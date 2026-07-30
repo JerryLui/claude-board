@@ -1,0 +1,3617 @@
+// Pure-module check: imports src/markdown.mjs, src/board.mjs and src/render.mjs
+// directly and asserts markdown-to-HTML, block splitting, anchor ids, and the packet
+// shape including unanswered, deferred and notes. No network, no daemon.
+//
+// Extends the visualize skill's check.mjs convention (~/.claude/skills/visualize/
+// check.mjs), minus its delimiter-extraction hack now that markdown.mjs is a real
+// module: carries the same assertions (bold, inline code escaping, links, images,
+// em, nested lists, tables, blockquotes, fenced code, mermaid fences) so the
+// promotion out of the visualize template provably loses nothing, plus this
+// project's own additions (anchors, packet assembly).
+
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync, readFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import os, { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
+import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, CSP } from '../src/render.mjs';
+import { resolveRef, langForPath, resolvePath, MAX_REF_BYTES } from '../src/resolve.mjs';
+import { ui } from '../src/ui.mjs';
+import { styles } from '../src/styles.mjs';
+import { computeBoardPatch } from '../src/patch.mjs';
+import {
+  extractHint, stepsToPath, pathToSteps, resolveSteps, buildSteps, composeHint,
+  parseHtmlTree, elementText, resolveDomAnchor, resolveDomAnchorInSection,
+  parseMermaidDomId, mermaidRefResolves, resolveMermaidAnchor, MERMAID_NODE_SELECTOR,
+} from '../src/anchor.mjs';
+
+let failures = 0;
+function check(name, fn) {
+  try {
+    fn();
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    failures++;
+    console.error(`FAIL - ${name}`);
+    console.error(err && err.stack || err);
+  }
+}
+
+// Fixture source files for reference-resolution checks: a dedicated temp dir
+// (mkdtempSync, same convention as CLAUDE_BOARD_HOME elsewhere), cleaned up at the
+// end regardless of pass/fail.
+const fixturesDir = mkdtempSync(path.join(tmpdir(), 'claude-board-pure-fixtures-'));
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Strip the inlined <style> block, the #board-data JSON payload, and the client
+ * <script type="module"> from a rendered page, leaving only the block markup that
+ * renderBlock actually emitted. Asserting against the raw page string is unsafe for
+ * a block-kind-coverage check: a class name like "compare-grid" or "mermaid-block"
+ * is also a CSS selector in src/styles.mjs and a querySelector string literal in
+ * src/ui.mjs, and any field value on a block (a label, a snippet of prose) is also
+ * present in the JSON board.blocks the page inlines verbatim for hydration -- none
+ * of that proves the corresponding renderBlock case ran. Stripping all three first
+ * means a needle can only be found where the renderer actually put it. */
+function renderedMarkup(html) {
+  return html
+    .replace(/<style>[\s\S]*?<\/style>/, '')
+    .replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '')
+    .replace(/<script type="module">[\s\S]*?<\/script>/, '');
+}
+
+// --- markdown.mjs: carried from visualize/check.mjs -------------------------------
+
+check('mdToHtml carries the visualize renderer\'s pinned behaviour', () => {
+  const out = mdToHtml([
+    '# Title',
+    '',
+    'A **bold** move with `x < y`, about 75 % done, a [link](https://x.se) and ![alt](img.png).',
+    '',
+    '_Findings for MAP_AUTH.md, method census._ The `ssn_country` field and plain ssn_country stay literal, __double__ works.',
+    '',
+    '- one',
+    '  - nested',
+    '- two',
+    '',
+    '| H1 | H2 |',
+    '|----|----|',
+    '| a  | b  |',
+    '',
+    '> quoted',
+    '',
+    '```',
+    'if (a < b) {}',
+    '```',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    '  A --> B',
+    '```',
+  ].join('\n'));
+
+  const expect = [
+    '<strong>bold</strong>',
+    '<code>x &lt; y</code>',
+    'about 75 % done',
+    '<a href="https://x.se">link</a>',
+    '<img alt="alt" src="img.png">',
+    '<em>Findings for MAP_AUTH.md, method census.</em>',
+    'plain ssn_country stay literal',
+    '<strong>double</strong>',
+    '<ul><li id="title-li1">one<ul><li>nested</li></ul></li><li id="title-li2">two</li></ul>',
+    '<table><tr><th>H1</th><th>H2</th></tr><tr><td>a</td><td>b</td></tr></table>',
+    '<blockquote><p>quoted</p></blockquote>',
+    '<pre><code>if (a &lt; b) {}</code></pre>',
+    '<pre class="mermaid">flowchart LR\n  A --&gt; B</pre>',
+  ];
+  for (const e of expect) {
+    assert.ok(out.includes(e), `missing: ${e}\ngot: ${out}`);
+  }
+  // heading now carries its anchor id (the promotion's one behavioural addition)
+  assert.ok(out.includes('<h1 id="title">Title</h1>'));
+});
+
+// --- markdown.mjs: anchors ----------------------------------------------------------
+
+check('one anchor per heading and per top-level list item', () => {
+  const md = [
+    '# Acceptance Criteria',
+    '',
+    '- one',
+    '  - nested under one',
+    '- two',
+    '- three',
+    '',
+    '## Open Questions',
+    '',
+    '1. first question',
+    '2. second question',
+  ].join('\n');
+  const { html, anchors } = mdToHtmlAndAnchors(md);
+
+  const refs = anchors.map(a => a.ref);
+  assert.deepEqual(refs, [
+    'acceptance-criteria',
+    'acceptance-criteria-li1',
+    'acceptance-criteria-li2',
+    'acceptance-criteria-li3',
+    'open-questions',
+    'open-questions-li1',
+    'open-questions-li2',
+  ]);
+  assert.ok(html.includes('<h1 id="acceptance-criteria">'));
+  assert.ok(html.includes('id="acceptance-criteria-li1"'));
+  assert.ok(html.includes('id="acceptance-criteria-li3"'));
+  // nested list items are not top-level and get no anchor id
+  assert.ok(!html.includes('id="acceptance-criteria-li1-li'));
+  assert.ok(!/<li id="[^"]*">nested under one/.test(html));
+});
+
+check('duplicate heading text gets a disambiguated slug', () => {
+  const md = '# Notes\n\nfirst\n\n# Notes\n\nsecond';
+  const { anchors } = mdToHtmlAndAnchors(md);
+  assert.deepEqual(anchors.map(a => a.ref), ['notes', 'notes-2']);
+});
+
+// --- ticket 10: attribute-value escaping in the markdown renderer (security) ------
+//
+// markdown.mjs's `esc` covered only & < > and was never applied to attribute values
+// at all -- `alt`, `src` and `href` were built by raw string concatenation, so
+// `!["  onerror=alert(1) x="](y.png)` rendered a live `onerror` handler:
+// `<img alt="" onerror=alert(1) x="" src="y.png">`. Content reaches this renderer by
+// reference from arbitrary files on disk, so this is a real injection path, not a
+// hypothetical one. Every check below asserts the dangerous construct (an
+// unquoted/breaking-out attribute, a live event handler, a javascript: URL) is
+// *absent* from the rendered markup, not merely that some safe substring like
+// `alt=` is present -- that weaker style of assertion would still pass against the
+// vulnerable renderer. (Ablation-verified: reverting the markdown.mjs fix and
+// re-running this file fails every check in this section -- see the ticket log.)
+
+// A crafted attribute value that broke out would leave the browser parsing a
+// SECOND, bareword attribute on the same tag (that's exactly what "onerror=alert(1)
+// x=" is: not part of alt's value, but a new onerror attribute followed by a new x
+// attribute). So the general, content-independent signature of "no break-out
+// happened" is that the whole opening tag is accounted for by exactly the attributes
+// this renderer is supposed to emit, each value quote-delimited with no literal `"`
+// inside it -- i.e. the tag matches this strict shape end to end, `>$` included. A
+// looser check like "the string onerror=alert doesn't appear anywhere" is not
+// enough: that substring legitimately appears, harmlessly, inside a *correctly*
+// quoted attribute value (see the exact-output assertions below) or as ordinary text
+// content -- it would falsely fail on safe output. Shape-matching the whole tag is
+// what actually distinguishes "quoted value that happens to contain those words"
+// from "a second attribute got created".
+function soleTag(html, re) {
+  const m = re.exec(html);
+  assert.ok(m, `expected tag not found in: ${html}`);
+  return m[0];
+}
+
+check('a crafted image alt cannot break out of the alt="..." attribute to inject a live handler', () => {
+  const out = mdToHtml('![" onerror=alert(1) x="](y.png)');
+  const tag = soleTag(out, /<img[^]*?>/);
+  assert.ok(/^<img alt="[^"]*" src="[^"]*">$/.test(tag), `img tag is not exactly alt+src, a live attribute leaked in: ${tag}`);
+  assert.equal(out, '<p><img alt="&quot; onerror=alert(1) x=&quot;" src="y.png"></p>');
+});
+
+check('a crafted image src cannot break out of the src="..." attribute to inject a live handler', () => {
+  const out = mdToHtml('![alt](y.png"onerror=alert(1)x=")');
+  const tag = soleTag(out, /<img[^]*?>/);
+  assert.ok(/^<img alt="[^"]*" src="[^"]*">$/.test(tag), `img tag is not exactly alt+src, a live attribute leaked in: ${tag}`);
+  assert.equal(out, '<p><img alt="alt" src="y.png&quot;onerror=alert(1">x=")</p>');
+});
+
+check('a crafted link url cannot break out of the href="..." attribute to inject a live handler', () => {
+  const out = mdToHtml('[t](https://x.se/"onmouseover=alert(1)x=")');
+  const tag = soleTag(out, /<a[^]*?>/);
+  assert.ok(/^<a href="[^"]*">$/.test(tag), `a tag is not exactly href, a live attribute leaked in: ${tag}`);
+  assert.equal(out, '<p><a href="https://x.se/&quot;onmouseover=alert(1">t</a>x=")</p>');
+});
+
+check('a crafted heading cannot break out of the id="..." attribute its anchor slug is rendered into', () => {
+  const md = '# " onmouseover=alert(1) x="\n\n- " onmouseover=alert(1) y="';
+  const { html, anchors } = mdToHtmlAndAnchors(md);
+  const h1 = soleTag(html, /<h1[^]*?>/);
+  const li = soleTag(html, /<li[^]*?>/);
+  assert.ok(/^<h1 id="[^"]*">$/.test(h1), `h1 tag is not exactly id, a live attribute leaked in: ${h1}`);
+  assert.ok(/^<li id="[^"]*">$/.test(li), `li tag is not exactly id, a live attribute leaked in: ${li}`);
+  assert.equal(html, '<h1 id="onmouseoveralert1-x">" onmouseover=alert(1) x="</h1>' +
+    '<ul><li id="onmouseoveralert1-x-li1">" onmouseover=alert(1) y="</li></ul>');
+  // the slug itself only ever contains [a-z0-9-] -- slugify strips everything else
+  // before the id attribute is even built, so the anchor ref used for comment
+  // resolution (src/board.mjs, src/render.mjs data-anchor-ref) is equally clean.
+  assert.ok(anchors.every(a => /^[a-z0-9-]+$/.test(a.ref)));
+});
+
+check('a javascript: link URL is neutralised, not rendered as a live href', () => {
+  const out = mdToHtml('[t](javascript:alert(1))');
+  assert.ok(!/href="javascript:/i.test(out), `javascript: URL rendered live: ${out}`);
+  assert.equal(out, '<p><a href="#">t</a>)</p>');
+});
+
+check('a javascript: image src is neutralised, not rendered as a live src', () => {
+  const out = mdToHtml('![alt](javascript:alert(1))');
+  assert.ok(!/src="javascript:/i.test(out), `javascript: URL rendered live: ${out}`);
+  assert.equal(out, '<p><img alt="alt" src="">)</p>');
+});
+
+check('a data: image src is neutralised too -- the allowlist is http(s)/mailto/relative/fragment, not a javascript:-only denylist', () => {
+  const out = mdToHtml('![alt](data:text/html,<script>alert(1)</script>)');
+  assert.ok(!/src="data:/i.test(out), `data: URL rendered live: ${out}`);
+});
+
+check('http, https, mailto, relative and fragment URLs still render as live links -- the javascript: fix does not neuter ordinary markdown', () => {
+  assert.equal(mdToHtml('[h](https://x.se/path)'), '<p><a href="https://x.se/path">h</a></p>');
+  assert.equal(mdToHtml('[m](mailto:a@b.com)'), '<p><a href="mailto:a@b.com">m</a></p>');
+  assert.equal(mdToHtml('[r](/a/b)'), '<p><a href="/a/b">r</a></p>');
+  assert.equal(mdToHtml('[f](#sec)'), '<p><a href="#sec">f</a></p>');
+});
+
+// --- board.mjs: block normalisation, rounds, packet assembly ----------------------
+
+check('createBoard mints ids, renders markdown blocks, and starts round 1', () => {
+  const board = createBoard({
+    title: 'Ticket 01 review',
+    blocks: [
+      { kind: 'markdown', text: '# Acceptance Criteria\n\n- one\n- two' },
+      {
+        kind: 'question',
+        prompt: 'Ship it?',
+        widget: 'single',
+        options: [{ label: 'Yes' }, { label: 'No', description: 'not yet' }],
+        context: [{ kind: 'markdown', text: '# Context\n\nsome prose' }],
+      },
+    ],
+  });
+
+  assert.match(board.id, /^b_[0-9a-f]{32}$/);
+  assert.match(board.thread, /^th_[0-9a-f]{8}$/);
+  assert.equal(board.rounds.length, 1);
+  assert.equal(board.rounds[0].status, 'open');
+  assert.equal(board.blocks.length, 2);
+
+  const md = board.blocks[0];
+  assert.equal(md.kind, 'markdown');
+  assert.equal(md.id, 'd1');
+  assert.equal(md.round, 1);
+  assert.ok(md.html.includes('<h1 id="acceptance-criteria">'));
+  assert.equal(md.anchors.length, 3);
+  assert.equal(typeof md.sha, 'string');
+  assert.equal(md.sha.length, 64);
+
+  const q = board.blocks[1];
+  assert.equal(q.kind, 'question');
+  assert.equal(q.id, 'q1');
+  assert.equal(q.context.length, 1);
+  assert.equal(q.context[0].kind, 'markdown');
+  assert.equal(q.context[0].id, 'd2'); // ids stay ordinal across nested context too
+});
+
+check('addRound continues the id sequence and adds an open round', () => {
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# A' }] });
+  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: '# B' }] });
+  assert.equal(round2, 2);
+  assert.equal(board.rounds.length, 2);
+  assert.equal(board.rounds[1].status, 'open');
+  assert.equal(board.blocks[1].id, 'd2');
+  assert.equal(board.blocks[1].round, 2);
+});
+
+check('every round stores its own title, and an amend refines it without ever blanking it', () => {
+  // `ask` requires a non-empty title on every call and commands/grill.md tells the
+  // agent to make it the branch name. Destructuring only `blocks` threw it away on
+  // every round after the first. (Ablation: drop `title` from the round object in
+  // addRound and the second assertion below reads '' -- with nothing else failing,
+  // which is precisely how this stayed broken while the suite was green.)
+  const board = createBoard({ title: 'feat/one', blocks: [{ kind: 'markdown', text: '# A' }] });
+  assert.equal(board.rounds[0].title, 'feat/one', 'round 1 carries the title too, not just the board');
+
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  addRound(board, { blocks: [{ kind: 'markdown', text: '# B' }], title: 'fix/two' });
+  assert.equal(board.rounds[1].title, 'fix/two');
+  assert.equal(board.title, 'feat/one', 'the board title stays what the thread was opened with');
+
+  amendRound(board, { blocks: [{ kind: 'markdown', text: '# C' }] });
+  assert.equal(board.rounds[1].title, 'fix/two', 'an amend naming no title must not blank the label on screen');
+  amendRound(board, { blocks: [{ kind: 'markdown', text: '# D' }], title: 'fix/two-renamed' });
+  assert.equal(board.rounds[1].title, 'fix/two-renamed');
+
+  // A round posted without one falls back to the board title rather than a bare number.
+  addRound(board, { blocks: [{ kind: 'markdown', text: '# E' }] });
+  assert.equal(board.rounds[2].title, 'feat/one');
+});
+
+// --- ticket 04: amending a still-open round, and the additive-push patch --------
+
+check('amendRound appends a new block into the still-open round without minting round 2', () => {
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# A' }] });
+  const result = amendRound(board, { blocks: [{ kind: 'markdown', text: '# B' }] });
+  assert.equal(result.round, 1);
+  assert.deepEqual(result.blockIds, ['d2']);
+  assert.equal(board.rounds.length, 1, 'no new round is minted by an amend');
+  assert.equal(board.rounds[0].status, 'open');
+  assert.equal(board.blocks.length, 2);
+  assert.equal(board.blocks[1].round, 1);
+});
+
+check('amendRound replaces a block in place when the incoming block carries an existing id', () => {
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# Original' }] });
+  const originalId = board.blocks[0].id;
+  const result = amendRound(board, { blocks: [{ id: originalId, kind: 'markdown', text: '# Replaced' }] });
+  assert.deepEqual(result.blockIds, [originalId]);
+  assert.equal(board.blocks.length, 1, 'a replace must not append a duplicate block');
+  assert.ok(board.blocks[0].text.includes('Replaced'));
+});
+
+check('amendRound throws once the open round has already been sent (use addRound instead)', () => {
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# A' }] });
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  assert.throws(() => amendRound(board, { blocks: [{ kind: 'markdown', text: '# B' }] }));
+});
+
+check('amendRound refuses to hijack a block id that belongs to a different, already-sent round', () => {
+  // Ablation: reverting the `board.blocks[idx].round !== openRound.n` guard in
+  // src/board.mjs back to a bare `idx !== -1` makes this pass instead of throw,
+  // and the block silently moves rounds -- exactly the corruption this guards.
+  const board = createBoard({
+    title: 't',
+    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+  });
+  const q1 = board.blocks[0].id;
+  applySubmit(board, { action: 'send', answers: [{ id: q1, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  addRound(board, { blocks: [{ kind: 'markdown', text: '# Round Two' }] });
+
+  assert.throws(
+    () => amendRound(board, { blocks: [{ id: q1, kind: 'question', prompt: 'Hijacked', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    /cannot amend/,
+  );
+  // and the board is untouched by the rejected attempt
+  const stillQ1 = board.blocks.find(b => b.id === q1);
+  assert.equal(stillQ1.round, 1);
+  assert.equal(stillQ1.prompt, 'Ship it?');
+});
+
+check('a caller-supplied block id must match the minted id shape; anything else is rejected rather than accepted verbatim', () => {
+  // Ablation: this closes the same vector as the amend-hijack guard above from a
+  // different angle -- an id containing DOM-selector-breaking characters (which
+  // src/ui.mjs's amend-lookup interpolates into a CSS attribute selector) is
+  // rejected at mint time rather than trusted through to the browser.
+  assert.throws(
+    () => createBoard({ title: 't', blocks: [{ id: 'not a real id', kind: 'markdown', text: '# A' }] }),
+    /invalid block id/,
+  );
+  assert.throws(
+    () => createBoard({ title: 't', blocks: [{ id: 'd1"], .block[data-block-id="x', kind: 'markdown', text: '# A' }] }),
+    /invalid block id/,
+  );
+  // a well-formed, minted-shaped id is still accepted (this is the legitimate
+  // amend "replace this exact block" path)
+  const board = createBoard({ title: 't', blocks: [{ id: 'd7', kind: 'markdown', text: '# A' }] });
+  assert.equal(board.blocks[0].id, 'd7');
+});
+
+check('computeBoardPatch: a round push is additive -- the prior round\'s blocks are never reported as added or changed', () => {
+  const before = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# Round One' }] });
+  const round1BlockId = before.blocks[0].id;
+  applySubmit(before, { action: 'send', answers: [], comments: [] }, 1);
+  const after = JSON.parse(JSON.stringify(before));
+  const round2 = addRound(after, { blocks: [{ kind: 'markdown', text: '# Round Two' }] });
+
+  const patch = computeBoardPatch(before, after);
+  // Ablation: computing this by diffing the two board objects wholesale (e.g.
+  // "anything JSON.stringify'd differently") rather than per-block ids would flag
+  // round 1's block here too, since board.updatedAt/rounds also changed.
+  assert.ok(!patch.addedBlockIds.includes(round1BlockId));
+  assert.ok(!patch.changedBlockIds.includes(round1BlockId));
+  assert.equal(patch.changedBlockIds.length, 0);
+  assert.equal(patch.addedBlockIds.length, 1);
+  assert.notEqual(patch.addedBlockIds[0], round1BlockId);
+  assert.deepEqual(patch.roundsNewlyOpen, [round2]);
+  assert.deepEqual(patch.roundsNowSent, []);
+});
+
+check('computeBoardPatch: a submit flips exactly that round from open to sent, and reports no added blocks', () => {
+  const board = createBoard({
+    title: 't',
+    blocks: [{ kind: 'question', prompt: 'Q', widget: 'single', options: [{ label: 'Yes' }] }],
+  });
+  const before = JSON.parse(JSON.stringify(board));
+  applySubmit(board, { action: 'send', answers: [{ id: board.blocks[0].id, choice: 'Yes' }], comments: [] }, 1);
+  const patch = computeBoardPatch(before, board);
+  assert.deepEqual(patch.roundsNowSent, [1]);
+  assert.deepEqual(patch.roundsNewlyOpen, []);
+  assert.deepEqual(patch.addedBlockIds, []);
+});
+
+check('computeBoardPatch: an amend that replaces one block reports only that block as changed', () => {
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# Original' }] });
+  const originalId = board.blocks[0].id;
+  const before = JSON.parse(JSON.stringify(board));
+  amendRound(board, { blocks: [{ id: originalId, kind: 'markdown', text: '# Replaced content' }] });
+  const patch = computeBoardPatch(before, board);
+  assert.deepEqual(patch.changedBlockIds, [originalId]);
+  assert.deepEqual(patch.addedBlockIds, []);
+});
+
+check('the exact function embedded in ui.mjs (via .toString()) is executable and behaves identically to the imported one', () => {
+  // Proves the toString()-splicing mechanism itself, not just that the text
+  // "function computeBoardPatch(" appears somewhere: a hand-copied, silently
+  // drifted reimplementation would satisfy a bare substring check but fail this.
+  const rehydrated = new Function('return (' + computeBoardPatch.toString() + ')')();
+  const before = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# A' }] });
+  const after = JSON.parse(JSON.stringify(before));
+  addRound(after, { blocks: [{ kind: 'markdown', text: '# B' }] });
+  assert.deepEqual(rehydrated(before, after), computeBoardPatch(before, after));
+});
+
+check('ui.mjs embeds the literal source of computeBoardPatch, not a hand-copied reimplementation', () => {
+  assert.ok(
+    ui.includes(computeBoardPatch.toString()),
+    'the client script must contain the exact function source, so the unit-tested implementation and the browser copy can never drift apart',
+  );
+});
+
+// Ticket 03 / criterion 6: the same computeBoardPatch technique, applied to the
+// hint-composition rule test/check-comment-mode.mjs's criterion-6 checks exercise
+// end to end. An earlier draft got this specifically wrong: src/anchor.mjs
+// carried a design COMMENT describing the rule but no actual code, so reverting
+// that file changed nothing any check could see -- exactly the "looks right,
+// believed correct, not actually exercised" shape SPEC_ANCHORING.md exists to
+// repair. This check is what makes that regression loud again if it recurs: a
+// hand-edit of ui.mjs's embedded copy that diverges from src/anchor.mjs's real
+// composeHint fails here even before any behavioural check would notice.
+check('ui.mjs embeds the literal source of composeHint, not a hand-copied reimplementation', () => {
+  assert.ok(
+    ui.includes(composeHint.toString()),
+    'the client script must contain the exact function source, so criterion 6\'s hint rule and the browser copy can never drift apart',
+  );
+});
+
+check('composeHint: identity alone outside a compare, matching ticket 02\'s plain html-stage hint unchanged', () => {
+  assert.equal(composeHint('Send', 'button', false, '', ''), 'Send');
+  assert.equal(composeHint('Send', 'button', false, '', 'html'), 'Send', 'blockKind alone (no compare ancestor) must never add context');
+  assert.equal(composeHint('Total', 'td', false, '', 'markdown'), 'Total', 'a plain table cell carries no role word and no context');
+});
+
+check('composeHint: identity + role word + context inside a compare, the criterion-6 shape', () => {
+  assert.equal(composeHint('Send', 'button', true, 'After', 'html'), 'Send button in After stage');
+  assert.equal(composeHint('old copy', 'p', true, 'Before', 'markdown'), 'old copy in Before block');
+});
+
+check('composeHint: a compare side with its own label left blank still counts as "inside a compare" (insideCompare, not a truthy label, is the signal)', () => {
+  assert.equal(composeHint('Send', 'button', true, '', 'html'), 'Send button in stage');
+});
+
+check('composeHint: falls back to a role word, then the bare tag name, for an element with no text', () => {
+  assert.equal(composeHint('', 'img', false, '', ''), 'image');
+  assert.equal(composeHint('', 'button', true, 'After', 'html'), 'button in After stage');
+  assert.equal(composeHint('', 'div', false, '', ''), 'div', 'a tag with no role word in the table falls back to its own bare name');
+});
+
+// Audit C6: `ROLE_WORD[tag]`/`BLOCK_NOUN[blockKind]` had no `hasOwnProperty`
+// guard, so a tag/blockKind of 'constructor' (or any other Object.prototype
+// member name) walked the prototype chain instead of missing the lookup --
+// returning the `Object` CONSTRUCTOR FUNCTION as the "role word"/"block noun",
+// which JSON.stringify then silently drops (`undefined`) when the anchor is
+// persisted, or stringifies into "function Object() { [native code] }" once
+// concatenated into a longer hint.
+check('composeHint: C6 regression -- a tag or blockKind of "constructor" (or any other Object.prototype member) must never leak a function into the hint', () => {
+  const bare = composeHint('', 'constructor', false, '', '');
+  assert.equal(typeof bare, 'string', 'composeHint must always return a string');
+  assert.equal(bare, 'constructor', 'an unrecognised tag falls back to its own bare name, not Object.prototype.constructor');
+
+  const withContext = composeHint('Send', 'constructor', true, 'After', 'html');
+  assert.equal(typeof withContext, 'string');
+  assert.equal(withContext, 'Send in After stage', 'no role word for an unrecognised tag, and no leaked function/native-code text');
+  assert.doesNotMatch(withContext, /native code|function Object/);
+
+  const badBlockKind = composeHint('x', 'span', true, 'A', 'constructor');
+  assert.equal(typeof badBlockKind, 'string');
+  assert.equal(badBlockKind, 'x in A block', 'an unrecognised blockKind (including "constructor") degrades to the same "block" fallback as any other unknown kind');
+});
+
+check('composeHint: every block-kind noun the ticket names, and an unknown kind degrades to "block" rather than throwing', () => {
+  assert.equal(composeHint('x', 'span', true, 'A', 'html'), 'x in A stage');
+  assert.equal(composeHint('x', 'span', true, 'A', 'mermaid'), 'x in A diagram');
+  assert.equal(composeHint('x', 'span', true, 'A', 'code'), 'x in A reference');
+  assert.equal(composeHint('x', 'span', true, 'A', 'question'), 'x in A question');
+  assert.equal(composeHint('x', 'span', true, 'A', 'compare'), 'x in A comparison');
+  assert.equal(composeHint('x', 'span', true, 'A', 'markdown'), 'x in A block');
+  assert.equal(composeHint('x', 'span', true, 'A', 'nonsense-kind'), 'x in A block');
+});
+
+check('packet shape names board, round, and every question status/choice/note', () => {
+  const board = createBoard({
+    title: 'Widget check',
+    blocks: [
+      { kind: 'markdown', text: '# Acceptance Criteria\n\n- one\n- two' },
+      { kind: 'question', prompt: 'Answered?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      { kind: 'question', prompt: 'Untouched?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] },
+      { kind: 'question', prompt: 'Deferred?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] },
+    ],
+  });
+
+  applySubmit(board, {
+    action: 'send',
+    answers: [
+      { id: 'q1', status: 'answered', choice: 'Yes', note: 'looks good' },
+      { id: 'q3', status: 'deferred', choice: null, note: 'ask later' },
+      // q2 deliberately left out -> must come back explicitly unanswered
+    ],
+    comments: [
+      { blockId: 'd1', anchor: { kind: 'md', ref: 'acceptance-criteria-li2', label: 'two' }, text: 'criterion 2 needs work' },
+      { blockId: 'd1', anchor: { kind: 'md', ref: 'acceptance-criteria-li9', label: 'ghost' }, text: 'anchor that no longer exists' },
+      { blockId: 'q1', anchor: { kind: 'block' }, text: 'whole-block comment' },
+    ],
+  }, 1);
+
+  const packet = buildPacket(board, 1, 'http://127.0.0.1:7391/b/' + board.id);
+
+  assert.equal(packet.board, board.id);
+  assert.equal(packet.thread, board.thread);
+  assert.equal(packet.round, 1);
+  assert.equal(packet.status, 'submitted');
+  assert.equal(packet.answers.length, 3);
+
+  const byId = Object.fromEntries(packet.answers.map(a => [a.id, a]));
+  assert.equal(byId.q1.status, 'answered');
+  assert.equal(byId.q1.choice, 'Yes');
+  assert.equal(byId.q1.note, 'looks good');
+  assert.equal(byId.q2.status, 'unanswered');
+  assert.equal(byId.q2.choice, null);
+  assert.equal(byId.q2.note, ''); // note always present, '' when empty
+  assert.equal(byId.q3.status, 'deferred');
+  assert.equal(byId.q3.note, 'ask later');
+
+  assert.equal(packet.comments.length, 3);
+  const resolved = packet.comments.find(c => c.anchor.ref === 'acceptance-criteria-li2');
+  assert.equal(resolved.resolved, true);
+  assert.equal(resolved.blockKind, 'markdown');
+  assert.equal(resolved.lost, undefined);
+
+  const lost = packet.comments.find(c => c.anchor.ref === 'acceptance-criteria-li9');
+  assert.equal(lost.resolved, false);
+  assert.equal(lost.lost, 'acceptance-criteria-li9');
+
+  const blockLevel = packet.comments.find(c => c.blockId === 'q1');
+  assert.equal(blockLevel.resolved, true);
+  assert.equal(blockLevel.anchor.kind, 'block');
+});
+
+check('a comment whose block no longer exists reports what it lost, not silently drops', () => {
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# A\n\nprose' }] });
+  board.comments.push({ n: 1, blockId: 'd99', anchor: { kind: 'block' }, text: 'orphaned', createdAt: new Date().toISOString(), round: 1 });
+  const resolved = resolveComment(board, board.comments[0]);
+  assert.equal(resolved.resolved, false);
+  assert.equal(resolved.lost, 'd99');
+  assert.equal(findBlock(board, 'd99'), null);
+});
+
+// --- src/anchor.mjs: element-level anchoring, pure (ticket 06) --------------------
+//
+// Click gestures themselves need a browser and are explicitly out of scope for the
+// automated checks (SPEC_BOARD.md Testing); src/anchor.mjs is the seam that carries
+// every bit of anchoring logic that *isn't* the gesture -- path building, hint
+// extraction, path resolution, mermaid id round-tripping -- so it can be proven
+// here without simulating a DOM. src/ui.mjs's click handlers are a thin duplicate
+// of these same functions (necessarily: the served page has no import graph at
+// runtime, see ticket 05's standalone-archive guarantee), exercised only by hand.
+
+check('extractHint collapses whitespace and caps length, never inventing a coordinate', () => {
+  assert.equal(extractHint('  Send   \n  Message  '), 'Send Message');
+  assert.equal(extractHint(''), '');
+  assert.equal(extractHint(null), '');
+  const long = 'x'.repeat(120);
+  const hint = extractHint(long);
+  assert.ok(hint.length <= 80);
+  assert.ok(hint.endsWith('…'));
+});
+
+check('stepsToPath / pathToSteps round-trip a dom path, and pathToSteps degrades malformed input to empty rather than throwing', () => {
+  assert.equal(stepsToPath([2, 1, 3]), '2.1.3');
+  assert.deepEqual(pathToSteps('2.1.3'), [2, 1, 3]);
+  assert.deepEqual(pathToSteps(''), []);
+  assert.deepEqual(pathToSteps(null), []);
+  assert.deepEqual(pathToSteps('2.garbage.3'), [2, 3]); // non-numeric segment dropped, not thrown
+  assert.deepEqual(pathToSteps('2.0.3'), [2, 3]); // 0 is not a valid 1-based index
+});
+
+// A plain object tree stands in for a real DOM element here -- both just need a
+// `.children` array, which is the whole point of the shared shape (see
+// src/anchor.mjs's file comment): resolveSteps/buildSteps don't know or care which
+// one they're walking.
+function el(tag, children) {
+  return { tag, children: children || [] };
+}
+
+check('buildSteps and resolveSteps are exact inverses of each other over a plain node tree', () => {
+  const target = el('button');
+  const tree = el('body', [
+    el('div', [el('span'), target]),
+    el('div'),
+  ]);
+  target.parentElement = tree.children[0];
+  tree.children[0].parentElement = tree;
+  tree.children[1].parentElement = tree;
+
+  const steps = buildSteps(tree, target);
+  assert.deepEqual(steps, [1, 2]); // 1st child of body, 2nd child of that div
+  assert.equal(resolveSteps(tree, steps), target);
+});
+
+check('buildSteps refuses to anchor a click that landed outside the given root', () => {
+  const root = el('body', [el('div')]);
+  root.children[0].parentElement = root;
+  const outsider = el('span'); // detached: no parentElement chain back to root
+  assert.equal(buildSteps(root, outsider), null);
+});
+
+check('resolveSteps reports null the moment a step no longer resolves -- the "this anchor is lost" case, structurally', () => {
+  const tree = el('body', [el('div', [el('span')])]);
+  assert.equal(resolveSteps(tree, [1, 1]), tree.children[0].children[0]);
+  assert.equal(resolveSteps(tree, [1, 2]), null); // that div only has one child
+  assert.equal(resolveSteps(tree, [9]), null); // body doesn't have 9 children
+});
+
+// --- parseHtmlTree / elementText: the "just enough" html structure walk -----------
+//
+// An earlier draft validated a `dom` anchor by testing whether the hint appeared
+// ANYWHERE in the raw html string, never touching `ref` at all. That both
+// false-resolved (a hint matching a class name or tag name) and false-"lost"
+// (nested markup, entities, or extractHint's own truncation ellipsis broke the
+// contiguous-substring match) -- caught by audit, see TICKETS_BOARD.md ticket 06's
+// log. These checks pin the fix: ref must actually address an element, and only
+// that element's own text is checked against the hint.
+
+check('parseHtmlTree builds an element tree where .children is element-only (matching real Element.children, not childNodes)', () => {
+  const root = parseHtmlTree('<div>a<span>b</span>c</div>');
+  assert.equal(root.children.length, 1); // one element child: div
+  const div = root.children[0];
+  assert.equal(div.tag, 'div');
+  assert.equal(div.children.length, 1); // text nodes "a"/"c" are not counted here
+  assert.equal(div.children[0].tag, 'span');
+});
+
+check('elementText reconstructs textContent in document order across mixed text/element children', () => {
+  const root = parseHtmlTree('<button>Click <span>me</span> now</button>');
+  const button = root.children[0];
+  assert.equal(elementText(button), 'Click me now'); // not "Click nowme"
+});
+
+check('parseHtmlTree decodes the five named entities plus numeric character references', () => {
+  const root = parseHtmlTree('<p>Save &amp; Exit &#38; &#x26;</p>');
+  assert.equal(elementText(root.children[0]), 'Save & Exit & &');
+});
+
+check('parseHtmlTree treats script/style bodies as opaque -- a "<" inside them is never mistaken for a tag, and the element itself is KEPT so sibling indices match the browser', () => {
+  const root = parseHtmlTree('<div><script>if (a < b) {}</script><p>real</p></div>');
+  const div = root.children[0];
+  // The browser keeps <script> as an element child, so every following sibling's
+  // index depends on it being counted here too. Deleting it (the old behaviour)
+  // shifted <p> from index 2 to index 1 server-side, and a stored ref of "1.2"
+  // then resolved to nothing -- a live element reported lost.
+  assert.equal(div.children.length, 2);
+  assert.equal(div.children[0].tag, 'script');
+  assert.equal(elementText(div.children[0]), ''); // body blanked, never parsed as markup
+  assert.equal(div.children[1].tag, 'p');
+  assert.equal(elementText(div), 'real'); // the script source is not part of the text
+});
+
+check('parseHtmlTree ignores an unmatched closing tag rather than throwing', () => {
+  assert.doesNotThrow(() => parseHtmlTree('<div></span><p>ok</p></div>'));
+  const root = parseHtmlTree('<div></span><p>ok</p></div>');
+  assert.equal(elementText(root.children[0]), 'ok');
+});
+
+// --- resolveDomAnchor: ref AND hint both have to agree ----------------------------
+
+check('resolveDomAnchor resolves when ref addresses an element whose own text contains the hint', () => {
+  const html = '<div class="mock"><button>Send</button></div>';
+  assert.ok(resolveDomAnchor(html, '1.1', 'Send')); // div is 1, button is div's 1st child
+  assert.equal(resolveDomAnchor(html, '9.9', 'Send'), false); // ref addresses nothing
+});
+
+check('resolveDomAnchor rejects a hint that only matches an attribute value or tag name, not real text -- the false-resolve an earlier draft had', () => {
+  const html = '<div class="mock"><button>Send</button></div>';
+  assert.equal(resolveDomAnchor(html, '1.1', 'mock'), false); // "mock" is a class value, not button's text
+  assert.equal(resolveDomAnchor(html, '1.1', 'div'), false); // "div" is a tag name, not button's text
+});
+
+// Audit 2026-07-29, finding C1: `domIdentityHintMatches` ended
+// `return normalizedHint.startsWith(normalizedIdentity)`, checking the
+// relationship backwards -- a live element whose text is a literal PREFIX of
+// some unrelated stored hint satisfied `startsWith` by coincidence, resolving
+// the comment onto the wrong element rather than reporting it lost. These are
+// the three rows the director measured true (should be false) on HEAD before
+// the fix; see this check's own name for the row each assertion locks in.
+check('resolveDomAnchor: C1 regression -- a stored hint that merely STARTS WITH the live element\'s text must not resolve (the inverted prefix check\'s false-positive)', () => {
+  assert.equal(resolveDomAnchor('<div class="mock"><button>S</button></div>', '1.1', 'Send'), false,
+    'row 1: button text "S" is a prefix of stored hint "Send" -- must not resolve');
+  assert.equal(resolveDomAnchor('<div class="mock"><div></div></div>', '1.1', 'div is broken'), false,
+    'row 2: an empty <div>\'s bare-tag-name identity "div" is a prefix of stored hint "div is broken" -- must not resolve');
+  assert.equal(resolveDomAnchor('<div class="mock"><button></button></div>', '1.1', 'button me'), false,
+    'row 3: an empty <button>\'s role-word identity "button" is a prefix of stored hint "button me" -- must not resolve');
+});
+
+check('resolveDomAnchor resolves across nested markup and HTML entities in the hinted element\'s text -- the false-lost an earlier draft had', () => {
+  const html = '<div><button>Click <span>me</span></button><p>A &amp; B</p></div>';
+  assert.ok(resolveDomAnchor(html, '1.1', 'Click me')); // button, text spans a nested <span>
+  assert.ok(resolveDomAnchor(html, '1.2', 'A & B')); // p, text contains a real entity
+});
+
+check('resolveDomAnchor tolerates extractHint\'s own truncation ellipsis on a long hint', () => {
+  const longText = 'x'.repeat(120);
+  const html = `<div><p>${longText}</p></div>`;
+  const truncated = extractHint(longText); // ends in an ellipsis, per extractHint's own contract
+  assert.ok(truncated.endsWith('…'));
+  assert.ok(resolveDomAnchor(html, '1.1', truncated));
+});
+
+check('resolveDomAnchor requires a non-empty hint, and degrades to false rather than throwing on malformed input', () => {
+  const html = '<div><button>Send</button></div>';
+  assert.equal(resolveDomAnchor(html, '1.1', ''), false);
+  assert.equal(resolveDomAnchor(html, '1.1', null), false);
+  assert.equal(resolveDomAnchor(html, '', 'Send'), false);
+  assert.equal(resolveDomAnchor(html, null, 'Send'), false);
+  assert.doesNotThrow(() => resolveDomAnchor('<div><unclosed>', '1.1', 'Send'));
+});
+
+// Audit 2026-07-29, finding C2: a browser parses `srcdoc` as a full document
+// and hoists a leading <style>/<script>/<meta>/<link>/<title>/<base> into
+// <head>, so `document.body`'s first child is the mock's own top-level
+// element, not the style tag -- exactly what src/ui.mjs mints every ref
+// against. `resolveDomAnchor` used to resolve against parseHtmlTree's raw
+// synthetic root instead, which kept the leading <style> as a body sibling and
+// shifted every following index by one: the browser-minted ref reported LOST,
+// and the UNHOISTED ref one index later resolved instead. Both director
+// measurements from the audit, now inverted.
+check('resolveDomAnchor: C2 regression -- a leading <style> before the mock\'s real content must not shift ref indices', () => {
+  const html = '<style>.mock{font:14px system-ui}</style><div class="mock"><button>Send</button></div>';
+  assert.equal(resolveDomAnchor(html, '1.1', 'Send'), true,
+    'what a real browser mints (body.children[0] is the div, unaffected by the hoisted <style>) must resolve');
+  assert.equal(resolveDomAnchor(html, '2.1', 'Send'), false,
+    'the pre-fix off-by-one ref (treating <style> as body.children[0]) must NOT resolve');
+});
+
+check('resolveDomAnchor: C2 -- an explicit top-level <body> and a full <!doctype html> document are both modelled the same way', () => {
+  const withBody = '<style>.mock{color:red}</style><body><div class="mock"><button>Send</button></div></body>';
+  assert.equal(resolveDomAnchor(withBody, '1.1', 'Send'), true);
+
+  const fullDoc = '<!doctype html><html><head><meta charset="utf-8"><style>.mock{color:red}</style></head><body><div class="mock"><button>Send</button></div></body></html>';
+  assert.equal(resolveDomAnchor(fullDoc, '1.1', 'Send'), true);
+
+  // A <style> AFTER real body content has already started is an ordinary body
+  // child, not hoisted -- only a LEADING run is head-only.
+  const styleAfterContent = '<div class="mock"><button>Send</button></div><style>.mock{color:red}</style>';
+  assert.equal(resolveDomAnchor(styleAfterContent, '1.1', 'Send'), true);
+  assert.equal(resolveDomAnchor(styleAfterContent, '2', 'style'), true,
+    'a <style> AFTER real content has already started stays an ordinary body child at its real index, not hoisted');
+});
+
+// --- mermaid ---------------------------------------------------------------------
+
+check('parseMermaidDomId recovers the source-declared node id from mermaid\'s own generated element id, not an invented scheme', () => {
+  // The shape mermaid 11 -- the version the page's CDN tag actually pins -- emits:
+  // the node id is PREFIXED with the diagram's own svg id. These four are copied
+  // verbatim from a real browser rendering test/fixtures/mermaid-real-ids.json's
+  // source; a regex anchored at ^flowchart- returns null for every one of them,
+  // which is what left the diagram gesture dead in every browser while this file
+  // stayed green against the bare ids below.
+  assert.equal(parseMermaidDomId('mermaid-1785397890978-flowchart-shim-0'), 'shim');
+  assert.equal(parseMermaidDomId('mermaid-1785397890978-flowchart-daemon-1'), 'daemon');
+  assert.equal(parseMermaidDomId('mermaid-1785397890978-flowchart-page-3'), 'page');
+  assert.equal(parseMermaidDomId('mermaid-1785397890978-flowchart-submit-5'), 'submit');
+  // A node id that itself contains a hyphen still round-trips under the prefix.
+  assert.equal(parseMermaidDomId('mermaid-1785397890978-flowchart-check-out-7'), 'check-out');
+  // mermaid 10's bare form stays supported: an archived board holds whatever its
+  // own render produced, and must keep resolving after this change.
+  assert.equal(parseMermaidDomId('flowchart-A-3'), 'A');
+  assert.equal(parseMermaidDomId('flowchart-checkoutButton-12'), 'checkoutButton');
+  assert.equal(parseMermaidDomId('some-other-id'), null); // doesn't match the flowchart-<id>-<seq> shape
+  assert.equal(parseMermaidDomId(''), null);
+  // Not every id containing the word is a node: the sequence suffix is required.
+  assert.equal(parseMermaidDomId('mermaid-123-flowchart-noSequence'), null);
+});
+
+check('mermaidRefResolves traces a ref back to the diagram source, and reports false for a ref the source never declared', () => {
+  const source = 'flowchart LR\n  A[Start] --> B[End]';
+  assert.ok(mermaidRefResolves(source, 'A'));
+  assert.ok(mermaidRefResolves(source, 'B'));
+  assert.equal(mermaidRefResolves(source, 'Z'), false);
+  assert.equal(mermaidRefResolves(source, ''), false);
+});
+
+check('mermaidRefResolves does not false-negative on chained arrows or inline-label edges -- what the old arrow-grammar regex got wrong', () => {
+  // A --> B --> C: an earlier regex-based id extractor only ever captured the first
+  // two ids in a chain and lost the tail (audit-caught, see ticket 06's log).
+  const chained = 'flowchart LR\n  A --> B --> C';
+  assert.ok(mermaidRefResolves(chained, 'A'));
+  assert.ok(mermaidRefResolves(chained, 'B'));
+  assert.ok(mermaidRefResolves(chained, 'C'), 'the tail of a chained arrow must still resolve');
+
+  // A -- yes --> B: mermaid's inline-label edge syntax (not the `-->|label|` pipe
+  // form) -- the old regex mistook the label word itself for a node id.
+  const inlineLabel = 'flowchart LR\n  A -- yes --> B';
+  assert.ok(mermaidRefResolves(inlineLabel, 'A'));
+  assert.ok(mermaidRefResolves(inlineLabel, 'B'));
+});
+
+check('mermaidRefResolves runs in linear time even against a large, adversarial-shaped source -- no catastrophic backtracking', () => {
+  // The old arrow-chain regex had measured catastrophic backtracking on input like
+  // this (audit-caught: 10s+ at 160KB). A plain indexOf-based scan must stay fast.
+  const adversarial = 'A-'.repeat(50000);
+  const start = Date.now();
+  const result = mermaidRefResolves(adversarial, 'nonexistent-ref');
+  assert.equal(result, false);
+  assert.ok(Date.now() - start < 1000, 'mermaidRefResolves must not exhibit exponential/quadratic blowup on adversarial input');
+});
+
+// --- src/board.mjs resolveComment: the lost-anchor treatment extended to dom and --
+// mermaid anchors (it already covered md and block; see the check above and
+// PROTOCOL.md "Anchors at headings and list items").
+
+check('resolveComment resolves a dom anchor whose ref+hint are still valid together, and reports lost for one that never matched', () => {
+  const board = createBoard({
+    title: 'dom anchor',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+  });
+  const blockId = board.blocks[0].id;
+  board.comments.push(
+    { n: 1, blockId, anchor: { kind: 'dom', ref: '1.1', hint: 'Send' }, text: 'move this left', createdAt: new Date().toISOString(), round: 1 },
+    { n: 2, blockId, anchor: { kind: 'dom', ref: '9.9', hint: 'Launch' }, text: 'stale anchor', createdAt: new Date().toISOString(), round: 1 },
+    { n: 3, blockId, anchor: { kind: 'dom', ref: '1.1', hint: 'mock' }, text: 'ref right, hint is actually a class name', createdAt: new Date().toISOString(), round: 1 },
+  );
+  const resolved = resolveComment(board, board.comments[0]);
+  assert.equal(resolved.resolved, true);
+  assert.equal(resolved.blockKind, 'html');
+  assert.equal(resolved.lost, undefined);
+
+  const lost = resolveComment(board, board.comments[1]);
+  assert.equal(lost.resolved, false);
+  // Ticket 04: a lost `dom` anchor reports the stored HINT ("Launch"), not the
+  // opaque index-chain ref ("9.9") -- the hint is what a human or agent can
+  // actually recognise as "what this comment was about" once the element it
+  // named is gone (SPEC_ANCHORING.md ticket 04: "the stored hint is what
+  // survives when the element does not"). An `md`/`mermaid` anchor's ref is
+  // already human-legible (a heading slug, a diagram node id), so those still
+  // report their ref -- see the checks below for mermaid and check-http.mjs for
+  // md.
+  assert.equal(lost.lost, 'Launch');
+
+  const wrongHint = resolveComment(board, board.comments[2]);
+  assert.equal(wrongHint.resolved, false, 'a right ref with a hint that only matches an attribute value must not resolve');
+});
+
+check('resolveComment resolves a mermaid anchor whose node id is still in the diagram source, and reports lost for one that never was', () => {
+  const board = createBoard({
+    title: 'mermaid anchor',
+    blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' }],
+  });
+  const blockId = board.blocks[0].id;
+  board.comments.push(
+    { n: 1, blockId, anchor: { kind: 'mermaid', ref: 'A' }, text: 'rename this node', createdAt: new Date().toISOString(), round: 1 },
+    { n: 2, blockId, anchor: { kind: 'mermaid', ref: 'Ghost' }, text: 'stale anchor', createdAt: new Date().toISOString(), round: 1 },
+  );
+  const resolved = resolveComment(board, board.comments[0]);
+  assert.equal(resolved.resolved, true);
+  assert.equal(resolved.blockKind, 'mermaid');
+
+  const lost = resolveComment(board, board.comments[1]);
+  assert.equal(lost.resolved, false);
+  assert.equal(lost.lost, 'Ghost');
+});
+
+// --- ticket 05: resolveMermaidAnchor's precedence -- generic first, node id ---
+// leaned on as a fallback, per SPEC_ANCHORING.md's "Mermaid stops being the
+// template" -- see src/anchor.mjs's "ticket 05 design" comment for the full
+// reasoning. Direct, pure tests over resolveMermaidAnchor itself (not just
+// through resolveComment/board.mjs) so the precedence is checkable and
+// ablatable in one place, plus a resolveComment-level check right after
+// proving the same precedence survives the real server-side call site.
+//
+// A mermaid block's server-rendered section never contains the live SVG a
+// click actually landed in (rendering is client-side, from the CDN -- see this
+// file's own header comment), so resolveDomAnchorInSection can only ever find
+// an element that was ALREADY in that server-rendered markup -- there is no
+// diagram node there to find. To construct the "generic resolves" half of the
+// fallback deliberately (not just leave it unreachable), these tests point
+// `domRef` at the `.stage-wrap` element every mermaid section's server-rendered
+// markup does contain (path "2" -- section's children are [kicker, stage-wrap,
+// ...comment area]), with a hint derived from ITS text (which is just its
+// `pre.mermaid` child's diagram-source text, `.stage-wrap` itself carrying
+// none), not a diagram node's. That is not how a real click mints a mermaid
+// anchor (a click always lands on a live SVG node, never on the stage
+// wrapper) -- it is a deliberate, honest construction that exercises
+// resolveDomAnchorInSection succeeding on its own terms, so the precedence
+// test proves the ORDER, not just that the id fallback happens to always win
+// because the generic half can never succeed in this codebase today.
+//
+// `pre.mermaid` itself (audit V3, ticket 08) is excluded from the resolution
+// surface -- the same chrome exclusion src/ui.mjs's click listener already
+// applies (ANCHOR_CHROME_SELECTOR lists `pre.mermaid` precisely because a real
+// click there is handled by wireMermaidBlock's own listener, never this
+// generic path) -- so it can no longer stand in for "the one element the
+// server-rendered markup contains" the way it used to; `.stage-wrap`, one
+// level up, is not chrome and serves the same constructive purpose.
+{
+  const mermaidBoard = createBoard({
+    title: 'ticket 05 -- mermaid anchor precedence',
+    blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' }],
+  });
+  const mermaidBlock = mermaidBoard.blocks[0];
+  const mermaidSectionHtml = renderBlock(mermaidBlock, mermaidBoard, new Map(), false);
+  const mermaidSectionRoot = parseHtmlTree(mermaidSectionHtml).children[0];
+  const stageWrapNode = resolveSteps(mermaidSectionRoot, pathToSteps('2'));
+  assert.ok(stageWrapNode && (stageWrapNode.cls || []).includes('stage-wrap'),
+    'setup failure: "2" must address the mermaid block\'s own <div class="stage-wrap"> element');
+  const preHint = extractHint(elementText(stageWrapNode));
+  // Sanity check the construction itself before relying on it below -- the same
+  // discipline test/check-anchor-rerender.mjs's own "contrast" check uses.
+  assert.equal(resolveDomAnchorInSection(mermaidSectionHtml, '2', preHint), true,
+    'setup failure: the deliberately-constructed generic ref must actually resolve against the pre.mermaid element');
+
+  check('resolveMermaidAnchor: the generic reference does not resolve, the node id does -- the anchor survives', () => {
+    const anchor = { kind: 'mermaid', ref: 'A', domRef: '99.99', hint: 'nowhere in this section' };
+    assert.equal(resolveDomAnchorInSection(mermaidSectionHtml, anchor.domRef, anchor.hint), false, 'setup failure: domRef must NOT resolve for this case');
+    assert.equal(mermaidRefResolves(mermaidBlock.text, anchor.ref), true, 'setup failure: ref must resolve for this case');
+    assert.equal(resolveMermaidAnchor(mermaidSectionHtml, mermaidBlock.text, anchor), true,
+      'the node id must carry the anchor when the generic reference no longer resolves');
+  });
+
+  check('resolveMermaidAnchor: the reverse -- the generic reference resolves, the node id does not -- the anchor still survives', () => {
+    const anchor = { kind: 'mermaid', ref: 'Ghost', domRef: '2', hint: preHint };
+    assert.equal(resolveDomAnchorInSection(mermaidSectionHtml, anchor.domRef, anchor.hint), true, 'setup failure: domRef must resolve for this case');
+    assert.equal(mermaidRefResolves(mermaidBlock.text, anchor.ref), false, 'setup failure: ref must NOT resolve for this case');
+    assert.equal(resolveMermaidAnchor(mermaidSectionHtml, mermaidBlock.text, anchor), true,
+      'the generic reference must carry the anchor on its own, genuinely tried first -- not merely because the node id happens to agree');
+  });
+
+  check('resolveMermaidAnchor: neither the generic reference nor the node id resolve -- the anchor is lost, and reports what it lost', () => {
+    const anchor = { kind: 'mermaid', ref: 'Ghost', domRef: '99.99', hint: 'nowhere in this section' };
+    assert.equal(resolveMermaidAnchor(mermaidSectionHtml, mermaidBlock.text, anchor), false,
+      'an anchor whose generic reference AND node id are both stale must not resolve');
+
+    mermaidBoard.comments.push({ n: 1, blockId: mermaidBlock.id, anchor, text: 'stale both ways', createdAt: new Date().toISOString(), round: 1 });
+    const resolved = resolveComment(mermaidBoard, mermaidBoard.comments[0]);
+    assert.equal(resolved.resolved, false);
+    assert.equal(resolved.lost, 'nowhere in this section', 'a lost mermaid anchor with a hint must report the hint (ticket 04\'s lostLabel rule), not the bare node id');
+  });
+
+  check('resolveComment: a mermaid anchor with domRef/hint that resolves generically, but a node id that does not, still resolves through the real server-side call site', () => {
+    const okBoard = createBoard({
+      title: 'ticket 05 -- resolveComment reaches the generic half too',
+      blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' }],
+    });
+    const okBlock = okBoard.blocks[0];
+    okBoard.comments.push({
+      n: 1, blockId: okBlock.id,
+      anchor: { kind: 'mermaid', ref: 'Ghost', domRef: '2', hint: preHint },
+      text: 'generic half carries this one', createdAt: new Date().toISOString(), round: 1,
+    });
+    const resolved = resolveComment(okBoard, okBoard.comments[0]);
+    assert.equal(resolved.resolved, true);
+    assert.equal(resolved.lost, undefined);
+  });
+}
+
+// --- audit V3: the block's own chrome must never be inside the resolution surface --
+
+check('resolveDomAnchorInSection: V3 regression -- a ref addressing a markdown block\'s own kicker chrome must not resolve, even with a matching hint', () => {
+  const board = createBoard({ title: 'V3', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
+  const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
+  const sectionRoot = parseHtmlTree(sectionHtml).children[0];
+  const kicker = resolveSteps(sectionRoot, pathToSteps('1'));
+  assert.ok(kicker && (kicker.cls || []).includes('block-kicker'), 'setup failure: "1" must address the block-kicker chrome');
+  const kickerHint = extractHint(elementText(kicker));
+  // Sanity: the chrome element's own identity really is what a forged ref would
+  // need to claim to pass domIdentityHintMatches on its own terms.
+  assert.ok(kickerHint, 'setup failure: the kicker must carry some text to construct a plausible forged hint from');
+  assert.equal(resolveDomAnchorInSection(sectionHtml, '1', kickerHint), false,
+    'a ref into the block-kicker must never resolve, no matter how well the hint matches its text');
+});
+
+check('resolveComment: V3 regression -- a forged dom anchor stored against a block\'s own chrome (the audit\'s own measured shape) reports lost, not resolved', () => {
+  const board = createBoard({ title: 'V3 end to end', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
+  const blockId = board.blocks[0].id;
+  applySubmit(board, {
+    action: 'send', answers: [],
+    comments: [{ blockId, anchor: { kind: 'dom', ref: '1', hint: 'Markdown comment' }, text: 'forged' }],
+  }, 1);
+  assert.equal(resolveComment(board, board.comments[0]).resolved, false,
+    'a dom anchor into a markdown block\'s own kicker (its comment-button text) must not resolve');
+});
+
+check('resolveMermaidAnchor: V3 regression -- a forged domRef into the block\'s own chrome (the audit\'s own measured shape: a nonexistent node id, domRef "1") never carries the anchor, only mermaidRefResolves can', () => {
+  const board = createBoard({ title: 'V3 mermaid', blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' }] });
+  const block = board.blocks[0];
+  const sectionHtml = renderBlock(block, board, new Map(), false);
+  const sectionRoot = parseHtmlTree(sectionHtml).children[0];
+  const kicker = resolveSteps(sectionRoot, pathToSteps('1'));
+  assert.ok(kicker && (kicker.cls || []).includes('block-kicker'), 'setup failure: "1" must address the block-kicker chrome');
+  const kickerHint = extractHint(elementText(kicker));
+  const anchor = { kind: 'mermaid', ref: 'NODE_THAT_NEVER_EXISTED', domRef: '1', hint: kickerHint };
+  assert.equal(resolveDomAnchorInSection(sectionHtml, anchor.domRef, anchor.hint), false,
+    'domRef "1" addresses the block-kicker, which is chrome -- must not resolve even with a matching hint');
+  assert.equal(resolveMermaidAnchor(sectionHtml, block.text, anchor), false,
+    'with domRef excluded and the node id never declared in source, the anchor must be lost, not silently resolved via the generic half');
+});
+
+// --- applySubmit: an untrusted anchor is sanitised, not stored verbatim (V3) --
+
+check('applySubmit: an anchor with an unrecognised kind degrades to a whole-block comment rather than being stored verbatim', () => {
+  const board = createBoard({ title: 'sanitize kind', blocks: [{ kind: 'markdown', text: '# Notes' }] });
+  const blockId = board.blocks[0].id;
+  applySubmit(board, {
+    action: 'send', answers: [],
+    comments: [{ blockId, anchor: { kind: 'sql-injection', ref: '1; DROP TABLE boards' }, text: 'x' }],
+  }, 1);
+  assert.deepEqual(board.comments[0].anchor, { kind: 'block' });
+});
+
+check('applySubmit: a dom/md/mermaid anchor with a non-string or missing ref degrades to a whole-block comment', () => {
+  const board = createBoard({ title: 'sanitize ref', blocks: [{ kind: 'markdown', text: '# Notes' }] });
+  const blockId = board.blocks[0].id;
+  applySubmit(board, {
+    action: 'send', answers: [],
+    comments: [
+      { blockId, anchor: { kind: 'dom', ref: { toString: () => '1' }, hint: 'Notes' }, text: 'object ref' },
+      { blockId, anchor: { kind: 'dom', hint: 'Notes' }, text: 'missing ref' },
+      { blockId, anchor: { kind: 'md' }, text: 'missing ref, md' },
+    ],
+  }, 1);
+  for (const c of board.comments) assert.deepEqual(c.anchor, { kind: 'block' });
+});
+
+check('applySubmit: a comment naming a blockId that is not a real block on the board is dropped, not stored', () => {
+  const board = createBoard({ title: 'sanitize blockId', blocks: [{ kind: 'markdown', text: '# Notes' }] });
+  applySubmit(board, {
+    action: 'send', answers: [],
+    comments: [
+      { blockId: 'ghost99', anchor: { kind: 'block' }, text: 'no such block' },
+      { blockId: board.blocks[0].id, anchor: { kind: 'block' }, text: 'real block' },
+    ],
+  }, 1);
+  assert.equal(board.comments.length, 1, 'only the comment naming a real block must be stored');
+  assert.equal(board.comments[0].text, 'real block');
+});
+
+// --- audit U5: a dom anchor must not survive its block's kind changing under it --
+
+// NOTE on reachability: `resolveBlockId` (above in this file) already refuses
+// an incoming block whose `kind` doesn't match its `id`'s own kind-letter
+// prefix (`{id:'h1', kind:'markdown', ...}` throws "does not start with the
+// 'h' letter"), on every normalizeBlock path amendRound uses -- so the exact
+// "amendRound swaps a block's kind at the same id" mechanism the audit
+// describes is NOT reachable through the normal write path today; a block's
+// kind is permanently fixed by its own id once minted. The fixture below
+// constructs the shape by direct mutation instead of through amendRound, to
+// prove resolveComment's OWN guard is correct defense-in-depth regardless --
+// against a hand-edited store file, or any future change elsewhere that
+// relaxes that constraint -- matching the symmetry the `mermaid` branch's own
+// `block.kind === 'mermaid' &&` guard already has, unconditionally, for the
+// same reason.
+check('resolveComment: U5 regression -- a dom anchor whose block\'s kind no longer matches the kind it was minted against reports lost, not resolved against the new shape by coincidence', () => {
+  const board = createBoard({
+    title: 'U5',
+    // Two top-level children in the iframe body, so ref "2.1" (not "1.1") is
+    // what a real click on "Send" mints -- deliberately NOT index "1", which a
+    // page-scoped section's own chrome (block-kicker) always occupies, so this
+    // fixture isolates U5's own guard from V3's separate chrome exclusion
+    // rather than being caught by it instead.
+    blocks: [{ kind: 'html', html: '<div class="deco"></div><div class="mock"><button>Send</button></div>' }],
+  });
+  const blockId = board.blocks[0].id;
+  const htmlSectionHtml = board.blocks[0].html;
+  assert.equal(resolveDomAnchor(htmlSectionHtml, '2.1', 'Send'), true, 'setup failure: the ref must resolve against the original html');
+
+  // A comment minted while the block was still 'html' -- pushed directly, the
+  // same way this file's own mermaid-precedence and nested-compare fixtures
+  // construct a specific stored shape, standing in for what a real click ->
+  // (queued, not yet sent) -> Send would have produced against the live DOM at
+  // click time (mintBlockKind records the block's kind AT THAT MOMENT).
+  board.comments.push({
+    n: 1, blockId, anchor: { kind: 'dom', ref: '2.1', hint: 'Send' }, text: 'about the button',
+    createdAt: new Date().toISOString(), round: 1, mintBlockKind: 'html',
+  });
+
+  // The block at this SAME id is now some other kind -- a well-formed markdown
+  // block, minted normally on a throwaway board, then spliced in directly
+  // (see this check's own NOTE above for why not through amendRound). Its own
+  // heading text is chosen so an UNGUARDED dom branch would coincidentally
+  // resolve "2.1" (md-content's own first, non-chrome child) against it too.
+  const donor = createBoard({ title: 'donor', blocks: [{ kind: 'markdown', text: '# Send' }] });
+  board.blocks[0] = { ...donor.blocks[0], id: blockId, round: board.blocks[0].round };
+  assert.equal(findBlock(board, blockId).kind, 'markdown', 'setup failure: the block must genuinely be a different kind at the same id');
+  const newSectionHtml = renderBlock(findBlock(board, blockId), board, new Map(), false);
+  assert.equal(resolveDomAnchorInSection(newSectionHtml, '2.1', 'Send'), true,
+    'setup failure: "2.1" must coincidentally address the new heading\'s text so this fixture actually exercises the collision, not just an out-of-range ref');
+  assert.equal(resolveComment(board, board.comments[0]).resolved, false,
+    'a dom anchor minted against the block when it was "html" must not be resolved against its "markdown" replacement, even though "2.1" coincidentally addresses matching text there');
+});
+
+check('resolveComment: a dom anchor with no recorded mintBlockKind (a pre-ticket-08 comment) resolves exactly as before -- the guard is backward compatible', () => {
+  const board = createBoard({ title: 'U5 backcompat', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
+  const blockId = board.blocks[0].id;
+  // Hand-built, bypassing applySubmit, exactly like an older archive's stored
+  // JSON would be -- no mintBlockKind field at all.
+  board.comments.push({ n: 1, blockId, anchor: { kind: 'dom', ref: '1.1', hint: 'Send' }, text: 'old comment', createdAt: new Date().toISOString(), round: 1 });
+  assert.equal(resolveComment(board, board.comments[0]).resolved, true);
+});
+
+// --- audit U4 (routed to ticket 08's resolver-side half by the director) ------
+//
+// An 'html' block has two client-side roots but resolveComment used to assume
+// only one: `.html-stage` (the iframe) is chrome, reached only through
+// wireHtmlStage's own listener, which mints a ref rooted at the iframe's
+// `contentDocument.body`. `.stage-wrap` (the div THAT WRAPS the iframe) is NOT
+// chrome, so a click on its own boundary -- padding around the iframe, never
+// landing inside the sandboxed document -- is caught by the generic
+// page-scoped listener instead, which mints a ref rooted at the block's own
+// SECTION, the same as every other block kind. This locks in that
+// resolveComment now tries both roots for an 'html' block, not just the
+// iframe one.
+check('resolveComment: U4 regression -- a dom anchor rooted at an html block\'s own SECTION (a click on .stage-wrap, not chrome, never landing inside the sandboxed iframe) still resolves, not just an iframe-body-rooted one', () => {
+  const board = createBoard({ title: 'U4', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
+  const blockId = board.blocks[0].id;
+  const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
+  const sectionRoot = parseHtmlTree(sectionHtml).children[0];
+  // block-kicker(1), stage-wrap(2){iframe, pin-layer}, comment-target(3)... --
+  // "2" addresses .stage-wrap itself (el === root of the click, i.e. the
+  // wrapper div, carrying no visible text of its own since an iframe's
+  // sandboxed content never contributes to the OUTER document's textContent).
+  const stageWrap = resolveSteps(sectionRoot, pathToSteps('2'));
+  assert.ok(stageWrap && (stageWrap.cls || []).includes('stage-wrap'), 'setup failure: "2" must address .stage-wrap');
+  const hint = extractHint(elementText(stageWrap)) || composeHint('', 'div', false, '', '');
+  assert.equal(hint, 'div');
+
+  // The iframe body has exactly one top-level child (the mock div at index
+  // 1), so ref "2" is out of range against it -- confirming this anchor
+  // genuinely needs the SECTION root, not the iframe one, to resolve at all.
+  assert.equal(resolveDomAnchor(board.blocks[0].html, '2', hint), false, 'setup failure: "2" must NOT resolve against the iframe body alone');
+  assert.equal(resolveDomAnchorInSection(sectionHtml, '2', hint), true, 'setup failure: "2" must resolve against the section root');
+
+  board.comments.push({ n: 1, blockId, anchor: { kind: 'dom', ref: '2', hint }, text: 'about the stage wrapper', createdAt: new Date().toISOString(), round: 1, mintBlockKind: 'html' });
+  assert.equal(resolveComment(board, board.comments[0]).resolved, true,
+    'a dom anchor rooted at the html block\'s own section (not the iframe) must still resolve -- the resolver must not assume block.kind === "html" means "always root at the iframe"');
+});
+
+// --- audit U1/U2: anchors into answer-derived content, re-measured with C1 fixed --
+//
+// Judgement call (ticket 08, see this repo's report for the full reasoning):
+// NOT fixed here, by design. SPEC_ANCHORING.md's Decision "An anchor survives
+// re-render, not editing" scopes the promise to content unchanged since post
+// time. U1's status line and U2's rank order both derive from `board.answers`,
+// which only changes when the reviewer answers/re-ranks and sends -- an edit
+// of that specific block's answer, not a re-render of unchanged stored JSON. A
+// bare re-render (a second page load, an SSE push of the same round) never
+// shifts a rank order or an answer status, so it never loses either pin; only
+// an intervening Send that changes the answer does, and honestly reports what
+// it lost rather than silently vanishing or misattributing -- exactly what
+// criterion 4's second half promises. What DOES matter, and is fixed by C1
+// above: before that fix, a rank re-order could resolve onto the WRONG
+// sibling (a silent misattribution) whenever one option's identity was a
+// prefix of another's; after it, the same re-order always degrades to an
+// honest "lost", never a wrong resolve. This locks in that re-measurement
+// using the audit's own scenario (options "Ship it" / "Ship it later" / "Drop
+// it", where "Ship it" is a literal prefix of "Ship it later").
+
+check('U1, re-verified (director could not reproduce it; confirmed here with the real board.mjs functions): a status-line comment is lost by the very Send that carries it, when that Send also answers the question', () => {
+  const board = createBoard({
+    title: 'U1',
+    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const qid = board.blocks[0].id;
+  const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
+  const sectionRoot = parseHtmlTree(sectionHtml).children[0];
+  // question-main(1) > question-footer(5) > answer-status span(2) -- fixed
+  // sibling positions regardless of widget contents (block-kicker, prompt,
+  // widget, note-field, footer are always exactly one element each).
+  const statusNode = resolveSteps(sectionRoot, pathToSteps('1.5.2'));
+  assert.ok(statusNode && (statusNode.cls || []).includes('answer-status'), 'setup failure: "1.5.2" must address the status span');
+  const hint = extractHint(elementText(statusNode));
+  assert.equal(hint, 'status: unanswered');
+  assert.equal(resolveDomAnchorInSection(sectionHtml, '1.5.2', hint), true, 'setup failure: must resolve while genuinely unanswered');
+
+  // The reviewer's ONE Send carries both the comment minted against the
+  // still-unanswered status line AND the answer itself -- an answer can only
+  // ever be merged into the SAME round its question was posted in
+  // (applySubmit's own `answerable` set), so "anchor while unanswered, answer
+  // it, Send" is necessarily one request, not two.
+  applySubmit(board, {
+    action: 'send',
+    answers: [{ id: qid, choice: 'Yes' }],
+    comments: [{ blockId: qid, anchor: { kind: 'dom', ref: '1.5.2', hint }, text: 'still says unanswered?' }],
+  }, 1);
+
+  const resolved = resolveComment(board, board.comments[0]);
+  // Judgement call (not a bug -- see this block's own header comment): the
+  // status text this anchor names genuinely changed as a direct result of the
+  // reviewer's own answer, in the same request. Reported lost, honestly, per
+  // criterion 4's second half.
+  assert.equal(resolved.resolved, false, 'answering the question changes the status line this anchor named -- must report lost, not silently keep resolving against now-false text');
+  assert.equal(resolved.lost, 'status: unanswered');
+});
+
+check('U2, re-measured with C1 fixed: a rank re-order that used to silently misattribute the pin onto a prefix-colliding sibling now honestly reports lost instead', () => {
+  const board = createBoard({
+    title: 'U2',
+    blocks: [{ kind: 'question', prompt: 'Rank', widget: 'rank', options: [{ label: 'Ship it' }, { label: 'Ship it later' }, { label: 'Drop it' }] }],
+  });
+  const rid = board.blocks[0].id;
+  const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
+  const sectionRoot = parseHtmlTree(sectionHtml).children[0];
+  // question-main(1) > rank-list(3) > 2nd <li> ("Ship it later")
+  const secondLi = resolveSteps(sectionRoot, pathToSteps('1.3.2'));
+  const hint = extractHint(elementText(secondLi));
+  assert.equal(hint, '2 Ship it later');
+
+  board.comments.push({ n: 1, blockId: rid, anchor: { kind: 'dom', ref: '1.3.2', hint }, text: 'about this one', createdAt: new Date().toISOString(), round: 1, mintBlockKind: 'question' });
+  assert.equal(resolveComment(board, board.comments[0]).resolved, true, 'setup failure: must resolve before any re-rank');
+
+  // Re-rank so "Ship it" (a literal prefix of the stored hint's identity
+  // "Ship it later") now sits at the SAME ref, "1.3.2".
+  applySubmit(board, { action: 'send', answers: [{ id: rid, choice: ['Ship it later', 'Ship it', 'Drop it'] }], comments: [] }, 1);
+  addRound(board, { blocks: [] });
+  applySubmit(board, { action: 'send', answers: [{ id: rid, choice: ['Ship it', 'Ship it later', 'Drop it'] }], comments: [] }, 2);
+
+  const afterRerank = resolveComment(board, board.comments[0]);
+  assert.equal(afterRerank.resolved, false, 'C1 fixed: must report lost, never silently resolve onto "Ship it" just because it is a prefix of the stored hint "2 Ship it later"');
+  assert.equal(afterRerank.lost, '2 Ship it later', 'the reviewer must be told what was lost, not have it silently reattributed to the wrong option');
+});
+
+check('findBlock and resolveComment reach an html/mermaid block nested inside a compare block nested inside a question\'s context -- not just top-level compares', () => {
+  const board = createBoard({
+    title: 'nested compare in question context',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which stage is right?',
+      widget: 'single',
+      options: [{ label: 'Left' }, { label: 'Right' }],
+      context: [{
+        kind: 'compare',
+        left: { label: 'Before', block: { kind: 'html', html: '<button>Old</button>' } },
+        right: { label: 'After', block: { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' } },
+      }],
+    }],
+  });
+  const q = board.blocks[0];
+  const compare = q.context[0];
+  const htmlBlockId = compare.left.block.id;
+  const mermaidBlockId = compare.right.block.id;
+
+  assert.equal(findBlock(board, htmlBlockId)?.kind, 'html');
+  assert.equal(findBlock(board, mermaidBlockId)?.kind, 'mermaid');
+
+  board.comments.push(
+    { n: 1, blockId: htmlBlockId, anchor: { kind: 'dom', ref: '1', hint: 'Old' }, text: 'update this', createdAt: new Date().toISOString(), round: 1 },
+    { n: 2, blockId: mermaidBlockId, anchor: { kind: 'mermaid', ref: 'A' }, text: 'rename', createdAt: new Date().toISOString(), round: 1 },
+  );
+  const domResolved = resolveComment(board, board.comments[0]);
+  assert.equal(domResolved.resolved, true, 'a real anchor nested inside compare-inside-question-context must not report lost');
+  assert.equal(domResolved.blockKind, 'html');
+
+  const mermaidResolved = resolveComment(board, board.comments[1]);
+  assert.equal(mermaidResolved.resolved, true);
+  assert.equal(mermaidResolved.blockKind, 'mermaid');
+});
+
+// --- ui.mjs / anchor.mjs parity: the mint side must agree with the resolve side --
+//
+// src/ui.mjs duplicates extractHint, stepsToPath and buildSteps as plain functions
+// inside its template string -- necessarily, since the served page has no import
+// graph at runtime (ticket 05's standalone-archive guarantee) -- rather than
+// importing src/anchor.mjs. Nothing before this point ever checked that the two
+// copies actually agree: src/anchor.mjs's own copies are exercised directly above,
+// and ui.mjs's copy was previously only checked structurally (readonly guards,
+// etc.), never executed.
+//
+// The risk this closes: src/ui.mjs's buildSteps/stepsToPath/extractHint MINT an
+// anchor's ref/hint at click time, in the browser; src/anchor.mjs's resolveSteps/
+// resolveDomAnchor RESOLVE that same ref/hint server-side, at packet-assembly time
+// and every re-render. If the two implementations ever drift -- a different index
+// base, different handling of text/whitespace-only children, a different
+// truncation length or ellipsis character -- every anchor the browser mints would
+// resolve as lost server-side. The reviewer sees a pin; the agent receives "lost
+// anchor". No test that only exercises one side would ever notice.
+//
+// Technique: extract the three functions out of the `ui` template string by
+// explicit start/end markers (src/ui.mjs's `/* anchor-parity:<name> start/end */`
+// comments) and eval them with `new Function`, precisely as
+// ~/.claude/skills/visualize/check.mjs does for template.html's own inline
+// functions. Extraction failure is itself asserted (loudly, as its own check) so
+// a future rename/restructure of ui.mjs surfaces as a failing check, not a
+// silently-skipped one.
+
+/** Pull the source between `/* anchor-parity:<name> start *(/` and the matching
+ * `end` marker out of `src`, or throw a clear, specific error -- never returns
+ * undefined/empty silently. */
+function extractMarked(src, name) {
+  const startMarker = '/* anchor-parity:' + name + ' start */';
+  const endMarker = '/* anchor-parity:' + name + ' end */';
+  const afterStart = src.split(startMarker);
+  if (afterStart.length < 2) {
+    throw new Error('anchor-parity extraction failed: start marker not found for "' + name + '" in src/ui.mjs -- ' +
+      'the function may have been renamed or moved without its markers');
+  }
+  const body = afterStart[1].split(endMarker);
+  if (body.length < 2) {
+    throw new Error('anchor-parity extraction failed: end marker not found for "' + name + '" in src/ui.mjs');
+  }
+  return body[0];
+}
+
+/** Extract `name` from the ui.mjs template string and eval it into a callable,
+ * via the same `new Function(src + '; return name;')()` technique as
+ * ~/.claude/skills/visualize/check.mjs. Throws (not returns null/undefined) if
+ * extraction or eval fails, so a broken extraction fails loudly as its own check
+ * rather than producing a function that silently does nothing useful. */
+function extractUiFunction(name) {
+  const src = extractMarked(ui, name);
+  const fn = new Function(src + '; return ' + name + ';')();
+  if (typeof fn !== 'function') {
+    throw new Error('anchor-parity extraction for "' + name + '" did not yield a function');
+  }
+  return fn;
+}
+
+check('anchor-parity: extraction actually finds and evaluates all three marked functions in ui.mjs (fails loudly, not silently, if the markers ever go missing)', () => {
+  assert.equal(typeof extractUiFunction('extractHint'), 'function');
+  assert.equal(typeof extractUiFunction('stepsToPath'), 'function');
+  assert.equal(typeof extractUiFunction('buildSteps'), 'function');
+  assert.throws(() => extractUiFunction('doesNotExist'), /start marker not found/);
+});
+
+const uiExtractHint = extractUiFunction('extractHint');
+const uiStepsToPath = extractUiFunction('stepsToPath');
+const uiBuildSteps = extractUiFunction('buildSteps');
+
+check('anchor-parity: extractHint -- ui.mjs\'s copy agrees with src/anchor.mjs across whitespace, boundary and ellipsis cases', () => {
+  const cases = [
+    '',
+    '   ',
+    '\n\t  \n',
+    'Send',
+    '  Send   Message  ',
+    'Send\nMessage\twith\r\ntabs and newlines',
+    'x'.repeat(79),   // just under the 80-char truncation boundary
+    'x'.repeat(80),   // exactly at the boundary
+    'x'.repeat(81),   // just over
+    'x'.repeat(200),  // well over
+    'y'.repeat(75) + '…', // source text already contains the ellipsis character, under the boundary
+    'z'.repeat(85) + '…', // ...and over it, where extractHint's own truncation also kicks in
+    'word '.repeat(30), // long, but whitespace-heavy -- collapsing changes the pre-truncation length
+    null,
+    undefined,
+  ];
+  for (const input of cases) {
+    const uiOut = uiExtractHint(input);
+    const anchorOut = extractHint(input);
+    assert.equal(uiOut, anchorOut, 'extractHint parity failed for input: ' + JSON.stringify(input) + ' (ui: ' + JSON.stringify(uiOut) + ', anchor.mjs: ' + JSON.stringify(anchorOut) + ')');
+  }
+});
+
+check('anchor-parity: stepsToPath -- ui.mjs\'s copy agrees with src/anchor.mjs across empty, single and multi-digit step chains', () => {
+  const cases = [[], [1], [1, 2, 3], [10, 2, 300], [1, 1, 1, 1, 1]];
+  for (const steps of cases) {
+    assert.equal(uiStepsToPath(steps), stepsToPath(steps), 'stepsToPath parity failed for: ' + JSON.stringify(steps));
+  }
+});
+
+/** Recursively wire `.parentElement` on every element in a `{ tag, children }`
+ * tree (anchor.mjs's parseHtmlTree already builds `children` element-only,
+ * matching real DOM `Element.children` -- this only adds the upward pointers
+ * buildSteps needs that parseHtmlTree itself has no reason to set). */
+function linkParents(node) {
+  for (const child of node.children || []) {
+    child.parentElement = node;
+    linkParents(child);
+  }
+  return node;
+}
+
+/** Every element node in `tree`, root included -- so a battery of round-trip
+ * checks can hit every depth/breadth case (single child, last child, deepest
+ * leaf, etc.) in one pass without hand-picking targets. */
+function everyElement(node, out) {
+  out = out || [];
+  out.push(node);
+  for (const child of node.children || []) everyElement(child, out);
+  return out;
+}
+
+check('anchor-parity: buildSteps -- ui.mjs\'s copy agrees with src/anchor.mjs over hand-built trees (single child, last child, deep, wide)', () => {
+  const trees = [
+    // single-child chain at every level
+    linkParents(el('body', [el('div', [el('span', [el('em')])])])),
+    // wide: five siblings, target each in turn including the last
+    linkParents(el('body', [el('a'), el('b'), el('c'), el('d'), el('e')])),
+    // deep + wide mixed, so a "last child of a last child" case exists
+    linkParents(el('body', [
+      el('div', [el('span'), el('button')]),
+      el('div', [el('a'), el('b'), el('c')]),
+    ])),
+  ];
+  let compared = 0;
+  for (const tree of trees) {
+    for (const target of everyElement(tree)) {
+      const uiSteps = uiBuildSteps(tree, target);
+      const anchorSteps = buildSteps(tree, target);
+      assert.deepEqual(uiSteps, anchorSteps, 'buildSteps parity failed for a target in tree ' + JSON.stringify(tree.tag));
+      compared++;
+      if (target !== tree) {
+        // round trip: the ui.mjs copy mints the path, src/anchor.mjs's resolveSteps
+        // (the actual server-side resolution function) must land back on the same
+        // element -- this is the exact mint -> resolve boundary the ticket's
+        // guarantee depends on.
+        assert.equal(resolveSteps(tree, uiSteps), target, 'round trip (ui buildSteps -> anchor.mjs resolveSteps) failed to land back on the clicked element');
+      }
+    }
+  }
+  assert.ok(compared >= 10, 'expected the battery to cover at least 10 distinct targets, covered ' + compared);
+});
+
+check('anchor-parity: buildSteps -- agrees even when text and whitespace-only nodes sit between the elements being indexed', () => {
+  // Realistic markup: literal whitespace between tags becomes real text-node
+  // children in a browser DOM. anchor.mjs's own parseHtmlTree already excludes
+  // them from `.children` (matching Element.children) -- reusing it here as the
+  // shared tree builder means this battery exercises the exact scenario a
+  // hand-rolled index-chain implementation most plausibly gets wrong, without
+  // hand-modelling text nodes ourselves (see this module's file comment for why
+  // parseHtmlTree exists at all).
+  const html = [
+    '<div>',
+    '  <button>A</button>',
+    '  ',
+    '  <span>B</span>',
+    '\n\n',
+    '  <p>C<br>\n  D</p>',
+    '</div>',
+  ].join('\n');
+  const tree = linkParents(parseHtmlTree(html));
+  let compared = 0;
+  for (const target of everyElement(tree)) {
+    if (target === tree) continue; // the synthetic #root has no real position to build steps to
+    const uiSteps = uiBuildSteps(tree, target);
+    const anchorSteps = buildSteps(tree, target);
+    assert.deepEqual(uiSteps, anchorSteps, 'buildSteps parity failed with whitespace-interleaved children for tag ' + target.tag);
+    assert.equal(resolveSteps(tree, uiSteps), target, 'round trip failed to land back on the clicked element with whitespace-interleaved children');
+    compared++;
+  }
+  assert.ok(compared >= 5, 'expected at least 5 targets from the whitespace-interleaved fixture, covered ' + compared);
+});
+
+check('anchor-parity: buildSteps -- both copies refuse a click outside the given root, identically', () => {
+  const root = linkParents(el('body', [el('div')]));
+  const outsider = el('span'); // detached, no parentElement chain back to root
+  assert.equal(uiBuildSteps(root, outsider), null);
+  assert.equal(buildSteps(root, outsider), null);
+});
+
+// --- render.mjs: pure function of the JSON -----------------------------------------
+
+check('renderBoardPage is a pure function that inlines its own board JSON', () => {
+  const board = createBoard({
+    title: 'Render check',
+    blocks: [
+      { kind: 'markdown', text: '# Acceptance Criteria\n\n- one\n- two' },
+      { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] },
+    ],
+  });
+  const html1 = renderBoardPage(board);
+  const html2 = renderBoardPage(board);
+  assert.equal(html1, html2);
+  assert.ok(html1.includes('id="board-data"'));
+  assert.ok(html1.includes(JSON.stringify(board.id)));
+  assert.ok(html1.includes('id="acceptance-criteria"'));
+  assert.ok(html1.includes('data-anchor-ref="acceptance-criteria-li1"'));
+  assert.ok(html1.includes('data-choice="A"'));
+  assert.ok(html1.includes('id="send-btn"'));
+});
+
+// A temp CLAUDE_BOARD_HOME sanity guard: this check touches no disk at all, but
+// assert the convention still holds for anything added here later.
+check('this check never touches the real store', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'claude-board-pure-'));
+  try {
+    assert.notEqual(tmp, undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// --- src/resolve.mjs: content-by-reference resolution -----------------------------
+
+check('resolveRef slices a 1-based inclusive line range and hashes the result', () => {
+  const file = path.join(fixturesDir, 'lines.txt');
+  writeFileSync(file, ['one', 'two', 'three', 'four', 'five'].join('\n'), 'utf8');
+  const result = resolveRef({ path: 'lines.txt', lines: [2, 4] }, { cwd: fixturesDir });
+  assert.equal(result.text, 'two\nthree\nfour');
+  assert.equal(typeof result.sha, 'string');
+  assert.equal(result.sha.length, 64);
+  assert.equal(result.error, undefined);
+});
+
+check('resolveRef slices a markdown section by heading slug, stopping at the next same-or-shallower heading', () => {
+  const file = path.join(fixturesDir, 'doc.md');
+  writeFileSync(file, [
+    '# Title',
+    '',
+    'intro prose',
+    '',
+    '## Notes',
+    '',
+    'note body',
+    '- item one',
+    '',
+    '## Other',
+    '',
+    'other body',
+  ].join('\n'), 'utf8');
+  const result = resolveRef({ path: 'doc.md', section: 'notes' }, { cwd: fixturesDir });
+  assert.ok(result.text.startsWith('## Notes'));
+  assert.ok(result.text.includes('note body'));
+  assert.ok(!result.text.includes('## Other'));
+  assert.ok(!result.text.includes('other body'));
+});
+
+check('resolveRef reports missing file, bad line range, and missing section as errors, never throws', () => {
+  const at = { cwd: fixturesDir };
+  assert.equal(typeof resolveRef({ path: 'nope.md' }, at).error, 'string');
+  writeFileSync(path.join(fixturesDir, 'short.txt'), 'only one line', 'utf8');
+  assert.equal(typeof resolveRef({ path: 'short.txt', lines: [5, 8] }, at).error, 'string');
+  assert.equal(typeof resolveRef({ path: 'short.txt', lines: [3, 1] }, at).error, 'string'); // to < from
+  writeFileSync(path.join(fixturesDir, 'doc2.md'), '# Title\n\nprose', 'utf8');
+  assert.equal(typeof resolveRef({ path: 'doc2.md', section: 'does-not-exist' }, at).error, 'string');
+  assert.equal(typeof resolveRef(null).error, 'string');
+});
+
+check('langForPath guesses a language from the extension, falling back to empty', () => {
+  assert.equal(langForPath('src/board.mjs'), 'javascript');
+  assert.equal(langForPath('README'), '');
+});
+
+check('a board carrying reference-resolved content snapshots text+sha at post time, and a bad reference reports an error without dropping the block', () => {
+  const codeFile = path.join(fixturesDir, 'snippet.js');
+  writeFileSync(codeFile, ['function add(a, b) {', '  return a + b;', '}', ''].join('\n'), 'utf8');
+  const mdFile = path.join(fixturesDir, 'contract.md');
+  writeFileSync(mdFile, '# Contract\n\n## Notes\n\nresolved by reference', 'utf8');
+
+  const board = createBoard({
+    title: 'Reference resolution',
+    cwd: fixturesDir,
+    blocks: [
+      { kind: 'code', source: { path: 'snippet.js', lines: [1, 2] } },
+      { kind: 'markdown', source: { path: 'contract.md', section: 'notes' } },
+      { kind: 'markdown', source: { path: 'missing-file.md' } },
+    ],
+  });
+
+  const code = board.blocks[0];
+  assert.equal(code.text, 'function add(a, b) {\n  return a + b;');
+  assert.equal(code.lang, 'javascript'); // guessed from the source path when no explicit lang
+  assert.equal(code.sha.length, 64);
+  assert.equal(code.error, undefined);
+
+  const md = board.blocks[1];
+  assert.ok(md.text.includes('resolved by reference'));
+  assert.ok(md.html.includes('resolved by reference'));
+  assert.equal(md.error, undefined);
+
+  const broken = board.blocks[2];
+  assert.equal(board.blocks.length, 3); // the bad reference is still minted, not dropped
+  assert.equal(broken.kind, 'markdown');
+  assert.equal(broken.text, '');
+  assert.equal(typeof broken.error, 'string');
+  assert.ok(broken.error.includes('missing-file.md'));
+});
+
+check('a block with a failed resolution renders its error on the page instead of vanishing', () => {
+  const board = createBoard({
+    title: 'Broken reference',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'code', source: { path: 'does-not-exist.js' } }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('class="resolve-error"'));
+  assert.ok(markup.includes('Could not resolve'));
+});
+
+// --- four answer widgets: packet shape, including unanswered, deferred, notes -----
+
+check('all four widgets produce their documented answer shape in the packet, including unanswered, deferred, and notes', () => {
+  const board = createBoard({
+    title: 'Widget survey',
+    blocks: [
+      { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] },
+      { kind: 'question', prompt: 'Pick some', widget: 'multi', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] },
+      { kind: 'question', prompt: 'Say something', widget: 'text', options: [] },
+      { kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] },
+      { kind: 'question', prompt: 'Set aside for later', widget: 'single', options: [{ label: 'X' }] },
+      { kind: 'question', prompt: 'Never touched', widget: 'multi', options: [{ label: 'A' }] },
+    ],
+  });
+  const [single, multi, text, rank, deferredId, neverTouched] = board.blocks.map(b => b.id);
+
+  applySubmit(board, {
+    action: 'send',
+    answers: [
+      { id: single, status: 'answered', choice: 'A', note: 'clean call' },
+      { id: multi, status: 'answered', choice: ['A', 'C'], note: 'both' },
+      { id: text, status: 'answered', choice: 'a full paragraph of free-form prose', note: '' },
+      { id: rank, status: 'answered', choice: ['C', 'A', 'B'], note: 'reordered' },
+      { id: deferredId, status: 'deferred', choice: null, note: 'coming back to this' },
+      // neverTouched deliberately absent -> must come back explicitly unanswered
+    ],
+    comments: [],
+  }, 1);
+
+  const packet = buildPacket(board, 1, 'http://127.0.0.1:7391/b/' + board.id);
+  assert.equal(packet.answers.length, 6);
+  const byId = Object.fromEntries(packet.answers.map(a => [a.id, a]));
+
+  assert.equal(byId[single].widget, 'single');
+  assert.equal(byId[single].status, 'answered');
+  assert.equal(byId[single].choice, 'A');
+  assert.equal(byId[single].note, 'clean call');
+
+  assert.equal(byId[multi].widget, 'multi');
+  assert.deepEqual(byId[multi].choice, ['A', 'C']);
+  assert.equal(byId[multi].note, 'both');
+
+  assert.equal(byId[text].widget, 'text');
+  assert.equal(typeof byId[text].choice, 'string');
+  assert.equal(byId[text].choice, 'a full paragraph of free-form prose');
+  assert.equal(byId[text].note, ''); // note always present, '' when empty
+
+  assert.equal(byId[rank].widget, 'rank');
+  assert.deepEqual(byId[rank].choice, ['C', 'A', 'B']);
+  assert.equal(byId[rank].note, 'reordered');
+
+  assert.equal(byId[deferredId].status, 'deferred');
+  assert.equal(byId[deferredId].choice, null);
+  assert.equal(byId[deferredId].note, 'coming back to this');
+
+  assert.equal(byId[neverTouched].status, 'unanswered');
+  assert.equal(byId[neverTouched].choice, null);
+  assert.equal(byId[neverTouched].note, '');
+});
+
+check('render markup: multi-select, text, rank and defer carry the data attributes src/ui.mjs reads generically', () => {
+  const board = createBoard({
+    title: 'Widget markup',
+    blocks: [
+      { kind: 'question', prompt: 'Pick some', widget: 'multi', options: [{ label: 'Red' }, { label: 'Blue' }] },
+      { kind: 'question', prompt: 'Say something', widget: 'text', options: [] },
+      { kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'First' }, { label: 'Second' }] },
+    ],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+
+  assert.ok(markup.includes('class="card-choice choice-multi"'));
+  assert.ok(markup.includes('data-choice="Red"'));
+  assert.ok(markup.includes('data-answer-for='));
+  assert.ok(markup.includes('class="rank-list"'));
+  assert.ok(markup.includes('draggable="true"'));
+  assert.ok(markup.includes('data-choice="First"'));
+  assert.ok(markup.includes('class="btn-defer"'));
+  assert.ok(markup.includes('data-defer-for='));
+  assert.ok(markup.includes('data-widget="multi"'));
+  assert.ok(markup.includes('data-widget="text"'));
+  assert.ok(markup.includes('data-widget="rank"'));
+});
+
+check('the rank widget renders options in the stored order when there is a prior answer', () => {
+  const board = createBoard({
+    title: 'Rank order',
+    blocks: [{ kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] }],
+  });
+  const qid = board.blocks[0].id;
+  applySubmit(board, { action: 'send', answers: [{ id: qid, status: 'answered', choice: ['C', 'A', 'B'], note: '' }], comments: [] }, 1);
+  const markup = renderedMarkup(renderBoardPage(board));
+  const order = [...markup.matchAll(/data-choice="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ['C', 'A', 'B']);
+});
+
+// --- ticket 04: the history rail ---------------------------------------------------
+//
+// SPEC_BOARD.md Decisions -> "A board is a session-scoped thread with rounds": "the
+// sent round collapsed into a history rail with its answers still readable."
+
+check('a sent round renders as history with its prompt, choice and note still readable; a still-open round renders live', () => {
+  const board = createBoard({
+    title: 'History rail',
+    blocks: [{ kind: 'question', prompt: 'Round 1 question', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const q1 = board.blocks[0].id;
+  applySubmit(board, { action: 'send', answers: [{ id: q1, status: 'answered', choice: 'Yes', note: 'first round note' }], comments: [] }, 1);
+  addRound(board, { blocks: [{ kind: 'question', prompt: 'Round 2 question', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] }] });
+
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(/<section class="round round-history" data-round="1" data-round-status="sent">/.test(markup));
+  assert.ok(markup.includes('Round 1 question'), 'the sent round\'s prompt must still be readable');
+  assert.ok(markup.includes('first round note'), 'the sent round\'s note must still be readable');
+  // the answer is "still readable" specifically as the selected choice, not just
+  // present as text somewhere on the page (ablation: dropping the `selected` class
+  // while leaving the label text would pass a bare `.includes('Yes')` check)
+  assert.ok(/class="card-choice choice-single selected"[^>]*data-choice="Yes"/.test(markup));
+
+  assert.ok(/<section class="round round-open" data-round="2" data-round-status="open">/.test(markup));
+  assert.ok(markup.includes('Round 2 question'), 'the still-open round must render live below the history');
+});
+
+check('interactive controls inside a history round are rendered disabled, so a later Send can never silently rewrite a sent answer', () => {
+  const board = createBoard({
+    title: 'History disabled',
+    blocks: [{ kind: 'question', prompt: 'Q1', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const q1 = board.blocks[0].id;
+  applySubmit(board, { action: 'send', answers: [{ id: q1, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  addRound(board, { blocks: [{ kind: 'markdown', text: '# more' }] });
+
+  const html = renderBoardPage(board);
+  const historySection = /<section class="round round-history"[\s\S]*?<section class="round round-open"/.exec(html)[0];
+  // Ablation: rendering the round-1 widgets without `historical` (i.e. always
+  // passing `false`) leaves this identical to the open-round markup and fails here.
+  assert.ok(historySection.includes('disabled'), 'a sent round\'s answer controls must be disabled in the markup');
+  assert.ok(/class="card-choice choice-single selected"[^>]*disabled/.test(historySection) || /disabled[^>]*class="card-choice choice-single selected"/.test(historySection));
+});
+
+check('a history round\'s comment form is disabled too, on every block kind -- not just the question widgets', () => {
+  // Audit finding: commentArea() didn't originally take `historical` at all, so a
+  // fresh page load of a board with a sent round left every comment form fully
+  // live even though the round's answer controls were correctly disabled --
+  // divergent from what the client-side collapse (markRoundHistory) already did.
+  // Covers markdown too, not just question, since renderBlock now threads
+  // `historical` into every block kind's commentArea call, not only question's.
+  const board = createBoard({
+    title: 'Comment form disabled',
+    blocks: [
+      { kind: 'markdown', text: '# Notes' },
+      { kind: 'question', prompt: 'Q1', widget: 'single', options: [{ label: 'Yes' }] },
+    ],
+  });
+  const q1 = board.blocks[1].id;
+  applySubmit(board, { action: 'send', answers: [{ id: q1, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  addRound(board, { blocks: [{ kind: 'markdown', text: '# more' }] });
+
+  const html = renderBoardPage(board);
+  const historySection = /<section class="round round-history"[\s\S]*?<section class="round round-open"/.exec(html)[0];
+  const commentForms = [...historySection.matchAll(/<form class="comment-form"[\s\S]*?<\/form>/g)];
+  assert.equal(commentForms.length, 2, 'both blocks in the sent round must carry a comment form');
+  for (const [form] of commentForms) {
+    assert.ok(/<input type="text" placeholder="Add a comment" disabled>/.test(form), `comment input must be disabled in a history round:\n${form}`);
+    assert.ok(/<button type="submit" disabled>Add<\/button>/.test(form), `comment submit must be disabled in a history round:\n${form}`);
+  }
+
+  // and the still-open round's comment forms stay fully live
+  const openSection = html.slice(html.indexOf('<section class="round round-open"'));
+  assert.ok(/<input type="text" placeholder="Add a comment">/.test(openSection));
+  assert.ok(!/placeholder="Add a comment" disabled/.test(openSection));
+});
+
+check('renderRoundSection produces byte-identical markup for a round whether called directly or through renderBoardPage', () => {
+  const board = createBoard({
+    title: 'Consistency',
+    blocks: [{ kind: 'question', prompt: 'Q', widget: 'single', options: [{ label: 'Yes' }] }],
+  });
+  const commentsByBlock = groupCommentsByBlock(board.comments.map(c => resolveComment(board, c)));
+  const direct = renderRoundSection(board, 1, commentsByBlock);
+  const wholePage = renderBoardPage(board);
+  assert.ok(wholePage.includes(direct.trim()), 'src/server.mjs renders the exact same fragment for an SSE push of a new round as the full page does');
+});
+
+check('renderBlock renders a single block fragment usable for an SSE amend push, matching the block markup inside the full page', () => {
+  const board = createBoard({
+    title: 'Amend fragment',
+    blocks: [{ kind: 'markdown', text: '# Amend target\n\noriginal' }],
+  });
+  const commentsByBlock = groupCommentsByBlock(board.comments.map(c => resolveComment(board, c)));
+  const fragment = renderBlock(board.blocks[0], board, commentsByBlock, false);
+  assert.ok(renderBoardPage(board).includes(fragment.trim()));
+});
+
+// --- five context kinds render into the page ---------------------------------------
+
+check('all five context kinds render into the page: markdown, code, mermaid, html, compare', () => {
+  const board = createBoard({
+    title: 'Context kinds',
+    blocks: [
+      { kind: 'markdown', text: '# Prose\n\nsome text' },
+      { kind: 'code', text: 'const x = 1;', lang: 'javascript' },
+      { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
+      { kind: 'html', html: '<div class="mock"><button>Click</button></div>' },
+      {
+        kind: 'compare',
+        left: { label: 'Before', block: { kind: 'markdown', text: '# Before\n\nold copy' } },
+        right: { label: 'After', block: { kind: 'markdown', text: '# After\n\nnew copy' } },
+      },
+    ],
+  });
+  // Stripped of the inlined <style>, the #board-data JSON, and the client <script>:
+  // every needle below can only be satisfied by markup renderBlock actually emitted,
+  // not by a CSS selector, a querySelector string literal in src/ui.mjs, or a field
+  // value riding along in the hydration payload. (Verified: replacing the compare
+  // arm of the render dispatch with `return ''` makes this check fail, as it must.)
+  const markup = renderedMarkup(renderBoardPage(board));
+
+  assert.ok(markup.includes('class="md-content"'));
+  assert.ok(markup.includes('some text'));
+
+  assert.ok(markup.includes('class="block code-block"'));
+  // Ticket 03: every source line is its own element (criterion 1's "a line of a
+  // code reference" needs an element the generic dom anchor can build a path to).
+  assert.ok(markup.includes('<pre><code><span class="code-line">const x = 1;</span></code></pre>'));
+  assert.ok(markup.includes('Code · javascript'));
+
+  assert.ok(markup.includes('class="block mermaid-block"'));
+  assert.ok(markup.includes('<pre class="mermaid">flowchart LR'));
+
+  assert.ok(markup.includes('class="block html-block"'));
+  assert.ok(markup.includes('class="html-stage"'));
+  assert.ok(markup.includes('srcdoc='));
+  assert.ok(markup.includes('&lt;button&gt;Click&lt;/button&gt;')); // srcdoc is attribute-escaped, not stripped
+
+  assert.ok(markup.includes('class="block compare-block"'));
+  assert.ok(markup.includes('class="compare-grid"'));
+  assert.ok(markup.includes('<div class="compare-label">Before</div>'));
+  assert.ok(markup.includes('<div class="compare-label">After</div>'));
+  assert.ok(markup.includes('old copy'));
+  assert.ok(markup.includes('new copy'));
+});
+
+// --- ticket 06: numbered pins on the element, in html-stage and mermaid blocks ----
+
+check('html and mermaid blocks each render a stage-wrap + pin-layer, the anchor point src/ui.mjs positions numbered pins into', () => {
+  const board = createBoard({
+    title: 'Pin layers',
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+      { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' },
+    ],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const htmlBlockId = board.blocks[0].id;
+  const mermaidBlockId = board.blocks[1].id;
+  assert.ok(markup.includes(`<div class="pin-layer" data-block-id="${htmlBlockId}"></div>`));
+  assert.ok(markup.includes(`<div class="pin-layer" data-block-id="${mermaidBlockId}"></div>`));
+  assert.ok(markup.includes('class="stage-wrap"'));
+});
+
+// --- the element-level gesture has to be discoverable -------------------------
+//
+// Found in the manual pass, 2026-07-29: the wiring below was correct and unusable.
+// A mermaid diagram and an iframe'd mock both read as pictures, nothing in either
+// said an individual element could take a comment, and the reviewer's first move was
+// the kicker's block-level button — which is exactly the outcome criterion 10 was
+// written against ("the agent receives 'the Send button in the after stage' rather
+// than 'the small card'"). Two affordances, one per stage kind, plus the note.
+
+check('both stage kinds tell the reviewer their elements are clickable, and a read-only archive does not', () => {
+  const board = createBoard({
+    title: 'Stage affordances',
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+      { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' },
+    ],
+  });
+  const page = renderBoardPage(board);
+  const markup = renderedMarkup(page);
+
+  const hints = [...markup.matchAll(/<span class="stage-hint">([^<]*)<\/span>/g)].map(m => m[1]);
+  assert.equal(hints.length, 2, `expected one hint per stage kind, got: ${JSON.stringify(hints)}`);
+  assert.ok(hints.some(h => /click any element/i.test(h)), 'the html stage must say its elements are clickable');
+  assert.ok(hints.some(h => /turn on comment mode to click a node/i.test(h)), 'the mermaid stage must say comment mode has to be on before its nodes are clickable');
+
+  // Each hint sits in its own block's kicker, not both in one.
+  const htmlKicker = /<div class="block-kicker">HTML stage.*?<\/div>/s.exec(markup);
+  const mermaidKicker = /<div class="block-kicker">Mermaid.*?<\/div>/s.exec(markup);
+  assert.ok(htmlKicker && htmlKicker[0].includes('stage-hint'), 'the html-stage kicker carries the hint');
+  assert.ok(mermaidKicker && mermaidKicker[0].includes('stage-hint'), 'the mermaid kicker carries the hint');
+
+  // Nothing is clickable in a standalone file: archive, so the invitation is hidden
+  // there rather than lying. (styles, not markup: the page is byte-identical either
+  // way — ticket 05's standalone guarantee.)
+  assert.match(page, /body\.readonly \.stage-hint \{[^}]*display: none/, 'a read-only archive must hide the hint');
+});
+
+check('a mermaid node highlights under the cursor, and an html stage gets the same affordance injected into its own document', () => {
+  // Mermaid renders into the page's own DOM, so the page stylesheet can reach it.
+  // Ticket 05: gated on body.comment-mode too, same as everything else this
+  // gesture touches -- a diagram node is no longer a standing exception.
+  // Bound to a REAL mermaid 11 node id rather than to the selector's spelling. The
+  // rules used to be asserted as literal `g[id^="flowchart-"]` text, which is how a
+  // dead affordance stayed green: the string matched, and the selector it described
+  // matched nothing mermaid actually renders. Here the check builds the id mermaid
+  // emits and asks whether the shipped rule would select it.
+  const realNodeId = 'mermaid-1785397890978-flowchart-shim-0';
+  const hoverSelectors = /(.+):hover \{[^}]*outline: 2px solid var\(--accent\)/.exec(styles);
+  assert.ok(hoverSelectors, 'the mermaid hover rule must still exist');
+  const cursorRule = new RegExp(`([^{}]+)\\{[^}]*cursor: pointer`).exec(
+    styles.slice(styles.indexOf('.mermaid-block svg g')));
+  assert.ok(cursorRule, 'the mermaid cursor rule must still exist');
+
+  // Every alternative in the shared selector is scoped and comment-mode gated, and
+  // at least one of them selects a real node id.
+  const alts = MERMAID_NODE_SELECTOR.split(',').map(s => s.trim());
+  assert.ok(alts.length > 0);
+  for (const alt of alts) {
+    assert.match(styles, new RegExp(`body\\.comment-mode:not\\(\\.readonly\\) \\.mermaid-block svg g${alt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+      `the hover/cursor rules must cover the selector alternative ${alt}, scoped and comment-mode gated`);
+  }
+  const selectsReal = alts.some(alt => {
+    const m = /^\[id([\^*]?)="(.+)"\]$/.exec(alt);
+    if (!m) return false;
+    return m[1] === '*' ? realNodeId.includes(m[2]) : m[1] === '^' ? realNodeId.startsWith(m[2]) : realNodeId === m[2];
+  });
+  assert.ok(selectsReal, `no alternative in ${MERMAID_NODE_SELECTOR} selects a real mermaid 11 node id (${realNodeId}) — the hover affordance and pointer cursor would be invisible in every browser`);
+
+  // Ticket 10: the html stage is now a genuinely cross-origin iframe (no
+  // `allow-same-origin`), so nothing in src/ui.mjs can reach in to inject a
+  // stylesheet or track a hover any more -- that lives entirely inside
+  // stageAgentScript (src/render.mjs), the string inlined into every html
+  // block's `srcdoc`, exercised for real by test/check-click.mjs and friends.
+  // This check inspects that one real copy structurally: the affordance must
+  // be gated on comment mode actually being ON, not merely present
+  // unconditionally (an archived, read-only board never sends `commentMode:
+  // true` at all -- src/ui.mjs's `setCommentMode` -- so this is what keeps
+  // test/check-archive.mjs's "no hover stylesheet is even injected" true).
+  const script = stageAgentScript();
+  const modeIdx = script.indexOf("data.type === 'mode'");
+  const styleIdx = script.indexOf("createElement('style')");
+  const ensureIdx = script.indexOf('function ensureHoverStyle');
+  const hoverIdx = script.indexOf("addEventListener('mouseover'");
+  assert.ok(modeIdx !== -1, "stageAgentScript must handle the parent's 'mode' message");
+  assert.ok(styleIdx !== -1, 'stageAgentScript must inject a stylesheet into the stage document');
+  assert.ok(hoverIdx !== -1, 'stageAgentScript must track the hovered element');
+  assert.ok(ensureIdx !== -1 && ensureIdx < styleIdx, 'the stylesheet injection must live inside a function, not run unconditionally at script start');
+  assert.ok(
+    /if \(commentMode\) ensureHoverStyle\(\);/.test(script),
+    "the hover stylesheet must be injected lazily, only once comment mode has actually turned on -- never unconditionally at script start (which would inject it into a read-only archive's stage too)",
+  );
+
+  // One class name, used by both the rule and the handler that sets it: a rename in
+  // either alone would leave a highlight that never shows, with nothing failing.
+  const decl = /var HOVER_CLASS = '([^']+)';/.exec(script);
+  assert.ok(decl, 'HOVER_CLASS must be declared once in the stage agent script');
+  assert.ok(script.includes("'.' + HOVER_CLASS + ' {"), 'the injected rule must be built from HOVER_CLASS');
+  assert.ok(script.includes('classList.add(HOVER_CLASS)'), 'the handler must set the same class');
+  // Everywhere OTHER than the one declaration itself must reference the
+  // variable, never re-spell the class name as a second literal.
+  const afterDecl = script.slice(decl.index + decl[0].length);
+  assert.ok(!afterDecl.includes(`'${decl[1]}'`), 'the class name must not be repeated as a literal');
+});
+
+check('a dom-anchored comment renders its hint and number in the block\'s comment list; a lost one names the ref it lost', () => {
+  const board = createBoard({
+    title: 'dom comment list',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+  });
+  const blockId = board.blocks[0].id;
+  applySubmit(board, {
+    action: 'send',
+    answers: [],
+    comments: [
+      { blockId, anchor: { kind: 'dom', ref: '1.1', hint: 'Send' }, text: 'move it' },
+      { blockId, anchor: { kind: 'dom', ref: '9.9', hint: 'Launch' }, text: 'stale' },
+    ],
+  }, 1);
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('#1 · Send'));
+  // Ticket 04: the lost tag names the stored hint ("Launch"), not the opaque
+  // ref ("9.9") -- see the matching resolveComment check above for why.
+  assert.ok(markup.includes('#2 · lost: Launch'));
+  assert.ok(markup.includes('comment-lost'));
+});
+
+check('a mermaid-anchored comment renders its node id and number in the block\'s comment list; a lost one names the ref it lost', () => {
+  const board = createBoard({
+    title: 'mermaid comment list',
+    blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' }],
+  });
+  const blockId = board.blocks[0].id;
+  applySubmit(board, {
+    action: 'send',
+    answers: [],
+    comments: [
+      { blockId, anchor: { kind: 'mermaid', ref: 'A' }, text: 'rename' },
+      { blockId, anchor: { kind: 'mermaid', ref: 'Ghost' }, text: 'stale' },
+    ],
+  }, 1);
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('#1 · A'));
+  assert.ok(markup.includes('#2 · lost: Ghost'));
+});
+
+check('a question carrying non-markdown context kinds normalises and renders them inline', () => {
+  const board = createBoard({
+    title: 'Question with mixed context',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which diagram is right?',
+      widget: 'single',
+      options: [{ label: 'Left' }, { label: 'Right' }],
+      context: [
+        { kind: 'mermaid', text: 'flowchart TD\n  X --> Y' },
+        { kind: 'html', html: '<p>mock</p>' },
+      ],
+    }],
+  });
+  const q = board.blocks[0];
+  assert.equal(q.context.length, 2);
+  assert.equal(q.context[0].kind, 'mermaid');
+  assert.equal(q.context[1].kind, 'html');
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('class="question-context"'));
+  assert.ok(markup.includes('<pre class="mermaid">flowchart TD'));
+  assert.ok(markup.includes('class="html-stage"'));
+});
+
+// --- ticket 05: snapshot and standalone archive ------------------------------------
+//
+// See SPEC_BOARD.md Decisions -> "JSON is truth, the page is a projection" and
+// "Questions by value, content by reference, snapshotted at post time". The HTTP
+// check (test/check-http.mjs) covers the store-mutation and end-to-end
+// rewrite/delete guarantees; these are the pure-function halves: renderBoardPage
+// must be byte-exact given the same JSON, and it must never re-read a `source` ref.
+
+check('renderBoardPage is byte-identical across repeated calls, across a JSON round-trip, and after answering', () => {
+  const board = createBoard({
+    title: 'Byte-exact re-render',
+    blocks: [
+      { kind: 'markdown', text: '# Acceptance Criteria\n\n- one\n- two' },
+      { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+    ],
+  });
+
+  const first = renderBoardPage(board);
+  const second = renderBoardPage(board);
+  assert.equal(first, second);
+
+  // A board round-tripped through JSON (exactly what store.mjs does on every read)
+  // must render identically to the live object -- this is what proves render.mjs
+  // depends only on the JSON shape, not on object identity, key insertion order
+  // surviving by luck, or any non-enumerable/Map/Set state.
+  const roundTripped = JSON.parse(JSON.stringify(board));
+  assert.equal(renderBoardPage(roundTripped), first);
+
+  // Answering legitimately changes the page; repeated renders of that *new*
+  // snapshot must still be self-identical, and still survive a JSON round-trip.
+  applySubmit(board, {
+    action: 'send',
+    answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'ok' }],
+    comments: [{ blockId: 'd1', anchor: { kind: 'block' }, text: 'noted' }],
+  }, 1);
+  const afterAnswer1 = renderBoardPage(board);
+  const afterAnswer2 = renderBoardPage(board);
+  assert.equal(afterAnswer1, afterAnswer2);
+  assert.notEqual(afterAnswer1, first); // sanity: the answer actually changed the page
+  assert.equal(renderBoardPage(JSON.parse(JSON.stringify(board))), afterAnswer1);
+});
+
+check('a board whose referenced source was rewritten, then deleted, still renders the post-time snapshot byte-for-byte', () => {
+  const srcFile = path.join(fixturesDir, 'snapshot-source.md');
+  writeFileSync(srcFile, '# Doc\n\noriginal content on screen when answered', 'utf8');
+
+  const board = createBoard({
+    title: 'Snapshot guarantee',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'markdown', source: { path: 'snapshot-source.md' } }],
+  });
+  const originalText = board.blocks[0].text;
+  const originalSha = board.blocks[0].sha;
+  assert.ok(originalText.includes('original content on screen when answered'));
+
+  const renderedOriginal = renderBoardPage(board);
+
+  writeFileSync(srcFile, '# Doc\n\nCOMPLETELY REWRITTEN, nothing like the original', 'utf8');
+  const afterRewrite = renderBoardPage(board);
+  assert.equal(afterRewrite, renderedOriginal); // byte-exact, not "looks similar"
+  assert.equal(board.blocks[0].text, originalText);
+  assert.equal(board.blocks[0].sha, originalSha);
+
+  unlinkSync(srcFile);
+  const afterDelete = renderBoardPage(board);
+  assert.equal(afterDelete, renderedOriginal);
+  const markup = renderedMarkup(afterDelete);
+  assert.ok(markup.includes('original content on screen when answered'));
+  assert.ok(!markup.includes('COMPLETELY REWRITTEN'));
+});
+
+// --- ticket 05: standalone read-only archive ----------------------------------------
+//
+// Chrome-automated checks of the interactive layer are out of scope (SPEC_BOARD.md
+// Testing), so this is a structural check on the shipped mechanism rather than a
+// simulated click: the client script (src/ui.mjs, exported as a plain string) must
+// decide read-only mode synchronously from the page's own protocol, and every
+// listener that would mutate answer/comment state or reach the network must guard
+// on that decision. (Ablation-tested: dropping the guard from any one of the
+// mutating listeners below makes this check fail.)
+
+/** Extract the body of every `.addEventListener(<event>, function (...) { ... })`
+ * callback in `src`, via brace counting (the script has no braces inside string
+ * literals in listener bodies, so a naive counter is safe here). */
+function listenerBodies(src) {
+  const out = [];
+  const re = /\.addEventListener\((?:'[^']+'|"[^"]+")\s*,\s*(?:async\s*)?function\s*\([^)]*\)\s*\{/g;
+  let m;
+  while ((m = re.exec(src))) {
+    const openIdx = re.lastIndex - 1;
+    let depth = 1;
+    let j = openIdx + 1;
+    while (depth > 0 && j < src.length) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}') depth--;
+      j++;
+    }
+    out.push(src.slice(openIdx + 1, j - 1));
+  }
+  return out;
+}
+
+/** Extract the body of a top-level `function <name>(...) { ... }` declaration in
+ * `src`, via the same brace-counting as listenerBodies. Returns null if `name`
+ * isn't found. Used to check *ordering* within a single function (e.g. "the pin
+ * render call happens before the readonly early-return, not after") -- something a
+ * whole-file substring search can't pin down, since it can't tell which
+ * `if (readonly) return;` among several in the file a given call precedes. */
+function namedFunctionBody(src, name) {
+  const marker = new RegExp('function\\s+' + name + '\\s*\\([^)]*\\)\\s*\\{');
+  const m = marker.exec(src);
+  if (!m) return null;
+  const openIdx = m.index + m[0].length - 1;
+  let depth = 1;
+  let j = openIdx + 1;
+  while (depth > 0 && j < src.length) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') depth--;
+    j++;
+  }
+  return src.slice(openIdx + 1, j - 1);
+}
+
+check('mode detection is synchronous, from the document\'s own protocol -- never a network probe to the daemon', () => {
+  assert.ok(/var readonly\s*=\s*\(location\.protocol === 'file:'\)/.test(ui));
+  // Exactly two fetches, both accounted for: the submit, and the resync that
+  // catches this client up on anything broadcast while it was disconnected. Any
+  // third one is a network call nobody has justified -- in particular, mode
+  // detection must never become a probe to the daemon.
+  const fetchCalls = [...ui.matchAll(/fetch\(([^)]*)/g)].map(m => m[1]);
+  assert.equal(fetchCalls.length, 2, `expected exactly the submit and resync fetches, found ${fetchCalls.length}`);
+  assert.ok(fetchCalls.some(c => c.includes('/submit')), 'one fetch must be the submit');
+  assert.ok(fetchCalls.some(c => c.includes("'/b/'")), 'the other must be the resync read of the board');
+  // Both live behind a readonly guard: the standalone file:// archive is
+  // network-free, period.
+  assert.match(namedFunctionBody(ui, 'resync'), /if \(readonly\) return;/);
+});
+
+check('every ui.mjs listener that mutates answer/comment state or submits guards on readonly', () => {
+  const bodies = listenerBodies(ui);
+  // submitBoard( is in this list because the fetch now lives inside that one
+  // shared function (Send and Discuss in chat post the same body to the same
+  // route, differing only in `action`) rather than inline in a click listener --
+  // the listeners that reach it must still be as inert in readonly as the ones
+  // that write selections/notes/deferred directly.
+  const mutators = bodies.filter(b => /selections\[|notes\[|deferred\[|pendingComments\.push|fetch\(|submitBoard\(/.test(b));
+  assert.ok(mutators.length >= 9, `expected at least 9 mutating/submitting listeners, found ${mutators.length}`);
+  for (const b of mutators) {
+    assert.ok(/\breadonly\b/.test(b), `listener mutates state without checking readonly:\n${b}`);
+  }
+  // ...and the shared submit path guards on its own account too, so a future
+  // caller that forgets can't post from a read-only page.
+  const submitBody = namedFunctionBody(ui, 'submitBoard');
+  assert.ok(submitBody, 'expected a single shared submitBoard(action) in src/ui.mjs');
+  assert.ok(/^\s*if \(readonly\) return;/.test(submitBody), 'submitBoard must return early in readonly mode');
+});
+
+// --- ticket 06: the click-to-comment gesture must be inert in read-only mode, ---
+// exactly like every other mutating listener above, and pin rendering (which is
+// what makes an archived board still show its pins) must NOT be gated on it.
+
+check('the html-stage and mermaid element-click listeners guard on readonly too, so click-to-comment is inert in read-only mode', () => {
+  const bodies = listenerBodies(ui);
+  const anchorClickBodies = bodies.filter(b => /openCommentForm\(/.test(b));
+  // Ticket 03 named 4 listeners that open a comment form: .comment-btn, the
+  // html-stage click, the mermaid click, and the generic comment-mode click.
+  // Ticket 10 moved the html-stage one behind a postMessage dispatch --
+  // `openCommentForm(` no longer appears literally inside an
+  // `addEventListener` callback for that case, only inside the named
+  // `handleStageClick` helper the single `message` listener calls -- so the
+  // literal-body count drops to 3 here; `handleStageClick` is asserted
+  // separately, immediately below, for the same property (opens a form,
+  // guards on readonly) the 4th used to prove inline.
+  assert.equal(anchorClickBodies.length, 3, 'expected exactly 3 DIRECT listeners that open a comment form: .comment-btn, the mermaid click, the generic comment-mode click');
+  for (const b of anchorClickBodies) {
+    assert.ok(/\breadonly\b/.test(b), `a listener opens a comment form without checking readonly:\n${b}`);
+  }
+
+  const stageClickBody = namedFunctionBody(ui, 'handleStageClick');
+  assert.ok(stageClickBody, 'handleStageClick not found -- the html-stage click is minted here, dispatched from the single window message listener');
+  assert.ok(/openCommentForm\(/.test(stageClickBody), 'handleStageClick must open a comment form');
+  assert.ok(/\breadonly\b/.test(stageClickBody), 'handleStageClick opens a comment form without checking readonly');
+});
+
+check('pin rendering is never gated by readonly, only the click/hover gesture is -- an archived (readonly) board still shows its pins', () => {
+  // wireMermaidBlock's shape is unchanged: one function, pin rendering then a
+  // readonly early-return before the click listener, so ordering WITHIN that
+  // one function is still the right thing to pin down (ablation-verified --
+  // moving the guard above the pin-render call in a scratch copy left a
+  // weaker, presence-only version of this check green).
+  const mermaidBody = namedFunctionBody(ui, 'wireMermaidBlock');
+  assert.ok(mermaidBody, 'wireMermaidBlock not found');
+  const pinIdxMermaid = mermaidBody.indexOf('renderMermaidPins(');
+  const guardIdxMermaid = mermaidBody.indexOf('if (readonly'); // wireMermaidBlock's guard also checks `|| !svg`
+  assert.ok(pinIdxMermaid !== -1, 'wireMermaidBlock must call renderMermaidPins');
+  assert.ok(guardIdxMermaid !== -1, 'wireMermaidBlock must have a readonly early-return gating the click listener');
+  assert.ok(pinIdxMermaid < guardIdxMermaid, 'renderMermaidPins must run before the readonly early-return, not after -- otherwise an archived board loses its pins');
+
+  // Ticket 10: the html-stage case no longer has one function with an
+  // ordering to pin down -- pin positioning (handleStageReady ->
+  // requestStagePositions, fired the moment a stage announces itself
+  // 'ready') and the click gesture (handleStageClick) are separate functions
+  // dispatched from one message listener, so the equivalent property is that
+  // NEITHER handleStageReady NOR requestStagePositions ever checks `readonly`
+  // at all (nothing gates drawing a pin), while handleStageClick does (see
+  // the previous check, which already asserts that half). A stage never even
+  // being TOLD comment mode is on in the first place -- setCommentMode
+  // refusing readonly -- is what keeps the archived gesture inert instead;
+  // this is what keeps the archived PINS visible.
+  const readyBody = namedFunctionBody(ui, 'handleStageReady');
+  const requestBody = namedFunctionBody(ui, 'requestStagePositions');
+  assert.ok(readyBody, 'handleStageReady not found');
+  assert.ok(requestBody, 'requestStagePositions not found');
+  assert.ok(!/\breadonly\b/.test(readyBody), 'handleStageReady must never gate on readonly -- an archived stage still needs its pins positioned');
+  assert.ok(!/\breadonly\b/.test(requestBody), 'requestStagePositions must never gate on readonly -- an archived stage still needs its pins positioned');
+});
+
+check('readonly mode hard-disables every input-capable element and strips native drag, not just CSS pointer-events', () => {
+  assert.ok(/if \(readonly\) \{[\s\S]*?el\.disabled = true;/.test(ui));
+  assert.ok(ui.includes("qsa('textarea, input, button')"));
+  assert.ok(ui.includes('removeAttribute(\'draggable\')'));
+});
+
+check('CSS gates the readonly banner and Send bar strictly on body.readonly', () => {
+  assert.ok(styles.includes('.readonly-banner { display: none;'));
+  assert.ok(styles.includes('body.readonly .readonly-banner { display: block; }'));
+  assert.ok(styles.includes('body.readonly .send-bar { display: none; }'));
+});
+
+check('renderBoardPage always emits the readonly-banner element in the body markup (client JS decides visibility)', () => {
+  const board = createBoard({ title: 'Banner', blocks: [] });
+  assert.ok(renderedMarkup(renderBoardPage(board)).includes('class="readonly-banner"'));
+});
+
+// --- ticket 04: SSE push is applied additively, never a wholesale re-render -----
+//
+// Field preservation on a push is browser-DOM behaviour, which SPEC_BOARD.md's
+// Testing section explicitly puts out of automated scope ("checked by opening a
+// board and using it"). What IS provable here without a browser: the client script
+// never wipes the live board container and only ever inserts/replaces targeted
+// nodes, and it subscribes over SSE only in the same circumstances every other
+// daemon-only capability is allowed to run.
+
+check('the client script never wholesale-replaces the blocks container on a push -- only targeted insertion/replacement', () => {
+  // Ablation: if applyRoundPush did `document.getElementById('blocks').innerHTML =
+  // data.html` (or similar on any live container) instead of building a detached
+  // wrapper and moving/replacing individual nodes, this fails.
+  assert.ok(
+    !/getElementById\('blocks'\)\.innerHTML\s*=/.test(ui) && !/querySelector\('\.blocks'\)\.innerHTML\s*=/.test(ui),
+    'a push must never reassign innerHTML on the live blocks container',
+  );
+  assert.ok(ui.includes('new EventSource('), 'the page must subscribe to round pushes over SSE');
+  assert.ok(/appendChild|replaceWith/.test(ui), 'a push must be applied via targeted DOM insertion/replacement, not a blanket re-render');
+});
+
+check('SSE subscription is guarded exactly like every other daemon-only capability -- never opened in readonly (file://) mode', () => {
+  const idx = ui.indexOf('new EventSource(');
+  assert.ok(idx !== -1);
+  const before = ui.slice(Math.max(0, idx - 200), idx);
+  assert.ok(/if\s*\(\s*!readonly/.test(before), 'EventSource must only be opened when the page is not in readonly mode (ablation: dropping this guard would open a network connection from the standalone file:// archive)');
+});
+
+check('a push seeds newly-appeared block answers through the same computeBoardPatch used elsewhere -- it does not touch any existing block\'s selections/notes/deferred entries', () => {
+  // Structural proof that field preservation rests on computeBoardPatch's
+  // added/changed sets, not on some separate ad-hoc mechanism: the only place
+  // selections/notes/deferred are seeded from server data outside of the initial
+  // hydrate is seedAnswers(patch.addedBlockIds.concat(patch.changedBlockIds), ...).
+  assert.ok(ui.includes('seedAnswers(patch.addedBlockIds.concat(patch.changedBlockIds)'));
+  assert.equal([...ui.matchAll(/\bselections\[/g)].length >= 1, true);
+});
+
+check('a push wires the freshly-parsed fragment BEFORE inserting it into the live document -- never re-wiring blocks the push did not touch', () => {
+  // Real bug found and fixed during audit: wireRoot(container) / wireRoot(roundSection)
+  // called AFTER moving the new nodes into the live #blocks / round section
+  // re-registers every listener on every block ALREADY there too (wireRoot has no
+  // idempotence guard -- an already-wired element gets a second listener set).
+  // Confirmed by direct experiment: two listeners on the same multi-select button
+  // toggle it on then immediately back off, so multi-select and Defer become
+  // silent no-ops after any push. Fix: wire the DETACHED wrap/frag first --
+  // querySelectorAll and addEventListener behave identically whether or not the
+  // subtree is attached to the document, and the listeners survive the later
+  // move -- so wireRoot's own scope is exactly the new nodes, never anything
+  // already on screen. This asserts the ORDER, which is the only thing that
+  // actually prevents the double-registration (ablation: swapping the two lines
+  // back reproduces the bug and this check fails).
+  const newRoundIdx = ui.indexOf("data.mode === 'new-round'");
+  const newRoundBlock = ui.slice(newRoundIdx, ui.indexOf("} else if (data.mode === 'amend')", newRoundIdx));
+  const wireIdxA = newRoundBlock.indexOf('wireRoot(wrap)');
+  const appendIdxA = newRoundBlock.indexOf('container.appendChild(node)');
+  assert.ok(wireIdxA !== -1 && appendIdxA !== -1, 'expected wireRoot(wrap) and container.appendChild(node) in the new-round push branch');
+  assert.ok(wireIdxA < appendIdxA, 'wireRoot(wrap) must run before the new nodes are appended into the live #blocks container');
+
+  const amendIdx = ui.indexOf("data.mode === 'amend'");
+  const amendBlock = ui.slice(amendIdx, ui.indexOf('patch.roundsNowSent.forEach', amendIdx));
+  const wireIdxB = amendBlock.indexOf('wireRoot(frag)');
+  const replaceIdxB = amendBlock.indexOf('.replaceWith(blockEl)');
+  assert.ok(wireIdxB !== -1 && replaceIdxB !== -1, 'expected wireRoot(frag) and .replaceWith(blockEl) in the amend push branch');
+  assert.ok(wireIdxB < replaceIdxB, 'wireRoot(frag) must run before the amended blocks replace/join the live round section');
+});
+
+// --- ticket 04 / ticket 06 merge: element-level anchoring must be wired on -----
+// content that arrives over a push, not just on what was on the page at hydrate.
+//
+// Before this merge, ticket 06's html-stage wiring was a separate, unscoped,
+// run-once-at-load pass (`qsa('.html-stage')`, no root, executed exactly once
+// right after hydrate) -- correct for round 1, but silently inert for any html
+// or mermaid stage that arrives in a round pushed later over SSE, since nothing
+// ever re-ran that pass. Folding it into wireRoot(root), scoped to root exactly
+// like every other wiring loop, is what makes anchoring keep working after a
+// push. The two checks below prove this end to end without a browser: the first
+// proves anchoring wiring genuinely lives inside wireRoot (not bolted on as a
+// second, separate pass); the second proves every DOM-insertion branch that
+// handles a push actually calls wireRoot on the content it just inserted. Neither
+// fact alone is sufficient -- ticket 04's push code could wire a subtree that
+// never wires anchors, or the anchoring wiring could live somewhere a push never
+// reaches -- so both need to hold, and did not both hold on either side of this
+// merge before it was resolved this way.
+
+check('element-level anchoring on a pushed html stage needs no per-push wiring pass at all -- ticket 10 replaced the root-scoped DOM wiring this check used to require with a page-level, push-agnostic message listener', () => {
+  // Before ticket 10: `wireHtmlStage` reached into `frame.contentDocument`
+  // directly, so a pushed stage had to be found and wired EXPLICITLY, inside
+  // wireRoot, scoped to whatever subtree a push actually inserted -- an
+  // unscoped, run-once-at-load pass was silently inert for anything pushed
+  // later (see this section's own header comment on the ticket 04/06 merge
+  // this check was originally written to prove). Ticket 10 drops
+  // `allow-same-origin`, so that direct reach is impossible now regardless of
+  // scoping -- and, structurally, unnecessary: a stage's own agent script
+  // announces itself 'ready' the moment it runs, wherever/whenever its
+  // iframe ends up in the document, and ONE page-level
+  // `window.addEventListener('message', ...)` (registered once, never
+  // inside wireRoot, never re-registered per push) reacts to it. So the
+  // property this check now proves is the opposite shape of before: there is
+  // NO root-scoped html-stage wiring loop left inside wireRoot to find (an
+  // ablation that reintroduced one would be regressing toward the pre-
+  // ticket-10 architecture, not fixing anything), and exactly one page-level
+  // message listener exists, declared outside wireRoot.
+  const wireRootBody = namedFunctionBody(ui, 'wireRoot');
+  assert.ok(wireRootBody, 'wireRoot not found');
+  assert.ok(
+    !wireRootBody.includes("qsa('.html-stage'"),
+    'wireRoot must not contain an html-stage-specific wiring loop any more -- ticket 10 replaced it with a page-level message listener; a match here means the old, contentDocument-reaching architecture crept back in',
+  );
+
+  const messageListenerSites = [...ui.matchAll(/window\.addEventListener\('message', function \(ev\) \{/g)];
+  assert.equal(messageListenerSites.length, 1, 'expected exactly one window-level "message" listener');
+  const messageListenerIdx = messageListenerSites[0].index;
+  const wireRootIdx = ui.indexOf('function wireRoot(root)');
+  assert.ok(wireRootIdx !== -1, 'wireRoot not found');
+  const wireRootEnd = wireRootIdx + namedFunctionBody(ui, 'wireRoot').length;
+  assert.ok(
+    messageListenerIdx < wireRootIdx || messageListenerIdx > wireRootEnd,
+    'the message listener must be registered OUTSIDE wireRoot -- once for the page\'s whole lifetime, not re-registered on every push (which would double-handle every later stage\'s messages)',
+  );
+
+  // The actual end-to-end proof that a pushed html stage is genuinely
+  // anchorable -- comment mode on, click the pushed element, a pin lands --
+  // lives in test/check-anchor-push.mjs, driven through the real
+  // subscription src/ui.mjs itself opens, exactly the kind of check
+  // SPEC_ANCHORING.md's Testing section asks for over a structural one like
+  // this file's own checks.
+});
+
+check('a round pushed over SSE has its html/mermaid stages wired for anchoring: applyRoundPush and applySubmittedPush call wireRoot on exactly the content they insert', () => {
+  // Combined with the previous check, this proves a pushed html/mermaid block
+  // ends up exactly as anchorable as one that was on the page at load. Ablation:
+  // deleting any one of these three wireRoot(...) calls (or pointing it at the
+  // wrong variable) makes this fail, and -- because anchoring wiring lives inside
+  // wireRoot per the previous check -- would also mean that push silently never
+  // wires anchoring on the content it inserts.
+  const pushBody = namedFunctionBody(ui, 'applyRoundPush');
+  assert.ok(pushBody, 'applyRoundPush not found');
+  assert.ok(/wireRoot\(wrap\)/.test(pushBody), 'the new-round branch must wire the round fragment it just parsed');
+  assert.ok(/wireRoot\(frag\)/.test(pushBody), 'the amend branch must wire the blocks it just parsed');
+
+  const submittedBody = namedFunctionBody(ui, 'applySubmittedPush');
+  assert.ok(submittedBody, 'applySubmittedPush not found');
+  assert.ok(
+    /wireRoot\(replacement\)/.test(submittedBody),
+    'the submitted-round swap-in must also wire its replacement content -- a round that just went out can still carry an html/mermaid stage whose EXISTING pins/comments are worth showing correctly',
+  );
+});
+
+check('an amend that replaces a block clears the reviewer\'s local field state for that block, rather than leaving a stale, invisible value behind', () => {
+  // Real bug found and fixed during audit: a replace-amend re-renders the block
+  // fresh from the server (an open round's textarea comes back empty, since
+  // board.answers has no entry yet), but the client's own `selections`/`notes`
+  // dicts were left untouched -- so a reviewer who had typed something into a
+  // block that then got replaced would see a BLANK field on screen while Send
+  // still submitted their old, now-invisible text. Fix: clearFieldState() runs
+  // on patch.changedBlockIds before seeding, so a replaced block always starts
+  // clean.
+  assert.ok(ui.includes('clearFieldState(patch.changedBlockIds)'));
+  const clearIdx = ui.indexOf('function clearFieldState');
+  const clearBody = ui.slice(clearIdx, ui.indexOf('}\n', ui.indexOf('}\n', clearIdx) + 1));
+  assert.ok(/delete selections\[id\]/.test(clearBody));
+  assert.ok(/delete notes\[id\]/.test(clearBody));
+  assert.ok(/delete deferred\[id\]/.test(clearBody));
+  assert.ok(/delete touched\[id\]/.test(clearBody));
+});
+
+check('the emitted page has no external script or stylesheet reference -- everything needed to open standalone is inlined', () => {
+  const board = createBoard({
+    title: 'Standalone',
+    blocks: [{ kind: 'markdown', text: '# A' }, { kind: 'question', prompt: 'Q', widget: 'single', options: [{ label: 'X' }] }],
+  });
+  const html = renderBoardPage(board);
+  assert.ok(!/<link[^>]+rel=["']stylesheet["']/.test(html));
+  assert.ok(!/<script[^>]+\bsrc=/.test(html));
+  assert.ok(html.includes('<style>'));
+  assert.ok(html.includes('id="board-data"'));
+});
+
+// =================================================================================
+// Audit regressions (2026-07-28). Each check below fails without its fix; the
+// ablation that proves it is named in the check's own comment.
+// =================================================================================
+
+// --- H4 / N5: block ids are the board's only join key ----------------------------
+
+check('H4: a caller-supplied id raises the ordinal counter, so the next minted id cannot collide with it', () => {
+  // Ablation: drop BOTH of resolveBlockId's collision guards (the
+  // `counters[m[1]] = Math.max(...)` bump and the `while (ids.taken.has(id) ||
+  // ids.minted.has(id))` skip -- either alone still holds, which is the point) and
+  // both blocks come back as 'q1'. board.answers is keyed by id, so the two
+  // questions collapse to one entry and the packet reports the reviewer's answer to
+  // "Ship it?" against the prompt "Delete the table?". Verified: the deepEqual below
+  // fails with ['q1','q1'].
+  const board = createBoard({
+    title: 'dup',
+    blocks: [
+      { kind: 'question', id: 'q1', prompt: 'Ship it?', widget: 'single', options: [{ label: 'yes' }, { label: 'no' }] },
+      { kind: 'question', prompt: 'Delete the table?', widget: 'single', options: [{ label: 'yes' }, { label: 'no' }] },
+    ],
+  });
+  assert.deepEqual(board.blocks.map(b => b.id), ['q1', 'q2']);
+
+  applySubmit(board, {
+    action: 'send',
+    answers: [
+      { id: 'q1', status: 'answered', choice: 'yes', note: '' },
+      { id: 'q2', status: 'answered', choice: 'no', note: '' },
+    ],
+    comments: [],
+  }, 1);
+  const packet = buildPacket(board, 1, 'http://x');
+  const byPrompt = Object.fromEntries(packet.answers.map(a => [a.prompt, a.choice]));
+  assert.equal(byPrompt['Ship it?'], 'yes');
+  assert.equal(byPrompt['Delete the table?'], 'no');
+});
+
+check('H4: two blocks in one post cannot claim the same id', () => {
+  // Ablation: remove the `ids.minted.has(id)` branch and both blocks are minted as
+  // 'q1', silently.
+  assert.throws(
+    () => createBoard({
+      title: 'dup',
+      blocks: [
+        { kind: 'question', id: 'q1', prompt: 'A', widget: 'single', options: [{ label: 'x' }] },
+        { kind: 'question', id: 'q1', prompt: 'B', widget: 'single', options: [{ label: 'x' }] },
+      ],
+    }),
+    /duplicate block id q1/,
+  );
+});
+
+check('H4: addRound refuses an id that already exists on the board -- a Send racing an amend cannot destroy round 1\'s answer', () => {
+  // Ablation: remove `idLedgerFromBoard` from addRound (pass emptyIdLedger()) and the
+  // second q1 is appended into round 2, board.answers['q1'] is overwritten by the new
+  // block's answer, and round 1's history rail renders a question with no answer.
+  const board = createBoard({
+    title: 't',
+    blocks: [{ kind: 'question', prompt: 'Round one?', widget: 'single', options: [{ label: 'Yes' }] }],
+  });
+  applySubmit(board, { action: 'send', answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+
+  assert.throws(
+    () => addRound(board, { blocks: [{ id: 'q1', kind: 'question', prompt: 'Hijacked', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    /belongs to round 1/,
+  );
+  assert.equal(board.rounds.length, 1, 'the rejected addRound must not have minted a round');
+  assert.equal(board.blocks.length, 1);
+  assert.equal(board.blocks[0].prompt, 'Round one?');
+  assert.equal(board.answers.q1.choice, 'Yes');
+});
+
+check('N5: a caller-supplied id must carry the kind letter of the block it names', () => {
+  // Ablation: drop the `m[1] !== KIND_LETTER[kind]` branch. Then `{kind:'markdown',
+  // id:'q2'}` is accepted while `counters.q` stays at 1, the next question mints
+  // 'q2', collides with the markdown block and REPLACES it -- the markdown silently
+  // vanishes from the board and any comment anchored to it now resolves against a
+  // question block.
+  assert.throws(
+    () => createBoard({ title: 't', blocks: [{ kind: 'markdown', id: 'q2', text: '# A' }] }),
+    /does not start with the 'd' letter/,
+  );
+  const board = createBoard({
+    title: 't',
+    blocks: [
+      { kind: 'question', prompt: 'Q1', widget: 'single', options: [{ label: 'x' }] },
+      { kind: 'markdown', text: '# A' },
+    ],
+  });
+  amendRound(board, { blocks: [{ kind: 'markdown', id: 'd1', text: '# A revised' }] });
+  assert.equal(board.blocks.length, 2, 'a same-letter amend still replaces in place');
+  assert.equal(board.blocks[1].text, '# A revised');
+});
+
+// --- C2: content resolution is confined to the board's project directory ---------
+
+check('C2: an absolute reference path is refused, not read', () => {
+  // Ablation: restore `path.isAbsolute(ref.path) ? ref.path : ...` in resolvePath and
+  // /etc/passwd's contents land in the board JSON and the served page.
+  const r = resolveRef({ path: '/etc/passwd' }, { cwd: fixturesDir });
+  assert.equal(typeof r.error, 'string');
+  assert.match(r.error, /absolute/);
+  assert.equal(r.text, undefined);
+});
+
+check('C2: a relative reference cannot traverse out of the board cwd with ../', () => {
+  // Ablation: remove the path.relative()/startsWith('..') check and this reads
+  // /etc/hosts.
+  const nested = path.join(fixturesDir, 'deep', 'deeper');
+  mkdirSync(nested, { recursive: true });
+  const r = resolveRef({ path: '../../../../../../../../etc/hosts' }, { cwd: nested });
+  assert.equal(typeof r.error, 'string');
+  assert.equal(r.text, undefined);
+});
+
+check('C2: a symlink pointing out of the board cwd is refused -- confinement is on the REALPATH, not the spelling', () => {
+  // Ablation: resolve with path.resolve() instead of realpathSync() and the symlink
+  // reads straight through, since its own spelling never leaves the project.
+  const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-outside-'));
+  try {
+    writeFileSync(path.join(outside, 'secret.txt'), 'exfiltrated', 'utf8');
+    const link = path.join(fixturesDir, 'escape-link');
+    try { unlinkSync(link); } catch { /* not there yet */ }
+    symlinkSync(path.join(outside, 'secret.txt'), link);
+    const r = resolveRef({ path: 'escape-link' }, { cwd: fixturesDir });
+    assert.equal(typeof r.error, 'string');
+    assert.equal(r.text, undefined);
+    assert.ok(!String(r.text ?? '').includes('exfiltrated'));
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+check('C2: an ordinary relative reference inside the project still resolves, and resolvePath reports {path} not a bare string', () => {
+  writeFileSync(path.join(fixturesDir, 'inside.txt'), 'still works', 'utf8');
+  assert.equal(resolveRef({ path: 'inside.txt' }, { cwd: fixturesDir }).text, 'still works');
+  assert.equal(resolvePath({ path: 'inside.txt' }, fixturesDir).error, undefined);
+  assert.ok(resolvePath({ path: 'inside.txt' }, fixturesDir).path.endsWith('inside.txt'));
+});
+
+// --- H5: a special or huge file must not wedge the single-threaded daemon --------
+
+check('H5: a fifo is refused by stat, never opened -- readFileSync on one would block the daemon\'s only thread forever', () => {
+  // Ablation: remove the statSync/isFile() guard and this check HANGS (no assertion
+  // failure, no timeout -- the process never exits), which is exactly the daemon's
+  // failure mode: health, every other board and every SSE stream stop with it.
+  const fifo = path.join(fixturesDir, 'wedge.fifo');
+  try { unlinkSync(fifo); } catch { /* not there yet */ }
+  try {
+    execFileSync('mkfifo', [fifo]);
+  } catch {
+    return; // no mkfifo on this platform; the size cap below still exercises the guard
+  }
+  const started = Date.now();
+  const r = resolveRef({ path: 'wedge.fifo' }, { cwd: fixturesDir });
+  assert.ok(Date.now() - started < 1000, 'resolving a fifo must return immediately, not block');
+  assert.equal(typeof r.error, 'string');
+  assert.match(r.error, /not a regular file/);
+  unlinkSync(fifo);
+});
+
+check('H5: a directory is refused as "not a regular file" rather than read', () => {
+  mkdirSync(path.join(fixturesDir, 'a-directory'), { recursive: true });
+  const r = resolveRef({ path: 'a-directory' }, { cwd: fixturesDir });
+  assert.equal(typeof r.error, 'string');
+  assert.match(r.error, /not a regular file/);
+});
+
+check('H5: a file over the byte cap is refused by stat, before any of it is read into memory', () => {
+  // Ablation: remove the st.size check and the whole file is slurped inline on the
+  // request thread.
+  const big = path.join(fixturesDir, 'huge.txt');
+  writeFileSync(big, 'x'.repeat(MAX_REF_BYTES + 1), 'utf8');
+  const r = resolveRef({ path: 'huge.txt' }, { cwd: fixturesDir });
+  assert.equal(typeof r.error, 'string');
+  assert.match(r.error, /exceeds the .* cap/);
+  assert.equal(r.text, undefined);
+  unlinkSync(big);
+});
+
+check('N2/cap: a by-value text or html block over the same cap is a loud 400-able error, not silently accepted', () => {
+  // Ablation: remove byValueText and a multi-megabyte `html` string posted by value
+  // is stored verbatim and re-parsed by src/anchor.mjs on every render, SSE fragment
+  // and packet -- the file cap does not cover by-value content.
+  const oversize = 'x'.repeat(MAX_REF_BYTES + 1);
+  assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'html', html: oversize }] }), /over the .*-byte cap/);
+  assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'markdown', text: oversize }] }), /over the .*-byte cap/);
+});
+
+// --- H6: the server's html tree must be the tree the browser built ---------------
+//
+// Every fixture here is a shape where the browser's parser inserts or auto-closes an
+// element. src/ui.mjs mints the index chain against the LIVE dom; src/anchor.mjs
+// resolves it against the snapshot. A one-node disagreement makes a live, on-screen
+// element report LOST (breaking acceptance criterion 10 and this module's own "a
+// live anchor is never misreported lost" invariant), and the pin renders pin-lost.
+//
+// Ablation for all four: revert parseHtmlTree to the tag-omission-free version (no
+// autoCloseFor/impliedParentFor, script/style deleted by regex) and every
+// resolveDomAnchor assertion below flips to false.
+
+check('H6: <table><tr> resolves through the tbody the browser implies', () => {
+  const html = '<table><tr><td>Send</td></tr></table>';
+  const root = parseHtmlTree(html);
+  const table = root.children[0];
+  assert.equal(table.tag, 'table');
+  assert.equal(table.children[0].tag, 'tbody', 'the browser inserts tbody; so must this parser');
+  // browser chain for the <td>: table(1) > tbody(1) > tr(1) > td(1)
+  assert.ok(resolveDomAnchor(html, '1.1.1.1', 'Send'));
+});
+
+check('H6: <ul><li>alpha<li>beta</ul> gives two SIBLING list items, not a nested one', () => {
+  const html = '<ul><li>alpha<li>beta</ul>';
+  const root = parseHtmlTree(html);
+  const ul = root.children[0];
+  assert.equal(ul.children.length, 2);
+  assert.equal(elementText(ul.children[0]), 'alpha');
+  assert.equal(elementText(ul.children[1]), 'beta');
+  assert.ok(resolveDomAnchor(html, '1.2', 'beta'));
+});
+
+check('H6: <p>intro<div>Send</div> auto-closes the p, so the div is a SIBLING at index 2', () => {
+  const html = '<p>intro<div>Send</div>';
+  const root = parseHtmlTree(html);
+  assert.equal(root.children.length, 2);
+  assert.equal(root.children[0].tag, 'p');
+  assert.equal(elementText(root.children[0]), 'intro');
+  assert.equal(root.children[1].tag, 'div');
+  assert.ok(resolveDomAnchor(html, '2', 'Send'));
+});
+
+check('H6: a <style> element is COUNTED as a child, so the button after it keeps the index the browser gave it', () => {
+  const html = '<div>a</div><style>.x{}</style><button>Send</button>';
+  const root = parseHtmlTree(html);
+  assert.deepEqual(root.children.map(c => c.tag), ['div', 'style', 'button']);
+  assert.ok(resolveDomAnchor(html, '3', 'Send'), 'the browser mints "3" for the button; deleting <style> made this "2" server-side');
+  assert.equal(resolveDomAnchor(html, '2', 'Send'), false);
+});
+
+check('N9: an element whose text uses a typographic entity still matches the hint the browser minted from textContent', () => {
+  // Ablation: shrink NAMED_ENTITIES back to the six-entry table and elementText
+  // returns the literal "Don&rsquo;t send" while the stored hint holds "Don’t send"
+  // -- a live button reports lost.
+  const html = '<div><button>Don&rsquo;t send</button></div>';
+  assert.equal(elementText(parseHtmlTree(html).children[0].children[0]), 'Don’t send');
+  assert.ok(resolveDomAnchor(html, '1.1', 'Don’t send'));
+  assert.ok(resolveDomAnchor('<p>a &mdash; b &hellip; c &times; d &rarr; e</p>', '1', 'a — b … c × d → e'));
+});
+
+// --- N4: mermaid's dominant edge operator ----------------------------------------
+
+check('N4: a mermaid ref resolves across -->, -.->, --- and -->|label| edges', () => {
+  // Ablation: put `-` back in isWordChar and every `A` assertion below flips to
+  // false -- the reviewer clicks node A and the packet says the anchor was lost
+  // against the very source it was minted from, while B resolves.
+  assert.ok(mermaidRefResolves('flowchart TD\n  A-->B', 'A'));
+  assert.ok(mermaidRefResolves('flowchart TD\n  A-->B', 'B'));
+  assert.ok(mermaidRefResolves('flowchart TD\n  A-.->B', 'A'));
+  assert.ok(mermaidRefResolves('flowchart TD\n  A---B', 'A'));
+  assert.ok(mermaidRefResolves('flowchart TD\n  A-->|yes|B', 'A'));
+  assert.equal(mermaidRefResolves('flowchart TD\n  A-->B', 'Ghost'), false);
+});
+
+// --- M6 / L1: one slug algorithm, one label ---------------------------------------
+
+check('M6: the anchor slug for a heading with an entity is the SAME slug resolveRef resolves as a section', () => {
+  // Ablation: slugify the escaped text again (`slugify(escapedText, ...)`) and the
+  // anchor becomes 'risk-amp-reward' while only section 'risk-reward' resolves --
+  // the only slug the agent is ever shown is the one that cannot work.
+  const src = '# Doc\n\n## Risk & Reward\n\nbody text here\n\n## After\n\ntail';
+  const { anchors } = mdToHtmlAndAnchors(src);
+  const ref = anchors.find(a => a.label === 'Risk & Reward').ref;
+  assert.equal(ref, 'risk-reward');
+
+  const file = path.join(fixturesDir, 'amp.md');
+  writeFileSync(file, src, 'utf8');
+  const resolved = resolveRef({ path: 'amp.md', section: ref }, { cwd: fixturesDir });
+  assert.equal(resolved.error, undefined, 'the slug the agent was shown must resolve as a section');
+  assert.ok(resolved.text.includes('body text here'));
+  assert.ok(!resolved.text.includes('tail'));
+});
+
+check('L1: an anchor label is the raw source text, escaped once at emit time -- not entity-escaped twice', () => {
+  // Ablation: push `escapedText`/`it.text` as the label and the UI and the packet
+  // both show "Risk &amp; Reward".
+  const { anchors, html } = mdToHtmlAndAnchors('## Risk & Reward\n\n- a & b\n');
+  assert.equal(anchors[0].label, 'Risk & Reward');
+  assert.equal(anchors[1].label, 'a & b');
+  assert.ok(html.includes('Risk &amp; Reward'), 'the HTML body itself is still escaped exactly once');
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '## Risk & Reward\n' }] });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('data-anchor-label="Risk &amp; Reward"'));
+  assert.ok(!markup.includes('Risk &amp;amp; Reward'));
+});
+
+// --- N6 / N7 / N8: the two heading scanners must agree, and ids must be unique ----
+
+check('N6: a "#" comment inside a fenced code block is not a heading -- sliceSection skips fences exactly like markdown.mjs', () => {
+  // Ablation: drop the inFence toggle in sliceSection and the Setup section is
+  // truncated at the fence with NO error, silently dropping its body.
+  const src = [
+    '## Setup', '', 'run this:', '', '```sh', '# Install deps', 'npm i', '```', '',
+    'and then you are done.', '', '## Next', '', 'unrelated',
+  ].join('\n');
+  writeFileSync(path.join(fixturesDir, 'fenced.md'), src, 'utf8');
+  const r = resolveRef({ path: 'fenced.md', section: 'setup' }, { cwd: fixturesDir });
+  assert.equal(r.error, undefined);
+  assert.ok(r.text.includes('npm i'));
+  assert.ok(r.text.includes('and then you are done.'), 'the section must not stop at the fenced "# Install deps"');
+  assert.ok(!r.text.includes('unrelated'));
+});
+
+check('N6: fenced "#" lines do not shift heading ordinals, so a -2 slug names the same heading in both scanners', () => {
+  const src = ['# Notes', '', '```sh', '# Notes', '```', '', '# Notes', '', 'second real one'].join('\n');
+  writeFileSync(path.join(fixturesDir, 'ordinals.md'), src, 'utf8');
+  const { anchors } = mdToHtmlAndAnchors(src);
+  assert.deepEqual(anchors.map(a => a.ref), ['notes', 'notes-2']);
+  const r = resolveRef({ path: 'ordinals.md', section: 'notes-2' }, { cwd: fixturesDir });
+  assert.equal(r.error, undefined);
+  assert.ok(r.text.includes('second real one'));
+});
+
+check('N7: a quoted heading or bullet mints no anchor and consumes no slug', () => {
+  // Ablation: drop the `quoted` flag and the quotation takes the `plan` slug while
+  // the real heading gets `plan-2` -- which resolveRef (blind to blockquotes) then
+  // refuses, while `plan` returns the real body under an id naming the quotation.
+  const src = ['> ## Plan', '> - quoted bullet', '', '## Plan', '', '- real bullet'].join('\n');
+  const { anchors, html } = mdToHtmlAndAnchors(src);
+  assert.deepEqual(anchors.map(a => a.ref), ['plan', 'plan-li1']);
+  assert.equal(anchors[0].label, 'Plan');
+  assert.equal(anchors[1].label, 'real bullet');
+  assert.ok(html.includes('<blockquote>'));
+  assert.ok(!/<blockquote><h2 id=/.test(html), 'a quoted heading carries no id');
+  assert.equal((html.match(/id="plan"/g) || []).length, 1);
+});
+
+check('N8: a heading slug can never collide with a list-item id', () => {
+  // Ablation: mint the li ref as a bare string again (no reserveRef) and both the
+  // bullet and the "Risks li1" heading render id="risks-li1"; render.mjs's last-wins
+  // labelByRef then labels a comment on the bullet with the heading's text.
+  const { anchors, html } = mdToHtmlAndAnchors('## Risks\n\n- first risk\n- second risk\n\n## Risks li1\n\nprose');
+  const refs = anchors.map(a => a.ref);
+  assert.equal(new Set(refs).size, refs.length, 'every anchor ref must be unique');
+  assert.equal((html.match(/id="risks-li1"/g) || []).length, 1);
+  const byRef = new Map(anchors.map(a => [a.ref, a.label]));
+  assert.equal(byRef.get('risks-li1'), 'first risk');
+});
+
+// --- P3: criterion 5 holds unconditionally ---------------------------------------
+
+check('P3: a headingless markdown source still yields one anchor per top-level list item', () => {
+  // Ablation: remove the SYNTHETIC_SECTION assignment and this returns anchors: [],
+  // so nothing in the single most likely thing to post -- a bare criteria list --
+  // can be commented on at element level at all.
+  const { anchors, html } = mdToHtmlAndAnchors('- one\n- two');
+  assert.equal(anchors.length, 2);
+  assert.deepEqual(anchors.map(a => a.ref), ['_body-li1', '_body-li2']);
+  assert.deepEqual(anchors.map(a => a.label), ['one', 'two']);
+  assert.ok(html.includes('id="_body-li1"'));
+  // ids stay stable while the document's shape is unchanged
+  assert.deepEqual(mdToHtmlAndAnchors('- one\n- two').anchors.map(a => a.ref), ['_body-li1', '_body-li2']);
+  // and the synthetic prefix cannot be produced by slugify, so it can never shadow
+  // a real heading's slug
+  assert.notEqual(slugify('_body', new Set()), '_body');
+  const mixed = mdToHtmlAndAnchors('- preamble\n\n## Body\n\n- under a heading');
+  assert.deepEqual(mixed.anchors.map(a => a.ref), ['_body-li1', 'body', 'body-li1']);
+});
+
+// --- L2: an unanswerable question is a rejection, not a silent 'single' -----------
+
+check('L2: an unrecognised widget is rejected instead of silently becoming "single"', () => {
+  // Ablation: restore `WIDGETS.includes(raw.widget) ? raw.widget : 'single'` and
+  // {widget:'freetext'} renders a question with no cards and no textarea -- literally
+  // unanswerable -- which Send then reports back as `unanswered`, so the agent
+  // misreports it as "the reviewer left it blank".
+  assert.throws(
+    () => createBoard({ title: 't', blocks: [{ kind: 'question', prompt: 'Why?', widget: 'freetext', options: [] }] }),
+    /unknown widget/,
+  );
+});
+
+check('L2: a single/multi/rank question with zero options is rejected; a text question with none is fine', () => {
+  for (const widget of ['single', 'multi', 'rank']) {
+    assert.throws(
+      () => createBoard({ title: 't', blocks: [{ kind: 'question', prompt: 'Pick', widget, options: [] }] }),
+      /requires at least one option/,
+      `widget ${widget} with no options must be rejected`,
+    );
+  }
+  const ok = createBoard({ title: 't', blocks: [{ kind: 'question', prompt: 'Say', widget: 'text', options: [] }] });
+  assert.equal(ok.blocks[0].widget, 'text');
+});
+
+// --- C3: an answer must name a real question of the round being submitted ---------
+
+check('C3: an answer whose id names no question block of that round is ignored, not stored', () => {
+  // Ablation: remove the `answerable.has(a.id)` guard and a forged submit writes
+  // board.answers['ghost9'], which buildPacket hands straight to the agent.
+  const board = createBoard({
+    title: 't',
+    blocks: [
+      { kind: 'markdown', text: '# A' },
+      { kind: 'question', prompt: 'Real?', widget: 'single', options: [{ label: 'Yes' }] },
+    ],
+  });
+  applySubmit(board, {
+    action: 'send',
+    answers: [
+      { id: 'ghost9', status: 'answered', choice: 'Yes', note: 'forged' },
+      { id: 'd1', status: 'answered', choice: 'Yes', note: 'not a question' },
+      { id: 'q1', status: 'answered', choice: 'Yes', note: 'real' },
+    ],
+    comments: [],
+  }, 1);
+  assert.equal(board.answers.ghost9, undefined);
+  assert.equal(board.answers.d1, undefined);
+  assert.equal(board.answers.q1.note, 'real');
+  assert.deepEqual(Object.keys(board.answers), ['q1']);
+});
+
+check('C3: a later round\'s submit cannot rewrite an already-sent round\'s answer', () => {
+  const board = createBoard({
+    title: 't',
+    blocks: [{ kind: 'question', prompt: 'R1?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  applySubmit(board, { action: 'send', answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  addRound(board, { blocks: [{ kind: 'question', prompt: 'R2?', widget: 'single', options: [{ label: 'A' }] }] });
+  applySubmit(board, {
+    action: 'send',
+    answers: [{ id: 'q1', status: 'answered', choice: 'No', note: 'rewritten' }, { id: 'q2', status: 'answered', choice: 'A', note: '' }],
+    comments: [],
+  }, 2);
+  assert.equal(board.answers.q1.choice, 'Yes', 'round 1\'s settled answer must survive round 2\'s submit');
+  assert.equal(board.answers.q2.choice, 'A');
+});
+
+// --- N3: nested questions are real questions -------------------------------------
+
+check('N3: answers to questions nested in a compare side or a question\'s context reach the packet', () => {
+  // Ablation: walk `board.blocks` directly in buildPacket/applySubmit instead of
+  // questionBlocks() and the packet reports ONLY the top-level question -- the
+  // reviewer answered three, the answers were persisted, and the agent is told one.
+  const board = createBoard({
+    title: 'nested',
+    blocks: [
+      {
+        kind: 'compare',
+        left: { label: 'A', block: { kind: 'question', prompt: 'In compare?', widget: 'single', options: [{ label: 'Yes' }] } },
+        right: { label: 'B', block: { kind: 'markdown', text: '# B' } },
+      },
+      {
+        kind: 'question',
+        prompt: 'Top level?',
+        widget: 'single',
+        options: [{ label: 'Yes' }],
+        context: [{ kind: 'question', prompt: 'In context?', widget: 'single', options: [{ label: 'Yes' }] }],
+      },
+    ],
+  });
+  const ids = questionBlocks(board).map(b => b.id);
+  assert.equal(ids.length, 3, 'three question blocks exist on this board');
+
+  applySubmit(board, {
+    action: 'send',
+    answers: ids.map(id => ({ id, status: 'answered', choice: 'Yes', note: '' })),
+    comments: [],
+  }, 1);
+  assert.deepEqual(Object.keys(board.answers).sort(), [...ids].sort());
+
+  const packet = buildPacket(board, 1, 'http://x');
+  assert.deepEqual(packet.answers.map(a => a.id).sort(), [...ids].sort());
+  for (const a of packet.answers) assert.equal(a.choice, 'Yes');
+});
+
+check('N11: the STORED json carries an explicit unanswered entry for an untouched question, nested ones included', () => {
+  // Ablation: delete the unanswered-synthesis loop in applySubmit. The packet still
+  // looks right (buildPacket has its own fallback), which is why the suite stayed
+  // green -- but the archive, which criteria 4 and 14 rest on, can no longer tell
+  // "the reviewer left this blank" from "this round was never submitted".
+  const board = createBoard({
+    title: 't',
+    blocks: [
+      { kind: 'question', prompt: 'Touched?', widget: 'single', options: [{ label: 'Yes' }] },
+      { kind: 'question', prompt: 'Untouched?', widget: 'single', options: [{ label: 'Yes' }], context: [{ kind: 'question', prompt: 'Nested untouched?', widget: 'single', options: [{ label: 'Yes' }] }] },
+    ],
+  });
+  applySubmit(board, { action: 'send', answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  const stored = JSON.parse(JSON.stringify(board)); // exactly what src/store.mjs persists
+  assert.equal(stored.answers.q2.status, 'unanswered');
+  assert.equal(stored.answers.q2.choice, null);
+  assert.equal(stored.answers.q2.note, '');
+  assert.equal(stored.answers.q3.status, 'unanswered');
+});
+
+// --- M4: the packet is the round, not the thread's history ------------------------
+
+check('M4: the packet carries only the round being submitted, and every entry names its round', () => {
+  // Ablation: drop the `b.round === round` / `c.round === round` filters and round
+  // 2's packet redelivers round 1 -- /grill re-addresses settled feedback and
+  // re-reports round 1's `deferred` as a fresh signal.
+  const board = createBoard({
+    title: 't',
+    blocks: [
+      { kind: 'markdown', text: '# R1\n\n- one' },
+      { kind: 'question', prompt: 'R1 question', widget: 'single', options: [{ label: 'Yes' }] },
+    ],
+  });
+  applySubmit(board, {
+    action: 'send',
+    answers: [{ id: 'q1', status: 'deferred', choice: null, note: 'later' }],
+    comments: [{ blockId: 'd1', anchor: { kind: 'md', ref: 'r1-li1', label: 'one' }, text: 'round 1 feedback' }],
+  }, 1);
+
+  addRound(board, { blocks: [{ kind: 'question', prompt: 'R2 question', widget: 'single', options: [{ label: 'A' }] }] });
+  applySubmit(board, {
+    action: 'send',
+    answers: [{ id: 'q2', status: 'answered', choice: 'A', note: '' }],
+    comments: [{ blockId: 'd1', anchor: { kind: 'block' }, text: 'round 2 feedback' }],
+  }, 2);
+
+  const p1 = buildPacket(board, 1, 'http://x');
+  assert.deepEqual(p1.answers.map(a => a.id), ['q1']);
+  assert.deepEqual(p1.comments.map(c => c.text), ['round 1 feedback']);
+
+  const p2 = buildPacket(board, 2, 'http://x');
+  assert.deepEqual(p2.answers.map(a => a.id), ['q2'], 'round 2 must not redeliver round 1');
+  assert.deepEqual(p2.comments.map(c => c.text), ['round 2 feedback']);
+  assert.equal(p2.answers[0].round, 2);
+  assert.equal(p2.comments[0].round, 2);
+  assert.equal(typeof p2.comments[0].createdAt, 'string');
+  // the full history is still in the board itself, and still distinguishable
+  assert.equal(Object.keys(board.answers).length, 2);
+  assert.equal(board.comments.length, 2);
+});
+
+// --- N1: the scheme allowlist cannot be stepped around with a control byte --------
+
+check('N1: a leading C0 control byte does not smuggle javascript: past the scheme allowlist', () => {
+  // Ablation: drop stripUrlControls and `[x](\x01javascript:alert(1))` emits
+  // href="\x01javascript:alert(1" -- the HTML tokenizer keeps U+0001 in the
+  // attribute, but the WHATWG URL parser strips leading C0 controls before reading
+  // the scheme, so the browser navigates to javascript: and executes at the
+  // daemon's origin. Markdown blocks come from arbitrary files on disk, which is the
+  // exact threat the allowlist exists for.
+  for (const ctrl of ['\x00', '\x01', '\x08', '\x0e', '\x1f', '\x7f']) {
+    const html = mdToHtml(`[x](${ctrl}javascript:alert(1))`);
+    assert.ok(!html.includes('javascript:'), `control byte ${ctrl.charCodeAt(0)} must not smuggle a javascript: href`);
+    assert.ok(html.includes('href="#"'));
+    const img = mdToHtml(`![x](${ctrl}javascript:alert(1))`);
+    assert.ok(!img.includes('javascript:'));
+  }
+  // and the emitted URL is the vetted, normalised one -- no stray control bytes
+  const clean = mdToHtml('[x](\x01https://example.com/a)');
+  assert.ok(clean.includes('href="https://example.com/a"'));
+  assert.ok(!clean.includes('\x01'));
+  // ticket 10's original guarantees still hold
+  assert.ok(mdToHtml('[t](javascript:alert(1))').includes('href="#"'));
+  assert.ok(mdToHtml('[t](https://x.se)').includes('href="https://x.se"'));
+});
+
+// --- N2: nothing on the request thread may backtrack quadratically ----------------
+//
+// The daemon is single-threaded: while any of these run, health, every other board
+// and every SSE stream are stopped. Each bound below is ~50x the fixed
+// implementation's measured time and a small fraction of the pre-fix time.
+
+check('N2: a long non-separator line after a table-shaped line is probed in linear time', () => {
+  // Ablation: restore /^\s*\|?[\s|:-]+$/ + .includes('-'): 100KB took 4.0s, 400KB
+  // 63s, ~1MB about 7 minutes -- from two lines of ordinary-looking input.
+  const md = '| h |\n' + ' '.repeat(200000) + 'x\n';
+  const started = Date.now();
+  mdToHtml(md);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `table-separator probe took ${elapsed}ms on 200KB`);
+});
+
+check('N2: underscore-heavy prose with no closing delimiter is scanned in linear time', () => {
+  // Ablation: restore the lazy /(^|[\s(])_(?=\S)([\s\S]*?\S)_(?=$|[\s).,;:!?])/g
+  // pair: 3.4s at 256KB, ~54s at 1MB -- reachable from ordinary prose, no crafting.
+  const md = ' _a'.repeat(150000); // 450KB, inside the by-value cap
+  const started = Date.now();
+  mdToHtml(md);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `underscore emphasis took ${elapsed}ms on 450KB`);
+});
+
+check('N2: an html block full of unclosed script tags is parsed in linear time -- the persistent one', () => {
+  // Ablation: restore the /<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi strip: 5.4s at
+  // 224KB, ~100s at 1MB. This one is PERSISTENT -- a single dom-anchored comment
+  // makes resolveComment re-run it on every renderBoardPage, every SSE fragment and
+  // every buildPacket, so one comment poisons the board for good.
+  const html = '<script>x'.repeat(25000);
+  const started = Date.now();
+  parseHtmlTree(html);
+  resolveDomAnchor(html, '1', 'x');
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `parseHtmlTree took ${elapsed}ms on ~225KB`);
+});
+
+check('N2: emphasis still renders correctly after the rewrite -- linearity did not cost behaviour', () => {
+  assert.ok(mdToHtml('a __bold__ b').includes('<strong>bold</strong>'));
+  assert.ok(mdToHtml('a _em_ b').includes('<em>em</em>'));
+  assert.ok(mdToHtml('_Findings for MAP_AUTH.md, census._').includes('<em>Findings for MAP_AUTH.md, census.</em>'));
+  assert.ok(!mdToHtml('plain ssn_country stays literal').includes('<em>'));
+});
+
+// --- C2, second half: the caller does not get to choose an unbounded cwd ----------
+//
+// Confinement to `cwd` buys nothing while the caller also picks `cwd`: `cwd: '/'` plus
+// a relative path reaches the whole filesystem, which is how the coordinator's live
+// exfil still worked after the per-reference confinement landed. These pin what the
+// binding does achieve. What it does NOT achieve is written down in `bindBoardCwd`'s
+// comment in src/board.mjs and is a spec question, not a gap these checks paper over.
+
+check('C2b: the live exfil PoC -- an unbounded cwd plus a relative path -- is refused at post time', () => {
+  // Ablation: drop the `real === path.parse(real).root` branch in resolveBoardCwd and
+  // this board is created with cwd '/', after which { path: 'etc/passwd' } resolves,
+  // confinement and all, and the content lands in the board JSON and the served page.
+  assert.throws(
+    () => createBoard({
+      title: 'exfil',
+      cwd: '/',
+      blocks: [{ kind: 'code', source: { path: 'etc/passwd' } }],
+    }),
+    /filesystem root is not a project directory/,
+  );
+});
+
+check('C2b: $HOME, a directory above it, a non-directory and a path that does not exist are all refused as cwd', () => {
+  // Ablation: drop the homedir()/contains() branch and `cwd: os.homedir()` is accepted
+  // -- every project at once, plus ssh keys, browser profiles and shell history, all
+  // reachable by relative path from a board that passes every other check.
+  const home = os.homedir();
+  assert.throws(() => createBoard({ title: 't', cwd: home, blocks: [] }), /too broad/);
+  assert.throws(() => createBoard({ title: 't', cwd: path.dirname(home), blocks: [] }), /too broad/);
+  const file = path.join(fixturesDir, 'not-a-dir.txt');
+  writeFileSync(file, 'x', 'utf8');
+  assert.throws(() => createBoard({ title: 't', cwd: file, blocks: [] }), /not a directory/);
+  assert.throws(() => createBoard({ title: 't', cwd: path.join(fixturesDir, 'nope'), blocks: [] }), /does not exist/);
+  assert.throws(() => createBoard({ title: 't', cwd: 'relative/project', blocks: [] }), /must be an absolute path/);
+});
+
+check('C2b: a bound cwd is stored canonicalised, so the board records the directory its content actually came from', () => {
+  const link = path.join(fixturesDir, 'project-link');
+  const realProject = path.join(fixturesDir, 'real-project');
+  mkdirSync(realProject, { recursive: true });
+  writeFileSync(path.join(realProject, 'note.md'), '# Note\n\nreal body', 'utf8');
+  try { unlinkSync(link); } catch { /* not there yet */ }
+  symlinkSync(realProject, link);
+
+  const board = createBoard({
+    title: 'canonical',
+    cwd: link,
+    blocks: [{ kind: 'markdown', source: { path: 'note.md' } }],
+  });
+  assert.equal(board.cwd, realpathSync(realProject), 'the stored cwd is the realpath, not the spelling posted');
+  assert.ok(board.blocks[0].text.includes('real body'));
+});
+
+check('C2b: a later round cannot retarget a live board at a different project directory', () => {
+  // Ablation: remove assertCwdNotRetargeted from addRound/amendRound and a second post
+  // moves the filesystem out from under a board the reviewer already has open, with
+  // round 1 still on screen vouching for it.
+  const projectA = path.join(fixturesDir, 'project-a');
+  const projectB = path.join(fixturesDir, 'project-b');
+  mkdirSync(projectA, { recursive: true });
+  mkdirSync(projectB, { recursive: true });
+  writeFileSync(path.join(projectA, 'a.md'), '# A\n\nfrom project A', 'utf8');
+  writeFileSync(path.join(projectB, 'b.md'), '# B\n\nfrom project B', 'utf8');
+
+  const board = createBoard({ title: 't', cwd: projectA, blocks: [{ kind: 'markdown', source: { path: 'a.md' } }] });
+  const boundCwd = board.cwd;
+
+  assert.throws(
+    () => amendRound(board, { blocks: [{ kind: 'markdown', source: { path: 'b.md' } }], cwd: projectB }),
+    /cannot change the project directory of a live board/,
+  );
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  assert.throws(
+    () => addRound(board, { blocks: [{ kind: 'markdown', source: { path: 'b.md' } }], cwd: projectB }),
+    /cannot change the project directory of a live board/,
+  );
+  assert.equal(board.cwd, boundCwd, 'the rejected attempts must leave the binding untouched');
+  assert.equal(board.blocks.length, 1, 'and must not have added a block');
+
+  // agreeing with the existing binding is not a retarget, and a round with no cwd at
+  // all -- what the shim actually sends -- still works
+  assert.doesNotThrow(() => addRound(board, { blocks: [{ kind: 'markdown', text: '# ok' }], cwd: projectA }));
+  assert.doesNotThrow(() => amendRound(board, { blocks: [{ kind: 'markdown', text: '# also ok' }] }));
+});
+
+check('C2b: a second board in an EXISTING thread inherits that thread\'s cwd and cannot move it', () => {
+  // The thread's directory is bound once. `threadCwd` is what src/server.mjs passes
+  // when the post names a thread that already exists (see the report: that call site
+  // is the one line this needs on the server side).
+  const projectA = path.join(fixturesDir, 'thread-a');
+  const projectB = path.join(fixturesDir, 'thread-b');
+  mkdirSync(projectA, { recursive: true });
+  mkdirSync(projectB, { recursive: true });
+  const bound = realpathSync(projectA);
+
+  const second = createBoard({ title: 't2', thread: 'th_abcd1234', cwd: projectA, threadCwd: bound, blocks: [] });
+  assert.equal(second.cwd, bound);
+  assert.equal(second.thread, 'th_abcd1234');
+  // omitting cwd entirely inherits the thread's, rather than falling back to "none"
+  assert.equal(createBoard({ title: 't3', thread: 'th_abcd1234', threadCwd: bound, blocks: [] }).cwd, bound);
+  assert.throws(
+    () => createBoard({ title: 't4', thread: 'th_abcd1234', cwd: projectB, threadCwd: bound, blocks: [] }),
+    /cannot retarget thread/,
+  );
+});
+
+check('C2b: a board with NO cwd cannot resolve a reference at all -- it never falls back to the daemon\'s own directory', () => {
+  // Ablation: restore `realpathSync(cwd || process.cwd())` and a board that named no
+  // project directory resolves against whatever directory launchd started the daemon
+  // in -- a directory nobody chose, that no board records, and that is plausibly /.
+  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', source: { path: 'package.json' } }] });
+  assert.equal(board.cwd, null);
+  assert.match(board.blocks[0].error, /no project directory/);
+  assert.equal(board.blocks[0].text, '');
+  assert.match(resolveRef({ path: 'package.json' }).error, /no project directory/);
+});
+
+// --- N10: an out-of-range line reference is an error, not an empty block ----------
+
+check('N10: a line range past the end of a newline-terminated file errors instead of returning empty text', () => {
+  // Ablation: split without dropping the phantom trailing element and lines:[4,4] on
+  // a 3-line file returns { text: '', sha: e3b0c442... } with NO error, rendering an
+  // empty <pre> the reviewer cannot interpret -- PROTOCOL.md names out-of-range
+  // lines as exactly what `error` is for.
+  writeFileSync(path.join(fixturesDir, 'three.txt'), 'a\nb\nc\n', 'utf8');
+  const at = { cwd: fixturesDir };
+  assert.match(resolveRef({ path: 'three.txt', lines: [4, 4] }, at).error, /past end of file/);
+  assert.match(resolveRef({ path: 'three.txt', lines: [2, 9] }, at).error, /past end of file/);
+  assert.equal(resolveRef({ path: 'three.txt', lines: [1, 3] }, at).text, 'a\nb\nc');
+  assert.equal(resolveRef({ path: 'three.txt', lines: [3, 3] }, at).text, 'c');
+});
+
+// --- P1: Discuss in chat, the second way out -----------------------------------
+//
+// SPEC_BOARD.md Decisions -> "Two ways out, plus a wall clock" / acceptance
+// criterion 7. The whole path behind it (POST /submit {action:'discuss'},
+// board.state='discuss', the shim's stop-posting branch) shipped and is checked
+// elsewhere; for a long stretch the AFFORDANCE did not exist at all, so half of
+// criterion 7 was dead with every server-side check still green. These assertions
+// are against the rendered markup with the <style> block, the #board-data payload
+// and the client script stripped (renderedMarkup above) -- the string "discuss"
+// occurs in the inlined JSON's `state` field and in src/ui.mjs's own source, so an
+// assertion against the raw page would pass without a button existing.
+
+check('the send bar carries Discuss in chat beside Send, in the rendered markup', () => {
+  const board = createBoard({
+    title: 'Two ways out',
+    blocks: [{ kind: 'question', prompt: 'Pick', widget: 'single', options: [{ label: 'A' }] }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('id="send-btn"'));
+  assert.ok(markup.includes('id="discuss-btn"'), 'the board must render a Discuss-in-chat control, not just Send');
+  assert.match(markup, /Discuss in chat/, 'the control must be labelled for a human, not just carry an id');
+  // Beside Send, inside the one .send-bar -- which is what makes it disappear in
+  // readonly exactly as Send does (body.readonly .send-bar { display: none }).
+  const bar = markup.slice(markup.indexOf('<div class="send-bar">'), markup.indexOf('</div>', markup.indexOf('id="send-btn"')));
+  assert.ok(bar.includes('id="discuss-btn"'), 'Discuss must live inside the send bar, so readonly hides both together');
+  assert.ok(bar.includes('id="send-btn"'));
+});
+
+check('Discuss posts the same body as Send through one shared submit path, differing only in action', () => {
+  // One fetch, one body-building path: a second, hand-copied fetch is how Discuss
+  // would quietly come to collect less than Send does (SPEC_BOARD.md: it returns
+  // "whatever is filled in" -- partial answers are the point).
+  const submitFetches = [...ui.matchAll(/fetch\([^)]*\/submit/g)];
+  assert.equal(submitFetches.length, 1, 'both actions must share one submit fetch, not carry two divergent copies');
+  const submitBody = namedFunctionBody(ui, 'submitBoard');
+  assert.ok(submitBody, 'expected a shared submitBoard(action)');
+  assert.match(submitBody, /action:\s*action/, 'the posted body must carry the caller-chosen action verbatim');
+  assert.match(submitBody, /comments:\s*pendingComments/, 'Discuss must carry the queued comments too');
+  assert.match(submitBody, /collectAnswers\(\)/, 'Discuss must read the same answer surface Send does');
+  const listeners = listenerBodies(ui);
+  const discussListener = listeners.find(b => /submitBoard\('discuss'\)/.test(b));
+  const sendListener = listeners.find(b => /submitBoard\('send'\)/.test(b));
+  assert.ok(discussListener, "a click listener must post action 'discuss'");
+  assert.ok(sendListener, "a click listener must post action 'send'");
+  assert.match(discussListener, /\breadonly\b/, 'Discuss must be inert in readonly mode');
+});
+
+// --- P6: a queued comment gets its pin immediately ------------------------------
+//
+// SPEC_BOARD.md calls the batching the win ("queue a dozen comments, send once");
+// criterion 10 says "a numbered pin appears on the element". The queue-side of
+// that used to push onto pendingComments and never touch a pin layer, so no pin
+// appeared until after Send. commentsWithPending is extracted and evaluated here
+// rather than pattern-matched, so the numbering is actually exercised.
+
+function evalCommentsWithPending(board, pendingComments) {
+  const next = namedFunctionBody(ui, 'nextCommentNumber');
+  const body = namedFunctionBody(ui, 'commentsWithPending');
+  assert.ok(next && body, 'expected nextCommentNumber and commentsWithPending in src/ui.mjs');
+  const fn = new Function('board', 'pendingComments',
+    `function nextCommentNumber() {${next}}\nfunction commentsWithPending() {${body}}\nreturn commentsWithPending();`);
+  return fn(board, pendingComments);
+}
+
+check('a comment queued but not yet sent gets a provisional number continuing the server sequence, flagged pending', () => {
+  const board = {
+    comments: [
+      { n: 1, blockId: 'h1', anchor: { kind: 'dom', ref: '1.1' }, text: 'first', resolved: true },
+      { n: 2, blockId: 'm1', anchor: { kind: 'mermaid', ref: 'A' }, text: 'second', resolved: false, lost: 'A' },
+    ],
+  };
+  const pending = [
+    { blockId: 'h1', anchor: { kind: 'dom', ref: '1.2' }, text: 'queued one' },
+    { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'B' }, text: 'queued two' },
+  ];
+  const all = evalCommentsWithPending(board, pending);
+  assert.equal(all.length, 4, 'pending comments must appear alongside the persisted ones, not instead of them');
+  // The server's own comments are passed through untouched, verdict included.
+  assert.deepEqual(all.slice(0, 2), board.comments);
+  assert.equal(all[2].n, 3, 'the first queued comment continues the sequence');
+  assert.equal(all[3].n, 4, 'and the next one continues it again');
+  assert.equal(all[2].pending, true);
+  assert.equal(all[3].pending, true);
+  assert.ok(!all[0].pending && !all[1].pending, 'a sent comment must never be flagged pending');
+  // Once the queue is emptied (a submit landed) the provisional pins are gone --
+  // the reconciliation, and why a comment can never be pinned twice.
+  assert.deepEqual(evalCommentsWithPending(board, []), board.comments);
+});
+
+check('an empty board numbers the first queued comment 1, not 0 or NaN', () => {
+  const all = evalCommentsWithPending({ comments: [] }, [{ blockId: 'h1', anchor: { kind: 'dom', ref: '1' }, text: 'x' }]);
+  assert.equal(all.length, 1);
+  assert.equal(all[0].n, 1);
+});
+
+check('both pin renderers draw from commentsWithPending, and queueing a comment refreshes the pins right then', () => {
+  const domPins = namedFunctionBody(ui, 'renderDomPins');
+  const mermaidPins = namedFunctionBody(ui, 'renderMermaidPins');
+  assert.match(domPins, /commentsWithPending\(\)/, 'dom pins must include the unsent queue, not only board.comments');
+  assert.match(mermaidPins, /commentsWithPending\(\)/, 'mermaid pins must include the unsent queue, not only board.comments');
+  // The queue-a-comment listener itself has to trigger a redraw; without it the
+  // pin would only appear on the next resize.
+  const queueListener = listenerBodies(ui).find(b => /pendingComments\.push/.test(b));
+  assert.ok(queueListener, 'expected the comment-form submit listener');
+  assert.match(queueListener, /refreshPins\(/, 'queueing a comment must place its pin immediately, not wait for Send');
+  // And a landed submit must empty the queue BEFORE redrawing, or the provisional
+  // pins would be joined by the server-numbered copies of the same comments.
+  const submitBody = namedFunctionBody(ui, 'submitBoard');
+  const emptyIdx = submitBody.indexOf('pendingComments = []');
+  const refreshIdx = submitBody.indexOf('refreshPins(', emptyIdx === -1 ? 0 : emptyIdx);
+  assert.ok(emptyIdx !== -1, 'a landed submit must empty the pending queue');
+  assert.ok(refreshIdx > emptyIdx, 'pins must be re-rendered after the queue is emptied, so provisional pins give way to the server\'s');
+});
+
+check('a pending pin is visually distinguishable from a sent one, in both the client and the stylesheet', () => {
+  const placePin = namedFunctionBody(ui, 'placePin');
+  assert.match(placePin, /c\.pending \? ' pin-pending' : ''/, 'placePin must mark a provisional pin with its own class');
+  assert.ok(styles.includes('.anchor-pin.pin-pending'), 'src/styles.mjs must style .pin-pending differently from a sent pin');
+});
+
+// --- P2 (page side): badge the tab and notify, never steal focus ---------------
+//
+// SPEC_BOARD.md Decisions -> "Open once, then badge and notify": "pending count in
+// the title, badge on the favicon, and a macOS notification instead of a focus
+// steal when the tab is open but unfocused". None of the three existed.
+
+function evalTitleBadge(startingTitle, count) {
+  const body = namedFunctionBody(ui, 'setTitleBadge');
+  assert.ok(body, 'expected setTitleBadge in src/ui.mjs');
+  const doc = { title: startingTitle };
+  new Function('document', 'baseTitle', 'count', `(function setTitleBadge(count) {${body}})(count);`)(doc, startingTitle, count);
+  return doc.title;
+}
+
+check('a pending round puts its count in the document title, and clearing restores the title exactly', () => {
+  assert.equal(evalTitleBadge('Round one', 1), '(1) Round one');
+  assert.equal(evalTitleBadge('Round one', 3), '(3) Round one');
+  assert.equal(evalTitleBadge('Round one', 0), 'Round one', 'clearing must restore the original title, not leave "(0)"');
+});
+
+check('an SSE round push marks the tab: title count, favicon badge and a notification', () => {
+  const push = namedFunctionBody(ui, 'applyRoundPush');
+  assert.ok(push, 'expected applyRoundPush in src/ui.mjs');
+  assert.match(push, /markPendingRound\(/, 'a round push must mark the tab -- the tab is never reopened, so the page has to say so itself');
+  const mark = namedFunctionBody(ui, 'markPendingRound');
+  assert.match(mark, /setTitleBadge\(/);
+  assert.match(mark, /setFaviconBadge\(/);
+  assert.match(mark, /notifyRound\(/);
+  assert.match(mark, /if \(readonly\) return;/, 'marking must be inert in readonly mode');
+});
+
+check('the favicon badge is drawn inline as a data URI -- no new asset file, nothing external', () => {
+  const draw = namedFunctionBody(ui, 'drawFavicon');
+  assert.ok(draw, 'expected drawFavicon in src/ui.mjs');
+  assert.match(draw, /createElement\('canvas'\)/);
+  assert.match(draw, /toDataURL\(/, 'the badge must be a data URI the page draws, not a fetched or bundled file');
+  const set = namedFunctionBody(ui, 'setFaviconBadge');
+  assert.match(set, /removeAttribute\('href'\)/, 'clearing the badge must unbadge the favicon, not leave the last count on it');
+  // Nothing about this may add an external reference to the emitted page.
+  const html = renderBoardPage(createBoard({ title: 'Fav', blocks: [{ kind: 'markdown', text: '# A' }] }));
+  assert.ok(!/<link[^>]+href=["']?http/.test(html));
+});
+
+check('the notification fires only when the tab is unfocused, degrades silently, and never steals focus', () => {
+  const notify = namedFunctionBody(ui, 'notifyRound');
+  assert.ok(notify, 'expected notifyRound in src/ui.mjs');
+  assert.match(notify, /typeof Notification === 'undefined'/, 'must degrade silently where Notification does not exist');
+  assert.match(notify, /document\.hidden/, 'a visible, focused tab already shows the round -- no notification');
+  assert.match(notify, /hasFocus/);
+  assert.match(notify, /if \(!unfocused\) return;/);
+  assert.match(notify, /Notification\.permission === 'denied'/, 'a denied permission must never be re-prompted');
+  assert.match(notify, /requestPermission\(\)/, 'permission is requested lazily, on the first round that would notify');
+  assert.match(notify, /if \(readonly\) return;/, 'the standalone file:// archive must never ask for notification permission');
+  // The focus steal is exactly what this replaces: nothing in the client script
+  // may pull the window forward.
+  assert.ok(!/window\.focus\(/.test(ui), 'the page must never steal focus -- the notification is what replaces that');
+});
+
+check('coming back to the tab clears the marks', () => {
+  const clear = namedFunctionBody(ui, 'clearPendingMark');
+  assert.ok(clear, 'expected clearPendingMark in src/ui.mjs');
+  assert.match(clear, /setTitleBadge\(0\)/);
+  assert.match(clear, /setFaviconBadge\(0\)/);
+  assert.ok(/visibilitychange/.test(ui), 'the marks must clear when the document becomes visible again');
+  assert.ok(/addEventListener\('focus'/.test(ui), 'and when the window regains focus');
+  // A landed submit clears them too: nothing is pending once the round went out.
+  assert.match(namedFunctionBody(ui, 'submitBoard'), /clearPendingMark\(\)/);
+});
+
+// --- dead/mismatched CSS --------------------------------------------------------
+
+check('the inline anchor-button class the markup emits is the one the stylesheet rules on', () => {
+  const board = createBoard({ title: 'Anchors', blocks: [{ kind: 'markdown', text: '# Heading\n\n- one' }] });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const m = markup.match(/class="comment-btn ([a-z-]+)"/);
+  assert.ok(m, 'expected the markdown block to emit an inline anchor button');
+  const cls = m[1];
+  assert.ok(
+    styles.includes('.' + cls),
+    `src/styles.mjs has no rule for ".${cls}", the class src/render.mjs actually emits -- inline anchor buttons fall back to base styling`
+  );
+  assert.ok(!/\.comment-inline\b/.test(styles), 'the orphaned .comment-inline rule must be gone, not left beside its replacement');
+});
+
+check('.anchor-target is wired: a comment list entry names the anchor it points at, and the client applies the class', () => {
+  const board = createBoard({ title: 'Target', blocks: [{ kind: 'markdown', text: '# Acceptance Criteria\n\n- one' }] });
+  const blockId = board.blocks[0].id;
+  applySubmit(board, {
+    action: 'send',
+    answers: [],
+    comments: [{ blockId, anchor: { kind: 'md', ref: 'acceptance-criteria', label: 'Acceptance Criteria' }, text: 'this one' }],
+  }, 1);
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.match(markup, /class="comment-item" data-anchor-kind="md" data-anchor-ref="acceptance-criteria"/,
+    'a comment list entry must carry the anchor it targets, so clicking it can highlight that anchor');
+  // ...and the client actually applies the class the stylesheet rules on, rather
+  // than the rule staying orphaned as it was.
+  const highlight = namedFunctionBody(ui, 'highlightAnchor');
+  assert.ok(highlight, 'expected highlightAnchor in src/ui.mjs');
+  assert.match(highlight, /classList\.add\('anchor-target'\)/);
+  assert.match(highlight, /classList\.remove\('anchor-target'\)/, 'exactly one anchor may be highlighted at a time');
+  assert.ok(styles.includes('.anchor-target'), 'the rule the client applies must still exist');
+});
+
+// --- computeBoardPatch sees NESTED blocks ---------------------------------------
+//
+// board.blocks is the top level only, but a question inside a compare side or
+// inside another question's `context` is rendered with its own data-block-id and
+// its own widget -- and Send iterates the DOM, where it very much exists. While
+// the diff walked only the top level, an amend that rewrote such a question
+// reported only its CONTAINER's id, clearFieldState never cleared the nested
+// question, and the reviewer's selection against the OLD prompt was posted under
+// the new one. The scenario below is that exact one, with the prompts chosen so
+// the consequence is unmistakable.
+
+check('computeBoardPatch reports a question nested inside a compare block when its prompt is rewritten', () => {
+  const nested = (prompt) => ({
+    id: 'x1', round: 1, kind: 'compare',
+    left: { label: 'L', block: { id: 'q1', round: 1, kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }] } },
+    right: { label: 'R', block: { id: 'd1', round: 1, kind: 'markdown', text: 'same', html: '<p>same</p>', anchors: [] } },
+  });
+  const prev = { blocks: [nested('Approve the copy change?')], rounds: [{ n: 1, status: 'open' }] };
+  const next = { blocks: [nested('Delete the production database?')], rounds: [{ n: 1, status: 'open' }] };
+  const patch = computeBoardPatch(prev, next);
+  assert.ok(
+    patch.changedBlockIds.includes('q1'),
+    'the nested question whose prompt was rewritten must be reported, or the reviewer\'s stale answer rides under the new prompt'
+  );
+  assert.ok(!patch.changedBlockIds.includes('d1'), 'the untouched sibling must not be reported');
+  assert.ok(
+    !patch.changedBlockIds.includes('x1'),
+    'the container itself did not change -- reporting it would clear field state for blocks that are still current'
+  );
+});
+
+check('computeBoardPatch reports a question context block, and a brand-new nested block, by their own ids', () => {
+  const q = (contextText) => ({
+    id: 'q1', round: 1, kind: 'question', prompt: 'Pick', widget: 'single', options: [{ label: 'A' }],
+    context: [{ id: 'c1', round: 1, kind: 'code', text: contextText, sha: contextText, lang: 'js' }],
+  });
+  const prev = { blocks: [q('const a = 1;')], rounds: [] };
+  const next = { blocks: [q('const a = 2;')], rounds: [] };
+  assert.deepEqual(computeBoardPatch(prev, next).changedBlockIds, ['c1']);
+
+  const withExtra = { blocks: [{ ...q('const a = 1;'), context: [{ id: 'c1', round: 1, kind: 'code', text: 'const a = 1;', sha: 'const a = 1;', lang: 'js' }, { id: 'c2', round: 1, kind: 'markdown', text: 'new', html: '<p>new</p>', anchors: [] }] }], rounds: [] };
+  const added = computeBoardPatch(prev, withExtra);
+  assert.deepEqual(added.addedBlockIds, ['c2'], 'a nested block that did not exist before is an addition, under its own id');
+  assert.deepEqual(added.changedBlockIds, []);
+});
+
+check('the nested walk survives the .toString() splice into the client script', () => {
+  // The browser copy is computeBoardPatch.toString() -- a MODULE-LEVEL helper
+  // would import fine for these checks and be a ReferenceError in the page.
+  const src = computeBoardPatch.toString();
+  const spliced = new Function('return (' + src + ')')();
+  const prev = { blocks: [{ id: 'x1', round: 1, kind: 'compare', left: { label: 'L', block: { id: 'q1', round: 1, kind: 'question', prompt: 'old' } }, right: { label: 'R', block: null } }], rounds: [] };
+  const next = { blocks: [{ id: 'x1', round: 1, kind: 'compare', left: { label: 'L', block: { id: 'q1', round: 1, kind: 'question', prompt: 'new' } }, right: { label: 'R', block: null } }], rounds: [] };
+  assert.deepEqual(spliced(prev, next).changedBlockIds, ['q1']);
+  assert.ok(ui.includes('flattenBlocks'), 'the flattening must travel with the function into src/ui.mjs');
+});
+
+check('a submitted push clears field state for every block in the replaced subtree, nested ones included', () => {
+  const body = namedFunctionBody(ui, 'applySubmittedPush');
+  assert.match(body, /qsa\('\.block', section\)/, 'the ids must be harvested from the DOM subtree, where nested blocks exist');
+  assert.match(body, /clearFieldState\(roundBlockIds\.concat\(replacedIds\)\)/,
+    'board.blocks alone is the top level only -- a nested question would keep its stale state');
+});
+
+// --- a sent round can never be re-submitted --------------------------------------
+//
+// #send-btn lives in .send-bar, OUTSIDE any round section, so markRoundHistory
+// (which disables everything inside the round it collapses) never reaches it and
+// no CSS hides it. With the old unconditional re-enable in .finally(), a plain
+// double-click posted twice: the second landed on an already-sent round, and its
+// comments were appended again with fresh numbers -- duplicate pins for one
+// comment.
+
+check('a landed submit leaves the send bar disabled; only a failure re-enables it', () => {
+  const body = namedFunctionBody(ui, 'submitBoard');
+  assert.ok(!/\.finally\(/.test(body), 'the unconditional re-enable in .finally() is exactly the double-submit hole');
+  const successArm = body.slice(body.indexOf('}).then(function (result)'), body.indexOf('}).catch('));
+  assert.ok(successArm.length > 0, 'expected a success arm in submitBoard');
+  assert.ok(!/setSendBarEnabled\(true\)/.test(successArm), 'a submit that landed must NOT re-enable the send bar');
+  const failureArm = body.slice(body.indexOf('}).catch('));
+  assert.match(failureArm, /setSendBarEnabled\(true\)/, 'a failed submit must let the reviewer retry');
+});
+
+check('the submitted push disables the send bar, and a new round brings it back', () => {
+  const submitted = namedFunctionBody(ui, 'applySubmittedPush');
+  const roundPush = namedFunctionBody(ui, 'applyRoundPush');
+  assert.match(submitted, /setSendBarEnabled\(openRoundNumber\(\) !== null\)/,
+    'a submitted push must lock the send bar -- markRoundHistory cannot reach it, it is outside the round');
+  assert.match(roundPush, /setSendBarEnabled\(openRoundNumber\(\) !== null\)/,
+    'a new round must bring the send bar back');
+  const open = namedFunctionBody(ui, 'openRoundNumber');
+  assert.match(open, /r\.status !== 'sent'/, 'the open round is the one not yet sent');
+  // Never re-enable anything in a read-only page, where everything is hard-disabled.
+  assert.match(namedFunctionBody(ui, 'setSendBarEnabled'), /if \(readonly\) return;/);
+});
+
+check('the submit body names the round it targets, and a 409 reads as already-sent rather than an error', () => {
+  const body = namedFunctionBody(ui, 'submitBoard');
+  assert.match(body, /round: openRoundNumber\(\)/,
+    'the server can only refuse a stale submit if the body says which round it is for');
+  assert.match(body, /r\.status === 409/, 'a 409 means the round already went out');
+  assert.match(body, /alreadySent: true/);
+  assert.ok(
+    body.indexOf('r.status === 409') < body.indexOf("throw new Error('submit failed"),
+    'the 409 branch must come before the generic failure throw, or it renders as a red error the reviewer clears by clicking Send again'
+  );
+});
+
+// --- resync on (re)connect -------------------------------------------------------
+//
+// EventSource reconnects, but the stream has no replay and the server emits no
+// `id:` lines -- so anything broadcast while this client was disconnected was lost
+// permanently. Concretely: the reviewer reopens the board from the index while the
+// agent amends the open round; the page never learns of the added question, they
+// send what they see, and that question returns `unanswered` to the agent that
+// just added it.
+
+check('the subscription resyncs on every open, through the same computeBoardPatch a live push uses', () => {
+  assert.match(ui, /es\.addEventListener\('open', function \(\) \{ resync\(\); \}\)/,
+    "'open' fires on the first connect AND every reconnect -- exactly the moments something may have been missed");
+  const resyncBody = namedFunctionBody(ui, 'resync');
+  assert.match(resyncBody, /fetch\('\/b\/' \+ encodeURIComponent\(boardId\)\)/, 'resync must re-read the current board');
+  assert.match(resyncBody, /getElementById\('board-data'\)/, 'the board JSON comes from the page\'s own embedded payload');
+  assert.match(resyncBody, /\.catch\(/, 'a failed catch-up must never break the live subscription');
+
+  const apply = namedFunctionBody(ui, 'applyResync');
+  assert.match(apply, /computeBoardPatch\(board, fresh\)/, 'the catch-up must diff, not blindly re-render');
+  assert.match(apply, /if \(!patch\.addedBlockIds\.length && !patch\.changedBlockIds\.length && !patch\.roundsNowSent\.length\) return;/,
+    'a first connection with nothing missed must do nothing at all -- no DOM churn, no badge');
+  assert.match(apply, /mode: 'new-round'/, 'a round missed entirely is replayed as the new-round push it was');
+  assert.match(apply, /mode: 'amend'/, 'an amend missed on an existing round is replayed as an amend');
+  assert.match(apply, /applyRoundPush\(/, 'one code path for arrived-live and arrived-late');
+  // ...and the round-status-only case, which inserts nothing.
+  assert.match(apply, /patch\.roundsNowSent\.forEach\(markRoundHistory\)/);
+});
+
+// --- the "commenting on:" line is rendered on every block, so it must be hidden ---
+
+check('.comment-target is emitted for every block and has a rule that keeps it hidden until a comment is being composed', () => {
+  const board = createBoard({
+    title: 'Six blocks',
+    blocks: [1, 2, 3, 4, 5, 6].map(i => ({ kind: 'markdown', text: `# H${i}` })),
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const emitted = [...markup.matchAll(/class="comment-target"/g)];
+  assert.equal(emitted.length, 6, 'render.mjs emits one per block, unconditionally');
+  assert.ok(
+    /\.comment-target \{[^}]*display: none/.test(styles),
+    'without a rule, six blocks render six stray lines each claiming a comment is in progress'
+  );
+  assert.ok(styles.includes('.comment-target.open'), 'and a rule that shows it while a comment IS being composed');
+  // The client opens and closes it alongside the form it labels.
+  const open = namedFunctionBody(ui, 'openCommentForm');
+  assert.match(open, /target\.classList\.add\('open'\)/);
+  const queueListener = listenerBodies(ui).find(b => /pendingComments\.push/.test(b));
+  assert.match(queueListener, /classList\.remove\('open'\)/, 'and closes it again once the comment is queued');
+});
+
+// --- defer survives a re-render ---------------------------------------------------
+
+check('the defer button re-applies the live deferred flag on every wire, like every other widget', () => {
+  // wireRoot runs again on a pushed/amended subtree. single/multi/note all
+  // re-apply their state to the fresh element; defer did not, so an amend showed
+  // an UNdeferred button while Send still reported the question deferred.
+  // Everything BEFORE the click listener is registered -- the click handler
+  // carries its own toggle, so slicing the whole loop would let that copy satisfy
+  // the assertion and prove nothing about what happens at wire time.
+  const deferLoop = ui.slice(ui.indexOf("qsa('.btn-defer', root)"));
+  const beforeListener = deferLoop.slice(0, deferLoop.indexOf('addEventListener'));
+  assert.match(beforeListener, /btn\.classList\.toggle\('active', !!deferred\[qid\]\)/,
+    'the freshly-rendered defer button must show the state the client actually holds, at wire time');
+});
+
+// --- no more mirror drift between the markup and the stylesheet -------------------
+
+check('every class the stylesheet rules on is a class something actually emits', () => {
+  const emitters = ['src/render.mjs', 'src/ui.mjs', 'src/indexpage.mjs', 'src/markdown.mjs']
+    .map(f => readFileSync(path.join(repoRoot, f), 'utf8')).join('\n');
+  const ruled = new Set();
+  for (const m of styles.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([a-zA-Z][\w-]*)/g)) ruled.add(m[1]);
+  const orphans = [...ruled].filter(c => !emitters.includes(c));
+  assert.deepEqual(orphans, [], `src/styles.mjs rules on classes nothing emits: ${orphans.join(', ')}`);
+});
+
+rmSync(fixturesDir, { recursive: true, force: true });
+
+if (failures) {
+  console.error(`\n${failures} check(s) failed`);
+  process.exit(1);
+}
+console.log('\nall pure checks ok');

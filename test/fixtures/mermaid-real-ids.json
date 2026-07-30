@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Element ids observed from REAL mermaid@11 (the version src/render.mjs's CDN tag",
+    "pins), rendering the `source` below in headless Chrome on 2026-07-30. Recorded",
+    "because the checks previously hand-wrote `id=\"flowchart-A-12\"` -- a shape",
+    "mermaid does not emit -- which let the entire diagram gesture ship dead: the",
+    "click walk-up, the pin-candidate scan and the hover/cursor CSS all keyed off a",
+    "`^flowchart-` prefix that never matched, in a browser, ever.",
+    "",
+    "The point is the PREFIX: mermaid 11 namespaces every node id with the diagram's",
+    "own generated svg id. Any check that mocks mermaid must reproduce that shape, or",
+    "it is testing a diagram renderer that does not exist.",
+    "",
+    "To re-record: render `source` in a browser and read back the g.node ids."
+  ],
+  "mermaidVersion": "11",
+  "source": "flowchart LR\n  shim[MCP shim] --> daemon[Daemon]\n  daemon --> page[Board page]\n  page --> submit[Submit]\n",
+  "svgId": "mermaid-1785397890978",
+  "nodeIds": [
+    "mermaid-1785397890978-flowchart-shim-0",
+    "mermaid-1785397890978-flowchart-daemon-1",
+    "mermaid-1785397890978-flowchart-page-3",
+    "mermaid-1785397890978-flowchart-submit-5"
+  ],
+  "declaredNodeIds": ["shim", "daemon", "page", "submit"]
+}

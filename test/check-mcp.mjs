@@ -1,0 +1,1310 @@
+// MCP protocol check: drives bin/mcp.mjs with a scripted stdio JSON-RPC client
+// (no MCP SDK, hand-rolled newline-delimited JSON) against a daemon started
+// in-process on an ephemeral port. No browser (CLAUDE_BOARD_NO_OPEN=1 stands in
+// for `open`), no network beyond loopback. Writes only inside a temp
+// CLAUDE_BOARD_HOME.
+//
+// Covers: initialize/tools-list shapes, tools/call on `ask`, progress
+// notifications flowing throughout a held-open wait (cadence shortened via
+// CLAUDE_BOARD_PROGRESS_MS rather than sleeping for real time), the result
+// packet shape, the discuss path, the wall-clock timeout path, the
+// unreachable-daemon error (names the revive command, writes nothing), and
+// the non-interactive refusal (fails before posting, writes nothing).
+//
+// Also covers the things a single call with a single token cannot see, which is
+// most of what actually breaks a live session:
+//   * two CONCURRENT `ask` calls over one shim connection — auto-backgrounding
+//     makes this the normal case, not an edge case — each keeping their own
+//     progress stream, and minting exactly one thread between them;
+//   * two SEQUENTIAL `ask` calls pushing round 2 into the same board;
+//   * a wait surviving a real daemon restart (a separate bin/daemon.mjs process,
+//     SIGTERMed and restarted underneath the shim);
+//   * bin/daemon.mjs exiting promptly on SIGTERM with an SSE stream open;
+//   * a daemon 4xx reported as a rejection rather than as a dead service;
+//   * a later round reopening the tab when nothing is connected to the board.
+
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, readdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import http from 'node:http';
+import net from 'node:net';
+import { SECRET_HEADER } from '../src/secret.mjs';
+import { startServer } from '../src/server.mjs';
+import { runCheck } from './run.mjs';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const mcpBin = path.join(here, '..', 'bin', 'mcp.mjs');
+const daemonBin = path.join(here, '..', 'bin', 'daemon.mjs');
+
+// The local secret, in this check's own temp dir — never ~/.config/claude-board. Set on
+// this process's env before any server or shim starts: the daemon reads it once at
+// startup, and every shim spawned below inherits the seam and reads the same file, which
+// is what makes the end-to-end path (shim -> daemon write) work at all now that writes
+// require it.
+const secretDir = mkdtempSync(path.join(tmpdir(), 'claude-board-secret-'));
+const SECRET_FILE = path.join(secretDir, 'secret');
+const SECRET = 'e'.repeat(64);
+writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
+process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
+
+/** Headers for a write made directly by this check, standing in for the served page. */
+function writeHeaders() {
+  return { 'content-type': 'application/json', [SECRET_HEADER]: SECRET };
+}
+
+let failures = 0;
+async function check(name, fn) {
+  try {
+    await fn();
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    failures++;
+    console.error(`FAIL - ${name}`);
+    console.error((err && err.stack) || err);
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** Scripted JSON-RPC 2.0 client over a child process's stdio: writes
+ * newline-delimited requests/notifications to stdin, and demuxes stdout lines
+ * into resolved request promises vs. a running list of server-initiated
+ * notifications (progress, in particular). */
+class McpClient {
+  constructor(child) {
+    this.child = child;
+    this.buf = '';
+    this.nextId = 1;
+    this.pending = new Map();
+    this.notifications = [];
+    this.stderr = '';
+    child.stdout.on('data', chunk => this._onData(chunk));
+    child.stderr.on('data', chunk => { this.stderr += chunk.toString(); });
+  }
+
+  _onData(chunk) {
+    this.buf += chunk.toString('utf8');
+    let idx;
+    while ((idx = this.buf.indexOf('\n')) !== -1) {
+      const line = this.buf.slice(0, idx);
+      this.buf = this.buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue; // stray non-protocol output would be a bug, but don't crash the test on it
+      }
+      if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
+        const pend = this.pending.get(msg.id);
+        if (pend) {
+          this.pending.delete(msg.id);
+          pend(msg);
+        }
+      } else {
+        this.notifications.push(msg);
+      }
+    }
+  }
+
+  request(method, params) {
+    return this.requestWithId(method, params).promise;
+  }
+
+  /** Same, but hands back the JSON-RPC id too — needed to cancel a call, and to
+   * assert that a cancelled call is never answered. */
+  requestWithId(method, params) {
+    const id = this.nextId++;
+    const promise = new Promise(resolve => this.pending.set(id, resolve));
+    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    return { id, promise };
+  }
+
+  answered(id) {
+    return !this.pending.has(id);
+  }
+
+  notify(method, params) {
+    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+  }
+
+  close() {
+    try { this.child.stdin.end(); } catch { /* already closed */ }
+    try { this.child.kill(); } catch { /* already dead */ }
+  }
+}
+
+/** Merge `overrides` onto the real process env, actually deleting a key when
+ * its override value is `undefined` — a plain `{ ...process.env, ...overrides }`
+ * spread can't unset a key (an absent key in `overrides` just leaves the
+ * inherited value in place), which matters here: this suite's own process
+ * runs inside an interactive Claude Code session, so CLAUDE_CODE_ENTRYPOINT is
+ * already set in process.env and must be explicitly deleted to test the
+ * "absent" refusal path rather than silently inheriting `cli`. */
+function spawnShim(overrides) {
+  const env = { ...process.env };
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
+  const child = spawn(process.execPath, [mcpBin], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  return new McpClient(child);
+}
+
+function listBoardIds(home) {
+  const dir = path.join(home, 'boards');
+  if (!existsSync(dir)) return new Set();
+  return new Set(
+    readdirSync(dir).filter(f => f.endsWith('.json') && !f.includes('.tmp-')).map(f => f.slice(0, -'.json'.length))
+  );
+}
+
+/** Poll the store for a board file that was not already present in `knownIds`
+ * — several checks share one CLAUDE_BOARD_HOME, so "the board file appeared"
+ * has to mean *this* call's board, not a leftover from an earlier check. */
+async function waitForNewBoardFile(home, knownIds, timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const id of listBoardIds(home)) {
+      if (!knownIds.has(id)) return id;
+    }
+    await sleep(20);
+  }
+  throw new Error('timed out waiting for a new board file to appear in the store');
+}
+
+function countBoardFiles(home) {
+  return listBoardIds(home).size;
+}
+
+/** Never let a concurrency check hang: a broken shim leaves a call unanswered
+ * forever, and a hang reads as "still running" instead of as a failure. */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms}ms: ${label}`)), ms).unref()),
+  ]);
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
+const spawnedDaemons = new Set();
+const tempDirs = [];
+
+function tempHome(tag) {
+  const dir = mkdtempSync(path.join(tmpdir(), `claude-board-${tag}-`));
+  tempDirs.push(dir);
+  return dir;
+}
+
+/** Start bin/daemon.mjs as a real child process (not startServer in-process): the
+ * restart and shutdown checks are about process lifecycle, which an in-process
+ * server cannot exercise. Resolves once the daemon says it is listening. */
+function startDaemonProcess(port, daemonHome) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [daemonBin], {
+      env: { ...process.env, CLAUDE_BOARD_HOME: daemonHome, CLAUDE_BOARD_PORT: String(port) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    spawnedDaemons.add(child);
+    child.on('exit', () => spawnedDaemons.delete(child));
+    let out = '';
+    let stderr = '';
+    child.stderr.on('data', c => { stderr += c.toString(); });
+    const timer = setTimeout(() => reject(new Error(`daemon never reported listening: ${out}${stderr}`)), 8000);
+    timer.unref();
+    child.stdout.on('data', c => {
+      out += c.toString();
+      if (out.includes('listening')) {
+        clearTimeout(timer);
+        resolve(child);
+      }
+    });
+    child.on('exit', code => reject(new Error(`daemon exited early with ${code}: ${out}${stderr}`)));
+  });
+}
+
+/** SIGTERM the daemon and report how long it took to actually go away. Returns
+ * null if it outlived `ms` (in which case it is SIGKILLed, so the suite still
+ * finishes). */
+function terminateDaemon(child, ms) {
+  const start = Date.now();
+  return new Promise(resolve => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      resolve(null);
+    }, ms);
+    timer.unref();
+    child.once('exit', (code, signal) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ elapsed: Date.now() - start, code, signal });
+    });
+    child.kill('SIGTERM');
+  });
+}
+
+/** Hold an SSE subscription open the way a real board tab does, so shutdown has a
+ * connection that never ends on its own to deal with. */
+function openSseStream(port, boardId) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      { hostname: '127.0.0.1', port, path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}` } },
+      res => {
+        res.once('data', () => resolve({ req, res }));
+        res.on('error', () => { /* torn down at shutdown; that is the point */ });
+      }
+    );
+    req.on('error', reject);
+  });
+}
+
+/** A pass-through in front of the real daemon that also answers the read-only
+ * `GET /api/board/:id/clients` probe the shim uses to decide whether the reviewer
+ * still has a window on this board. The daemon does not serve that route yet (it
+ * belongs to src/server.mjs, owned elsewhere); this stands in for it so the shim's
+ * reopen decision is exercised against real board traffic, and `clients: null`
+ * stands in for a daemon that does not serve it at all. */
+function startClientsProxy(targetPort, state) {
+  const proxy = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://internal');
+    const m = u.pathname.match(/^\/api\/board\/([^/]+)\/clients$/);
+    if (req.method === 'GET' && m) {
+      const body = JSON.stringify(state.clients === null ? { error: 'not found' } : { clients: state.clients });
+      res.writeHead(state.clients === null ? 404 : 200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+      });
+      return res.end(body);
+    }
+    const upstream = http.request(
+      { hostname: '127.0.0.1', port: targetPort, path: req.url, method: req.method, headers: req.headers },
+      ures => {
+        res.writeHead(ures.statusCode, ures.headers);
+        ures.pipe(res);
+      }
+    );
+    upstream.on('error', () => { try { res.writeHead(502); res.end(); } catch { /* client gone */ } });
+    req.pipe(upstream);
+  });
+  return new Promise(resolve => {
+    proxy.listen(0, '127.0.0.1', () => resolve({ proxy, port: proxy.address().port }));
+  });
+}
+
+/** Whatever is listening on the port need not be the daemon: during a restart
+ * window any local process can bind it first. This one answers a POST with a
+ * board id and a `url` of the test's choosing, and a /wait that returns at once. */
+function startHostileDaemon({ boardId, url }) {
+  const send = (res, status, obj) => {
+    const body = JSON.stringify(obj);
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+  };
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://internal');
+    if (req.method === 'POST' && u.pathname === '/api/board') {
+      req.resume();
+      req.on('end', () => send(res, 200, { boardId, thread: 'th_hostile', round: 1, url }));
+      return;
+    }
+    if (req.method === 'GET' && u.pathname.endsWith('/wait')) {
+      return send(res, 200, {
+        board: boardId, thread: 'th_hostile', title: 'hostile', round: 1,
+        status: 'submitted', answers: [], comments: [], url,
+      });
+    }
+    return send(res, 404, { error: 'not found' });
+  });
+  return new Promise(resolve => {
+    srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => srv.close() }));
+  });
+}
+
+/** A stand-in for `open`: records the URLs it is handed, one per line. */
+function makeOpenRecorder(dir) {
+  const script = path.join(dir, 'fake-open.sh');
+  const log = path.join(dir, 'opened.log');
+  writeFileSync(script, '#!/bin/sh\nprintf \'%s\\n\' "$1" >> "$CLAUDE_BOARD_OPEN_LOG"\n', { mode: 0o755 });
+  return {
+    script,
+    log,
+    opened() {
+      if (!existsSync(log)) return [];
+      return readFileSync(log, 'utf8').split('\n').filter(Boolean);
+    },
+    async waitForOpens(n, timeoutMs = 3000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (this.opened().length >= n) return this.opened();
+        await sleep(25);
+      }
+      return this.opened();
+    },
+  };
+}
+
+function progressCount(client, token) {
+  return client.notifications.filter(
+    n => n.method === 'notifications/progress' && n.params.progressToken === token
+  ).length;
+}
+
+/** Poll until `n` progress notifications have landed for `token`, rather than
+ * sleeping exactly n cadences and asserting on the count: one interval of margin
+ * flakes on any GC pause or loaded machine. Returns the count actually seen. */
+async function waitForProgress(client, token, n, timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (progressCount(client, token) >= n) break;
+    await sleep(25);
+  }
+  return progressCount(client, token);
+}
+
+/** Submit as the page would. A submit must NAME the round it is answering
+ * (PROTOCOL.md "HTTP surface"; the server 400s without it and 409s on a stale one),
+ * so this reads the currently-open round off the stored board rather than assuming
+ * round 1 -- several checks below are submitting round 2. Callers can still pin
+ * `round` explicitly to exercise the stale-client refusals. */
+async function submitBoard(baseUrl, boardId, body, boardHome = home) {
+  const stored = JSON.parse(readFileSync(path.join(boardHome, 'boards', `${boardId}.json`), 'utf8'));
+  const open = stored.rounds.find(r => r.status === 'open');
+  const res = await fetch(`${baseUrl}/api/board/${boardId}/submit`, {
+    method: 'POST',
+    headers: writeHeaders(),
+    body: JSON.stringify({
+      action: 'send',
+      answers: [],
+      comments: [],
+      round: open ? open.n : stored.rounds.length,
+      ...body,
+    }),
+  });
+  assert.equal(res.status, 200, `submit must succeed (got ${res.status}: ${await res.clone().text()})`);
+  return res.json();
+}
+
+// No explicit id: ids are minted per board, so two concurrent posts get q1/q2
+// rather than the second silently replacing the first.
+const QUESTION = { kind: 'question', prompt: 'Looks right?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
+
+const home = mkdtempSync(path.join(tmpdir(), 'claude-board-mcp-'));
+let server, port, base;
+
+async function main() {
+  ({ server, port } = await startServer({ home, port: 0 }));
+  base = `http://127.0.0.1:${port}`;
+
+  const baseEnv = {
+    CLAUDE_BOARD_HOME: home,
+    CLAUDE_BOARD_PORT: String(port),
+    CLAUDE_BOARD_NO_OPEN: '1', // stand-in for `open`: no real browser, ever
+    CLAUDE_CODE_ENTRYPOINT: 'cli',
+    CLAUDE_BOARD_PROGRESS_MS: '80', // shortened cadence instead of real 20s waits
+  };
+
+  // --- initialize + tools/list shapes -------------------------------------
+
+  let client = spawnShim(baseEnv);
+
+  await check('initialize returns MCP protocol/server info', async () => {
+    const res = await client.request('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'check-mcp', version: '0.0.0' },
+    });
+    assert.ok(res.result, 'expected a result, not an error');
+    assert.equal(res.result.serverInfo.name, 'claude-board');
+    assert.ok(res.result.capabilities.tools, 'must advertise the tools capability');
+  });
+  client.notify('notifications/initialized', {});
+
+  await check('tools/list exposes exactly the single ask tool', async () => {
+    const res = await client.request('tools/list', {});
+    assert.equal(res.result.tools.length, 1);
+    const tool = res.result.tools[0];
+    assert.equal(tool.name, 'ask');
+    assert.equal(tool.inputSchema.type, 'object');
+    assert.ok(tool.inputSchema.properties.title);
+    assert.ok(tool.inputSchema.properties.blocks);
+    assert.ok(tool.inputSchema.required.includes('title'));
+    assert.ok(tool.inputSchema.required.includes('blocks'));
+  });
+
+  // --- tools/call ask: blocking wait, progress flowing, result shape -----
+
+  await check('tools/call ask posts a board, blocks, keeps sending progress, and returns on submit', async () => {
+    const knownIds = listBoardIds(home);
+    const callPromise = client.request('tools/call', {
+      name: 'ask',
+      arguments: {
+        title: 'MCP check',
+        blocks: [
+          { kind: 'markdown', text: '# Notes\n\nsome context' },
+          { kind: 'question', prompt: 'Looks right?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+        ],
+      },
+      _meta: { progressToken: 'tok-normal' },
+    });
+
+    const boardId = await waitForNewBoardFile(home, knownIds);
+
+    // Simulate the board sitting past the MCP idle window: let several
+    // progress notifications land before anyone submits. Polled with a generous
+    // deadline rather than sleeping exactly three cadences, which flakes.
+    const seen = await waitForProgress(client, 'tok-normal', 3);
+    assert.ok(seen >= 3, `expected several progress notifications while waiting, got ${seen}`);
+    const progressSoFar = client.notifications.filter(
+      n => n.method === 'notifications/progress' && n.params.progressToken === 'tok-normal'
+    );
+    for (const n of progressSoFar) {
+      assert.equal(typeof n.params.progress, 'number');
+      assert.equal(typeof n.params.total, 'number');
+    }
+
+    const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'lgtm' }],
+        comments: [],
+      }),
+    });
+    assert.equal(submitRes.status, 200);
+
+    // A submit arriving after the idle window still returns normally.
+    const res = await callPromise;
+    assert.ok(res.result, 'expected a tool result, not a protocol error');
+    const result = res.result;
+
+    assert.equal(result.isError, false);
+    assert.ok(Array.isArray(result.content) && result.content[0].type === 'text');
+    assert.equal(result.status, 'submitted');
+    assert.equal(result.board, boardId);
+    assert.equal(result.round, 1);
+    assert.equal(result.title, 'MCP check');
+    assert.ok(result.url && result.url.includes(boardId), 'the board URL must be in the result');
+    assert.ok(result.content[0].text.includes(result.url), 'the board URL must also be in the text summary');
+    assert.equal(result.answers.length, 1);
+    assert.equal(result.answers[0].id, 'q1');
+    assert.equal(result.answers[0].status, 'answered');
+    assert.equal(result.answers[0].choice, 'Yes');
+    assert.equal(result.answers[0].note, 'lgtm');
+    assert.equal(result.comments.length, 0);
+
+    // progress notifications did not stop before the submit actually landed
+    const progressAfter = client.notifications.filter(
+      n => n.method === 'notifications/progress' && n.params.progressToken === 'tok-normal'
+    );
+    assert.ok(progressAfter.length >= progressSoFar.length, 'progress must keep flowing right up to the submit');
+  });
+
+  client.close();
+
+  // --- discuss path: returns immediately with partial answers ------------
+
+  await check('discuss-in-chat returns immediately with partial answers and a stop-posting status', async () => {
+    const knownIds = listBoardIds(home);
+    const discussClient = spawnShim(baseEnv);
+    const callPromise = discussClient.request('tools/call', {
+      name: 'ask',
+      arguments: {
+        title: 'Discuss check',
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+      },
+    });
+
+    const boardId = await waitForNewBoardFile(home, knownIds, 5000);
+
+    await fetch(`${base}/api/board/${boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'discuss',
+        answers: [{ id: 'q1', status: 'deferred', choice: null, note: 'want to talk it through' }],
+        comments: [],
+      }),
+    });
+
+    const res = await callPromise;
+    const result = res.result;
+    assert.equal(result.isError, false);
+    assert.equal(result.status, 'discuss');
+    assert.equal(result.answers[0].status, 'deferred');
+    assert.ok(result.url, 'discuss result must still carry the board URL');
+    assert.match(result.content[0].text, /stop/i);
+    assert.match(result.content[0].text, /discuss/i);
+
+    discussClient.close();
+  });
+
+  // --- wall-clock timeout: explicit no-response, not a hang ---------------
+
+  await check('the wall-clock cap returns an explicit timeout status rather than hanging', async () => {
+    const timeoutClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_TIMEOUT_MS: '150', CLAUDE_BOARD_PROGRESS_MS: '40' });
+    const start = Date.now();
+    const res = await timeoutClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'Timeout check', blocks: [{ kind: 'markdown', text: '# never answered' }] },
+    });
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 5000, `timeout must return promptly, took ${elapsed}ms`);
+    const result = res.result;
+    assert.equal(result.isError, false);
+    assert.equal(result.status, 'timeout');
+    assert.match(result.content[0].text, /no response/i);
+    assert.ok(result.url, 'timeout result must still carry the board URL to recover the tab');
+
+    timeoutClient.close();
+  });
+
+  // --- unreachable daemon: names the revive command, writes nothing ------
+
+  await check('an unreachable daemon reports the revive command and writes nothing', async () => {
+    const { server: throwaway, port: deadPort } = await startServer({ home: mkdtempSync(path.join(tmpdir(), 'claude-board-dead-')), port: 0 });
+    await new Promise(resolve => throwaway.close(resolve)); // now nothing listens on deadPort
+
+    const before = countBoardFiles(home);
+    const deadClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_PORT: String(deadPort) });
+    const res = await deadClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'Unreachable check', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const result = res.result;
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /launchctl kickstart -k gui\/\$\(id -u\)\/claude-board/);
+    assert.match(result.content[0].text, /install\.sh/);
+    assert.equal(countBoardFiles(home), before, 'an unreachable daemon must write nothing to the store');
+
+    deadClient.close();
+  });
+
+  // --- the local secret: the shim holds it, or refuses ----------------------
+
+  await check('a shim with no local secret refuses before posting, names ./install.sh, and writes nothing', async () => {
+    // Every other check in this file proves the end-to-end path WITH the secret: the
+    // shim reads it, the daemon requires it on every write, and boards get posted and
+    // answered. This is the other half. (Ablation: drop the SECRET guard from askTool
+    // and the shim posts anyway, gets a bare 401 from the daemon, and reports it as
+    // "the daemon rejected this board" -- a message that sends the user to fix their
+    // blocks rather than to run the installer.)
+    const before = countBoardFiles(home);
+    // Pointed at a port with NOTHING on it, deliberately: that is what makes this bind
+    // on the guard rather than on the daemon's 401. With the guard, the shim never
+    // opens a socket and says "local secret"; without it, the very next thing that
+    // happens is ECONNREFUSED and the message becomes "the daemon is not reachable...
+    // kickstart", which sends the user to restart a service that is not the problem.
+    const deadPort = await freePort();
+    const noSecretClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_PORT: String(deadPort),
+      CLAUDE_BOARD_POST_TIMEOUT_MS: '2000',
+      CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'does-not-exist'),
+    });
+    const start = Date.now();
+    const res = await noSecretClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'No secret', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 2000, `refusal must be immediate, took ${elapsed}ms`);
+    const result = res.result;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /refused/i);
+    assert.match(result.content[0].text, /local secret/);
+    assert.match(result.content[0].text, /install\.sh/, 'the message must name the fix');
+    assert.doesNotMatch(result.content[0].text, /kickstart/, 'nothing was even contacted: this must not read as a dead daemon');
+    assert.doesNotMatch(result.content[0].text, /not reachable/, 'the shim must refuse before it opens a socket at all');
+    assert.equal(countBoardFiles(home), before, 'a shim with no secret must post nothing');
+
+    noSecretClient.close();
+  });
+
+  await check('a shim holding the WRONG secret reports the 401 as a credential problem, not as a bad board', async () => {
+    const before = countBoardFiles(home);
+    const wrongFile = path.join(secretDir, 'wrong-secret');
+    writeFileSync(wrongFile, 'f'.repeat(64), { mode: 0o600 });
+    const wrongClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_SECRET_FILE: wrongFile });
+    const res = await wrongClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'Wrong secret', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const result = res.result;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /local secret/);
+    assert.match(result.content[0].text, /install\.sh/);
+    assert.equal(countBoardFiles(home), before, 'a 401 must leave the store untouched');
+
+    wrongClient.close();
+  });
+
+  // --- non-interactive refusal: fails before posting, writes nothing -----
+
+  await check('a non-interactive session (sdk-cli entrypoint) is refused, not parked', async () => {
+    const before = countBoardFiles(home);
+    const headlessClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' });
+    const start = Date.now();
+    const res = await headlessClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'Headless check', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 2000, `refusal must be immediate, took ${elapsed}ms`);
+    const result = res.result;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /refused/i);
+    assert.equal(countBoardFiles(home), before, 'a refused non-interactive session must write nothing');
+
+    headlessClient.close();
+  });
+
+  await check('CLAUDE_BOARD_HEADLESS=1 forces refusal even with an interactive entrypoint', async () => {
+    const before = countBoardFiles(home);
+    const forcedClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_HEADLESS: '1' });
+    const res = await forcedClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'Forced headless check', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const result = res.result;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /CLAUDE_BOARD_HEADLESS/);
+    assert.equal(countBoardFiles(home), before, 'a forced-headless refusal must write nothing');
+
+    forcedClient.close();
+  });
+
+  // --- two concurrent asks: each call keeps ITS OWN progress stream ---------
+  // Auto-backgrounding means a session stays interactive while an `ask` blocks, so
+  // a second `ask` while the first is still waiting is the designed flow. If the
+  // progress sink lives on the session instead of on the call, the second call
+  // redirects the first call's notifications to its own progressToken; the first
+  // call then has nothing holding the MCP idle-abort timer off and dies with its
+  // board still open. One call with one token cannot see that.
+
+  await check('two concurrent asks each keep receiving progress on their own token', async () => {
+    const knownIds = listBoardIds(home);
+    const client2 = spawnShim(baseEnv);
+    try {
+      const callA = client2.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Concurrent A', blocks: [QUESTION] },
+        _meta: { progressToken: 'tok-A' },
+      });
+      // Same tick as A would also be legal; a beat later is the realistic shape
+      // (the agent gets control back, then asks again).
+      await sleep(120);
+      const callB = client2.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Concurrent B', blocks: [QUESTION] },
+        _meta: { progressToken: 'tok-B' },
+      });
+
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      const countFor = tok => progressCount(client2, tok);
+
+      // Let both calls sit past several progress ticks with B definitely running.
+      await waitForProgress(client2, 'tok-B', 3);
+      await waitForProgress(client2, 'tok-A', 3);
+      const aWhileBRuns = countFor('tok-A');
+      const bWhileBRuns = countFor('tok-B');
+      assert.ok(
+        aWhileBRuns >= 3,
+        `call A must keep its own progress stream while a second ask runs, got ${aWhileBRuns} notification(s) on tok-A`
+      );
+      assert.ok(
+        bWhileBRuns >= 3,
+        `call B must have its own progress stream, got ${bWhileBRuns} notification(s) on tok-B`
+      );
+
+      // The board URL is the fallback that cannot fail: it has to reach the human
+      // while the call is still blocked, not only in the final result.
+      const aNote = client2.notifications.find(
+        n => n.method === 'notifications/progress' && n.params.progressToken === 'tok-A'
+      );
+      assert.match(aNote.params.message, new RegExp(`/b/${boardId}`), 'progress must carry the board URL');
+
+      await submitBoard(base, boardId, {
+        answers: [
+          { id: 'q1', status: 'answered', choice: 'Yes', note: '' },
+          { id: 'q2', status: 'answered', choice: 'No', note: '' },
+        ],
+      });
+
+      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'both concurrent asks must return');
+      assert.equal(resA.result.status, 'submitted', 'call A must return normally, not die waiting');
+      assert.equal(resB.result.status, 'submitted');
+
+      // Progress kept flowing for BOTH right up to the submit.
+      assert.ok(countFor('tok-A') >= aWhileBRuns, 'tok-A progress must not stop when a second ask starts');
+      assert.ok(countFor('tok-B') >= bWhileBRuns);
+    } finally {
+      client2.close();
+    }
+  });
+
+  // --- two concurrent asks mint exactly ONE thread (no double-post race) -----
+
+  await check('two asks fired in the same tick mint one board, not two', async () => {
+    const knownIds = listBoardIds(home);
+    const raceClient = spawnShim(baseEnv);
+    try {
+      // Both requests written before either can be answered: `session.boardId` is
+      // read before an await and written after one, so without an in-flight guard
+      // both calls see null, both POST a brand-new board, and one shim ends up
+      // owning two threads.
+      const callA = raceClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Race A', blocks: [QUESTION] }, _meta: { progressToken: 'race-A' },
+      });
+      const callB = raceClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Race B', blocks: [QUESTION] }, _meta: { progressToken: 'race-B' },
+      });
+
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await sleep(400); // ample time for a second board file to show up if one is coming
+
+      const fresh = [...listBoardIds(home)].filter(id => !knownIds.has(id));
+      assert.deepEqual(fresh, [boardId], `one shim is one thread: expected exactly one new board, got ${fresh.length}`);
+
+      await submitBoard(base, boardId, {
+        answers: [
+          { id: 'q1', status: 'answered', choice: 'Yes', note: '' },
+          { id: 'q2', status: 'answered', choice: 'Yes', note: '' },
+        ],
+      });
+
+      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'both racing asks must return');
+      assert.equal(resA.result.board, boardId);
+      assert.equal(resB.result.board, boardId, 'the racing call must land in the same thread, not a second one');
+    } finally {
+      raceClient.close();
+    }
+  });
+
+  // --- session continuity: the second ask pushes ROUND 2 into the same board -
+
+  await check('a second ask on the same connection pushes round 2 into the same board', async () => {
+    const knownIds = listBoardIds(home);
+    const seqClient = spawnShim(baseEnv);
+    try {
+      const first = seqClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Round one', blocks: [QUESTION] },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
+      const firstRes = await withTimeout(first, 8000, 'first ask must return');
+      assert.equal(firstRes.result.round, 1);
+
+      const afterFirst = listBoardIds(home);
+      const second = seqClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Round two', blocks: [QUESTION] },
+      });
+      await sleep(400);
+      assert.deepEqual(
+        [...listBoardIds(home)].filter(id => !afterFirst.has(id)), [],
+        'a later ask must push a round into the live board, never mint a second one'
+      );
+
+      await submitBoard(base, boardId, { answers: [{ id: 'q2', status: 'answered', choice: 'No', note: 'round two' }] });
+      const secondRes = await withTimeout(second, 8000, 'second ask must return');
+      assert.equal(secondRes.result.board, boardId, 'the same thread, by board id');
+      assert.equal(secondRes.result.round, 2, 'the second ask must be round 2');
+      assert.equal(secondRes.result.thread, firstRes.result.thread, 'one thread per shim process');
+    } finally {
+      seqClient.close();
+    }
+  });
+
+  // --- a daemon 4xx is a rejection, not a dead service ----------------------
+
+  await check('a daemon refusal reports the reason without a revive command', async () => {
+    const before = countBoardFiles(home);
+    const badClient = spawnShim(baseEnv);
+    try {
+      const res = await withTimeout(badClient.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Typo check', blocks: [{ kind: 'markdwon', text: '# oops' }] },
+      }), 8000, 'a rejected board must return promptly');
+      const result = res.result;
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /rejected/i, 'the daemon answered: say so');
+      assert.match(result.content[0].text, /markdwon/, 'relay the daemon\'s own reason verbatim');
+      assert.doesNotMatch(
+        result.content[0].text, /launchctl kickstart/,
+        'a healthy daemon that refused a bad board must not be reported as needing a restart'
+      );
+      assert.doesNotMatch(result.content[0].text, /not reachable/i);
+      assert.equal(countBoardFiles(home), before, 'a rejected board writes nothing');
+    } finally {
+      badClient.close();
+    }
+  });
+
+  // --- the wait reattaches across a real daemon restart ---------------------
+  // A restart is routine: WatchPaths covers the whole clone, KeepAlive restarts on
+  // crash, and the revive command in every unreachable message is a kickstart. The
+  // board stays open on disk throughout, so the wait must reattach by board id
+  // rather than report a failure and strand whatever the reviewer submits next.
+
+  await check('the blocking wait reattaches after the daemon restarts underneath it', async () => {
+    const dhome = tempHome('restart');
+    const dport = await freePort();
+    let daemon = await startDaemonProcess(dport, dhome);
+    const dbase = `http://127.0.0.1:${dport}`;
+    const restartClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_HOME: dhome,
+      CLAUDE_BOARD_PORT: String(dport),
+      CLAUDE_BOARD_RETRY_MS: '50',
+      CLAUDE_BOARD_RETRY_MAX_MS: '200',
+    });
+    try {
+      const call = restartClient.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Restart check', blocks: [QUESTION] },
+        _meta: { progressToken: 'tok-restart' },
+      });
+      const boardId = await waitForNewBoardFile(dhome, new Set());
+      await sleep(250); // the wait GET is established and held open
+
+      const ended = await terminateDaemon(daemon, 6000);
+      assert.ok(ended, 'the daemon must exit on SIGTERM even with a wait held open');
+      daemon = await startDaemonProcess(dport, dhome);
+
+      // The reviewer submits after the restart, on a board that never stopped
+      // being open. The call must still return the packet, normally.
+      await submitBoard(dbase, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'after restart' }] }, dhome);
+
+      const res = await withTimeout(call, 20000, 'the reattached wait must return the packet');
+      const result = res.result;
+      assert.equal(result.isError, false, `a restart must not surface as a failure: ${result.content[0].text}`);
+      assert.equal(result.status, 'submitted', 'the wait must resolve normally after reattaching');
+      assert.equal(result.board, boardId);
+      assert.equal(result.answers[0].note, 'after restart');
+      assert.match(restartClient.stderr, /reattach/i, 'the reattach must be logged to stderr, not silent');
+    } finally {
+      restartClient.close();
+      try { daemon.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+
+  // --- the daemon exits promptly on SIGTERM with an SSE stream open ---------
+  // server.close() waits for open connections and an SSE stream never ends, so
+  // without an explicit teardown launchd SIGKILLs after ExitTimeOut (~20s), which
+  // is ~20s of total outage on every WatchPaths reload and an unclean kill that can
+  // land mid-write.
+
+  await check('the daemon exits on SIGTERM while a board tab holds an SSE stream open', async () => {
+    const dhome = tempHome('shutdown');
+    const dport = await freePort();
+    const daemon = await startDaemonProcess(dport, dhome);
+    let stream;
+    try {
+      const posted = await fetch(`http://127.0.0.1:${dport}/api/board`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ title: 'Shutdown check', blocks: [QUESTION] }),
+      }).then(r => r.json());
+
+      stream = await openSseStream(dport, posted.boardId); // exactly what an open tab holds
+
+      const ended = await terminateDaemon(daemon, 8000);
+      assert.ok(ended, 'the daemon must not have to be SIGKILLed: an open SSE stream never ends on its own');
+      assert.ok(ended.elapsed < 5000, `shutdown must be prompt, took ${ended.elapsed}ms`);
+      assert.equal(ended.signal, null, `the daemon must exit on its own, not by signal (got ${ended.signal})`);
+      assert.equal(ended.code, 0, 'a clean exit code');
+    } finally {
+      try { stream?.req.destroy(); } catch { /* already gone */ }
+      try { daemon.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+
+  // --- a later round reopens the tab when nothing is connected --------------
+  // "Open once, then badge and notify... If no client is connected at all the
+  // daemon opens the tab again." Without the reopen, a round pushed into a tab the
+  // reviewer closed blocks the call in silence for the full wall clock.
+
+  await check('a later round reopens the tab only when no client is connected', async () => {
+    const dir = tempHome('reopen');
+    const recorder = makeOpenRecorder(dir);
+    const clientsState = { clients: 1 }; // a tab is connected to start with
+    const { proxy, port: proxyPort } = await startClientsProxy(port, clientsState);
+    const proxyBase = `http://127.0.0.1:${proxyPort}`;
+    const knownIds = listBoardIds(home);
+    const openClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_PORT: String(proxyPort),
+      CLAUDE_BOARD_NO_OPEN: undefined, // let it "open" for real, into the recorder
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      const first = openClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Reopen round 1', blocks: [QUESTION] },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      assert.equal((await recorder.waitForOpens(1)).length, 1, 'the first board always opens the tab');
+      await submitBoard(proxyBase, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
+      await withTimeout(first, 8000, 'round 1 must return');
+
+      // The reviewer closed the tab. Round 2 must reopen it.
+      clientsState.clients = 0;
+      const second = openClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Reopen round 2', blocks: [QUESTION] },
+      });
+      const afterRound2 = await recorder.waitForOpens(2);
+      assert.equal(afterRound2.length, 2, 'a round pushed where no client is connected must reopen the tab');
+      assert.ok(afterRound2[1].includes(boardId), 'the reopened tab must be this board');
+      await submitBoard(proxyBase, boardId, { answers: [{ id: 'q2', status: 'answered', choice: 'Yes', note: '' }] });
+      await withTimeout(second, 8000, 'round 2 must return');
+
+      // A tab is connected again: round 3 must NOT steal focus.
+      clientsState.clients = 2;
+      const third = openClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Reopen round 3', blocks: [QUESTION] },
+      });
+      await sleep(500);
+      assert.equal(recorder.opened().length, 2, 'a round pushed into a live tab must not reopen (no focus steal)');
+      await submitBoard(proxyBase, boardId, { answers: [{ id: 'q3', status: 'answered', choice: 'Yes', note: '' }] });
+      await withTimeout(third, 8000, 'round 3 must return');
+    } finally {
+      openClient.close();
+      proxy.close();
+    }
+  });
+
+  // --- comments have to survive on the channel no client can drop ----------
+  // A client is free to keep only `content`, `isError` and `structuredContent` and
+  // drop unrecognised top-level keys. If the text summary says "2 comment(s)." the
+  // whole comment feature conveys nothing at all — silently — even though
+  // commands/grill.md tells the agent to address comments as their own input.
+
+  await check('comments reach the agent through structuredContent AND the text summary', async () => {
+    const knownIds = listBoardIds(home);
+    const commentClient = spawnShim(baseEnv);
+    try {
+      const call = commentClient.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'Comment check',
+          blocks: [{ kind: 'markdown', text: '# Notes\n\nsome context' }, QUESTION],
+        },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await submitBoard(base, boardId, {
+        answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }],
+        comments: [
+          { blockId: 'd1', anchor: { kind: 'md', ref: 'notes' }, text: 'this heading overstates it' },
+          { blockId: 'q1', anchor: { kind: 'block' }, text: 'ask this differently' },
+        ],
+      });
+
+      const res = await withTimeout(call, 8000, 'the comment board must return');
+      const result = res.result;
+
+      assert.ok(result.structuredContent, 'the packet must also be nested under structuredContent');
+      assert.equal(result.structuredContent.board, boardId);
+      assert.equal(result.structuredContent.comments.length, 2);
+      assert.equal(result.structuredContent.comments[0].blockId, 'd1');
+      assert.equal(result.structuredContent.comments[0].text, 'this heading overstates it');
+
+      // The guaranteed channel, on its own, must name each comment's block, its
+      // anchor and its words.
+      const text = result.content[0].text;
+      assert.match(text, /d1/, 'the text must name the commented block');
+      assert.match(text, /md:notes/, 'the text must name the anchor');
+      assert.match(text, /this heading overstates it/, 'the text must carry the comment itself');
+      assert.match(text, /q1/);
+      assert.match(text, /ask this differently/);
+    } finally {
+      commentClient.close();
+    }
+  });
+
+  // --- formatAnchor (bin/mcp.mjs) has to name the element, not just the ref -----
+  //
+  // src/render.mjs's anchorTag prefers a dom/mermaid anchor's hint over its bare
+  // ref; formatAnchor used to agree for `dom` but not `mermaid` (it rendered
+  // `mermaid:${ref}` unconditionally), so the ONE channel guaranteed to survive
+  // the MCP client (this file's own doc comment on packetResult) told the agent
+  // "mermaid:B" instead of "End" for a diagram comment. Ticket 12. Comments are
+  // posted straight through submitBoard with hand-built anchors -- each one a
+  // shape `applySubmit`'s own `sanitizeAnchor` accepts as-is (ticket 08 closed
+  // off anything else — see findings/audit-2026-07-29-anchoring.md V3) -- so
+  // every kind, hint-present/absent and resolved/lost combination is exercised
+  // directly, without depending on the click-to-anchor client wiring covered
+  // elsewhere.
+  await check('formatAnchor names the element for every anchor kind, hint or no hint, resolved or lost', async () => {
+    const knownIds = listBoardIds(home);
+    const anchorClient = spawnShim(baseEnv);
+    try {
+      const call = anchorClient.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'formatAnchor check',
+          blocks: [
+            { kind: 'markdown', text: '# Notes\n\nsome context' },
+            QUESTION,
+            { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+            { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' },
+          ],
+        },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await submitBoard(base, boardId, {
+        answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }],
+        comments: [
+          // block: no ref/hint at all.
+          { blockId: 'q1', anchor: { kind: 'block' }, text: 'whole-block comment' },
+          // md: ref + label, always shown together (unchanged by this ticket).
+          { blockId: 'd1', anchor: { kind: 'md', ref: 'notes', label: 'Notes' }, text: 'md comment' },
+          // dom: ref + hint, resolves against the html block's live markup.
+          { blockId: 'h1', anchor: { kind: 'dom', ref: '1.1', hint: 'Send' }, text: 'dom comment with hint' },
+          // dom: ref only, no hint — degrades to the bare ref either way.
+          { blockId: 'h1', anchor: { kind: 'dom', ref: '1.1' }, text: 'dom comment without hint' },
+          // mermaid: ref + hint (ticket 05 shape) — this is the one that regressed.
+          { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'B', hint: 'End' }, text: 'mermaid comment with hint' },
+          // mermaid: ref only (pre-ticket-05 shape, no hint/domRef minted) — must
+          // degrade to the bare ref, not crash on the missing field.
+          { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'B' }, text: 'mermaid comment without hint' },
+          // dom, lost: a ref that resolves against nothing in the html block.
+          { blockId: 'h1', anchor: { kind: 'dom', ref: '9.9', hint: 'Never there' }, text: 'lost dom comment' },
+        ],
+      });
+
+      const res = await withTimeout(call, 8000, 'the formatAnchor board must return');
+      const text = res.result.content[0].text;
+
+      assert.match(text, /whole-block comment/);
+      assert.match(text, /\bblock\b.*whole-block comment/, 'kind "block" must format as "whole block"');
+
+      assert.match(text, /md:notes \("Notes"\).*md comment/, 'md keeps its ref + label');
+
+      assert.match(text, /dom:1\.1 \("Send"\).*dom comment with hint/, 'dom prefers the hint alongside its ref');
+      assert.match(text, /dom:1\.1(?! \(").*dom comment without hint/, 'dom with no hint degrades to the bare ref');
+
+      assert.match(text, /mermaid:B \("End"\).*mermaid comment with hint/, 'mermaid must prefer the hint, like the dom case and like anchorTag in src/render.mjs');
+      assert.match(text, /mermaid:B(?! \(").*mermaid comment without hint/, 'a pre-ticket-05 mermaid anchor with no hint must degrade to the bare ref, not drop the line or throw');
+
+      assert.match(text, /dom:9\.9 \("Never there"\).*lost dom comment/, 'a lost anchor still names what it lost via formatAnchor');
+      assert.match(text, /lost dom comment.*\[anchor no longer resolves\]|\[anchor no longer resolves\].*lost dom comment/s, 'a lost anchor is flagged as unresolved');
+    } finally {
+      anchorClient.close();
+    }
+  });
+
+  // --- a cancelled call stops waiting, polling and notifying ----------------
+
+  await check('notifications/cancelled stops the wait, the progress and the response', async () => {
+    const knownIds = listBoardIds(home);
+    const cancelClient = spawnShim(baseEnv);
+    try {
+      const { id, promise } = cancelClient.requestWithId('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Cancel check', blocks: [QUESTION] },
+        _meta: { progressToken: 'tok-cancel' },
+      });
+      promise.catch(() => { /* a cancelled call is never answered; nothing awaits this */ });
+
+      await waitForNewBoardFile(home, knownIds);
+      await waitForProgress(cancelClient, 'tok-cancel', 2);
+
+      cancelClient.notify('notifications/cancelled', { requestId: id, reason: 'user pressed escape' });
+      await sleep(300);
+      const atCancel = progressCount(cancelClient, 'tok-cancel');
+      await sleep(500); // several more cadences at CLAUDE_BOARD_PROGRESS_MS=80
+
+      assert.equal(
+        progressCount(cancelClient, 'tok-cancel'), atCancel,
+        'progress notifications must stop when the call is cancelled, not run for the full wall clock'
+      );
+      assert.equal(cancelClient.answered(id), false, 'MCP: a cancelled request gets no response');
+      assert.match(cancelClient.stderr, /cancel/i, 'the cancellation must be acted on, not silently ignored');
+
+      // The shim itself is unharmed and still serving.
+      const ping = await withTimeout(cancelClient.request('ping', {}), 3000, 'the shim must survive a cancellation');
+      assert.ok(ping.result, 'the shim must still answer after a cancelled call');
+    } finally {
+      cancelClient.close();
+    }
+  });
+
+  // --- `open` is never handed a peer-supplied string ------------------------
+  // The daemon's `url` field is data from whatever answered on the port. During a
+  // restart window that need not be the daemon, and `open` launches a GUI app with
+  // no prompt. The URL to open is rebuilt locally from this process's own base URL.
+
+  await check('the tab is opened on a locally built URL, never the daemon-supplied one', async () => {
+    const dir = tempHome('hostile');
+    const recorder = makeOpenRecorder(dir);
+    const hostile = await startHostileDaemon({ boardId: 'b_hostile', url: '/Applications/Evil.app' });
+    const hostileClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_PORT: String(hostile.port),
+      CLAUDE_BOARD_NO_OPEN: undefined,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      const res = await withTimeout(hostileClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Hostile url', blocks: [QUESTION] },
+      }), 8000, 'the hostile-daemon call must return');
+
+      const opened = await recorder.waitForOpens(1);
+      assert.equal(opened.length, 1, 'exactly one open');
+      assert.equal(
+        opened[0], `http://127.0.0.1:${hostile.port}/b/b_hostile`,
+        'the opened URL must be rebuilt locally from the shim\'s own base URL'
+      );
+      assert.ok(!opened.some(u => u.includes('Evil.app')), 'a daemon-supplied path must never reach `open`');
+      assert.ok(!String(res.result.url).includes('Evil.app'), 'nor be reported as the board URL');
+    } finally {
+      hostileClient.close();
+      hostile.close();
+    }
+  });
+
+  await check('a board id that is not a board id opens nothing at all', async () => {
+    const dir = tempHome('hostile-id');
+    const recorder = makeOpenRecorder(dir);
+    const hostile = await startHostileDaemon({ boardId: '-a /Applications/Evil.app', url: 'http://127.0.0.1:1/b/x' });
+    const hostileClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_PORT: String(hostile.port),
+      CLAUDE_BOARD_NO_OPEN: undefined,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      const res = await withTimeout(hostileClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Hostile id', blocks: [QUESTION] },
+      }), 8000, 'the hostile-id call must return');
+      await sleep(300);
+      assert.equal(recorder.opened().length, 0, 'nothing may be handed to `open`');
+      assert.equal(res.result.isError, true, 'and the shim must say so rather than carry on');
+    } finally {
+      hostileClient.close();
+      hostile.close();
+    }
+  });
+
+  // --- a second daemon on a taken port fails by name, not by stack trace ----
+
+  await check('a daemon that cannot bind reports EADDRINUSE plainly and exits', async () => {
+    const dhome = tempHome('addrinuse');
+    const dport = await freePort();
+    const first = await startDaemonProcess(dport, dhome);
+    try {
+      const second = spawn(process.execPath, [daemonBin], {
+        env: { ...process.env, CLAUDE_BOARD_HOME: dhome, CLAUDE_BOARD_PORT: String(dport) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stderr = '';
+      second.stderr.on('data', c => { stderr += c.toString(); });
+      const exit = await withTimeout(
+        new Promise(resolve => second.on('exit', (code, signal) => resolve({ code, signal }))),
+        8000, 'the second daemon must exit rather than hang'
+      );
+
+      assert.equal(exit.code, 1, 'a daemon that cannot serve must exit non-zero');
+      assert.match(stderr, /cannot start/i, 'it must say, in words, that it could not start');
+      assert.match(stderr, /EADDRINUSE/, 'and name the actual cause');
+      assert.match(stderr, new RegExp(String(dport)), 'and the port');
+      assert.doesNotMatch(
+        stderr, /node:internal|ERR_UNHANDLED_REJECTION|at async/,
+        'an unhandled rejection stack trace is not a report; a crash-looping service needs the one-line cause'
+      );
+    } finally {
+      try { first.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+
+  // --- the suite runner enforces its own deadline --------------------------
+  // A check that hangs must be a named failure, not a job that never ends — and it
+  // must not orphan the shims and daemons it spawned.
+
+  await check('test/run.mjs kills a hung check and its children instead of hanging', async () => {
+    const dir = tempHome('runner');
+    const hangCheck = path.join(dir, 'hang-check.mjs');
+    const pidFile = path.join(dir, 'grandchild.pid');
+    writeFileSync(hangCheck, [
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      `writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
+      'setInterval(() => {}, 1000);', // the hang itself: exactly what an unanswerable wait looks like
+    ].join('\n'));
+
+    const result = await withTimeout(runCheck(hangCheck, 700), 8000, 'runCheck must enforce its own deadline');
+    assert.equal(result.timedOut, true, 'a check past its deadline must be reported as timed out');
+    assert.ok(result.elapsed < 5000, `the deadline must actually fire, took ${result.elapsed}ms`);
+
+    await sleep(300);
+    const grandchild = Number(readFileSync(pidFile, 'utf8'));
+    assert.throws(
+      () => process.kill(grandchild, 0),
+      /ESRCH/,
+      'a timed-out check must take its child processes (shims, daemons, wait loops) with it'
+    );
+  });
+
+  await check('an absent CLAUDE_CODE_ENTRYPOINT is refused (fails closed)', async () => {
+    const before = countBoardFiles(home);
+    const noEntrypointClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined });
+    const res = await noEntrypointClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'No entrypoint check', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const result = res.result;
+    assert.equal(result.isError, true);
+    assert.equal(countBoardFiles(home), before);
+
+    noEntrypointClient.close();
+  });
+}
+
+main()
+  .catch(err => {
+    failures++;
+    console.error('FAIL - unexpected error');
+    console.error(err);
+  })
+  .finally(() => {
+    if (server) server.close();
+    for (const child of spawnedDaemons) {
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+    rmSync(home, { recursive: true, force: true });
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    rmSync(secretDir, { recursive: true, force: true });
+    if (failures) {
+      console.error(`\n${failures} check(s) failed`);
+      process.exit(1);
+    }
+    console.log('\nall mcp checks ok');
+  });

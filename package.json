@@ -1,0 +1,24 @@
+{
+  "name": "claude-board",
+  "version": "0.1.0",
+  "description": "A local review surface for Claude Code: the agent posts a board of questions and rendered context, you answer them all in a browser and submit once.",
+  "license": "MIT",
+  "author": "Jerry Liu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JerryLui/claude-board.git"
+  },
+  "homepage": "https://github.com/JerryLui/claude-board#readme",
+  "bugs": "https://github.com/JerryLui/claude-board/issues",
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node test/run.mjs"
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "id": "b_c6ee6ec2cee8fc9f8361dd3e5cc7a5f6",
+  "thread": "th_b302b027",
+  "title": "Pre-ticket-04 board (built with commit 578f666 code)",
+  "cwd": null,
+  "createdAt": "2026-07-29T10:37:25.231Z",
+  "updatedAt": "2026-07-29T10:37:25.233Z",
+  "state": "submitted",
+  "rounds": [
+    {
+      "n": 1,
+      "postedAt": "2026-07-29T10:37:25.231Z",
+      "status": "sent",
+      "sentAt": "2026-07-29T10:37:25.233Z",
+      "title": "Pre-ticket-04 board (built with commit 578f666 code)"
+    }
+  ],
+  "blocks": [
+    {
+      "round": 1,
+      "id": "d1",
+      "kind": "markdown",
+      "source": null,
+      "text": "# Findings\n\nA paragraph of prose from before the generic model existed.\n\n- alpha item\n- beta item",
+      "sha": "f0daf5a88014daba44b2b99e08597730a05ded43284b88c58b09fd3c06c7fe3f",
+      "html": "<h1 id=\"findings\">Findings</h1><p>A paragraph of prose from before the generic model existed.</p><ul><li id=\"findings-li1\">alpha item</li><li id=\"findings-li2\">beta item</li></ul>",
+      "anchors": [
+        {
+          "kind": "md",
+          "ref": "findings",
+          "label": "Findings"
+        },
+        {
+          "kind": "md",
+          "ref": "findings-li1",
+          "label": "alpha item"
+        },
+        {
+          "kind": "md",
+          "ref": "findings-li2",
+          "label": "beta item"
+        }
+      ]
+    },
+    {
+      "round": 1,
+      "id": "h1",
+      "kind": "html",
+      "html": "<div class=\"mock\"><button>Send</button></div>"
+    },
+    {
+      "round": 1,
+      "id": "m1",
+      "kind": "mermaid",
+      "source": null,
+      "text": "flowchart TD\n  A[Start] --> B[Finish]",
+      "sha": "7f7ca65ebdbeaa3ec3042dbc30137571062320c86c281e08f91388573f9f39b0"
+    }
+  ],
+  "answers": {},
+  "comments": [
+    {
+      "n": 1,
+      "blockId": "d1",
+      "anchor": {
+        "kind": "block"
+      },
+      "text": "a whole-block comment, from before this spec",
+      "createdAt": "2026-07-29T10:37:25.233Z",
+      "round": 1
+    },
+    {
+      "n": 2,
+      "blockId": "d1",
+      "anchor": {
+        "kind": "md",
+        "ref": "findings-li1",
+        "label": "alpha item"
+      },
+      "text": "anchored to the alpha list item",
+      "createdAt": "2026-07-29T10:37:25.233Z",
+      "round": 1
+    },
+    {
+      "n": 3,
+      "blockId": "h1",
+      "anchor": {
+        "kind": "dom",
+        "ref": "1.1",
+        "hint": "Send"
+      },
+      "text": "anchored to the Send button in the mock",
+      "createdAt": "2026-07-29T10:37:25.233Z",
+      "round": 1
+    },
+    {
+      "n": 4,
+      "blockId": "m1",
+      "anchor": {
+        "kind": "mermaid",
+        "ref": "A"
+      },
+      "text": "anchored to node A",
+      "createdAt": "2026-07-29T10:37:25.233Z",
+      "round": 1
+    },
+    {
+      "n": 5,
+      "blockId": "d1",
+      "anchor": {
+        "kind": "md",
+        "ref": "findings-li9",
+        "label": "ghost"
+      },
+      "text": "a stale anchor, already lost under the old code",
+      "createdAt": "2026-07-29T10:37:25.233Z",
+      "round": 1
+    }
+  ]
+}

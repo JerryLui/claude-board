@@ -1,0 +1,17 @@
+.DS_Store
+node_modules/
+*.log
+.claude/worktrees/
+
+# Spec and tickets are working documents, kept local rather than versioned.
+# They stay on disk and are still the contract -- see CLAUDE.md / the /spec and
+# /tickets skills -- they are just not tracked here.
+SPEC_*.md
+TICKETS_*.md
+
+# The internal audit reports stay local too. The security record ships as
+# SECURITY.md (current posture) and CHANGELOG.md (found and fixed per release);
+# see SECURITY.md "How this record is kept". Publishing a per-commit adversarial
+# audit of a pre-release codebase would mean maintaining a second, staler
+# security narrative beside the one a reader actually needs.
+findings/
