@@ -2,7 +2,7 @@
 // /api/board/:id/wait, and (ticket 04) the SSE push on /api/board/:id/events. See
 // PROTOCOL.md "HTTP surface" and "SSE events".
 //
-// Three gates, in this order (SPEC_BOARD.md Decisions -> "A loopback Host check, an
+// Three gates, in this order (DESIGN.md Decisions -> "A loopback Host check, an
 // origin check, and a local secret"):
 //
 //   1. Host is loopback, on every route          -> 403, no body
@@ -23,7 +23,7 @@
 // disconnected would see. SSE survives it too, but differently: nothing can mutate
 // the board while the daemon is down, so a client whose connection drops on
 // restart just reconnects (EventSource does this natively) and picks up live
-// pushes again with nothing missed in between — see SPEC_BOARD.md "Always on under
+// pushes again with nothing missed in between — see DESIGN.md "Always on under
 // launchd, reloaded by WatchPaths".
 
 import http from 'node:http';
@@ -139,7 +139,7 @@ export function isLoopbackHost(hostHeader) {
  * will not let that page forge is `Origin`/`Sec-Fetch-Site`, so those are what gate a
  * write. Both are absent on a non-browser client (the shim, curl, the checks), which is
  * deliberate: this closes the browser-driven CSRF hole the Host check cannot see, not
- * local processes, which SPEC_BOARD.md's "Localhost, one human" boundary already trusts. */
+ * local processes, which DESIGN.md's "Localhost, one human" boundary already trusts. */
 function isSameOriginWrite(req) {
   const origin = req.headers.origin;
   if (origin && origin !== `http://${req.headers.host}`) return false;
@@ -213,7 +213,7 @@ function sendJson(res, status, obj) {
 
 // Content-Security-Policy for every HTML response, plus the X-Frame-Options that
 // says the same thing to anything that predates `frame-ancestors` -- `CSP`
-// itself now lives in src/render.mjs (ticket 10, SPEC_ANCHORING.md, audit S2),
+// itself now lives in src/render.mjs (ticket 10, DESIGN.md, audit S2),
 // single-sourced with the `<meta http-equiv>` renderBoardPage now also emits, so
 // an archived board opened from disk with no daemon (and so no HTTP response to
 // carry this header) still carries the policy. See render.mjs's own comment on
@@ -347,7 +347,7 @@ async function handlePostBoard(req, res, home, sse) {
       const latestRound = board.rounds[board.rounds.length - 1];
       if (latestRound && latestRound.status === 'open') {
         // The open round hasn't been sent yet: amend it in place rather than
-        // minting round N+1 (see SPEC_BOARD.md "the agent may amend a round that
+        // minting round N+1 (see DESIGN.md "the agent may amend a round that
         // is still open... without disturbing filled-in fields").
         //
         // `title` is passed through on both paths: `ask` requires a non-empty title on
@@ -465,7 +465,7 @@ async function handleSubmit(req, res, id, home, sse) {
   // everything else unanswered. A stale client is the normal case, not an attack: a
   // laptop waking from sleep with no SSE replay, a second tab, or a plain double-click
   // on Send. The board is meant to be the durable record of what was decided
-  // (SPEC_BOARD.md criterion 4), so a submit that does not name the currently-open round
+  // (DESIGN.md board criterion 4), so a submit that does not name the currently-open round
   // is refused with 409 and changes nothing — which is also what makes a client retry
   // safe, rather than duplicating every comment (and its pin number, PROTOCOL.md
   // "Identifiers") and re-applying every answer.

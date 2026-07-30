@@ -1,11 +1,11 @@
-// Ticket 11 (SPEC_ANCHORING.md), audit V4 and V5b: two independent cost claims
+// Ticket 11 (DESIGN.md), audit V4 and V5b: two independent cost claims
 // about the same hot path (resolveComment, walked on every render/SSE push/
 // archive write/packet build), each fixed differently, each checked here as a
 // regression guard with a generous-but-real deadline -- not just "does it still
 // work", but "does it still work FAST", since a future edit that reintroduces
 // either quadratic behaviour would otherwise ship behind a suite that stays
 // green right up until a real board's daemon starts burning CPU for seconds per
-// request (SPEC_ANCHORING.md criterion 7: "no board can be wedged by content
+// request (DESIGN.md anchoring criterion 7: "no board can be wedged by content
 // that fails to parse" -- pathologically slow is its own kind of wedge on a
 // single-threaded daemon).
 //

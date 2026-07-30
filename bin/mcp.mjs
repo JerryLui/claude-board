@@ -6,7 +6,7 @@
 // no client is connected to it), and blocks on /api/board/:id/wait, emitting
 // `notifications/progress` throughout so the MCP idle-abort timer never fires.
 // See PROTOCOL.md "MCP surface" and "Detecting a session with no human in it",
-// and SPEC_BOARD.md Decisions -> "The blocking tool call is the wait", "Two ways
+// and DESIGN.md Decisions -> "The blocking tool call is the wait", "Two ways
 // out, plus a wall clock", "Fail loudly, never degrade silently", "A board is
 // never posted where no human is watching", "One blocking tool, with a known
 // escape route", "Open once, then badge and notify", "Always on under launchd,
@@ -230,7 +230,7 @@ function sleep(ms) {
 // ---------------------------------------------------------------------------
 // Opening the tab. macOS `open <url>` on the thread's FIRST board, and on a
 // later round ONLY when nothing is connected to that board any more —
-// SPEC_BOARD.md "Open once, then badge and notify": later rounds push over SSE
+// DESIGN.md "Open once, then badge and notify": later rounds push over SSE
 // into the live tab and must not steal focus, but "if no client is connected at
 // all the daemon opens the tab again", otherwise a round pushed into a tab the
 // reviewer closed blocks the call in silence for the full wall clock.
@@ -280,7 +280,7 @@ function openBoardTab(url) {
  * then the read-only `GET /api/board/:id/clients` probe. A daemon too old to know
  * either answers 404 and we return null, which reads as "unknown": we do not reopen
  * on a guess, because opening every round is exactly the focus-stealing behaviour
- * SPEC_BOARD.md rejects. Unknown is logged to stderr rather than swallowed. */
+ * DESIGN.md rejects. Unknown is logged to stderr rather than swallowed. */
 async function connectedClientCount(posted) {
   if (typeof posted.clients === 'number') return posted.clients;
   try {
@@ -319,7 +319,7 @@ async function reopenIfNoClient(posted, url) {
 // The GET is re-issued, not abandoned, when the socket dies. A daemon restart is
 // routine (WatchPaths reload, KeepAlive, a kickstart from the revive command) and
 // tears every open connection down; the board is untouched on disk and still open,
-// so the only correct move is to reattach by board id and round — SPEC_BOARD.md
+// so the only correct move is to reattach by board id and round — DESIGN.md
 // "Always on under launchd": "the shim reattaches by board id and the page
 // reconnects over SSE". Reporting "daemon not reachable" there strands whatever the
 // reviewer submits next. Only a daemon refusal (a status code — 404 board gone,
@@ -521,7 +521,7 @@ function packetResult(text, packet) {
  * `session.boardId == null` is read before an await and written after one: two
  * `ask` calls arriving in the same tick would otherwise both see null, both POST a
  * brand-new board and both open a tab, minting two threads for one shim. That
- * breaks "one thread per MCP shim process" (SPEC_BOARD.md "A thread per session").
+ * breaks "one thread per MCP shim process" (DESIGN.md "A thread per session").
  * The promise is cleared in `finally`, so a failed first post leaves the session
  * clean for the next call to retry rather than wedging the thread forever. */
 async function postThisRound(session, title, blocks) {
@@ -661,7 +661,7 @@ function respondError(id, code, message) {
 }
 
 /** The board URL rides along in every progress message, not just the final result:
- * it is the fallback that cannot fail (SPEC_BOARD.md "Open once, then badge and
+ * it is the fallback that cannot fail (DESIGN.md "Open once, then badge and
  * notify"), and it has to reach the human *before* they submit, not after. */
 function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
   write({

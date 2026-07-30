@@ -1,5 +1,5 @@
 // The daemon root: a thread index plus archive search, as a view over the store.
-// See PROTOCOL.md "HTTP surface", SPEC_BOARD.md Decisions -> "A thread per session,
+// See PROTOCOL.md "HTTP surface", DESIGN.md Decisions -> "A thread per session,
 // addressable from an index" and "Archived boards are searchable".
 //
 // A thread is `board.thread` (one MCP shim process, one Claude session). In the
@@ -8,7 +8,7 @@
 // `thread` rather than assuming a 1:1 board:thread mapping keeps this correct even
 // in the edge case where a caller reuses a thread id across board docs. Two threads
 // with the same `cwd` are still two separate rows here, each with its own pending
-// count — the exact case SPEC_BOARD.md's Decisions section calls out as the failure
+// count — the exact case DESIGN.md's Decisions section calls out as the failure
 // of keying by project directory instead.
 
 import { styles } from './styles.mjs';

@@ -58,7 +58,7 @@ export const ui = `
   // Marks the innermost element under the cursor for the page's OWN generic
   // anchor gesture (the delegated document-level listener further down), so the
   // click-to-anchor gesture is visible before it is used. An html stage's
-  // element-level hover (ticket 10, SPEC_ANCHORING.md) lives in a SEPARATE
+  // element-level hover (ticket 10, DESIGN.md) lives in a SEPARATE
   // document -- its own class, of the same name by convention but declared and
   // applied entirely inside the injected agent script src/render.mjs's
   // 'stageAgentScript' carries, never here; see that file's design comment for
@@ -73,7 +73,7 @@ export const ui = `
   var deferred = {};     // qid -> bool, the per-question defer affordance
   var touched = {};      // qid -> bool, has this widget actually been interacted with
 
-  // Comment mode (ticket 03, SPEC_ANCHORING.md): off by default, so every ordinary
+  // Comment mode (ticket 03, DESIGN.md): off by default, so every ordinary
   // widget handler below runs exactly as it always has. Declared here, at the very
   // top alongside the other page-lifetime state, because it is read from inside
   // wireRoot's per-widget handlers (guarding single/multi/rank/defer against
@@ -83,7 +83,7 @@ export const ui = `
   var commentMode = false;
 
   // Which html-stage <iframe>s have a stage-side agent that confirmed 'ready'
-  // (ticket 10, SPEC_ANCHORING.md -- see the design comment above
+  // (ticket 10, DESIGN.md -- see the design comment above
   // src/render.mjs's 'stageAgentScript'). Replaces the old 'stageHoverClears'
   // array, which reached across into each stage's own document directly to
   // clear an in-progress hover -- no longer possible at all once
@@ -308,7 +308,7 @@ export const ui = `
     return composeHint(extractHint(el.textContent), el.tagName, insideCompare, compareLabel, blockKind);
   }
 
-  // html stage (ticket 10, SPEC_ANCHORING.md): the iframe no longer carries
+  // html stage (ticket 10, DESIGN.md): the iframe no longer carries
   // 'allow-same-origin' (src/render.mjs), so its browsing context is genuinely
   // cross-origin from this page and 'contentDocument'/'contentWindow.document'
   // are unreachable here -- reaching in is exactly the pre-existing security
@@ -329,7 +329,7 @@ export const ui = `
   // small offset per layer rather than piling every one on the exact same pixel
   // (each .pin-layer gets its own counter via a WeakMap, so blocks don't interfere).
   //
-  // U6 (SPEC_ANCHORING.md ticket 09, audit finding U6): this counter used to
+  // U6 (DESIGN.md ticket 09, audit finding U6): this counter used to
   // live for the page's whole lifetime, incrementing every call while
   // 'layer.innerHTML = ''' (renderDomPins/renderMermaidPins, below) cleared the
   // very pins it was counting -- so a layer re-rendered on every resize, queued
@@ -622,8 +622,8 @@ export const ui = `
         if (!host) {
           // Iterate and compare via parseMermaidDomId rather than interpolating
           // the stored ref into a CSS attribute-selector string: a crafted ref
-          // could otherwise break out of the selector (see TICKETS_BOARD.md
-          // ticket 06's log). This is display-positioning only -- resolved/lost
+          // could otherwise break out of the selector (see DESIGN.md's board
+          // slice 06 log). This is display-positioning only -- resolved/lost
           // styling never depends on this lookup succeeding, either path.
           var candidates = svg.querySelectorAll(MERMAID_NODE_SELECTOR);
           for (var i = 0; i < candidates.length; i++) {
@@ -941,7 +941,7 @@ export const ui = `
 
   // --- drag-to-rank: native HTML5 drag and drop reorder -----------------------
   //
-  // The gesture itself can't be asserted without a browser (see SPEC_BOARD.md
+  // The gesture itself can't be asserted without a browser (see DESIGN.md
   // Testing); what matters for the node checks is that the answer ends up as the
   // ordered array of option labels, read from DOM order on drop.
 
@@ -1204,7 +1204,7 @@ export const ui = `
 
   // Cheap, partial mitigation for pin drift: reposition every pin on a window
   // resize. Does not track an iframe's own internal scroll or its resize-drag
-  // handle (SPEC_BOARD.md puts gesture-level fidelity like this outside automated
+  // handle (DESIGN.md puts gesture-level fidelity like this outside automated
   // scope; a known, accepted gap rather than an attempt at full continuous
   // tracking).
   // Repositioning only -- refreshPins (above) deliberately does not re-run the
@@ -1214,7 +1214,7 @@ export const ui = `
 
   // --- the two ways out: Send, and Discuss in chat -----------------------------
   //
-  // SPEC_BOARD.md Decisions -> "Two ways out, plus a wall clock": beside Send the
+  // DESIGN.md Decisions -> "Two ways out, plus a wall clock": beside Send the
   // board carries Discuss in chat, which returns the blocked ask() call
   // immediately with whatever is filled in right now and a status telling the
   // agent to stop posting boards. Both buttons post the SAME body to the SAME
@@ -1346,7 +1346,7 @@ export const ui = `
     });
   }
 
-  // --- "Open once, then badge and notify" (SPEC_BOARD.md Decisions) ------------
+  // --- "Open once, then badge and notify" (DESIGN.md Decisions) ------------
   //
   // The tab is opened exactly once, for a thread's first board; every later round
   // arrives over SSE into that same tab, so the page itself has to be what tells
@@ -1462,7 +1462,7 @@ export const ui = `
   // --- SSE: a follow-up round pushes into this already-open tab ---------------
   //
   // "Open once, then badge and notify" / "Always on under launchd, reloaded by
-  // WatchPaths" (SPEC_BOARD.md): the daemon can restart mid-review, so the page
+  // WatchPaths" (DESIGN.md): the daemon can restart mid-review, so the page
   // must reconnect rather than lose the thread. EventSource does that natively
   // (automatic retry on drop); since nothing can mutate the board while the daemon
   // is down, a bare reconnect is enough to catch back up — no resync fetch needed.
@@ -1567,7 +1567,7 @@ export const ui = `
       }
     }
 
-    // U3 (SPEC_ANCHORING.md ticket 09, audit finding U3): wireRoot(wrap)/
+    // U3 (DESIGN.md ticket 09, audit finding U3): wireRoot(wrap)/
     // wireRoot(frag) above both ran BEFORE the subtree was attached, so
     // wirePageDomPins (called from inside wireRoot) computed every page-scoped
     // pin's position from a detached node -- getBoundingClientRect walks
@@ -1584,7 +1584,7 @@ export const ui = `
     patch.roundsNowSent.forEach(markRoundHistory);
 
     // The round is in the DOM; now mark the TAB, since this push is the whole
-    // reason the tab was not reopened and focus not stolen (SPEC_BOARD.md "Open
+    // reason the tab was not reopened and focus not stolen (DESIGN.md "Open
     // once, then badge and notify"). Last, and after every early-return above, so
     // a push that failed to render is never counted as one waiting to be read.
     markPendingRound(data.round);

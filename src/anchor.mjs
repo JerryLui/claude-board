@@ -2,7 +2,7 @@
 // owns the actual click gesture) and the server (src/board.mjs resolves a stored
 // anchor at packet-assembly time). Kept dependency-free and DOM-free on purpose so
 // it is testable in node with no browser (test/check-pure.mjs) — see
-// SPEC_BOARD.md "Click-to-comment reaches individual elements" and PROTOCOL.md
+// DESIGN.md "Click-to-comment reaches individual elements" and PROTOCOL.md
 // "Answers, comments, anchors" for the two shapes this module builds and resolves:
 // { kind: 'dom', ref, hint } and { kind: 'mermaid', ref, domRef, hint }. Ticket
 // 05 added `domRef`/`hint` to the mermaid shape without changing what `ref`
@@ -27,7 +27,7 @@
 
 // --- ticket 03 design: one generic element reference over the board's own DOM --
 //
-// Written before the implementation, per SPEC_ANCHORING.md's Next Steps ("design
+// Written before the implementation, per DESIGN.md's Next Steps ("design
 // the generic element reference at the start of ticket 03"). This is the design;
 // the code below and in src/ui.mjs is what it produced.
 //
@@ -40,7 +40,7 @@
 //   - block.kind === 'html'   -> root is the stage's iframe body (unchanged from
 //     ticket 02). The click happens in a different DOCUMENT (the sandboxed
 //     srcdoc), so this stays the one cross-document case -- see "isolation of
-//     hand-mocked HTML is kept" in SPEC_ANCHORING.md's Decisions. Nothing about
+//     hand-mocked HTML is kept" in DESIGN.md's Decisions. Nothing about
 //     this case's minting or resolving changes here.
 //   - every other block kind -> root is that block's own rendered `<section
 //     class="block" data-block-id="...">` in the board page's OWN document. A
@@ -140,7 +140,7 @@
 // a `dom` anchor when `block.kind === 'html'` (see its own comment). A `dom`
 // anchor minted against the new, page-scoped root reports `lost` the moment
 // it round-trips through a real submit + re-render, honestly rather than
-// silently -- SPEC_ANCHORING.md's "an anchor that no longer resolves reports
+// silently -- DESIGN.md's "an anchor that no longer resolves reports
 // what it lost" -- until ticket 04 teaches it to re-render that one block
 // (`renderBlock` is already exported for exactly this) and resolve the ref
 // against it the same way `resolveDomAnchor` already does for stage html.
@@ -154,7 +154,7 @@
 
 // --- ticket 05 design: a diagram node folds into the generic model ------------
 //
-// SPEC_ANCHORING.md's Decision "Mermaid stops being the template" states the
+// DESIGN.md's Decision "Mermaid stops being the template" states the
 // order deliberately: "The generic model comes first; a diagram node is
 // anchored by it like anything else. The node id is kept alongside the generic
 // reference as the more durable of the two ... kept as a fallback the generic
@@ -181,7 +181,7 @@
 //   resolves through -- no new server-side mermaid-specific parsing exists, or
 //   is needed, to make that true. It falls back to mermaidRefResolves (`ref`)
 //   only when that first attempt fails. In practice, for as long as diagram
-//   rendering stays client-side (SPEC_ANCHORING.md's Out of Scope:
+//   rendering stays client-side (DESIGN.md's Out of Scope:
 //   "Server-side diagram rendering"), the generic attempt fails server-side
 //   EVERY time: the block's re-rendered section (src/render.mjs's
 //   renderMermaidBlock, exactly what resolveDomAnchorInSection walks) only ever
@@ -336,7 +336,7 @@ export function buildSteps(root, el) {
 // anywhere in the raw html at all" — which false-resolved against tag names and
 // attribute values (a hint of "mock" matching `class="mock"`) and false-"lost"
 // anything spanning nested markup, entities, or extractHint's own truncation
-// ellipsis (ablation/audit-caught: see TICKETS_BOARD.md ticket 06's log). Fixed by
+// ellipsis (ablation/audit-caught: see DESIGN.md's board slice 06 log). Fixed by
 // actually parsing enough structure to walk the ref and read that one element's
 // text, the same way a real DOM would, rather than pattern-matching the whole
 // blob.
@@ -416,7 +416,7 @@ const CLOSES_P = new Set([
 ]);
 
 /** Pop the elements a `tag` start implies are finished, mutating `stack`. Never pops
- * past index 0 (the synthetic root). Exported (ticket 07, SPEC_ANCHORING.md) so
+ * past index 0 (the synthetic root). Exported (ticket 07, DESIGN.md) so
  * test/dom-stand-in.mjs's own tag-omission handling is this exact function, not a
  * second, hand-ported copy that could silently drift the way it did before ticket
  * 07 (audit finding C3): sharing the DECISION functions is what keeps the two
@@ -660,7 +660,7 @@ function roleAwareInPrefix(text, tag) {
 
 /** Ticket 04, fixed by the 2026-07-29 audit (finding C1): whether `node`'s own
  * live content still backs a stored `hint`. Content is snapshotted at post time
- * (SPEC_ANCHORING.md Decisions -> "An anchor survives re-render, not editing"),
+ * (DESIGN.md Decisions -> "An anchor survives re-render, not editing"),
  * so a still-live element's own text hasn't changed since mint time:
  * re-deriving the IDENTITY half of composeHint's rule from that unchanged text
  * (extractHint of the resolved element's own text, or -- when there's no text
@@ -716,7 +716,7 @@ function domIdentityHintMatches(node, hint) {
 // an ordinary body child, same as this module already modelled). An explicit
 // `<html>`/`<head>`/`<body>` wrapper is honoured as given rather than
 // re-hoisted. Left unmodelled, an ordinary mock that inlines its own styling --
-// which SPEC_ANCHORING.md's own isolation Decision is what makes an author
+// which DESIGN.md's own isolation Decision is what makes an author
 // do -- shifts the index of every element that follows the leading `<style>`,
 // so a browser's `body.children[0]` (the real, clicked element) is this
 // module's `root.children[1]`: every ref minted against the real DOM reports
@@ -919,15 +919,15 @@ export const MERMAID_NODE_SELECTOR = '[id*="-flowchart-"], [id^="flowchart-"]';
  * (earlier drafts tried to parse mermaid's arrow/shape grammar to do that; it was
  * both wrong on ordinary syntax like chained arrows and inline-label edges, and
  * had catastrophic-backtracking behaviour on adversarial input, since this runs
- * server-side on every render/packet — see TICKETS_BOARD.md ticket 06's log) but
+ * server-side on every render/packet — see DESIGN.md's board slice 06 log) but
  * "does this exact token still appear in the text at all", answered by a single
  * linear scan with no backtracking-capable pattern. A plain presence check can
  * false-positive if the id string happens to appear inside a label rather than as
  * a real id; it cannot false-negative on a legitimate, still-present id, which is
  * the failure mode that actually matters for "an anchor that no longer resolves
- * reports what it lost" (SPEC_BOARD.md) — a live anchor must never be misreported
+ * reports what it lost" (DESIGN.md) — a live anchor must never be misreported
  * lost. Parsing mermaid's grammar fully stays client-side, from its own CDN engine
- * (SPEC_BOARD.md "The daemon renders markdown; the page renders mermaid"). */
+ * (DESIGN.md "The daemon renders markdown; the page renders mermaid"). */
 export function mermaidRefResolves(source, ref) {
   if (!ref) return false;
   const text = String(source ?? '');

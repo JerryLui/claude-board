@@ -1,7 +1,7 @@
-// Ticket 05 (SPEC_ANCHORING.md): "A diagram node is anchored like anything
+// Ticket 05 (DESIGN.md): "A diagram node is anchored like anything
 // else." Extends the end-to-end DOM stand-in seam ticket 01 built (this repo's
 // standard for criterion 8: a check that drives the REAL src/ui.mjs client
-// script, not just the pure module underneath it -- see SPEC_ANCHORING.md's own
+// script, not just the pure module underneath it -- see DESIGN.md's own
 // Testing section and this ticket's instructions for why that distinction is
 // the whole point here). test/check-pure.mjs covers resolveMermaidAnchor's
 // precedence as a pure function; this file covers the actual click gesture and
@@ -194,7 +194,7 @@ await check('comment mode: submitting the opened form drops a numbered, non-lost
   assert.equal(pins.length, 1, `expected exactly one pin after queueing one comment, got ${pins.length}`);
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'a freshly-queued comment must not render as lost');
 
-  // Ticket 07 (SPEC_ANCHORING.md), audit finding V1: position asserted, not just
+  // Ticket 07 (DESIGN.md), audit finding V1: position asserted, not just
   // presence -- renderMermaidPins' formula (`hostBox.left - wrapBox.left +
   // hostBox.width / 2`, `... + hostBox.height / 2`, src/ui.mjs) recomputed here
   // independently from the actual clicked node and the actual pin-layer, using
@@ -340,7 +340,7 @@ await check('CDN unreachable: pins still render from the server\'s verdict, reso
 
   // No window.mermaid supplied: the dynamic import of the CDN module rejects in
   // this sandbox (no network), exercising the exact fallback path
-  // SPEC_ANCHORING.md requires src/ui.mjs to behave sanely in.
+  // DESIGN.md requires src/ui.mjs to behave sanely in.
   const document = await loadBoard(html, null);
 
   const section = document.querySelector('.mermaid-block');

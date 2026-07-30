@@ -1,6 +1,6 @@
-// Ticket 10 (SPEC_ANCHORING.md), the 2026-07-29 audit's S1 and S2: this is the
+// Ticket 10 (DESIGN.md), the 2026-07-29 audit's S1 and S2: this is the
 // check that exists to prove the property the whole ticket is about, the way
-// SPEC_ANCHORING.md's Testing section demands -- against the real gesture, not
+// DESIGN.md's Testing section demands -- against the real gesture, not
 // the pieces underneath it.
 //
 // S1 (HIGH): `sandbox="allow-same-origin allow-scripts"` on the html-stage
@@ -27,10 +27,10 @@
 //      present and carries the same policy the live daemon sends as a header.
 //
 // Every ablation below is run for real against the actual code, then reverted
-// -- SPEC_ANCHORING.md's own standard ("ablation discipline used throughout the
+// -- DESIGN.md's own standard ("ablation discipline used throughout the
 // tickets file"): this file's own comments record what a broken version of
 // each property looks like and that check-stage-isolation.mjs actually catches
-// it; TICKETS_ANCHORING.md's ticket 10 log records the transcripts.
+// it; DESIGN.md's anchoring slice 10 log records the transcripts.
 
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
@@ -139,7 +139,7 @@ check('S1: a <script> inside a mock cannot reach the parent document, even thoug
   assert.equal(form.classList.contains('open'), true, 'the legitimate click-to-anchor gesture must still work in a stage that also runs a hostile script');
 });
 
-// Ablation record (run by hand, reverted immediately after -- SPEC_ANCHORING.md's
+// Ablation record (run by hand, reverted immediately after -- DESIGN.md's
 // ablation discipline): restoring `sandbox="allow-same-origin allow-scripts"` in
 // src/render.mjs's renderHtmlBlock and re-running this file fails the very next
 // check below (the message-protocol checks) differently -- with allow-same-origin
@@ -283,8 +283,8 @@ check('S2: renderBoardPage emits a <meta http-equiv="Content-Security-Policy"> c
 // Ablation record: commenting out the `<meta http-equiv...>` line in
 // src/render.mjs's renderBoardPage and re-running this file fails the check
 // immediately above with "renderBoardPage must emit a <meta ...>" -- run by
-// hand, reverted immediately after (SPEC_ANCHORING.md's ablation discipline);
-// the transcript is recorded in TICKETS_ANCHORING.md's ticket 10 log.
+// hand, reverted immediately after (DESIGN.md's ablation discipline);
+// the transcript is recorded in DESIGN.md's anchoring slice 10 log.
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);

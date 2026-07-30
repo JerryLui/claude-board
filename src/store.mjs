@@ -128,7 +128,7 @@ export function listBoards(home = boardHome()) {
 
 /** Archive search: what was asked (question prompts, option labels), what was
  * answered (chosen values and notes) and when (round timestamps), across every
- * board in the store — see PROTOCOL.md "HTTP surface" and SPEC_BOARD.md Decisions
+ * board in the store — see PROTOCOL.md "HTTP surface" and DESIGN.md Decisions
  * -> "Archived boards are searchable". The store is the only source: this walks
  * `listBoards` fresh on every call rather than maintaining a side index that could
  * drift from the board files.

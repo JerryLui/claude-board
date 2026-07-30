@@ -82,7 +82,7 @@ Questions go through the local claude-board daemon, not one at a time in the ter
 { kind: 'code', source: { path: 'src/server.mjs', lines: [40, 72] } }
 
 // a markdown block, one section of a document, addressed by heading slug
-{ kind: 'markdown', source: { path: 'SPEC_BOARD.md', section: 'acceptance-criteria' } }
+{ kind: 'markdown', source: { path: 'SPEC_AUTH.md', section: 'acceptance-criteria' } }
 
 // a mermaid block, the whole file
 { kind: 'mermaid', source: { path: 'docs/flow.mmd' } }

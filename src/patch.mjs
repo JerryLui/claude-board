@@ -1,6 +1,6 @@
 // Pure diff between two board JSON snapshots -- the seam that proves an SSE push
 // is applied additively (new content only) rather than by wholesale re-render. See
-// PROTOCOL.md "Board document" for the shape being diffed, and SPEC_BOARD.md
+// PROTOCOL.md "Board document" for the shape being diffed, and DESIGN.md
 // Decisions -> "A board is a session-scoped thread with rounds": "the sent round
 // collapsed into a history rail with its answers still readable... and does not
 // disturb fields already filled in but not yet sent."

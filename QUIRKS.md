@@ -97,7 +97,7 @@ cannot be reached.
 The html-stage iframe is sandboxed and the page's tokens deliberately do not reach
 into it. Its hover-highlight rule is built with a hardcoded hex, and mermaid's
 `themeVariables` are hardcoded too. Both must be updated by hand when `--accent` /
-the surface tokens change in `src/styles.mjs`. Ticket 10 (SPEC_ANCHORING.md)
+the surface tokens change in `src/styles.mjs`. Ticket 10 (DESIGN.md)
 dropped `allow-same-origin` from the iframe and moved the hover rule from
 `wireHtmlStage` (`src/ui.mjs`, since deleted — the parent can no longer reach
 `contentDocument` at all) into `stageAgentScript` (`src/render.mjs`), the

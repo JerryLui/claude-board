@@ -137,7 +137,7 @@ svg { flex: none; }
 }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
-/* the comment-mode toggle (SPEC_ANCHORING.md "The gesture is an explicit comment
+/* the comment-mode toggle (DESIGN.md "The gesture is an explicit comment
    mode"): visible chrome, not a held modifier -- this IS criterion 2's
    discoverability. Off by default, so the page behaves exactly as before until
    the reviewer turns it on (criterion 3, true by construction). */
@@ -406,7 +406,7 @@ body.readonly .stage-hint { display: none; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g')} { cursor: pointer; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
 
-/* the generic comment-mode hover outline (SPEC_ANCHORING.md criterion 2: "before
+/* the generic comment-mode hover outline (DESIGN.md anchoring criterion 2: "before
    committing the reviewer can see exactly which element will be anchored"). Set
    from JS (src/ui.mjs) on the innermost element under the cursor, never via a
    :hover rule -- that would outline every ancestor in the chain at once. The
@@ -435,7 +435,7 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease); }
 .btn-send:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-send:active:not(:disabled) { transform: translateY(1px); }
-/* the second way out (SPEC_BOARD.md "Two ways out, plus a wall clock"): returns the
+/* the second way out (DESIGN.md "Two ways out, plus a wall clock"): returns the
    call now with whatever is filled in. Secondary weight -- Send stays the primary
    action -- but it sits in the same bar, so body.readonly hides both together. */
 .btn-discuss { background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--hairline);

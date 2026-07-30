@@ -459,7 +459,7 @@ check('ui.mjs embeds the literal source of computeBoardPatch, not a hand-copied 
 // end to end. An earlier draft got this specifically wrong: src/anchor.mjs
 // carried a design COMMENT describing the rule but no actual code, so reverting
 // that file changed nothing any check could see -- exactly the "looks right,
-// believed correct, not actually exercised" shape SPEC_ANCHORING.md exists to
+// believed correct, not actually exercised" shape DESIGN.md exists to
 // repair. This check is what makes that regression loud again if it recurs: a
 // hand-edit of ui.mjs's embedded copy that diverges from src/anchor.mjs's real
 // composeHint fails here even before any behavioural check would notice.
@@ -593,7 +593,7 @@ check('a comment whose block no longer exists reports what it lost, not silently
 // --- src/anchor.mjs: element-level anchoring, pure (ticket 06) --------------------
 //
 // Click gestures themselves need a browser and are explicitly out of scope for the
-// automated checks (SPEC_BOARD.md Testing); src/anchor.mjs is the seam that carries
+// automated checks (DESIGN.md Testing); src/anchor.mjs is the seam that carries
 // every bit of anchoring logic that *isn't* the gesture -- path building, hint
 // extraction, path resolution, mermaid id round-tripping -- so it can be proven
 // here without simulating a DOM. src/ui.mjs's click handlers are a thin duplicate
@@ -662,8 +662,8 @@ check('resolveSteps reports null the moment a step no longer resolves -- the "th
 // ANYWHERE in the raw html string, never touching `ref` at all. That both
 // false-resolved (a hint matching a class name or tag name) and false-"lost"
 // (nested markup, entities, or extractHint's own truncation ellipsis broke the
-// contiguous-substring match) -- caught by audit, see TICKETS_BOARD.md ticket 06's
-// log. These checks pin the fix: ref must actually address an element, and only
+// contiguous-substring match) -- caught by audit, see DESIGN.md's board slice
+// 06 log. These checks pin the fix: ref must actually address an element, and only
 // that element's own text is checked against the hint.
 
 check('parseHtmlTree builds an element tree where .children is element-only (matching real Element.children, not childNodes)', () => {
@@ -874,7 +874,7 @@ check('resolveComment resolves a dom anchor whose ref+hint are still valid toget
   // Ticket 04: a lost `dom` anchor reports the stored HINT ("Launch"), not the
   // opaque index-chain ref ("9.9") -- the hint is what a human or agent can
   // actually recognise as "what this comment was about" once the element it
-  // named is gone (SPEC_ANCHORING.md ticket 04: "the stored hint is what
+  // named is gone (DESIGN.md ticket 04: "the stored hint is what
   // survives when the element does not"). An `md`/`mermaid` anchor's ref is
   // already human-legible (a heading slug, a diagram node id), so those still
   // report their ref -- see the checks below for mermaid and check-http.mjs for
@@ -905,7 +905,7 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
 });
 
 // --- ticket 05: resolveMermaidAnchor's precedence -- generic first, node id ---
-// leaned on as a fallback, per SPEC_ANCHORING.md's "Mermaid stops being the
+// leaned on as a fallback, per DESIGN.md's "Mermaid stops being the
 // template" -- see src/anchor.mjs's "ticket 05 design" comment for the full
 // reasoning. Direct, pure tests over resolveMermaidAnchor itself (not just
 // through resolveComment/board.mjs) so the precedence is checkable and
@@ -1181,7 +1181,7 @@ check('resolveComment: U4 regression -- a dom anchor rooted at an html block\'s 
 // --- audit U1/U2: anchors into answer-derived content, re-measured with C1 fixed --
 //
 // Judgement call (ticket 08, see this repo's report for the full reasoning):
-// NOT fixed here, by design. SPEC_ANCHORING.md's Decision "An anchor survives
+// NOT fixed here, by design. DESIGN.md's Decision "An anchor survives
 // re-render, not editing" scopes the promise to content unchanged since post
 // time. U1's status line and U2's rank order both derive from `board.answers`,
 // which only changes when the reviewer answers/re-ranks and sends -- an edit
@@ -1717,7 +1717,7 @@ check('the rank widget renders options in the stored order when there is a prior
 
 // --- ticket 04: the history rail ---------------------------------------------------
 //
-// SPEC_BOARD.md Decisions -> "A board is a session-scoped thread with rounds": "the
+// DESIGN.md Decisions -> "A board is a session-scoped thread with rounds": "the
 // sent round collapsed into a history rail with its answers still readable."
 
 check('a sent round renders as history with its prompt, choice and note still readable; a still-open round renders live', () => {
@@ -2051,7 +2051,7 @@ check('a question carrying non-markdown context kinds normalises and renders the
 
 // --- ticket 05: snapshot and standalone archive ------------------------------------
 //
-// See SPEC_BOARD.md Decisions -> "JSON is truth, the page is a projection" and
+// See DESIGN.md Decisions -> "JSON is truth, the page is a projection" and
 // "Questions by value, content by reference, snapshotted at post time". The HTTP
 // check (test/check-http.mjs) covers the store-mutation and end-to-end
 // rewrite/delete guarantees; these are the pure-function halves: renderBoardPage
@@ -2122,7 +2122,7 @@ check('a board whose referenced source was rewritten, then deleted, still render
 
 // --- ticket 05: standalone read-only archive ----------------------------------------
 //
-// Chrome-automated checks of the interactive layer are out of scope (SPEC_BOARD.md
+// Chrome-automated checks of the interactive layer are out of scope (DESIGN.md
 // Testing), so this is a structural check on the shipped mechanism rather than a
 // simulated click: the client script (src/ui.mjs, exported as a plain string) must
 // decide read-only mode synchronously from the page's own protocol, and every
@@ -2285,7 +2285,7 @@ check('renderBoardPage always emits the readonly-banner element in the body mark
 
 // --- ticket 04: SSE push is applied additively, never a wholesale re-render -----
 //
-// Field preservation on a push is browser-DOM behaviour, which SPEC_BOARD.md's
+// Field preservation on a push is browser-DOM behaviour, which DESIGN.md's
 // Testing section explicitly puts out of automated scope ("checked by opening a
 // board and using it"). What IS provable here without a browser: the client script
 // never wipes the live board container and only ever inserts/replaces targeted
@@ -2407,7 +2407,7 @@ check('element-level anchoring on a pushed html stage needs no per-push wiring p
   // anchorable -- comment mode on, click the pushed element, a pin lands --
   // lives in test/check-anchor-push.mjs, driven through the real
   // subscription src/ui.mjs itself opens, exactly the kind of check
-  // SPEC_ANCHORING.md's Testing section asks for over a structural one like
+  // DESIGN.md's Testing section asks for over a structural one like
   // this file's own checks.
 });
 
@@ -3202,7 +3202,7 @@ check('N10: a line range past the end of a newline-terminated file errors instea
 
 // --- P1: Discuss in chat, the second way out -----------------------------------
 //
-// SPEC_BOARD.md Decisions -> "Two ways out, plus a wall clock" / acceptance
+// DESIGN.md Decisions -> "Two ways out, plus a wall clock" / acceptance
 // criterion 7. The whole path behind it (POST /submit {action:'discuss'},
 // board.state='discuss', the shim's stop-posting branch) shipped and is checked
 // elsewhere; for a long stretch the AFFORDANCE did not exist at all, so half of
@@ -3230,7 +3230,7 @@ check('the send bar carries Discuss in chat beside Send, in the rendered markup'
 
 check('Discuss posts the same body as Send through one shared submit path, differing only in action', () => {
   // One fetch, one body-building path: a second, hand-copied fetch is how Discuss
-  // would quietly come to collect less than Send does (SPEC_BOARD.md: it returns
+  // would quietly come to collect less than Send does (DESIGN.md: it returns
   // "whatever is filled in" -- partial answers are the point).
   const submitFetches = [...ui.matchAll(/fetch\([^)]*\/submit/g)];
   assert.equal(submitFetches.length, 1, 'both actions must share one submit fetch, not carry two divergent copies');
@@ -3249,7 +3249,7 @@ check('Discuss posts the same body as Send through one shared submit path, diffe
 
 // --- P6: a queued comment gets its pin immediately ------------------------------
 //
-// SPEC_BOARD.md calls the batching the win ("queue a dozen comments, send once");
+// DESIGN.md calls the batching the win ("queue a dozen comments, send once");
 // criterion 10 says "a numbered pin appears on the element". The queue-side of
 // that used to push onto pendingComments and never touch a pin layer, so no pin
 // appeared until after Send. commentsWithPending is extracted and evaluated here
@@ -3322,7 +3322,7 @@ check('a pending pin is visually distinguishable from a sent one, in both the cl
 
 // --- P2 (page side): badge the tab and notify, never steal focus ---------------
 //
-// SPEC_BOARD.md Decisions -> "Open once, then badge and notify": "pending count in
+// DESIGN.md Decisions -> "Open once, then badge and notify": "pending count in
 // the title, badge on the favicon, and a macOS notification instead of a focus
 // steal when the tab is open but unfocused". None of the three existed.
 

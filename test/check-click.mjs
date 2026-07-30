@@ -1,4 +1,4 @@
-// End-to-end click check (ticket 01, SPEC_ANCHORING.md): drives the REAL src/ui.mjs
+// End-to-end click check (ticket 01, DESIGN.md): drives the REAL src/ui.mjs
 // client script, in a minimal in-repo DOM stand-in (test/dom-stand-in.mjs), through
 // the actual gesture a reviewer performs -- click an element inside a hand-mocked
 // html stage -- and asserts a comment form opens with the anchor filled in.
@@ -63,14 +63,14 @@ function loadBoard() {
 
 // --- credibility: pin the one browser behaviour this check exists to reproduce --
 //
-// SPEC_ANCHORING.md Decisions -> "Criterion 8 runs in a DOM stand-in": the leading
+// DESIGN.md Decisions -> "Criterion 8 runs in a DOM stand-in": the leading
 // hypothesis for the defect is an iframe's initial (about:blank) document being what
 // gets wired up, instead of the real one. Before trusting the click check below,
 // this pins that the stand-in actually reproduces that shape: the iframe's
 // contentDocument is already present, 'complete', and empty the moment the page is
 // parsed -- BEFORE the client script runs and BEFORE the real srcdoc content ever
 // loads. A stand-in that instead handed the real document straight to the client
-// script would make the check below pass for the wrong reason (see SPEC_ANCHORING.md
+// script would make the check below pass for the wrong reason (see DESIGN.md
 // Testing: "a stand-in that models the browser wrongly is exactly how this feature
 // shipped dead twice").
 
@@ -91,7 +91,7 @@ check('clicking an element inside a hand-mocked html stage opens that block\'s c
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage iframe on the rendered page');
 
-  // Ticket 03 (SPEC_ANCHORING.md): the user's decision, one gesture toggle-gated
+  // Ticket 03 (DESIGN.md): the user's decision, one gesture toggle-gated
   // everywhere, means the stage click no longer fires on its own -- comment mode
   // has to be turned on first, through the actual toggle button, exactly the way
   // a reviewer would. test/check-comment-mode.mjs's own checks cover comment
@@ -139,7 +139,7 @@ check('clicking an element inside a hand-mocked html stage opens that block\'s c
 // --- audit C2, ticket 08: a mock that inlines its own <style> ------------------
 //
 // A hand-mocked stage carrying its own styling is the ordinary case -- it is
-// what SPEC_ANCHORING.md's own isolation Decision makes an author do, since the
+// what DESIGN.md's own isolation Decision makes an author do, since the
 // page's tokens deliberately never reach into the sandboxed srcdoc. A real
 // browser hoists that leading <style> into <head>, so `document.body`'s first
 // child is the mock's own top-level element, not the style tag. This check
@@ -159,7 +159,7 @@ const styledPageHtml = renderBoardPage(styledBoard);
 
 check('C2: clicking an element in a mock whose srcdoc opens with its own <style> mints a ref the server actually resolves, not an off-by-one', () => {
   const document = parseHTML(styledPageHtml);
-  // Ticket 10 (SPEC_ANCHORING.md): a real, working `window` here, not a
+  // Ticket 10 (DESIGN.md): a real, working `window` here, not a
   // throwaway `{ addEventListener() {} }` stub -- src/ui.mjs's own
   // `window.addEventListener('message', ...)` (the parent's half of the
   // postMessage protocol the html-stage click now goes over) has to reach a

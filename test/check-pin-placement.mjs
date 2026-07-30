@@ -1,4 +1,4 @@
-// Ticket 09 (SPEC_ANCHORING.md): "every pin lands where it is named" -- criteria 4
+// Ticket 09 (DESIGN.md): "every pin lands where it is named" -- criteria 4
 // and 5 re-earned. Fixes audit findings C4 and U6; U3 is covered in
 // test/check-anchor-push.mjs (it is specifically about SSE-pushed content).
 //

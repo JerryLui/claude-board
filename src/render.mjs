@@ -29,7 +29,7 @@ import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs
 
 /** Content-Security-Policy for every board page, both as the HTTP response
  * header src/server.mjs sends on every live request AND (ticket 10,
- * SPEC_ANCHORING.md, audit S2) as the `<meta http-equiv>` renderBoardPage now
+ * DESIGN.md, audit S2) as the `<meta http-equiv>` renderBoardPage now
  * emits below. One string, not two independently-maintained policies: this is
  * the module both sides import it from, since src/server.mjs already imports
  * `renderBoardPage` itself from here (the reverse import would be circular).
@@ -77,7 +77,7 @@ function safeJson(value) {
 }
 
 /** The one-line "you can click this" note on a stage. Both stage kinds anchor a
- * comment to an individual element (SPEC_BOARD.md criterion 10), and neither
+ * comment to an individual element (DESIGN.md board criterion 10), and neither
  * announced it: a mermaid diagram and an iframe'd mock both read as pictures, so
  * the gesture was there and undiscovered. Hidden in a standalone `file:` archive,
  * where nothing is clickable — `body.readonly` in src/styles.mjs. */
@@ -94,7 +94,7 @@ const COMMENT_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none
 
 /** The comment-mode toggle's icon: a crosshair, distinct from the comment glyph
  * above so the two controls don't read as the same affordance twice. See
- * SPEC_ANCHORING.md Decisions -> "The gesture is an explicit comment mode": this
+ * DESIGN.md Decisions -> "The gesture is an explicit comment mode": this
  * button is the one thing on the page that makes the generic element-level
  * gesture discoverable without being told it exists (criterion 2) -- it has to be
  * visible chrome, not a held modifier or a hover-only affordance. src/ui.mjs reads
@@ -279,7 +279,7 @@ function renderTextWidget(block, answer, historical) {
 /** Drag-to-rank: every option, in the stored order if there is a prior answer, else
  * options order. The answer is the ordered array of option labels; the drag gesture
  * itself lives in src/ui.mjs and is not asserted by the node checks (see
- * SPEC_BOARD.md Testing — that check "is not automated and should not pretend to
+ * DESIGN.md Testing — that check "is not automated and should not pretend to
  * be"), but the markup and data shape here are. */
 function renderRankWidget(block, answer, historical) {
   const hasOrder = answer && Array.isArray(answer.choice) && answer.choice.length;
@@ -339,7 +339,7 @@ function resolveErrorNote(block) {
 }
 
 /** Mermaid stays client-side from its CDN exactly as /visualize does today (see
- * SPEC_BOARD.md "The daemon renders markdown; the page renders mermaid") — the
+ * DESIGN.md "The daemon renders markdown; the page renders mermaid") — the
  * daemon only emits the raw diagram source in a `pre.mermaid`, and src/ui.mjs finds
  * and renders every such node in the page. The stage-scoped `pin-layer` nested in
  * `.stage-wrap` is an empty, absolutely positioned sibling that src/ui.mjs
@@ -392,7 +392,7 @@ function renderCodeLines(text) {
 }
 
 /** A file plus a line range or section, resolved once at post time (see
- * src/resolve.mjs). No syntax highlighting — SPEC_BOARD.md Out of Scope calls that a
+ * src/resolve.mjs). No syntax highlighting — DESIGN.md Out of Scope calls that a
  * hand-rolled cost zero-dependency packaging doesn't buy. */
 function renderCodeBlock(block, board, commentsByBlock, historical) {
   const label = sourceLabel(block.source);
@@ -409,7 +409,7 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
 
 // --- ticket 10 design: genuine stage isolation via postMessage -----------------
 //
-// SPEC_ANCHORING.md's Decision "Isolation of hand-mocked HTML is kept" says a
+// DESIGN.md's Decision "Isolation of hand-mocked HTML is kept" says a
 // mock's CSS and markup must never leak into or clash with the board page. Before
 // this ticket that promise was false for SCRIPT: the iframe below carried
 // `sandbox="allow-same-origin allow-scripts"`, and `allow-same-origin` on a
@@ -471,7 +471,7 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
 //                                          `composeHint` needs no THIRD copy
 //                                          embedded here alongside src/ui.mjs's
 //                                          own (single-source discipline,
-//                                          SPEC_ANCHORING.md ticket 10): only
+//                                          DESIGN.md ticket 10): only
 //                                          `buildSteps`/`stepsToPath`/
 //                                          `pathToSteps`/`resolveSteps` do, bound
 //                                          below via `.toString()` from
@@ -504,7 +504,7 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
 //                                          obey the toggle exactly as they did
 //                                          before this ticket -- see "one
 //                                          gesture, toggle-gated everywhere" in
-//                                          SPEC_ANCHORING.md. The hover
+//                                          DESIGN.md. The hover
 //                                          stylesheet itself is injected
 //                                          LAZILY, the first time `commentMode`
 //                                          turns true (not at script start) --
@@ -592,7 +592,7 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
  * src/ui.mjs already uses for `composeHint` (see that file's own comment on
  * why: dependency-free pure functions can be spliced in verbatim rather than
  * hand-copied a second time, which is what "single-source discipline"
- * (SPEC_ANCHORING.md ticket 10) requires here). Placed AFTER the mock's own
+ * (DESIGN.md ticket 10) requires here). Placed AFTER the mock's own
  * markup in the `srcdoc` string (renderHtmlBlock, below) rather than before
  * it: every listener here is attached to `document.body` itself (delegation),
  * which needs `document.body` to already exist and works regardless of
@@ -824,7 +824,7 @@ export function groupCommentsByBlock(resolvedComments) {
  * choice, note all come from board.answers exactly as the open-round path reads
  * them) but every widget renders `disabled` — see renderQuestionBlock — so it
  * collapses into a history rail rather than staying a second, stale place to edit
- * the same question. See SPEC_BOARD.md Decisions -> "A board is a session-scoped
+ * the same question. See DESIGN.md Decisions -> "A board is a session-scoped
  * thread with rounds": "the sent round collapsed into a history rail with its
  * answers still readable." Exported (ticket 04) so this is also what
  * src/server.mjs renders for an SSE push of a brand-new round — the full page and a
@@ -853,18 +853,18 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
 /** Render a complete, self-contained HTML page for `board`. Pure function of the
  * board JSON: same input, same output, every time. Blocks are grouped by round
  * (see renderRoundSection) rather than flattened, so a follow-up round renders
- * below the earlier ones without displacing them — see SPEC_BOARD.md "A board is
+ * below the earlier ones without displacing them — see DESIGN.md "A board is
  * a session-scoped thread with rounds". Every comment is run through
  * resolveComment exactly once here (`resolvedComments`), and that single verdict
  * feeds both the server-rendered per-block comment list AND the `#board-data`
  * payload src/ui.mjs hydrates pins from — one source of truth for "does this
  * anchor still resolve", not two independently-computed ones that could disagree
- * (see TICKETS_BOARD.md ticket 06's log for what went wrong when the client
+ * (see DESIGN.md's board slice 06 log for what went wrong when the client
  * re-derived resolved/lost itself against the live DOM/SVG). src/server.mjs's SSE
  * push payloads build `boardForClient` the same way, for the same reason — see
  * "SSE events" in PROTOCOL.md.
  *
- * The send bar carries BOTH ways out of a round (SPEC_BOARD.md Decisions → "Two
+ * The send bar carries BOTH ways out of a round (DESIGN.md Decisions → "Two
  * ways out, plus a wall clock"): `#send-btn` posts `action:'send'`, `#discuss-btn`
  * posts `action:'discuss'` with whatever is filled in right now — partial answers
  * are the point — and tells the agent to stop posting boards. Both live inside the

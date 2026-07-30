@@ -1,4 +1,4 @@
-// Ticket 07 (SPEC_ANCHORING.md): audit finding V1, the SSE row -- the one the
+// Ticket 07 (DESIGN.md): audit finding V1, the SSE row -- the one the
 // audit calls out as "the one that matters most" and "drivable today": deleting
 // all three of src/ui.mjs's `wireRoot(...)` calls inside its SSE push handlers
 // (`applyRoundPush`'s `wireRoot(wrap)` for a brand-new round and `wireRoot(frag)`

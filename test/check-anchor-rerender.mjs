@@ -1,4 +1,4 @@
-// Ticket 04 (SPEC_ANCHORING.md): "Anchors survive re-render, and every older
+// Ticket 04 (DESIGN.md): "Anchors survive re-render, and every older
 // board still renders." test/check-http.mjs's own new section proves the live,
 // real-server half of criterion 4 (a page-scoped `dom` anchor round-trips through
 // a real post/submit/re-render without going lost). This file covers the two
@@ -9,7 +9,7 @@
 //     agent reads (buildPacket's own `resolved`/`lost` fields) -- rather than
 //     silently vanishing (criterion 4, second half).
 //   - a board archived BEFORE this ticket -- built with the actual code at
-//     commit 578f666 (the tip before SPEC_ANCHORING.md's tickets started;
+//     commit 578f666 (the tip before DESIGN.md's tickets started;
 //     test/fixtures/pre-ticket04-board.json, committed alongside this file, is
 //     that commit's own createBoard/applySubmit output, not a hand-written
 //     "old-shaped" anchor) -- still renders its comments and pins unchanged
@@ -73,7 +73,7 @@ const lostBlockId = lostBoard.blocks[0].id;
 // existing lost-anchor check in this repo already uses (test/check-pure.mjs's
 // '9.9' for an html stage, a heading slug that was never minted for `md`, a
 // node id a diagram never declared for `mermaid`) -- see this ticket's own
-// instructions: content is snapshotted at post time (SPEC_ANCHORING.md
+// instructions: content is snapshotted at post time (DESIGN.md
 // Decisions -> "An anchor survives re-render, not editing"), so the only way a
 // `dom` anchor goes lost is exactly this: a ref/hint that never matched what's
 // actually stored, e.g. because the element it named at mint time is gone.

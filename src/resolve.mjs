@@ -1,5 +1,5 @@
 // Content-by-reference resolution and sha snapshotting. See PROTOCOL.md "Board
-// document" (the `Ref` shape) and SPEC_BOARD.md "Questions by value, content by
+// document" (the `Ref` shape) and DESIGN.md "Questions by value, content by
 // reference, snapshotted at post time".
 //
 // The agent addresses content with `{ path, section?, lines? }`; this module reads
@@ -274,7 +274,7 @@ export function resolveRef(ref, { cwd } = {}) {
 
 // Best-effort file-extension -> language guess for a resolved code block's `lang`
 // field, when the caller doesn't pass one explicitly. Unknown extensions fall back
-// to ''; this is display-only (no syntax highlighting — see SPEC_BOARD.md "Out of
+// to ''; this is display-only (no syntax highlighting — see DESIGN.md "Out of
 // Scope"), so a wrong or missing guess costs nothing but a label.
 const EXT_LANG = {
   js: 'javascript', mjs: 'javascript', cjs: 'javascript',

@@ -9,6 +9,13 @@ node_modules/
 SPEC_*.md
 TICKETS_*.md
 
+# The design record stays local too, by decision 2026-07-30. It is what the
+# source comments mean by "see DESIGN.md": the reasoning, the rejected
+# alternatives and the slice logs, promoted out of the two specs before they were
+# deleted. Accepted consequence: the published tree carries references to a file
+# it does not ship. `git add -f DESIGN.md` is the whole reversal.
+DESIGN.md
+
 # The internal audit reports stay local too. The security record ships as
 # SECURITY.md (current posture) and CHANGELOG.md (found and fixed per release);
 # see SECURITY.md "How this record is kept". Publishing a per-commit adversarial

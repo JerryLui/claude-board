@@ -1,5 +1,5 @@
 // A minimal, zero-dependency DOM stand-in for test/check-click.mjs (ticket 01,
-// SPEC_ANCHORING.md) and test/check-click-pin.mjs (ticket 02). It exists to run
+// DESIGN.md) and test/check-click-pin.mjs (ticket 02). It exists to run
 // the REAL src/ui.mjs client script -- not a hand-summary of what it does --
 // against something DOM-shaped enough that a real click gesture can travel
 // through it end to end.
@@ -25,7 +25,7 @@
 // simply left undefined/inert -- `typeof x !== 'undefined'` guards and untaken
 // branches mean the script never needs them to exist or do anything.
 //
-// Ticket 07 (SPEC_ANCHORING.md), addressing audit finding C3: this file's HTML
+// Ticket 07 (DESIGN.md), addressing audit finding C3: this file's HTML
 // parser now shares its tag-omission DECISIONS (autoCloseFor/impliedParentFor,
 // which elements auto-close on which start tags, which parents are implied) with
 // src/anchor.mjs's own parseHtmlTree, imported directly rather than re-derived --
@@ -42,7 +42,7 @@
 // that breaks agreement fails a check rather than shipping silently.
 //
 // The one piece of browser behaviour this stand-in exists to reproduce faithfully
-// (see SPEC_ANCHORING.md Decisions -> "Criterion 8 runs in a DOM stand-in"): an
+// (see DESIGN.md Decisions -> "Criterion 8 runs in a DOM stand-in"): an
 // <iframe> does not start out empty. The moment it is parsed, a real browser has
 // already given it a live `contentDocument` for `about:blank` -- readyState
 // 'complete', a real (empty) `<body>` -- well before the `srcdoc` navigation has
@@ -53,14 +53,14 @@
 // `load`. Getting this ordering right is the entire point of the check that uses
 // this module -- collapsing it to a single synchronous document would make the
 // check green against the still-broken src/ui.mjs, which is exactly the failure
-// mode SPEC_ANCHORING.md's Testing section warns about.
+// mode DESIGN.md's Testing section warns about.
 
-// Ticket 07 (SPEC_ANCHORING.md), audit finding C3: the tag-omission rules and
+// Ticket 07 (DESIGN.md), audit finding C3: the tag-omission rules and
 // entity table are the SAME implementation src/anchor.mjs's parseHtmlTree uses,
 // imported directly rather than hand-ported a second time -- see the parsing
 // section below and test/check-parser-parity.mjs.
 //
-// Ticket 10 (SPEC_ANCHORING.md): this file now also models `window`/
+// Ticket 10 (DESIGN.md): this file now also models `window`/
 // `postMessage` and actually EXECUTES a document's own `<script>` elements --
 // new capability, not previously implemented at all (a `<script>`'s body used
 // to be parsed and blanked, matching the browser's tree shape, but never run).
@@ -73,7 +73,7 @@
 // property ticket 10 exists to establish (S1 in the 2026-07-29 audit). See
 // StandInWindow, IframeElement.loadSrcdoc and runInlineScripts below.
 //
-// Ticket 08 (SPEC_ANCHORING.md), audit finding C2: `HEAD_ONLY_TAGS`, imported
+// Ticket 08 (DESIGN.md), audit finding C2: `HEAD_ONLY_TAGS`, imported
 // the same way as the tag-omission rules above, is what makes `parseHTML`
 // hoist a leading run of head-only elements (`<style>`, `<script>`, `<meta>`,
 // `<link>`, `<title>`, `<base>`) out of the synthetic body the same way a real
@@ -87,7 +87,7 @@ import { autoCloseFor, impliedParentFor, decodeEntities, VOID_ELEMENTS, HEAD_ONL
 // --- HTML parsing: just enough to build a tree from the exact markup
 // src/render.mjs's renderBoardPage emits, and (unlike this file's own header
 // comment used to claim) from arbitrary agent-supplied `srcdoc` HTML too --
-// ticket 07 (SPEC_ANCHORING.md), audit finding C3: this file's tag-omission
+// ticket 07 (DESIGN.md), audit finding C3: this file's tag-omission
 // handling is now genuinely shared with src/anchor.mjs's parseHtmlTree (see the
 // file header comment), not a second, narrower hand-port of the same rules. -----
 
@@ -366,7 +366,7 @@ function searchDescendants(root, selectorText) {
 // is one src/ui.mjs relies on reaching an ancestor listener, so a universal
 // bubble is simpler and never wrong for this check's purposes). -------------------
 //
-// Ticket 07 follow-up (SPEC_ANCHORING.md, audit finding C5): 'dragstart' needs no
+// Ticket 07 follow-up (DESIGN.md, audit finding C5): 'dragstart' needs no
 // dedicated event class or `dataTransfer` stub -- deliberately. src/ui.mjs's own
 // `list.addEventListener('dragstart', ...)` handler (the one comment mode's
 // `commentMode ||` guard sits in) reads exactly one thing off the event: `.target`
@@ -385,7 +385,7 @@ function searchDescendants(root, selectorText) {
 // dispatches a 'dragover') and is named, not silently skipped, in
 // test/check-comment-mode.mjs's own comment: this stand-in has no pointer
 // position or native drag-and-drop state machine, the same documented ceiling
-// SPEC_BOARD.md's Testing section already states for the rank drag in general. No
+// DESIGN.md's Testing section already states for the rank drag in general. No
 // `dataTransfer` object is stubbed at all: nothing in src/ui.mjs's drag handlers
 // ever reads or writes one, so leaving it absent means a future edit that DID try
 // to touch `ev.dataTransfer.setData(...)` throws immediately (a TypeError on
@@ -436,7 +436,7 @@ class EventTarget {
   }
 }
 
-// --- window / postMessage (ticket 10, SPEC_ANCHORING.md) -----------------------
+// --- window / postMessage (ticket 10, DESIGN.md) -----------------------
 //
 // A minimal stand-in for the two `window` objects a board page and one of its
 // html-stage iframes each get in a real browser, existing ONLY to carry
@@ -576,7 +576,7 @@ export class Element extends EventTarget {
     nodes.forEach(n => { n.parentElement = this; });
     this.childNodes = nodes;
   }
-  // Ticket 07 (SPEC_ANCHORING.md), audit finding V6: previously absent entirely
+  // Ticket 07 (DESIGN.md), audit finding V6: previously absent entirely
   // (accessing it returned `undefined`, not even an empty string), so
   // src/ui.mjs's applyResync -- `html += el.outerHTML` inside a loop, `''`
   // concatenated with `undefined` -- silently built the STRING "undefined" into
@@ -633,7 +633,7 @@ export class Element extends EventTarget {
     return null;
   }
   focus() { /* no-op: nothing in this check asserts on focus */ }
-  // Ticket 07 (SPEC_ANCHORING.md), audit finding V1 (director-verified
+  // Ticket 07 (DESIGN.md), audit finding V1 (director-verified
   // separately): this used to return an unconditional all-zero box for every
   // element, attached or not -- so a pin placed correctly and a pin placed at
   // (0,0) were byte-identical in every assertion, and the director confirmed
@@ -738,7 +738,7 @@ function aboutBlankDocument() {
 }
 
 /** Run every `<script>` element found in `doc`, in document order, against
- * `win` -- ticket 10 (SPEC_ANCHORING.md): new capability, not previously
+ * `win` -- ticket 10 (DESIGN.md): new capability, not previously
  * implemented (a script's body used to be parsed and blanked, matching the
  * browser's tree shape, but never executed). This is what lets IframeElement's
  * `loadSrcdoc` actually run the stage-side agent script src/render.mjs now
@@ -871,7 +871,7 @@ export class IframeElement extends Element {
  * itself a full document -- including hoisting a LEADING run of head-only
  * elements (style/script/meta/link/title/base) into the synthetic `<head>`
  * rather than leaving them as `<body>`'s first children (ticket 08,
- * SPEC_ANCHORING.md, audit C2): this stand-in mints every html-stage `dom` ref
+ * DESIGN.md, audit C2): this stand-in mints every html-stage `dom` ref
  * from `frame.contentDocument.body`, same as a real browser, so if this parser
  * disagreed with src/anchor.mjs's own HEAD_ONLY_TAGS-hoisting `resolveDomAnchor`
  * (imported above, one shared list, not a second one), a check driving a real
@@ -926,7 +926,7 @@ export function parseHTML(htmlString) {
   return doc;
 }
 
-// --- EventSource stand-in (ticket 07, SPEC_ANCHORING.md) -----------------------
+// --- EventSource stand-in (ticket 07, DESIGN.md) -----------------------
 //
 // src/ui.mjs reads a bare, unqualified `EventSource` (never `typeof EventSource
 // !== 'undefined'`-guarded for the constructor call itself -- only for whether to

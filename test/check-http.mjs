@@ -104,7 +104,7 @@ process.env.CLAUDE_BOARD_HOME = home;
 
 // The local secret, in this check's own temp dir — never ~/.config/claude-board. Set
 // before startServer below, because the daemon reads it once at startup. Every write
-// route requires it (SPEC_BOARD.md Decisions -> "A loopback Host check, an origin
+// route requires it (DESIGN.md Decisions -> "A loopback Host check, an origin
 // check, and a local secret"); read routes deliberately do not.
 const SECRET_FILE = path.join(home, 'secret');
 const SECRET = 'a'.repeat(64);
@@ -1001,7 +1001,7 @@ async function main() {
 
   // --- ticket 06: element-level anchoring (dom, mermaid) round-trips through submit --
   //
-  // The click gesture itself needs a browser (SPEC_BOARD.md Testing puts it out of
+  // The click gesture itself needs a browser (DESIGN.md Testing puts it out of
   // automated scope); what's asserted here is the data shape: a comment carrying a
   // `dom` anchor and one carrying a `mermaid` anchor, posted exactly as src/ui.mjs's
   // click handlers would construct them, come back out of the blocked /wait call's
@@ -1062,7 +1062,7 @@ async function main() {
     // Ticket 04: a lost `dom` anchor's `.lost` names the stored HINT ("Launch"),
     // not the opaque index-chain ref ("9.9") -- the hint is what a human or an
     // agent reading the packet can recognise as "what this comment was about"
-    // once the element is gone (SPEC_ANCHORING.md ticket 04: "the stored hint is
+    // once the element is gone (DESIGN.md ticket 04: "the stored hint is
     // what survives when the element does not"). `c.anchor.ref` still carries
     // the raw ref for anything that wants it.
     assert.equal(domLost.lost, 'Launch');
@@ -1204,7 +1204,7 @@ async function main() {
       captureAnchor(doc1, option, questionId),
     ];
     // The html-stage side of the compare, still element (2) of ticket 03's TWO
-    // roots (SPEC_ANCHORING.md / src/anchor.mjs's design comment) -- included so
+    // roots (DESIGN.md / src/anchor.mjs's design comment) -- included so
     // this same round trip also proves block.kind === 'html' resolution is
     // unchanged by this ticket, not just the new page-scoped path.
     const frame = doc1.querySelector('.html-stage');
@@ -1922,7 +1922,7 @@ async function main() {
 
   // --- the local secret ---------------------------------------------------------
   //
-  // SPEC_BOARD.md Decisions -> "A loopback Host check, an origin check, and a local
+  // DESIGN.md Decisions -> "A loopback Host check, an origin check, and a local
   // secret". The Host check closes the network and the origin check closes the browser;
   // neither can see a local process, which is what these cover. Every write above sends
   // the secret (writeHeaders), so the ones here that deliberately do not are what make

@@ -163,7 +163,7 @@ function byValueText(value, field) {
  * block into its stored shape, minting an id and, for markdown, rendering html +
  * anchors. Content is resolved once here: by reference (`raw.source`, a Ref) through
  * src/resolve.mjs, or by value (`raw.text`) when there is no source — see
- * SPEC_BOARD.md "Questions by value, content by reference, snapshotted at post
+ * DESIGN.md "Questions by value, content by reference, snapshotted at post
  * time". `cwd` is the board's project directory, against which a relative Ref
  * resolves. `ids` is the pass's id ledger (see `emptyIdLedger`); it is threaded
  * through the recursion so a nested context/compare block competes for ids with
@@ -344,7 +344,7 @@ function idLedgerFromBoard(board, replaceRound = null) {
  * choice unforgeable: any local process that can reach the loopback port can still POST
  * a NEW board naming a `cwd` it picked and read that directory back off the served page.
  * Closing that step needs the daemon to distinguish the session's own shim from any
- * other local caller, i.e. a credential the shim holds — which SPEC_BOARD.md's "no
+ * other local caller, i.e. a credential the shim holds — which DESIGN.md's "no
  * tokens, no login" currently forbids. That is a spec question, deliberately not
  * answered here with an invented token. */
 function bindBoardCwd(requested, threadCwd) {
@@ -434,7 +434,7 @@ export function addRound(board, { blocks, cwd, title }) {
 /** Push blocks into the round that is CURRENTLY OPEN without minting a new round
  * number: a block whose incoming raw carries an id already on the board replaces
  * that block in place, everything else is appended to the same round. See
- * SPEC_BOARD.md Decisions -> "A board is a session-scoped thread with rounds"
+ * DESIGN.md Decisions -> "A board is a session-scoped thread with rounds"
  * ("the agent may amend a round that is still open... without disturbing
  * filled-in fields") and ticket 04. Returns the round number amended and the ids
  * of exactly the blocks this call added or replaced -- not the round's full
@@ -479,7 +479,7 @@ export function amendRound(board, { blocks, cwd, title }) {
  * recurses when minting, so a compare nested inside a question's context, or a
  * compare-inside-compare, is a structurally valid board; findBlock has to be able
  * to reach it too, or a comment anchored to an element inside one always reports
- * lost even though it's live — see TICKETS_BOARD.md ticket 06's log). */
+ * lost even though it's live — see DESIGN.md's board slice 06 log). */
 export function findBlock(board, blockId) {
   const search = b => {
     if (!b) return null;
@@ -657,7 +657,7 @@ const NO_COMMENTS = new Map();
 
 /** The human-readable label a lost anchor reports: the stored hint when the anchor
  * carries one (a `dom` anchor's `hint`, e.g. "Send button in After stage" — see
- * SPEC_ANCHORING.md's ticket 04, "what it was about... is what survives when the
+ * DESIGN.md's ticket 04, "what it was about... is what survives when the
  * element does not"), else the ref (an `md`/`mermaid` anchor's ref is already a
  * human-legible slug/node-id), else `fallback`. Never undefined, so a malformed or
  * hand-edited anchor still names *something*. */
@@ -724,7 +724,7 @@ function stageRootForBlock(blockCache, block) {
  * attempt returns false immediately for an absent ref; a `block` anchor is always
  * resolved (the block itself, if present). An anchor that no longer exists reports which anchor it lost
  * rather than vanishing (see PROTOCOL.md "Anchors at headings and list items" and
- * "Click-to-comment reaches individual elements" in SPEC_BOARD.md — the same
+ * "Click-to-comment reaches individual elements" in DESIGN.md — the same
  * archived-board guarantee extends from markdown anchors to element-level ones).
  * `lost` always falls back to naming *something* (lostLabel above) rather than
  * coming back undefined, so a malformed/hand-edited anchor still names what it

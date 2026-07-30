@@ -204,7 +204,7 @@ async function main() {
 
   // --- the local secret -------------------------------------------------------
   //
-  // SPEC_BOARD.md Decisions -> "A loopback Host check, an origin check, and a local
+  // DESIGN.md Decisions -> "A loopback Host check, an origin check, and a local
   // secret". install.sh owns generating it, because it is the one place that runs once
   // per machine and can set the modes before anything is written into the file.
 
@@ -272,7 +272,7 @@ async function main() {
     // still restarts it (the spec's "reloaded by WatchPaths").
     assert.ok(plist.WatchPaths.includes(path.join(repoRoot, 'src')));
     assert.ok(plist.WatchPaths.includes(path.join(repoRoot, 'bin')));
-    // The clone root is deliberately NOT watched: editing SPEC_BOARD.md, a ticket
+    // The clone root is deliberately NOT watched: editing DESIGN.md, a ticket
     // log or a findings file would otherwise restart the daemon mid-review,
     // dropping every SSE stream and every held-open wait.
     assert.ok(!plist.WatchPaths.includes(repoRoot), 'the clone root must not be watched');

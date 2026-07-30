@@ -1,4 +1,4 @@
-// Ticket 11 (SPEC_ANCHORING.md), audit V5a: `decodeEntities` used to raise
+// Ticket 11 (DESIGN.md), audit V5a: `decodeEntities` used to raise
 // `RangeError` on an out-of-range numeric entity (`&#1114112;`, one past Unicode's
 // max; `&#x999999999;`, wildly larger), contradicting parseHtmlTree's own "Never
 // throws" contract. The only reachable input is raw `block.html` on an `html`

@@ -1,10 +1,10 @@
-// Ticket 03 (SPEC_ANCHORING.md): comment mode, and one anchoring model over the
+// Ticket 03 (DESIGN.md): comment mode, and one anchoring model over the
 // board's own rendered DOM. Extends the end-to-end DOM stand-in seam ticket 01
 // built and ticket 02 turned green (test/dom-stand-in.mjs, test/check-click.mjs,
 // test/check-click-pin.mjs) rather than adding another unit check over the pure
 // module -- the whole point of this repo's testing strategy is that a check over
 // src/anchor.mjs alone cannot see whether a listener is actually attached to a
-// live document (see SPEC_ANCHORING.md Decisions -> "Criterion 8 runs in a DOM
+// live document (see DESIGN.md Decisions -> "Criterion 8 runs in a DOM
 // stand-in", and its own Testing section).
 //
 // Covers, against the REAL src/ui.mjs client script run in the stand-in:
@@ -23,7 +23,7 @@
 //     is a real assertion on the collected answers, not just "it didn't throw").
 //     Drag-to-rank and text-selection are the two interactions this repo's own
 //     testing docs already carve out as not automatable in a headless DOM
-//     (SPEC_BOARD.md Testing) -- see this file's own note further down for
+//     (DESIGN.md Testing) -- see this file's own note further down for
 //     exactly what is and isn't covered here for that reason.
 //   - criterion 6: the hint for a clicked element names both its own identity and
 //     its containing context -- the concrete "Send button in the after stage"
@@ -258,7 +258,7 @@ check('comment mode off: hovering marks nothing at all (the affordance itself is
 
 // --- criterion 3: comment mode OFF (never touched below) never steals an ------
 // ordinary interaction. Driven end to end through the real client script, not
-// argued -- SPEC_ANCHORING.md's own Testing section and this ticket's
+// argued -- DESIGN.md's own Testing section and this ticket's
 // instructions both call out that an untested claim here is exactly how this
 // spec's own defect shipped twice.
 //
@@ -267,11 +267,11 @@ check('comment mode off: hovering marks nothing at all (the affordance itself is
 // it implements no selection API at all, and 'dragover' (where the actual
 // reordering happens, driven by a live pointer position) is not modelled either --
 // both are pre-existing, documented ceilings of this stand-in, not new gaps this
-// file introduces. SPEC_BOARD.md's Testing section already carves the FULL
+// file introduces. DESIGN.md's Testing section already carves the FULL
 // drag-and-drop gesture out as unautomatable without a real browser for that
 // reason.
 //
-// Ticket 07 follow-up (SPEC_ANCHORING.md, audit finding C5): what IS reachable,
+// Ticket 07 follow-up (DESIGN.md, audit finding C5): what IS reachable,
 // and IS covered a few checks below, is the one thing criterion 3 actually turns
 // on for this widget -- the 'dragstart' handler's own `commentMode ||` guard
 // (src/ui.mjs). This comment used to claim that coverage existed here without any
@@ -522,7 +522,7 @@ check('comment mode: turning it off mid-hover clears an already-applied stage ho
 });
 
 // =================================================================================
-// Ticket 07 (SPEC_ANCHORING.md): every ablation in the audit's V1 table must fail
+// Ticket 07 (DESIGN.md): every ablation in the audit's V1 table must fail
 // a NAMED check. Each block below is written against, and verified red against,
 // the specific line(s) the audit names -- see this ticket's own log/report for the
 // ablation output. Grouped here (rather than a new file) because every one of

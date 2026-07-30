@@ -1,5 +1,5 @@
 // /grill command check: `commands/grill.md` is prose, not code, so this binds
-// only what is mechanically checkable (ticket 09 / SPEC_BOARD.md "`/grill` asks
+// only what is mechanically checkable (ticket 09 / DESIGN.md "`/grill` asks
 // in branch-sized rounds"):
 //
 //   - the file exists and carries no HTML template of its own
@@ -146,7 +146,7 @@ async function main() {
     // ...and the replacement rule has to be positively stated, not merely absent.
     // Widened 2026-07-30 from /branch-sized/ to either phrasing: the command now
     // batches by dependency LAYER (every branch nothing unresolved gates, in one
-    // round) rather than one branch per round. See SPEC_BOARD.md Decisions ->
+    // round) rather than one branch per round. See DESIGN.md Decisions ->
     // "/grill asks in layer-sized rounds".
     assert.match(
       text, /(layer-sized|branch-sized)/i,

@@ -1,4 +1,4 @@
-// Ticket 02 (SPEC_ANCHORING.md): a numbered pin actually lands after the click.
+// Ticket 02 (DESIGN.md): a numbered pin actually lands after the click.
 //
 // test/check-click.mjs (ticket 01) proves the click gesture opens the right
 // comment form with the right anchor filled in, but stops there -- it never
@@ -88,7 +88,7 @@ check('clicking an element, then submitting the opened comment form, draws a num
   assert.equal(pin.classList.contains('pin-lost'), false, 'a freshly-queued comment anchored to the element that was actually clicked must not render as lost');
   assert.ok(String(pin.title || '').indexOf('Send') !== -1, `expected the pin's title to name the clicked element ("Send"), got ${JSON.stringify(pin.title)}`);
 
-  // Ticket 07 (SPEC_ANCHORING.md), audit finding V1: test/dom-stand-in.mjs's
+  // Ticket 07 (DESIGN.md), audit finding V1: test/dom-stand-in.mjs's
   // getBoundingClientRect used to return an unconditional all-zero box, so this
   // check's own name -- "positioned from the real (loaded) stage document" -- was
   // never actually true: the director confirmed that replacing BOTH of

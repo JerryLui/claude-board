@@ -1,4 +1,4 @@
-// Ticket 07 (SPEC_ANCHORING.md), audit finding C3: "the stand-in shares the
+// Ticket 07 (DESIGN.md), audit finding C3: "the stand-in shares the
 // server's parser bugs, so criterion 8 cannot see them." Concretely, the audit
 // measured test/dom-stand-in.mjs's OWN parser disagreeing with src/anchor.mjs's
 // parseHtmlTree -- the module every `dom` anchor is actually RESOLVED against,

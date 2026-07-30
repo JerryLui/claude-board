@@ -1,7 +1,7 @@
 # PROTOCOL — shared contract for `claude-board`
 
 This file is the integration contract every ticket builds against. It is derived from
-`SPEC_BOARD.md` (Decisions → "One block document, two modes") and fixes the details the
+`DESIGN.md` (Decisions → "One block document, two modes") and fixes the details the
 spec leaves elliptical, so that independently-built chunks compose.
 
 **Rules for changing this file:** if a ticket needs a shape that is not here, add it here
@@ -203,11 +203,11 @@ Anchor  = { kind: 'block' }                             // whole block
         | { kind: 'md',      ref, label }               // heading slug + ordinal
         | { kind: 'dom',     ref, hint }                // "N.N.N" child-index path + a composed hint,
                                                          // see below -- applies page-wide, not just to
-                                                         // an html stage (SPEC_ANCHORING.md ticket 03)
+                                                         // an html stage (DESIGN.md ticket 03)
         | { kind: 'mermaid', ref, domRef, hint }        // node id, plus the same "N.N.N" path + hint
                                                          // every other element-level anchor carries;
                                                          // ref is the fallback the generic domRef/hint
-                                                         // leans on, never the model (SPEC_ANCHORING.md
+                                                         // leans on, never the model (DESIGN.md
                                                          // ticket 05) -- domRef/hint are absent on an
                                                          // anchor minted before that ticket
 ```
@@ -217,7 +217,7 @@ that heading: `acceptance-criteria`, `acceptance-criteria-li4`. Stable while the
 shape is unchanged. An anchor of any kind that no longer resolves at render time is
 reported, not dropped: the comment survives with `resolved: false` and a `lost` field
 naming what it lost (`src/board.mjs`'s `lostLabel`) — the stored `hint` for a `dom` anchor
-or a `mermaid` anchor minted since ticket 05 (SPEC_ANCHORING.md), the bare `ref` for
+or a `mermaid` anchor minted since ticket 05 (DESIGN.md), the bare `ref` for
 everything else, including a `mermaid` anchor minted before that ticket (no `hint` to fall
 back to).
 
@@ -240,7 +240,7 @@ counted as elements. `src/ui.mjs` mints it against the live DOM and `src/anchor.
 resolves it against the snapshot; the two trees have to agree node for node or a live
 element reports lost.
 
-A `dom` anchor's root depends on which block it names (SPEC_ANCHORING.md ticket 03/04):
+A `dom` anchor's root depends on which block it names (DESIGN.md ticket 03/04):
 for an `html` block, root is that stage's sandboxed iframe body, resolved by
 `resolveDomAnchor`; for every other block kind (markdown, code, question, compare, and a
 `mermaid` block's own chrome), root is the anchored block's own `<section
@@ -305,7 +305,7 @@ carries `X-Frame-Options: DENY` and a `frame-ancestors 'none'` CSP.
 
 ### The local secret
 
-Additive, audit 2026-07-28; `SPEC_BOARD.md` Decisions → "A loopback Host check, an origin
+Additive, audit 2026-07-28; `DESIGN.md` Decisions → "A loopback Host check, an origin
 check, and a local secret". The Host check closes the network and the origin check closes
 the browser. Neither can see a **local process**: anything able to open a socket to
 `127.0.0.1:7391` could post its own board naming a `cwd` it picked and read that directory
@@ -422,7 +422,7 @@ which `body.readonly` hides wholesale — so the standalone `file:` archive offe
 
 ### Marking an already-open tab
 
-"Open once, then badge and notify" (SPEC_BOARD.md) splits across two owners. Page side, on a
+"Open once, then badge and notify" (DESIGN.md) splits across two owners. Page side, on a
 `round` push: a pending count in `document.title`, a badge drawn onto a data-URI favicon (canvas,
 no asset file — the page must stay a single self-contained file), and, only when the document is
 hidden or unfocused, a `Notification`. Permission is requested lazily on the first round that

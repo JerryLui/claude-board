@@ -1,4 +1,4 @@
-// Ticket 06 (SPEC_ANCHORING.md), criterion 5: "An archived board opened from disk
+// Ticket 06 (DESIGN.md), criterion 5: "An archived board opened from disk
 // with no daemon shows every pin in the right place, read-only, and invites no
 // gesture it cannot honour."
 //
@@ -24,7 +24,7 @@
 // pattern -- so every ref/hint this file submits is a genuine one the client would
 // actually produce, not a hand-guessed index chain. Those, plus one deliberately
 // stale anchor (so "every pin in the right place" is checked against a LOST one
-// too, per SPEC_ANCHORING.md's "a lost anchor still reports what it lost"), are
+// too, per DESIGN.md's "a lost anchor still reports what it lost"), are
 // submitted server-side with no HTTP involved (src/board.mjs's own applySubmit --
 // there is no daemon in this file, on purpose), then re-rendered, written to disk,
 // and read back for the actual archive pass.
@@ -84,7 +84,7 @@ function enableCommentMode(document) {
  * ticket-04 `captureAnchor`, reused so every ref/hint fed into applySubmit below is
  * one the real gesture actually produced.
  *
- * Ticket 07 (SPEC_ANCHORING.md), audit finding V2: this used to just click and
+ * Ticket 07 (DESIGN.md), audit finding V2: this used to just click and
  * read the form back, never closing it first. Six of the eight captures below
  * SHARE a block (three on the markdown block, two on the html-stage blocks), so
  * they share one <form> element across calls -- a click that does NOTHING (the
@@ -217,7 +217,7 @@ for (const p of mintedPairs) {
   assert.ok(p.anchor.ref, `setup failure: empty ref minted for block ${p.blockId}`);
 }
 
-// Ticket 07 (SPEC_ANCHORING.md), audit finding V2, second guard: every capture
+// Ticket 07 (DESIGN.md), audit finding V2, second guard: every capture
 // must be genuinely distinct from every other one that shares its block -- three
 // captures share mdBlockId's form (prose/list-item/table-cell) and two share the
 // html-stage blocks' forms (through their own iframes). Two captures on the same
@@ -269,7 +269,7 @@ check('setup: the file actually landed on disk at a real path', () => {
   assert.equal(fileContents.length > 0, true);
 });
 
-// The whole archive/live split is one byte-identical page (SPEC_BOARD.md "JSON is
+// The whole archive/live split is one byte-identical page (DESIGN.md "JSON is
 // truth, the page is a projection", proven at the daemon level by
 // test/check-http.mjs's own "served page / pages/ file / fresh render" check): the
 // SAME markup src/render.mjs emits for a live GET is what gets written to disk and

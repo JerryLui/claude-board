@@ -1,5 +1,5 @@
 // The local secret: the one credential that tells the session's own shim from any
-// other local process. See SPEC_BOARD.md Decisions -> "A loopback Host check, an
+// other local process. See DESIGN.md Decisions -> "A loopback Host check, an
 // origin check, and a local secret", and PROTOCOL.md "The local secret".
 //
 // Why this exists at all. The loopback Host check and the origin check between them
@@ -10,7 +10,7 @@
 // would otherwise gate ~/Documents, ~/Desktop and ~/Downloads per application. The
 // secret is what a caller has to hold to make the daemon resolve a file for it.
 //
-// It is a FILE, not a URL parameter: SPEC_BOARD.md rejects tokens in URLs because
+// It is a FILE, not a URL parameter: DESIGN.md rejects tokens in URLs because
 // bookmarks and stale links carry them around. A 0600 file read by the shim and sent
 // in a request header has neither problem.
 //

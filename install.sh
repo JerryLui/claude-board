@@ -1,7 +1,7 @@
 #!/bin/bash
 # install.sh — one idempotent command from a fresh clone of claude-board to a
 # running service. Owns the two things that sit outside this repository (see
-# SPEC_BOARD.md Decisions -> "One install command, because a clone is not
+# DESIGN.md Decisions -> "One install command, because a clone is not
 # enough"):
 #
 #   1. MCP registration (Claude Code owns the config): `claude mcp add
@@ -9,7 +9,7 @@
 #   2. The launchd plist in ~/Library/LaunchAgents, running THIS clone's
 #      bin/daemon.mjs (PROTOCOL.md "Layout"), with RunAtLoad + KeepAlive +
 #      WatchPaths on the repo so config sync landing new code restarts the
-#      daemon (SPEC_BOARD.md Decisions -> "Always on under launchd, reloaded
+#      daemon (DESIGN.md Decisions -> "Always on under launchd, reloaded
 #      by WatchPaths").
 #
 # Running this script again on a machine that already has the service must
@@ -106,7 +106,7 @@ fi
 
 # --- 0. the local secret ----------------------------------------------------
 # The credential that tells this machine's shim from any other local process
-# (SPEC_BOARD.md Decisions -> "A loopback Host check, an origin check, and a
+# (DESIGN.md Decisions -> "A loopback Host check, an origin check, and a
 # local secret"). The daemon requires it on every write and on anything that
 # resolves a file; bin/mcp.mjs reads it at startup and sends it.
 #
@@ -155,7 +155,7 @@ xml_escape() {
 }
 
 # WatchPaths watches the code, not the clone. Pointed at $REPO_DIR it also fires on
-# every edit to SPEC_BOARD.md, TICKETS_BOARD.md, findings/ and any scratch file, each
+# every edit to DESIGN.md, a findings file and any scratch file, each
 # one costing a daemon restart — and a restart mid-review drops every SSE stream and
 # every held-open wait, which then has to reattach. src/ and bin/ are the only paths
 # whose contents change what the daemon runs.
