@@ -107,8 +107,21 @@ export function activeWaitCount() {
   return activeWaits;
 }
 
-/** True iff the Host header names loopback: 127.0.0.1, ::1, or localhost. Anything
- * else (including a missing header) is refused — this is what closes DNS rebinding. */
+/** A subdomain of the reserved `.localhost` TLD, e.g. `board.localhost`. Kept strict
+ * (letters, digits, dots, dashes only) because the Host header is reflected verbatim
+ * into boardUrl() and thence into `open`. */
+const LOCALHOST_SUBDOMAIN = /^[a-z0-9][a-z0-9.-]*\.localhost$/;
+
+/** True iff the Host header names loopback: 127.0.0.1, ::1, localhost, or a subdomain
+ * of localhost. Anything else (including a missing header) is refused — this is what
+ * closes DNS rebinding.
+ *
+ * `.localhost` is safe to admit alongside the bare name: RFC 6761 reserves the TLD and
+ * it is never delegated in the public root, so an attacker cannot own a name under it
+ * and cannot point one at this daemon. Chrome and Firefox resolve `*.localhost` to
+ * loopback in the browser; Safari defers to the system resolver, which needs an
+ * /etc/hosts line. Either way the mapping is the user's, not a remote DNS server's,
+ * which is exactly what rebinding needs and cannot get here. */
 export function isLoopbackHost(hostHeader) {
   if (!hostHeader) return false;
   const h = hostHeader.trim().toLowerCase(); // Host is case-insensitive: LOCALHOST is localhost
@@ -130,7 +143,7 @@ export function isLoopbackHost(hostHeader) {
     if (idx !== -1 && !/^\d+$/.test(h.slice(idx + 1))) return false;
     name = idx === -1 ? h : h.slice(0, idx);
   }
-  return name === '127.0.0.1' || name === '::1' || name === 'localhost';
+  return name === '127.0.0.1' || name === '::1' || name === 'localhost' || LOCALHOST_SUBDOMAIN.test(name);
 }
 
 /** True iff this non-GET request is same-origin. The loopback Host check alone does

@@ -1901,6 +1901,22 @@ async function main() {
     }
   });
 
+  await check('a subdomain of the reserved .localhost TLD is loopback; a name that merely ends in the letters is not', async () => {
+    // `.localhost` is never delegated in the public root, so the mapping behind one of
+    // these is always the user's own (browser short-circuit or /etc/hosts) and never an
+    // attacker's DNS -- which is what makes it admissible where evil.example is not.
+    for (const host of [`board.localhost:${port}`, 'board.localhost', `BOARD.LOCALHOST:${port}`, `a.b.localhost:${port}`]) {
+      const r = await rawRequest(port, 'GET', '/api/health', host);
+      assert.equal(r.status, 200, `Host "${host}" is under .localhost and must be accepted`);
+    }
+    // (Ablation: a bare endsWith('localhost') accepts the first three of these, and
+    // `notlocalhost` IS an ownable public name.)
+    for (const host of ['notlocalhost', 'evil-localhost', 'localhost.evil.example', '.localhost', `board.localhost@evil.example:${port}`]) {
+      const r = await rawRequest(port, 'GET', '/api/health', host);
+      assert.equal(r.status, 403, `Host "${host}" must not pass as loopback`);
+    }
+  });
+
   await check('every HTML response refuses to be framed and carries a CSP', async () => {
     // The index sorts live-first then newest, so a board posted through a CSRF hole is
     // deterministically the top row, with an attacker-chosen cwd as its label -- one
