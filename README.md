@@ -138,9 +138,17 @@ npm run check      # 17 checks, node only, no browser and no network
 Every check is also runnable alone, and each runs under a deadline in its own process
 group, so a check that hangs fails by name instead of stalling the run.
 
-One gotcha: the launchd job watches `src/` and `bin/`, so editing either restarts the
-daemon — which drops in-flight event streams and any board mid-review. More traps in
-[QUIRKS.md](QUIRKS.md).
+One gotcha worth knowing before you debug anything: editing `src/` or `bin/` does **not**
+reload the service. The plist carries `WatchPaths` on both directories, but it also
+carries `KeepAlive`, and `WatchPaths` only ever *starts* a job that is not running — so
+the watch is inert and a stale daemon looks exactly like a working one. Restart it
+yourself after a code change:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/claude-board
+```
+
+More traps in [QUIRKS.md](QUIRKS.md).
 
 The interactive layer — drag-to-rank, click-to-comment, notifications, live hydration
 — is verified by hand, not by the suite. That is a deliberate limit, not an oversight:

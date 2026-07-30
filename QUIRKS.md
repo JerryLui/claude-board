@@ -46,6 +46,27 @@ More generally: a mock of someone else's renderer is an assumption about their o
 and it is worth exactly as much as the last time someone checked it against the real
 thing.
 
+## `WatchPaths` does not restart the daemon, and never has
+
+The plist carries both `KeepAlive` true and `WatchPaths` on `src/` and `bin/`, and the
+second one is inert. `WatchPaths` tells launchd to *start* a job when a watched path
+changes; a job that is already running — which `KeepAlive` guarantees — is simply not
+started again. Measured 2026-07-30: the daemon had 3h40m of uptime across an in-place
+edit to `src/store.mjs`, and neither creating nor deleting a file under `src/` moved its
+pid either. So editing code does **not** reload the service, and a stale daemon is
+indistinguishable from a working one until you read the page it serves.
+
+After any edit under `src/` or `bin/`, restart it yourself:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/claude-board
+```
+
+`test/check-install.mjs` asserts the plist *contains* those `WatchPaths` entries, which
+is true and beside the point. That is the fourth recorded instance on this project of a
+green check sitting on top of a dead mechanism, and the second where the check asserted
+structure while the behaviour was absent.
+
 ## Driving the real page in real Chrome
 
 The check suite's DOM stand-in cannot see this class of defect, by construction. To

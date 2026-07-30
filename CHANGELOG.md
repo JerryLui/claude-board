@@ -21,6 +21,9 @@ this project does not yet follow semantic versioning, because nothing has been r
   before release.
 - No uninstall script. Manual steps are in the README.
 - `install.sh` does not install the `/grill` command file; copy it by hand.
+- The plist's `WatchPaths` is inert: it coexists with `KeepAlive`, and launchd only uses
+  a watch to *start* a job that is not running. Editing `src/` or `bin/` therefore does
+  not reload the daemon — `launchctl kickstart -k gui/$(id -u)/claude-board` does.
 
 ## 0.1.0 — unreleased
 
