@@ -107,11 +107,11 @@ const MODE_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" s
 
 /** The back-to-index control's icon: a plain left arrow, distinct from the
  * comment/mode glyphs above so three chrome controls never read as the same
- * affordance. Ticket 04 (SPEC_POLISH.md criterion 4): `.board-head` otherwise
+ * affordance. Ticket 04 (DESIGN.md polish criterion 4): `.board-head` otherwise
  * has no way back to `/` once a reviewer is on a board page. */
 const BACK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="M11 18l-6-6 6-6"/></svg>';
 
-/** The diagram-expand control's icon (SPEC_POLISH.md ticket 05): four arrowheads
+/** The diagram-expand control's icon (DESIGN.md polish ticket 05): four arrowheads
  * pointing out of the corners, the standard "open this full size" glyph and
  * distinct from the three above. Inline SVG for the same reason every other icon
  * here is — the standalone archive has no network to fetch anything from. */
@@ -121,7 +121,7 @@ function commentModeToggle() {
   return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false">${MODE_ICON}<span class="mode-toggle-label">Comment mode: off</span></button>`;
 }
 
-/** SPEC_POLISH.md ticket 05, criterion 10: the explicit control that opens a
+/** DESIGN.md polish ticket 05, criterion 10: the explicit control that opens a
  * diagram in the full-viewport lens. Explicit, and never the diagram itself —
  * "the click gesture on a diagram keeps its current meaning in both modes" (the
  * spec's own Decision), so clicking a node still means "comment on this node"
@@ -685,7 +685,7 @@ export function stageAgentScript() {
   return `<script>(function () {
   var CB = 'cb-stage';
   var HOVER_CLASS = 'cb-anchor-hover';
-  // SPEC_POLISH.md ticket 02, criterion 12: applied instead of HOVER_CLASS to
+  // DESIGN.md polish ticket 02, criterion 12: applied instead of HOVER_CLASS to
   // an element whose own ref is already in 'sentRefs' below -- the stage-side
   // half of the same de-affordance src/ui.mjs applies page-side via its own
   // .cb-anchor-sent (same class name, by the convention QUIRKS.md "Two
@@ -733,7 +733,7 @@ export function stageAgentScript() {
     styleInjected = true;
     try {
       var style = document.createElement('style');
-      // SPEC_POLISH.md ticket 02 criterion 12: a SENT_CLASS rule alongside the
+      // DESIGN.md polish ticket 02 criterion 12: a SENT_CLASS rule alongside the
       // ordinary hover one. The hover rule's colour is STAGE_ACCENT_HEX, kept in
       // step with src/styles.mjs by hand (QUIRKS.md "Two stylesheets, one
       // palette") because this stylesheet cannot reach the page's tokens -- one
@@ -811,7 +811,7 @@ export function stageAgentScript() {
     if (!data || typeof data !== 'object' || data.cb !== CB || typeof data.type !== 'string') return;
     if (data.type === 'mode') {
       commentMode = !!data.commentMode;
-      // SPEC_POLISH.md ticket 02: 'sentRefs' widens this message (still 'mode',
+      // DESIGN.md polish ticket 02: 'sentRefs' widens this message (still 'mode',
       // not a new type -- sent-ness is exactly the kind of fact that matters
       // precisely when mode changes). Shape-checked like every other field this
       // channel carries: an absent or malformed list leaves 'sentRefs'

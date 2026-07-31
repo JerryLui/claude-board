@@ -283,7 +283,7 @@ svg { flex: none; }
 .board-head-title { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .board-head h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.015em; }
 .board-head .meta { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; margin-top: 2px; }
-/* ticket 04 (SPEC_POLISH.md criterion 4): the one way back to the thread
+/* ticket 04 (DESIGN.md polish criterion 4): the one way back to the thread
    index. Absent under body.readonly (criterion 14) -- a standalone file://
    archive has no daemon behind "/" to navigate to -- same idiom as
    .mode-toggle/.send-bar just above/below: kept in the markup (one
@@ -514,7 +514,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .comment-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-/* ticket 05 (SPEC_POLISH.md) criterion 10: the diagram's expand control. Same
+/* polish ticket 05 (DESIGN.md) criterion 10: the diagram's expand control. Same
    pill chrome as the comment button beside it in the kicker, written out rather
    than folded into the selector above so neither rule's exact text moves (several
    rules in this file are asserted by their text -- QUIRKS.md). It deliberately
@@ -552,13 +552,13 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .comment-item[data-anchor-kind="md"] { cursor: pointer; }
 .comment-item[data-anchor-kind="md"]:hover { border-color: var(--accent); background: var(--panel-3); }
 /* queued locally, not yet sent -- matches the hollow .pin-pending badge. Ticket
-   02 (SPEC_POLISH.md): only a PENDING entry ever carries a delete control
+   02 (DESIGN.md polish): only a PENDING entry ever carries a delete control
    (criterion 3: a sent comment has none), so only it reserves gutter space
    for one. */
 .comment-item.comment-pending { border-style: dashed; border-color: var(--accent); border-left-color: var(--accent); padding-right: 30px; }
 .comment-item .comment-anchor { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-right: 8px; }
 .comment-item .comment-lost { color: var(--critical); }
-/* ticket 02 (SPEC_POLISH.md) criterion 2: the "x" on a queued comment's own
+/* polish ticket 02 (DESIGN.md) criterion 2: the "x" on a queued comment's own
    list entry -- removes that one entry, its hollow pin, and (src/ui.mjs's
    refreshPendingCommentItems) renumbers whatever queued comments are left so
    the sequence stays contiguous. */
@@ -592,7 +592,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .mermaid-block .missing { color: var(--warning); font-size: 12.5px; }
 
 /* code: a file plus a line range or section, no syntax highlighting. Ticket 03
- * (SPEC_POLISH.md): a reference can run to hundreds of lines and previously had
+ * (DESIGN.md polish): a reference can run to hundreds of lines and previously had
  * no height cap at all, pushing everything below it off-screen -- capped at
  * ~480px (roughly 24 lines at this font-size/line-height) with overflow: auto
  * and resize: vertical. NOT quite the idiom '.html-stage' below uses, despite
@@ -621,7 +621,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
  * badges inside it once the element they point at is resolvable in the live DOM. */
 .stage-wrap { position: relative; }
 .pin-layer { position: absolute; inset: 0; pointer-events: none; }
-/* Ticket 03 (SPEC_POLISH.md): a capped code block's pin-layer is the same div as
+/* Polish ticket 03 (DESIGN.md): a capped code block's pin-layer is the same div as
  * every other block's, but src/ui.mjs resizes it (inline style) to exactly the
  * <pre>'s own box rather than leaving it at inset: 0 over the whole section --
  * overflow: hidden here is what turns "a pin computed outside that box" into
@@ -652,7 +652,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 body.readonly .stage-hint { display: none; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g')} { cursor: pointer; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
-/* ticket 02 (SPEC_POLISH.md) criterion 12: a node that already carries a SENT
+/* polish ticket 02 (DESIGN.md) criterion 12: a node that already carries a SENT
    comment is no longer a comment target at all while comment mode is on --
    de-affordanced (not-allowed cursor, no hover outline) rather than marked
    permanently, riding this same body.comment-mode class rather than a
@@ -663,7 +663,7 @@ ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hov
 body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent { cursor: not-allowed; }
 body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { outline: none; }
 
-/* --- the diagram lens (ticket 05, SPEC_POLISH.md criteria 10 and 11) ----------
+/* --- the diagram lens (ticket 05, DESIGN.md polish criteria 10 and 11) ----------
    A full-viewport <dialog> src/ui.mjs builds once, lazily, and reuses: drag pans,
    scroll zooms, fit and 1:1 reset the view. Modelled on /explain's lens
    (~/.claude/skills/explain/template.html), with two differences that are the
@@ -732,7 +732,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
    deliberately does not reach in there -- see QUIRKS.md "two stylesheets, one
    palette". */
 .cb-anchor-hover { outline: 2px solid var(--accent); outline-offset: 2px; cursor: pointer; }
-/* ticket 02 (SPEC_POLISH.md) criterion 12: applied INSTEAD OF .cb-anchor-hover
+/* polish ticket 02 (DESIGN.md) criterion 12: applied INSTEAD OF .cb-anchor-hover
    the moment an element already carries a sent comment -- no outline, and a
    cursor that says clicking here does nothing.
 

@@ -701,9 +701,9 @@ await check('mermaid (H4): the OS preference flipping is correctly ignored while
 });
 
 // =================================================================================
-// 8. SPEC_POLISH.md criterion 15: an OPEN diagram lens rethemes with the page.
+// 8. DESIGN.md polish criterion 15: an OPEN diagram lens rethemes with the page.
 //
-//    The lens (SPEC_POLISH.md ticket 05) holds a cloneNode(true) of the inline
+//    The lens (DESIGN.md polish ticket 05) holds a cloneNode(true) of the inline
 //    svg, and a redraw REPLACES that svg with a new element. The two features
 //    were built on separate branches, so nothing connected them: measured in
 //    Chrome 2026-07-31, switching to Light with the lens open left the lens's
@@ -760,7 +760,7 @@ await check('the lens: a theme switch while the lens is OPEN re-clones the redra
   const lensSvgs = document.querySelectorAll('.diagram-lens .lens-canvas svg');
   assert.equal(lensSvgs.length, 1, `the lens canvas must hold exactly one diagram after a retheme, got ${lensSvgs.length}`);
   assert.equal(lensSvgs[0].getAttribute('id'), inlineAfter.getAttribute('id'),
-    'the open lens is still showing a clone of the svg the redraw replaced -- it must be re-cloned from the freshly redrawn one, or the reviewer sees a dark diagram inside light chrome (SPEC_POLISH.md criterion 15)');
+    'the open lens is still showing a clone of the svg the redraw replaced -- it must be re-cloned from the freshly redrawn one, or the reviewer sees a dark diagram inside light chrome (DESIGN.md polish criterion 15)');
 
   assert.equal(canvas.style.transform, transformBefore,
     'the reviewer\'s pan/zoom must survive a retheme they did not ask for -- the source is unchanged, so the layout is unchanged and there is nothing to refit');

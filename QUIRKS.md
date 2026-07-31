@@ -121,7 +121,7 @@ throwaway under `/tmp` is the right home. Two things that cost time:
 
 Any drag-to-pan surface will reach for `element.setPointerCapture(ev.pointerId)` in
 its `pointerdown` handler — `/explain`'s lens does exactly that, and this repo's
-diagram lens (SPEC_POLISH.md ticket 05) copied it. While a capture is active Chrome
+diagram lens (DESIGN.md polish ticket 05) copied it. While a capture is active Chrome
 retargets **everything that follows** at the capture element: `pointerup`, `mouseup`
 and, crucially, the `click` the pair produces. So a click handler on that same
 surface sees `ev.target === theSurface`, not the thing under the pointer, and any
@@ -149,7 +149,7 @@ API whose whole job is reporting real layout is either absent or permanently zer
 different consequences follow from that, worth telling apart.
 
 - **`IntersectionObserver` is not defined at all.** `setupRoundObserver` (`src/ui.mjs`,
-  the round badge's position-tracking half, SPEC_POLISH.md ticket 04) guards on
+  the round badge's position-tracking half, DESIGN.md polish ticket 04) guards on
   `typeof IntersectionObserver !== 'function'` and returns immediately when it is
   missing -- by design, so the stand-in does not throw, but it also means the half of
   the round badge that decides which round number to show as you scroll runs under no
@@ -198,7 +198,7 @@ fetch-dependent assertion first, or give it its own browser.
 
 ## Criterion 12's html-stage half is checked by reading its source, not by running it
 
-`test/check-pure.mjs`'s check on `stageAgentScript()` (SPEC_POLISH.md ticket 02,
+`test/check-pure.mjs`'s check on `stageAgentScript()` (DESIGN.md polish ticket 02,
 "a SENT element is de-affordanced on hover, in the html stage too") extracts the
 client script as a string and asserts against it with regexes: that `SENT_CLASS` is
 declared once, that the hover handler's body contains a check against `sentRefs`, that
@@ -284,7 +284,7 @@ dropped `allow-same-origin` from the iframe and moved the hover rule from
 stage-side agent injected into every html block's `srcdoc`. The hex lives there
 now; the "update by hand" trap is unchanged, only the address moved.
 
-SPEC_POLISH.md ticket 02 added a second stage-side rule next to that one:
+DESIGN.md polish ticket 02 added a second stage-side rule next to that one:
 `.cb-anchor-sent` (`cursor: not-allowed`, no outline at all), for an element that
 already carries a *sent* comment — no hex to keep in step this time, just a
 `cursor` value, but it is hand-maintained in the same sense: `stageAgentScript`
@@ -312,7 +312,7 @@ holds nothing of ours. Its light values are hand-copied from the LIGHT palette a
 `test/check-pure.mjs` asserts each against the real token, so a palette change
 fails there rather than quietly leaving this page on the old colours.
 
-SPEC_POLISH.md ticket 05 added no third place: the diagram lens's own chrome is
+DESIGN.md polish ticket 05 added no third place: the diagram lens's own chrome is
 written entirely against `:root`'s tokens (no hex anywhere in `.diagram-lens` and
 friends), and the diagram *inside* it is a `cloneNode(true)` of the already-rendered
 SVG, so it simply inherits whatever mermaid's `themeVariables` produced.

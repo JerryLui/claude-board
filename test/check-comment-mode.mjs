@@ -713,7 +713,7 @@ check('comment mode: clicking the html-stage iframe element itself (the outer-do
     'clicking the iframe element itself must not ALSO open a page-scoped dom-anchor form via the generic page-wide listener');
 });
 
-// --- the markdown anchor button (SPEC_POLISH.md criteria 1 and 12) -----------
+// --- the markdown anchor button (DESIGN.md polish criteria 1 and 12) -----------
 //
 // `.comment-btn[data-anchor-kind="md"]` -- the inline control injectAnchorButtons
 // (src/render.mjs) puts after every markdown heading and list item -- is the ONLY

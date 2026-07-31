@@ -362,7 +362,7 @@ check('a round going sent over SSE (\'submitted\') leaves the badge total unchan
   assert.equal(badge.textContent, 'round 1 of 2', 'a submit never changes board.rounds.length, so M is unchanged');
 });
 
-// --- the code cap's once-only marker (SPEC_POLISH.md, audit finding D1) -------
+// --- the code cap's once-only marker (DESIGN.md polish, audit finding D1) -------
 //
 // Same family as every check above it, and the same push paths: something that
 // runs during `wireRoot(wrap)`/`wireRoot(frag)` sees a DETACHED subtree.

@@ -982,7 +982,7 @@ export function resolveMermaidAnchor(sectionHtml, source, anchor) {
   return resolveMermaidAnchorAtRoot(sectionRootFrom(sectionHtml), source, anchor);
 }
 
-// --- ticket 02 (SPEC_POLISH.md): the pending-comment queue, pure -------------
+// --- polish ticket 02 (DESIGN.md): the pending-comment queue, pure -------------
 //
 // `pendingComments` itself (an array of `{ id, blockId, anchor, text }`) lives
 // only in src/ui.mjs's page-lifetime state -- there is no server shape for it,

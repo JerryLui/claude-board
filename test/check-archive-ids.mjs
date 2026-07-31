@@ -34,7 +34,7 @@
 // `'file:'` -- never a hand-set `readonly` flag and never a hand-summary of
 // what the scripts do.
 //
-// EXTENDED 2026-07-31 (SPEC_POLISH.md, post-merge): that audit swept the files
+// EXTENDED 2026-07-31 (DESIGN.md polish, post-merge): that audit swept the files
 // as they stood on `direct/theme`. The polish batch landed seven MORE
 // id-by-blockId lookups it never saw -- `comment-list-<blockId>` (the queued
 // comment list), a second `comment-form-<blockId>` (the html-stage message
@@ -124,7 +124,7 @@ const board = createBoard({
         '',
         '## Round badge',
         '',
-        'SPEC_POLISH.md ticket 04 promoted the real one from a <div> to a <button>.',
+        'DESIGN.md polish ticket 04 promoted the real one from a <div> to a <button>.',
         '',
         `## Comment list ${MD_ID}`,
         '',

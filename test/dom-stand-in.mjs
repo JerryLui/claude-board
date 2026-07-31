@@ -8,7 +8,7 @@
 // touches while wiring an html-stage iframe, handling a click inside it, and (for
 // ticket 02's pin check) queueing the comment that click opens a form for --
 // element/attribute/classList/className/style/dataset plumbing, createTextNode,
-// cloneNode (ticket 05 of SPEC_POLISH.md -- the diagram lens clones an SVG, and
+// cloneNode (polish ticket 05 (DESIGN.md) -- the diagram lens clones an SVG, and
 // the duplicate ids that produces are the whole point of the trap it navigates),
 // innerHTML (ticket 04 -- a real setter, parsing the assigned markup with this
 // file's own parseNodes, not a no-op; see Element's own comment for why that
@@ -21,7 +21,7 @@
 // small CSS-selector subset (tag, .class, #id, [attr], [attr="value"],
 // [attr^="value"], :not(), comma lists and descendant combinators -- no >, +, ~
 // or nth-child, none of which ui.mjs uses), bubbling addEventListener/
-// dispatchEvent, `clientHeight`/`scrollHeight` (SPEC_POLISH.md finding D1 -- a
+// dispatchEvent, `clientHeight`/`scrollHeight` (DESIGN.md polish finding D1 -- a
 // deliberately minimal model: 0 when the node is not in a document, and
 // otherwise whatever the fixture declared; see Element's own comment for why
 // that is one true statement about the browser rather than the beginning of a
@@ -408,7 +408,7 @@ function searchDescendants(root, selectorText) {
 // omission rather than a stub that would have to guess at a shape nothing needs
 // yet.
 
-/** `props` (SPEC_POLISH.md, audit finding D5) carries whatever else the handler
+/** `props` (DESIGN.md polish, audit finding D5) carries whatever else the handler
  * under test reads off the event -- in practice the pointer fields
  * (`clientX`/`clientY`/`pointerId`/`button`) the diagram lens's pan gesture
  * needs. Copied on verbatim rather than declared as named parameters, so this
@@ -942,7 +942,7 @@ export class Element extends EventTarget {
   }
   // --- box metrics: exactly one true statement, deliberately not a layout model -
   //
-  // SPEC_POLISH.md audit finding D1 turns on ONE fact about the browser, and it
+  // DESIGN.md polish audit, finding D1 turns on ONE fact about the browser, and it
   // is not a fact about layout: a node that is not in a document has no box, so
   // `clientHeight` and `scrollHeight` are both 0 no matter what it contains.
   // Every push path in src/ui.mjs wires its subtree while it is still DETACHED
@@ -1070,7 +1070,7 @@ export class Element extends EventTarget {
     return '<' + tag + attrs + '>' + inner + '</' + tag + '>';
   }
   appendChild(node) { node.parentElement = this; this.childNodes.push(node); return node; }
-  // SPEC_POLISH.md ticket 05: the diagram lens clones the rendered mermaid SVG
+  // DESIGN.md polish ticket 05: the diagram lens clones the rendered mermaid SVG
   // into its own canvas (src/ui.mjs's lensOpen), which is what puts TWO elements
   // carrying each mermaid node id in the document at once -- the duplicate-id
   // trap that ticket exists to get right. Previously absent here, so a check

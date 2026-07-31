@@ -212,7 +212,7 @@ export const ui = `
   // land on" is not.
   var composeHint = ${composeHint.toString()};
 
-  // Ticket 02 (SPEC_POLISH.md): the two pure functions its own log calls out
+  // Polish ticket 02 (DESIGN.md): the two pure functions its own log calls out
   // for extraction, spliced in the same way and for the same reason as
   // composeHint just above -- src/anchor.mjs is the module test/check-pure.mjs
   // imports and checks directly, and this is the exact same code, not a
@@ -248,7 +248,7 @@ export const ui = `
   // unless actually disabled. Belt and suspenders — every input-capable element is
   // hard-disabled here, on top of every handler's own readonly guard.
   //
-  // One deliberate exception (SPEC_POLISH.md ticket 05): the diagram's expand
+  // One deliberate exception (DESIGN.md polish ticket 05): the diagram's expand
   // control. 'The lens is view-only under body.readonly. Pan and zoom work in a
   // standalone archive (pure JS, no network, consistent with the archive's
   // guarantee); the comment gesture inside it is gated exactly like every other
@@ -292,7 +292,7 @@ export const ui = `
   // stored attribute is just the empty string, harmless since the submit
   // handler below only reads it for that one kind.
   //
-  // editing (SPEC_POLISH.md ticket 02, criterion 1) is the existing
+  // editing (DESIGN.md polish ticket 02, criterion 1) is the existing
   // pendingComments entry this same anchor already matched
   // (findPendingCommentForAnchor), found by the caller -- never re-derived
   // here. When present, the form is stamped with the entry's own id and the
@@ -401,7 +401,7 @@ export const ui = `
     return (board.comments || []).filter(function (c) { return c && c.resolved !== false; });
   }
 
-  // SPEC_POLISH.md ticket 02, criterion 12: does blockId+anchor already carry a
+  // DESIGN.md polish ticket 02, criterion 12: does blockId+anchor already carry a
   // SENT comment -- board.comments, never pendingComments. Reuses
   // findPendingCommentForAnchor's own kind+ref match rule against a different
   // array rather than a second copy of it (see that function's own comment,
@@ -417,7 +417,7 @@ export const ui = `
     return !!findPendingCommentForAnchor(liveSentComments(), blockId, anchor);
   }
 
-  // SPEC_POLISH.md ticket 02, criterion 12 (html-stage half): the dom refs
+  // DESIGN.md polish ticket 02, criterion 12 (html-stage half): the dom refs
   // already carrying a SENT comment on blockId, in the ref-only shape the
   // stage's own postMessage 'mode' message carries (below) -- the parent is
   // what holds board.comments, and the stage's isolation (ticket 10: no
@@ -670,7 +670,7 @@ export const ui = `
   }
 
   /** Build one queued comment's '.comment-item.comment-pending' list entry,
-   * numbered 'n' -- SPEC_POLISH.md ticket 02 criteria 2/3: it carries a delete
+   * numbered 'n' -- DESIGN.md polish ticket 02 criteria 2/3: it carries a delete
    * control ('.comment-delete') a SENT comment's server-rendered entry
    * (src/render.mjs's commentArea) never emits, and 'data-pending-id' names
    * exactly which pendingComments entry it is, for the delete listener
@@ -729,7 +729,7 @@ export const ui = `
   function renderDomPins(blockId, stageRoot, layer) {
     layer.innerHTML = '';
     resetStackedOffset(layer);
-    // Ticket 03 (SPEC_POLISH.md): a code block's own <pre> gets a height cap
+    // Polish ticket 03 (DESIGN.md): a code block's own <pre> gets a height cap
     // (src/styles.mjs) and scrolls internally once its content passes it. This
     // layer otherwise spans the WHOLE section -- fine for markdown/compare/
     // question, whose content never scrolls on its own, but wrong for a capped
@@ -891,7 +891,7 @@ export const ui = `
     // (a fresh round pushed over SSE, say) needs to be told the CURRENT state,
     // not just future toggles -- setCommentMode only ever broadcasts to frames
     // isWiredStage already recognises at the moment it runs. sentRefs travels
-    // in the same message (SPEC_POLISH.md ticket 02, criterion 12): a stage
+    // in the same message (DESIGN.md polish ticket 02, criterion 12): a stage
     // that has just announced itself needs to know which of ITS OWN elements
     // are already off-limits before its first hover, same as it needs to know
     // whether comment mode is even on.
@@ -903,7 +903,7 @@ export const ui = `
     if (readonly || !commentMode) return;
     if (typeof data.ref !== 'string' || !data.ref) return;
     var anchor = { kind: 'dom', ref: data.ref };
-    // SPEC_POLISH.md ticket 02, criterion 12: an element inside this stage
+    // DESIGN.md polish ticket 02, criterion 12: an element inside this stage
     // that already carries a SENT comment is no longer a comment target at
     // all -- clicking it does nothing (the parent never even opens a form),
     // one of the three anchor-minting entry points this criterion has to hold
@@ -1042,7 +1042,7 @@ export const ui = `
   //
   // The live element a stored 'mermaid' anchor points at, or null -- factored out
   // of renderMermaidPins (below) so the LENS's own pin layer (renderLensPins,
-  // ticket 05 of SPEC_POLISH.md) answers the same question through the same
+  // polish ticket 05 (DESIGN.md)) answers the same question through the same
   // precedence instead of a second, drifting copy of it. Every lookup here is
   // scoped to the 'svg'/'section' it is handed and NEVER to 'document': the lens
   // clones the rendered SVG, and a clone carries duplicate element ids, so a
@@ -1092,7 +1092,7 @@ export const ui = `
     });
   }
 
-  // SPEC_POLISH.md ticket 05, criterion 11: "a mermaid node can be commented on
+  // DESIGN.md polish ticket 05, criterion 11: "a mermaid node can be commented on
   // from inside the lens, and that comment is the SAME comment as one minted
   // inline -- same anchor". That is a property of there being exactly ONE minting
   // path, not of two paths happening to agree, so this is it: both the inline
@@ -1126,7 +1126,7 @@ export const ui = `
     var steps = host ? buildSteps(section, host) : null;
     var domRef = (steps && steps.length) ? stepsToPath(steps) : '';
     var hint = host ? buildHint(section, host) : '';
-    // SPEC_POLISH.md ticket 02, criterion 1: a second click on a node that
+    // DESIGN.md polish ticket 02, criterion 1: a second click on a node that
     // already has a QUEUED (unsent) comment reopens and edits it, rather than
     // minting a duplicate -- again, in the lens exactly as inline.
     openCommentForm(blockId, 'mermaid', ref, hint, domRef, findPendingCommentForAnchor(pendingComments, blockId, anchor));
@@ -1140,12 +1140,12 @@ export const ui = `
     var layer = section.querySelector('.pin-layer');
     if (layer) renderMermaidPins(blockId, svg || null, layer, section);
     // Before the readonly/no-svg return below, deliberately: the lens is
-    // view-only under body.readonly, not absent (SPEC_POLISH.md ticket 05), so
+    // view-only under body.readonly, not absent (DESIGN.md polish ticket 05), so
     // its expand control has to be wired in an archive too. It removes ITSELF
     // when there is no rendered SVG to show.
     wireDiagramExpand(section, blockId, svg || null);
     if (readonly || !svg) return; // nothing live to click without a rendered diagram
-    // SPEC_POLISH.md ticket 02, criterion 12: stamp every node that already
+    // DESIGN.md polish ticket 02, criterion 12: stamp every node that already
     // carries a SENT comment so the comment-mode hover/cursor rules
     // (src/styles.mjs's .cb-anchor-sent) can de-affordance it -- computed once,
     // here, from board.comments. A node's sent status can only change via a
@@ -1186,7 +1186,7 @@ export const ui = `
     });
   }
 
-  // --- the diagram lens (SPEC_POLISH.md ticket 05) -----------------------------
+  // --- the diagram lens (DESIGN.md polish ticket 05) -----------------------------
   //
   // Criterion 10: "a mermaid block carries an expand control that opens the
   // diagram in a full-viewport lens: drag pans, scroll zooms, with fit and 1:1
@@ -1491,7 +1491,7 @@ export const ui = `
     renderLensPins();
   }
 
-  /** SPEC_POLISH.md criterion 15, the two batches' one real collision: a theme
+  /** DESIGN.md polish criterion 15, the two batches' one real collision: a theme
    * change re-renders every inline diagram (runMermaidRedrawPass, further
    * down), and mermaid does that by REPLACING each 'pre.mermaid''s svg with a
    * brand-new element drawn in the new palette. The lens holds a
@@ -1760,7 +1760,7 @@ export const ui = `
     // child of <body> -- so it needs its own line here rather than being found by
     // the loops above. This is what makes a comment queued from INSIDE the lens
     // get its hollow pin there immediately, exactly as one queued inline does
-    // (SPEC_POLISH.md ticket 05, criterion 11).
+    // (DESIGN.md polish ticket 05, criterion 11).
     renderLensPins();
   }
 
@@ -1773,7 +1773,7 @@ export const ui = `
    * of an already-persisted comment's pin off of, so wireRoot has to do it
    * directly or a board reopened with existing element-level comments would show
    * no pins at all until the next resize. */
-  /** Ticket 03 (SPEC_POLISH.md), criterion 5's "can be dragged taller": measured
+  /** Polish ticket 03 (DESIGN.md), criterion 5's "can be dragged taller": measured
    * in real Chrome (not assumed -- the ticket's own warning that resize interacts
    * with max-height in ways worth checking), CSS max-height clamps the rendered
    * box PERMANENTLY, including against the explicit inline height the browser's
@@ -1814,7 +1814,7 @@ export const ui = `
     qsa('[data-block-id]', root).forEach(function (section) {
       var layer = directChildPinLayer(section);
       if (layer) renderDomPins(section.getAttribute('data-block-id'), section, layer);
-      // Ticket 03 (SPEC_POLISH.md): renderDomPins' code-block branch clips pins
+      // Polish ticket 03 (DESIGN.md): renderDomPins' code-block branch clips pins
       // to the <pre>'s own box, but is otherwise only ever re-run from here --
       // on resize, a comment queued, or Send (refreshPins above), never on the
       // pre's own internal scroll. Wired once per <pre> (a marker on the
@@ -1892,7 +1892,7 @@ export const ui = `
     }
     document.body.classList.toggle('comment-mode', commentMode);
     if (!commentMode) clearAnchorHover();
-    // SPEC_POLISH.md ticket 05: the lens rides the same body class for its own
+    // DESIGN.md polish ticket 05: the lens rides the same body class for its own
     // node hover/cursor affordance (src/styles.mjs's .lens-canvas rules), so the
     // only thing it needs told directly is what its hint line should now say.
     lensUpdateHint();
@@ -1911,7 +1911,7 @@ export const ui = `
     // touched.
     qsa('.html-stage', document).forEach(function (frame) {
       if (!isWiredStage(frame)) return;
-      // SPEC_POLISH.md ticket 02, criterion 12: sentRefs travels alongside
+      // DESIGN.md polish ticket 02, criterion 12: sentRefs travels alongside
       // commentMode on every toggle, not just at 'ready' -- the moment mode
       // turns on is exactly the moment the stage's hover starts mattering, so
       // it needs the current sent-list right then, not whatever it happened
@@ -1964,7 +1964,7 @@ export const ui = `
   // postMessage-minted ref (ticket 10) and mermaid's own node-click ref are
   // untouched; only the wrap's own dead padding stops being anchorable.
   //
-  // .diagram-lens (ticket 05, SPEC_POLISH.md): the lens dialog is a direct child
+  // .diagram-lens (polish ticket 05, DESIGN.md): the lens dialog is a direct child
   // of <body>, so nothing inside it has a [data-block-id] ancestor and this
   // listener would already find no root for a click there -- EXCEPT that the
   // block's own comment form is moved into the lens while it is open, and that
@@ -1994,7 +1994,7 @@ export const ui = `
   function clearAnchorHover() {
     if (anchorHovered && anchorHovered.classList) {
       anchorHovered.classList.remove(STAGE_HOVER_CLASS);
-      // SPEC_POLISH.md ticket 02, criterion 12: the de-affordance class the
+      // DESIGN.md polish ticket 02, criterion 12: the de-affordance class the
       // mouseover handler below applies instead of STAGE_HOVER_CLASS when the
       // hovered element already carries a SENT comment.
       anchorHovered.classList.remove('cb-anchor-sent');
@@ -2012,7 +2012,7 @@ export const ui = `
     // Marks ONLY ev.target (criterion 2: "that element, and not its ancestors") --
     // never walked up, exactly like the iframe's own hover handler above.
     anchorHovered = el;
-    // SPEC_POLISH.md ticket 02, criterion 12: an element that already carries a
+    // DESIGN.md polish ticket 02, criterion 12: an element that already carries a
     // SENT comment is visibly not a comment target -- de-affordanced (no
     // outline, cursor: not-allowed via .cb-anchor-sent in src/styles.mjs)
     // rather than marked with the ordinary "you can anchor here" outline.
@@ -2181,7 +2181,7 @@ export const ui = `
   // it's shared with).
 
   // This loop wires BOTH shapes src/render.mjs's commentButton emits, and they
-  // are not the same gesture (SPEC_POLISH.md criteria 1 and 12, audit findings
+  // are not the same gesture (DESIGN.md polish criteria 1 and 12, audit findings
   // P1/P2):
   //
   //   kind 'block'  the whole-block "Add comment" affordance. Several separate
@@ -2253,7 +2253,7 @@ export const ui = `
         : anchorKind === 'dom' ? { kind: 'dom', ref: anchorRef, hint: anchorLabel }
         : anchorKind === 'mermaid' ? { kind: 'mermaid', ref: anchorRef, domRef: anchorDomRef, hint: anchorLabel }
         : { kind: 'block' };
-      // SPEC_POLISH.md ticket 02 criterion 1: a form reopened on an anchor that
+      // DESIGN.md polish ticket 02 criterion 1: a form reopened on an anchor that
       // already has a comment queued (openCommentForm's 'editing' argument
       // stamped data-editing-id when it did) REPLACES that entry's anchor/text
       // in place rather than pushing a second, independent one. Keyed by the
@@ -2348,7 +2348,7 @@ export const ui = `
   document.addEventListener('click', function (ev) {
     var item = ev.target && ev.target.closest ? ev.target.closest('.comment-item') : null;
     if (!item) return;
-    // SPEC_POLISH.md ticket 02: the delete "x" has its own listener, just below --
+    // DESIGN.md polish ticket 02: the delete "x" has its own listener, just below --
     // it must not ALSO trigger this entry's highlight-on-click behaviour.
     if (ev.target.closest && ev.target.closest('.comment-delete')) return;
     if (item.getAttribute('data-anchor-kind') !== 'md') return;
@@ -2356,7 +2356,7 @@ export const ui = `
   });
 
   // --- delete a queued (unsent) comment from its own list entry -----------------
-  // (SPEC_POLISH.md ticket 02, criterion 2). Delegated from the document, same
+  // (DESIGN.md polish ticket 02, criterion 2). Delegated from the document, same
   // reasoning as the highlight listener just above: a pending entry can appear
   // at any time after hydrate (queued locally, or -- reopened and re-edited --
   // rebuilt by refreshPendingCommentItems), so there is no single wireRoot pass
@@ -2718,7 +2718,7 @@ export const ui = `
     return n;
   }
 
-  // --- round badge: "round N of M" (ticket 04, SPEC_POLISH.md) -----------------
+  // --- round badge: "round N of M" (polish ticket 04, DESIGN.md) -----------------
   //
   // N is the topmost round crossing the sticky header line, via
   // IntersectionObserver with a root margin matching the header -- no scroll
@@ -3126,7 +3126,7 @@ export const ui = `
     var label = section.querySelector('.round-label');
     if (label && label.textContent.indexOf('sent') === -1) label.textContent = label.textContent + ' · sent';
     // The diagram's expand control is exempt, exactly as it is in the readonly
-    // pass at the top of this file, and for the same reason (SPEC_POLISH.md
+    // pass at the top of this file, and for the same reason (DESIGN.md polish
     // ticket 05: "the lens is view-only under body.readonly ... pan and zoom
     // work"). A round collapsing into history makes its ANSWERS immutable; it
     // does not make its diagrams unreadable, and a settled round is precisely
@@ -3162,7 +3162,7 @@ export const ui = `
     });
   }
 
-  // SPEC_POLISH.md ticket 05: close the diagram lens before any of the three
+  // DESIGN.md polish ticket 05: close the diagram lens before any of the three
   // paths below start replacing sections. The lens holds a CLONE of a diagram
   // that is about to stop existing, and -- until it is closed -- the block's own
   // comment form, moved in there and due back at a placeholder in markup this is

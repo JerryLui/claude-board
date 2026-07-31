@@ -386,7 +386,7 @@ await check('rendered, but the node the anchor names is gone from THIS diagram: 
   assert.equal(pins[0].classList.contains('pin-lost'), true, 'a comment naming a node no longer in the diagram must render lost');
 });
 
-// --- SPEC_POLISH.md ticket 05: the diagram lens ------------------------------
+// --- DESIGN.md polish ticket 05: the diagram lens ------------------------------
 //
 // Criterion 10: "a mermaid block carries an expand control that opens the diagram
 // in a full-viewport lens: drag pans, scroll zooms, with fit and 1:1 controls."

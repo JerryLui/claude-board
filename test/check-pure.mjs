@@ -536,7 +536,7 @@ check('composeHint: every block-kind noun the ticket names, and an unknown kind 
   assert.equal(composeHint('x', 'span', true, 'A', 'nonsense-kind'), 'x in A block');
 });
 
-// Ticket 04 / criterion 7-8 (SPEC_POLISH.md): the round badge's label, the same
+// Ticket 04 / criterion 7-8 (DESIGN.md polish): the round badge's label, the same
 // toString()-splicing technique again -- see src/badge.mjs's own file comment for
 // why `round ${rounds.length}` (the old, position-blind label) was a real bug,
 // not a wording nitpick.
@@ -571,7 +571,7 @@ check('badgeLabel: the post-push shape -- M grows, N (the round still in view) d
   assert.equal(badgeLabel(2, 2), 'round 2 of 2');
 });
 
-// Ticket 05 / criterion 10 (SPEC_POLISH.md): the diagram lens's view math, the
+// Ticket 05 / criterion 10 (DESIGN.md polish): the diagram lens's view math, the
 // same toString()-splicing technique a third time -- see src/lens.mjs's own file
 // comment. Each of these is held to an arithmetic invariant rather than to a
 // remembered constant, which is the only way "scroll zooms" can be checked
@@ -2141,7 +2141,7 @@ check('a mermaid node highlights under the cursor, and an html stage gets the sa
   assert.ok(!afterDecl.includes(`'${decl[1]}'`), 'the class name must not be repeated as a literal');
 });
 
-// --- SPEC_POLISH.md ticket 02, criterion 12 (html-stage half) -----------------
+// --- DESIGN.md polish ticket 02, criterion 12 (html-stage half) -----------------
 //
 // An element already carrying a SENT comment must be VISIBLY inert inside the
 // stage too, not just click-inert (src/ui.mjs's handleStageClick already
@@ -2452,7 +2452,7 @@ check('the html-stage and mermaid element-click listeners guard on readonly too,
   // `openCommentForm(` no longer appears literally inside an
   // `addEventListener` callback for that case, only inside the named
   // `handleStageClick` helper the single `message` listener calls. Ticket 05 of
-  // SPEC_POLISH.md did the same to the mermaid one, for the same kind of reason:
+  // The polish batch (DESIGN.md) did the same to the mermaid one, for the same kind of reason:
   // a diagram node can now be clicked in TWO places (inline, and inside the
   // lens) and both must mint the identical anchor, so both call one named
   // `mintMermaidComment` instead of each opening a form themselves. The literal
@@ -2468,7 +2468,7 @@ check('the html-stage and mermaid element-click listeners guard on readonly too,
   assert.ok(/openCommentForm\(/.test(stageClickBody), 'handleStageClick must open a comment form');
   assert.ok(/\breadonly\b/.test(stageClickBody), 'handleStageClick opens a comment form without checking readonly');
 
-  // SPEC_POLISH.md ticket 05: the mermaid half. One minting function, and every
+  // DESIGN.md polish ticket 05: the mermaid half. One minting function, and every
   // listener that reaches it carries the same readonly guard the inline mermaid
   // listener used to carry on its own -- including the lens's, which is the
   // whole of "the comment gesture inside it is gated exactly like every other
@@ -2516,7 +2516,7 @@ check('pin rendering is never gated by readonly, only the click/hover gesture is
   assert.ok(!/\breadonly\b/.test(requestBody), 'requestStagePositions must never gate on readonly -- an archived stage still needs its pins positioned');
 });
 
-// --- the lens's pointer capture (SPEC_POLISH.md ticket 05) ---------------------
+// --- the lens's pointer capture (DESIGN.md polish ticket 05) ---------------------
 //
 // Asserted structurally, and only because the behaviour is genuinely out of
 // reach here: there is no such thing as pointer capture in this repo's DOM
@@ -2894,7 +2894,7 @@ check('C2: an ordinary relative reference inside the project still resolves, and
   assert.ok(resolvePath({ path: 'inside.txt' }, fixturesDir).path.endsWith('inside.txt'));
 });
 
-// --- the reference allowlist (ADR.md entry 3, SPEC_POLISH.md criterion 13) -------
+// --- the reference allowlist (ADR.md entry 3, DESIGN.md polish criterion 13) -------
 //
 // References now resolve inside `cwd` OR inside a configured root (default
 // `~/.claude`), and nowhere else. This is the one security boundary this batch moves,
@@ -4267,7 +4267,7 @@ check('a pending pin is visually distinguishable from a sent one, in both the cl
   assert.ok(styles.includes('.anchor-pin.pin-pending'), 'src/styles.mjs must style .pin-pending differently from a sent pin');
 });
 
-// --- SPEC_POLISH.md ticket 02: the pending-comment queue, pure -----------------
+// --- DESIGN.md polish ticket 02: the pending-comment queue, pure -----------------
 //
 // findPendingCommentForAnchor (criterion 1's "reopen and edit", also reused for
 // criterion 12's "already sent") and removePendingComment (criterion 2's delete
