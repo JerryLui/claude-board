@@ -50,12 +50,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readBoard, writeBoard, writePage, boardHome, listBoards, searchBoards } from './store.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
-import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE } from './handoff.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
 
-export const DEFAULT_PORT = 7391;
+// Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
+// re-exported here, where every caller has always looked for it.
+export { DEFAULT_PORT } from './handoff.mjs';
 
 // Heartbeat comment lines (`: heartbeat\n\n`) keep an idle SSE connection alive
 // through proxies and idle timers that would otherwise drop it; SSE comment lines
@@ -93,6 +95,15 @@ function createSseHub() {
       for (const res of set) {
         try { res.write(payload); } catch { /* dead connection; the 'close' handler cleans it up */ }
       }
+    },
+    /** How many browsers currently have this board open. Reported on the POST response
+     * so the shim can tell "the reviewer closed the tab" from "the reviewer is looking
+     * at it", which is what decides whether a later round reopens the tab. The shim used
+     * to ask for this over a `GET /api/board/:id/clients` route that was never routed
+     * here, so it always got null and never reopened (audit 2026-07-31 S3). */
+    clientCount(boardId) {
+      const set = subs.get(boardId);
+      return set ? set.size : 0;
     },
   };
 }
@@ -182,11 +193,38 @@ function isSameOriginWrite(req) {
 
 /** True iff this READ may proceed: either credential, and nothing weaker. A daemon with
  * no secret on disk refuses everything gated rather than falling open — it cannot derive
- * the session cookie either, so there is no credential it could honestly accept. */
+ * the session cookie either, so there is no credential it could honestly accept.
+ *
+ * The SECRET is accepted from anywhere. The COOKIE additionally has to look like it came
+ * from this origin, for the same reason writes have always been checked that way: the
+ * cookie is the credential a browser holds, so a browser is the only thing that should be
+ * spending it, and `Origin`/`Sec-Fetch-Site` are the two headers a page cannot forge.
+ *
+ * Be honest about the reach of this. It stops a PAGE on another origin reading boards
+ * through the reviewer's browser. It does NOT stop the attack that motivated it (audit
+ * 2026-07-31 S1): a local process that harvested the cookie — cookies are not port-scoped,
+ * so any other http server on this host receives it — sets whatever headers it likes and
+ * is indistinguishable from the browser here. That exposure is bounded by the cookie's
+ * lifetime and named in SECURITY.md; it is not closed by this function, and this comment
+ * exists so nobody later reads the check and concludes that it is. */
 function isAuthorizedRead(req, secret) {
   if (!secret) return false;
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
-  return sessionCookieMatches(req.headers.cookie, secret);
+  if (!sessionCookieMatches(req.headers.cookie, secret)) return false;
+  return isSameOriginRead(req);
+}
+
+/** Origin/Sec-Fetch-Site as they apply to a cookie-authenticated READ. Absence passes,
+ * exactly as it does for writes: the shim, curl and the checks send neither, and a
+ * top-level browser navigation — the bookmark case criterion 2 turns on — sends
+ * `Sec-Fetch-Site: none`. Requiring presence would refuse both and buy nothing, since
+ * the caller this would be aimed at can set the header anyway. */
+function isSameOriginRead(req) {
+  const origin = req.headers.origin;
+  if (origin && origin !== `http://${req.headers.host}`) return false;
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return false;
+  return true;
 }
 
 /** True iff this write may proceed. Two ways to hold a credential, and they are not
@@ -425,6 +463,22 @@ async function handlePostBoard(req, res, home, sse) {
     if (body.boardId) {
       board = readBoard(body.boardId, home);
       if (!board) return sendJson(res, 404, { error: 'board not found' });
+      // Idempotency (audit 2026-07-31 D1). Everything after readJsonBody is synchronous,
+      // so a socket that dies before the response lands — a reload-on-change exit, a
+      // kickstart, the shim's own inactivity timeout — leaves the round fully applied and
+      // the caller told it failed. The agent then retries, and amendRound APPENDS a second
+      // copy of every block: the reviewer sees the same question twice in one round. A
+      // retry carrying the same `requestId` is answered from what that id already did.
+      if (body.requestId && board.lastRequestId === body.requestId) {
+        return sendJson(res, 200, {
+          boardId: board.id,
+          thread: board.thread,
+          round: board.rounds[board.rounds.length - 1].n,
+          url: boardUrl(req, board.id),
+          clients: sse.clientCount(board.id),
+          deduped: true,
+        });
+      }
       const latestRound = board.rounds[board.rounds.length - 1];
       if (latestRound && latestRound.status === 'open') {
         // The open round hasn't been sent yet: amend it in place rather than
@@ -477,11 +531,24 @@ async function handlePostBoard(req, res, home, sse) {
   // and since GET /b/:id and /wait both re-render the SAME persisted board on
   // every future request, a render bug there turns into a permanent 500 for the
   // life of the board, not just this one request.
+  // Recorded on the board rather than in memory: the failure this defends against is a
+  // daemon that went away mid-request, so a dedupe table the restart empties would be
+  // empty in exactly the case it is needed.
+  if (body.requestId) board.lastRequestId = body.requestId;
   const html = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, html, home);
   if (pushMode) sse.broadcast(board.id, 'round', buildRoundPushPayload(board, round, pushMode, touchedBlockIds));
-  return sendJson(res, 200, { boardId: board.id, thread: board.thread, round, url: boardUrl(req, board.id) });
+  // `clients` is the count at the instant this round landed, which is what lets the shim
+  // tell "the reviewer closed the tab" from "the reviewer is looking at it" and reopen
+  // only in the first case. See createSseHub.clientCount (audit 2026-07-31 S3).
+  return sendJson(res, 200, {
+    boardId: board.id,
+    thread: board.thread,
+    round,
+    url: boardUrl(req, board.id),
+    clients: sse.clientCount(board.id),
+  });
 }
 
 /** Serve the board page. Reached only by a caller that already presented a credential
@@ -535,7 +602,20 @@ async function handleMintHandoff(req, res, handoffs) {
 function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
   const entry = HANDOFF_TOKEN_RE.test(token) ? handoffs.consume(token) : null;
   const cookie = entry ? sessionToken(secret) : null;
-  if (!entry || !cookie) return sendCredentialRefusal(req, res, pathname);
+  if (!entry || !cookie) {
+    // A spent token in the hands of a browser that ALREADY holds the cookie is not an
+    // attack, it is the Back button — and three other routine things: a daemon reload
+    // between mint and fetch (the handoff store is process-local), the 30s TTL expiring
+    // on a cold browser start, and Chrome's prerender spending the token before the
+    // visible navigation. Refusing the replay is still right; telling a fully authorized
+    // browser it holds no credential, and naming a command that changes nothing for it,
+    // is not (audit 2026-07-31 D3). Send it where the token would have sent it.
+    if (isAuthorizedRead(req, secret)) {
+      res.writeHead(302, { location: handoffTarget(null), 'cache-control': 'no-store', 'content-length': '0' });
+      return res.end();
+    }
+    return sendCredentialRefusal(req, res, pathname);
+  }
   res.writeHead(302, {
     location: entry.target,
     'set-cookie': `${SESSION_COOKIE}=${cookie}; Path=/; Max-Age=${SESSION_MAX_AGE_S}; HttpOnly; SameSite=Strict`,
@@ -598,6 +678,15 @@ async function handleSubmit(req, res, id, home, sse) {
   const openN = openRound ? openRound.n : null;
   const claimed = body.round;
   if (!Number.isInteger(claimed)) {
+    // "No round named" on a board with no open round is not a malformed request, it is
+    // the already-submitted case — and it is the exact body the page sends when its Send
+    // button is pressed on a finished board, because openRoundNumber() returns null
+    // there. Answering 400 sent the client down its generic error path (it special-cases
+    // only 409), which showed `submit failed: 400` and re-enabled the buttons for an
+    // identical retry, forever (audit 2026-07-31 D2). 409 is both truer and handled.
+    if (openN === null) {
+      return sendJson(res, 409, { error: 'this board has already been submitted', board: board.id, round: null });
+    }
     return sendJson(res, 400, { error: 'submit requires an integer "round" naming the round being answered', board: board.id, round: openN });
   }
   if (openN === null || claimed !== openN) {
@@ -674,15 +763,26 @@ function handleEvents(req, res, id, home, sse) {
  * binding a port — used directly by the check and by `startServer` below. Each
  * call gets its own SSE subscriber registry (createSseHub), so two independent
  * handlers built in the same process — as the checks do — never share subscribers. */
-export function createRequestHandler({ home = boardHome(), secret = readSecret() } = {}) {
+export function createRequestHandler({ home = boardHome(), secret: pinnedSecret } = {}) {
   const sse = createSseHub();
   // Per-instance, like the SSE hub and for the same reason: two daemons in one process
   // (as the checks spin up) must not redeem each other's handoffs.
   const handoffs = createHandoffStore();
-  // Read once, at startup, and say so plainly if it is missing — a daemon that
-  // silently accepted every write because the file was gone would be worse than one
-  // that refuses, since nothing in the UI would ever hint that the gate was open.
-  if (!secret) {
+  // Re-read PER REQUEST, not once at startup (audit 2026-07-31 S4). SECURITY.md,
+  // PROTOCOL.md, CHANGELOG.md and src/secret.mjs all name rotating the secret as THE way
+  // to revoke every browser at once. With the value captured in a closure that was false
+  // in the worst direction: the running daemon kept honouring the OLD secret — so a
+  // stolen cookie stayed live until the next reboot — while every freshly started shim
+  // read the NEW one and got 401s. The owner broke their own agent and revoked nothing.
+  // A caller that passes `secret` explicitly still pins it, which is what the checks do;
+  // absent, it comes off disk on every request. That is a 64-byte readFileSync next to a
+  // board parse, and it is what makes the documented revocation actually revoke.
+  const currentSecret = () => (pinnedSecret !== undefined ? pinnedSecret : readSecret());
+  // Say so plainly if it is missing — a daemon that silently accepted every write
+  // because the file was gone would be worse than one that refuses, since nothing in
+  // the UI would ever hint that the gate was open. Startup-time only: this is a message
+  // for the operator's log, not a gate, and every gate below re-reads.
+  if (!currentSecret()) {
     console.error(
       `claude-board: no local secret at ${secretPath()} — every request except /api/health will be ` +
       `refused with 401, reads included: the session cookie a browser holds is derived from the ` +
@@ -692,6 +792,7 @@ export function createRequestHandler({ home = boardHome(), secret = readSecret()
   }
   return async function requestHandler(req, res) {
     try {
+      const secret = currentSecret();
       if (!isLoopbackHost(req.headers.host)) {
         res.writeHead(403);
         res.end();
@@ -781,14 +882,23 @@ export function createRequestHandler({ home = boardHome(), secret = readSecret()
 
       return sendText(res, 404, 'not found');
     } catch (err) {
-      return sendJson(res, 500, { error: String((err && err.message) || err) });
+      // A tagged status means the request was refusable, not that the daemon broke:
+      // src/store.mjs throws `status: 400` for an id that cannot be a path, and that
+      // reaches here from every route that takes an id out of the URL rather than the
+      // body. Answering 500 would file an attack as a server fault in the log a reader
+      // uses to find real ones.
+      const status = err && Number.isInteger(err.status) ? err.status : 500;
+      return sendJson(res, status, { error: String((err && err.message) || err) });
     }
   };
 }
 
 /** Start listening on 127.0.0.1. Resolves once bound, with the actual port (useful
  * for `port: 0` ephemeral binding in checks). */
-export function startServer({ home = boardHome(), port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT, secret = readSecret() } = {}) {
+export function startServer({ home = boardHome(), port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT, secret } = {}) {
+  // `secret` is passed through UNRESOLVED on purpose: defaulting it to readSecret() here
+  // would pin the value for the life of the process and undo S4's fix one layer down,
+  // where it would be much harder to notice. Absent means "read it per request".
   const server = http.createServer(createRequestHandler({ home, secret }));
   return new Promise((resolve, reject) => {
     server.once('error', reject);

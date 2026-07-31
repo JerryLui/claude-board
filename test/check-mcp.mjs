@@ -298,12 +298,17 @@ function openSseStream(port, boardId) {
   });
 }
 
-/** A pass-through in front of the real daemon that also answers the read-only
- * `GET /api/board/:id/clients` probe the shim uses to decide whether the reviewer
- * still has a window on this board. The daemon does not serve that route yet (it
- * belongs to src/server.mjs, owned elsewhere); this stands in for it so the shim's
- * reopen decision is exercised against real board traffic, and `clients: null`
- * stands in for a daemon that does not serve it at all. */
+/** A pass-through in front of the real daemon that REWRITES the `clients` count on the
+ * POST /api/board response, so a check can drive the shim's reopen decision without
+ * standing up real browsers and real SSE subscriptions.
+ *
+ * It used to fabricate a `GET /api/board/:id/clients` route instead — a route
+ * src/server.mjs has never served. That kept this check green while the reopen path was
+ * dead in production for every real user: the probe 404ed, the count came back null, and
+ * the tab was never reopened (audit 2026-07-31 S3). The daemon now reports the count on
+ * the POST response from its own SSE hub, so this only has to override a real field.
+ * `state.clients === null` stands in for a daemon too old to report it at all, which is
+ * the field being absent — not a fabricated 404. */
 function startClientsProxy(targetPort, state) {
   // Every POST /api/handoff body the shim sends, in order. The URL the shim opens is
   // `/auth/<token>` and carries no board id by design (that is the point of the
@@ -327,14 +332,39 @@ function startClientsProxy(targetPort, state) {
       });
       return;
     }
-    const m = u.pathname.match(/^\/api\/board\/([^/]+)\/clients$/);
-    if (req.method === 'GET' && m) {
-      const body = JSON.stringify(state.clients === null ? { error: 'not found' } : { clients: state.clients });
-      res.writeHead(state.clients === null ? 404 : 200, {
-        'content-type': 'application/json; charset=utf-8',
-        'content-length': Buffer.byteLength(body),
+    if (req.method === 'POST' && u.pathname === '/api/board') {
+      const reqChunks = [];
+      req.on('data', c => reqChunks.push(c));
+      req.on('end', () => {
+        const raw = Buffer.concat(reqChunks);
+        const up = http.request(
+          { hostname: '127.0.0.1', port: targetPort, path: req.url, method: 'POST', headers: { ...req.headers, 'content-length': raw.length } },
+          ures => {
+            const resChunks = [];
+            ures.on('data', c => resChunks.push(c));
+            ures.on('end', () => {
+              let body = Buffer.concat(resChunks).toString('utf8');
+              if (ures.statusCode === 200) {
+                try {
+                  const json = JSON.parse(body);
+                  // Override the daemon's real count with the one this check is driving.
+                  // null means "this daemon does not report it": delete the field rather
+                  // than inventing a value, because absence is what an older daemon sends.
+                  if (state.clients === null) delete json.clients;
+                  else json.clients = state.clients;
+                  body = JSON.stringify(json);
+                } catch { /* not JSON: pass it through untouched */ }
+              }
+              const headers = { ...ures.headers, 'content-length': Buffer.byteLength(body) };
+              res.writeHead(ures.statusCode, headers);
+              res.end(body);
+            });
+          }
+        );
+        up.on('error', () => { try { res.writeHead(502); res.end(); } catch { /* client gone */ } });
+        up.end(raw);
       });
-      return res.end(body);
+      return;
     }
     const upstream = http.request(
       { hostname: '127.0.0.1', port: targetPort, path: req.url, method: req.method, headers: req.headers },

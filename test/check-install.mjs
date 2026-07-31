@@ -197,6 +197,10 @@ const env = {
 };
 
 const commandFile = path.join(commandsDir, 'grill.md');
+// The record install.sh writes beside the secret so it can tell an unmodified command
+// file from one the user edited. Same directory as the secret, by install.sh's own
+// $SECRET_DIR/grill.sha256.
+const hashFile = path.join(path.dirname(secretFile), 'grill.sha256');
 
 function runInstall() {
   return spawnSync('bash', [installScript], { env, encoding: 'utf8' });
@@ -821,6 +825,41 @@ async function main() {
     assert.ok(uninstallResult.stdout.includes(storeDir), 'must name the store path');
     assert.ok(uninstallResult.stdout.includes(secretFile), 'must name the secret path');
     assert.ok(uninstallResult.stdout.includes(logDir), 'must name the logs path');
+  });
+
+  await check('uninstall does NOT delete a user-edited command file, and names it and its record as left behind', async () => {
+    // The install-side mirror of this has had a dedicated check since the feature
+    // landed; the uninstall side had none, so the branch that decides whether to
+    // DELETE a user's customized /grill was never exercised (audit 2026-07-31, T2 and
+    // Sp1). Ablation: replace uninstall.sh's UNMODIFIED test with an unconditional
+    // `rm -f "$COMMAND_FILE"` and this reds.
+    mkdirSync(path.dirname(commandFile), { recursive: true });
+    writeFileSync(commandFile, '# my own grill\n\nedited by hand\n');
+    mkdirSync(path.dirname(hashFile), { recursive: true });
+    writeFileSync(hashFile, 'a'.repeat(64));
+
+    const edited = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
+    assert.equal(edited.status, 0, `uninstall must succeed against an edited command file\nstdout:\n${edited.stdout}\nstderr:\n${edited.stderr}`);
+    assert.ok(existsSync(commandFile), 'a user-edited command file must survive uninstall');
+    assert.equal(readFileSync(commandFile, 'utf8'), '# my own grill\n\nedited by hand\n', 'and survive byte-for-byte');
+    assert.ok(edited.stdout.includes(commandFile), 'the summary must name the file it left');
+    assert.ok(edited.stdout.includes(hashFile), 'and name the install record it left beside it');
+
+    rmSync(commandFile, { force: true });
+    rmSync(hashFile, { force: true });
+  });
+
+  await check('uninstall removes the install record even when the command file is already gone', async () => {
+    // The record used to be deleted only on the branch that deleted the file, so a user
+    // who removed ~/.claude/commands/grill.md by hand kept an orphan record forever,
+    // named in no summary (audit 2026-07-31 Sp1).
+    mkdirSync(path.dirname(hashFile), { recursive: true });
+    writeFileSync(hashFile, 'b'.repeat(64));
+    assert.ok(!existsSync(commandFile), 'precondition: no command file');
+
+    const orphan = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
+    assert.equal(orphan.status, 0, `uninstall must succeed\nstdout:\n${orphan.stdout}\nstderr:\n${orphan.stderr}`);
+    assert.ok(!existsSync(hashFile), 'the orphaned install record must be removed, not left unnamed');
   });
 
   await check('uninstall is safe to run twice', async () => {

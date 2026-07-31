@@ -576,6 +576,23 @@ function sanitizeAnchor(anchor) {
  * settled answer from a later round's Send) are all dropped silently rather than
  * stored -- there is nothing for the reviewer to fix, and a request that carries one
  * is not a request the human made. */
+/** The closed set of answer statuses, and the only way one enters the store.
+ *
+ * `status` carries the whole decision on its own: PROTOCOL.md pins that a caller reads
+ * it and never infers from `choice`, because a `deferred` answer may well have a choice
+ * the reviewer picked and then declined to commit to. A field that load-bearing cannot
+ * also be a free-text passthrough — an unrecognised value used to round-trip verbatim
+ * into the packet, so `{status: 'answered', choice: null}` from a stale tab or a script
+ * reported a decision the reviewer never made (audit 2026-07-31 D4). Anything outside
+ * the set falls back to the same inference used when `status` is absent entirely, which
+ * is the conservative reading rather than a silent accept. */
+const ANSWER_STATUSES = new Set(['answered', 'unanswered', 'deferred']);
+
+function normalizeStatus(a) {
+  if (typeof a.status === 'string' && ANSWER_STATUSES.has(a.status)) return a.status;
+  return a.choice != null ? 'answered' : 'unanswered';
+}
+
 export function applySubmit(board, { action, answers, comments }, round) {
   const now = new Date().toISOString();
 
@@ -587,7 +604,7 @@ export function applySubmit(board, { action, answers, comments }, round) {
     if (!answerable.has(a.id)) continue;
     board.answers[a.id] = {
       id: a.id,
-      status: a.status || (a.choice != null ? 'answered' : 'unanswered'),
+      status: normalizeStatus(a),
       choice: a.choice ?? null,
       note: a.note ?? '',
     };

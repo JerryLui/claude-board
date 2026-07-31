@@ -382,6 +382,70 @@ async function main() {
 
   // --- ticket 04: SSE round pushes into a live thread --------------------------
 
+  await check('POST /api/board reports how many browsers have the board open, from the real subscriber set', async () => {
+    // The check that was missing when the reopen path died (audit 2026-07-31 S3). The
+    // shim decides whether to reopen a closed tab from this number, and it used to ask a
+    // route the daemon never served: it got null every time, so a later round never
+    // reopened anything. test/check-mcp.mjs covered the DECISION against a proxy that
+    // fabricated the route, so nothing anywhere covered the daemon actually reporting.
+    // Ablation: delete the `clients` field from handlePostBoard's response and this reds.
+    const created = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Client count', blocks: [{ kind: 'markdown', text: '# One' }] }),
+    })).json();
+    assert.equal(created.clients, 0, 'a board nobody has open reports zero, not null and not absent');
+
+    const watcher = await openSseClient(port, created.boardId);
+    const withOne = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: created.boardId, title: 'Client count', blocks: [{ kind: 'markdown', text: '# Two' }] }),
+    })).json();
+    assert.equal(withOne.clients, 1, 'an open stream is one connected client');
+
+    watcher.res.destroy();
+    // The unsubscribe runs on the socket's close event, not synchronously with destroy().
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const afterClose = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: created.boardId, title: 'Client count', blocks: [{ kind: 'markdown', text: '# Three' }] }),
+    })).json();
+    assert.equal(afterClose.clients, 0, 'a closed tab drops back to zero, which is what makes the shim reopen it');
+  });
+
+  await check('a retried post carrying the same requestId is applied once, not appended twice', async () => {
+    // audit 2026-07-31 D1: the daemon applies the round and broadcasts before the
+    // response is sent, so a socket that dies in between leaves the round landed and the
+    // caller told it failed. The retry used to amend a second copy of every block into
+    // the open round -- the reviewer saw the same question twice.
+    const created = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Idempotent', blocks: [{ kind: 'markdown', text: '# One' }] }),
+    })).json();
+    await fetch(`${base}/api/board/${created.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+    });
+
+    const round2 = { boardId: created.boardId, title: 'Idempotent', blocks: [{ kind: 'question', prompt: 'Ship?', widget: 'single', options: [{ label: 'Yes' }] }], requestId: 'abc123' };
+    const first = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(round2) })).json();
+    const retry = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(round2) })).json();
+
+    assert.equal(retry.deduped, true, 'the daemon must say it recognised the retry rather than silently reapplying');
+    assert.equal(retry.round, first.round, 'a retry does not advance the round');
+    const board = JSON.parse(readFileSync(path.join(home, 'boards', `${created.boardId}.json`), 'utf8'));
+    const prompts = board.blocks.filter(b => b.kind === 'question' && b.round === first.round);
+    assert.equal(prompts.length, 1, `the retried round must hold ONE question, not two (got ${prompts.length})`);
+    // A genuinely different round still lands: dedupe is on the id, not on "any repeat".
+    const round3 = { ...round2, requestId: 'def456', blocks: [{ kind: 'question', prompt: 'Ship now?', widget: 'single', options: [{ label: 'Yes' }] }] };
+    const third = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(round3) })).json();
+    assert.notEqual(third.deduped, true, 'a different requestId is a different request');
+  });
+
   await check('GET /api/board/:id/events streams a new-round push to two clients, additively -- only the new round, not the whole board', async () => {
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
@@ -2190,8 +2254,14 @@ async function main() {
     assert.match(setCookie, /SameSite=Strict/, 'no other origin may cause it to be sent');
     assert.match(setCookie, /Path=\//, 'it covers every read route, not one board');
     assert.doesNotMatch(setCookie, /Domain=/i, 'host-only: no Domain attribute, so no sibling host can claim it');
+    // Both halves, because they pull against each other and only one of them used to be
+    // pinned. Long enough that criterion 2's bookmark-days-later works; SHORT enough that
+    // the exposure audit 2026-07-31 S1 found — cookies are not port-scoped, so any other
+    // loopback server the reviewer visits receives this value — expires while expiring it
+    // is still worth something. An unbounded upper end is how this sat at 400 days.
     const maxAge = Number((setCookie.match(/Max-Age=(\d+)/) || [])[1]);
-    assert.ok(maxAge > 30 * 24 * 3600, `the cookie must outlive the browser session (Max-Age=${maxAge}s) — a bookmark opened days later still has to work`);
+    assert.ok(maxAge > 7 * 24 * 3600, `the cookie must outlive the browser session (Max-Age=${maxAge}s) — a bookmark opened days later still has to work`);
+    assert.ok(maxAge <= 90 * 24 * 3600, `the cookie must not be effectively permanent (Max-Age=${maxAge}s) — it reaches every other server on this host`);
 
     // Criterion 2's second half: the cookie alone, with no handoff and no secret, is
     // what makes reloading and bookmarking work.

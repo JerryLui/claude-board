@@ -39,9 +39,13 @@ past macOS TCC, which otherwise gates `~/Documents`, `~/Desktop` and `~/Download
 application.
 
 **Another local process reading your boards, or forging an answer on one.** Every route
-but `GET /api/health` requires a credential — the index, a board page, archive search,
-the blocking wait and the event stream alike. There are exactly two credentials: the
-secret file above, and a cookie the daemon derives from it and hands to your browser.
+but `GET /api/health` and `GET /auth/<token>` requires a credential — the index, a board
+page, archive search, the blocking wait and the event stream alike. (`/auth/<token>` is
+the route that *hands out* the credential, so it cannot require one; it is protected by
+the token being unguessable, single-use and seconds-lived.) There are exactly two
+credentials: the secret file above, and a cookie the daemon derives from it and hands to
+your browser. **The cookie has a caveat worth reading before you rely on it — see "Any
+other HTTP server on your machine" below.**
 The browser gets it through a single-use handoff that lives for about thirty seconds:
 the session's shim asks the daemon for one, opens that URL, and the daemon consumes it,
 sets the cookie and redirects to the plain board URL. Nothing you can bookmark carries a
@@ -77,6 +81,32 @@ file staying yours.
 **A browser extension with host permissions on the profile holding the credential.** It
 can read boards and submit as you. `HttpOnly` stops page script, not extensions.
 
+**Any other HTTP server on your machine, whatever port it listens on.** Cookies are not
+scoped by port (RFC 6265 §8.5) and `SameSite` is not port-aware — a "site" is a scheme
+plus a host, so every port on `127.0.0.1` is the same site. If you authorize a board and
+then visit `http://127.0.0.1:3000` in the same browser — your own dev server, a notebook
+kernel, a container you published on loopback — that server receives the `cb_session`
+cookie on a plain navigation, and can replay it here to read every board and answer any
+open round. It never touches the secret file, so this sits *outside* the "any process
+running as you" boundary above: a container that cannot read your home directory can
+still do it.
+
+This is not closable at this layer. The daemon cannot tell a replay from the browser it
+minted the cookie for, and the cookie cannot be scoped away from other ports while the
+index lives at `/`. What is done instead is bounding it:
+
+- the cookie expires after 30 days rather than the 400 it used to, so a leaked one stops
+  being worth anything on a horizon you can reason about;
+- a cookie-authenticated request must also look same-origin (`Origin` / `Sec-Fetch-Site`),
+  which stops a *web page* on another origin using it through your browser. It does not
+  stop the case above, because a local process sets its own headers;
+- rotating the secret revokes every cookie immediately, and now genuinely does — the
+  daemon re-reads the secret per request rather than at startup.
+
+If you run other services on loopback and this matters to you, use a separate browser
+profile for boards. Found and documented 2026-07-31; it was previously listed as
+defended, which was wrong.
+
 **A process watching `ps` at the instant a tab opens.** Opening a URL puts it in an
 argument list, so the handoff token is briefly visible to any process running as you. The
 mitigation is that the handoff is single-use and lives for seconds: a watcher has to be
@@ -99,16 +129,25 @@ repository it quotes.
 
 ## Open
 
-Nothing currently listed. The one item that stood here — unauthenticated read routes,
-which let any local process read every board and forge an answer on one — was closed
-before public release by gating reads behind the same credential as writes, and by
-deleting the board-scoped submit token that only existed because reads were open.
+**The session cookie reaches every other HTTP server on your machine.** Described in full
+under "Any other HTTP server on your machine" above. Bounded, not closed, and listed here
+rather than only in the not-defended section because it was found *after* the posture
+above was written and it contradicted it.
+
+The item that used to stand here — unauthenticated read routes, which let any local
+process read every board and forge an answer on one — was closed before public release by
+gating reads behind the same credential as writes, and by deleting the board-scoped submit
+token that only existed because reads were open.
 
 Two properties of the fix are worth stating so nobody has to reverse-engineer them:
 
 - **The browser credential is derived from the secret, not stored.** So restarting the
   daemon does not log your browser out, and *rotating the secret invalidates every
-  browser at once*. That is the intended way to revoke.
+  browser at once*. That is the intended way to revoke, and it works on a running daemon:
+  the secret is re-read per request. It was captured once at startup until 2026-07-31,
+  which made rotation do the opposite of what this paragraph promised — the running daemon
+  kept honouring the old secret while newly started shims read the new one and were
+  refused.
 - **An archived board still opens from disk with no credential at all.** `pages/*.html`
   is a standalone file; the gate is on the daemon, not on the archive. Anything that can
   read that directory can read those boards, which is the same statement as "the store is

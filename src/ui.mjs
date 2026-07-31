@@ -1434,12 +1434,25 @@ export const ui = `
     // retheme" rather than invisible as "one shape is the wrong colour".
     var vars = mermaidThemeVariables();
     if (!vars) return;
+    // Only nodes this pass could RESTORE may be handed to run(). An unstashed node is
+    // one that appeared after the queue snapshot -- applyRoundPush attaches a new
+    // round's <pre class="mermaid"> synchronously, so a redraw already queued when a
+    // round lands sees it here with no stash. Rendering it anyway (which this used to
+    // do: the restore skipped it, the run did not) let the render pass that follows
+    // stash its RENDERED SVG TEXT as if it were diagram source. The next theme switch
+    // then restored that text, mermaid failed to parse it, and the diagram was
+    // permanently an error graphic -- a third and fourth switch never recovered it
+    // (audit 2026-07-31 R1). The render pass owns first-render for those nodes and will
+    // stash them correctly; leaving them alone here is what lets it.
+    var restorable = [];
     nodes.forEach(function (n) {
       var original = mermaidSourceByBlock && mermaidSourceByBlock.has(n) ? mermaidSourceByBlock.get(n) : null;
       if (original == null) return; // never successfully rendered -- nothing to restore
       n.textContent = original;
       n.removeAttribute('data-processed');
+      restorable.push(n);
     });
+    if (!restorable.length) return;
     try {
       // M2 continued: initialize moved INSIDE the try (it used to sit
       // outside it, AFTER the destructive restore above, so a throw here
@@ -1447,9 +1460,9 @@ export const ui = `
       // belt-and-suspenders alongside the validation above, not a
       // replacement for it.
       mermaidMod.initialize({ startOnLoad: false, theme: 'base', themeVariables: vars });
-      await mermaidMod.run({ nodes: nodes, suppressErrors: true });
+      await mermaidMod.run({ nodes: restorable, suppressErrors: true });
     } catch (e) { /* a redraw failure leaves the just-restored source in place; the next redraw retries from there */ }
-    nodes.forEach(function (n) {
+    restorable.forEach(function (n) {
       var svg = n.querySelector('svg');
       if (svg) wireMermaidBlock(n, svg);
     });

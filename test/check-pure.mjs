@@ -3892,6 +3892,21 @@ check('the session cookie matcher accepts only the real cookie, and never throws
   assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${sessionToken(secret)}`, null), false, 'no secret on disk accepts nothing');
 });
 
+check('a duplicate session cookie cannot shadow the real one: the FIRST match wins', () => {
+  // audit 2026-07-31 S5. Cookies ignore ports, so any other server on this host can set
+  // a second cb_session for it. Last-wins meant one such cookie sorting later shadowed
+  // the daemon's own and locked the reviewer out of every board -- permanently, because
+  // bin/authorize.mjs re-mints at the same (host, path) key and leaves the duplicate in
+  // place, so the one command the refusal page names could not clear it.
+  // RFC 6265 section 5.4 sends the most specific match first, which is the host-and-path
+  // cookie this daemon set. Ablation: restore last-wins in parseCookies and this reds.
+  const secret = 'c'.repeat(64);
+  const real = sessionToken(secret);
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${real}; ${SESSION_COOKIE}=junk`, secret), true, 'a duplicate appended after the real cookie must not shadow it');
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${real}; other=1; ${SESSION_COOKIE}=${'e'.repeat(64)}`, secret), true, 'nor a duplicate that is the right shape but the wrong value');
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=junk; ${SESSION_COOKIE}=${real}`, secret), false, 'and a bare-name cookie sorting first is still honoured as first -- the ordering is the browser\'s statement about specificity, not something to search past');
+});
+
 check('the recovery command names a file that exists, absolutely, and survives a path with spaces', () => {
   const cmd = recoveryCommand();
   const script = path.join(repoRoot, 'bin', 'authorize.mjs');

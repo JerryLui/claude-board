@@ -22,3 +22,9 @@ DESIGN.md
 # audit of a pre-release codebase would mean maintaining a second, staler
 # security narrative beside the one a reader actually needs.
 findings/
+
+# CONTEXT.md is working vocabulary for this repo's own sessions, not documentation
+# for someone who cloned it. Same reasoning as the specs above: it describes decisions
+# still in motion, so publishing it means maintaining a second, vaguer account of the
+# project beside README.md.
+CONTEXT.md

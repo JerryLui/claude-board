@@ -33,6 +33,7 @@ import http from 'node:http';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, SECRET_HEADER } from '../src/secret.mjs';
@@ -156,16 +157,30 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
     }
     req.on('error', err => {
       if (err.name === 'AbortError') return; // caller-initiated abort, not a failure to report
-      reject(err);
+      // Did the request actually go out? A socket that died before the body was flushed
+      // wrote nothing; one that died after may have been fully applied by the daemon,
+      // which is a difference the caller's error message has to respect rather than
+      // guess at (audit 2026-07-31 D1).
+      reject(Object.assign(err, { requestSent: req.writableFinished === true }));
     });
     if (data) req.write(data);
     req.end();
   });
 }
 
-function daemonUnreachableMessage(err) {
+/** `sent` distinguishes the two cases that used to share one sentence (audit 2026-07-31
+ * D1). A connection that never opened really did write nothing. A connection that died
+ * AFTER the request body went out may have applied the whole round and lost only the
+ * response — the daemon's work is synchronous once the body is read — so claiming
+ * "nothing was posted or written" there is a false statement that makes the agent retry
+ * into a duplicate round. The retry is safe anyway now, because `ask` carries a
+ * requestId the daemon dedupes on, but the message still has to be true. */
+function daemonUnreachableMessage(err, { sent = false } = {}) {
   return [
-    `claude-board daemon is not reachable at ${BASE_URL} (${err.code || err.message}). Nothing was posted or written.`,
+    `claude-board daemon is not reachable at ${BASE_URL} (${err.code || err.message}).`,
+    sent
+      ? `The request had already been sent, so the round may or may not have landed. Retrying this same call is safe: it carries an idempotency key and the daemon will not duplicate it.`
+      : `Nothing was posted or written.`,
     `Revive it with: launchctl kickstart -k gui/$(id -u)/claude-board`,
     `If it was never installed on this machine, run ./install.sh from the claude-board repository first.`,
   ].join('\n');
@@ -212,7 +227,8 @@ function toolErrorFor(err, url) {
   if (typeof err?.statusCode === 'number' && err.statusCode >= 400) {
     return new ToolError(daemonRejectedMessage(err, url));
   }
-  return new ToolError(url ? `${daemonUnreachableMessage(err)}\nBoard: ${url}` : daemonUnreachableMessage(err));
+  const msg = daemonUnreachableMessage(err, { sent: err?.requestSent === true });
+  return new ToolError(url ? `${msg}\nBoard: ${url}` : msg);
 }
 
 // Socket-level failures that mean "the daemon went away", as opposed to "the daemon
@@ -327,27 +343,26 @@ function openBoardTab(url) {
 }
 
 /** How many clients are connected to `boardId` right now, or null when the daemon
- * does not report it. Two sources, in order: the `clients` count on the POST
- * response (free, and race-free — it is the count at the instant the round landed),
- * then the read-only `GET /api/board/:id/clients` probe. A daemon too old to know
- * either answers 404 and we return null, which reads as "unknown": we do not reopen
- * on a guess, because opening every round is exactly the focus-stealing behaviour
- * DESIGN.md rejects. Unknown is logged to stderr rather than swallowed. */
-async function connectedClientCount(posted) {
-  if (typeof posted.clients === 'number') return posted.clients;
-  try {
-    const res = await httpJson('GET', `${BASE_URL}/api/board/${posted.boardId}/clients`, null, { timeoutMs: POST_TIMEOUT_MS });
-    if (res && typeof res.clients === 'number') return res.clients;
-    return null;
-  } catch {
-    return null;
-  }
+ * does not report it — an older daemon, which reads as "unknown". We do not reopen on a
+ * guess, because opening every round is exactly the focus-stealing behaviour DESIGN.md
+ * rejects. Unknown is logged to stderr rather than swallowed.
+ *
+ * ONE source: the `clients` count on the POST response, which is free and race-free —
+ * it is the count at the instant the round landed. There used to be a second, a
+ * `GET /api/board/:id/clients` probe, and src/server.mjs has never routed it: it 404ed,
+ * so this returned null every time and the reopen below has never once fired in
+ * production, while test/check-mcp.mjs kept it green by standing the route up in a
+ * proxy (audit 2026-07-31 S3). Deleted rather than implemented on the daemon side too,
+ * because the POST response already knows and a second source is a second thing to keep
+ * true. */
+function connectedClientCount(posted) {
+  return typeof posted.clients === 'number' ? posted.clients : null;
 }
 
 /** Reopen the tab for a later round when the reviewer has no window on this board
  * open any more. Never called for the first board (that always opens). */
 async function reopenIfNoClient(posted, url) {
-  const clients = await connectedClientCount(posted);
+  const clients = connectedClientCount(posted);
   if (clients === null) {
     logErr(
       `daemon does not report connected clients for board ${posted.boardId}; not reopening the tab. ` +
@@ -609,9 +624,19 @@ async function postThisRound(session, title, blocks) {
   // non-empty one on every call and commands/grill.md tells the agent to make it the
   // branch name, and src/board.mjs now stores it per round for src/render.mjs to label
   // the round with. Dropping it here left every later round labelled "Round N".
+  //
+  // `requestId` is derived from what this round IS, not randomly: an agent retrying a
+  // call whose response was lost re-sends the same blocks, so the same id, and the daemon
+  // recognises it as the request it already applied instead of appending a second copy of
+  // every question (audit 2026-07-31 D1). A genuinely new round differs in its blocks and
+  // so gets a different id. Scoped to the board so two boards cannot collide.
+  const requestId = createHash('sha256')
+    .update(JSON.stringify([session.boardId, title, blocks]))
+    .digest('hex')
+    .slice(0, 32);
   const posted = await httpJson(
     'POST', `${BASE_URL}/api/board`,
-    { boardId: session.boardId, blocks, title },
+    { boardId: session.boardId, blocks, title, requestId },
     { timeoutMs: POST_TIMEOUT_MS }
   );
   return { posted, isFirstBoard: false };

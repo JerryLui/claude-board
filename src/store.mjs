@@ -30,6 +30,26 @@ function pagesDir(home = boardHome()) {
   return path.join(home, 'pages');
 }
 
+/** What a board id is allowed to be. Canonical here rather than in a caller because
+ * THIS module is what turns an id into a filesystem path, and a pattern enforced at the
+ * route is a pattern the next route forgets: `POST /api/board` used to hand
+ * `body.boardId` straight to readBoard, so an id of `../../../../tmp/victim/settings`
+ * read and then OVERWROTE a file outside the store (audit 2026-07-31 S2). Minted ids are
+ * `b_<32 hex>` (src/board.mjs); the class is wider than that so an id minted by an older
+ * version still resolves, and narrow enough that no member of it contains a separator,
+ * a dot, or a NUL. */
+export const SAFE_BOARD_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Every path built from an id goes through here. Throws rather than returning null:
+ * an id that cannot be a path is a caller bug or an attack, and both deserve to be loud
+ * — readBoard turns it back into a 400 for the one caller that takes ids from the wire. */
+function assertSafeId(id) {
+  if (typeof id !== 'string' || !SAFE_BOARD_ID.test(id)) {
+    throw Object.assign(new Error(`unsafe board id: ${JSON.stringify(String(id))}`), { status: 400 });
+  }
+  return id;
+}
+
 // The store holds every question, answer, note and snapshotted source file from every
 // session and every project, indefinitely. Confidentiality is not something to leave to
 // whatever the parent directory happens to be: dirs are owner-only, files are owner-only.
@@ -43,11 +63,11 @@ function ensureDirs(home = boardHome()) {
 }
 
 function boardPath(id, home = boardHome()) {
-  return path.join(boardsDir(home), `${id}.json`);
+  return path.join(boardsDir(home), `${assertSafeId(id)}.json`);
 }
 
 function pagePath(id, home = boardHome()) {
-  return path.join(pagesDir(home), `${id}.html`);
+  return path.join(pagesDir(home), `${assertSafeId(id)}.html`);
 }
 
 /** Atomic write: temp file in the same directory, fsync, then rename over the target.

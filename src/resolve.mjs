@@ -86,11 +86,50 @@ export function resolveBoardCwd(cwd) {
   if (real === path.parse(real).root) {
     return { error: `refusing cwd ${cwd}: the filesystem root is not a project directory` };
   }
-  const home = homedir();
-  if (home && contains(real, home)) {
+  if (isHomeOrAbove(real, st)) {
     return { error: `refusing cwd ${cwd}: $HOME (or a directory above it) is too broad to be a project directory` };
   }
   return { path: real };
+}
+
+/** Is `real` $HOME itself, or an ancestor of it? Compared by FILESYSTEM IDENTITY
+ * (device + inode), not by string.
+ *
+ * A string comparison was bypassable twice over on macOS (audit 2026-07-31 S6), because
+ * realpathSync canonicalizes neither of the two ways one directory gets two names here:
+ *
+ *   /users/jerry                        APFS is case-insensitive, so this IS $HOME, and
+ *                                       realpathSync returns it unchanged, lowercase
+ *   /System/Volumes/Data/Users/jerry    the firmlink behind /Users, also returned as-is
+ *                                       because a firmlink is not a symlink
+ *
+ * Neither is a lexical ancestor of `/Users/jerry`, so both sailed past the check and
+ * bound a board's project root to the entire home directory — after which any `Ref`
+ * could snapshot `.ssh/id_ed25519` or `.aws/credentials` into the board JSON and onto
+ * the rendered page. `/users` and `/USERS` widened it to every account on the machine.
+ *
+ * dev+ino is immune to both: two names for one directory have one identity. Walks up
+ * from $HOME rather than down from `real` so the loop is bounded by path depth and does
+ * not depend on `real` being canonical in the first place. */
+function isHomeOrAbove(real, realStat) {
+  const home = homedir();
+  if (!home) return false;
+  let dir;
+  try {
+    dir = realpathSync(home);
+  } catch {
+    // No readable home: fall back to the lexical check rather than failing open.
+    return contains(real, home);
+  }
+  for (;;) {
+    try {
+      const st = statSync(dir);
+      if (st.dev === realStat.dev && st.ino === realStat.ino) return true;
+    } catch { /* unreadable ancestor: keep climbing rather than giving up */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return false; // reached the root
+    dir = parent;
+  }
 }
 
 /** Is `parent` an ancestor of, or equal to, `child`? Both must already be absolute

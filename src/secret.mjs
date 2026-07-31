@@ -21,9 +21,10 @@
 // capture.
 //
 // CLAUDE_BOARD_SECRET_FILE is a testing seam in exactly the style of
-// CLAUDE_BOARD_LAUNCH_AGENTS_DIR and CLAUDE_BOARD_HOME: not user-facing
-// configuration, defaults to the real path, exists so the checks never read or write
-// the real one.
+// CLAUDE_BOARD_LAUNCH_AGENTS_DIR: not user-facing configuration, defaults to the real
+// path, exists so the checks never read or write the real one. (CLAUDE_BOARD_HOME used
+// to be listed here as a third example and is not one — it is documented configuration
+// for where the store lives; see README.md.)
 
 import { readFileSync } from 'node:fs';
 import { timingSafeEqual, createHmac } from 'node:crypto';
@@ -37,15 +38,22 @@ export const SECRET_HEADER = 'x-claude-board-secret';
 /** Cookie an authorized browser holds. See sessionToken below. */
 export const SESSION_COOKIE = 'cb_session';
 
-/** How long that cookie lives, in seconds. 400 days, which is the ceiling Chrome
- * (and the cookie-expiry draft it implements) clamps any longer Max-Age to, so
- * asking for more would be silently rounded down rather than honoured.
+/** How long that cookie lives, in seconds.
  *
  * It is deliberately NOT a session cookie: SPEC_LAUNCH.md criterion 2 says
  * bookmarking a board and opening the bookmark days later still works, and a
  * cookie that dies with the browser window turns every morning into a
- * re-authorization. */
-export const SESSION_MAX_AGE_S = 400 * 24 * 60 * 60;
+ * re-authorization.
+ *
+ * 30 days, cut from 400 on 2026-07-31 (audit S1). 400 was the Chrome clamp ceiling —
+ * i.e. the longest the browser would honour, chosen for no reason but that. Lifetime is
+ * one of only two levers that bound the cookie's exposure, because the other one people
+ * reach for does not exist: cookies are NOT port-scoped (RFC 6265 §8.5), so this value
+ * travels to every http server on the same host, whatever port it listens on. It cannot
+ * be scoped away from them, so it is instead made to expire while it is still worth
+ * something to expire. `bin/authorize.mjs` re-mints in one command, so the cost of the
+ * cut is one re-authorization a month against a 13x smaller window. */
+export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
 
 export function secretPath() {
   return process.env.CLAUDE_BOARD_SECRET_FILE || path.join(os.homedir(), '.config', 'claude-board', 'secret');
@@ -100,13 +108,29 @@ export function secretMatches(provided, expected) {
  * including the source excerpts boards embed. It is NOT the secret: it is refused in
  * the `x-claude-board-secret` header, so it cannot create a board, cannot name a
  * `cwd`, and therefore can never make the daemon resolve a file. What it does not
- * defend against, and cannot: a process that can read the 0600 secret file can mint
- * this itself, and is already fully trusted; a browser extension with host permissions
- * on the profile can read the cookie, because HttpOnly stops page script, not
- * extensions. Both are stated in SECURITY.md rather than papered over here.
+ * defend against, and cannot:
  *
- * No `Secure` attribute is set by the caller and none is possible: the daemon serves
- * plain http on 127.0.0.1, and a `Secure` cookie would simply never be sent back. */
+ *  - a process that can read the 0600 secret file can mint this itself, and is already
+ *    fully trusted;
+ *  - a browser extension with host permissions on the profile can read the cookie,
+ *    because HttpOnly stops page script, not extensions;
+ *  - ANY OTHER http server on this host, whatever port it listens on. Cookies are not
+ *    port-scoped (RFC 6265 §8.5) and SameSite is not port-aware — site is scheme plus
+ *    host — so a reviewer who opens `http://127.0.0.1:3000` in the same browser hands
+ *    that server this cookie on a plain navigation, and it can then replay it here.
+ *    Found 2026-07-31 (audit S1) and NOT fixable at this layer: the daemon cannot
+ *    distinguish a replay from the browser it minted for, and Path cannot be narrowed
+ *    below `/` while the index lives at `/`. What is done instead is bounding it —
+ *    SESSION_MAX_AGE_S above — and refusing browser-driven cross-origin use in
+ *    src/server.mjs `isSameOriginRead`. All three are stated in SECURITY.md rather than
+ *    papered over here.
+ *
+ * No `Secure` attribute is set. Not because it would be ignored — Chrome treats
+ * `http://127.0.0.1` as a potentially-trustworthy origin and does return `Secure`
+ * cookies to it — but because it buys nothing on a loopback-only plain-http daemon and
+ * would break any browser that does not implement that carve-out. (This comment used to
+ * claim such a cookie "would simply never be sent back", which is wrong; corrected
+ * 2026-07-31.) */
 export function sessionToken(secret) {
   if (!secret) return null;
   return createHmac('sha256', secret).update('claude-board/session/v1').digest('hex');
@@ -121,14 +145,24 @@ export function sessionCookieMatches(cookieHeader, secret) {
 }
 
 /** Parse a Cookie header into a plain object. Values are not URL-decoded: everything
- * this daemon sets is hex. */
+ * this daemon sets is hex.
+ *
+ * FIRST wins, not last (audit 2026-07-31 S5). RFC 6265 §5.4 sends the most specific
+ * match first, so the first `cb_session` in the header is the one set for this exact
+ * host and path — this daemon's own. Last-wins let any other loopback server set a
+ * second `cb_session` that sorted later and SHADOWED the real one, which locked the
+ * reviewer out permanently: every board answered with the refusal page, and
+ * `bin/authorize.mjs` could not fix it because a re-mint writes the same (host, path)
+ * key and leaves the shadowing duplicate untouched. */
 export function parseCookies(header) {
   const out = {};
   if (!header) return out;
   for (const part of String(header).split(';')) {
     const eq = part.indexOf('=');
     if (eq === -1) continue;
-    out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+    const name = part.slice(0, eq).trim();
+    if (Object.prototype.hasOwnProperty.call(out, name)) continue;
+    out[name] = part.slice(eq + 1).trim();
   }
   return out;
 }

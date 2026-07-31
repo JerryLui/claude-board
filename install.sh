@@ -31,10 +31,14 @@
 # overwritten only while the copy on disk is still the one install put there
 # (see step 1 below) — a user's own edit is deliberately NOT unconditional.
 #
-# Testing seams (env vars) — exactly like CLAUDE_BOARD_HOME is for the store:
-# not user-facing configuration, defaults are the real paths, exist so
-# test/check-install.mjs can point everything at a temp dir and a stub
-# binary instead of touching this machine for real.
+# Testing seams (env vars): not user-facing configuration, defaults are the real
+# paths, exist so test/check-install.mjs can point everything at a temp dir and a
+# stub binary instead of touching this machine for real.
+#
+# CLAUDE_BOARD_HOME is NOT one of these. It is documented configuration — where the
+# store lives — in README.md and PROTOCOL.md. This comment used to cite it as the
+# example of a test seam, which is the description SPEC_LAUNCH.md criterion 15
+# specifically retired.
 #
 #   CLAUDE_BOARD_LAUNCH_AGENTS_DIR   default: ~/Library/LaunchAgents
 #   CLAUDE_BOARD_LOG_DIR             default: ~/Library/Logs/claude-board

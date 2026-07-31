@@ -115,11 +115,21 @@ fi
 # shipped copy) is safe to delete. Anything else is the user's edit, and this
 # script is exactly as careful about destroying it on the way out as install.sh
 # is about overwriting it on the way in (SPEC_LAUNCH.md criterion 11).
+HASH_FILE_LEFT=0
 if [ ! -f "$COMMAND_FILE" ]; then
   echo "==> no command file at $COMMAND_FILE"
+  # The record outlives the file it describes: a user who deleted the command file by
+  # hand a month ago still has this, and it used to be removed only on the branch that
+  # removed the file, so it was left behind and named nowhere (audit 2026-07-31 Sp1).
+  if [ -f "$HASH_FILE" ]; then rm -f "$HASH_FILE"; echo "==> removed $HASH_FILE (the record of a file that is already gone)"; fi
 elif [ -z "$NODE_BIN" ]; then
-  # No node on PATH to hash with: refuse to guess, leave the file, say why.
+  # No node on PATH to hash with: refuse to guess, leave the file, say why. This is
+  # reachable in an ordinary setup, not just a broken one -- `command -v node` finds
+  # nothing in a non-interactive shell when node comes from an nvm shell function, which
+  # install.sh says to expect on this machine. So it is named in the summary rather than
+  # mentioned once and scrolled past.
   echo "==> $COMMAND_FILE left in place (no node on PATH to verify it is unmodified)"
+  HASH_FILE_LEFT=1
 else
   INSTALLED_HASH="$(sha256_file "$COMMAND_FILE")"
   RECORDED_HASH=""
@@ -142,6 +152,7 @@ else
   else
     echo "==> $COMMAND_FILE has local edits — leaving it (it is your file, not this repo's)"
     echo "    remove it yourself if you want it gone: rm \"$COMMAND_FILE\""
+    HASH_FILE_LEFT=1
   fi
 fi
 
@@ -156,4 +167,10 @@ echo "left in place on purpose:"
 echo "  store (your review history):  $STORE_DIR"
 echo "  local secret:                 $SECRET_FILE"
 echo "  logs:                         $LOG_DIR"
+if [ -f "$COMMAND_FILE" ]; then
+  echo "  your edited command file:     $COMMAND_FILE"
+fi
+if [ "$HASH_FILE_LEFT" -eq 1 ] && [ -f "$HASH_FILE" ]; then
+  echo "  its install record:           $HASH_FILE"
+fi
 echo "Remove them yourself if you want them gone."

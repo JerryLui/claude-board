@@ -78,3 +78,36 @@ widens the gate, which is the cost of making it configurable at all. Rejected: h
 `~/.claude` (smallest widening, but every other tool's config is then unreachable);
 rejected: dropping confinement entirely, which is more honest about the weak boundary but
 rewrites the security posture for a convenience fix.
+
+## 4. Every command falls back off the board, `/grill` included — 2026-07-31
+
+**Context:** `SPEC_LAUNCH.md` and `commands/grill.md` both state the opposite, deliberately
+and at length: there is no automatic fallback to the terminal for a board-shaped round,
+because "a feature that quietly downgrades is a feature that stays broken for a week." The
+shim enforces it by refusing a non-interactive session before posting anything. Migrating
+`/audit`, `/example` and the renderers onto the board made that rule load-bearing for
+commands that do have a terminal path — and the reviewer wants these runnable headless, on a
+VPS, where the shim refuses by design.
+
+**Decision:** Every command carries a non-board path and takes it when the board is
+unreachable or the session is headless, announcing that it did. A fallback is **degraded, not
+equivalent**: it promises a path exists, never the same experience. `/grill` falls back to
+`AskUserQuestion` and loses multi-select, ranking, attached context and comment anchoring.
+`/example` writes its HTML and says the visual choice was unavailable. `/audit` writes the
+findings file it writes today.
+
+**Consequences:** The rule the launch spec picked to protect is gone, and the failure it
+predicted is now possible: a broken board can go unnoticed for as long as the degraded path
+keeps working, which is exactly how the EPERM defect survived seven rounds. What replaces it
+is announcement rather than refusal, which is weaker and depends on a human reading the line.
+`commands/grill.md`'s "Fail loudly, don't fall back" section and the
+`no automatic terminal fallback is described` case in `test/check-grill.mjs` both have to be
+rewritten, so this reaches published docs and a check, not just a prompt. It stops there,
+though: `bin/mcp.mjs` keeps returning `isError` on an unreachable daemon and that assertion
+stays, so only the command's *response* to the error changes. "Loud" survives;
+"unrecoverable" is what was actually traded away. Accepted because the alternative is that a headless
+runner cannot use any migrated command at all, and because the board is additive for every
+command but `/grill` — for `/grill` alone, the fallback genuinely loses the artifact.
+Rejected: migrated commands fall back and `/grill` does not (two rules, and the VPS case
+still fails for the one command most likely to be run there); rejected: nothing falls back,
+which leaves "the daemon is merely down on your own machine" unanswered.

@@ -9,10 +9,11 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 - **Read routes now require a credential.** The index, a board page, archive search, the
   blocking wait and the event stream all refuse a caller holding neither the local secret
-  nor the browser session cookie, with **401**. Only `GET /api/health` stays open, because
-  `install.sh` polls it with plain `curl` to decide whether the service came up. Before
-  this, any process that could open a socket to the port read every board — source
-  excerpts, questions and answers included.
+  nor the browser session cookie, with **401**. Two routes stay open: `GET /api/health`,
+  because `install.sh` polls it with plain `curl` to decide whether the service came up,
+  and `GET /auth/<token>`, which is the route that hands out the credential and so cannot
+  require one. Before this, any process that could open a socket to the port read every
+  board — source excerpts, questions and answers included.
 - **The browser is authorized by a single-use handoff, never by a token in a URL.** The
   session's shim asks the daemon for one (`POST /api/handoff`, secret required), opens it,
   and the daemon consumes it, sets a host-only `HttpOnly` `SameSite=Strict` cookie and

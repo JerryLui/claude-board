@@ -49,7 +49,12 @@ export const HANDOFF_TOKEN_RE = /^[0-9a-f]{64}$/;
 // header of the redirect below, so it is checked rather than trusted: a CR/LF would
 // forge a header and a leading `//` or scheme would turn the redirect into an open
 // redirect off this origin.
-export const SAFE_BOARD_ID = /^[A-Za-z0-9_-]{1,64}$/;
+//
+// Re-exported from src/store.mjs rather than declared twice. The store is what turns an
+// id into a filesystem path, so it owns the definition; two copies of one pattern is how
+// a tightening in one place silently leaves the other wide (audit 2026-07-31 S2).
+export { SAFE_BOARD_ID } from './store.mjs';
+import { SAFE_BOARD_ID } from './store.mjs';
 
 /** Where a consumed handoff sends the browser. The caller names a BOARD, never a path:
  * the only two possible targets are this daemon's index and one of its board pages, so
@@ -59,6 +64,12 @@ export const SAFE_BOARD_ID = /^[A-Za-z0-9_-]{1,64}$/;
 export function handoffTarget(boardId) {
   return typeof boardId === 'string' && SAFE_BOARD_ID.test(boardId) ? `/b/${boardId}` : '/';
 }
+
+/** The port the daemon listens on unless told otherwise. Declared HERE rather than in
+ * src/server.mjs, which re-exports it: server.mjs imports this module, so the constant
+ * has to live on the side that does not import back, and recoveryCommand below needs it
+ * to know whether the port is worth naming. */
+export const DEFAULT_PORT = 7391;
 
 /** The repository this daemon is running from. `install.sh` points launchd at a clone
  * wherever the user put it, so this is the only way to name the recovery command with a
@@ -77,9 +88,16 @@ export function shellQuote(s) {
 /** The ONE command that re-authorizes a browser holding no credential — a cleared
  * cookie jar, a second profile, a different browser. Absolute, so it can be pasted from
  * anywhere; named verbatim by the refusal page, by bin/mcp.mjs when it cannot mint a
- * handoff, and by README.md. All three read it from here so they cannot drift apart. */
-export function recoveryCommand() {
-  return `node ${shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs'))}`;
+ * handoff, and by README.md. All three read it from here so they cannot drift apart.
+ *
+ * Carries the port when it is not the default (audit 2026-07-31 S7). bin/authorize.mjs
+ * reads CLAUDE_BOARD_PORT from the shell that runs it, not from the daemon it is
+ * recovering, so on a non-default-port install the command as printed talked to 7391 —
+ * which is either nothing at all, or somebody else's service, to which it would then
+ * present this daemon's secret. */
+export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT) {
+  const cmd = `node ${shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs'))}`;
+  return port === DEFAULT_PORT ? cmd : `CLAUDE_BOARD_PORT=${port} ${cmd}`;
 }
 
 /** The live handoffs of ONE daemon instance. Created per request handler rather than at

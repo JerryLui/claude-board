@@ -900,6 +900,17 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
  * are the point — and tells the agent to stop posting boards. Both live inside the
  * one `.send-bar`, which `body.readonly` hides wholesale (src/styles.mjs), so the
  * standalone file:// archive has neither. */
+/** Is there a round waiting to be answered? Decides whether the send bar is live at
+ * HYDRATE time, which nothing used to (audit 2026-07-31 D2): the buttons were rendered
+ * enabled unconditionally and only ever disabled by an SSE push handler, so a finished
+ * board opened from the index had a live Send. Pressing it posted `round: null`, which
+ * the server answers 400 — not the 409 the client special-cases — so the page showed
+ * `Error: submit failed: 400` and re-enabled the buttons, forever. */
+function hasOpenRound(board) {
+  const latest = board.rounds[board.rounds.length - 1];
+  return Boolean(latest && latest.status === 'open');
+}
+
 export function renderBoardPage(board) {
   const resolvedComments = resolveComments(board, board.comments);
   const commentsByBlock = groupCommentsByBlock(resolvedComments);
@@ -933,9 +944,9 @@ export function renderBoardPage(board) {
     ${roundsHtml}
   </div>
   <div class="send-bar">
-    <span class="send-status" id="send-status"></span>
-    <button type="button" class="btn-discuss" id="discuss-btn">Discuss in chat</button>
-    <button type="button" class="btn-send" id="send-btn">Send</button>
+    <span class="send-status" id="send-status">${hasOpenRound(board) ? '' : 'This round has been sent. Waiting for the next one.'}</span>
+    <button type="button" class="btn-discuss" id="discuss-btn"${hasOpenRound(board) ? '' : ' disabled'}>Discuss in chat</button>
+    <button type="button" class="btn-send" id="send-btn"${hasOpenRound(board) ? '' : ' disabled'}>Send</button>
   </div>
 </div>
 <script id="board-data" type="application/json">${safeJson(boardForClient)}</script>
