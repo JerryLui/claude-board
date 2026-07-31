@@ -12,6 +12,7 @@
 // of keying by project directory instead.
 
 import { styles } from './styles.mjs';
+import { themeBootScript, themeToggle } from './theme.mjs';
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -135,13 +136,19 @@ export function renderIndexPage({ threads = [], query = '', results = [] } = {})
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>claude-board</title>
+<script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>
 <body>
 <div class="index-shell">
   <header class="index-head">
-    <h1>claude-board</h1>
-    <div class="meta">one thread per Claude session</div>
+    <div class="index-head-titles">
+      <h1>claude-board</h1>
+      <div class="meta">one thread per Claude session</div>
+    </div>
+    <div class="index-head-actions">
+      ${themeToggle()}
+    </div>
   </header>
 
   <form class="search-form" action="/" method="get">

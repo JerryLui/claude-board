@@ -76,6 +76,10 @@ beside any answer, click **comment mode** and click any element on the page to a
 comment to it, then **Send**. Follow-up rounds push into the same tab, with the
 previous round collapsed into a history rail and its answers still readable.
 
+The page follows your OS's light/dark preference by default; a control in the header
+cycles System → Light → Dark, and the choice is remembered per origin. A standalone
+archive always follows the OS and remembers nothing.
+
 Two other ways out, beside Send: **Discuss in chat** returns immediately with whatever
 is filled in and tells the agent to stop posting boards, and a wall-clock cap (default
 two hours) returns an explicit no-response rather than blocking the call forever.
@@ -132,7 +136,7 @@ them yourself if you want them gone — the store is your review history.
 ## Development
 
 ```sh
-npm run check      # 17 checks, node only, no browser and no network
+npm run check      # 21 checks, node only, no browser and no network
 ```
 
 Every check is also runnable alone, and each runs under a deadline in its own process

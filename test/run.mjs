@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const CHECK_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_CHECK_TIMEOUT_MS) || 180_000;
 
-const checks = ['check-pure.mjs', 'check-http.mjs', 'check-mcp.mjs', 'check-install.mjs', 'check-grill.mjs', 'check-click.mjs', 'check-click-pin.mjs', 'check-comment-mode.mjs', 'check-anchor-rerender.mjs', 'check-mermaid-anchor.mjs', 'check-archive.mjs', 'check-anchor-push.mjs', 'check-pin-placement.mjs', 'check-parser-parity.mjs', 'check-anchor-robustness.mjs', 'check-anchor-perf.mjs', 'check-stage-isolation.mjs'];
+const checks = ['check-pure.mjs', 'check-contrast.mjs', 'check-theme.mjs', 'check-http.mjs', 'check-mcp.mjs', 'check-install.mjs', 'check-grill.mjs', 'check-click.mjs', 'check-click-pin.mjs', 'check-comment-mode.mjs', 'check-anchor-rerender.mjs', 'check-mermaid-anchor.mjs', 'check-mermaid-theme.mjs', 'check-archive.mjs', 'check-archive-ids.mjs', 'check-anchor-push.mjs', 'check-pin-placement.mjs', 'check-parser-parity.mjs', 'check-anchor-robustness.mjs', 'check-anchor-perf.mjs', 'check-stage-isolation.mjs'];
 
 /** Run one check file with a deadline. Resolves `{ code, signal, timedOut, elapsed }`
  * — never rejects, so one broken check cannot abort the run. */

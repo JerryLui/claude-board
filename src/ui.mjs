@@ -45,10 +45,57 @@
 
 import { computeBoardPatch } from './patch.mjs';
 import { composeHint, parseMermaidDomId, MERMAID_NODE_SELECTOR } from './anchor.mjs';
+import { THEME_CHANGE_EVENT } from './theme.mjs';
+
+// Ticket 04 (light theme): mermaid variable -> CSS token, read at call time
+// from the live computed style rather than hardcoded a second time in the
+// client script below. QUIRKS.md used to record this file's twelve dark
+// hex/rgba literals as an independently-maintained mirror of src/styles.mjs's
+// own DARK palette ("Two stylesheets, one palette") -- every one of those
+// twelve was an exact match for the token it's mapped to below, so a dark
+// reader's diagram is unchanged except for 'lineColor'/'--muted': ticket 02
+// moved --muted's own value to '#8690a2' for contrast (it used to be
+// '#7b869a', this map's old hardcoded value) and this map now inherits that
+// fix rather than keeping its own stale copy. 'background' and the
+// 'fontFamily'/'fontSize' pair stay literal in mermaidThemeVariables below --
+// neither is a color token.
+//
+// A real, top-level module constant (not just text inside the `ui` template
+// literal below) for the same reason MERMAID_NODE_SELECTOR above is imported
+// rather than retyped: it's spliced into the client script via
+// JSON.stringify so the two can never drift, AND it's directly importable by
+// test/check-mermaid-theme.mjs, which cross-checks every value against
+// src/styles.mjs's real palettes -- the audit finding this exists to close
+// (9 of 12 mappings were asserted nowhere; a palette rename that orphaned one
+// used to surface only as an unhandled rejection wiping every diagram, never
+// as a test failure).
+export const MERMAID_TOKEN_MAP = {
+  primaryColor: '--panel-2',
+  primaryTextColor: '--ink',
+  primaryBorderColor: '--accent',
+  secondaryColor: '--panel-3',
+  tertiaryColor: '--panel',
+  lineColor: '--muted',
+  textColor: '--ink-2',
+  mainBkg: '--panel-2',
+  nodeBorder: '--accent',
+  clusterBkg: '--accent-glow',
+  clusterBorder: '--hairline-2',
+  edgeLabelBackground: '--panel',
+};
 
 export const ui = `
 (function () {
-  var dataEl = document.getElementById('board-data');
+  // Tag/type-qualified, not a bare getElementById: board content is markdown
+  // snapshotted from arbitrary files (src/markdown.mjs's own comment on the
+  // threat model), and a heading '## Board data' slugifies to a SECOND
+  // id="board-data" on an <h2> that renders before this real script tag in
+  // tree order (audit 2026-07-31, finding P1). getElementById('board-data')
+  // used to return that heading, JSON.parse threw on its text, and the whole
+  // client IIFE died before body.readonly was ever applied -- a file:// archive
+  // then rendered as if it were a live, writable board. No heading is ever a
+  // <script>, so this selector cannot be satisfied by anything markdown emits.
+  var dataEl = document.querySelector('script#board-data[type="application/json"]');
   if (!dataEl) return;
   var board = JSON.parse(dataEl.textContent);
   var boardId = board.id;
@@ -107,6 +154,31 @@ export const ui = `
   function isWiredStage(frame) { return !!wiredStageFrames && wiredStageFrames.has(frame); }
   function markStageWired(frame) { if (wiredStageFrames) wiredStageFrames.add(frame); }
 
+  // Ticket 04 (light theme): a theme switch redraws every mermaid diagram in
+  // place -- wireMermaidBlock (below) runs again against whatever fresh <svg>
+  // that redraw leaves behind, so the pin layer repositions and (still
+  // node-id-anchored) pins survive. Its click listener must NOT be
+  // re-attached on that second pass, or a reader cycling the theme control
+  // several times ends up with several stacked handlers minting several
+  // comments per click -- the exact 'every resize would stack another click
+  // handler' hazard refreshPins' own comment already names for html stages,
+  // from a different trigger. Same WeakSet shape as wiredStageFrames just
+  // above, for the same reason: membership only ever answers 'has this exact
+  // <pre> already gotten its listener', never enumerated.
+  var mermaidWiredBlocks = typeof WeakSet === 'function' ? new WeakSet() : null;
+  function isMermaidBlockWired(preEl) { return !!mermaidWiredBlocks && mermaidWiredBlocks.has(preEl); }
+  function markMermaidBlockWired(preEl) { if (mermaidWiredBlocks) mermaidWiredBlocks.add(preEl); }
+
+  // Each pre.mermaid's ORIGINAL diagram source, stashed the first time
+  // renderMermaidBlocks (below) runs it: mermaid.run() overwrites the node's
+  // own content with the rendered SVG and marks it processed, so a second run
+  // against the same node is a no-op unless the source goes back in first --
+  // and once the SVG is in, the source is gone from the DOM; it cannot be
+  // re-derived from the rendered markup afterwards. A WeakMap, not a data
+  // attribute: nothing else in this file re-serialises a block's own content
+  // into its markup a second time, and the source can be arbitrarily long.
+  var mermaidSourceByBlock = typeof WeakMap === 'function' ? new WeakMap() : null;
+
   // Pure diff between two board JSON snapshots (added/changed block ids, rounds
   // that just became sent) -- unit-tested directly in test/check-pure.mjs via
   // src/patch.mjs. This is the EXACT same function, spliced in verbatim by
@@ -149,6 +221,16 @@ export const ui = `
   if (readonly) {
     qsa('textarea, input, button').forEach(function (el) { el.disabled = true; });
     qsa('.rank-list li[draggable]').forEach(function (li) { li.removeAttribute('draggable'); });
+    // Ticket 03 (src/theme.mjs): the theme control is the one exception -- an
+    // archive reader is exactly who needs it. Re-enabled right after the
+    // blanket disable above rather than excluded from that selector, so the
+    // selector's own literal text stays intact (test/check-pure.mjs asserts
+    // it verbatim) and this reads as the carve-out it is. Tag-qualified
+    // ('button#theme-toggle', not a bare id) for the same reason as
+    // src/theme.mjs's own lookup -- a heading can mint a second
+    // id="theme-toggle" that is never a <button> (audit finding L1).
+    var themeToggleBtn = document.querySelector('button#theme-toggle');
+    if (themeToggleBtn) themeToggleBtn.disabled = false;
   }
 
   // Opens (and fills in) blockId's comment-form for a given anchor. Shared by the
@@ -165,14 +247,26 @@ export const ui = `
   // ever non-empty for anchorKind 'mermaid'; every other caller omits it and the
   // stored attribute is just the empty string, harmless since the submit
   // handler below only reads it for that one kind.
+  // Every id-by-blockId lookup in this file (comment-form-/comment-target-/
+  // comment-list-<blockId>, board-data, theme-toggle, comment-mode-toggle,
+  // send-btn/discuss-btn/send-status, blocks) is tag-qualified rather than a
+  // bare getElementById -- board content is markdown snapshotted from
+  // arbitrary files (src/markdown.mjs's threat-model comment), and a heading
+  // or top-level list item can mint an id identical to any of these
+  // (slugify), including a composed one like 'comment-form-q1'. Only render.mjs's
+  // OWN element ever carries the matching tag (<form>, <div>, <button>, ...)
+  // for one of these ids -- a heading is always <h1>-<h6> and a list item is
+  // always <li>, neither of which any of these lookups' tag qualifiers can
+  // ever match -- so tag-qualifying removes the collision, and the tree-order
+  // dependence it used to rely on, entirely (audit 2026-07-31, findings P1/P2/L1).
   function openCommentForm(blockId, anchorKind, anchorRef, anchorHint, anchorDomRef) {
-    var form = document.getElementById('comment-form-' + blockId);
+    var form = document.querySelector('form#comment-form-' + blockId);
     if (!form) return;
     form.setAttribute('data-anchor-kind', anchorKind);
     form.setAttribute('data-anchor-ref', anchorRef || '');
     form.setAttribute('data-anchor-label', anchorHint || '');
     form.setAttribute('data-anchor-domref', anchorDomRef || '');
-    var target = document.getElementById('comment-target-' + blockId);
+    var target = document.querySelector('div#comment-target-' + blockId);
     if (target) {
       target.textContent = anchorKind === 'block' ? 'commenting on: whole block' : 'commenting on: ' + (anchorHint || anchorRef);
       // Shown only while a comment is actually being composed on this block --
@@ -648,6 +742,12 @@ export const ui = `
     var layer = section.querySelector('.pin-layer');
     if (layer) renderMermaidPins(blockId, svg || null, layer, section);
     if (readonly || !svg) return; // nothing live to click without a rendered diagram
+    // Ticket 04: a theme switch calls this again for the SAME preEl (a fresh
+    // <svg> inside it, not a fresh <pre>), purely to refresh the pins above --
+    // the click listener itself must attach exactly once per element, ever,
+    // or repeated switches stack repeated handlers (mermaidWiredBlocks, above).
+    if (isMermaidBlockWired(preEl)) return;
+    markMermaidBlockWired(preEl);
     preEl.addEventListener('click', function (ev) {
       // One gesture, toggle-gated everywhere (the user's decision, relayed by
       // the director, ticket 03): a diagram node is no longer a standing
@@ -761,7 +861,9 @@ export const ui = `
   // ever sees) reproduces ticket 02's behaviour exactly, and turning it ON stands
   // those handlers down so a click anchors instead of mutating an answer.
 
-  var modeToggleBtn = document.getElementById('comment-mode-toggle');
+  // Tag-qualified, same reason as every other id-by-string lookup in this
+  // file -- see openCommentForm's own comment above.
+  var modeToggleBtn = document.querySelector('button#comment-mode-toggle');
 
   function setCommentMode(on) {
     commentMode = !!on && !readonly;
@@ -1053,7 +1155,7 @@ export const ui = `
         : { kind: 'block' };
       pendingComments.push({ blockId: blockId, anchor: anchor, text: text });
       var provisionalN = nextCommentNumber() + pendingComments.length - 1;
-      var list = document.getElementById('comment-list-' + blockId);
+      var list = document.querySelector('div#comment-list-' + blockId);
       if (list) {
         var item = document.createElement('div');
         item.className = 'comment-item comment-pending';
@@ -1076,7 +1178,7 @@ export const ui = `
       refreshPins(document);
       input.value = '';
       form.classList.remove('open');
-      var targetEl = document.getElementById('comment-target-' + blockId);
+      var targetEl = document.querySelector('div#comment-target-' + blockId);
       if (targetEl) targetEl.classList.remove('open');
     });
   });
@@ -1147,48 +1249,147 @@ export const ui = `
 
   // --- mermaid: client-side from the CDN, exactly as /visualize does today ---
 
+  // The real MERMAID_TOKEN_MAP module constant above, spliced in by value
+  // (JSON.stringify, same discipline as MERMAID_NODE_SELECTOR above) so this
+  // is never a second, hand-typed copy that can silently drift from the one
+  // test/check-mermaid-theme.mjs actually checks against src/styles.mjs's
+  // palettes.
+  var MERMAID_TOKEN_MAP = ${JSON.stringify(MERMAID_TOKEN_MAP)};
+
+  // Resolved the SAME way src/styles.mjs's own selectors resolve :root's
+  // tokens: an explicit data-theme attribute wins outright; absent that, the
+  // live OS preference decides. This has to match the CSS exactly, not just
+  // approximate it -- it is what mermaid's own 'darkMode' flag (which chooses
+  // its light/dark chart internals independently of themeVariables) keys off.
+  function isDarkThemeActive() {
+    var attr = document.documentElement.getAttribute('data-theme');
+    if (attr === 'dark') return true;
+    if (attr === 'light') return false;
+    return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+
+  // The actual cascade result, read fresh every call -- automatically correct
+  // for System mode, an explicit override, or any future selector change in
+  // src/styles.mjs, with no second place left to keep in sync (see
+  // MERMAID_TOKEN_MAP's own comment).
+  //
+  // Audit finding M2: a renamed/removed token (MERMAID_TOKEN_MAP naming a
+  // custom property src/styles.mjs no longer defines) resolves to '' here,
+  // and mermaid's own colour library throws on '' -- unrecoverably, if that
+  // throw happens inside initialize() after a destructive restore has
+  // already wiped every diagram's source. So this function itself is the
+  // validation gate: ANY unresolved mapped token fails the WHOLE call
+  // (returns null) rather than handing back a partial palette. Callers below
+  // treat null as "not safe to draw with right now" and choose, deliberately,
+  // to leave whatever is already on screen alone rather than destroy it for
+  // a redraw that cannot succeed -- see runMermaidRedrawPass's own comment
+  // for why that reads better than silently defaulting the one bad variable.
+  function mermaidThemeVariables() {
+    var computed = window.getComputedStyle(document.documentElement);
+    var vars = {
+      darkMode: isDarkThemeActive(),
+      background: 'transparent',
+      fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
+      fontSize: '13px',
+    };
+    for (var key in MERMAID_TOKEN_MAP) {
+      if (!Object.prototype.hasOwnProperty.call(MERMAID_TOKEN_MAP, key)) continue;
+      var value = computed.getPropertyValue(MERMAID_TOKEN_MAP[key]).trim();
+      if (!value) return null;
+      vars[key] = value;
+    }
+    return vars;
+  }
+
+  // Audit findings D1/D2: every mermaid pass below -- the very first render,
+  // a later SSE push's render of newly-inserted nodes, or a theme-triggered
+  // redraw -- is queued onto this ONE module-scoped promise chain instead of
+  // running the moment it's called. Real mermaid 11 claims a node's
+  // data-processed flag and does innerHTML = '' before its own first
+  // internal per-node await, so two passes that are merely STARTED (not
+  // SETTLED) can still write to the SAME node in the same tick: the newer
+  // pass's restore-to-source can land on a node the older pass has already
+  // begun re-rendering, and the older pass's eventual innerHTML = svg can
+  // land back on that node before the newer pass ever reaches it -- so the
+  // newer pass ends up parsing the OLDER pass's rendered SVG as if it were
+  // diagram source (D1's "Maximum text size in diagram exceeded" /
+  // "Syntax error in text", permanently, since nothing redraws it again
+  // until the NEXT theme change). Queuing makes "started" and "settled" the
+  // same event for every caller here: a pass's own function body does not
+  // even begin running until every previously queued pass has fully
+  // resolved, so no pass can ever observe another pass's half-finished node.
+  var mermaidQueue = Promise.resolve();
+  function queueMermaidTask(fn) {
+    var result = mermaidQueue.then(fn, fn);
+    // Never let one task's own bug wedge the chain for every task queued
+    // after it -- each fn below already narrows its OWN real failures
+    // internally (offline, CDN, an unresolved theme token); anything
+    // reaching here would be a bug in this file, not mermaid's, and the
+    // chain has to keep moving regardless.
+    mermaidQueue = result.then(function () {}, function () {});
+    return result;
+  }
+
+  // D1's other half, "coalesce redundant redraws": three theme clicks with
+  // no settling between them must not run three full redraw passes just
+  // because queuing (above) stops them from corrupting each other. Each
+  // redrawMermaidForTheme call captures the counter's value BEFORE queuing;
+  // the queued task then checks it again once its turn actually comes up --
+  // if a NEWER redraw was requested in the meantime, running this one now
+  // would only draw a palette the very next queued task immediately
+  // overwrites, so it is skipped entirely (the DOM is never touched), and
+  // only the LAST requested redraw still matches and actually runs.
+  var mermaidRedrawGeneration = 0;
+
   var mermaidMod = null;
-  async function renderMermaidBlocks(root) {
+  async function runMermaidRenderPass(root) {
     var nodes = qsa('pre.mermaid', root);
     if (!nodes.length) return;
+    // Ticket 04: stash each node's raw diagram source before mermaid ever
+    // touches it -- mermaid.run() replaces a node's own content with its
+    // rendered SVG, so this is the only point at which the original text is
+    // still there to read. runMermaidRedrawPass (below) restores it on every
+    // theme switch, since a re-run needs real source to parse, not the SVG
+    // (or worse, nothing) left behind by the last render.
+    nodes.forEach(function (n) {
+      if (mermaidSourceByBlock && !mermaidSourceByBlock.has(n)) mermaidSourceByBlock.set(n, n.textContent);
+    });
     try {
       if (!mermaidMod) {
         mermaidMod = window.mermaid
           || (await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')).default;
-        // The board page is dark unconditionally (src/styles.mjs sets
-        // color-scheme: dark and a fixed palette), so the diagram is too --
-        // keying this off the OS scheme, as it used to, dropped a light
-        // 'neutral' diagram into a dark page for anyone on a light desktop.
-        // Mermaid's 'base' theme is the only one that takes themeVariables, so
-        // the diagram is drawn from the same tokens as everything around it.
-        mermaidMod.initialize({
-          startOnLoad: false,
-          theme: 'base',
-          themeVariables: {
-            darkMode: true,
-            background: 'transparent',
-            fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
-            fontSize: '13px',
-            primaryColor: '#18202f',
-            primaryTextColor: '#eaeef6',
-            primaryBorderColor: '#7c9cff',
-            secondaryColor: '#1e2839',
-            tertiaryColor: '#131a27',
-            lineColor: '#7b869a',
-            textColor: '#b6bfd0',
-            mainBkg: '#18202f',
-            nodeBorder: '#7c9cff',
-            clusterBkg: 'rgba(124, 156, 255, 0.06)',
-            clusterBorder: 'rgba(255, 255, 255, 0.14)',
-            edgeLabelBackground: '#131a27',
-          },
-        });
       }
+      // Audit finding M1: initialize before EVERY run(), not once ever, on
+      // whatever mermaidMod already is -- gating this behind "only the first
+      // time the engine loads" is exactly how a round that arrives long
+      // after the reader switched theme (with no live diagram in between to
+      // trigger a redraw) used to get drawn in a palette nobody chose.
+      // Mermaid's 'base' theme is the only one that takes themeVariables, so
+      // the diagram is drawn from the same tokens as everything around it.
+      var vars = mermaidThemeVariables();
+      // M2: an unresolved token must not reach initialize -- funnel it
+      // through the SAME catch as offline/CDN failure below, so it degrades
+      // the same honest way: the source fallback, never a wiped diagram.
+      if (!vars) throw new Error('mermaid theme token unresolved');
+      mermaidMod.initialize({ startOnLoad: false, theme: 'base', themeVariables: vars });
       await mermaidMod.run({ nodes: nodes, suppressErrors: true });
-    } catch (e) { /* offline or CDN failure: fall through to the source fallback below */ }
+    } catch (e) { /* offline, CDN failure, or an unresolved theme token: fall through to the source fallback below */ }
     nodes.forEach(function (n) {
       var svg = n.querySelector('svg');
       if (svg) { wireMermaidBlock(n, svg); return; }
+      // Audit finding D2: 'no svg' here is supposed to mean mermaid genuinely
+      // could not draw this node (offline/CDN unreachable, or -- under
+      // suppressErrors -- mermaid's own error graphic, which IS an <svg> and
+      // so already took the branch above). 'data-processed' already true
+      // with STILL no svg only happens if some OTHER pass claimed this node
+      // and has not finished writing it yet -- impossible now that every
+      // pass is serialized through queueMermaidTask above, but kept as an
+      // explicit guard rather than an assumption resting entirely on that:
+      // never destroy (replaceWith) a node something else is mid-write on.
+      // This is the exact site that used to replaceWith() a diagram that HAD
+      // rendered out to a '.missing' fallback, permanently invisible to
+      // qsa('pre.mermaid', document) forever after.
+      if (n.getAttribute('data-processed') === 'true') return;
       var wrap = document.createElement('div');
       wrap.innerHTML = '<p class="missing">mermaid engine unavailable or chart invalid — raw source:</p><pre><code></code></pre>';
       wrap.querySelector('code').textContent = n.textContent;
@@ -1200,7 +1401,77 @@ export const ui = `
       wireMermaidBlock(wrap, null);
     });
   }
+  function renderMermaidBlocks(root) {
+    return queueMermaidTask(function () { return runMermaidRenderPass(root); });
+  }
   renderMermaidBlocks(document);
+
+  // Ticket 04: re-run every diagram already on the page against whatever the
+  // NEW active theme's variables are. mermaid.run() silently no-ops on a
+  // <pre> it has already marked processed -- its rendered SVG replaced the
+  // original source text, so there is nothing left for a second run to read
+  // -- which is why runMermaidRenderPass (above) stashes each block's raw
+  // source the first time it runs one. Restoring that text and clearing the
+  // marker is what makes a second run possible at all; wireMermaidBlock then
+  // re-associates the block with whatever <svg> comes out of it (a NEW
+  // element, carrying a NEW generated svg id -- see
+  // MERMAID_NODE_SELECTOR/parseMermaidDomId's own comments in src/anchor.mjs
+  // for why that's fine: a pin's anchor keys on the source-declared node id,
+  // recovered from the generated id, never the generated id itself) without
+  // stacking a second click listener (isMermaidBlockWired, above).
+  async function runMermaidRedrawPass() {
+    if (!mermaidMod) return; // never loaded (offline/CDN unreachable) -- nothing live to redraw
+    var nodes = qsa('pre.mermaid', document);
+    if (!nodes.length) return;
+    // M2: validate BEFORE the destructive restore below -- an unresolved
+    // token means this redraw cannot succeed, so the chosen degradation is
+    // to abort here and leave every diagram exactly as it is (still themed
+    // to the OLD palette) rather than wipe every <pre> back to raw source
+    // for a redraw with nothing able to draw it back. The alternative
+    // (skip only the one bad variable and let mermaid default it) would
+    // silently draw every FUTURE diagram with one wrong colour forever;
+    // aborting instead keeps the failure visible as "the diagram didn't
+    // retheme" rather than invisible as "one shape is the wrong colour".
+    var vars = mermaidThemeVariables();
+    if (!vars) return;
+    nodes.forEach(function (n) {
+      var original = mermaidSourceByBlock && mermaidSourceByBlock.has(n) ? mermaidSourceByBlock.get(n) : null;
+      if (original == null) return; // never successfully rendered -- nothing to restore
+      n.textContent = original;
+      n.removeAttribute('data-processed');
+    });
+    try {
+      // M2 continued: initialize moved INSIDE the try (it used to sit
+      // outside it, AFTER the destructive restore above, so a throw here
+      // was an unhandled rejection with every diagram already wiped) --
+      // belt-and-suspenders alongside the validation above, not a
+      // replacement for it.
+      mermaidMod.initialize({ startOnLoad: false, theme: 'base', themeVariables: vars });
+      await mermaidMod.run({ nodes: nodes, suppressErrors: true });
+    } catch (e) { /* a redraw failure leaves the just-restored source in place; the next redraw retries from there */ }
+    nodes.forEach(function (n) {
+      var svg = n.querySelector('svg');
+      if (svg) wireMermaidBlock(n, svg);
+    });
+  }
+  function redrawMermaidForTheme() {
+    var myGeneration = ++mermaidRedrawGeneration;
+    return queueMermaidTask(function () {
+      // D1: superseded by a newer redraw request before this one's own turn
+      // in the queue arrived -- skip it entirely (never touch the DOM), see
+      // mermaidRedrawGeneration's own comment above.
+      if (myGeneration !== mermaidRedrawGeneration) return;
+      return runMermaidRedrawPass();
+    });
+  }
+
+  // src/theme.mjs's boot script dispatches this on window after EVERY theme
+  // state change -- a click on the control, or (that file's own matchMedia
+  // listener) a live OS preference change while System is in force. One
+  // signal, one handler: this file never has to know which of those two
+  // triggered it, only that the active palette may have just changed under an
+  // already-rendered diagram.
+  window.addEventListener('${THEME_CHANGE_EVENT}', function () { redrawMermaidForTheme(); });
 
   // Cheap, partial mitigation for pin drift: reposition every pin on a window
   // resize. Does not track an iframe's own internal scroll or its resize-drag
@@ -1249,9 +1520,15 @@ export const ui = `
     return { choice: raw != null ? raw : null, answered: raw != null };
   }
 
-  var sendBtn = document.getElementById('send-btn');
-  var discussBtn = document.getElementById('discuss-btn');
-  var sendStatus = document.getElementById('send-status');
+  // Tag-qualified, same reason as every other id-by-string lookup in this
+  // file (see openCommentForm's own comment) -- '## Send btn' is exactly as
+  // mintable as '## Board data', and unlike the board-data collision (which
+  // throws and kills the whole script) this one is silent: the handler binds
+  // to the heading instead of the button, and Send just never fires (audit
+  // finding P2).
+  var sendBtn = document.querySelector('button#send-btn');
+  var discussBtn = document.querySelector('button#discuss-btn');
+  var sendStatus = document.querySelector('span#send-status');
 
   /** Collect the open round's answers exactly as they stand right now. Shared
    * verbatim by both actions -- Discuss reads the identical surface Send does, so
@@ -1530,7 +1807,9 @@ export const ui = `
     seedAnswers(patch.addedBlockIds.concat(patch.changedBlockIds), data.board);
 
     if (data.mode === 'new-round') {
-      var container = document.getElementById('blocks');
+      // Tag-qualified, same reason as every other id-by-string lookup in
+      // this file -- '## Blocks' slugifies to the same collision shape.
+      var container = document.querySelector('div#blocks');
       if (container) {
         var wrap = document.createElement('div');
         wrap.innerHTML = data.html;
@@ -1612,7 +1891,7 @@ export const ui = `
           // earlier 'round' push while disconnected): insert it now rather than
           // silently having no record of it, so a straggler still ends up
           // showing the round it missed as history, not a gap.
-          var container = document.getElementById('blocks');
+          var container = document.querySelector('div#blocks');
           if (container) container.appendChild(replacement);
         }
         renderMermaidBlocks(replacement);
@@ -1718,8 +1997,12 @@ export const ui = `
     }).then(function (text) {
       // DOMParser does not run scripts or fetch subresources, so parsing the
       // served page here is inert -- it is read purely as a data envelope.
+      // Tag/type-qualified for the same reason as the hydrate-time lookup at
+      // the top of this script -- this document is parsed straight from
+      // response bytes, so a '## Board data' heading could satisfy a bare id
+      // lookup here too.
       var doc = new DOMParser().parseFromString(text, 'text/html');
-      var node = doc.getElementById('board-data');
+      var node = doc.querySelector('script#board-data[type="application/json"]');
       if (!node) return;
       applyResync(JSON.parse(node.textContent), doc);
     }).catch(function () {

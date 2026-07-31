@@ -1,13 +1,16 @@
 // Page CSS for the board, exported as a string so render.mjs can inline it and the
-// page stays a single self-contained file. A dark, calm review surface: one accent,
-// layered slate surfaces, hairline borders, and motion only where it explains a
-// state change. No web fonts and no external assets — the standalone `file:`
-// archive has to look identical with the network off (see src/render.mjs).
+// page stays a single self-contained file. A calm review surface: one accent,
+// layered surfaces, hairline borders, and motion only where it explains a state
+// change. Dark by default; a light palette (designed against the accent, not a
+// mechanical inversion) takes over under `prefers-color-scheme: light` — see the
+// DARK/LIGHT objects below. No web fonts and no external assets — the standalone
+// `file:` archive has to look identical with the network off (see src/render.mjs).
 //
 // Everything is driven by the tokens in `:root`. Rules below reference tokens, never
-// raw hex, so a palette change is a one-block edit. Note that test/check-pure.mjs
-// asserts every class ruled on here is a class the markup actually emits — a rule
-// for a class nothing renders is a failure, not dead code.
+// a raw hex or rgba literal, so a palette change is a one-block edit (enforced by
+// test/check-pure.mjs, which fails the build if one leaks back in). Note that
+// test/check-pure.mjs also asserts every class ruled on here is a class the markup
+// actually emits — a rule for a class nothing renders is a failure, not dead code.
 
 import { MERMAID_NODE_SELECTOR } from './anchor.mjs';
 
@@ -19,41 +22,181 @@ import { MERMAID_NODE_SELECTOR } from './anchor.mjs';
 const mermaidNodeRule = (prefix, suffix = '') =>
   MERMAID_NODE_SELECTOR.split(',').map(s => `${prefix}${s.trim()}${suffix}`).join(',\n');
 
+// Both palettes are plain data: the same key set, one color value each. That is
+// what makes a palette change a one-block edit (DESIGN.md acceptance criterion 6)
+// no matter how many CSS rules end up referencing a token, and it is what lets
+// test/check-contrast.mjs assert the contrast bar by importing these objects
+// directly instead of regexing them back out of a CSS string. Every dark value
+// below is byte-for-byte what ticket 01 shipped, except --muted: measured at
+// 4.45:1 on --panel-2 and 4.03:1 on --panel-3 (both below the 4.5:1 bar, and
+// --muted genuinely sits on both), so it moves to the minimal same-hue lift that
+// clears 4.5:1 everywhere it's used (acceptance criterion 2).
+const DARK = {
+  // surfaces: bg is the page, surface climbs toward the viewer
+  '--bg': '#0a0e15',
+  '--bg-tint': '#101726',
+  '--panel': '#131a27',
+  '--panel-2': '#18202f',
+  '--panel-3': '#1e2839',
+  '--scrollbar-hover': '#2c3852',
+  '--history-bg': 'rgba(19, 26, 39, 0.55)',
+  '--stage-bg': '#fff',
+
+  // bg at partial alpha, for the two gradient masks that fade content into --bg.
+  // Plain CSS can't derive these from var(--bg) portably (no color-mix() here --
+  // this page has to render identically in whatever browser opens a file:// copy
+  // of it), so they're their own tokens, tracked by hand alongside --bg.
+  '--bg-fade-0': 'rgba(10, 14, 21, 0)',
+  '--bg-fade-80': 'rgba(10, 14, 21, 0.8)',
+
+  // ink
+  '--ink': '#eaeef6',
+  '--ink-2': '#b6bfd0',
+  '--muted': '#8690a2',
+  '--code-ink': '#cfd8ea',
+
+  // lines: alpha, so they read correctly on every surface level
+  '--hairline': 'rgba(255, 255, 255, 0.075)',
+  '--hairline-2': 'rgba(255, 255, 255, 0.14)',
+
+  // one accent, plus semantic status colors
+  '--accent': '#7c9cff',
+  '--accent-hi': '#a5b9ff',
+  '--accent-soft': 'rgba(124, 156, 255, 0.13)',
+  '--accent-glow': 'rgba(124, 156, 255, 0.06)',
+  '--accent-underline': 'rgba(124, 156, 255, 0.4)',
+  '--accent-select': 'rgba(124, 156, 255, 0.3)',
+  '--accent-ink': '#0a1020',
+  '--good': '#56d68a',
+  '--warning': '#e5b04d',
+  '--warning-soft': 'rgba(229, 176, 77, 0.12)',
+  '--warning-ink': '#f0cd8c',
+  '--warning-border': 'rgba(229, 176, 77, 0.35)',
+  '--warning-line': 'rgba(229, 176, 77, 0.4)',
+  '--warning-border-strong': 'rgba(229, 176, 77, 0.45)',
+  '--warning-ring': 'rgba(229, 176, 77, 0.5)',
+  '--warning-fade': 'rgba(229, 176, 77, 0)',
+  '--critical': '#f0757a',
+  '--critical-soft': 'rgba(240, 117, 122, 0.08)',
+  '--critical-border': 'rgba(240, 117, 122, 0.25)',
+
+  // elevation (--shadow-3 existed pre-ticket-01 and pre-dates this feature too --
+  // no rule anywhere ever referenced it. test/check-contrast.mjs's orphan-token
+  // check catches exactly this shape of drift, so it's dropped here rather than
+  // carried into two palettes.)
+  '--shadow-1': '0 1px 2px rgba(0, 0, 0, 0.4)',
+  '--shadow-2': '0 6px 20px -6px rgba(0, 0, 0, 0.55)',
+  '--ring': '0 0 0 3px rgba(124, 156, 255, 0.28)',
+};
+
+// Designed against --accent's own hue (periwinkle, ~226°), not an inversion of
+// DARK: inverting reliably washes out accent text and near-invisible hairlines
+// (DESIGN.md "Palette origin"). Surfaces don't mirror DARK's monotonic climb
+// either -- panel/panel-2 sit at/near white (they carry cards, inputs, code
+// blocks), and panel-3 is the one *deeper* than panel-2, because it is the
+// hover/scrollbar-thumb/inline-code surface and there is nothing lighter than
+// white left to climb to. Every value here is verified by
+// test/check-contrast.mjs against every surface token it can land on, not by eye.
+const LIGHT = {
+  // surfaces
+  '--bg': '#eef1f7',
+  '--bg-tint': '#f7f9fc',
+  '--panel': '#ffffff',
+  '--panel-2': '#f5f6fb',
+  '--panel-3': '#e2e6f0',
+  '--scrollbar-hover': '#c9d0e2',
+  '--history-bg': 'rgba(255, 255, 255, 0.55)',
+  '--stage-bg': '#fff',
+
+  // must track --bg exactly (same rgb triple) or the two fade masks show a seam
+  '--bg-fade-0': 'rgba(238, 241, 247, 0)',
+  '--bg-fade-80': 'rgba(238, 241, 247, 0.8)',
+
+  // ink
+  '--ink': '#171c2a',
+  '--ink-2': '#3c4459',
+  '--muted': '#515c76',
+  '--code-ink': '#3a4c78',
+
+  // lines: rgba(255,255,255,…) inverted to rgba(0,0,0,…) reads far too weak at
+  // DARK's alphas on a light surface, so these are relit by eye, not inverted
+  '--hairline': 'rgba(0, 0, 0, 0.1)',
+  '--hairline-2': 'rgba(0, 0, 0, 0.18)',
+
+  // accent: has to clear 4.5:1 on near-white as body/link text (#7c9cff on white
+  // is ~2.3:1), so it lands in the mid-blues, same hue family as DARK's. --accent-hi
+  // is the hover state and moves further from the background (darker), not lighter.
+  '--accent': '#3251c9',
+  '--accent-hi': '#2a46b8',
+  '--accent-soft': 'rgba(50, 81, 201, 0.13)',
+  '--accent-glow': 'rgba(50, 81, 201, 0.06)',
+  '--accent-underline': 'rgba(50, 81, 201, 0.4)',
+  '--accent-select': 'rgba(50, 81, 201, 0.3)',
+  '--accent-ink': '#f5f8ff',
+  // good/warning/critical (2026-07-31 audit, criterion 7 amendment): the prior
+  // values (#146b3f, #8a5a00, #b32432) were tuned to clear 4.5:1 against the
+  // full SURFACES cross product -- a self-imposed bar criterion 7 never asked
+  // for, since these three are used as fills/borders at least as often as
+  // text, and it is what pushed them into a desaturated dark-green/brown/brick
+  // family instead of the board's amber/green/red. Retuned against the bar
+  // criterion 7 actually states -- 4.5:1 at each one's REAL text sites
+  // (test/check-contrast.mjs's TEXT_SITES, the tightest of which is each
+  // color composited under its own *-soft background) -- with room to spare,
+  // not sitting on the boundary: light --warning on --warning-soft measures
+  // 4.96:1, light --good on --history-bg 5.54:1, light --critical on
+  // --critical-soft 5.07:1. warning-soft/border/line/border-strong/ring/fade
+  // and critical-soft/border share --warning's/--critical's own RGB triple at
+  // varying alpha, same convention as DARK above; --warning-ink is untouched
+  // (still clears 5.58:1 on the new --warning-soft).
+  '--good': '#007530',
+  '--warning': '#805300',
+  '--warning-soft': 'rgba(128, 83, 0, 0.12)',
+  '--warning-ink': '#7a4a00',
+  '--warning-border': 'rgba(128, 83, 0, 0.35)',
+  '--warning-line': 'rgba(128, 83, 0, 0.4)',
+  '--warning-border-strong': 'rgba(128, 83, 0, 0.45)',
+  '--warning-ring': 'rgba(128, 83, 0, 0.5)',
+  '--warning-fade': 'rgba(128, 83, 0, 0)',
+  '--critical': '#b81b1b',
+  '--critical-soft': 'rgba(184, 27, 27, 0.08)',
+  '--critical-border': 'rgba(184, 27, 27, 0.25)',
+
+  // elevation: much softer/tighter than DARK's heavy black shadows, or a light
+  // page reads muddy
+  '--shadow-1': '0 1px 2px rgba(16, 24, 40, 0.06)',
+  '--shadow-2': '0 6px 20px -6px rgba(16, 24, 40, 0.12)',
+  '--ring': '0 0 0 3px rgba(50, 81, 201, 0.28)',
+};
+
+// Exported so a later ticket (mermaid's themeVariables, ticket 04) can look the
+// active theme's colors up instead of hand-maintaining a second copy of the palette.
+export const palettes = { dark: DARK, light: LIGHT };
+
+/** Render a palette object as one `selector { ... }` rule's custom-property
+ * declarations, plus `color-scheme` so the browser's own chrome (native form
+ * controls, the default scrollbar when the webkit one above doesn't apply)
+ * matches too. Prior art: mermaidNodeRule above, the same "generate a CSS rule
+ * from JS data" shape for a different axis (selector fan-out instead of a
+ * palette swap). This is also exactly what test/check-pure.mjs's raw-literal
+ * check now means by "a token block": a rule whose declarations are all custom
+ * properties (plus this one `color-scheme` line). */
+const tokenBlock = (selector, palette, scheme) => `${selector} {
+  color-scheme: ${scheme};
+${Object.entries(palette).map(([name, value]) => `  ${name}: ${value};`).join('\n')}
+}`;
+
 export const styles = `
+${tokenBlock(':root', DARK, 'dark')}
+
+@media (prefers-color-scheme: light) {
+${tokenBlock(':root:not([data-theme="dark"])', LIGHT, 'light')}
+}
+
+${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
+
 :root {
-  color-scheme: dark;
-
-  /* surfaces: bg is the page, surface climbs toward the viewer */
-  --bg: #0a0e15;
-  --bg-tint: #101726;
-  --panel: #131a27;
-  --panel-2: #18202f;
-  --panel-3: #1e2839;
-
-  /* ink */
-  --ink: #eaeef6;
-  --ink-2: #b6bfd0;
-  --muted: #7b869a;
-
-  /* lines: alpha, so they read correctly on every surface level */
-  --hairline: rgba(255, 255, 255, 0.075);
-  --hairline-2: rgba(255, 255, 255, 0.14);
-
-  /* one accent, plus semantic status colors */
-  --accent: #7c9cff;
-  --accent-hi: #a5b9ff;
-  --accent-soft: rgba(124, 156, 255, 0.13);
-  --accent-ink: #0a1020;
-  --good: #56d68a;
-  --warning: #e5b04d;
-  --warning-soft: rgba(229, 176, 77, 0.12);
-  --critical: #f0757a;
-
-  /* elevation */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-2: 0 6px 20px -6px rgba(0, 0, 0, 0.55);
-  --shadow-3: 0 18px 44px -18px rgba(0, 0, 0, 0.75);
-  --ring: 0 0 0 3px rgba(124, 156, 255, 0.28);
+  /* non-color tokens: theme-independent, so they live in one shared block rather
+     than being duplicated into both DARK and LIGHT */
 
   /* radii */
   --r-sm: 6px;
@@ -96,20 +239,20 @@ body::before {
   z-index: 0;
   background:
     radial-gradient(900px 520px at 50% -10%, var(--bg-tint), transparent 70%),
-    radial-gradient(700px 420px at 100% 0%, rgba(124, 156, 255, 0.06), transparent 65%);
+    radial-gradient(700px 420px at 100% 0%, var(--accent-glow), transparent 65%);
 }
 code, pre { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; font-variant-ligatures: none; }
-a { color: var(--accent); text-decoration-color: rgba(124, 156, 255, 0.4); text-underline-offset: 2px; }
+a { color: var(--accent); text-decoration-color: var(--accent-underline); text-underline-offset: 2px; }
 a:hover { color: var(--accent-hi); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 button { cursor: pointer; }
 button:disabled { cursor: default; }
 svg { flex: none; }
-::selection { background: rgba(124, 156, 255, 0.3); }
+::selection { background: var(--accent-select); }
 ::-webkit-scrollbar { width: 11px; height: 11px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--panel-3); border: 3px solid transparent; background-clip: content-box; border-radius: var(--r-pill); }
-::-webkit-scrollbar-thumb:hover { background: #2c3852; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); background-clip: content-box; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   * { transition: none !important; animation: none !important; }
@@ -123,7 +266,7 @@ svg { flex: none; }
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
   margin-bottom: var(--space-5); padding: var(--space-4) 0 var(--space-3);
-  background: linear-gradient(to bottom, var(--bg) 62%, rgba(10, 14, 21, 0));
+  background: linear-gradient(to bottom, var(--bg) 62%, var(--bg-fade-0));
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--hairline);
 }
@@ -149,8 +292,26 @@ svg { flex: none; }
 .mode-toggle.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 body.readonly .mode-toggle { display: none; }
 
-.readonly-banner { display: none; background: var(--warning-soft); border: 1px solid rgba(229, 176, 77, 0.35);
-  color: #f0cd8c; font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }
+/* the theme control (src/theme.mjs): reuses .mode-toggle's chrome above rather
+   than duplicating it, plus this icon-only modifier -- no visible label, so
+   symmetric padding around a single glyph instead of text-plus-icon spacing. */
+.mode-toggle-icon { padding: 7px; }
+/* Unlike .mode-toggle, this control stays live in a read-only archive -- an
+   archive reader is exactly who needs to switch theme (DESIGN.md). An id
+   selector outranks body.readonly .mode-toggle's class selector regardless of
+   source order, so that rule's own wording (asserted verbatim by
+   test/check-archive.mjs) never has to change to carve this control out of it.
+   Tag-qualified ('button#theme-toggle', not bare '#theme-toggle') because
+   '#theme-toggle' is not reserved: src/markdown.mjs's slugify turns a heading
+   '## Theme toggle' into a second id="theme-toggle" on an <h2>, and board
+   content is exactly the input that gets to choose its own headings (audit
+   2026-07-31, finding L1). The tag qualifier is what the real button has and
+   a markdown-minted heading never can -- see src/ui.mjs's matching
+   'button#theme-toggle' lookup and its own comment on the same collision. */
+body.readonly button#theme-toggle { display: inline-flex; }
+
+.readonly-banner { display: none; background: var(--warning-soft); border: 1px solid var(--warning-border);
+  color: var(--warning-ink); font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }
 body.readonly .readonly-banner { display: block; }
 body.readonly .send-bar { display: none; }
 body.readonly input, body.readonly textarea, body.readonly button.card-choice { pointer-events: none; opacity: 0.7; }
@@ -171,7 +332,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    competition with the round that is actually asking for an answer */
 .round-history { position: relative; padding-left: var(--space-4); border-left: 2px solid var(--hairline-2); }
 .round-history .round-label { color: var(--muted); background: transparent; }
-.round-history .block { background: rgba(19, 26, 39, 0.55); box-shadow: none; }
+.round-history .block { background: var(--history-bg); box-shadow: none; }
 .round-history .md-content, .round-history .question-prompt { opacity: 0.86; }
 .round + .round { padding-top: var(--space-5); }
 
@@ -201,7 +362,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .md-content li { margin: 0.3em 0; }
 .md-content li::marker { color: var(--muted); }
 .md-content strong { color: var(--ink); font-weight: 600; }
-.md-content code { background: var(--panel-3); color: #cfd8ea; padding: 0.12em 0.4em; border-radius: var(--r-sm); font-size: 12.5px; }
+.md-content code { background: var(--panel-3); color: var(--code-ink); padding: 0.12em 0.4em; border-radius: var(--r-sm); font-size: 12.5px; }
 .md-content pre { background: var(--panel-2); border: 1px solid var(--hairline); padding: 12px 14px;
   border-radius: var(--r-md); overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
 .md-content pre code { background: none; padding: 0; font-size: inherit; }
@@ -245,8 +406,8 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .card-choice.selected .opt-desc { color: var(--ink-2); }
 
 .unsupported-widget { color: var(--warning); font-size: 12.5px; font-style: italic; }
-.resolve-error { color: var(--critical); font-size: 12.5px; background: rgba(240, 117, 122, 0.08);
-  border: 1px solid rgba(240, 117, 122, 0.25); border-radius: var(--r-sm); padding: 8px 12px; margin: 0; }
+.resolve-error { color: var(--critical); font-size: 12.5px; background: var(--critical-soft);
+  border: 1px solid var(--critical-border); border-radius: var(--r-sm); padding: 8px 12px; margin: 0; }
 
 /* multi-select: same card, plus a checkbox glyph */
 .opt-check { position: relative; display: inline-block; flex: none; width: 16px; height: 16px; margin-right: 10px;
@@ -299,7 +460,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
   font-size: 11.5px; font-weight: 550; border-radius: var(--r-pill); padding: 6px 14px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .btn-defer:hover:not(:disabled) { border-color: var(--warning); color: var(--ink); }
-.btn-defer.active { background: var(--warning-soft); border-color: rgba(229, 176, 77, 0.5); color: var(--warning); }
+.btn-defer.active { background: var(--warning-soft); border-color: var(--warning-ring); color: var(--warning); }
 
 /* the status line reads at a glance instead of being scanned as text: the dot is
    coloured from data-status, which src/render.mjs emits alongside the same word */
@@ -371,11 +532,11 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 /* code: a file plus a line range or section, no syntax highlighting */
 .code-block pre { background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-md);
   padding: 12px 14px; overflow-x: auto; margin: 0; }
-.code-block pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; color: #cfd8ea; }
+.code-block pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; color: var(--code-ink); }
 
 /* html stage: sandboxed iframe so a hand-mocked preview never leaks into the page */
 .html-stage { display: block; width: 100%; min-height: 320px; resize: vertical; overflow: auto;
-  border: 1px solid var(--hairline); border-radius: var(--r-md); background: #fff; }
+  border: 1px solid var(--hairline); border-radius: var(--r-md); background: var(--stage-bg); }
 
 /* element-level anchoring (ticket 06): pin-layer overlays the html-stage iframe or
  * the rendered mermaid SVG exactly, and src/ui.mjs positions numbered .anchor-pin
@@ -427,7 +588,7 @@ body.comment-mode .blocks { cursor: crosshair; }
 
 /* the action bar is the one thing that must never scroll away */
 .send-bar { position: sticky; bottom: 0; z-index: 20; margin-top: var(--space-6); padding: var(--space-4) 0;
-  background: linear-gradient(to top, var(--bg) 55%, rgba(10, 14, 21, 0.8) 85%, rgba(10, 14, 21, 0));
+  background: linear-gradient(to top, var(--bg) 55%, var(--bg-fade-80) 85%, var(--bg-fade-0));
   backdrop-filter: blur(10px);
   display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); }
 .btn-send { background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; border-radius: var(--r-md);
@@ -447,7 +608,10 @@ body.comment-mode .blocks { cursor: crosshair; }
 
 /* thread index (src/indexpage.mjs) — same tokens, its own layout */
 .index-shell { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: var(--space-6) var(--space-5) 96px; }
-.index-head { margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--hairline); }
+.index-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);
+  margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--hairline); }
+.index-head-titles { min-width: 0; }
+.index-head-actions { flex: none; display: flex; align-items: center; }
 .index-head h1 { font-size: 22px; margin: 0 0 var(--space-1); font-weight: 650; letter-spacing: -0.02em; }
 .index-head .meta { color: var(--muted); font-size: 12.5px; }
 
@@ -478,7 +642,7 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
 .thread-item:hover { border-color: var(--hairline-2); transform: translateY(-1px); box-shadow: var(--shadow-2); }
 /* a thread with an open round is the one thing on this page asking for something */
-.thread-item.live { border-color: rgba(229, 176, 77, 0.4); background:
+.thread-item.live { border-color: var(--warning-line); background:
   linear-gradient(to right, var(--warning-soft), transparent 45%), var(--panel); }
 .thread-item.live:hover { border-color: var(--warning); }
 .thread-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -486,15 +650,15 @@ body.comment-mode .blocks { cursor: crosshair; }
 .thread-meta { color: var(--muted); font-size: 12px; }
 .thread-status { display: flex; align-items: center; gap: var(--space-3); flex: none; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); display: inline-block;
-  box-shadow: 0 0 0 0 rgba(229, 176, 77, 0.5); animation: cb-pulse 2.4s var(--ease) infinite; }
+  box-shadow: 0 0 0 0 var(--warning-ring); animation: cb-pulse 2.4s var(--ease) infinite; }
 @keyframes cb-pulse {
-  70% { box-shadow: 0 0 0 7px rgba(229, 176, 77, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(229, 176, 77, 0); }
+  70% { box-shadow: 0 0 0 7px var(--warning-fade); }
+  100% { box-shadow: 0 0 0 0 var(--warning-fade); }
 }
 .pending-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink-2);
   background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 4px 12px; }
 .pending-badge.zero { color: var(--muted); }
-.pending-badge.has-pending { color: var(--warning); border-color: rgba(229, 176, 77, 0.45); background: var(--warning-soft); }
+.pending-badge.has-pending { color: var(--warning); border-color: var(--warning-border-strong); background: var(--warning-soft); }
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a
    phone-width window without a horizontal scrollbar or a two-column squeeze --- */

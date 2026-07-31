@@ -27,6 +27,14 @@ src/secret.mjs      the local secret: where it lives, constant-time comparison, 
 src/indexpage.mjs   daemon root: thread index and archive search
 src/ui.mjs          client-side script, exported as a string
 src/styles.mjs      page CSS, exported as a string
+src/theme.mjs       client-side theme selection: storage key, THEME_CHANGE_EVENT, the
+                     pre-paint boot script, and the control's markup. src/render.mjs and
+                     src/indexpage.mjs splice themeBootScript/themeToggle() into the page
+                     they emit; src/ui.mjs imports only THEME_CHANGE_EVENT, baked into its
+                     own separately-emitted client script. themeBootScript's inline
+                     <script> in <head> and ui's <script type="module"> at end of body are
+                     two independently-loaded contexts with no shared scope, agreeing on
+                     that event name with nothing at build time enforcing it
 src/patch.mjs       pure board-JSON diff (added/changed block ids, rounds now sent),
                      walking nested blocks too; imported directly by the checks AND
                      spliced verbatim into src/ui.mjs via computeBoardPatch.toString(),

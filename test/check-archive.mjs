@@ -46,8 +46,9 @@ import path from 'node:path';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
-import { styles } from '../src/styles.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { styles, palettes } from '../src/styles.mjs';
+import { themeBootScript } from '../src/theme.mjs';
+import { parseHTML, StandInEvent, StandInLocalStorage, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -70,6 +71,32 @@ function loadBoard(html, protocol) {
   const location = { protocol };
   new Function('document', 'window', 'location', ui)(document, window, location);
   return document;
+}
+
+/** Extract the real `<style>...</style>` block's CSS text from a rendered
+ * page. NOT the first (or last) `<style>`/`</style>` substring in the bytes:
+ * `themeBootScript` (src/theme.mjs) carries the literal words "before
+ * `<style>` is even parsed" inside its own JS comments, and `styles`
+ * (src/styles.mjs) itself carries "injected into the sandboxed document's
+ * own `<style>`" inside a CSS comment describing the (unrelated) html-stage
+ * hover outline -- real prose baked into the client script and the
+ * stylesheet's own text, both landing BEFORE the true closing `</style>`, so
+ * neither a naive `/<style>([\s\S]*?)<\/style>/` (grabs from the FIRST fake
+ * opener) nor a `lastIndexOf('<style>', closeIdx)` (grabs the LAST one,
+ * which turns out to be the CSS-comment one, still short of the real tag) is
+ * safe. src/render.mjs and src/indexpage.mjs both emit the real tag
+ * immediately after the boot script's own closing tag
+ * (`<script>${themeBootScript}</script>\n<style>${styles}</style>`) -- an
+ * exact, structural adjacency neither piece of PROSE text reproduces -- so
+ * that marker is what actually locates it. */
+function extractStyleBlock(html) {
+  const marker = '</script>\n<style>';
+  const markerIdx = html.indexOf(marker);
+  assert.ok(markerIdx !== -1, 'setup failure: no boot-script-then-<style> boundary found in the rendered page');
+  const openIdx = markerIdx + marker.length;
+  const closeIdx = html.indexOf('</style>', openIdx);
+  assert.ok(closeIdx !== -1, 'setup failure: no </style> after the real <style> tag');
+  return html.slice(openIdx, closeIdx);
 }
 
 function enableCommentMode(document) {
@@ -298,6 +325,45 @@ function loadArchive() {
   };
 }
 
+// Ticket 05: like loadArchive() above, but also runs src/theme.mjs's
+// themeBootScript -- the SAME bytes read off disk above, run through BOTH real
+// client scripts in the real page's own order (the inline pre-<style> boot
+// script first, then ui's deferred module script second), with
+// location.protocol genuinely 'file:', never a hand-set flag (this file's own
+// header comment). `storage`, if given, is attached to the fresh document's own
+// window BEFORE either script runs -- one StandInLocalStorage instance passed to
+// two separate calls models one origin's storage outliving a single sitting
+// (test/dom-stand-in.mjs's own comment on StandInLocalStorage), which is what
+// the reopen check below needs. fetch/EventSource are stubbed exactly like
+// loadArchive(), for the same reason: the archive must never reach for either.
+function loadArchiveThemed(storage) {
+  const originalFetch = globalThis.fetch;
+  const originalES = globalThis.EventSource;
+  globalThis.fetch = () => Promise.reject(new Error('the archive must never call fetch'));
+  class SpyEventSource {
+    constructor() { /* no-op: an archive must never construct one */ }
+  }
+  globalThis.EventSource = SpyEventSource;
+
+  const document = parseHTML(fileContents);
+  const window = document.defaultView;
+  if (storage) window.localStorage = storage;
+  const location = { protocol: 'file:' };
+  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
+  new Function('document', 'window', 'location', ui)(document, window, location);
+  // Audit 2026-07-31 (H2): a freshly parsed document now starts `readyState
+  // === 'loading'`, so the theme control's click listener is not wired until
+  // this simulates the parser reaching the end of the document (see
+  // test/dom-stand-in.mjs's own comment on finishParsing/readyState) --
+  // every check below that clicks the control depends on this having run.
+  document.finishParsing();
+
+  return {
+    document,
+    restore() { globalThis.fetch = originalFetch; globalThis.EventSource = originalES; },
+  };
+}
+
 // =================================================================================
 // 1. Every pin in the right place, including a lost one.
 // =================================================================================
@@ -385,6 +451,32 @@ check('archive: ticket 03\'s claim -- the comment-mode toggle is both CSS-hidden
     toggle.dispatchEvent(new StandInEvent('click'));
     assert.equal(toggle.classList.contains('active'), false, 'clicking the toggle in readonly must never turn comment mode on');
     assert.equal(document.body.classList.contains('comment-mode'), false, 'body must never gain .comment-mode in a read-only archive');
+  } finally { restore(); }
+});
+
+// Audit finding H3: `body.readonly button#theme-toggle { display: inline-flex;
+// }` (src/styles.mjs) is the readonly carve-out that keeps the theme control
+// visible while `body.readonly .mode-toggle { display: none; }` hides every
+// OTHER control wearing `.mode-toggle`'s chrome (the comment-mode toggle
+// above). Nothing asserted it before this: delete that one rule and the
+// theme control inherits the SAME `display: none` the comment-mode toggle
+// gets, in every archive, silently -- QUIRKS.md's own "readonly is locked
+// twice" entry names exactly this shape of gap. Asserted as the COMPUTED
+// display (test/dom-stand-in.mjs's resolveComputedProperty, audit C1/H3),
+// against the file's own <style> text and the REAL button element from a
+// loaded archive -- not the rule's spelling, which is what QUIRKS.md warns
+// against asserting.
+check('archive: audit finding H3 -- the theme control\'s COMPUTED display is inline-flex under body.readonly, not silently inheriting .mode-toggle\'s own display:none', () => {
+  const cssText = extractStyleBlock(fileContents);
+
+  const { document, restore } = loadArchive();
+  try {
+    assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
+    const btn = document.getElementById('theme-toggle');
+    assert.ok(btn, 'setup failure: no #theme-toggle rendered in the archive');
+    const display = resolveComputedProperty(cssText, btn, true, 'display');
+    assert.equal(display, 'inline-flex',
+      `the real button's computed display in a readonly archive must be inline-flex -- got "${display}" (deleting body.readonly button#theme-toggle leaves it display:none, hidden by the SAME rule that correctly hides the comment-mode toggle)`);
   } finally { restore(); }
 });
 
@@ -525,6 +617,98 @@ check('archive: the emitted page still has no external script or stylesheet refe
   assert.ok(!/<link[^>]+rel=["']stylesheet["']/.test(fileContents));
   assert.ok(!/<script[^>]+\bsrc=/.test(fileContents));
   assert.ok(fileContents.includes('<style>'));
+});
+
+// =================================================================================
+// 4. Ticket 05 (light theme): the archive follows the OS, its control still
+//    works for the sitting, and nothing persists across a reopen -- spec:
+//    "Follow the OS; the control still works for the sitting but persists
+//    nothing." Exercised against the SAME bytes read off disk above, the same
+//    way every other check in this file is: never a hand-set `readonly` flag,
+//    never a constructed document standing in for the real file (this file's
+//    own header comment).
+// =================================================================================
+
+// Audit 2026-07-31 (C1): this used to assert the two light rules by their
+// SPELLING -- a regex matching the literal `@media { :root:not(...) { ... } }`
+// nesting and a separate `:root[data-theme="light"] { ... }` match, each
+// checked for a substring. That is exactly the trap QUIRKS.md's "the
+// stylesheet and the markup are checked against each other" entry warns
+// against (see also the mermaid-id trap it documents): nesting the override
+// INSIDE the media query -- breaking a dark-OS reader's Light choice, the one
+// case this feature exists for -- still contains both substrings, so the old
+// version of this check stayed green through it. Replaced with the real
+// cascade resolver (test/dom-stand-in.mjs, audit C1) run against the file's
+// OWN `<style>` text (not the in-memory `styles` export -- if render.mjs ever
+// diverged from it, this would still catch that too), asserting the full
+// {OS dark, OS light} x {no attribute, data-theme="light", data-theme="dark"}
+// matrix resolves to the intended palette.
+check('archive: the bytes on disk carry a real, working cascade -- every (OS preference, data-theme) combination resolves to the intended palette, computed from the file\'s own <style> text, not asserted by any one rule\'s spelling', () => {
+  const cssText = extractStyleBlock(fileContents);
+
+  const document = parseHTML(fileContents);
+  const docEl = document.documentElement;
+
+  const cases = [
+    { systemDark: true, attr: null, expect: 'dark' },
+    { systemDark: true, attr: 'light', expect: 'light' },
+    { systemDark: true, attr: 'dark', expect: 'dark' },
+    { systemDark: false, attr: null, expect: 'light' },
+    { systemDark: false, attr: 'light', expect: 'light' },
+    { systemDark: false, attr: 'dark', expect: 'dark' },
+  ];
+  for (const { systemDark, attr, expect } of cases) {
+    if (attr) docEl.setAttribute('data-theme', attr); else docEl.removeAttribute('data-theme');
+    const got = resolveComputedProperty(cssText, docEl, systemDark, '--bg');
+    assert.equal(got, palettes[expect]['--bg'],
+      `OS ${systemDark ? 'dark' : 'light'} + data-theme=${attr || '(none)'}: expected ${expect}'s --bg from the file's own <style> text, got "${got}"`);
+  }
+});
+
+check('archive: opened fresh, the control is live -- not merely present-and-enabled -- and clicking it actually cycles data-theme through light and dark, without ever writing to storage', () => {
+  const storage = new StandInLocalStorage();
+  const { document, restore } = loadArchiveThemed(storage);
+  try {
+    const btn = document.getElementById('theme-toggle');
+    assert.ok(btn, 'setup failure: no #theme-toggle rendered in the archive');
+    assert.equal(btn.disabled, false, 'the theme control must not be disabled in the archive (test/check-theme.mjs already proves this on an in-memory page; re-checked here against the real bytes on disk)');
+    assert.equal(document.documentElement.hasAttribute('data-theme'), false, 'setup failure: the archive must start following the OS -- no data-theme attribute');
+
+    // Belt and suspenders, same as this file's own toggle check above: the
+    // stand-in does not model a browser's native click-suppression on a
+    // disabled element, so `disabled === false` is asserted directly, not
+    // inferred from the click's effect alone.
+    btn.dispatchEvent(new StandInEvent('click'));
+    assert.equal(document.documentElement.getAttribute('data-theme'), 'light', 'clicking the control in the real archive must switch to light -- the control is live');
+    btn.dispatchEvent(new StandInEvent('click'));
+    assert.equal(document.documentElement.getAttribute('data-theme'), 'dark', 'clicking again must switch to dark');
+
+    assert.equal(storage.map.size, 0, 'the archive must never write to storage, even while the control is actively cycling');
+  } finally { restore(); }
+});
+
+check('archive: reopening the SAME file in a fresh document, sharing the storage stand-in a previous sitting used, comes up with no data-theme -- the previous sitting\'s explicit choice left nothing behind', () => {
+  const sharedStorage = new StandInLocalStorage();
+
+  const first = loadArchiveThemed(sharedStorage);
+  try {
+    const firstBtn = first.document.getElementById('theme-toggle');
+    firstBtn.dispatchEvent(new StandInEvent('click')); // System -> Light: an explicit choice, made during this sitting
+    assert.equal(first.document.documentElement.getAttribute('data-theme'), 'light', 'setup failure: the first sitting did not switch to light');
+    assert.equal(sharedStorage.map.size, 0, 'setup failure: even mid-sitting the archive must not have written to storage');
+  } finally { first.restore(); }
+
+  // A brand-new document/window (a real reopen mints a fresh one -- see
+  // loadArchiveThemed's own comment), but the SAME storage instance: this is
+  // the one input that could leak a previous sitting's choice into a reopen,
+  // and it is exactly what test/check-theme.mjs's `file:` guard is supposed to
+  // prevent from ever being written to in the first place.
+  const second = loadArchiveThemed(sharedStorage);
+  try {
+    assert.equal(second.document.documentElement.hasAttribute('data-theme'), false, 'reopening the archive must return to the OS preference -- the previous sitting\'s explicit Light choice must not leak in, even sharing the same storage instance');
+    const secondBtn = second.document.getElementById('theme-toggle');
+    assert.equal(secondBtn.getAttribute('aria-label'), 'Theme: System', 'the control itself must also read back System on reopen, not the previous sitting\'s Light');
+  } finally { second.restore(); }
 });
 
 if (failures) {

@@ -17,10 +17,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, CSP } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, CSP } from '../src/render.mjs';
 import { resolveRef, langForPath, resolvePath, MAX_REF_BYTES } from '../src/resolve.mjs';
 import { ui } from '../src/ui.mjs';
-import { styles } from '../src/styles.mjs';
+import { styles, palettes } from '../src/styles.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
 import {
   extractHint, stepsToPath, pathToSteps, resolveSteps, buildSteps, composeHint,
@@ -3546,7 +3546,12 @@ check('the subscription resyncs on every open, through the same computeBoardPatc
     "'open' fires on the first connect AND every reconnect -- exactly the moments something may have been missed");
   const resyncBody = namedFunctionBody(ui, 'resync');
   assert.match(resyncBody, /fetch\('\/b\/' \+ encodeURIComponent\(boardId\)\)/, 'resync must re-read the current board');
-  assert.match(resyncBody, /getElementById\('board-data'\)/, 'the board JSON comes from the page\'s own embedded payload');
+  // Tag/type-qualified, not a bare getElementById -- audit 2026-07-31,
+  // finding P1: this document is parsed straight from response bytes, so a
+  // '## Board data' heading could satisfy a bare id lookup here exactly like
+  // it could at hydrate time (see the top of `ui` itself, and
+  // test/check-archive-ids.mjs, which drives this end to end).
+  assert.match(resyncBody, /querySelector\('script#board-data\[type="application\/json"\]'\)/, 'the board JSON comes from the page\'s own embedded payload, found by a selector no heading can satisfy');
   assert.match(resyncBody, /\.catch\(/, 'a failed catch-up must never break the live subscription');
 
   const apply = namedFunctionBody(ui, 'applyResync');
@@ -3599,13 +3604,203 @@ check('the defer button re-applies the live deferred flag on every wire, like ev
 
 // --- no more mirror drift between the markup and the stylesheet -------------------
 
+/** Strip line and block comments from JS source, respecting
+ * string/template-literal and regex-literal boundaries -- audit finding M5:
+ * the orphan-class check below used to substring-search the RAW emitter
+ * source, comments included, so `.mode-toggle-icon` (named only in a doc
+ * comment above `themeToggle()`, src/theme.mjs) satisfied it even after
+ * being dropped from the real markup that comment describes (src/theme.mjs's
+ * own `class="mode-toggle mode-toggle-icon"` string). A naive line-by-line
+ * comment strip is unsafe here for two reasons this codebase actually
+ * exercises: these five files ARE the client-script template literals (`ui`,
+ * `stageAgentScript()`, `themeBootScript`) -- real code, not comments, that a
+ * template-literal-blind stripper would otherwise be free to mutilate if it
+ * misread a comment-shaped sequence inside one -- and at least one of them
+ * (src/markdown.mjs, the bold/italic markdown replace pair) contains a regex
+ * literal whose own body, read blind to regex syntax, contains a run of
+ * escaped asterisks immediately followed by its closing slash -- exactly the
+ * two-character sequence that ends a block comment, so a scanner that cannot
+ * tell a regex literal from ordinary code would treat the regex's own middle
+ * as a comment closer and mis-scan everything after it. This is a small,
+ * single-pass character scanner (not a real JS parser) that tracks
+ * string/template-literal boundaries and uses the standard "does the
+ * previous significant token complete a value" heuristic to tell a regex
+ * literal's opening slash apart from division, so both hazards above are
+ * skipped over intact rather than corrupted. */
+function stripJsComments(src) {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  let lastSignificant = ''; // last emitted non-whitespace char, for regex-vs-division
+  while (i < n) {
+    const c = src[i];
+    const c2 = src[i + 1];
+    if (c === '/' && c2 === '/') {
+      i += 2;
+      while (i < n && src[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && c2 === '*') {
+      i += 2;
+      const end = src.indexOf('*/', i);
+      i = end === -1 ? n : end + 2;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === quote) { j++; break; }
+        j++;
+      }
+      out += src.slice(i, j);
+      lastSignificant = quote;
+      i = j;
+      continue;
+    }
+    // A regex literal, but only where the previous significant token means a
+    // value has NOT just ended here (real division always follows one) --
+    // the standard regex-vs-division disambiguation.
+    if (c === '/' && !/[\w$\])]/.test(lastSignificant)) {
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        else if (src[j] === '[') { inClass = true; j++; }
+        else if (src[j] === ']') { inClass = false; j++; }
+        else if (src[j] === '/' && !inClass) { j++; closed = true; break; }
+        else if (src[j] === '\n') break; // not actually a regex after all
+        else j++;
+      }
+      if (closed) {
+        while (j < n && /[a-z]/i.test(src[j])) j++; // trailing flags (g, i, ...)
+        out += src.slice(i, j);
+        lastSignificant = 'x'; // a regex literal is a value, like an identifier
+        i = j;
+        continue;
+      }
+      // fall through: not actually a regex -- treat '/' as an ordinary char
+    }
+    if (!/\s/.test(c)) lastSignificant = c;
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 check('every class the stylesheet rules on is a class something actually emits', () => {
-  const emitters = ['src/render.mjs', 'src/ui.mjs', 'src/indexpage.mjs', 'src/markdown.mjs']
-    .map(f => readFileSync(path.join(repoRoot, f), 'utf8')).join('\n');
+  const emitters = ['src/render.mjs', 'src/ui.mjs', 'src/indexpage.mjs', 'src/markdown.mjs', 'src/theme.mjs']
+    .map(f => stripJsComments(readFileSync(path.join(repoRoot, f), 'utf8'))).join('\n');
   const ruled = new Set();
   for (const m of styles.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([a-zA-Z][\w-]*)/g)) ruled.add(m[1]);
   const orphans = [...ruled].filter(c => !emitters.includes(c));
   assert.deepEqual(orphans, [], `src/styles.mjs rules on classes nothing emits: ${orphans.join(', ')}`);
+});
+
+check('no rule outside a token block carries a raw hex or rgba literal', () => {
+  // A palette change has to stay a one-block edit (DESIGN.md acceptance criterion
+  // 6). This invariant already rotted once -- the header comment above `styles`
+  // asserted it while 21 rules quietly reached past the token block for a raw
+  // literal -- so it is enforced here instead of merely claimed in prose.
+  const RAW_COLOR = /#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{4}\b|#[0-9a-fA-F]{3}\b|\brgba?\([^)]*\)/;
+
+  // A "token block" is any rule -- :root, or :root nested inside a @media query
+  // (ticket 02's light palette), or any future selector -- whose declarations are
+  // ALL either a custom property (`--name: value;`) or `color-scheme` (the one
+  // non-custom-property declaration a palette's :root carries alongside it).
+  // Blanking every such leaf rule out (character-for-character, so line numbers
+  // still line up) before scanning is what lets this check not know the token
+  // block's selector in advance -- it stays correct however many get added, and
+  // it does not require special-casing ticket 02's second block by name.
+  //
+  // The regex below matches leaf declaration blocks only (no braces inside the
+  // body): run globally left-to-right over CSS that nests a rule inside a
+  // @media/@keyframes wrapper, a failed match at the wrapper's own `{` makes the
+  // engine retry at the next character, so the first successful match is always
+  // the innermost rule -- exactly the block whose declarations this needs to see.
+  function isTokenBlockBody(body) {
+    const decls = body.split(';').map(d => d.trim()).filter(Boolean);
+    if (decls.length === 0) return false;
+    return decls.every(d => {
+      const prop = d.slice(0, d.indexOf(':')).trim();
+      return prop.startsWith('--') || prop === 'color-scheme';
+    });
+  }
+
+  // Finds the first raw color literal outside any token block in `css` (comments
+  // and token blocks both blanked to whitespace first, character-for-character,
+  // so the reported line number still lines up with the source), or null if the
+  // rest of the sheet is clean.
+  function firstLeakOutsideTokenBlocks(css) {
+    const noComments = css.replace(/\/\*[\s\S]*?\*\//g, s => s.replace(/[^\n]/g, ' '));
+    let sawTokenBlock = false;
+    const stripped = noComments.replace(/[^{}]+\{[^{}]*\}/g, block => {
+      const body = block.slice(block.indexOf('{') + 1, block.lastIndexOf('}'));
+      if (!isTokenBlockBody(body)) return block;
+      sawTokenBlock = true;
+      return block.replace(/[^\n]/g, ' ');
+    });
+    assert.ok(sawTokenBlock, 'no token block (a rule of only custom properties) found');
+    const m = RAW_COLOR.exec(stripped);
+    if (!m) return null;
+    const line = css.slice(0, m.index).split('\n').length;
+    return `'${m[0]}' on line ${line}`;
+  }
+
+  const pageLeak = firstLeakOutsideTokenBlocks(styles);
+  assert.equal(pageLeak, null, `src/styles.mjs has a raw color literal outside its token blocks: ${pageLeak}`);
+});
+
+check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and the exemption is honest', () => {
+  // Spec criterion 6's binding amendment: "The sandboxed stage stylesheet
+  // (stageAgentScript) is exempt and keeps its literal." A prior version of
+  // this exemption let `stageAgentScript()`'s injected CSS satisfy the SAME
+  // "token block" shape the check above blanks out (a `:root { --accent:
+  // <anything> }` rule), which made the check self-certifying: it would have
+  // passed even if the stage's literal were changed to '#ff0000' (2026-07-31
+  // audit, finding H5), because "wrapped in a one-declaration :root block" was
+  // the only thing it ever checked for.
+  //
+  // The real reason the stage gets a literal at all (STAGE_ACCENT_HEX's own
+  // comment, src/render.mjs, has the full account) is that the srcdoc
+  // document it's injected into is sandboxed and never receives the page's
+  // tokens -- but a CUSTOM PROPERTY is exactly the mechanism that would reach
+  // through that isolation anyway: properties inherit, so agent-authored
+  // HTML in that same document could declare its own `--accent` and silently
+  // hijack the outline with no specificity contest. So what is actually true
+  // and worth guarding here is the ABSENCE of any custom property in the
+  // stage stylesheet, not the presence of some hex or other. That is read
+  // from STAGE_ACCENT_HEX, a real exported constant, rather than
+  // reconstructed by regexing every single-quoted chunk out of the whole
+  // client-script string the way this check used to (`stageAgentScript()`
+  // is hundreds of lines of client JS, including `.toString()`-embedded
+  // functions from src/anchor.mjs) -- an apostrophe inside a `//` comment
+  // anywhere in that string offsets which quoted chunks the regex sees, so
+  // what it "scanned" was parity luck, not the actual injected CSS.
+  assert.ok(/^#[0-9a-fA-F]{6}$/.test(STAGE_ACCENT_HEX),
+    `STAGE_ACCENT_HEX (src/render.mjs) must be a plain hex literal -- the one value untrusted content in the stage document cannot override -- not a custom property or anything else it could be hijacked through: ${STAGE_ACCENT_HEX}`);
+
+  const script = stageAgentScript();
+  const ensureBody = script.slice(script.indexOf('function ensureHoverStyle'), script.indexOf('function clearHover'));
+  assert.ok(ensureBody.length > 0 && !ensureBody.includes('function clearHover'),
+    'setup failure: could not isolate ensureHoverStyle from stageAgentScript() to inspect its injected CSS');
+  assert.ok(!/--[a-zA-Z-]/.test(ensureBody),
+    `the stage stylesheet (ensureHoverStyle, stageAgentScript, src/render.mjs) must declare or reference NO custom property at all -- that is the actual isolation property this exemption relies on, and it is what a sandboxed srcdoc document cannot protect on its own (custom properties inherit from agent-authored ancestors regardless of the iframe boundary): ${ensureBody}`);
+
+  assert.ok(script.includes('outline: 2px solid ' + STAGE_ACCENT_HEX + ' !important'),
+    'stageAgentScript() must actually inject STAGE_ACCENT_HEX -- the exported constant this check reads is not proof of what is served if the two drift apart');
+
+  // The hand-maintained half of QUIRKS.md "Two stylesheets, one palette":
+  // this literal has no test forcing it to stay in step with --accent short
+  // of this one. Also exactly what falsifies the check above as a decoy --
+  // changing STAGE_ACCENT_HEX to some other plain hex (e.g. '#ff0000') still
+  // declares no custom property and still round-trips through the assertion
+  // just above, so only THIS assertion catches a value that drifted from the
+  // token it is supposed to track.
+  assert.equal(STAGE_ACCENT_HEX, palettes.dark['--accent'],
+    `the stage's hand-maintained literal (STAGE_ACCENT_HEX, src/render.mjs) no longer matches --accent's dark value (${palettes.dark['--accent']}) -- QUIRKS.md "Two stylesheets, one palette" requires updating it by hand when that token changes`);
 });
 
 rmSync(fixturesDir, { recursive: true, force: true });

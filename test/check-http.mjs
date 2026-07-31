@@ -1449,6 +1449,44 @@ async function main() {
     assert.equal(served, freshlyRendered, 're-rendering the stored JSON must reproduce the served page exactly');
   });
 
+  await check('DESIGN.md "archives already on disk stay dark": a pages/*.html frozen before this feature shipped is never rewritten, and GET /b/:id always serves a fresh, themed render regardless of what the frozen file contains', async () => {
+    // Stand in for an archive written by a pre-ticket-05 daemon: hand-written
+    // directly to pages/, bypassing writePage entirely, carrying none of
+    // src/theme.mjs's machinery (no themeBootScript, no #theme-toggle, no light
+    // media query) -- exactly what every archive predating this change looks
+    // like, forever, per the spec's own "no migration, no re-render sweep on
+    // upgrade" decision.
+    const pagePath = path.join(home, 'pages', `${boardId}.html`);
+    // Audit test gap: this check overwrites the SHARED pages/<boardId>.html
+    // fixture and previously never restored it, leaving it corrupted for the
+    // rest of the run -- green only by accident, because the next check that
+    // touches this board posts a different one first. Captured up front and
+    // restored in a `finally`, same discipline as this file's other
+    // real-file-on-disk checks.
+    const originalPageContents = readFileSync(pagePath, 'utf8');
+    const staleHtml = '<!doctype html><html><head><title>stale pre-theme archive</title></head><body><p>a pre-ticket-05 archive: dark-only, no theme machinery at all</p></body></html>';
+    try {
+      writeFileSync(pagePath, staleHtml, 'utf8');
+      assert.equal(readFileSync(pagePath, 'utf8'), staleHtml, 'setup failure: could not stand the page file in as a stale pre-theme archive');
+
+      // Reopening this board through the daemon -- a plain GET, exactly what a
+      // reviewer's browser does -- must serve a FRESH, themed render, proving GET
+      // never reads pages/*.html to answer a request; it only ever re-renders the
+      // stored board JSON (src/server.mjs's handleGetPage).
+      const served = await (await fetch(`${base}/b/${boardId}`)).text();
+      assert.ok(served.includes('id="theme-toggle"'), 'GET /b/:id must serve a freshly rendered, themed page even though the file on disk is a stale, pre-theme archive');
+      assert.notEqual(served, staleHtml, 'the served page must not be the stale bytes sitting on disk');
+
+      // And the frozen file itself must be untouched by that GET: no migration, no
+      // re-render sweep, ever -- an archive is a snapshot of what was posted, and
+      // rewriting an old one would contradict that.
+      const onDiskAfter = readFileSync(pagePath, 'utf8');
+      assert.equal(onDiskAfter, staleHtml, 'a GET must never rewrite pages/*.html -- an old archive stays exactly as it was written, forever (ablation: this is what would break if a migration/re-render sweep were ever added on startup or on read)');
+    } finally {
+      writeFileSync(pagePath, originalPageContents, 'utf8');
+    }
+  });
+
   await check('answering mutates only the store JSON on disk; any regenerated page is a full re-render of that JSON, never an in-place edit', async () => {
     const postRes = await fetch(`${base}/api/board`, {
       method: 'POST',

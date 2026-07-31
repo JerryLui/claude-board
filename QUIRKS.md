@@ -83,6 +83,24 @@ throwaway under `/tmp` is the right home. Two things that cost time:
 - An iframe stage's mock content usually fills only a slice of the frame. Clicking
   the frame's empty area correctly anchors nothing, which reads exactly like a dead
   gesture. Probe several points before believing it.
+- This Chrome version's `/json/new` HTTP endpoint (used to open a tab and get its
+  `webSocketDebuggerUrl` without hand-rolling `Target.createTarget` over the browser
+  socket) rejects a plain `GET` with "Using unsafe HTTP verb GET to invoke /json/new.
+  This action supports only PUT verb." — a 200 response carrying an error STRING, not
+  a 4xx, so a caller that does `resp.json()` unconditionally gets `SyntaxError:
+  Unexpected token 'U', "Using unsa"... is not valid JSON` pointing nowhere near the
+  real cause. Use `fetch(url, { method: 'PUT' })`.
+- A race that depends on "the initial render is still in flight" (D1/D2, audit
+  2026-07-31) needs the render to actually take measurable time. This machine's
+  jsdelivr fetch of mermaid's CDN module was fast enough (sub-20ms, likely warm HTTP
+  cache after the first hit) that 6-10 tiny flowcharts finished rendering in under
+  100ms total — a "click again 200ms later" reproduction landed AFTER the page had
+  already settled, every trial, and looked like the bug was fixed when it had simply
+  never been exercised. Sampling `document.querySelectorAll('pre.mermaid svg').length`
+  every 5ms after navigation (a throwaway timing probe, not a permanent check) is the
+  fast way to confirm the window is wide enough before trusting a "0 corrupt" result;
+  widening each diagram (more nodes, so dagre's layout pass actually costs
+  milliseconds) is more reliable than guessing at a smaller click interval.
 
 ## No external assets, ever
 
@@ -95,9 +113,12 @@ cannot be reached.
 ## Two stylesheets, one palette
 
 The html-stage iframe is sandboxed and the page's tokens deliberately do not reach
-into it. Its hover-highlight rule is built with a hardcoded hex, and mermaid's
-`themeVariables` are hardcoded too. Both must be updated by hand when `--accent` /
-the surface tokens change in `src/styles.mjs`. Ticket 10 (DESIGN.md)
+into it. Its hover-highlight rule is built with a hardcoded hex, updated by hand
+when `--accent` / the surface tokens change in `src/styles.mjs`. Mermaid's
+`themeVariables` no longer are: `mermaidThemeVariables()` (`src/ui.mjs`) now reads
+live computed style through a mermaid-variable -> CSS-token map
+(`MERMAID_TOKEN_MAP`), so a palette change reaches it with nothing to update by
+hand. Ticket 10 (DESIGN.md)
 dropped `allow-same-origin` from the iframe and moved the hover rule from
 `wireHtmlStage` (`src/ui.mjs`, since deleted — the parent can no longer reach
 `contentDocument` at all) into `stageAgentScript` (`src/render.mjs`), the
@@ -121,6 +142,22 @@ the former but not the latter. Same trap applies to `src/render.mjs`'s
 single quote for an inline code reference inside either string; save backticks
 for outside them.
 
+It is not limited to the three *client scripts* (`src/ui.mjs`'s `ui`,
+`src/render.mjs`'s `stageAgentScript()`, `src/theme.mjs`'s `themeBootScript`)
+— `src/styles.mjs`'s whole `export const styles = \`...\`;` is the identical
+shape for CSS, and a backtick inside one of ITS `/* ... */` comments ends that
+string just as early (2026-07-31 audit fix, hit directly while editing a
+comment above `body.readonly button#theme-toggle`). Unlike the client
+scripts, this one usually IS loud: whatever CSS text follows the premature
+close brace rarely also parses as JS, so `node --check src/styles.mjs` throws
+straight away (verified: `.foo { color: red; }` after a truncated `styles`
+assignment fails with `Unexpected identifier`, pointing at the stray backtick's
+own line). Loud is not the same as easy to read, though — the reported error
+points at the CSS content, not the word "backtick" that actually caused it, so
+the fix is the same as ever: single quotes for an inline code reference inside
+CSS comments too, and don't assume "the file still parses" means nothing
+downstream broke.
+
 ## A block's id is kind-locked, permanently
 
 `src/board.mjs`'s `resolveBlockId` rejects any incoming block whose `kind` doesn't
@@ -133,6 +170,33 @@ resolver's own defensive guard against it), splice a properly-normalised block
 from a throwaway `createBoard` directly into `board.blocks[i]`, id overwritten by
 hand -- don't fight `amendRound` for it, it will always throw.
 
+## Readonly is locked twice -- CSS and JS -- and reusing chrome inherits both
+
+`.mode-toggle` (the comment-mode toggle's chrome, `src/styles.mjs`/`src/ui.mjs`)
+is hidden in a read-only archive by TWO independent, unrelated mechanisms:
+`body.readonly .mode-toggle { display: none; }` in the stylesheet, AND
+`src/ui.mjs`'s blanket `qsa('textarea, input, button').forEach(el => el.disabled
+= true)` readonly loop, which disables it a second time regardless of the CSS.
+Ticket 03's theme control reuses `.mode-toggle`'s chrome (by design -- one set of
+button rules, not two) but, unlike every other control that ever wore that
+class, has to stay live in readonly. Carving it out of only one of the two
+mechanisms produces a control that LOOKS fixed and isn't: excluding it from the
+CSS selector alone leaves it visible but still `disabled` (silently unclickable,
+and the stand-in's `EventTarget.dispatchEvent` doesn't model a browser's native
+click-suppression on a disabled element either -- see test/check-archive.mjs's
+own comment on that -- so a check that only dispatches a click and checks the
+result can pass against a genuinely `disabled` button); excluding it from the JS
+loop alone leaves it `display: none`. Both had to be carved out, independently,
+and neither existing rule could just be edited to add the exception: both are
+asserted by exact literal text elsewhere in the suite (`body.readonly
+.mode-toggle { display: none` in test/check-archive.mjs; `qsa('textarea, input,
+button')` in test/check-pure.mjs), so the fix in both places is an ADDITIONAL
+rule/line stated as an override, not a rewrite of the existing one. The general
+lesson: before reusing an existing control's class for a new one with different
+readonly semantics, grep for every place that class is gated on `body.readonly`
+-- CSS and JS are not the same gate, and a control can pass a check that only
+looks at one of them while still being broken by the other.
+
 ## Preview harness
 
 There is no dev server for the rendered page. To eyeball UI changes, write a
@@ -140,3 +204,141 @@ throwaway script that calls `createBoard` / `addRound` / `renderBoardPage` and d
 the HTML somewhere, then serve that directory over http — Chrome automation refuses
 `file:` URLs. Do not serve out of `/tmp` on this machine: a stray `/tmp/inspect.py`
 shadows the stdlib and breaks `python3 -m http.server`.
+
+## `test/check-archive.mjs`'s own `loadBoard`/`loadArchive` never run `themeBootScript`
+
+They run exactly one script — `src/ui.mjs`'s `ui` — against the real file bytes.
+That is enough for every check that existed before ticket 05 (readonly, pins,
+gestures), because none of it depends on `src/theme.mjs`. But `#theme-toggle`'s
+click handler and the pre-paint `data-theme` attribute are both wired by
+`themeBootScript`, not `ui` — a real page runs the boot script first (inline,
+pre-`<style>`) and `ui` second (the deferred module script), and a check that
+only runs `ui` against the archive bytes will find `#theme-toggle` in the
+markup (`ui`'s readonly loop re-enables it by id) but nothing will happen when
+it's clicked, since no listener was ever attached. Proving the theme control
+actually works *in the archive* — not just that it's present and not
+disabled — needs a second loader that runs both scripts in that same order
+(`loadArchiveThemed` in `test/check-archive.mjs`), the same way
+`test/check-theme.mjs`'s own readonly check already combines them on an
+in-memory page. Same lesson as the mermaid-id trap above: a helper that only
+exercises *one* of the page's real scripts is not "the real page" for
+anything the other script owns.
+
+## The stand-in's `getComputedStyle` has no CSS engine behind it
+
+`test/dom-stand-in.mjs`'s `getComputedStyle` never reads `src/styles.mjs`'s `styles`
+string. It reimplements, in plain JS from the imported `palettes` object, the one
+precedence decision the real cascade encodes: an explicit `data-theme` attribute
+wins outright, and only when it is absent does `prefers-color-scheme` decide. Every
+check that reads a token through `getComputedStyle` — `test/check-mermaid-theme.mjs`,
+`test/check-archive.mjs`'s themed loader — is therefore comparing the stand-in's OWN
+copy of that precedence against itself, never against the CSS `tokenBlock()`
+(`src/styles.mjs`) actually emits.
+
+A mutation that breaks the real cascade but leaves this hand-written copy of it
+intact is invisible to the whole suite. Concretely: nesting the explicit
+`:root[data-theme="light"]` override *inside* the `@media (prefers-color-scheme:
+light)` block at `src/styles.mjs:176-180` means a reader on a dark-OS machine who
+clicks the control to Light gets a page that stays entirely dark — the one thing
+this feature exists to do — while `node test/run.mjs` reports every check green,
+because the stand-in never looked at the media query or the nesting at all.
+
+The general lesson: a green check here proves the JS that CONSUMES a computed style
+is correct for whatever the stand-in decides that style is, not that the stylesheet
+produces it under a real cascade. Nothing in this harness parses CSS — a check that
+wants to defend the cascade itself needs a small resolver over the `styles` string
+(evaluate the media query, match selectors by specificity/source order), which does
+not exist yet.
+
+**Resolved 2026-07-31** (audit findings C1/H3): `getComputedStyle` now runs a real,
+if small, cascade resolver (`resolveComputedProperty`, `test/dom-stand-in.mjs`) over
+the actual `styles` text — see the next two entries for what building and calling it
+correctly took.
+
+## Finding the real `<style>` tag in rendered bytes: `<style>` and `</style>` are not reserved words in this codebase's own prose
+
+A check that wants to test the cascade against the ACTUAL bytes on disk (not the
+in-memory `styles` export, in case `src/render.mjs` ever diverged from it) has to
+locate the real `<style>...</style>` block inside a fully rendered page first. The
+obvious `/<style>([\s\S]*?)<\/style>/` is unsafe: both `src/theme.mjs`'s
+`themeBootScript` and `src/styles.mjs`'s own `styles` string contain the literal
+words `<style>` inside their own comments (`themeBootScript`: "before `<style>` is
+even parsed"; the `.cb-anchor-hover` comment in `styles`: "injected into the
+sandboxed document's own `<style>`") — both land, as rendered text, BEFORE the one
+true opening tag, and there is exactly one real `</style>` in a page (client-script
+text never closes a tag it never opened). A non-greedy regex from the first `<style>`
+match up to that one real `</style>` therefore captures the ENTIRE boot script and
+`ui` module script as "CSS" (confirmed: ~43KB of client-script text, not ~7KB of
+real CSS) — and even `lastIndexOf('<style>', closeIdx)` is not safe either, because
+`styles`' own comment ALSO contains the substring, landing between the true opening
+tag and the close, so "last occurrence before the real close" still lands inside the
+stylesheet's own prose rather than at the top of it. What actually works: locate the
+structural adjacency `src/render.mjs`/`src/indexpage.mjs` both emit,
+`` </script>\n<style> `` (the boot script's closing tag immediately followed by the
+real style tag opening) — a shape no comment's prose reproduces. See
+`extractStyleBlock` in `test/check-archive.mjs`.
+
+## A block-comment stripper needs to know about regex literals, not just strings
+
+`test/check-pure.mjs`'s orphan-class check used to substring-search raw emitter
+source *including comments*, so a class named only in a doc comment (never in real
+markup) satisfied it — audit finding M5, `.mode-toggle-icon` named in a comment
+above `themeToggle()` (`src/theme.mjs`) but not (after a mutation) in the button's
+own `class="..."` string. The fix strips comments from the emitter source before
+searching (`stripJsComments`), but a naive `//`/`/* */` scanner is unsafe on this
+codebase for two independent reasons: these five files ARE the client-script
+template literals (`ui`, `stageAgentScript()`, `themeBootScript`) — real code, not
+comments, so a scanner blind to string/template-literal boundaries could mistake a
+comment-shaped sequence inside one of THOSE strings for an actual comment and eat
+real code — and separately, `src/markdown.mjs`'s bold/italic regex
+(`.replace(/\*\*([^*]+)\*\*/g, ...)`) has a regex literal whose own body, read blind
+to regex syntax, contains a run of escaped asterisks immediately followed by the
+regex's closing slash: exactly the two-character sequence that closes a block
+comment. A scanner that does not know it is inside a regex literal at that point
+would treat the regex's own middle as `*/`, closing a "comment" that was never open
+and mis-scanning everything after it as normal code (or, depending on what came
+before, silently eating real code it thought WAS a comment). `stripJsComments`
+tracks string/template-literal boundaries AND uses the standard "does the previous
+significant token complete a value" heuristic to tell a regex literal's opening `/`
+apart from division, specifically to survive both hazards.
+
+## `readyState`'s default is not one fact, it's three, and only one of them should change
+
+Audit finding H2: `test/dom-stand-in.mjs`'s `StandInDocument` used to hardcode
+`readyState = 'complete'` unconditionally, so `src/theme.mjs`'s `themeBootScript`
+always took the `else { wire(); }` branch — the one branch a real page (where this
+script runs inline in `<head>`, before `<body>` exists) never takes. Fixing the
+DEFAULT to `'loading'` is one line; the trap is that `StandInDocument` backs THREE
+different documents in this file, only one of which should change:
+
+- The outer page (`parseHTML`, run through a check's own loader) — this is the one
+  that needed the fix. A caller now calls the new `document.finishParsing()`
+  (flips `readyState` to `'complete'`, dispatches a real `DOMContentLoaded`) at the
+  point it wants to simulate the parser reaching the end of the document, AFTER
+  running the boot script and (per spec: module/deferred scripts run before
+  `DOMContentLoaded`) AFTER running `ui` too.
+- The `about:blank` placeholder every `<iframe>` gets the instant it's parsed
+  (`aboutBlankDocument`) — genuinely `'complete'` immediately in a real browser,
+  unrelated to this fix; `test/check-click.mjs` already asserted this. Left at the
+  old default by setting it explicitly right after construction, not by leaving the
+  class default alone (there is only one class).
+- An html-stage's real `srcdoc` content, once `IframeElement.loadSrcdoc()` "loads"
+  it — nothing currently reads this one's `readyState`, but leaving it `'loading'`
+  forever after the method's own doc comment says navigation has ALREADY finished
+  would be a lie the next thing that reads it inherits; set to `'complete'`
+  immediately for fidelity, not because anything failed without it.
+
+Get this split wrong (e.g. changing the class default and stopping there) and
+`test/check-click.mjs`'s about:blank assertion breaks for a reason that has nothing
+to do with the actual fix — exactly the "run the WHOLE suite, understand why before
+adjusting it" case: a fix to one document's realistic default looks, from inside the
+one shared class, like a fix to all three.
+
+Separately, the real ordering matters and is easy to get backwards: a
+`<script type="module">` (`ui`, no `async`) is a DEFERRED script by spec, which runs
+AFTER parsing finishes but BEFORE `DOMContentLoaded` fires — so a loader that wants
+both real scripts to have run by the time it hands back a document must run
+`themeBootScript`, then `ui`, then call `finishParsing()`, in that order. Calling
+`finishParsing()` between the two (a plausible first guess, "boot script pre-body,
+`ui` post-body") wires the theme control before `ui` runs, which nothing in this
+suite currently depends on being wrong, but is not what a real page does.

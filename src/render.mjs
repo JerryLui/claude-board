@@ -24,6 +24,7 @@
 
 import { styles } from './styles.mjs';
 import { ui } from './ui.mjs';
+import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
 
@@ -607,6 +608,33 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
 // copy (e.g. "the hover style is injected lazily, gated on comment mode actually
 // turning on") without parsing it back out of a rendered page's escaped HTML
 // attribute.
+
+/** The stage's hover-highlight color -- a literal hex, deliberately NOT a CSS
+ * custom property. This srcdoc document is sandboxed and its stylesheet
+ * (ensureHoverStyle, below) is the one this file's header comment and
+ * QUIRKS.md ("Two stylesheets, one palette") describe as never reachable from
+ * the page's own tokens -- but a custom property is exactly the mechanism
+ * that WOULD reach through that isolation regardless: custom properties
+ * inherit, so any ancestor in agent-authored HTML that itself declares
+ * `--accent` (its own brand color, or deliberately) wins over a `:root`
+ * rule in this same document, with no specificity contest -- `!important`
+ * on `outline` protects the `outline` declaration, not the `var()` it
+ * substitutes. Measured in real Chrome (2026-07-31 audit, finding H5): a
+ * block under `style="--accent: transparent"` rendered the hover outline
+ * `rgba(0, 0, 0, 0)` -- invisible -- and this outline is the ONLY
+ * per-element targeting feedback the stage gives, so a reviewer could be led
+ * to anchor a comment to an element they never saw highlighted. A literal is
+ * the one value untrusted content in the same document cannot override.
+ * Spec criterion 6's binding amendment names this file's stage stylesheet as
+ * exempt from the "no raw literal outside a token block" rule for exactly
+ * this reason -- see test/check-pure.mjs, which asserts the isolation
+ * property this comment describes (no custom property at all) rather than
+ * merely "some hex is present". Hand-kept in sync with --accent's DARK value
+ * in src/styles.mjs (QUIRKS.md "Two stylesheets, one palette" -- the stage
+ * has no light variant, by the same design tradeoff as before this
+ * feature); test/check-pure.mjs asserts that sync too. */
+export const STAGE_ACCENT_HEX = '#7c9cff';
+
 export function stageAgentScript() {
   return `<script>(function () {
   var CB = 'cb-stage';
@@ -630,20 +658,22 @@ export function stageAgentScript() {
 
   // Discoverability CSS, applied inside THIS document only -- see QUIRKS.md
   // "Two stylesheets, one palette": the outer page's tokens deliberately do
-  // not reach in here (isolation is the point), so the accent hex is kept in
-  // step with --accent in src/styles.mjs by hand, unchanged from before this
-  // ticket. Injected LAZILY (only once comment mode has genuinely turned on
-  // at least once) rather than unconditionally at script start -- a read-only
-  // archive never sends 'mode' with commentMode true at all, so its stage
-  // document never gains this stylesheet, matching this ticket's unchanged
-  // behavioural contract (test/check-archive.mjs: "no hover stylesheet is
-  // even injected" in a read-only archive).
+  // not reach in here (isolation is the point), so this injected stylesheet
+  // is a literal hex (STAGE_ACCENT_HEX's own comment, above, explains why a
+  // custom property would defeat that isolation rather than merely being
+  // redundant with it), kept in step with --accent's DARK value in
+  // src/styles.mjs by hand. Injected LAZILY (only once comment mode has
+  // genuinely turned on at least once) rather than unconditionally at script
+  // start -- a read-only archive never sends 'mode' with commentMode true at
+  // all, so its stage document never gains this stylesheet, matching this
+  // ticket's unchanged behavioural contract (test/check-archive.mjs: "no
+  // hover stylesheet is even injected" in a read-only archive).
   function ensureHoverStyle() {
     if (styleInjected) return;
     styleInjected = true;
     try {
       var style = document.createElement('style');
-      style.textContent = '.' + HOVER_CLASS + ' { outline: 2px solid #7c9cff !important; outline-offset: 2px; cursor: pointer !important; } body { cursor: default; }';
+      style.textContent = '.' + HOVER_CLASS + ' { outline: 2px solid ${STAGE_ACCENT_HEX} !important; outline-offset: 2px; cursor: pointer !important; } body { cursor: default; }';
       (document.head || document.body).appendChild(style);
     } catch (e) { /* no hover highlight; the click below still anchors */ }
   }
@@ -882,6 +912,7 @@ export function renderBoardPage(board) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
 <title>${escHtml(board.title || 'board')}</title>
+<script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>
 <body>
@@ -894,6 +925,7 @@ export function renderBoardPage(board) {
     </div>
     <div class="board-head-actions">
       ${commentModeToggle()}
+      ${themeToggle()}
       <div class="round-badge">round ${board.rounds.length}</div>
     </div>
   </header>

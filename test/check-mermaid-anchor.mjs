@@ -47,6 +47,7 @@ import { readFileSync } from 'node:fs';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
+import { themeBootScript } from '../src/theme.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
 
 let failures = 0;
@@ -383,6 +384,141 @@ await check('rendered, but the node the anchor names is gone from THIS diagram: 
   const pins = layer.querySelectorAll('.anchor-pin');
   assert.equal(pins.length, 1);
   assert.equal(pins[0].classList.contains('pin-lost'), true, 'a comment naming a node no longer in the diagram must render lost');
+});
+
+// --- ticket 04 (light theme): pin survival across a theme-driven redraw -----
+//
+// DESIGN.md's spec decision names this criterion 8's RISKY half: "diagram
+// anchors key on the source-declared node id and already strip mermaid's
+// unstable generated prefix, so a re-render of unchanged source should
+// preserve them. Confirm this rather than assume it." A theme switch
+// (src/theme.mjs's THEME_CHANGE_EVENT, src/ui.mjs's redrawMermaidForTheme)
+// redraws the SAME diagram from the SAME source into a brand-new <svg> --
+// mermaid namespaces every node id with that svg's own generated id (see
+// parseMermaidDomId's own comment in src/anchor.mjs), so node A's id after
+// the switch is NOT node A's id before it. This section proves a pin placed
+// before the switch still resolves after it, with the generated id
+// DELIBERATELY different across the two renders, never coincidentally equal.
+
+/** A second, real-shaped ('mermaid-<digits>') svg id, deliberately different
+ * from SVG_ID above -- the fact this whole section exists to exercise. */
+const SVG_ID_2 = 'mermaid-' + (Number(SVG_ID.match(/\d+$/)[0]) + 1);
+const nodeDomId2 = (declared, seq) => `${SVG_ID_2}-flowchart-${declared}-${seq}`;
+
+/** A theme-aware mermaid mock, local to this section: renders with
+ * SVG_ID/nodeDomId the FIRST time, and -- on a second call only, i.e. the
+ * redraw a theme switch triggers -- with SVG_ID_2/nodeDomId2 instead. Unlike
+ * mockMermaid() above (a single static render), this one also has to behave
+ * correctly across a SECOND render of the SAME node, which is the one new
+ * thing a theme switch actually exercises: it skips a node already marked
+ * 'data-processed' (proving src/ui.mjs clears that marker before a redraw,
+ * not just that something runs) and refuses to render a node whose text
+ * isn't real diagram source (proving src/ui.mjs restores the stashed
+ * original source first -- a node still carrying its own rendered-SVG-derived
+ * text, e.g. "StartEnd", fails this the same way a real mermaid parse error
+ * would). */
+function mockMermaidRedrawable() {
+  let renderCount = 0;
+  return {
+    initialize() {},
+    async run(opts) {
+      renderCount++;
+      const id = renderCount === 1 ? nodeDomId : nodeDomId2;
+      const svgId = renderCount === 1 ? SVG_ID : SVG_ID_2;
+      (opts.nodes || []).forEach(n => {
+        if (n.getAttribute('data-processed') === 'true') return;
+        if (String(n.textContent || '').indexOf('flowchart') === -1) return;
+        n.innerHTML = ''
+          + `<svg id="${svgId}">`
+          + `<g class="node" id="${id('A', 12)}"><rect></rect><text class="nodeLabel">Start</text></g>`
+          + `<g class="node" id="${id('B', 13)}"><rect></rect><text class="nodeLabel">End</text></g>`
+          + '</svg>';
+        n.setAttribute('data-processed', 'true');
+      });
+    },
+  };
+}
+
+/** Like loadBoard above, but also runs the REAL src/theme.mjs boot script
+ * first -- exactly the order a real page executes them in (the head boot
+ * script, which owns THEME_CHANGE_EVENT's dispatch, before ui's own deferred
+ * module script, which listens for it). loadBoard itself is left untouched:
+ * every other check in this file neither needs nor exercises the theme
+ * control, and this file's convention (see mockMermaidDuplicateIds above) is
+ * a specialised local helper for a specialised local section, not a
+ * broadened shared one. */
+async function loadBoardWithTheme(pageHtml, mermaidMock) {
+  const document = parseHTML(pageHtml);
+  const window = document.defaultView;
+  if (mermaidMock) window.mermaid = mermaidMock;
+  const location = { protocol: 'http:' };
+  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
+  new Function('document', 'window', 'location', ui)(document, window, location);
+  // Audit 2026-07-31 (H2): a freshly parsed document now starts `readyState
+  // === 'loading'`, so the theme control's click listener is not wired until
+  // `document.finishParsing()` simulates the parser reaching the end of the
+  // document (test/dom-stand-in.mjs) -- every check below that clicks the
+  // control depends on this having run first.
+  document.finishParsing();
+  await flush();
+  return document;
+}
+
+await check('ticket 04: a comment pin placed on a diagram node still resolves to the same anchor after a theme switch, even though the redraw gives the svg a genuinely different generated id -- criterion 8\'s risky half, confirmed rather than assumed', async () => {
+  const themeBoard = createBoard({
+    title: 'Ticket 04 -- pin survival across a theme switch',
+    blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }],
+  });
+  const themeBlockId = themeBoard.blocks[0].id;
+  const pageHtml = renderBoardPage(themeBoard);
+
+  const document = await loadBoardWithTheme(pageHtml, mockMermaidRedrawable());
+  enableCommentMode(document);
+
+  const svgBefore = document.querySelector('.mermaid-block pre.mermaid svg');
+  assert.ok(svgBefore, 'setup failure: no svg from the first render');
+  const hostABefore = svgBefore.querySelector(`[id="${nodeDomId('A', 12)}"]`);
+  assert.ok(hostABefore, 'setup failure: node A not found in the first render');
+  const rectBefore = hostABefore.children.find(c => c.tagName === 'RECT') || hostABefore;
+  rectBefore.dispatchEvent(new StandInEvent('click'));
+
+  const form = document.getElementById('comment-form-' + themeBlockId);
+  assert.ok(form && form.classList.contains('open'), 'setup failure: clicking node A did not open the comment form');
+  assert.equal(form.getAttribute('data-anchor-ref'), 'A');
+  const input = form.querySelector('input[type=text]');
+  input.value = 'this must still point at node A after a theme switch';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  const layer = document.querySelector('.mermaid-block .pin-layer');
+  const pinBefore = layer.querySelector('.anchor-pin');
+  assert.ok(pinBefore, 'setup failure: no pin after queueing the comment');
+  assert.equal(pinBefore.classList.contains('pin-lost'), false, 'setup failure: the freshly-queued pin must not be lost');
+
+  // Switch the theme (System -> Light), which redraws the diagram via
+  // mockMermaidRedrawable's SECOND call.
+  const themeToggle = document.getElementById('theme-toggle');
+  assert.ok(themeToggle, 'setup failure: no #theme-toggle rendered');
+  themeToggle.dispatchEvent(new StandInEvent('click'));
+  await flush();
+
+  assert.equal(document.documentElement.getAttribute('data-theme'), 'light', 'setup failure: the click must have switched the page to light');
+
+  const svgAfter = document.querySelector('.mermaid-block pre.mermaid svg');
+  assert.ok(svgAfter, 'the diagram must still be a live svg after the switch');
+  assert.notEqual(svgAfter.getAttribute('id'), svgBefore.getAttribute('id'),
+    'setup failure: the redraw must produce a genuinely different generated svg id, or this check proves nothing');
+
+  const hostAAfter = svgAfter.querySelector(`[id="${nodeDomId2('A', 12)}"]`);
+  assert.ok(hostAAfter, 'setup failure: node A not found in the SECOND render');
+  assert.notEqual(hostAAfter.getAttribute('id'), hostABefore.getAttribute('id'),
+    'setup failure: node A\'s own generated id must differ across the two renders too');
+
+  const pinAfter = layer.querySelector('.anchor-pin');
+  assert.ok(pinAfter, 'the pin must still be there after the theme switch redrew the diagram');
+  assert.equal(pinAfter.classList.contains('pin-lost'), false,
+    'criterion 8: a comment pin placed before a theme switch must still resolve after it, even though the svg\'s generated id changed');
+  assert.notEqual(pinAfter, pinBefore,
+    'the pin layer must have been rebuilt fresh against the NEW svg (renderMermaidPins run again), not left as a stale reference from before the switch');
 });
 
 if (failures) {

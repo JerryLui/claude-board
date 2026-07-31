@@ -14,6 +14,10 @@ this project does not yet follow semantic versioning, because nothing has been r
 ### Added
 
 - README, license, this changelog, `SECURITY.md`, and CI running the check suite.
+- **A light theme.** Follows the OS `prefers-color-scheme` by default, with a header
+  control that cycles System → Light → Dark; the choice is remembered in
+  `localStorage` per origin, applied before first paint so there is no dark-then-light
+  flash. A standalone archive always follows the OS and remembers nothing.
 
 ### Known issues
 

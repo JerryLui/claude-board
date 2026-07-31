@@ -83,6 +83,14 @@
 // file ever builds (the outer page AND an html stage's own srcdoc, ticket 10's
 // addition) go through this same parseHTML, so both get it.
 import { autoCloseFor, impliedParentFor, decodeEntities, VOID_ELEMENTS, HEAD_ONLY_TAGS } from '../src/anchor.mjs';
+// Audit 2026-07-31 (C1): StandInWindow's getComputedStyle below used to
+// resolve a requested custom property against the imported `palettes` object
+// directly -- a hand-written copy of theme precedence that never read this
+// text at all. It now runs the real cascade resolver (further down this
+// file) over THIS string, so a change to the stylesheet's own selectors or
+// nesting changes what a check sees, not just a change to the palette
+// values.
+import { styles } from '../src/styles.mjs';
 
 // --- HTML parsing: just enough to build a tree from the exact markup
 // src/render.mjs's renderBoardPage emits, and (unlike this file's own header
@@ -425,7 +433,16 @@ class EventTarget {
     if (idx !== -1) arr.splice(idx, 1);
   }
   dispatchEvent(event) {
-    event.target = event.target || this;
+    // A plain StandInEvent's `target` is a normal writable field, but ticket 04
+    // (src/theme.mjs's `cb-theme-change` notification) dispatches a REAL
+    // platform `CustomEvent` through here -- window.dispatchEvent has to accept
+    // one in a real browser too, since a hand-rolled plain object fails there
+    // with "parameter 1 is not of type 'Event'". A genuine Event's `.target` is
+    // an accessor with no setter, so this assignment throws in strict mode
+    // (every ES module is strict); harmless to skip, since `.type` and
+    // `.defaultPrevented` -- the only two fields anything dispatched through
+    // this stand-in ever reads -- stay readable on it regardless.
+    try { event.target = event.target || this; } catch (e) { /* real Event: target is getter-only, see above */ }
     let cur = this;
     while (cur) {
       const handlers = cur.listeners && cur.listeners.get(event.type);
@@ -434,6 +451,330 @@ class EventTarget {
     }
     return !event.defaultPrevented;
   }
+}
+
+/** Stand-in for `MediaQueryList` (`window.matchMedia(query)`'s return value) --
+ * ticket 04, src/ui.mjs's `isDarkThemeActive`/`mermaidThemeVariables` and
+ * src/theme.mjs's own OS-preference-change listener both read `.matches` and
+ * `.addEventListener('change', ...)` off one of these. `_setMatches` is a test
+ * hook with no real-`MediaQueryList` equivalent (a real one has no settable
+ * `.matches` -- only the OS can change it): it exists purely so a check can
+ * simulate "the OS preference changed while the page was open" without a real
+ * browser, firing 'change' the same way StandInWindow._setSystemPrefersDark
+ * (below) does when it flips an already-vended instance. */
+export class StandInMediaQueryList extends EventTarget {
+  constructor(query, matches) {
+    super();
+    this.media = query;
+    this.matches = !!matches;
+  }
+  // Legacy pre-EventTarget MediaQueryList API (Safari < 14): harmless to
+  // support alongside addEventListener/removeEventListener, and src/theme.mjs
+  // falls back to it defensively.
+  addListener(fn) { this.addEventListener('change', fn); }
+  removeListener(fn) { this.removeEventListener('change', fn); }
+  _setMatches(next) {
+    const nextBool = !!next;
+    if (this.matches === nextBool) return;
+    this.matches = nextBool;
+    this.dispatchEvent({ type: 'change', matches: this.matches, media: this.media });
+  }
+}
+
+/** Whether `query` (a `(prefers-color-scheme: dark|light)` string, the only
+ * shape src/theme.mjs or src/ui.mjs ever asks for) matches, given one
+ * underlying "does the OS prefer dark" boolean -- the two queries are treated
+ * as strict opposites, which is all this repo's own CSS/JS ever assumes (see
+ * src/styles.mjs's `@media (prefers-color-scheme: light)` block: there is no
+ * third "no preference" case handled anywhere in this codebase, so the
+ * stand-in does not invent one either). */
+function matchesPrefersColorScheme(query, systemPrefersDark) {
+  if (/prefers-color-scheme:\s*dark/.test(query)) return !!systemPrefersDark;
+  if (/prefers-color-scheme:\s*light/.test(query)) return !systemPrefersDark;
+  return false;
+}
+
+// --- CSS cascade resolver (audit 2026-07-31, C1/H3) ----------------------------
+//
+// StandInWindow's getComputedStyle used to reimplement theme precedence by hand,
+// in JS, from the imported `palettes` object -- it never read `styles`
+// (src/styles.mjs) at all, so a change to the STYLESHEET's own selectors or
+// nesting (e.g. accidentally nesting the explicit `:root[data-theme="light"]`
+// override inside `@media (prefers-color-scheme: light)`, which breaks a dark-OS
+// reader's Light choice in a real browser) was invisible to every check that read
+// a token through getComputedStyle. What follows is a small, real cascade
+// resolver over the ACTUAL `styles` text: parse rules (including `@media`
+// wrapping), evaluate a `(prefers-color-scheme: ...)` condition against
+// `_systemPrefersDark`, match a selector against a real element (walking
+// `.parentElement`, same as the selector engine above), and resolve ties by
+// CSS's own (id-count, class/attr/pseudo-count, type-count) specificity tuple,
+// then source order -- not a CSS engine (this only ever has to be as general as
+// the stylesheet it reads), but a real one: a change to the stylesheet's
+// selectors or nesting changes what this returns.
+//
+// Two different callers need two different SHAPES of match:
+//   - `:root` (plain, `:not([data-theme="dark"])`, `[data-theme="light"]`) --
+//     custom-property tokens, matched only against `document.documentElement`
+//     (`:root` always refers to a document's root element, i.e. `<html>`).
+//   - ordinary tag/.class/#id/[attr]/:not()/descendant-chain selectors -- e.g.
+//     `body.readonly button#theme-toggle` -- matched against any real element
+//     and its ancestors, needed by audit finding H3 (the readonly carve-out:
+//     asserting the COMPUTED display a real button ends up with, not any one
+//     rule's spelling -- QUIRKS.md's own warning against the latter).
+// One tolerant parser (parseCascadeCompound below) covers both: a leading
+// `:root` is a pseudo-class matched against `el.tagName === 'HTML'`,
+// contributing specificity like any other pseudo-class/attribute; anything else
+// unrecognised (a dynamic pseudo-class/pseudo-element this resolver has no
+// pointer/focus state to evaluate -- `:hover`, `:disabled`,
+// `::-webkit-scrollbar`, ...) makes the compound (and therefore the whole rule)
+// NEVER match, deliberately -- a correct answer for a resolver with no live
+// interaction state, not a guess standing in for one, and never a thrown error:
+// this has to walk arbitrary, human-authored CSS, not the fixed, known selector
+// vocabulary the runtime engine above (parseCompound, which THROWS on the same
+// input) exists to run.
+
+/** Split `css` into top-level "head { body }" blocks, tracking brace depth so a
+ * wrapper's own nested rules (an `@media` block's contents, a `@keyframes`
+ * block's percentage stops) stay intact as one block's body, to be recursed
+ * into by the caller rather than split apart here. Comments must already be
+ * stripped. */
+function tokenizeCssBlocks(css) {
+  const blocks = [];
+  let i = 0;
+  const n = css.length;
+  while (i < n) {
+    while (i < n && /\s/.test(css[i])) i++;
+    if (i >= n) break;
+    const headStart = i;
+    while (i < n && css[i] !== '{') i++;
+    if (i >= n) break; // trailing text with no block: ignore
+    const head = css.slice(headStart, i).trim();
+    i++; // consume '{'
+    const bodyStart = i;
+    let depth = 1;
+    while (i < n && depth > 0) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}') depth--;
+      if (depth === 0) break;
+      i++;
+    }
+    const body = css.slice(bodyStart, i);
+    i++; // consume the matching '}'
+    blocks.push({ head, body });
+  }
+  return blocks;
+}
+
+/** Flatten `css` into leaf rules -- a selector plus its own declarations, no
+ * further nesting -- in SOURCE ORDER across the whole sheet (the array index a
+ * caller iterates with is therefore exactly what "later wins a specificity tie"
+ * means in a real cascade). An `@media (...)` wrapper contributes its condition
+ * to every rule nested inside it; any other at-rule (`@keyframes`, ...) is
+ * walked the same way with no condition added -- its own nested blocks (a
+ * keyframe's percentage selectors) simply never match anything
+ * parseCascadeCompound resolves later. */
+function collectLeafRules(css) {
+  const leaves = [];
+  (function walk(text, mediaConditions) {
+    for (const { head, body } of tokenizeCssBlocks(text)) {
+      if (/^@media\b/i.test(head)) {
+        walk(body, [...mediaConditions, head.replace(/^@media\b/i, '').trim()]);
+      } else if (head.startsWith('@')) {
+        walk(body, mediaConditions);
+      } else {
+        leaves.push({ selector: head, body, mediaConditions });
+      }
+    }
+  })(css, []);
+  return leaves;
+}
+
+/** Parse one leaf rule's declaration-block body into a `Map` of property ->
+ * value. Every property this resolver is ever asked about (`--custom-property`
+ * names, `display`) has a value with no colon of its own (hex/rgba color, a
+ * keyword) -- splitting on the FIRST `:` in each `;`-separated declaration is
+ * exactly what a real CSS declaration-list parse means for this stylesheet's
+ * own shapes, without needing a real CSS value tokenizer. */
+function parseCssDeclarations(body) {
+  const decls = new Map();
+  for (const raw of body.split(';')) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf(':');
+    if (idx === -1) continue;
+    decls.set(trimmed.slice(0, idx).trim(), trimmed.slice(idx + 1).trim());
+  }
+  return decls;
+}
+
+/** Parse ONE compound selector token (no combinators/whitespace) for the
+ * cascade resolver: an optional leading `:root`, then any number of `.class` /
+ * `#id` / `[attr]` / `[attr="v"]` / `[attr^="v"]` / `:not(...)`. Returns `null`
+ * -- "never matches", not a thrown error -- for anything else (see this
+ * section's own header comment for why). `:root` is tracked separately from
+ * `tag` (a real element's `tagName` is 'HTML', never literally the
+ * pseudo-class), but contributes to specificity exactly like any other
+ * pseudo-class/attribute selector, matching real CSS's own rule that `:root`
+ * and `[attr]` sit in the same specificity bucket. */
+function parseCascadeCompound(token) {
+  const n = token.length;
+  let i = 0;
+  let tag = null;
+  let isRoot = false;
+  const classes = [];
+  let id = null;
+  const attrs = [];
+  const nots = [];
+  if (token.slice(0, 5) === ':root') {
+    isRoot = true;
+    i = 5;
+  } else {
+    const tagMatch = /^[A-Za-z*][A-Za-z0-9-]*/.exec(token);
+    if (tagMatch) { tag = tagMatch[0].toLowerCase(); i = tagMatch[0].length; }
+  }
+  while (i < n) {
+    const c = token[i];
+    if (c === '.') {
+      const m = /^\.[A-Za-z0-9_-]+/.exec(token.slice(i));
+      if (!m) return null;
+      classes.push(m[0].slice(1));
+      i += m[0].length;
+    } else if (c === '#') {
+      const m = /^#[A-Za-z0-9_-]+/.exec(token.slice(i));
+      if (!m) return null;
+      id = m[0].slice(1);
+      i += m[0].length;
+    } else if (c === '[') {
+      const end = token.indexOf(']', i);
+      if (end === -1) return null;
+      let attr;
+      try { attr = parseAttrSelector(token.slice(i + 1, end)); } catch (e) { return null; }
+      attrs.push(attr);
+      i = end + 1;
+    } else if (token.slice(i, i + 5) === ':not(') {
+      const end = token.indexOf(')', i);
+      if (end === -1) return null;
+      const inner = parseCascadeCompound(token.slice(i + 5, end));
+      if (!inner) return null;
+      nots.push(inner);
+      i = end + 1;
+    } else {
+      return null; // an unrecognised token (:hover, ::before, ...): never matches
+    }
+  }
+  return { tag, isRoot, classes, id, attrs, nots };
+}
+
+function cascadeCompoundMatches(el, compound) {
+  if (!compound || !el || el.nodeType !== 1) return false;
+  if (compound.isRoot) { if (el.tagName !== 'HTML') return false; }
+  else if (compound.tag && compound.tag !== '*' && el.tagName.toLowerCase() !== compound.tag) return false;
+  for (const cls of compound.classes) if (!el.classList.contains(cls)) return false;
+  if (compound.id !== null && el.getAttribute('id') !== compound.id) return false;
+  for (const attr of compound.attrs) {
+    const val = el.getAttribute(attr.name);
+    if (attr.op === null) { if (val === null) return false; }
+    else if (attr.op === 'equals') { if (val !== attr.value) return false; }
+    else if (attr.op === 'contains') { if (val === null || !val.includes(attr.value)) return false; }
+    else if (val === null || !val.startsWith(attr.value)) return false;
+  }
+  for (const not of compound.nots) if (cascadeCompoundMatches(el, not)) return false;
+  return true;
+}
+
+/** Real CSS specificity, as an (ids, classes, types) tuple -- `:root` and an
+ * attribute selector are both "classes" bucket (weight 1 each); `:not(X)`
+ * contributes X's OWN specificity, not a weight of its own (the real CSS rule,
+ * and the reason `body.readonly button#theme-toggle` -- one id -- beats
+ * `body.readonly .mode-toggle` -- zero ids, more classes -- regardless of which
+ * comes first in the sheet; see src/styles.mjs's own comment on that rule). */
+function cascadeCompoundSpecificity(compound) {
+  let ids = compound.id !== null ? 1 : 0;
+  let classes = compound.classes.length + compound.attrs.length + (compound.isRoot ? 1 : 0);
+  let types = (compound.tag && compound.tag !== '*') ? 1 : 0;
+  for (const not of compound.nots) {
+    const s = cascadeCompoundSpecificity(not);
+    ids += s.ids; classes += s.classes; types += s.types;
+  }
+  return { ids, classes, types };
+}
+
+function splitCascadeSelectorGroups(selectorText) {
+  return selectorText.split(',').map(s => s.trim()).filter(Boolean).map(part => part.split(/\s+/).filter(Boolean));
+}
+
+/** Match `targetEl` (and its ancestors, for a descendant chain longer than one
+ * compound) against a selector already split into whitespace-separated
+ * compound TOKENS -- returns the chain's total specificity tuple on a match,
+ * `null` on no match OR on a compound this resolver cannot parse (see
+ * parseCascadeCompound). Same walk as `elementMatchesChain` above (the runtime
+ * querySelector engine), reimplemented against `parseCascadeCompound` rather
+ * than the throwing `parseCompound`, for the reason this section's header
+ * comment gives. */
+function cascadeChainMatch(targetEl, tokens) {
+  const compounds = tokens.map(parseCascadeCompound);
+  if (compounds.some(c => c === null)) return null;
+  if (!cascadeCompoundMatches(targetEl, compounds[compounds.length - 1])) return null;
+  let cur = targetEl.parentElement;
+  for (let idx = compounds.length - 2; idx >= 0; idx--) {
+    let found = false;
+    while (cur && cur.nodeType === 1) {
+      if (cascadeCompoundMatches(cur, compounds[idx])) { found = true; break; }
+      cur = cur.parentElement;
+    }
+    if (!found) return null;
+    cur = cur.parentElement;
+  }
+  let ids = 0, classes = 0, types = 0;
+  for (const c of compounds) {
+    const s = cascadeCompoundSpecificity(c);
+    ids += s.ids; classes += s.classes; types += s.types;
+  }
+  return { ids, classes, types };
+}
+
+function specificityGreater(a, b) {
+  if (a.ids !== b.ids) return a.ids > b.ids;
+  if (a.classes !== b.classes) return a.classes > b.classes;
+  return a.types > b.types;
+}
+function specificityEqual(a, b) { return a.ids === b.ids && a.classes === b.classes && a.types === b.types; }
+
+/** The resolver itself: `propName`'s winning value for `targetEl` under a real
+ * cascade over `cssText`, given one "does the OS prefer dark" fact
+ * (`systemPrefersDark`) -- `''` if nothing in the sheet sets it there, same as a
+ * real `getPropertyValue` on an unset custom property. Walks every leaf rule in
+ * source order, skips one whose `@media` condition(s) do not hold
+ * (matchesPrefersColorScheme's own comment: an unrelated media feature, e.g.
+ * `(max-width: 860px)`, always evaluates false here -- this resolver has no
+ * viewport, so a rule gated on one correctly never applies) or whose selector
+ * does not match `targetEl`, and keeps the highest-specificity match, breaking
+ * a tie by source order (a LATER rule of equal specificity wins, same as a real
+ * cascade) -- exactly the mechanism that makes `:root[data-theme="light"]`'s
+ * unconditional override beat `:root:not([data-theme="dark"])`'s media-gated
+ * one when both match (audit C1's whole point: nest the override inside the
+ * media query and it stops matching on a dark OS at all, which THIS walk --
+ * unlike a hand-copied precedence rule -- actually notices). */
+export function resolveComputedProperty(cssText, targetEl, systemPrefersDark, propName) {
+  const noComments = cssText.replace(/\/\*[\s\S]*?\*\//g, '');
+  const leaves = collectLeafRules(noComments);
+  let winner = null;
+  leaves.forEach((leaf, sourceIndex) => {
+    if (!leaf.mediaConditions.every(cond => matchesPrefersColorScheme(cond, systemPrefersDark))) return;
+    const decls = parseCssDeclarations(leaf.body);
+    if (!decls.has(propName)) return;
+    let best = null;
+    for (const tokens of splitCascadeSelectorGroups(leaf.selector)) {
+      const spec = cascadeChainMatch(targetEl, tokens);
+      if (spec && (!best || specificityGreater(spec, best))) best = spec;
+    }
+    if (!best) return;
+    if (!winner || specificityGreater(best, winner.spec) ||
+        (specificityEqual(best, winner.spec) && sourceIndex > winner.sourceIndex)) {
+      winner = { value: decls.get(propName), spec: best, sourceIndex };
+    }
+  });
+  return winner ? winner.value : '';
 }
 
 // --- window / postMessage (ticket 10, DESIGN.md) -----------------------
@@ -469,6 +810,17 @@ export class StandInWindow extends EventTarget {
   constructor() {
     super();
     this.parent = this; // matches a real un-framed window: window.parent === window
+    this._mediaQueries = new Map();
+    // Ticket 04: the one underlying "does the OS prefer dark" fact both
+    // `matchMedia('(prefers-color-scheme: dark)')` and `...light)` are derived
+    // from (see matchesPrefersColorScheme above). Defaults to dark, matching
+    // this repo's own dark-first default (src/styles.mjs: the plain `:root`
+    // block is DARK, LIGHT only wins under an explicit override or an OS/media
+    // match) -- a check that needs the OTHER default sets
+    // `window._systemPrefersDark = false` itself, BEFORE running the script
+    // under test, exactly like it already sets `location.protocol` or attaches
+    // a `StandInLocalStorage` up front rather than through a setter.
+    this._systemPrefersDark = true;
   }
   // A default only ever used for self-messaging (nothing in this repo's client
   // script does that); IframeElement.loadSrcdoc overrides this per-instance with
@@ -477,6 +829,54 @@ export class StandInWindow extends EventTarget {
   // not to some fixed default.
   postMessage(data) {
     this.dispatchEvent({ type: 'message', data, origin: 'self', source: this });
+  }
+  // Ticket 04: `window.matchMedia(query)` -- one `StandInMediaQueryList` per
+  // distinct query string, cached, so a check that grabs the same instance the
+  // script under test registered its 'change' listener on (by calling
+  // `matchMedia` again with the identical query) can drive that listener via
+  // `_setSystemPrefersDark` below, the same way a real OS preference flip
+  // would fire it.
+  matchMedia(query) {
+    if (!this._mediaQueries.has(query)) {
+      this._mediaQueries.set(query, new StandInMediaQueryList(query, matchesPrefersColorScheme(query, this._systemPrefersDark)));
+    }
+    return this._mediaQueries.get(query);
+  }
+  /** Test hook (see `_systemPrefersDark`'s own comment): simulates a live OS
+   * light/dark preference change while the page is open, updating every
+   * already-vended MediaQueryList and firing 'change' on the ones whose
+   * `.matches` actually flips -- never on one that doesn't, so a listener
+   * counting its own calls can tell "the OS changed" apart from "matchMedia
+   * was merely queried again". */
+  _setSystemPrefersDark(next) {
+    this._systemPrefersDark = !!next;
+    this._mediaQueries.forEach(mql => mql._setMatches(matchesPrefersColorScheme(mql.media, this._systemPrefersDark)));
+  }
+  /** Ticket 04: `window.getComputedStyle(el).getPropertyValue('--token')` --
+   * src/ui.mjs's mermaidThemeVariables reads mermaid's whole palette this way
+   * rather than importing src/styles.mjs's `palettes` directly into the client
+   * script, specifically so it reflects whatever the CASCADE actually resolved
+   * (System mode, an explicit override, a future selector change) rather than
+   * a second, independent read of the same preference. Audit 2026-07-31 (C1):
+   * this used to reimplement that precedence by hand from `palettes`, which
+   * meant it could never notice a broken STYLESHEET (see "CSS cascade
+   * resolver" above); it now runs the real resolver over `styles`
+   * (src/styles.mjs's exported string), the same text a real browser parses.
+   * Only `document.documentElement` resolves to anything (every token this
+   * repo ever reads lives on `:root`); any other element's computed style is
+   * empty, which is fine -- nothing in this codebase asks `getComputedStyle`
+   * about anything else (a check that needs a non-custom-property, non-:root
+   * value -- e.g. audit finding H3's `display` on a real button -- calls the
+   * exported `resolveComputedProperty` directly, not through this method). */
+  getComputedStyle(el) {
+    const win = this;
+    return {
+      getPropertyValue(prop) {
+        const docEl = win.document && win.document.documentElement;
+        if (!docEl || el !== docEl) return '';
+        return resolveComputedProperty(styles, docEl, win._systemPrefersDark, prop);
+      },
+    };
   }
 }
 
@@ -689,7 +1089,27 @@ export class StandInDocument extends EventTarget {
     this.hidden = false;
     const titleEl = findChildByTag(this.head, 'title');
     this._title = titleEl ? titleEl.textContent : '';
-    this.readyState = 'complete';
+    // Audit 2026-07-31 (H2): defaults to 'loading', matching a real browser's
+    // `document.readyState` at the moment an inline <head> script runs (this
+    // repo's boot script, src/theme.mjs's themeBootScript, is placed BEFORE
+    // <style>, i.e. before the parser has even reached <body> -- see that
+    // export's own comment on why the ordering is the whole no-flash
+    // mechanism). Previously hardcoded 'complete' here, which meant
+    // `document.readyState === 'loading'` -- the boot script's ONLY real
+    // branch (`document.addEventListener('DOMContentLoaded', wire)`) -- was
+    // unreachable from any check in this suite; only the 'not loading, wire()
+    // immediately' branch a real page never takes at that point ever ran.
+    // Callers that need a document already past that point (the about:blank
+    // placeholder a real browser hands an <iframe> instantly, or a stage's
+    // srcdoc content once its own "navigation" has finished -- see
+    // aboutBlankDocument and IframeElement.loadSrcdoc below) set `readyState`
+    // to 'complete' themselves; a caller driving the OUTER page calls
+    // `finishParsing()` below at the point it wants to simulate the parser
+    // reaching the end of the document, never by poking `readyState` alone --
+    // that method also dispatches the real `DOMContentLoaded` event
+    // `themeBootScript`'s deferred branch actually waits for, so the two can
+    // never drift apart.
+    this.readyState = 'loading';
     // Ticket 10: real DOM's `document.defaultView` -- the window this document
     // belongs to. Wired by whoever CONSTRUCTS a document (parseHTML /
     // aboutBlankDocument below), never here in the constructor itself: a
@@ -701,6 +1121,20 @@ export class StandInDocument extends EventTarget {
   get title() { return this._title; }
   set title(v) { this._title = v; }
   hasFocus() { return true; }
+  /** Audit 2026-07-31 (H2): simulates the HTML parser reaching the end of the
+   * document -- flips `readyState` to 'complete' and dispatches a real
+   * 'DOMContentLoaded', the one event `themeBootScript`'s deferred branch
+   * (registered because `readyState` was 'loading' when it ran) actually
+   * waits for. A caller runs the head boot script FIRST (readyState still
+   * 'loading', matching its real position before <body> exists), then any
+   * deferred/module script (src/ui.mjs's `ui`, a real `<script type="module">`
+   * -- deferred by the platform until after parsing finishes, which per spec
+   * happens BEFORE `DOMContentLoaded` fires), THEN calls this -- see this
+   * file's checks' own loaders for the exact three-step sequence. */
+  finishParsing() {
+    this.readyState = 'complete';
+    this.dispatchEvent(new StandInEvent('DOMContentLoaded'));
+  }
   getElementById(id) {
     let found = null;
     (function walk(el) {
@@ -731,6 +1165,13 @@ function aboutBlankDocument() {
   html.appendChild(head);
   html.appendChild(body);
   const doc = new StandInDocument(html);
+  // Unlike StandInDocument's own new default (audit 2026-07-31, H2: 'loading',
+  // matching a real page's inline <head> boot script) -- about:blank really is
+  // immediately 'complete' in a real browser, per this file's own header
+  // comment on why IframeElement manufactures this placeholder eagerly at all;
+  // that fact predates and is unrelated to the theme-boot-script ordering fix,
+  // so it is restored explicitly here rather than left at the new default.
+  doc.readyState = 'complete';
   const win = new StandInWindow();
   win.document = doc;
   doc.defaultView = win;
@@ -853,6 +1294,16 @@ export class IframeElement extends Element {
    * property this ticket exists to prove (see test/check-stage-isolation.mjs). */
   loadSrcdoc() {
     this.contentDocument = parseHTML(this.getAttribute('srcdoc') || '');
+    // Audit 2026-07-31 (H2): parseHTML's documents now default to 'loading'
+    // (matching the OUTER page at the moment its own inline boot script
+    // runs), but this method models the srcdoc navigation ALREADY having
+    // finished (it dispatches 'load' at the end, and nothing here interleaves
+    // script execution with parsing -- see this method's own comment) -- a
+    // real stage document at that point is 'complete', not 'loading' forever.
+    // Nothing in src/render.mjs's stageAgentScript (or an agent-supplied mock
+    // script) reads document.readyState, so this is fidelity, not a behaviour
+    // fix for anything this suite currently exercises.
+    this.contentDocument.readyState = 'complete';
     const stageWindow = this.contentDocument.defaultView;
     this.contentWindow = stageWindow;
     const outerDoc = this.ownerDocument;
@@ -974,4 +1425,32 @@ export class StandInEventSource {
     (this.listeners.get(type) || []).slice().forEach(fn => fn(ev));
   }
   close() { this.readyState = 2; }
+}
+
+// --- localStorage stand-in (ticket 03, src/theme.mjs) ---------------------------
+//
+// A plain Map-backed getItem/setItem/removeItem, string keys and values only --
+// the one thing src/theme.mjs's `themeBootScript` needs, and all it needs (it
+// never reads `.length`, iterates keys, or reacts to a 'storage' event). Belongs
+// here rather than inside one check file: a later ticket needs the exact same
+// stand-in to prove a `file:` archive never touches it at all, and duplicating
+// it per check would risk the two copies drifting apart the way QUIRKS.md warns
+// a hand-copied mock always eventually does.
+//
+// Deliberately NOT auto-attached to StandInWindow: one instance models one
+// origin's storage, and a real browser hands every document from that origin
+// (including a fresh reload) the SAME underlying storage, not a fresh one per
+// `window` object. This stand-in's `parseHTML`/`aboutBlankDocument` each mint a
+// brand-new `StandInWindow` per call (modelling a real reload's brand-new
+// `window`), so a caller that wants to prove a preference "survives a reload"
+// has to construct ONE `StandInLocalStorage` and assign it to
+// `window.localStorage` on every document/window it loads, exactly the way a
+// real browser's origin storage outlives any one document. Auto-creating a new
+// instance per window would make persistence untestable by construction.
+export class StandInLocalStorage {
+  constructor() { this.map = new Map(); }
+  getItem(key) { return this.map.has(key) ? this.map.get(key) : null; }
+  setItem(key, value) { this.map.set(key, String(value)); }
+  removeItem(key) { this.map.delete(key); }
+  get size() { return this.map.size; }
 }
