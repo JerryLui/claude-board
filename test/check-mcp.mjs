@@ -32,6 +32,7 @@ import { spawn } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import { SECRET_HEADER } from '../src/secret.mjs';
+import { recoveryCommand } from '../src/handoff.mjs';
 import { startServer } from '../src/server.mjs';
 import { runCheck } from './run.mjs';
 
@@ -262,12 +263,32 @@ function terminateDaemon(child, ms) {
   });
 }
 
+/** One GET, following no redirect and reading no cookie jar — which is exactly what a
+ * browser's FIRST fetch of a handoff URL is. `fetch` would follow the 302 and hide both
+ * the Location and the Set-Cookie this needs to assert on. */
+function rawGet(urlStr, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const req = http.request(
+      { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'GET', headers: { host: u.host, ...headers } },
+      res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** Hold an SSE subscription open the way a real board tab does, so shutdown has a
- * connection that never ends on its own to deal with. */
+ * connection that never ends on its own to deal with. Carries the secret because reads
+ * are gated now; a real tab carries the session cookie instead. */
 function openSseStream(port, boardId) {
   return new Promise((resolve, reject) => {
     const req = http.get(
-      { hostname: '127.0.0.1', port, path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}` } },
+      { hostname: '127.0.0.1', port, path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } },
       res => {
         res.once('data', () => resolve({ req, res }));
         res.on('error', () => { /* torn down at shutdown; that is the point */ });
@@ -284,8 +305,28 @@ function openSseStream(port, boardId) {
  * reopen decision is exercised against real board traffic, and `clients: null`
  * stands in for a daemon that does not serve it at all. */
 function startClientsProxy(targetPort, state) {
+  // Every POST /api/handoff body the shim sends, in order. The URL the shim opens is
+  // `/auth/<token>` and carries no board id by design (that is the point of the
+  // handoff), so this is how a check can still assert WHICH board the reopened tab was
+  // for. Buffered and re-sent rather than piped, since reading the body consumes it.
+  const handoffMints = [];
   const proxy = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://internal');
+    if (req.method === 'POST' && u.pathname === '/api/handoff') {
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        try { handoffMints.push(JSON.parse(raw.toString('utf8') || '{}')); } catch { handoffMints.push(null); }
+        const up = http.request(
+          { hostname: '127.0.0.1', port: targetPort, path: req.url, method: 'POST', headers: { ...req.headers, 'content-length': raw.length } },
+          ures => { res.writeHead(ures.statusCode, ures.headers); ures.pipe(res); }
+        );
+        up.on('error', () => { try { res.writeHead(502); res.end(); } catch { /* client gone */ } });
+        up.end(raw);
+      });
+      return;
+    }
     const m = u.pathname.match(/^\/api\/board\/([^/]+)\/clients$/);
     if (req.method === 'GET' && m) {
       const body = JSON.stringify(state.clients === null ? { error: 'not found' } : { clients: state.clients });
@@ -306,7 +347,7 @@ function startClientsProxy(targetPort, state) {
     req.pipe(upstream);
   });
   return new Promise(resolve => {
-    proxy.listen(0, '127.0.0.1', () => resolve({ proxy, port: proxy.address().port }));
+    proxy.listen(0, '127.0.0.1', () => resolve({ proxy, port: proxy.address().port, handoffMints }));
   });
 }
 
@@ -866,10 +907,11 @@ async function main() {
   });
 
   // --- the wait reattaches across a real daemon restart ---------------------
-  // A restart is routine: WatchPaths covers the whole clone, KeepAlive restarts on
-  // crash, and the revive command in every unreachable message is a kickstart. The
-  // board stays open on disk throughout, so the wait must reattach by board id
-  // rather than report a failure and strand whatever the reviewer submits next.
+  // A restart is routine: KeepAlive restarts on crash, a reload-on-change exit under
+  // CLAUDE_BOARD_RELOAD_ON_CHANGE=1 restarts on a source edit, and the revive command
+  // in every unreachable message is a kickstart. The board stays open on disk
+  // throughout, so the wait must reattach by board id rather than report a failure
+  // and strand whatever the reviewer submits next.
 
   await check('the blocking wait reattaches after the daemon restarts underneath it', async () => {
     const dhome = tempHome('restart');
@@ -916,8 +958,9 @@ async function main() {
   // --- the daemon exits promptly on SIGTERM with an SSE stream open ---------
   // server.close() waits for open connections and an SSE stream never ends, so
   // without an explicit teardown launchd SIGKILLs after ExitTimeOut (~20s), which
-  // is ~20s of total outage on every WatchPaths reload and an unclean kill that can
-  // land mid-write.
+  // is ~20s of total outage on every restart -- including a reload-on-change exit,
+  // which sends itself a normal shutdown, not a signal -- and an unclean kill that
+  // can land mid-write.
 
   await check('the daemon exits on SIGTERM while a board tab holds an SSE stream open', async () => {
     const dhome = tempHome('shutdown');
@@ -953,7 +996,7 @@ async function main() {
     const dir = tempHome('reopen');
     const recorder = makeOpenRecorder(dir);
     const clientsState = { clients: 1 }; // a tab is connected to start with
-    const { proxy, port: proxyPort } = await startClientsProxy(port, clientsState);
+    const { proxy, port: proxyPort, handoffMints } = await startClientsProxy(port, clientsState);
     const proxyBase = `http://127.0.0.1:${proxyPort}`;
     const knownIds = listBoardIds(home);
     const openClient = spawnShim({
@@ -968,7 +1011,7 @@ async function main() {
         name: 'ask', arguments: { title: 'Reopen round 1', blocks: [QUESTION] },
       });
       const boardId = await waitForNewBoardFile(home, knownIds);
-      assert.equal((await recorder.waitForOpens(1)).length, 1, 'the first board always opens the tab');
+      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the first board always opens the tab');
       await submitBoard(proxyBase, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
       await withTimeout(first, 8000, 'round 1 must return');
 
@@ -977,9 +1020,14 @@ async function main() {
       const second = openClient.request('tools/call', {
         name: 'ask', arguments: { title: 'Reopen round 2', blocks: [QUESTION] },
       });
-      const afterRound2 = await recorder.waitForOpens(2);
+      const afterRound2 = await recorder.waitForOpens(2, 10_000);
       assert.equal(afterRound2.length, 2, 'a round pushed where no client is connected must reopen the tab');
-      assert.ok(afterRound2[1].includes(boardId), 'the reopened tab must be this board');
+      // The reopened tab lands on a handoff, not on the board URL — that is what makes
+      // it land ALREADY AUTHORIZED (SPEC_LAUNCH.md criterion 2). The board it is for is
+      // in the mint request, not in the URL, which is the whole point: nothing a
+      // bookmark or a `ps` line captures names a credential AND a board.
+      assert.match(afterRound2[1], new RegExp(`^${proxyBase}/auth/[0-9a-f]{64}$`), 'the reopened tab must be opened on a one-time handoff');
+      assert.equal(handoffMints.at(-1)?.boardId, boardId, 'and that handoff must have been minted for this board');
       await submitBoard(proxyBase, boardId, { answers: [{ id: 'q2', status: 'answered', choice: 'Yes', note: '' }] });
       await withTimeout(second, 8000, 'round 2 must return');
 
@@ -1151,6 +1199,88 @@ async function main() {
       assert.ok(ping.result, 'the shim must still answer after a cancelled call');
     } finally {
       cancelClient.close();
+    }
+  });
+
+  // --- the tab lands already authorized ------------------------------------
+  // Reads are gated (SPEC_LAUNCH.md), so the URL the shim hands `open` cannot be the
+  // board URL: a browser with no cookie would land on the refusal page instead of the
+  // board. The shim is the only participant holding the secret, so it is the one that
+  // asks for the handoff.
+
+  await check('the first board opens on a one-time handoff that lands the browser already authorized', async () => {
+    const dir = tempHome('handoff');
+    const recorder = makeOpenRecorder(dir);
+    const knownIds = listBoardIds(home);
+    const client = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_NO_OPEN: undefined,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      const call = client.request('tools/call', {
+        name: 'ask', arguments: { title: 'Handoff open', blocks: [QUESTION] },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      // A longer budget than the 3s default: opening a tab now costs one extra
+      // round-trip (the handoff mint) on a single-threaded daemon that, by this point in
+      // the file, is also servicing several held-open /wait polls.
+      const opened = await recorder.waitForOpens(1, 10_000);
+      assert.equal(opened.length, 1, 'the first board opens exactly one tab');
+      assert.match(opened[0], new RegExp(`^${base}/auth/[0-9a-f]{64}$`), 'and it opens on a handoff, not on the board URL');
+
+      // Follow it exactly as the browser does: one GET, no redirect following.
+      const landed = await rawGet(opened[0]);
+      assert.equal(landed.status, 302, 'the handoff redirects rather than rendering');
+      assert.equal(landed.headers.location, `/b/${boardId}`, 'onto this call\'s board, at a URL carrying no credential');
+      const cookie = [].concat(landed.headers['set-cookie'] || []).join('; ').split(';')[0];
+      assert.match(cookie, /^cb_session=[0-9a-f]{64}$/, 'having been handed the session cookie on the way');
+
+      const page = await rawGet(`${base}/b/${boardId}`, { cookie });
+      assert.equal(page.status, 200, 'the bookmarkable URL renders for the authorized browser');
+
+      const replay = await rawGet(opened[0]);
+      assert.equal(replay.status, 401, 'and the handoff is dead the moment the browser used it');
+
+      await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
+      await withTimeout(call, 8000, 'the ask must return');
+    } finally {
+      client.close();
+    }
+  });
+
+  await check('a daemon that will not mint a handoff makes the shim name the recovery command rather than open a tab that fails silently', async () => {
+    // Degrading honestly: the tab still opens (a browser authorized on some earlier day
+    // holds a long-lived cookie and is fine), but a browser that is NOT authorized will
+    // land on the refusal page — so the session is told, in the same words the refusal
+    // page uses, what to run. A message that named the wrong fix here costs the reviewer
+    // the whole session.
+    const dir = tempHome('handoff-refused');
+    const recorder = makeOpenRecorder(dir);
+    const hostile = await startHostileDaemon({ boardId: 'b_nohandoff', url: `http://127.0.0.1:1/b/x` });
+    const client = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_PORT: String(hostile.port),
+      CLAUDE_BOARD_NO_OPEN: undefined,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      await withTimeout(client.request('tools/call', {
+        name: 'ask', arguments: { title: 'No handoff', blocks: [QUESTION] },
+      }), 8000, 'the call must still return');
+
+      const opened = await recorder.waitForOpens(1, 10_000);
+      assert.equal(opened[0], `http://127.0.0.1:${hostile.port}/b/b_nohandoff`, 'it falls back to the board URL rather than opening nothing');
+      assert.ok(
+        client.stderr.includes(recoveryCommand()),
+        `the shim must print the exact recovery command (${recoveryCommand()}); got: ${client.stderr.slice(-400)}`
+      );
+      assert.match(client.stderr, /not authorized/i, 'and say what symptom it is the fix for');
+    } finally {
+      client.close();
+      hostile.close();
     }
   });
 

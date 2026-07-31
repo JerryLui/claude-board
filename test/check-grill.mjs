@@ -331,6 +331,29 @@ async function main() {
     );
   });
 
+  // --- the file the repo ships is the one install.sh installs (SPEC_LAUNCH.md 9) --
+  //
+  // A different, smaller claim than the schema-drift checks above: not "is this file
+  // well-formed" but "is THIS file (grillPath, already loaded as `text`) the one
+  // install.sh actually copies to ~/.claude/commands/grill.md" -- install.sh's own
+  // runtime behaviour (does it clobber a user edit, does it update a stale copy) is
+  // check-install.mjs's job; this is the narrower, static identity claim. Parsed out
+  // of install.sh's real source rather than assumed, so pointing the install step at
+  // some other file (a stale committed copy, a different name) fails this check.
+
+  await check("install.sh installs THIS repo's commands/grill.md, not a different copy", () => {
+    const installSrc = readFileSync(path.join(repoRoot, 'install.sh'), 'utf8');
+    const srcMatch = installSrc.match(/^GRILL_SRC="\$REPO_DIR\/(.+)"$/m);
+    assert.ok(srcMatch, 'install.sh must resolve the file it installs from a GRILL_SRC="$REPO_DIR/..." assignment');
+    const resolvedSrc = path.join(repoRoot, srcMatch[1]);
+    assert.equal(resolvedSrc, grillPath, "install.sh's GRILL_SRC must resolve to this repo's own commands/grill.md");
+
+    // And it has to land at grill.md on the other end too -- not renamed en route.
+    const targetMatch = installSrc.match(/^COMMAND_FILE="\$COMMANDS_DIR\/(.+)"$/m);
+    assert.ok(targetMatch, 'install.sh must resolve its install target from a COMMAND_FILE="$COMMANDS_DIR/..." assignment');
+    assert.equal(targetMatch[1], 'grill.md', 'install.sh must install this file as grill.md, not rename it');
+  });
+
   if (failures) {
     console.error(`${failures} check(s) failed`);
     process.exit(1);

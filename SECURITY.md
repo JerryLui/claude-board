@@ -5,8 +5,9 @@ containing excerpts of your source files. That is a meaningful thing to install,
 document states plainly what it defends against, what it does not, and what is currently
 open.
 
-**Status: pre-release.** One item under [Open](#open) is a real hole, not a theoretical
-one, and closing it is the current work. Read that section before installing.
+**Status: pre-release.** The localhost hole that used to be listed here — unauthenticated
+read routes — is closed. What is left is [what is deliberately not
+defended](#not-defended-by-design), which is worth reading before installing.
 
 ## Threat model
 
@@ -37,8 +38,25 @@ the daemon runs always-on under launchd as the login user, that read would be la
 past macOS TCC, which otherwise gates `~/Documents`, `~/Desktop` and `~/Downloads` per
 application.
 
+**Another local process reading your boards, or forging an answer on one.** Every route
+but `GET /api/health` requires a credential — the index, a board page, archive search,
+the blocking wait and the event stream alike. There are exactly two credentials: the
+secret file above, and a cookie the daemon derives from it and hands to your browser.
+The browser gets it through a single-use handoff that lives for about thirty seconds:
+the session's shim asks the daemon for one, opens that URL, and the daemon consumes it,
+sets the cookie and redirects to the plain board URL. Nothing you can bookmark carries a
+credential, and the handoff is dead the moment your browser uses it. If a browser ends up
+holding nothing — cleared cookies, a second profile, a different browser — the refusal
+page names one command that fixes it: `node bin/authorize.mjs` from your clone.
+
+Submit accepts that cookie or the secret and nothing weaker. It used to also accept a
+token scoped to one board, minted for whoever could fetch that board's page; with reads
+gated that was strictly weaker than the credential a reader already had to present, so it
+was deleted rather than kept beside it.
+
 **Guessing a board URL.** Board ids are 16 random bytes. They were 4, which was
-enumerable by any local process in seconds; the audit caught it.
+enumerable by any local process in seconds; the audit caught it. This is now defence in
+depth rather than the only thing between a local process and your boards.
 
 **Content injection through rendered material.** Markdown, code and file content is
 escaped in both HTML text and attribute positions. Hand-mocked HTML stages render inside
@@ -51,11 +69,21 @@ the logs carry your own questions and answers, so they get the same posture as t
 ### Not defended, by design
 
 **Any process running as you.** It can read `~/.config/claude-board/secret` and is
-therefore fully trusted by the daemon. This is not fixable at this layer — it is the
-same posture as an ssh private key or a shell profile.
+therefore fully trusted by the daemon — it can read every board, answer any of them, and
+mint itself a browser credential. This is not fixable at this layer: it is the same
+posture as an ssh private key or a shell profile, and every gate above is built on that
+file staying yours.
 
 **A browser extension with host permissions on the profile holding the credential.** It
 can read boards and submit as you. `HttpOnly` stops page script, not extensions.
+
+**A process watching `ps` at the instant a tab opens.** Opening a URL puts it in an
+argument list, so the handoff token is briefly visible to any process running as you. The
+mitigation is that the handoff is single-use and lives for seconds: a watcher has to be
+polling continuously *and* win the race against the browser that is already fetching it,
+and if it loses it learns nothing — an already-used token is refused exactly like an
+expired or invented one. That is a narrow race, not an eliminated one. It is also inside
+the boundary above: such a process could read the secret file instead.
 
 **Anything multi-user or remote.** There is no authentication, no accounts, no
 cross-machine access, and none is planned. Do not expose the port.
@@ -71,22 +99,20 @@ repository it quotes.
 
 ## Open
 
-**Read routes are unauthenticated.** Fetching the index, a board page or the event
-stream requires no credential, because the reviewer's browser cannot hold a 0600 file.
-Two consequences, both real:
+Nothing currently listed. The one item that stood here — unauthenticated read routes,
+which let any local process read every board and forge an answer on one — was closed
+before public release by gating reads behind the same credential as writes, and by
+deleting the board-scoped submit token that only existed because reads were open.
 
-1. Any local process that can reach the port can read every board — source excerpts,
-   questions, answers.
-2. Submit accepts either the secret or a board-scoped token that the daemon mints as a
-   cookie when the page is fetched. So a local process that can fetch a board's page can
-   forge an answer on that board. It cannot escalate — creating a board, the only route
-   that resolves a file, still demands the secret — but it can put words in your mouth to
-   an agent that is about to act on them.
+Two properties of the fix are worth stating so nobody has to reverse-engineer them:
 
-This was an accepted trade-off while the only user was the author, and it is being closed
-before public release: a single-use handoff at the moment the tab opens, exchanged for a
-session cookie, with reads joining writes behind it. Until then, treat the machine
-running the daemon as you would treat one holding your ssh agent.
+- **The browser credential is derived from the secret, not stored.** So restarting the
+  daemon does not log your browser out, and *rotating the secret invalidates every
+  browser at once*. That is the intended way to revoke.
+- **An archived board still opens from disk with no credential at all.** `pages/*.html`
+  is a standalone file; the gate is on the daemon, not on the archive. Anything that can
+  read that directory can read those boards, which is the same statement as "the store is
+  owner-only" above.
 
 ## How this record is kept
 

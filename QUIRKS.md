@@ -46,26 +46,38 @@ More generally: a mock of someone else's renderer is an assumption about their o
 and it is worth exactly as much as the last time someone checked it against the real
 thing.
 
-## `WatchPaths` does not restart the daemon, and never has
+## `WatchPaths` never restarted the daemon — fixed by having the daemon exit itself
 
-The plist carries both `KeepAlive` true and `WatchPaths` on `src/` and `bin/`, and the
-second one is inert. `WatchPaths` tells launchd to *start* a job when a watched path
-changes; a job that is already running — which `KeepAlive` guarantees — is simply not
-started again. Measured 2026-07-30: the daemon had 3h40m of uptime across an in-place
-edit to `src/store.mjs`, and neither creating nor deleting a file under `src/` moved its
-pid either. So editing code does **not** reload the service, and a stale daemon is
-indistinguishable from a working one until you read the page it serves.
+Historical record, kept because it is a real trap and a real instance of the pattern
+below: the plist used to carry both `KeepAlive` true and `WatchPaths` on `src/` and
+`bin/`, and the second one was inert. `WatchPaths` tells launchd to *start* a job when
+a watched path changes; a job that is already running — which `KeepAlive` guarantees —
+is simply not started again. Measured 2026-07-30: the daemon had 3h40m of uptime across
+an in-place edit to `src/store.mjs`, and neither creating nor deleting a file under
+`src/` moved its pid either. `test/check-install.mjs` asserted the plist *contains*
+those `WatchPaths` entries, which was true and beside the point — the fourth recorded
+instance on this project of a green check sitting on top of a dead mechanism, and the
+second where the check asserted structure while the behaviour was absent.
 
-After any edit under `src/` or `bin/`, restart it yourself:
+**Fixed (SPEC_LAUNCH.md criterion 17):** `WatchPaths` is gone from the generated plist.
+In its place, `bin/daemon.mjs` watches its own `src/` and `bin/` and exits the moment
+either changes — the one thing that actually composes with `KeepAlive`, which then
+brings it straight back up running whatever is now on disk. Opt-in via
+`CLAUDE_BOARD_RELOAD_ON_CHANGE=1`, which only `install.sh`'s generated plist sets;
+every other caller of `bin/daemon.mjs` (this check suite, a shim's own daemon spawns,
+running it by hand) gets the old behaviour — no self-exit — because a daemon that
+vanishes on any file event under an unrelated harness is a new flake source, not a fix.
+launchd will not restart a job more than once per 10s, so two edits inside one 10s
+window collapse into a single restart; the second edit's reload waits out the rest of
+that window rather than happening immediately. `test/check-install.mjs` now spawns a
+real daemon with the env var set, touches a file under a temp copy of `src/`, and
+asserts the process actually exits — and asserts the negative (env var unset, no exit)
+— rather than reading the plist. If you still want the daemon back on your own
+schedule rather than waiting on a save:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/claude-board
 ```
-
-`test/check-install.mjs` asserts the plist *contains* those `WatchPaths` entries, which
-is true and beside the point. That is the fourth recorded instance on this project of a
-green check sitting on top of a dead mechanism, and the second where the check asserted
-structure while the behaviour was absent.
 
 ## Driving the real page in real Chrome
 
@@ -342,3 +354,26 @@ both real scripts to have run by the time it hands back a document must run
 `finishParsing()` between the two (a plausible first guess, "boot script pre-body,
 `ui` post-body") wires the theme control before `ui` runs, which nothing in this
 suite currently depends on being wrong, but is not what a real page does.
+
+## Every read is gated, so every HTTP check needs a credential
+
+Since the read gate landed (`SPEC_LAUNCH.md`), a plain `fetch('/b/:id')` from a check
+gets 401. `test/check-http.mjs` and `test/check-anchor-robustness.mjs` each shadow the
+global `fetch` at module scope with a wrapper that adds the secret header, so the
+hundred-odd requests that are *not* about the credential keep reading as they did. If
+you add a check that stands up a daemon, do the same — or send
+`x-claude-board-secret` by hand.
+
+Anything that deliberately speaks as an unauthorized caller must NOT go through that
+wrapper: use `rawRequest`/`rawGet`, or `rawFetch`, which send exactly the headers they
+are given. Raw `http.request` calls (SSE streams, the hang-up-mid-wait check) need the
+header spelled out; there is no wrapper for them.
+
+## `execFileSync` deadlocks against an in-process daemon
+
+Several checks start the daemon with `startServer` inside the check's own process. A
+synchronous spawn (`execFileSync`, `spawnSync`) that talks to that daemon blocks the
+event loop the daemon needs to answer, so the child times out and the check fails with
+"daemon is not reachable" — a message that names the wrong problem entirely. Use
+`promisify(execFile)` and `await` it. `test/check-install.mjs` gets away with
+`spawnSync` because its daemon is a separate process.

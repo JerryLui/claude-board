@@ -31,12 +31,13 @@ function hex(n) {
   return randomBytes(n).toString('hex');
 }
 
-/** Board ids are 16 bytes, not 4 (audit 2026-07-28, M7). Read routes are open by
- * design — the reviewer's browser cannot hold the secret — so the board id is the
- * de facto capability gating `GET /b/:id`, and the submit cookie is minted from
- * whoever can fetch that page. At 4 bytes a local process could enumerate the space;
- * at 16 it cannot. Thread ids stay short: a thread is a label in the index, nothing
- * is authorised by knowing one. */
+/** Board ids are 16 bytes, not 4 (audit 2026-07-28, M7). The width was forced when read
+ * routes were open and the id was therefore the only thing gating `GET /b/:id`: at 4
+ * bytes a local process could enumerate the space in seconds, at 16 it cannot. Reads are
+ * gated now (SPEC_LAUNCH.md), so this is defence in depth rather than the whole defence,
+ * and it stays that way — an id still travels in redirect targets and in whatever a
+ * reviewer pastes into a chat. Thread ids stay short: a thread is a label in the index,
+ * nothing is authorised by knowing one. */
 export function mintBoardId() {
   return `b_${hex(16)}`;
 }

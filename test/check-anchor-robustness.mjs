@@ -51,11 +51,19 @@ function writeHeaders(extra) {
   return { 'content-type': 'application/json', [SECRET_HEADER]: SECRET, ...(extra || {}) };
 }
 
+/** `fetch`, shadowed for this module only, carrying the secret on every call — reads are
+ * gated too now (SPEC_LAUNCH.md), and nothing in this file is about the credential.
+ * test/check-http.mjs owns the gate itself and does the same thing for the same reason. */
+const rawFetch = globalThis.fetch;
+function fetch(input, init = {}) {
+  return rawFetch(input, { ...init, headers: { [SECRET_HEADER]: SECRET, ...(init.headers || {}) } });
+}
+
 /** Open a raw SSE connection and collect event frames, same helper as check-http.mjs. */
 function openSseClient(port, boardId) {
   return new Promise((resolveOpen, rejectOpen) => {
     const req = http.request(
-      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}` } },
+      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } },
       res => {
         const events = [];
         let buf = '';

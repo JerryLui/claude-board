@@ -20,10 +20,12 @@ src/anchor.mjs      element-level (dom/mermaid) anchor path/hint logic, pure; sr
                      import graph at runtime (see its file comment)
 src/resolve.mjs     content-by-reference resolution and sha snapshotting
 src/render.mjs      board JSON -> complete HTML page (pure function)
-src/server.mjs      node:http daemon: routes, SSE, loopback Host check, write auth
-src/secret.mjs      the local secret: where it lives, constant-time comparison, and the
-                     board-scoped submit token the served page is handed (see "The local
-                     secret"); shared by the daemon and the shim
+src/server.mjs      node:http daemon: routes, SSE, loopback Host check, read + write auth
+src/secret.mjs      the two credentials: the local secret (where it lives, constant-time
+                     comparison) and the browser session cookie derived from it; shared
+                     by the daemon and the shim
+src/handoff.mjs     single-use, seconds-lived browser handoffs, and the recovery command
+                     every refusal names
 src/indexpage.mjs   daemon root: thread index and archive search
 src/ui.mjs          client-side script, exported as a string
 src/styles.mjs      page CSS, exported as a string
@@ -67,10 +69,11 @@ Daemon listens on `127.0.0.1:7391` (`CLAUDE_BOARD_PORT` overrides, for the check
 (kind letter + ordinal within the board, stable once minted). Comments are numbered `1..n`
 across the whole board — that number is what appears in the pin.
 
-The board id is 16 bytes, widened from 4 (audit 2026-07-28, M7): read routes are open by
-design, so knowing a board id is what gets you its page, and the submit cookie is minted
-for whoever can fetch that page. Thread ids stay 4 bytes — a thread is an index label and
-authorises nothing.
+The board id is 16 bytes, widened from 4 (audit 2026-07-28, M7). At the time read routes
+were open, which made the id the de facto capability gating `GET /b/:id`; reads are gated
+now, so the id is defence in depth rather than the only defence — and 16 bytes stays,
+because an id also appears in redirect targets and in whatever a reviewer pastes into
+chat. Thread ids stay 4 bytes — a thread is an index label and authorises nothing.
 
 A block id is **unique across the whole board** (additive, audit 2026-07-28): `board.answers`
 is keyed by it, so a duplicate is not a cosmetic clash, it is the agent being told an answer
@@ -290,6 +293,21 @@ carries its own `round` (and each comment its `createdAt`), so a caller that gen
 wants the thread's history reads `board.answers` / `board.comments` and can still tell the
 rounds apart. The stored board keeps everything; the packet is the round.
 
+**`status` is the only thing that says whether a question was decided; `choice` is not.**
+A caller must branch on `status` and never on `choice` being non-null, because the three
+statuses do not agree about `choice`:
+
+- `answered` — `choice` holds the answer.
+- `deferred` — `choice` may ALSO hold a selection. The reviewer can pick an option and
+  still mark it "revisit later", and that tentative lean is worth carrying rather than
+  discarding. A caller that reads `choice` alone therefore records a decision the reviewer
+  explicitly declined to make.
+- `unanswered` — `choice` is `null`.
+
+Found by using this: a round came back with a `deferred` question whose `choice` was
+populated beside an `unanswered` one whose `choice` was `null`, and nothing here said which
+was the contract and which was an accident.
+
 `answers` covers **every** question block of that round, including ones nested in another
 question's `context` or in a compare side — the renderer makes those live widgets and the
 page submits them, so dropping them would lose an answer the reviewer actually gave. An
@@ -301,6 +319,11 @@ rather than stored.
 Posting and waiting are separate routes on purpose, so the spec's escape hatch (splitting
 `ask` into post + collect) stays cheap. Every route refuses a request whose `Host` header
 is not loopback, with 403 and no body.
+
+Four gates, in order: loopback `Host` (403), same-origin on every non-GET (403), a
+credential on every non-GET (401), a credential on every GET but two (401). Both credential
+gates are written as "everything, minus an explicit exception list", so a route added later
+is gated by default rather than by whoever adds it remembering.
 
 The Host check does not cover a browser: a page on any origin doing
 `fetch('http://127.0.0.1:7391/...')` has its `Host` set to loopback by the browser itself.
@@ -329,39 +352,93 @@ x-claude-board-secret: <secret>    request header; read once at daemon startup, 
                                    with crypto.timingSafeEqual, length-guarded
 ```
 
-**Every non-GET request** must carry it, so a write route added later is gated by default
-rather than by remembering. A missing or wrong secret is **401 with no body** — nothing about
-what is behind it, not even whether the board exists. A daemon that finds no secret file says
-so on stderr at startup and refuses every write: it fails closed, never open. Reads are
-unaffected; `bin/mcp.mjs` reads the secret at startup, sends it on every call, and refuses to
-post at all (naming `./install.sh`, writing nothing) when it has none or the daemon answers
-401.
+**Every non-GET request** must carry it — except `POST /api/board/:id/submit`, which also
+takes the session cookie below — so a write route added later is gated by default rather than
+by remembering. A missing or wrong credential is **401 with no body** on a write: nothing
+about what is behind it, not even whether the board exists. A daemon that finds no secret
+file says so on stderr at startup and refuses everything gated: it fails closed, never open.
+`bin/mcp.mjs` reads the secret at startup, sends it on every call, and refuses to post at all
+(naming `./install.sh`, writing nothing) when it has none or the daemon answers 401.
 
-**Read routes stay open**, deliberately: `GET /`, `GET /b/:id`, `/api/search`,
-`/api/board/:id/wait` and the SSE stream all work without it, because the reviewer's browser
-has no way to hold a 0600 file and the model is "open the page and answer". So the archive
-remains readable by any local process. What the secret protects is *writing* — and with it
-the only thing that ever resolves a file, `POST /api/board`.
+### The browser session cookie
 
-**The one exception is the reviewer's own Send.** `GET /b/:id` responds with
+`SPEC_LAUNCH.md` Decisions → "Read routes are gated", overturning `DESIGN.md`'s "read
+routes stay open". **Every route but `GET /api/health` and `GET /auth/:token` now requires a
+credential**, reads included: `GET /`, `GET /b/:id`, `/api/search`, `/api/board/:id/wait` and
+the SSE stream. What that closes: any local process that could reach the port used to read
+every board — source excerpts, questions, answers — and forge an answer on any board whose
+page it could fetch.
+
+The browser cannot read a 0600 file, so it holds this instead:
 
 ```
-Set-Cookie: cb_submit=<HMAC-SHA256(secret, "submit:"+boardId)>;
-            Path=/api/board/<id>/submit; HttpOnly; SameSite=Strict
+Set-Cookie: cb_session=<HMAC-SHA256(secret, "claude-board/session/v1")>;
+            Path=/; Max-Age=34560000; HttpOnly; SameSite=Strict
 ```
 
-a host-only session cookie the page's existing same-origin `fetch` sends back on submit, and
-which `POST /api/board/:id/submit` accepts in place of the secret. It authorises answering
-that one board: it cannot create a board, cannot name a `cwd`, cannot resolve a file, and is
-not accepted as the secret anywhere. It is not written into the markup, so the served page
-and the standalone `pages/*.html` archive stay byte-identical. Its strength is exactly "can
-GET this board's page", which is open by design — and with no secret file, no token can be
-minted, so submits fail closed with everything else.
+Host-only (no `Domain`), `HttpOnly`, `SameSite=Strict`, and **not** a session cookie: a
+bookmarked board opened days later has to work. No `Secure`, and none is possible — the
+daemon serves plain http on loopback, so a `Secure` cookie would never be sent back.
+
+**Derived from the secret, not random**, which is what makes it survive a daemon restart:
+any daemon holding the same secret accepts the same cookie, so `launchctl kickstart`, a
+crash and a code reload are all invisible to an open browser. Rotating the secret invalidates
+every browser at once — intended.
+
+Its strength, precisely: "may read every board and answer any open round". It is refused in
+the `x-claude-board-secret` header, so it can never create a board and therefore never make
+the daemon resolve a file. It is **not** scoped to one board; the board-scoped submit
+cookie that used to sit beside it — an HMAC of the board id, minted for whoever could fetch
+that board's page — is deleted, because with reads gated it was strictly weaker than the
+credential the reader already had to present.
+
+### Authorizing a browser
+
+A credential never appears in a URL a bookmark can capture. Instead:
+
+```
+POST /api/handoff       { boardId? }  (secret required)  -> { token, expiresAt, ttlMs }
+GET  /auth/<token>      302 -> /b/<boardId> (or /), Set-Cookie: cb_session=…
+```
+
+`POST /api/handoff` mints a **single-use, ~30s** token (`CLAUDE_BOARD_HANDOFF_TTL_MS`
+overrides, for the checks). It takes the secret only — the session cookie is refused here, so
+a browser cannot mint itself a second credential. The caller names a *board*, never a path:
+anything that is not a board id redirects to the index, so there is no attacker-chosen
+redirect target to validate.
+
+`GET /auth/<token>` consumes it, sets the cookie, and redirects to a **clean** URL. Expired,
+already used, and never existed are one indistinguishable refusal. The token is process-local
+state, so it does not survive a daemon restart — the opposite of the cookie it hands out, and
+deliberately so.
+
+The shim opens the tab on a handoff URL rather than a board URL, and rebuilds that URL from
+its own base URL and the returned token rather than trusting anything in the response body.
+
+`node bin/authorize.mjs` (`npm run authorize`) is the recovery command: it mints a handoff
+and opens the browser. `--print` emits the URL instead, for a second profile or a different
+browser; an optional board id argument lands on that board rather than the index. The refusal
+page below names this command with an absolute path, and `src/handoff.mjs` `recoveryCommand()`
+is the single source of that string.
+
+### Refusing a caller with no credential
+
+**401, one status code everywhere**, matching what writes have always answered. No
+`WWW-Authenticate` header: it would raise a browser password prompt in front of the page that
+explains the actual fix, and there is no password to type.
+
+A **browser navigation** (a path outside `/api/` whose `Accept` includes `text/html`) gets an
+HTML page naming the recovery command verbatim, because the caller being refused is a human
+looking at a tab. Everything else — `/api/*`, the SSE stream, curl, the shim — gets
+`{ error, recover }` as JSON and no markup. Neither reveals anything about the store: the
+same page is served whether or not the board exists.
 
 ```
 GET  /                              thread index + archive search
 GET  /b/:boardId                    the served page
-GET  /api/health                    { ok: true, version }
+GET  /api/health                    { ok: true, version }        (open: install.sh polls it)
+GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
+POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread
                                     -> { boardId, thread, round, url }
 GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet

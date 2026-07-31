@@ -19,6 +19,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node test/run.mjs"
+    "check": "node test/run.mjs",
+    "authorize": "node bin/authorize.mjs"
   }
 }

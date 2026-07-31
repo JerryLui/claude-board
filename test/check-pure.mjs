@@ -10,14 +10,16 @@
 // project's own additions (anchors, packet assembly).
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, unlinkSync, readFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync, readFileSync, mkdirSync, symlinkSync, realpathSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, CSP } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, renderRefusalPage, CSP } from '../src/render.mjs';
+import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { resolveRef, langForPath, resolvePath, MAX_REF_BYTES } from '../src/resolve.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles, palettes } from '../src/styles.mjs';
@@ -3801,6 +3803,138 @@ check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and t
   // token it is supposed to track.
   assert.equal(STAGE_ACCENT_HEX, palettes.dark['--accent'],
     `the stage's hand-maintained literal (STAGE_ACCENT_HEX, src/render.mjs) no longer matches --accent's dark value (${palettes.dark['--accent']}) -- QUIRKS.md "Two stylesheets, one palette" requires updating it by hand when that token changes`);
+});
+
+// --- the handoff, and the credential it hands out ---------------------------------
+// Everything about the read gate that does not need a socket lives here; the routes
+// themselves are test/check-http.mjs's.
+
+check('a handoff is single-use, and a replay racing the first use loses', () => {
+  const store = createHandoffStore({ ttlMs: 10_000 });
+  const { token } = store.mint('/b/b_one');
+  assert.equal(store.size(), 1);
+  assert.deepEqual(store.consume(token)?.target, '/b/b_one');
+  assert.equal(store.size(), 0, 'consuming removes it, rather than marking it');
+  assert.equal(store.consume(token), null, 'the second caller gets nothing');
+  // The delete happens before anything is returned, so a replay arriving between the
+  // browser's fetch and the redirect being written still finds an empty map.
+  const { token: t2 } = store.mint('/');
+  const [first, second] = [store.consume(t2), store.consume(t2)];
+  assert.ok(first && !second, 'exactly one of two consumers of the same token wins');
+});
+
+check('an expired handoff and a spent one are indistinguishable to the caller', () => {
+  let now = 1_000_000;
+  const store = createHandoffStore({ ttlMs: 30_000, now: () => now });
+  const { token } = store.mint('/b/b_two');
+  now += 30_001;
+  assert.equal(store.consume(token), null, 'expiry is refused');
+  // Same null as a spent token and as a token that never existed. Three distinguishable
+  // answers would tell a `ps` poller it found a real token and merely arrived late.
+  assert.equal(store.consume('f'.repeat(64)), null);
+  assert.equal(store.size(), 0, 'and an expired handoff does not accumulate');
+});
+
+check('a handoff expires strictly, not on the boundary', () => {
+  let now = 0;
+  const store = createHandoffStore({ ttlMs: 1000, now: () => now });
+  const a = store.mint('/');
+  now = 999;
+  assert.ok(store.consume(a.token), 'still live one millisecond before the deadline');
+  const b = store.mint('/');
+  now = 999 + 1000;
+  assert.equal(store.consume(b.token), null, 'dead at exactly the deadline, not one tick after');
+});
+
+check('minting prunes expired handoffs, so a hammered route cannot grow the map', () => {
+  let now = 0;
+  const store = createHandoffStore({ ttlMs: 100, now: () => now });
+  for (let i = 0; i < 50; i++) store.mint('/');
+  assert.equal(store.size(), 50);
+  now = 1000;
+  store.mint('/');
+  assert.equal(store.size(), 1, 'only the live one survives');
+});
+
+check('a handoff target is one of two shapes this daemon chose, never caller text', () => {
+  assert.equal(handoffTarget('b_0123456789abcdef'), '/b/b_0123456789abcdef');
+  // Anything that is not a board id lands on the index. That is what makes an open
+  // redirect impossible by construction rather than by escaping: there is no caller
+  // input that reaches the Location header at all.
+  for (const hostile of [
+    'https://evil.example', '//evil.example', '../../etc/passwd', 'b_x\r\nSet-Cookie: cb_session=x',
+    '', null, undefined, 42, {}, 'b_' + 'a'.repeat(200),
+  ]) {
+    assert.equal(handoffTarget(hostile), '/', `${JSON.stringify(hostile)} must not become a redirect target`);
+  }
+});
+
+check('the session cookie is derived from the secret, so it survives a daemon restart', () => {
+  const a = sessionToken('a'.repeat(64));
+  assert.match(a, /^[0-9a-f]{64}$/);
+  // Two independent daemons holding the same secret accept the same cookie: that is
+  // what makes `launchctl kickstart` invisible to an open browser.
+  assert.equal(sessionToken('a'.repeat(64)), a);
+  // Rotating the secret invalidates every browser at once. Intended, not a bug.
+  assert.notEqual(sessionToken('b'.repeat(64)), a);
+  assert.equal(sessionToken(null), null, 'no secret, no cookie: the daemon fails closed');
+  assert.equal(sessionToken(''), null);
+});
+
+check('the session cookie matcher accepts only the real cookie, and never throws on a missing one', () => {
+  const secret = 'c'.repeat(64);
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${sessionToken(secret)}`, secret), true);
+  assert.equal(sessionCookieMatches(`other=1; ${SESSION_COOKIE}=${sessionToken(secret)}; x=2`, secret), true);
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${sessionToken('d'.repeat(64))}`, secret), false);
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=short`, secret), false, 'a length mismatch is false, not a timingSafeEqual throw');
+  assert.equal(sessionCookieMatches('', secret), false);
+  assert.equal(sessionCookieMatches(undefined, secret), false);
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${sessionToken(secret)}`, null), false, 'no secret on disk accepts nothing');
+});
+
+check('the recovery command names a file that exists, absolutely, and survives a path with spaces', () => {
+  const cmd = recoveryCommand();
+  const script = path.join(repoRoot, 'bin', 'authorize.mjs');
+  assert.ok(cmd.includes(script), `the command must name ${script}`);
+  assert.ok(path.isAbsolute(script) && existsSync(script), 'and that file must actually be there — a refusal page naming a missing script is worse than no page');
+  // The clone lives wherever the user put it, routinely under a path with a space.
+  assert.equal(shellQuote('/Users/x/claude-board'), '/Users/x/claude-board', 'an ordinary path is left alone');
+  assert.equal(shellQuote('/Users/x/my board'), `'/Users/x/my board'`, 'a space is quoted, so the command can be pasted as-is');
+  assert.equal(shellQuote("/Users/x/o'brien"), `'/Users/x/o'\\''brien'`, 'and a quote in the path does not break out of the quoting');
+});
+
+check('the refusal page names the recovery command and reveals nothing about the store', () => {
+  const html = renderRefusalPage(recoveryCommand());
+  assert.ok(html.includes(recoveryCommand()), 'the one command that restores access must be on the page verbatim');
+  assert.match(html, /not authorized/i);
+  assert.match(html, /<meta http-equiv="Content-Security-Policy"/, 'it renders under the same locked-down policy as a board');
+  assert.doesNotMatch(html, /<script/i, 'and needs no script to say what it says');
+  // It is served for a missing board and an existing one alike, so it must say nothing
+  // about either: a "board not found" here would leak existence to an id enumerator.
+  assert.doesNotMatch(html, /board-data|boardId|b_[0-9a-f]/);
+});
+
+check('the recovery command is one string, read from one place by everything that prints it', () => {
+  // A second copy in the refusal page, the shim or the README is a copy that drifts,
+  // and a command that names the wrong path costs the reviewer the session.
+  const server = readFileSync(path.join(repoRoot, 'src/server.mjs'), 'utf8');
+  const shim = readFileSync(path.join(repoRoot, 'bin/mcp.mjs'), 'utf8');
+  for (const [name, src] of [['src/server.mjs', server], ['bin/mcp.mjs', shim]]) {
+    assert.match(src, /recoveryCommand\(\)/, `${name} must call recoveryCommand() rather than spell the command out`);
+    assert.doesNotMatch(src, /node .*bin\/authorize\.mjs/, `${name} must not hardcode a second copy of it`);
+  }
+});
+
+check('nothing in the tree still refers to the deleted board-scoped submit token', () => {
+  // SPEC_LAUNCH.md: "Submit collapses into the read credential", and the deletion lands
+  // in the same slice as the gate. A leftover reference is a leftover code path.
+  const files = ['src/secret.mjs', 'src/server.mjs', 'src/handoff.mjs', 'src/ui.mjs', 'bin/mcp.mjs', 'bin/authorize.mjs', 'PROTOCOL.md'];
+  for (const f of files) {
+    const src = readFileSync(path.join(repoRoot, f), 'utf8');
+    for (const dead of ['cb_submit', 'SUBMIT_COOKIE', 'submitToken']) {
+      assert.ok(!src.includes(dead), `${f} still mentions ${dead}`);
+    }
+  }
 });
 
 rmSync(fixturesDir, { recursive: true, force: true });

@@ -8,8 +8,12 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { SECRET_HEADER, SUBMIT_COOKIE } from '../src/secret.mjs';
+import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { startServer, activeWaitCount } from '../src/server.mjs';
 import { readBoard, searchBoards } from '../src/store.mjs';
 import { renderBoardPage } from '../src/render.mjs';
@@ -103,9 +107,10 @@ const home = mkdtempSync(path.join(tmpdir(), 'claude-board-http-'));
 process.env.CLAUDE_BOARD_HOME = home;
 
 // The local secret, in this check's own temp dir — never ~/.config/claude-board. Set
-// before startServer below, because the daemon reads it once at startup. Every write
-// route requires it (DESIGN.md Decisions -> "A loopback Host check, an origin
-// check, and a local secret"); read routes deliberately do not.
+// before startServer below, because the daemon reads it once at startup. Every route
+// but /api/health requires a credential now: writes since DESIGN.md Decisions ->
+// "A loopback Host check, an origin check, and a local secret", reads since
+// SPEC_LAUNCH.md Decisions -> "Read routes are gated".
 const SECRET_FILE = path.join(home, 'secret');
 const SECRET = 'a'.repeat(64);
 writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
@@ -116,6 +121,29 @@ process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
  * 401 checks near the bottom send requests that deliberately do not. */
 function writeHeaders(extra) {
   return { 'content-type': 'application/json', [SECRET_HEADER]: SECRET, ...(extra || {}) };
+}
+
+/** `fetch`, shadowed for this module only, carrying the secret on every call.
+ *
+ * Reads are gated now (SPEC_LAUNCH.md), so a plain `fetch('/b/:id')` is refused — and
+ * this check is a hundred-odd requests exercising rendering, waiting, SSE and the store,
+ * none of which are about the credential. Rather than thread a header through every one,
+ * the default here is "a caller that holds the secret", which is what the shim is.
+ *
+ * Everything that is about the credential deliberately does NOT go through here: the
+ * gate checks below use `rawRequest` (which sends exactly the headers it is given) and
+ * `rawFetch`, so they can speak as a caller holding nothing, or holding only a cookie.
+ * An explicit header in `init` still wins, since it is spread last. */
+const rawFetch = globalThis.fetch;
+function fetch(input, init = {}) {
+  return rawFetch(input, { ...init, headers: { [SECRET_HEADER]: SECRET, ...(init.headers || {}) } });
+}
+
+/** The cookie an authorized browser sends back, as a Cookie header value. Derived from
+ * the secret exactly as src/server.mjs derives it, so a check can act as a browser that
+ * has already been through a handoff without doing one first. */
+function sessionCookieHeader() {
+  return `${SESSION_COOKIE}=${sessionToken(SECRET)}`;
 }
 
 // Short heartbeat so the SSE checks below can prove the stream survives past one
@@ -151,10 +179,10 @@ function projectDir(name) {
  * lines (heartbeats) out of the byte stream as they arrive. Returns immediately
  * with handles to the live request/response and a running `events` array the
  * caller polls; the caller is responsible for destroying `req` when done. */
-function openSseClient(port, boardId) {
+function openSseClient(port, boardId, { headers = { [SECRET_HEADER]: SECRET } } = {}) {
   return new Promise((resolveOpen, rejectOpen) => {
     const req = http.request(
-      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}` } },
+      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${boardId}/events`, headers: { host: `127.0.0.1:${port}`, ...headers } },
       res => {
         const events = [];
         let buf = '';
@@ -956,6 +984,54 @@ async function main() {
     assert.equal(byId[rank].note, '');
   });
 
+  // Found by using this for real (SPEC_LAUNCH.md criterion 7): a round came back
+  // carrying a `deferred` question whose `choice` WAS populated. Every check here and
+  // in check-mcp.mjs had only ever exercised `deferred` with `choice: null`, so the
+  // suite quietly encoded "deferred means no choice" — an assumption the reviewer
+  // disproved by picking an option and marking it revisit-later in the same breath,
+  // which is a perfectly reasonable thing to do and the more useful signal of the two.
+  //
+  // The contract is that `status` alone says whether a question was decided (see
+  // PROTOCOL.md "Packet"). This pins it, so a caller reading `choice` without branching
+  // on `status` fails here rather than in someone's session, silently recording a
+  // decision the reviewer explicitly declined to make.
+  await check('a deferred answer keeps its choice: status alone says whether a question was decided', async () => {
+    const post = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Deferred with a lean',
+        blocks: [{ kind: 'question', prompt: 'which way?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] }],
+      }),
+    });
+    const { boardId } = await post.json();
+    const qid = readBoard(boardId, home).blocks.find(b => b.kind === 'question').id;
+
+    const waitPromise = fetch(`${base}/api/board/${boardId}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [{ id: qid, status: 'deferred', choice: 'A', note: 'leaning A, want to sit with it' }],
+        comments: [],
+      }),
+    });
+    assert.equal(submitRes.status, 200);
+
+    const answer = (await waitPromise).answers.find(a => a.id === qid);
+    assert.equal(answer.status, 'deferred', 'a deferred answer must stay deferred, not get promoted by carrying a choice');
+    assert.equal(answer.choice, 'A', 'the tentative lean must survive: discarding it loses the more useful half of the signal');
+    assert.equal(answer.note, 'leaning A, want to sit with it');
+
+    // The same thing on the stored board, not just in the packet -- the board is the
+    // durable record, and a lean that only lived in one packet would be gone by round 2.
+    assert.equal(readBoard(boardId, home).answers[qid].status, 'deferred');
+    assert.equal(readBoard(boardId, home).answers[qid].choice, 'A');
+  });
+
   await check('POST /api/board carrying all five context kinds renders every block on the served page', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
@@ -1447,6 +1523,14 @@ async function main() {
     const freshlyRendered = renderBoardPage(readBoard(boardId, home));
     assert.equal(served, onDisk, 'served page must match the pages/ file exactly -- that file is what Finder opens standalone');
     assert.equal(served, freshlyRendered, 're-rendering the stored JSON must reproduce the served page exactly');
+    // The read gate lives entirely in headers and cookies, never in markup, which is
+    // what keeps the three equal above -- and what makes an archived board still open
+    // from disk with the daemon stopped and no credential anywhere (criterion 6).
+    // (Ablation: inline the session token or a handoff into the page and this fails,
+    // because renderBoardPage's output would stop being a function of the board JSON.)
+    for (const leak of [SESSION_COOKIE, sessionToken(SECRET), SECRET, SECRET_HEADER, '/auth/']) {
+      assert.ok(!served.includes(leak), `the rendered page must not carry ${leak}`);
+    }
   });
 
   await check('DESIGN.md "archives already on disk stay dark": a pages/*.html frozen before this feature shipped is never rewritten, and GET /b/:id always serves a fresh, themed render regardless of what the frozen file contains', async () => {
@@ -1744,7 +1828,7 @@ async function main() {
     // node:http rather than fetch: the point is to hang up mid-request, which needs a
     // handle on the socket. The round is never submitted, so the loop's only way out is
     // noticing the client left.
-    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: `/api/board/${created.boardId}/wait?round=1`, headers: { host: `127.0.0.1:${port}` } }, res => res.resume());
+    const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: `/api/board/${created.boardId}/wait?round=1`, headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } }, res => res.resume());
     req.on('error', () => { /* the hang-up below is the point */ });
     req.end();
 
@@ -2031,79 +2115,249 @@ async function main() {
     assert.match(JSON.parse(r.body).boardId, /^b_[0-9a-f]{32}$/);
   });
 
-  await check('SEC: read routes stay open without the secret -- the reviewer\'s browser cannot hold one', async () => {
-    // This is the deliberate shape of the fix, not an oversight: the archive stays
-    // readable by any local process, and only writing (and with it file resolution) is
-    // gated. A check that asserted 401 here would be asserting a broken product.
-    const index = await rawRequest(port, 'GET', '/', `127.0.0.1:${port}`);
-    assert.equal(index.status, 200, 'the thread index must render without a secret');
+  // --- the read gate (SPEC_LAUNCH.md criteria 1-5) --------------------------------
+  //
+  // THIS is the ablation site for the read gate. Delete the `isAuthorizedRead` block
+  // from createRequestHandler and every assertion in this section fails while the rest
+  // of the suite — and the rest of this file — stays green.
 
-    const page = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`);
-    assert.equal(page.status, 200, 'the served board page must render without a secret');
-    assert.ok(page.body.includes('id="board-data"'));
+  const BROWSER_NAV = { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' };
+
+  await check('SEC: index, board page, search and the event stream are all refused with no credential', async () => {
+    // The decision SPEC_LAUNCH.md overturned: these four used to answer 200 to anything
+    // that could open a socket, which handed every local process the source excerpts,
+    // questions and answers of every board in the store.
+    const index = await rawRequest(port, 'GET', '/', `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(index.status, 401, 'the thread index must not render without a credential');
+
+    const page = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(page.status, 401, 'the served board page must not render without a credential');
+    assert.ok(!page.body.includes('id="board-data"'), 'and must not leak the board JSON in the refusal');
 
     const search = await rawRequest(port, 'GET', '/api/search?q=trip', `127.0.0.1:${port}`);
-    assert.equal(search.status, 200, 'archive search must work without a secret');
+    assert.equal(search.status, 401, 'archive search must not answer without a credential');
 
-    const sse = await openSseClient(port, boardId);
+    const waiting = await rawRequest(port, 'GET', `/api/board/${boardId}/wait?round=1`, `127.0.0.1:${port}`);
+    assert.equal(waiting.status, 401, '/wait must not answer without a credential');
+
+    const sse = await openSseClient(port, boardId, { headers: {} });
     try {
-      assert.equal(sse.status, 200, 'the SSE stream must open without a secret');
+      assert.equal(sse.status, 401, 'the SSE stream must not open without a credential');
     } finally {
       sse.req.destroy();
     }
+
+    // The one deliberate exception, and the reason it is one: install.sh polls it with
+    // plain curl to decide whether the service came up.
+    const health = await rawRequest(port, 'GET', '/api/health', `127.0.0.1:${port}`);
+    assert.equal(health.status, 200, '/api/health stays open — install.sh has no credential to offer');
   });
 
-  await check('SEC: the served page submits with the board-scoped cookie GET /b/:id sets, and that cookie authorises nothing else', async () => {
-    // The browser has no way to read a 0600 file, so GET /b/:id hands it an HMAC of the
-    // board id under the secret instead (src/secret.mjs submitToken) -- enough to answer
-    // THAT board, never enough to create one or name a `cwd`.
+  await check('SEC: the refusal a browser navigation gets is a page naming the recovery command, not a bare status', async () => {
+    const refused = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(refused.status, 401);
+    assert.match(refused.headers['content-type'] || '', /text\/html/, 'a navigation gets a page');
+    assert.ok(refused.body.includes(recoveryCommand()), `the refusal must name the exact command: ${recoveryCommand()}`);
+    assert.match(refused.body, /bin\/authorize\.mjs/, 'and it must be a real, absolute path the reader can paste');
+    assert.doesNotMatch(
+      String(refused.headers['www-authenticate'] || ''), /./,
+      'no WWW-Authenticate: a browser password prompt in front of the page explaining the fix is worse than no page at all'
+    );
+
+    // An API/XHR caller gets the status and no markup. Same code, so "no credential" is
+    // one number everywhere and PROTOCOL.md can document one number.
+    const api = await rawRequest(port, 'GET', '/api/search?q=trip', `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(api.status, 401, 'the same status for an API caller');
+    assert.doesNotMatch(api.headers['content-type'] || '', /text\/html/, 'but not a page of markup');
+    assert.match(JSON.parse(api.body).recover, /bin\/authorize\.mjs/, 'it still names the fix, as one JSON field');
+  });
+
+  await check('SEC: a handoff authorizes a browser exactly once, and lands it on a clean URL', async () => {
+    const minted = JSON.parse((await rawRequest(port, 'POST', '/api/handoff', `127.0.0.1:${port}`, {
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId }),
+    })).body);
+    assert.match(minted.token, HANDOFF_TOKEN_RE, 'the handoff token is 32 random bytes as hex');
+
+    const redeemed = await rawRequest(port, 'GET', `/auth/${minted.token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(redeemed.status, 302, 'redeeming a handoff redirects rather than rendering');
+    assert.equal(redeemed.headers.location, `/b/${boardId}`, 'to the board it was minted for');
+    assert.doesNotMatch(redeemed.headers.location, /auth|token|secret|cb_session/, 'and the URL left in the address bar carries no credential');
+
+    const setCookie = [].concat(redeemed.headers['set-cookie'] || []).join('; ');
+    assert.match(setCookie, new RegExp(`${SESSION_COOKIE}=[0-9a-f]{64}`), 'the browser is handed the session cookie');
+    assert.match(setCookie, /HttpOnly/, 'page script must not be able to read it');
+    assert.match(setCookie, /SameSite=Strict/, 'no other origin may cause it to be sent');
+    assert.match(setCookie, /Path=\//, 'it covers every read route, not one board');
+    assert.doesNotMatch(setCookie, /Domain=/i, 'host-only: no Domain attribute, so no sibling host can claim it');
+    const maxAge = Number((setCookie.match(/Max-Age=(\d+)/) || [])[1]);
+    assert.ok(maxAge > 30 * 24 * 3600, `the cookie must outlive the browser session (Max-Age=${maxAge}s) — a bookmark opened days later still has to work`);
+
+    // Criterion 2's second half: the cookie alone, with no handoff and no secret, is
+    // what makes reloading and bookmarking work.
+    const cookie = setCookie.split(';')[0];
+    const reload = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: { ...BROWSER_NAV, cookie } });
+    assert.equal(reload.status, 200, 'the authorized browser renders the board');
+    assert.ok(reload.body.includes('id="board-data"'));
+    assert.equal(reload.headers['set-cookie'], undefined, 'the board page hands out no credential of its own — its bytes stay a pure function of the board JSON');
+
+    // Criterion 3: single-use. The replay is what a process that read the URL out of
+    // `ps` would attempt, and it gains nothing.
+    const replay = await rawRequest(port, 'GET', `/auth/${minted.token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(replay.status, 401, 'a handoff is single-use: replaying it is refused');
+    assert.equal([].concat(replay.headers['set-cookie'] || []).length, 0, 'and hands out no cookie');
+    assert.ok(replay.body.includes(recoveryCommand()), 'the replay refusal is the same page as any other refusal');
+
+    // Never-existed is the same answer as already-used: a poller must not learn that it
+    // found a real token and merely arrived late.
+    const forged = await rawRequest(port, 'GET', `/auth/${'f'.repeat(64)}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(forged.status, replay.status, 'a forged token and a spent one are refused identically');
+    assert.equal(forged.body, replay.body, 'byte-identical: the refusal must not distinguish them');
+  });
+
+  await check('SEC: a handoff expires, and an expired one is refused exactly like a spent one', async () => {
+    // Its own daemon, with a TTL short enough to watch elapse. The TTL seam exists for
+    // this: asserting expiry against the 30s default would mean a 30s check.
+    const ttlHome = mkdtempSync(path.join(tmpdir(), 'claude-board-ttl-'));
+    const prev = process.env.CLAUDE_BOARD_HANDOFF_TTL_MS;
+    process.env.CLAUDE_BOARD_HANDOFF_TTL_MS = '60';
+    let ttlServer, ttlPort;
+    try {
+      ({ server: ttlServer, port: ttlPort } = await startServer({ home: ttlHome, port: 0, secret: SECRET }));
+      const minted = JSON.parse((await rawRequest(ttlPort, 'POST', '/api/handoff', `127.0.0.1:${ttlPort}`, {
+        headers: writeHeaders(), body: JSON.stringify({}),
+      })).body);
+      await new Promise(r => setTimeout(r, 200));
+      const late = await rawRequest(ttlPort, 'GET', `/auth/${minted.token}`, `127.0.0.1:${ttlPort}`, { headers: BROWSER_NAV });
+      assert.equal(late.status, 401, 'an expired handoff is refused');
+      assert.equal([].concat(late.headers['set-cookie'] || []).length, 0, 'and sets no cookie');
+    } finally {
+      if (ttlServer) ttlServer.close();
+      if (prev === undefined) delete process.env.CLAUDE_BOARD_HANDOFF_TTL_MS;
+      else process.env.CLAUDE_BOARD_HANDOFF_TTL_MS = prev;
+      rmSync(ttlHome, { recursive: true, force: true });
+    }
+  });
+
+  await check('SEC: minting a handoff needs the secret — a browser cannot mint itself a second credential', async () => {
+    const none = await rawRequest(port, 'POST', '/api/handoff', `127.0.0.1:${port}`, {
+      headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(none.status, 401, 'no credential mints nothing');
+
+    const asBrowser = await rawRequest(port, 'POST', '/api/handoff', `127.0.0.1:${port}`, {
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie: sessionCookieHeader() },
+      body: '{}',
+    });
+    assert.equal(asBrowser.status, 401, 'the session cookie is accepted on submit and nowhere else — least of all on the route that mints credentials');
+  });
+
+  await check('SEC: criterion 5 — a process holding neither credential can neither read a board nor forge an answer on it', async () => {
+    // Written as the criterion words it: attempt both, from a caller that cannot read
+    // the secret file and was never handed the browser cookie. This is the whole shape
+    // of the hole SPEC_LAUNCH.md closed, in one check.
+    const target = JSON.parse((await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Criterion 5', blocks: [{ kind: 'question', prompt: 'Ship?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] }),
+    })).body);
+    const tid = target.boardId;
+    const qid = readBoard(tid, home).blocks[0].id;
+
+    // Attempt one: read it.
+    const read = await rawRequest(port, 'GET', `/b/${tid}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(read.status, 401, 'reading the board is refused');
+    assert.ok(!read.body.includes('Ship?'), 'and the question text does not appear in the refusal');
+
+    // Attempt two: forge an answer on it, speaking exactly as the page's own fetch does
+    // (same-origin headers, JSON content type) but with no cookie and no secret.
+    const forge = await rawRequest(port, 'POST', `/api/board/${tid}/submit`, `127.0.0.1:${port}`, {
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' },
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'forged' }], comments: [] }),
+    });
+    assert.equal(forge.status, 401, 'forging an answer is refused');
+    assert.equal(forge.body, '', 'a write refusal still carries no body');
+    assert.equal(readBoard(tid, home).rounds[0].status, 'open', 'and the round is untouched');
+    assert.equal(readBoard(tid, home).answers[qid], undefined, 'no answer was recorded');
+
+    // The board-scoped fallback the old design accepted here is gone: there is no
+    // weaker credential left to try. Anything derived per board is now just wrong.
+    const oldStyle = await rawRequest(port, 'POST', `/api/board/${tid}/submit`, `127.0.0.1:${port}`, {
+      headers: { 'content-type': 'application/json', cookie: `cb_submit=${'0'.repeat(64)}` },
+      body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+    });
+    assert.equal(oldStyle.status, 401, 'the deleted board-scoped submit cookie must not have been left accepted anywhere');
+  });
+
+  await check('SEC: the authorized browser can press Send, and its cookie is not a substitute for the secret', async () => {
     const created = JSON.parse((await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
-      headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+      headers: writeHeaders(),
       body: JSON.stringify({ title: 'Cookie submit', blocks: [{ kind: 'question', prompt: 'Ok?', widget: 'single', options: [{ label: 'Yes' }] }] }),
     })).body);
     const cid = created.boardId;
     const qid = readBoard(cid, home).blocks[0].id;
-
-    const served = await rawRequest(port, 'GET', `/b/${cid}`, `127.0.0.1:${port}`);
-    const setCookie = [].concat(served.headers['set-cookie'] || []).join('; ');
-    assert.match(setCookie, new RegExp(`${SUBMIT_COOKIE}=[0-9a-f]{64}`), 'the served page must be handed a submit token');
-    assert.match(setCookie, /HttpOnly/, 'script on any page must not be able to read it');
-    assert.match(setCookie, /SameSite=Strict/);
-    assert.match(setCookie, new RegExp(`Path=/api/board/${cid}/submit`), 'the token must be scoped to this board\'s submit route alone');
-    const cookie = setCookie.split(';')[0];
-    const token = cookie.split('=')[1];
+    const cookie = sessionCookieHeader();
 
     // Exactly what the page's own fetch() sends: same-origin headers, the cookie, no secret.
+    // (Ablation: drop the cookie arm of isAuthorizedWrite and this is 401 -- i.e. no
+    // reviewer can ever press Send, which is the entire product.)
     const sent = await rawRequest(port, 'POST', `/api/board/${cid}/submit`, `127.0.0.1:${port}`, {
       headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie },
       body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'from the page' }], comments: [] }),
     });
-    // (Ablation: drop the cookie arm of isAuthorizedWrite and this is 401 -- i.e. no
-    // reviewer can ever press Send, which is the entire product.)
     assert.equal(sent.status, 200, 'the reviewer must be able to answer the board from the browser');
     assert.equal(readBoard(cid, home).answers[qid].note, 'from the page');
 
-    // The cookie is a submit credential for ONE board, not a substitute for the secret.
+    // The session cookie reads and answers. It is refused in the secret header, so it
+    // can never reach the one route that resolves a file.
+    const token = cookie.split('=')[1];
     const asSecret = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
       headers: { 'content-type': 'application/json', [SECRET_HEADER]: token },
       body: JSON.stringify({ title: 'Escalation attempt', cwd: home, blocks: [{ kind: 'markdown', text: '# no' }] }),
     });
-    assert.equal(asSecret.status, 401, 'a submit token must not be usable as the secret');
+    assert.equal(asSecret.status, 401, 'the session cookie must not be usable as the secret');
 
-    const otherBoard = await rawRequest(port, 'POST', `/api/board/${boardId}/submit`, `127.0.0.1:${port}`, {
-      headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+    const asBoardPost = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie },
+      body: JSON.stringify({ title: 'Escalation attempt 2', cwd: home, blocks: [{ kind: 'markdown', text: '# no' }] }),
     });
-    assert.equal(otherBoard.status, 401, 'one board\'s submit token must not answer another board');
+    assert.equal(asBoardPost.status, 401, 'nor to create a board — the route that resolves a file stays behind the secret alone');
   });
 
-  await check('SEC: a daemon with no secret on disk refuses writes rather than falling open', async () => {
+  await check('SEC: the documented recovery command re-authorizes a browser that holds nothing', async () => {
+    // Criterion 4, run as the user runs it: the actual command the refusal page prints,
+    // spawned as a real process against this check's daemon. --print rather than the
+    // default so no browser is ever launched by the suite.
+    const authorizeBin = fileURLToPath(new URL('../bin/authorize.mjs', import.meta.url));
+    assert.ok(recoveryCommand().includes(authorizeBin), 'the refusal page must name this exact file');
+
+    // execFile, never execFileSync: the daemon it talks to is in THIS process, so a
+    // synchronous spawn would block the event loop that has to answer it.
+    const out = (await promisify(execFile)(process.execPath, [authorizeBin, '--print', boardId], {
+      env: { ...process.env, CLAUDE_BOARD_PORT: String(port), CLAUDE_BOARD_SECRET_FILE: SECRET_FILE },
+      encoding: 'utf8',
+    })).stdout.trim();
+    assert.match(out, new RegExp(`^http://127\\.0\\.0\\.1:${port}/auth/[0-9a-f]{64}$`), 'it prints one pasteable handoff URL and nothing else');
+
+    // A fresh cookie jar — a second profile, a different browser — follows it and is
+    // authorized. Nothing was reinstalled, nothing restarted, the store untouched.
+    const beforeBoards = readdirSync(path.join(home, 'boards')).length;
+    const token = out.slice(out.lastIndexOf('/') + 1);
+    const redeemed = await rawRequest(port, 'GET', `/auth/${token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
+    assert.equal(redeemed.status, 302);
+    assert.equal(redeemed.headers.location, `/b/${boardId}`, 'and lands on the board that was asked for');
+    const cookie = [].concat(redeemed.headers['set-cookie'] || []).join('; ').split(';')[0];
+    const page = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: { ...BROWSER_NAV, cookie } });
+    assert.equal(page.status, 200, 'the newly-authorized browser reads the board');
+    assert.equal(readdirSync(path.join(home, 'boards')).length, beforeBoards, 'authorizing touches no board in the store');
+  });
+
+  await check('SEC: a daemon with no secret on disk refuses everything gated rather than falling open', async () => {
     // The fail-closed half. (Ablation: `if (!secret) return true` in isAuthorizedWrite
-    // -- a plausible-looking "don't break machines that never installed" concession --
-    // and a machine with no secret file is exactly as exposed as before this fix.)
+    // or isAuthorizedRead -- a plausible-looking "don't break machines that never
+    // installed" concession -- and a machine with no secret file is wide open.)
     const bareHome = mkdtempSync(path.join(tmpdir(), 'claude-board-nosecret-'));
     // ...and says so, once, on stderr where launchd keeps it: a daemon silently
-    // refusing every write with no explanation is the same support call either way.
+    // refusing everything with no explanation is the same support call either way.
     const said = [];
     const realError = console.error;
     console.error = (...args) => said.push(args.join(' '));
@@ -2120,8 +2374,10 @@ async function main() {
         body: JSON.stringify({ title: 'No secret anywhere', blocks: [] }),
       });
       assert.equal(r.status, 401);
-      const readable = await rawRequest(barePort, 'GET', '/', `127.0.0.1:${barePort}`);
-      assert.equal(readable.status, 200, 'reads must still work: the daemon refuses writes, it does not shut down');
+      const readable = await rawRequest(barePort, 'GET', '/', `127.0.0.1:${barePort}`, { headers: BROWSER_NAV });
+      assert.equal(readable.status, 401, 'reads fail closed too: with no secret there is no cookie the daemon could honestly accept');
+      const health = await rawRequest(barePort, 'GET', '/api/health', `127.0.0.1:${barePort}`);
+      assert.equal(health.status, 200, 'but the daemon has not shut down — install.sh can still see it came up');
     } finally {
       bare.close();
       rmSync(bareHome, { recursive: true, force: true });

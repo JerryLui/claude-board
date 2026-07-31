@@ -5,20 +5,25 @@
 // opens a tab on the thread's *first* board (and again on a later round only if
 // no client is connected to it), and blocks on /api/board/:id/wait, emitting
 // `notifications/progress` throughout so the MCP idle-abort timer never fires.
+//
+// The tab is opened on a one-time handoff, not on the board URL: reads are gated
+// (SPEC_LAUNCH.md) and this process is the only one holding the secret, so it is the
+// only one that can hand the browser a credential. See `handoffUrl` below.
 // See PROTOCOL.md "MCP surface" and "Detecting a session with no human in it",
 // and DESIGN.md Decisions -> "The blocking tool call is the wait", "Two ways
 // out, plus a wall clock", "Fail loudly, never degrade silently", "A board is
 // never posted where no human is watching", "One blocking tool, with a known
-// escape route", "Open once, then badge and notify", "Always on under launchd,
-// reloaded by WatchPaths".
+// escape route", "Open once, then badge and notify", "Always on under launchd".
 //
 // Two properties this file has to hold that are easy to lose:
 //   * Every `ask` call is independent. Progress notifications, the wait and the
 //     deadline are per call, never stored on the shared session — auto-backgrounding
 //     means a second `ask` routinely runs while the first is still blocked, and a
 //     call whose notifications get redirected dies to the MCP idle-abort timer.
-//   * The daemon restarting is routine, not fatal. WatchPaths reloads it and
-//     KeepAlive restarts it; the store is on disk, so a wait that loses its socket
+//   * The daemon restarting is routine, not fatal. It restarts on a crash, on a
+//     kickstart, and — under CLAUDE_BOARD_RELOAD_ON_CHANGE=1, which install.sh sets —
+//     on its own source changing (bin/daemon.mjs exits itself; KeepAlive brings it
+//     back). The store is on disk either way, so a wait that loses its socket
 //     reattaches by board id instead of reporting a failure that strands answers.
 //
 // stdout carries protocol traffic ONLY. Every log line goes to stderr, or it
@@ -31,6 +36,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, SECRET_HEADER } from '../src/secret.mjs';
+import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 
 // ---------------------------------------------------------------------------
 // Configuration. CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the
@@ -46,7 +52,7 @@ const POST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_0
 const NO_OPEN = process.env.CLAUDE_BOARD_NO_OPEN === '1';
 const OPEN_CMD = process.env.CLAUDE_BOARD_OPEN_CMD || 'open';
 // Reattach backoff after the daemon drops a held-open wait (restart / kickstart /
-// WatchPaths reload). Starts short because a launchd restart is back in well under
+// reload-on-change). Starts short because a launchd restart is back in well under
 // a second, then doubles up to RETRY_MAX_MS so a longer outage is not a hot loop.
 const RETRY_MS = Number(process.env.CLAUDE_BOARD_RETRY_MS) || 250;
 const RETRY_MAX_MS = Number(process.env.CLAUDE_BOARD_RETRY_MAX_MS) || 2_000;
@@ -255,6 +261,52 @@ function safeBoardUrl(boardId) {
   return `${BASE_URL}/b/${boardId}`;
 }
 
+/** The URL to open so the tab lands ALREADY AUTHORIZED: a single-use, seconds-lived
+ * handoff the daemon mints on request and consumes on the first fetch, which then sets
+ * the browser's session cookie and redirects to the clean board URL (src/handoff.mjs,
+ * PROTOCOL.md "Authorizing a browser"). The shim is the right place to ask because it is
+ * the only participant that holds the secret.
+ *
+ * Built from THIS process's base URL and a token that has to look like a token, never
+ * from a URL in the response body — same reasoning as safeBoardUrl above, and it matters
+ * more here, because this string is the one handed to `open`.
+ *
+ * Returns null rather than throwing when the mint fails, and says out loud what that
+ * costs: opening the plain board URL still works for a browser that was authorized on
+ * some earlier day (the cookie is long-lived and survives daemon restarts), and lands on
+ * the refusal page for one that was not. Naming the recovery command here is the
+ * difference between a reviewer who types one line and a reviewer who reads "this
+ * browser is not authorized" in a tab and comes back to the session to ask why. */
+async function handoffUrl(boardId) {
+  let token;
+  try {
+    const minted = await httpJson('POST', `${BASE_URL}/api/handoff`, { boardId }, { timeoutMs: POST_TIMEOUT_MS });
+    token = minted && minted.token;
+  } catch (err) {
+    logErr(
+      `could not get a browser handoff from the daemon (${err.statusCode ? `HTTP ${err.statusCode}` : err.code || err.message}); ` +
+      `opening the board URL directly. If the tab says this browser is not authorized, run: ${recoveryCommand()}`
+    );
+    return null;
+  }
+  if (typeof token !== 'string' || !HANDOFF_TOKEN_RE.test(token)) {
+    logErr(
+      `the daemon returned no usable handoff token; opening the board URL directly. ` +
+      `If the tab says this browser is not authorized, run: ${recoveryCommand()}`
+    );
+    return null;
+  }
+  return `${BASE_URL}/auth/${token}`;
+}
+
+/** Open the tab on a fresh handoff, falling back to the board URL itself. Awaited by its
+ * callers only for the mint — `open` is spawned detached either way, so nothing here
+ * blocks on a browser. */
+async function openAuthorizedTab(boardId, url) {
+  if (NO_OPEN) return; // no HTTP either: a headless run must not mint credentials it will not use
+  openBoardTab((await handoffUrl(boardId)) ?? url);
+}
+
 function openBoardTab(url) {
   if (NO_OPEN) return;
   if (process.platform !== 'darwin' && !process.env.CLAUDE_BOARD_OPEN_CMD) return;
@@ -305,7 +357,7 @@ async function reopenIfNoClient(posted, url) {
   }
   if (clients > 0) return false;
   logErr(`no client connected to board ${posted.boardId}; reopening the tab at ${url}`);
-  openBoardTab(url);
+  await openAuthorizedTab(posted.boardId, url);
   return true;
 }
 
@@ -317,9 +369,10 @@ async function reopenIfNoClient(posted, url) {
 // impose our own idle timeout on it.
 //
 // The GET is re-issued, not abandoned, when the socket dies. A daemon restart is
-// routine (WatchPaths reload, KeepAlive, a kickstart from the revive command) and
-// tears every open connection down; the board is untouched on disk and still open,
-// so the only correct move is to reattach by board id and round — DESIGN.md
+// routine (a reload-on-change exit, a crash under KeepAlive, a kickstart from the
+// revive command) and tears every open connection down; the board is untouched on
+// disk and still open, so the only correct move is to reattach by board id and
+// round — DESIGN.md
 // "Always on under launchd": "the shim reattaches by board id and the page
 // reconnects over SSE". Reporting "daemon not reachable" there strands whatever the
 // reviewer submits next. Only a daemon refusal (a status code — 404 board gone,
@@ -596,7 +649,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   if (!url) throw new ToolError(`daemon returned an unusable board id: ${JSON.stringify(posted.boardId)}`);
   session.url = url;
 
-  if (isFirstBoard) openBoardTab(url);
+  if (isFirstBoard) await openAuthorizedTab(posted.boardId, url);
   else await reopenIfNoClient(posted, url);
 
   let waited;

@@ -944,3 +944,51 @@ export function renderBoardPage(board) {
 </html>
 `;
 }
+
+/** The page a browser holding no credential gets instead of a board (SPEC_LAUNCH.md
+ * criterion 1: "the refusal is a page that names the single command which restores
+ * access — not a bare status code").
+ *
+ * A bare 401 is a correct status and a useless answer: the reader sees an empty tab and
+ * has no way to tell a broken install from a cleared cookie jar. So this names the exact
+ * command, with an absolute path (src/handoff.mjs `recoveryCommand`), selectable and
+ * pasteable.
+ *
+ * It renders NOTHING about the request. No board id, no title, no store contents, not
+ * even whether the board exists — the whole point of the gate is that an unauthorized
+ * caller learns nothing behind it, and a "board not found" here would leak existence to
+ * anything that could enumerate ids. Self-contained (inline style only, no script, no
+ * network) so it renders under the same locked-down CSP every board page carries. */
+export function renderRefusalPage(recoveryCommand) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
+<title>claude-board — this browser is not authorized</title>
+<style>
+  body { margin: 0; background: #0f1115; color: #d7dce5; font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 40rem; margin: 12vh auto; padding: 0 1.5rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 .75rem; color: #f2f5fa; }
+  p { margin: 0 0 1rem; }
+  pre { background: #171a21; border: 1px solid #262b36; border-radius: 6px; padding: .85rem 1rem; overflow-x: auto; user-select: all; }
+  code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #9fd0ff; }
+  .muted { color: #8b93a3; font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>This browser is not authorized</h1>
+  <p>claude-board serves boards only to a browser it has handed a credential to. This
+  one is holding none — a cleared cookie jar, a different browser, or a fresh profile.</p>
+  <p>Run this to authorize it. It opens a tab and nothing else changes: no reinstall, no
+  restart, and your boards are untouched.</p>
+  <pre><code>${escHtml(recoveryCommand)}</code></pre>
+  <p class="muted">Add <code>--print</code> to get a link to paste into some other
+  browser instead of opening your default one.</p>
+</main>
+</body>
+</html>
+`;
+}

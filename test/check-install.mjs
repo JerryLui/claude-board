@@ -3,16 +3,19 @@
 // claude/launchctl executables, and asserts the second run is a no-op:
 // exit 0 both times, exactly one plist (well-formed, absolute paths
 // pointing at THIS clone, Label exactly "claude-board"), and exactly one
-// MCP registration rather than two.
+// MCP registration rather than two. Also runs uninstall.sh once, against
+// the state the two install runs left behind, and asserts it undoes
+// everything install.sh owns while leaving everything it does not
+// (SPEC_LAUNCH.md criteria 9 and 11).
 //
-// Never touches the real ~/Library/LaunchAgents, ~/Library/Logs, or Claude
-// MCP config, and never calls the real `launchctl` — everything install.sh
-// would otherwise touch outside the repo is redirected into a temp dir via
-// the testing-seam env vars install.sh accepts (see its header comment).
-// No browser, no network.
+// Never touches the real ~/Library/LaunchAgents, ~/Library/Logs, ~/.claude/commands,
+// ~/Library/Application Support/claude-board, or Claude MCP config, and never calls
+// the real `launchctl` — everything install.sh/uninstall.sh would otherwise touch
+// outside the repo is redirected into a temp dir via the testing-seam env vars both
+// scripts accept (see their header comments). No browser, no network.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync, chmodSync, statSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +24,7 @@ import http from 'node:http';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const installScript = path.join(repoRoot, 'install.sh');
+const uninstallScript = path.join(repoRoot, 'uninstall.sh');
 
 const STUB_CLAUDE = `#!/usr/bin/env node
 // Test stub standing in for the real \`claude\` CLI. Records every invocation
@@ -110,7 +114,18 @@ const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-install-check-'));
 const launchAgentsDir = path.join(workDir, 'LaunchAgents');
 const logDir = path.join(workDir, 'Logs');
 const binDir = path.join(workDir, 'bin');
+const commandsDir = path.join(workDir, 'Commands');
 mkdirSync(binDir, { recursive: true });
+
+// The store: install.sh/uninstall.sh never write to it, but uninstall.sh has to
+// REPORT its path, and the whole point of criterion 11 is that uninstall must never
+// touch it. Pre-populated with a fake board so "the store survives uninstall" is a
+// claim about real bytes on disk, not just a directory existing.
+const storeDir = path.join(workDir, 'Store');
+mkdirSync(path.join(storeDir, 'boards'), { recursive: true });
+const storeBoardFile = path.join(storeDir, 'boards', 'fake-board.json');
+const storeBoardContent = JSON.stringify({ id: 'fake-board', title: 'a board that must survive uninstall' });
+writeFileSync(storeBoardFile, storeBoardContent);
 
 const claudeStub = path.join(binDir, 'claude-stub.mjs');
 const launchctlStub = path.join(binDir, 'launchctl-stub.mjs');
@@ -170,6 +185,8 @@ const env = {
   CLAUDE_BOARD_SECRET_FILE: secretFile,
   CLAUDE_BOARD_LAUNCH_AGENTS_DIR: launchAgentsDir,
   CLAUDE_BOARD_LOG_DIR: logDir,
+  CLAUDE_BOARD_COMMANDS_DIR: commandsDir,
+  CLAUDE_BOARD_HOME: storeDir,
   CLAUDE_BOARD_MCP_CMD: claudeStub,
   CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,
   CLAUDE_BOARD_PORT: String(healthPort),
@@ -179,8 +196,140 @@ const env = {
   STUB_LAUNCHCTL_STATE: launchctlState,
 };
 
+const commandFile = path.join(commandsDir, 'grill.md');
+
 function runInstall() {
   return spawnSync('bash', [installScript], { env, encoding: 'utf8' });
+}
+
+// --- reload on change (SPEC_LAUNCH.md criterion 17) -------------------------------
+//
+// The structural plist check above only proves install.sh ASKS for reload-on-change.
+// This is the check that proves the mechanism it asks for exists at all: a real
+// bin/daemon.mjs, spawned with CLAUDE_BOARD_RELOAD_ON_CHANGE=1, watching a real src/
+// directory and exiting when a file under it changes -- and, with the env var unset
+// (the default, and the state every OTHER caller of this file runs under, including
+// the rest of this suite), NOT doing that on the identical edit. That negative is as
+// load-bearing as the positive: a daemon that self-exits on any file event under an
+// unrelated harness is a new flake source, which is exactly why the mechanism is
+// opt-in rather than always-on.
+//
+// Runs against a TEMP COPY of src/ and bin/, never this repo's own tree -- touching a
+// tracked file to prove a watcher fires would be a side effect on the actual worktree,
+// and "revert it afterwards" is one uncaught exception away from leaving a dirty tree
+// behind. bin/daemon.mjs only imports from '../src/*.mjs' and nothing outside that
+// pair (checked: no src/*.mjs file reads anything by a path outside src/ except
+// server.mjs's own-version read of package.json, which is wrapped in try/catch and
+// defaults to '0.0.0' when absent), so the copy is a fully working daemon on its own.
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const p = probe.address().port;
+      probe.close(() => resolve(p));
+    });
+  });
+}
+
+/** Poll GET /api/health until it answers or `deadlineMs` runs out. */
+async function waitForHealthy(port, deadlineMs) {
+  const start = Date.now();
+  while (Date.now() - start < deadlineMs) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/health`);
+      if (r.ok) return true;
+    } catch { /* not up yet */ }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
+/** Resolves `true` if `child` exits within `deadlineMs`, `false` if it is still
+ * running (left running either way -- the caller kills it). Never rejects: a check
+ * that hangs here is the one thing test/run.mjs's process-group kill exists to catch,
+ * but this file should not depend on that backstop when a plain timeout does the job.
+ *
+ * Waits for 'close', not 'exit': 'exit' fires as soon as the process is gone but does
+ * not guarantee its stdio has finished delivering, and every caller reads accumulated
+ * stderr the instant this resolves to assert on the daemon's own log line. 'close'
+ * is the event node documents as waiting for the stdio streams too. */
+function waitForExit(child, deadlineMs) {
+  return new Promise(resolve => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve(false);
+    }, deadlineMs);
+    timer.unref();
+    child.once('close', () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+/** A fresh temp copy of src/ + bin/, and a fresh bin/daemon.mjs spawned from it on its
+ * own ephemeral port, CLAUDE_BOARD_HOME and CLAUDE_BOARD_SECRET_FILE -- isolated from
+ * every other check in this suite and from the real repo tree. Resolves once
+ * /api/health answers; throws (after cleaning up) if it never does. */
+async function spawnReloadDaemon(reloadOnChange) {
+  // Everything from here down is wrapped so ANY failure -- a full disk on cpSync, a
+  // port race in freePort(), spawn() itself throwing -- still removes rWorkDir and
+  // kills whatever child made it as far as spawning, rather than leaking either. The
+  // alternative (only cleaning up the "never got healthy" case) misses exactly the
+  // failures that are least expected, which is the shape of leak that turns into a
+  // pile of /tmp/claude-board-reload-* directories nobody notices until disk pressure.
+  const rWorkDir = mkdtempSync(path.join(tmpdir(), 'claude-board-reload-'));
+  let child;
+  try {
+    cpSync(path.join(repoRoot, 'src'), path.join(rWorkDir, 'src'), { recursive: true });
+    cpSync(path.join(repoRoot, 'bin'), path.join(rWorkDir, 'bin'), { recursive: true });
+    const daemonCopy = path.join(rWorkDir, 'bin', 'daemon.mjs');
+    const home = path.join(rWorkDir, 'home');
+    mkdirSync(home, { recursive: true });
+    const rSecretFile = path.join(rWorkDir, 'secret');
+    writeFileSync(rSecretFile, 'f'.repeat(64), { mode: 0o600 });
+    const port = await freePort();
+
+    const rEnv = {
+      ...process.env,
+      CLAUDE_BOARD_HOME: home,
+      CLAUDE_BOARD_SECRET_FILE: rSecretFile,
+      CLAUDE_BOARD_PORT: String(port),
+    };
+    delete rEnv.CLAUDE_BOARD_RELOAD_ON_CHANGE; // never inherit this check process's own env
+    if (reloadOnChange) rEnv.CLAUDE_BOARD_RELOAD_ON_CHANGE = '1';
+
+    child = spawn(process.execPath, [daemonCopy], { env: rEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', c => { out += c.toString(); });
+    child.stderr.on('data', c => { err += c.toString(); });
+
+    const healthy = await waitForHealthy(port, 8000);
+    if (!healthy) {
+      throw new Error(`reload-check daemon never answered /api/health\nstdout:\n${out}\nstderr:\n${err}`);
+    }
+
+    return {
+      child,
+      srcFile: path.join(rWorkDir, 'src', 'store.mjs'),
+      stderr: () => err,
+      cleanup() {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        rmSync(rWorkDir, { recursive: true, force: true });
+      },
+    };
+  } catch (caught) {
+    if (child) { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
+    rmSync(rWorkDir, { recursive: true, force: true });
+    throw caught;
+  }
 }
 
 async function main() {
@@ -266,16 +415,18 @@ async function main() {
     assert.equal(plist.KeepAlive, true);
   });
 
-  await check('WatchPaths covers this clone\'s code, and only its code', async () => {
-    assert.ok(Array.isArray(plist.WatchPaths));
-    // src/ and bin/ are what changes what the daemon runs, so a config-sync pull
-    // still restarts it (the spec's "reloaded by WatchPaths").
-    assert.ok(plist.WatchPaths.includes(path.join(repoRoot, 'src')));
-    assert.ok(plist.WatchPaths.includes(path.join(repoRoot, 'bin')));
-    // The clone root is deliberately NOT watched: editing DESIGN.md, a ticket
-    // log or a findings file would otherwise restart the daemon mid-review,
-    // dropping every SSE stream and every held-open wait.
-    assert.ok(!plist.WatchPaths.includes(repoRoot), 'the clone root must not be watched');
+  await check('the plist sets the reload env var and does not carry WatchPaths (SPEC_LAUNCH.md criterion 17)', async () => {
+    // Secondary, structural guard only. The real assertion — that the mechanism this
+    // env var turns on actually works — lives in the "reload on change" section below,
+    // which spawns a real daemon and watches it exit.
+    //
+    // (Ablation: reintroducing a `WatchPaths` array here beside `KeepAlive: true` is
+    // exactly the dead-mechanism claim criterion 17 forbids — see QUIRKS.md
+    // "WatchPaths does not restart the daemon" — so this fails on purpose if it comes
+    // back.)
+    assert.ok(!('WatchPaths' in plist), 'WatchPaths is inert beside KeepAlive and must not be in the generated plist');
+    assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
+    assert.equal(plist.EnvironmentVariables.CLAUDE_BOARD_RELOAD_ON_CHANGE, '1', 'install.sh must opt the installed daemon into reload-on-change');
   });
 
   await check('stdout/stderr are redirected to absolute log paths', async () => {
@@ -359,6 +510,89 @@ async function main() {
 
   await check('the log directory is owner-only (it carries whatever the daemon prints about boards)', async () => {
     assert.equal(statSync(logDir).mode & 0o777, 0o700);
+  });
+
+  // --- the /grill command file (SPEC_LAUNCH.md criterion 9) --------------------
+  //
+  // The two install() runs above already installed it into `commandsDir` -- confirmed
+  // first here. Then the trickier half, which needs the shipped copy itself to change
+  // between runs: a THROWAWAY clone (its own bin/daemon.mjs + bin/mcp.mjs, never
+  // executed -- launchctl is stubbed and the claude stub only logs its args -- and its
+  // own commands/grill.md) so a "new version shipped" can be simulated without ever
+  // touching this repo's own tracked commands/grill.md.
+
+  await check('the command file is installed after both runs, matching the shipped copy', async () => {
+    assert.ok(existsSync(commandFile), 'install.sh must install commands/grill.md to CLAUDE_BOARD_COMMANDS_DIR');
+    const shipped = readFileSync(path.join(repoRoot, 'commands', 'grill.md'), 'utf8');
+    assert.equal(readFileSync(commandFile, 'utf8'), shipped, 'the installed file must match the repo copy install.sh shipped');
+  });
+
+  const grillCloneDir = path.join(workDir, 'grill-clone');
+  mkdirSync(path.join(grillCloneDir, 'bin'), { recursive: true });
+  mkdirSync(path.join(grillCloneDir, 'commands'), { recursive: true });
+  writeFileSync(path.join(grillCloneDir, 'bin', 'daemon.mjs'), '// stub\n');
+  writeFileSync(path.join(grillCloneDir, 'bin', 'mcp.mjs'), '// stub\n');
+  writeFileSync(path.join(grillCloneDir, 'install.sh'), readFileSync(installScript, 'utf8'));
+  const grillSrc = path.join(grillCloneDir, 'commands', 'grill.md');
+  const GRILL_V1 = '# grill v1\nshipped content, version 1\n';
+  const GRILL_V2 = '# grill v2\nshipped content, version 2 -- a fix landed\n';
+  writeFileSync(grillSrc, GRILL_V1);
+
+  const grillAgents = path.join(workDir, 'LaunchAgents-grillclone');
+  const grillLogs = path.join(workDir, 'Logs-grillclone');
+  const grillCommands = path.join(workDir, 'Commands-grillclone');
+  const grillInstalledFile = path.join(grillCommands, 'grill.md');
+  // Isolated from the shared secretFile too: the hash record lives beside the secret
+  // (CLAUDE_BOARD_SECRET_FILE), and this clone's grill.md content is deliberately
+  // different from the real repo's, so its hash record must never share a file with
+  // (and overwrite the record for) the shared commandFile the checks above installed.
+  const grillSecretFile = path.join(workDir, 'config-grillclone', 'claude-board', 'secret');
+
+  function runGrillCloneInstall() {
+    return spawnSync('bash', [path.join(grillCloneDir, 'install.sh')], {
+      env: {
+        ...env,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: grillAgents,
+        CLAUDE_BOARD_LOG_DIR: grillLogs,
+        CLAUDE_BOARD_COMMANDS_DIR: grillCommands,
+        CLAUDE_BOARD_SECRET_FILE: grillSecretFile,
+      },
+      encoding: 'utf8',
+    });
+  }
+
+  const firstGrillRun = runGrillCloneInstall();
+  await check('a fresh install writes the shipped command file and says so', async () => {
+    assert.equal(firstGrillRun.status, 0, `stdout:\n${firstGrillRun.stdout}\nstderr:\n${firstGrillRun.stderr}`);
+    assert.equal(readFileSync(grillInstalledFile, 'utf8'), GRILL_V1);
+    assert.match(firstGrillRun.stdout, /installed/i);
+  });
+
+  // The shipped copy changes (this throwaway clone's own file -- never the real
+  // repo's) and install runs again: the previously-installed copy was never touched
+  // by a user, so it must be replaced. This is how a user gets fixes.
+  writeFileSync(grillSrc, GRILL_V2);
+  const secondGrillRun = runGrillCloneInstall();
+  await check('an unmodified installed copy IS updated when the shipped copy changes', async () => {
+    assert.equal(secondGrillRun.status, 0, `stdout:\n${secondGrillRun.stdout}\nstderr:\n${secondGrillRun.stderr}`);
+    // (Ablation: an install.sh that only ever writes when the target is MISSING --
+    // i.e. drops the "matches shipped OR matches the recorded hash" reconciliation --
+    // leaves v1 here forever, which fails this exact assertion.)
+    assert.equal(readFileSync(grillInstalledFile, 'utf8'), GRILL_V2, 'the unmodified copy must pick up the new shipped version');
+  });
+
+  // Now the user edits their installed copy by hand. A THIRD reinstall (shipped copy
+  // unchanged from v2) must leave it exactly alone, exit 0, and say what it skipped.
+  const userEdit = GRILL_V2 + '\n<!-- I added my own note here -->\n';
+  writeFileSync(grillInstalledFile, userEdit);
+  const thirdGrillRun = runGrillCloneInstall();
+  await check('a user-modified command file is NOT clobbered, and install still exits 0 and says what it skipped', async () => {
+    assert.equal(thirdGrillRun.status, 0, `install must not die on a modified command file\nstdout:\n${thirdGrillRun.stdout}\nstderr:\n${thirdGrillRun.stderr}`);
+    // (Ablation: one of the brief's two headline assertions -- dropping the
+    // hash-comparison guard in install.sh's command-file step and always
+    // overwriting makes this fail: the file below reverts to the shipped v2 text.)
+    assert.equal(readFileSync(grillInstalledFile, 'utf8'), userEdit, 'a user edit must survive a reinstall untouched');
+    assert.match(thirdGrillRun.stdout, /(local edits|leaving it)/i, 'install must say it skipped the file, not stay silent');
   });
 
   // --- the interpreter baked into the plist ------------------------------------
@@ -450,14 +684,27 @@ async function main() {
   await check('a clone path containing XML metacharacters still produces a plist launchd can parse, and install exits 0', async () => {
     const oddDir = path.join(workDir, 'clone & <play>');
     mkdirSync(path.join(oddDir, 'bin'), { recursive: true });
+    mkdirSync(path.join(oddDir, 'commands'), { recursive: true });
     writeFileSync(path.join(oddDir, 'bin', 'daemon.mjs'), '// stub\n');
     writeFileSync(path.join(oddDir, 'bin', 'mcp.mjs'), '// stub\n');
+    writeFileSync(path.join(oddDir, 'commands', 'grill.md'), '# stub grill\n');
     writeFileSync(path.join(oddDir, 'install.sh'), readFileSync(installScript, 'utf8'));
 
     const oddAgents = path.join(workDir, 'LaunchAgents-odd');
     const oddLogs = path.join(workDir, 'Logs-odd');
+    // Isolated CLAUDE_BOARD_COMMANDS_DIR and CLAUDE_BOARD_SECRET_FILE (the hash record
+    // lives beside the secret), same as the LaunchAgents/Logs isolation above -- this
+    // clone's own commands/grill.md is unrelated stub content, and must never be
+    // reconciled against (or overwrite) the real repo copy the checks above this one
+    // already installed into the shared commandsDir.
     const r = spawnSync('bash', [path.join(oddDir, 'install.sh')], {
-      env: { ...env, CLAUDE_BOARD_LAUNCH_AGENTS_DIR: oddAgents, CLAUDE_BOARD_LOG_DIR: oddLogs },
+      env: {
+        ...env,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: oddAgents,
+        CLAUDE_BOARD_LOG_DIR: oddLogs,
+        CLAUDE_BOARD_COMMANDS_DIR: path.join(workDir, 'Commands-odd'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-odd', 'claude-board', 'secret'),
+      },
       encoding: 'utf8',
     });
     assert.equal(r.status, 0, `install must succeed from a path containing & and <>\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
@@ -473,7 +720,6 @@ async function main() {
     const oddPlistJson = JSON.parse(asJson.stdout);
     // escaped on the way in, and back to the literal path on the way out -- not mangled
     assert.equal(oddPlistJson.WorkingDirectory, oddDir);
-    assert.deepEqual(oddPlistJson.WatchPaths, [path.join(oddDir, 'src'), path.join(oddDir, 'bin')]);
     assert.equal(oddPlistJson.ProgramArguments[1], path.join(oddDir, 'bin', 'daemon.mjs'));
   });
 
@@ -494,6 +740,119 @@ async function main() {
     // running, while launchd has nothing loadable to load.)
     assert.notEqual(r.status, 0, 'a plist plutil rejects must fail the install');
     assert.match(r.stderr, /not valid/);
+  });
+
+  // --- reload on change: the behaviour, not the plist key ----------------------
+
+  await check('CLAUDE_BOARD_RELOAD_ON_CHANGE=1: editing a file under src/ makes the daemon exit', async () => {
+    const d = await spawnReloadDaemon(true);
+    try {
+      // A harmless content edit to the TEMP COPY made by spawnReloadDaemon -- never
+      // the real src/store.mjs -- shaped like an editor's atomic save landing a line.
+      writeFileSync(d.srcFile, '\n// touched by check-install.mjs reload check\n', { flag: 'a' });
+      const exited = await waitForExit(d.child, 5000);
+      // (Ablation: this is the assertion the brief asks to prove genuinely fails --
+      // revert bin/daemon.mjs's watchForReload/the CLAUDE_BOARD_RELOAD_ON_CHANGE branch
+      // and this check times out and fails, because nothing is watching src/ anymore.)
+      assert.ok(exited, `daemon must exit within 5s of a src/ change under CLAUDE_BOARD_RELOAD_ON_CHANGE=1\nstderr:\n${d.stderr()}`);
+      assert.match(d.stderr(), /exiting to reload/, 'the daemon must log why it is exiting');
+      assert.match(d.stderr(), /store\.mjs/, 'the log line must name the file that triggered the exit');
+    } finally {
+      d.cleanup();
+    }
+  });
+
+  await check('CLAUDE_BOARD_RELOAD_ON_CHANGE unset: the identical edit does NOT make the daemon exit', async () => {
+    const d = await spawnReloadDaemon(false);
+    try {
+      writeFileSync(d.srcFile, '\n// touched by check-install.mjs reload check\n', { flag: 'a' });
+      const exited = await waitForExit(d.child, 2500);
+      // (Ablation: making the watcher unconditional -- dropping the env-var gate in
+      // bin/daemon.mjs -- flips this to true, which is exactly the new flake source the
+      // brief calls out: every OTHER caller of bin/daemon.mjs, including the rest of
+      // this suite and check-mcp.mjs, spawns it without this var set.)
+      assert.ok(!exited, 'the daemon must not self-exit on a src/ change when the reload env var is unset');
+    } finally {
+      d.cleanup();
+    }
+  });
+
+  // --- uninstall (SPEC_LAUNCH.md criterion 11) ----------------------------------
+  //
+  // Runs against the SAME workDir/env the two install() runs at the top of this file
+  // used, deliberately last: the launchd job, the plist, the MCP registration and the
+  // still-unmodified command file they installed all still exist at this point, so
+  // "removes what install put there" is checked against real state rather than a
+  // freshly-faked one. Nothing above this point re-reads claudeLog/claudeState/
+  // launchctlLog/launchctlState for counting, so appending more invocations here (the
+  // way the odd-path and lint-fail installs above already do) is safe.
+
+  const uninstallResult = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
+
+  await check('uninstall exits 0', async () => {
+    assert.equal(uninstallResult.status, 0, `stdout:\n${uninstallResult.stdout}\nstderr:\n${uninstallResult.stderr}`);
+  });
+
+  await check('uninstall removes the plist', async () => {
+    assert.ok(!existsSync(plistPath), 'the plist must be gone after uninstall');
+  });
+
+  await check('uninstall removes the MCP registration', async () => {
+    const state = existsSync(claudeState) ? JSON.parse(readFileSync(claudeState, 'utf8')) : {};
+    assert.ok(!('claude-board' in state), 'the MCP registration must be removed');
+  });
+
+  await check('uninstall removes the (unmodified) installed command file', async () => {
+    assert.ok(!existsSync(commandFile), 'an unmodified command file must be removed by uninstall');
+  });
+
+  await check('uninstall leaves the store untouched -- directory and contents survive', async () => {
+    // This is the brief's OTHER headline assertion, alongside the modified-file
+    // refusal above. (Ablation: an uninstall.sh that `rm -rf`s CLAUDE_BOARD_HOME "to
+    // clean up after itself" makes both of these fail -- and per the brief, an
+    // uninstall that silently destroys a review archive is a far worse bug than one
+    // that leaves too much.)
+    assert.ok(existsSync(storeDir), 'the store directory must still exist after uninstall');
+    assert.ok(existsSync(storeBoardFile), 'a board file in the store must survive uninstall');
+    assert.equal(readFileSync(storeBoardFile, 'utf8'), storeBoardContent, 'the store content must be byte-for-byte untouched');
+  });
+
+  await check('uninstall names what it deliberately left behind: the store, the secret and the logs, by path', async () => {
+    assert.ok(uninstallResult.stdout.includes(storeDir), 'must name the store path');
+    assert.ok(uninstallResult.stdout.includes(secretFile), 'must name the secret path');
+    assert.ok(uninstallResult.stdout.includes(logDir), 'must name the logs path');
+  });
+
+  await check('uninstall is safe to run twice', async () => {
+    const second = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
+    assert.equal(second.status, 0, `a second uninstall must not fail\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+  });
+
+  await check('uninstall is safe to run on a machine with nothing installed', async () => {
+    const freshWorkDir = mkdtempSync(path.join(tmpdir(), 'claude-board-uninstall-fresh-'));
+    try {
+      const freshEnv = {
+        ...process.env,
+        CLAUDE_BOARD_SECRET_FILE: path.join(freshWorkDir, 'config', 'claude-board', 'secret'),
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(freshWorkDir, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(freshWorkDir, 'Logs'),
+        CLAUDE_BOARD_COMMANDS_DIR: path.join(freshWorkDir, 'Commands'),
+        CLAUDE_BOARD_HOME: path.join(freshWorkDir, 'Store'),
+        CLAUDE_BOARD_MCP_CMD: claudeStub, // still stubbed -- never touches the real `claude`
+        CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,
+        STUB_CLAUDE_LOG: path.join(freshWorkDir, 'claude-invocations.log'),
+        STUB_CLAUDE_STATE: path.join(freshWorkDir, 'claude-registrations.json'),
+        STUB_LAUNCHCTL_LOG: path.join(freshWorkDir, 'launchctl-invocations.log'),
+        STUB_LAUNCHCTL_STATE: path.join(freshWorkDir, 'launchctl-state.json'),
+      };
+      const r = spawnSync('bash', [uninstallScript], { env: freshEnv, encoding: 'utf8' });
+      // (Ablation: an uninstall.sh that lets a failing `launchctl bootout`/`claude mcp
+      // remove` propagate under `set -e` -- rather than branching on their exit code --
+      // fails this on a machine that has never seen install.sh.)
+      assert.equal(r.status, 0, `uninstall on a machine with nothing installed must still exit 0\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    } finally {
+      rmSync(freshWorkDir, { recursive: true, force: true });
+    }
   });
 }
 

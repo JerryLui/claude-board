@@ -1,10 +1,10 @@
-// The local secret: the one credential that tells the session's own shim from any
-// other local process. See DESIGN.md Decisions -> "A loopback Host check, an
-// origin check, and a local secret", and PROTOCOL.md "The local secret".
+// The two credentials the daemon accepts: the local secret (a 0600 file, held by the
+// session's own shim) and the session cookie derived from it (held by an authorized
+// browser). See PROTOCOL.md "The local secret" and "The browser session cookie".
 //
-// Why this exists at all. The loopback Host check and the origin check between them
-// close the network and the browser. Neither can see a local process: anything that
-// can open a socket to 127.0.0.1:7391 could POST its own board naming a `cwd` it
+// Why the secret exists at all. The loopback Host check and the origin check between
+// them close the network and the browser. Neither can see a local process: anything
+// that can open a socket to 127.0.0.1:7391 could POST its own board naming a `cwd` it
 // picked and read that directory back off the served page. The daemon runs always-on
 // under launchd as the login user, so it launders that read past macOS TCC, which
 // would otherwise gate ~/Documents, ~/Desktop and ~/Downloads per application. The
@@ -13,6 +13,12 @@
 // It is a FILE, not a URL parameter: DESIGN.md rejects tokens in URLs because
 // bookmarks and stale links carry them around. A 0600 file read by the shim and sent
 // in a request header has neither problem.
+//
+// Why the session cookie exists. SPEC_LAUNCH.md overturned "read routes stay open":
+// every read now needs a credential too, and the reviewer's browser cannot read a
+// 0600 file. So the browser gets a cookie instead, handed to it once through a
+// single-use handoff (src/handoff.mjs) and never visible in a URL a bookmark can
+// capture.
 //
 // CLAUDE_BOARD_SECRET_FILE is a testing seam in exactly the style of
 // CLAUDE_BOARD_LAUNCH_AGENTS_DIR and CLAUDE_BOARD_HOME: not user-facing
@@ -28,8 +34,18 @@ import os from 'node:os';
  * incoming header name. */
 export const SECRET_HEADER = 'x-claude-board-secret';
 
-/** Cookie the served page's own submit travels in. See submitToken below. */
-export const SUBMIT_COOKIE = 'cb_submit';
+/** Cookie an authorized browser holds. See sessionToken below. */
+export const SESSION_COOKIE = 'cb_session';
+
+/** How long that cookie lives, in seconds. 400 days, which is the ceiling Chrome
+ * (and the cookie-expiry draft it implements) clamps any longer Max-Age to, so
+ * asking for more would be silently rounded down rather than honoured.
+ *
+ * It is deliberately NOT a session cookie: SPEC_LAUNCH.md criterion 2 says
+ * bookmarking a board and opening the bookmark days later still works, and a
+ * cookie that dies with the browser window turns every morning into a
+ * re-authorization. */
+export const SESSION_MAX_AGE_S = 400 * 24 * 60 * 60;
 
 export function secretPath() {
   return process.env.CLAUDE_BOARD_SECRET_FILE || path.join(os.homedir(), '.config', 'claude-board', 'secret');
@@ -63,23 +79,45 @@ export function secretMatches(provided, expected) {
   return timingSafeEqual(a, b);
 }
 
-/** The board-scoped credential the SERVED PAGE submits with.
+/** The credential an AUTHORIZED BROWSER holds: an HMAC of a fixed label under the
+ * secret, carried in a host-only, HttpOnly, SameSite=Strict cookie that src/server.mjs
+ * sets when it consumes a handoff (src/handoff.mjs). It is what lets a browser read
+ * boards and press Send, neither of which it could do with a 0600 file it cannot open.
  *
- * The reviewer's browser cannot hold the secret — it has no way to read a 0600 file,
- * and inlining the real secret into a page that any local process can GET would hand
- * the whole credential away. So `GET /b/:id` hands the browser this instead: an HMAC
- * of the board id under the secret, in a host-only, path-scoped, HttpOnly session
- * cookie. It authorises exactly one thing: answering THAT board. It cannot create a
- * board, cannot name a `cwd`, and cannot resolve a file.
+ * DERIVED, not random, and that is the whole point. A random token would have to live
+ * somewhere: in daemon memory, where every `launchctl kickstart`, crash and code reload
+ * logs every browser out, or in a second file to keep in sync with the first. Deriving
+ * it from the secret means any daemon holding the same secret accepts the same cookie,
+ * so restarts are invisible to the browser — and rotating the secret invalidates every
+ * browser at once, which is the correct and intended consequence.
  *
- * Be precise about the strength: anything that can GET the page can also take this
- * cookie, and reads are deliberately open (see PROTOCOL.md). What it buys is that a
- * local process cannot forge answers to a board it never located, and — the part that
- * matters — the file-reading route stays behind the real secret. Without the secret
- * file no token can be minted at all, so submits fail closed with everything else. */
-export function submitToken(boardId, secret) {
+ * There is no per-board and no per-browser component on purpose. Binding it to one
+ * board is exactly what this replaced: it made "can read this board" a weaker
+ * credential than the secret and left every other board reachable by whoever held it.
+ *
+ * Be precise about the strength. This is a bearer credential worth "may read every
+ * board in the store and may answer any open round" — the whole review corpus,
+ * including the source excerpts boards embed. It is NOT the secret: it is refused in
+ * the `x-claude-board-secret` header, so it cannot create a board, cannot name a
+ * `cwd`, and therefore can never make the daemon resolve a file. What it does not
+ * defend against, and cannot: a process that can read the 0600 secret file can mint
+ * this itself, and is already fully trusted; a browser extension with host permissions
+ * on the profile can read the cookie, because HttpOnly stops page script, not
+ * extensions. Both are stated in SECURITY.md rather than papered over here.
+ *
+ * No `Secure` attribute is set by the caller and none is possible: the daemon serves
+ * plain http on 127.0.0.1, and a `Secure` cookie would simply never be sent back. */
+export function sessionToken(secret) {
   if (!secret) return null;
-  return createHmac('sha256', secret).update(`submit:${boardId}`).digest('hex');
+  return createHmac('sha256', secret).update('claude-board/session/v1').digest('hex');
+}
+
+/** True iff this request carries the session cookie for `secret`. Constant-time via
+ * secretMatches, and false for every shape of absence (no Cookie header, no such
+ * cookie, no secret on disk) rather than throwing. */
+export function sessionCookieMatches(cookieHeader, secret) {
+  if (!secret) return false;
+  return secretMatches(parseCookies(cookieHeader)[SESSION_COOKIE], sessionToken(secret));
 }
 
 /** Parse a Cookie header into a plain object. Values are not URL-decoded: everything

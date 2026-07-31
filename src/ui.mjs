@@ -1738,8 +1738,9 @@ export const ui = `
 
   // --- SSE: a follow-up round pushes into this already-open tab ---------------
   //
-  // "Open once, then badge and notify" / "Always on under launchd, reloaded by
-  // WatchPaths" (DESIGN.md): the daemon can restart mid-review, so the page
+  // "Open once, then badge and notify" / "Always on under launchd" (DESIGN.md):
+  // the daemon can restart mid-review -- on a crash, a kickstart, or its own
+  // reload-on-change exit under CLAUDE_BOARD_RELOAD_ON_CHANGE=1 -- so the page
   // must reconnect rather than lose the thread. EventSource does that natively
   // (automatic retry on drop); since nothing can mutate the board while the daemon
   // is down, a bare reconnect is enough to catch back up — no resync fetch needed.

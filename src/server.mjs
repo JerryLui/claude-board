@@ -2,20 +2,37 @@
 // /api/board/:id/wait, and (ticket 04) the SSE push on /api/board/:id/events. See
 // PROTOCOL.md "HTTP surface" and "SSE events".
 //
-// Three gates, in this order (DESIGN.md Decisions -> "A loopback Host check, an
-// origin check, and a local secret"):
+// Four gates, in this order (DESIGN.md Decisions -> "A loopback Host check, an
+// origin check, and a local secret"; SPEC_LAUNCH.md Decisions -> "Read routes are
+// gated", "One-time handoff, then a session cookie"):
 //
 //   1. Host is loopback, on every route          -> 403, no body
 //   2. non-GET is same-origin                    -> 403, no body
-//   3. a write holds the local secret            -> 401, no body
+//   3. a write holds a credential                -> 401, no body
+//   4. a read holds a credential                 -> 401, a page naming the fix
 //
-// Read routes are deliberately NOT gated by (3). The reviewer's browser has no way to
-// hold a 0600 file, and the spec's whole model is "open the page and answer", so
-// `GET /`, `GET /b/:id`, `/api/search`, `/wait` and the SSE stream all keep working
-// without it. What that means, plainly: the archive remains readable by any local
-// process. What (3) buys is that only a caller holding the secret can make the daemon
-// RESOLVE A FILE — i.e. create a board naming a `cwd` and read that directory back off
-// the served page, which is the gadget the audit found.
+// Both credential gates are written as "everything, minus an explicit exception list",
+// never as an enumeration of the routes that need them: a route added later is gated by
+// default rather than by whoever adds it remembering. The exception list for (4) is
+// `GET /api/health` (install.sh polls it with plain curl to decide whether the service
+// came up, and it reveals only a version string) and `GET /auth/<token>`, which is the
+// route that HANDS OUT the credential and so cannot require it.
+//
+// A credential is one of exactly two things (src/secret.mjs):
+//
+//   * the local secret, in the `x-claude-board-secret` header. The shim holds it,
+//     because it can read a 0600 file. Only this one may create a board, which is the
+//     only route that resolves a file.
+//   * the session cookie, derived from the secret, which a browser gets by following a
+//     single-use handoff (src/handoff.mjs). It reads boards and answers them, and is
+//     refused in the secret header, so it can never resolve a file.
+//
+// SPEC_LAUNCH.md overturned DESIGN.md's "read routes stay open", and deleted the
+// board-scoped submit token that decision forced. What that decision cost, plainly:
+// any local process that could reach the port read every board — source excerpts,
+// questions, answers — and could forge an answer on any board whose page it could
+// fetch. Defensible for one author on one machine, not for a posture a stranger
+// inherits by running one command.
 //
 // Waiting survives a daemon restart in principle: /wait polls the store (the
 // source of truth) on disk rather than holding process-local state, so a waiter
@@ -24,16 +41,18 @@
 // the board while the daemon is down, so a client whose connection drops on
 // restart just reconnects (EventSource does this natively) and picks up live
 // pushes again with nothing missed in between — see DESIGN.md "Always on under
-// launchd, reloaded by WatchPaths".
+// launchd" (bin/daemon.mjs reloads itself on a source change under
+// CLAUDE_BOARD_RELOAD_ON_CHANGE=1; KeepAlive restarts it either way).
 
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readBoard, writeBoard, writePage, boardHome, listBoards, searchBoards } from './store.mjs';
-import { readSecret, secretPath, secretMatches, submitToken, parseCookies, SECRET_HEADER, SUBMIT_COOKIE } from './secret.mjs';
+import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
+import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE } from './handoff.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments } from './board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, CSP } from './render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
 
 export const DEFAULT_PORT = 7391;
@@ -161,14 +180,27 @@ function isSameOriginWrite(req) {
   return true;
 }
 
-/** True iff this write may proceed. Two ways to hold the credential:
+/** True iff this READ may proceed: either credential, and nothing weaker. A daemon with
+ * no secret on disk refuses everything gated rather than falling open — it cannot derive
+ * the session cookie either, so there is no credential it could honestly accept. */
+function isAuthorizedRead(req, secret) {
+  if (!secret) return false;
+  if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
+  return sessionCookieMatches(req.headers.cookie, secret);
+}
+
+/** True iff this write may proceed. Two ways to hold a credential, and they are not
+ * interchangeable:
  *
- *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and
- *    it is what `POST /api/board` — the only route that resolves a file — demands.
- *  - the board-scoped submit cookie the daemon handed the browser when it served
- *    `GET /b/:id` (see src/secret.mjs `submitToken`), which authorises answering that
- *    one board and nothing else. Without it the reviewer could never press Send,
- *    since a page cannot read a 0600 file.
+ *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and it
+ *    is what EVERY write except submit demands — including `POST /api/board`, the only
+ *    route that resolves a file, and `POST /api/handoff`, which mints browser
+ *    credentials and so must never be reachable with one.
+ *  - the session cookie an authorized browser holds, which is accepted on submit and
+ *    only on submit. With reads gated, anything that can render the page to press Send
+ *    already presented that cookie to fetch the page, so submit needs nothing weaker —
+ *    and the board-scoped fallback token that used to sit here is deleted rather than
+ *    kept beside it (SPEC_LAUNCH.md: "Submit collapses into the read credential").
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. */
@@ -177,15 +209,51 @@ function isAuthorizedWrite(req, parts, secret) {
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
   const isSubmit = parts[0] === 'api' && parts[1] === 'board' && parts.length === 4 && parts[3] === 'submit';
   if (!isSubmit) return false;
-  const presented = parseCookies(req.headers.cookie)[SUBMIT_COOKIE];
-  return secretMatches(presented, submitToken(parts[2], secret));
+  return sessionCookieMatches(req.headers.cookie, secret);
 }
 
-// A board id is minted by src/board.mjs and always matches this, but the id in a URL
-// path is whatever the caller typed. It is spliced into a Set-Cookie header below, so
-// it is checked rather than trusted: a CR/LF would forge a header, a `;` a cookie
-// attribute, and a `/` the cookie's Path scope.
-const SAFE_BOARD_ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** The two GET routes that are reachable with no credential, and the reason each is.
+ *
+ *  - `/api/health`: install.sh polls it with plain `curl` to decide whether the service
+ *    actually came up, and gating it would make a fresh install report failure on a
+ *    daemon that is working perfectly. It answers `{ ok, version }` and nothing else —
+ *    no board, no path, no store contents.
+ *  - `/auth/<token>`: the route that hands a browser its credential. Requiring one here
+ *    would be a bootstrap loop. It is protected by the token being single-use, unguessable
+ *    and seconds-lived instead (src/handoff.mjs).
+ *
+ * Deliberately a closed list, not a prefix or a pattern: a route added later is gated
+ * unless someone comes here and argues for it. */
+function isOpenRoute(pathname, parts) {
+  if (pathname === '/api/health') return true;
+  return parts[0] === 'auth' && parts.length === 2;
+}
+
+/** True iff the refusal should be an HTML page rather than a status and a JSON line.
+ * A browser NAVIGATION is the case that needs prose — the reader is looking at a tab and
+ * needs to be told what to type. Everything else gets the status and no markup: `/api/*`
+ * covers the page's own fetches and the SSE stream (EventSource sends
+ * `Accept: text/event-stream` and could not display a page anyway), and a caller that
+ * does not ask for `text/html` — curl, the shim, the checks — is not a tab either. */
+function wantsHtmlRefusal(req, pathname) {
+  if (pathname === '/api' || pathname.startsWith('/api/')) return false;
+  return /\btext\/html\b/i.test(String(req.headers.accept || ''));
+}
+
+/** One status code for "no credential", everywhere: 401, matching what writes have
+ * always answered, and documented as such in PROTOCOL.md.
+ *
+ * No `WWW-Authenticate` header, deliberately. 401 is the honest status, but that header
+ * is what makes a browser throw up a username/password prompt — and there is no password
+ * here, so a prompt would be an unanswerable dialog in front of the one page that
+ * explains the actual fix. SPEC_LAUNCH.md rejected Basic auth for the same reason. */
+function sendCredentialRefusal(req, res, pathname) {
+  const command = recoveryCommand();
+  if (wantsHtmlRefusal(req, pathname)) {
+    return sendHtml(res, 401, renderRefusalPage(command), { 'cache-control': 'no-store' });
+  }
+  return sendJson(res, 401, { error: 'no claude-board credential', recover: command });
+}
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -416,22 +484,66 @@ async function handlePostBoard(req, res, home, sse) {
   return sendJson(res, 200, { boardId: board.id, thread: board.thread, round, url: boardUrl(req, board.id) });
 }
 
-/** Serve the board page, and hand the browser the one credential it can hold: a
- * host-only, path-scoped, HttpOnly SESSION cookie carrying this board's submit token.
- * Session-scoped (no Max-Age) so it dies with the browser rather than accumulating one
- * cookie per board ever opened; `SameSite=Strict` so no other origin can cause it to
- * be sent, on top of the origin check a write already passes. It is not written into
- * the markup, so the served page and the standalone pages/*.html archive stay
- * byte-identical — the page's bytes remain a pure function of the board JSON. */
-function handleGetPage(req, res, id, home, secret) {
+/** Serve the board page. Reached only by a caller that already presented a credential
+ * (gate 4), so it hands out none of its own: no `Set-Cookie` here, and nothing about the
+ * credential in the markup. That keeps the served page's bytes a pure function of the
+ * board JSON, which is what makes the standalone `pages/*.html` archive byte-identical
+ * to what the daemon serves — and what makes an archived board openable from disk with
+ * no daemon and no credential at all (SPEC_LAUNCH.md criterion 6). */
+function handleGetPage(req, res, id, home) {
   const board = readBoard(id, home);
   if (!board) return sendText(res, 404, 'board not found');
-  let extra = null;
-  const token = SAFE_BOARD_ID.test(id) ? submitToken(id, secret) : null;
-  if (token) {
-    extra = { 'set-cookie': `${SUBMIT_COOKIE}=${token}; Path=/api/board/${id}/submit; HttpOnly; SameSite=Strict` };
+  return sendHtml(res, 200, renderBoardPage(board));
+}
+
+/** POST /api/handoff -> { token, expiresAt }. Reached only with the SECRET (gate 3 does
+ * not accept the session cookie for anything but submit), so a browser cannot mint
+ * itself a second credential and neither can anything holding only a stolen cookie.
+ *
+ * The caller names a board, never a URL or a path: `handoffTarget` turns anything that
+ * is not a board id into the index, so the redirect target is one of two shapes this
+ * daemon chose and an open redirect is impossible by construction rather than by
+ * validation. The response carries the token only — the caller builds the URL from its
+ * own base URL, because "whatever answered on the port" is not necessarily this daemon
+ * (see bin/mcp.mjs `safeBoardUrl` for the same reasoning). */
+async function handleMintHandoff(req, res, handoffs) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
   }
-  return sendHtml(res, 200, renderBoardPage(board), extra);
+  const { token, expiresAt } = handoffs.mint(handoffTarget(body && body.boardId));
+  return sendJson(res, 200, { token, expiresAt, ttlMs: expiresAt - Date.now() });
+}
+
+/** GET /auth/:token — the whole point of the handoff: consume it, set the cookie, and
+ * redirect to a CLEAN url. What is left in the address bar after this carries no
+ * credential, so reloading it, bookmarking it and opening the bookmark days later all
+ * work (the cookie is long-lived and derived from the secret, so a daemon restart does
+ * not invalidate it) while the bookmark itself is worth nothing to anyone who copies it.
+ *
+ * A token that is expired, already used, or never existed gets the same refusal as a
+ * browser with no credential at all: identical status, identical page, no hint about
+ * which of the three it was. That is what makes a replay — including one by a process
+ * that read the URL out of `ps` while the browser was fetching it — gain nothing.
+ *
+ * `Cache-Control: no-store` because a cached 302 would let a back-button navigation
+ * "re-consume" a handoff from disk and land on a board it no longer authorizes;
+ * `Referrer-Policy: no-referrer` so the token cannot ride out on a Referer from the
+ * board page's own subresource loads. */
+function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
+  const entry = HANDOFF_TOKEN_RE.test(token) ? handoffs.consume(token) : null;
+  const cookie = entry ? sessionToken(secret) : null;
+  if (!entry || !cookie) return sendCredentialRefusal(req, res, pathname);
+  res.writeHead(302, {
+    location: entry.target,
+    'set-cookie': `${SESSION_COOKIE}=${cookie}; Path=/; Max-Age=${SESSION_MAX_AGE_S}; HttpOnly; SameSite=Strict`,
+    'cache-control': 'no-store',
+    'referrer-policy': 'no-referrer',
+    'content-length': '0',
+  });
+  res.end();
 }
 
 async function handleWait(req, res, id, url, home) {
@@ -564,14 +676,18 @@ function handleEvents(req, res, id, home, sse) {
  * handlers built in the same process — as the checks do — never share subscribers. */
 export function createRequestHandler({ home = boardHome(), secret = readSecret() } = {}) {
   const sse = createSseHub();
+  // Per-instance, like the SSE hub and for the same reason: two daemons in one process
+  // (as the checks spin up) must not redeem each other's handoffs.
+  const handoffs = createHandoffStore();
   // Read once, at startup, and say so plainly if it is missing — a daemon that
   // silently accepted every write because the file was gone would be worse than one
   // that refuses, since nothing in the UI would ever hint that the gate was open.
   if (!secret) {
     console.error(
-      `claude-board: no local secret at ${secretPath()} — every write will be refused with 401 ` +
-      `(reads still work). Run ./install.sh from the claude-board repository to generate one; ` +
-      `an existing secret is never rotated.`
+      `claude-board: no local secret at ${secretPath()} — every request except /api/health will be ` +
+      `refused with 401, reads included: the session cookie a browser holds is derived from the ` +
+      `secret, so with no secret there is no credential to accept. Run ./install.sh from the ` +
+      `claude-board repository to generate one; an existing secret is never rotated.`
     );
   }
   return async function requestHandler(req, res) {
@@ -600,8 +716,28 @@ export function createRequestHandler({ home = boardHome(), secret = readSecret()
         return;
       }
 
+      // Gate 4: the read gate. Everything except the two open routes above needs a
+      // credential — index, board page, search, /wait and the SSE stream alike. Unlike
+      // the write refusal this one carries a body, because the caller it most often
+      // refuses is a human looking at a tab, not a program: see sendCredentialRefusal.
+      //
+      // (Ablation: delete this block and an unauthenticated index, board page and event
+      // stream all answer 200 again — i.e. any local process reads every board, source
+      // excerpts included. test/check-http.mjs is where that shows up, and nowhere else.)
+      if (req.method === 'GET' && !isOpenRoute(url.pathname, parts) && !isAuthorizedRead(req, secret)) {
+        return sendCredentialRefusal(req, res, url.pathname);
+      }
+
       if (req.method === 'GET' && url.pathname === '/api/health') {
         return sendJson(res, 200, { ok: true, version: PKG_VERSION });
+      }
+
+      if (req.method === 'GET' && parts[0] === 'auth' && parts.length === 2) {
+        return handleAuthHandoff(req, res, parts[1], handoffs, secret, url.pathname);
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/handoff') {
+        return await handleMintHandoff(req, res, handoffs);
       }
 
       if (req.method === 'GET' && url.pathname === '/') {
@@ -626,7 +762,7 @@ export function createRequestHandler({ home = boardHome(), secret = readSecret()
       }
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
-        return handleGetPage(req, res, parts[1], home, secret);
+        return handleGetPage(req, res, parts[1], home);
       }
 
       if (parts[0] === 'api' && parts[1] === 'board' && parts.length === 4) {

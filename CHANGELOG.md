@@ -5,11 +5,34 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ## [Unreleased]
 
+### Security
+
+- **Read routes now require a credential.** The index, a board page, archive search, the
+  blocking wait and the event stream all refuse a caller holding neither the local secret
+  nor the browser session cookie, with **401**. Only `GET /api/health` stays open, because
+  `install.sh` polls it with plain `curl` to decide whether the service came up. Before
+  this, any process that could open a socket to the port read every board — source
+  excerpts, questions and answers included.
+- **The browser is authorized by a single-use handoff, never by a token in a URL.** The
+  session's shim asks the daemon for one (`POST /api/handoff`, secret required), opens it,
+  and the daemon consumes it, sets a host-only `HttpOnly` `SameSite=Strict` cookie and
+  redirects to the clean board URL. The handoff lives about 30 seconds and dies on first
+  use; expired, spent and invented tokens are refused identically. The cookie is derived
+  from the secret, so it survives a daemon restart and rotating the secret revokes every
+  browser at once.
+- **The board-scoped submit token is deleted.** `POST /api/board/:id/submit` accepts the
+  session cookie or the secret and nothing weaker. It existed only because reads were
+  open; with reads gated it was strictly weaker than the credential a reader had already
+  presented.
+
 ### Changed
 
 - The store default moved from `~/Documents/renders/board` to
   `~/Library/Application Support/claude-board`. `CLAUDE_BOARD_HOME` is now documented as
   configuration rather than as a test seam. No migration: there is no installed base.
+- `GET /b/:id` no longer sets any cookie. The served page's bytes stay a pure function of
+  the board JSON, so the standalone archive is unchanged and still opens from disk with no
+  daemon and no credential.
 
 ### Added
 
@@ -18,16 +41,35 @@ this project does not yet follow semantic versioning, because nothing has been r
   control that cycles System → Light → Dark; the choice is remembered in
   `localStorage` per origin, applied before first paint so there is no dark-then-light
   flash. A standalone archive always follows the OS and remembers nothing.
+- `bin/authorize.mjs` (`npm run authorize`), the recovery command: it mints a handoff and
+  opens an authorized tab for a browser holding no credential — a cleared cookie jar, a
+  second profile, a different browser — without reinstalling, restarting the service or
+  touching the store. `--print` emits the URL instead. Every refusal page names this
+  command with an absolute path.
+- `install.sh` now installs `/grill` itself, to `~/.claude/commands/grill.md` — the
+  board's only caller, previously a manual `cp` step in the README. Idempotent: an
+  unmodified copy is overwritten with fixes, but a copy the user has edited is left
+  alone, with install saying so and continuing rather than dying. "Unmodified" is
+  decided by a sha256 recorded at install time, kept beside the local secret in
+  `~/.config/claude-board/`.
+- `uninstall.sh`, symmetric to `install.sh`: removes the launchd job, its plist, the
+  MCP registration, and the installed `/grill` command file (unless it has local
+  edits, which it leaves and says so), then reports exactly what it leaves behind on
+  purpose — the store, the local secret, and the logs, named by path. Safe to run when
+  nothing is installed and safe to run twice.
 
-### Known issues
+### Fixed
 
-- Read routes are unauthenticated; see [SECURITY.md](SECURITY.md#open). Being closed
-  before release.
-- No uninstall script. Manual steps are in the README.
-- `install.sh` does not install the `/grill` command file; copy it by hand.
-- The plist's `WatchPaths` is inert: it coexists with `KeepAlive`, and launchd only uses
-  a watch to *start* a job that is not running. Editing `src/` or `bin/` therefore does
-  not reload the daemon — `launchctl kickstart -k gui/$(id -u)/claude-board` does.
+- The plist's `WatchPaths` never restarted the daemon: it coexists with `KeepAlive`,
+  and launchd only uses a watch to *start* a job that is not running, so editing `src/`
+  or `bin/` did nothing. Replaced with a mechanism that composes with `KeepAlive`
+  instead of fighting it: `bin/daemon.mjs` now watches its own `src/` and `bin/` and
+  exits on a change, and `KeepAlive` brings it straight back up. Opt-in via
+  `CLAUDE_BOARD_RELOAD_ON_CHANGE=1`, which only `install.sh`'s generated plist sets, so
+  nothing else that spawns the daemon (the check suite, running it by hand) self-exits
+  on an unrelated file event. `WatchPaths` is gone from the generated plist. launchd
+  will not restart a job more than once per 10s, so two edits inside one 10s window
+  collapse into a single restart. See [QUIRKS.md](QUIRKS.md).
 
 ## 0.1.0 — unreleased
 
