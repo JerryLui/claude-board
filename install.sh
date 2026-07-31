@@ -16,6 +16,10 @@
 #      makes the daemon itself watch src/ and bin/ and exit on a change —
 #      KeepAlive is what brings it back, which DOES compose. See
 #      bin/daemon.mjs and QUIRKS.md "WatchPaths does not restart the daemon".
+#      The same dict carries CLAUDE_BOARD_PORT and CLAUDE_BOARD_REF_ROOTS: a
+#      launchd job inherits nothing from your shell, so any knob the daemon
+#      reads from the environment has to be written here or it may as well
+#      not exist.
 #   3. The `/grill` command file, THIS clone's commands/grill.md, copied to
 #      ~/.claude/commands/grill.md — the board's only caller (README "Use").
 #      Without it a fresh clone yields a daemon and an MCP registration with no
@@ -77,10 +81,62 @@ OUT_LOG="$LOG_DIR/daemon.out.log"
 ERR_LOG="$LOG_DIR/daemon.err.log"
 COMMAND_FILE="$COMMANDS_DIR/grill.md"
 
+# The allowlist a content reference may resolve inside, on top of the board's own
+# project directory (ADR.md entry 3, src/resolve.mjs): colon-separated absolute paths,
+# so a session can render the skill, command or agent file it is discussing.
+#
+# The default is three directories, NOT ~/.claude as a whole (audit S1, 2026-07-31):
+# the rest of that tree is settings.json, .credentials.json, shell snapshots and every
+# project's transcripts, none of which a board has a reason to quote.
+# `CLAUDE_BOARD_REF_ROOTS=$HOME/.claude ./install.sh` still installs the whole tree for
+# anyone who wants it. Keep these three in step with DEFAULT_REF_ROOTS in
+# src/resolve.mjs; test/check-install.mjs asserts they match.
+#
+# This is also the ONLY place the default exists (audit S3): src/resolve.mjs reads an
+# absent CLAUDE_BOARD_REF_ROOTS as an EMPTY allowlist, so that a default living in code
+# cannot widen the boundary on machines whose plist predates it — the daemon restarts
+# itself on any src/ change, so such a default would go live during a `git pull`,
+# unannounced. Written here, the default arrives when someone runs the installer, which
+# is a thing a person does deliberately.
+#
+# Which leaves the upgrade path, and it used to leak the same way (audit NEW-2): this
+# script rewrites the plist unconditionally and never read the old one back, so an
+# operator who ran `CLAUDE_BOARD_REF_ROOTS= ./install.sh` to get a cwd-only daemon had
+# that decision reverted to the default by the next `git pull && ./install.sh` from a
+# clean shell — the boundary widening back with nothing on screen. So the precedence is:
+# an explicit variable wins (empty included), otherwise whatever the installed plist
+# already says is carried forward verbatim, and only a machine with no plist at all gets
+# the default. The resolved value is printed either way, so it is never a silent choice.
+# The consequence worth naming: a machine whose plist still says `~/.claude` from before
+# the narrowing keeps it until someone says otherwise. That is the safe direction of the
+# two — an upgrade may not widen what an operator narrowed, and it may not narrow what
+# they widened either, because both are their call and not this script's.
+DEFAULT_REF_ROOTS="$HOME/.claude/skills:$HOME/.claude/commands:$HOME/.claude/agents"
+if [ -n "${CLAUDE_BOARD_REF_ROOTS+set}" ]; then
+  REF_ROOTS="$CLAUDE_BOARD_REF_ROOTS"
+  REF_ROOTS_FROM="CLAUDE_BOARD_REF_ROOTS"
+elif REF_ROOTS="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS raw -o - "$PLIST_PATH" 2>/dev/null)"; then
+  # Exit 0 means the key was there, empty string included -- which is exactly the value
+  # that must survive an upgrade, since it is the one that narrows.
+  REF_ROOTS_FROM="carried forward from $PLIST_PATH"
+else
+  REF_ROOTS="$DEFAULT_REF_ROOTS"
+  REF_ROOTS_FROM="default"
+fi
+
 echo "==> claude-board install"
 echo "    repo:   $REPO_DIR"
 echo "    daemon: $DAEMON_PATH"
 echo "    mcp:    $MCP_PATH"
+# Spelled out rather than folded into a ${REF_ROOTS:-...} default: an apostrophe inside
+# that word is a quote character to bash even within double quotes, which silently
+# swallows the rest of the script up to the next one. See QUIRKS.md.
+if [ -n "$REF_ROOTS" ]; then
+  echo "    reference roots: $REF_ROOTS"
+else
+  echo "    reference roots: none (a reference resolves inside the board project directory only)"
+fi
+echo "                     [$REF_ROOTS_FROM]"
 
 if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$GRILL_SRC" ]; then
   echo "error: bin/daemon.mjs, bin/mcp.mjs or commands/grill.md not found under $REPO_DIR — run this script from a claude-board clone" >&2
@@ -232,8 +288,16 @@ chmod 700 "$LOG_DIR"
 # and `>` are all legal in one. Unescaped, a path containing `&` produces a plist
 # that plutil rejects while this script still exits 0 and launchd silently has
 # nothing to load.
+#
+# LC_ALL=C, because a filename is bytes and a locale is an opinion about them (audit
+# S9, 2026-07-31). Under a UTF-8 locale BSD sed refuses input that is not valid UTF-8
+# with "RE error: illegal byte sequence" and exits non-zero — and under `set -euo
+# pipefail` that failing command substitution aborts the entire install, part-way
+# through, on a clone path or a reference root containing one stray byte. In the C
+# locale sed treats the input as bytes and passes it through untouched, which is what
+# a substitution over three ASCII characters wanted all along.
 xml_escape() {
-  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+  printf '%s' "$1" | LC_ALL=C sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
 # bin/daemon.mjs itself watches src/ and bin/ when CLAUDE_BOARD_RELOAD_ON_CHANGE=1 (set
@@ -249,6 +313,13 @@ REPO_DIR_X="$(xml_escape "$REPO_DIR")"
 OUT_LOG_X="$(xml_escape "$OUT_LOG")"
 ERR_LOG_X="$(xml_escape "$ERR_LOG")"
 PORT_X="$(xml_escape "$PORT")"
+# Written unconditionally, resolved value and all, so the plist records exactly what the
+# daemon will confine reads to rather than leaving it implicit. The daemon runs under
+# launchd and inherits nothing from your shell, so a reference root that does not reach
+# it through here does not exist as far as the daemon is concerned — and src/resolve.mjs
+# reads an absent key as no allowlist at all, which is why this key is never omitted.
+# What the value IS was decided up top, including carrying an existing plist's forward.
+REF_ROOTS_X="$(xml_escape "$REF_ROOTS")"
 
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -276,6 +347,8 @@ cat > "$PLIST_PATH" <<PLIST
 	<dict>
 		<key>CLAUDE_BOARD_PORT</key>
 		<string>${PORT_X}</string>
+		<key>CLAUDE_BOARD_REF_ROOTS</key>
+		<string>${REF_ROOTS_X}</string>
 		<key>CLAUDE_BOARD_RELOAD_ON_CHANGE</key>
 		<string>1</string>
 	</dict>

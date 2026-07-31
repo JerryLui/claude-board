@@ -215,6 +215,16 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
   /* motion */
   --dur: 160ms;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* How far a scroll-to-anchor has to clear the sticky .board-head. Measured in
+     Chrome: the header is 81.4px at ordinary widths, so 88px leaves a small gap
+     -- but BELOW the 560px breakpoint .board-head becomes a column and grows to
+     115.4px, and a hardcoded 88 then parks the target 27px BEHIND the header it
+     was supposed to clear. One token, overridden in that same media query, so
+     the two can never disagree again. Every scroll-margin-top on the page reads
+     it (.round for the round badge's jump, .md-content [id] for a comment's
+     jump to its anchor). */
+  --head-clear: 88px;
 }
 
 * { box-sizing: border-box; }
@@ -270,14 +280,41 @@ svg { flex: none; }
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--hairline);
 }
+.board-head-title { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .board-head h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.015em; }
 .board-head .meta { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; margin-top: 2px; }
+/* ticket 04 (SPEC_POLISH.md criterion 4): the one way back to the thread
+   index. Absent under body.readonly (criterion 14) -- a standalone file://
+   archive has no daemon behind "/" to navigate to -- same idiom as
+   .mode-toggle/.send-bar just above/below: kept in the markup (one
+   byte-identical page, live or archived) and hidden structurally, not merely
+   disabled. */
+.back-to-index {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: var(--r-md); color: var(--ink-2);
+  background: var(--panel-2); border: 1px solid var(--hairline);
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.back-to-index:hover { border-color: var(--hairline-2); color: var(--ink); background: var(--panel-3); }
+body.readonly .back-to-index { display: none; }
+/* font: inherit is not decoration -- ticket 04 turned this from a <span> into a
+   <button> (src/render.mjs), and a button does NOT inherit font-family from its
+   ancestors: without this the badge renders in the UA's own default (measured in
+   Chrome: Arial) beside a .round-label pill in Inter, so the two controls that
+   are meant to read as the same object silently stopped matching. Every other
+   button rule in this file already carries it; this one was missed at the
+   span-to-button conversion. Same reason :hover is qualified with :not(:disabled)
+   -- an archive hard-disables the badge (src/ui.mjs's readonly pass), and an
+   unqualified :hover lights a dead control up as if it were live, exactly as
+   .mode-toggle and .btn-send below already guard against. */
 .board-head .round-badge {
-  flex: none; color: var(--ink-2); font-size: 11.5px; font-weight: 550;
+  flex: none; font: inherit; color: var(--ink-2); font-size: 11.5px; font-weight: 550;
   letter-spacing: 0.04em; text-transform: uppercase;
   background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-pill); padding: 5px 12px;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
+.board-head .round-badge:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
 /* the comment-mode toggle (DESIGN.md "The gesture is an explicit comment
@@ -321,7 +358,10 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 /* a round is a session-scoped batch: open rounds render live, a sent round
    collapses into a history rail -- still fully readable, never a second place to
    edit the same answer (see PROTOCOL.md "Board document", ticket 04) */
-.round { display: flex; flex-direction: column; gap: var(--space-4); }
+/* scroll-margin-top clears the sticky .board-head when the round badge
+   (criterion 9) or a resync jumps a round section to the top of the
+   viewport -- same value as .md-content [id]'s below, for the same reason. */
+.round { display: flex; flex-direction: column; gap: var(--space-4); scroll-margin-top: var(--head-clear); }
 .round-label {
   align-self: flex-start;
   font-size: 10.5px; font-weight: 600; letter-spacing: 0.11em; text-transform: uppercase;
@@ -377,7 +417,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .md-content tr:last-child td { border-bottom: none; }
 .md-content hr { border: none; border-top: 1px solid var(--hairline); margin: 1.4em 0; }
 /* clears the sticky .board-head when a comment jumps to its anchor */
-.md-content [id] { scroll-margin-top: 88px; }
+.md-content [id] { scroll-margin-top: var(--head-clear); }
 /* applied by src/ui.mjs to the heading/list item a comment is anchored to, when
    that comment's list entry is clicked -- exactly one element carries it at a time */
 .md-content [id].anchor-target { background: var(--accent-soft); box-shadow: 0 0 0 4px var(--accent-soft);
@@ -474,6 +514,17 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .comment-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* ticket 05 (SPEC_POLISH.md) criterion 10: the diagram's expand control. Same
+   pill chrome as the comment button beside it in the kicker, written out rather
+   than folded into the selector above so neither rule's exact text moves (several
+   rules in this file are asserted by their text -- QUIRKS.md). It deliberately
+   does NOT also carry .comment-btn: that class is what wireRoot binds the
+   "open a block-level comment form" click handler to. */
+.expand-btn { display: inline-flex; align-items: center; gap: 5px; background: transparent;
+  border: 1px solid var(--hairline); color: var(--muted); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.expand-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 /* the compact glyph-only variant injected after an anchored heading/list item
    (src/render.mjs commentButton, inline = true) -- the class name here must stay
    the one the markup emits; it once named a class the markup never used, so these
@@ -492,7 +543,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 @media (hover: none) { .inline-anchor-btn { opacity: 0.5; } }
 
 .comment-list { margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
-.comment-item { font-size: 12.5px; color: var(--ink-2); background: var(--panel-2);
+.comment-item { position: relative; font-size: 12.5px; color: var(--ink-2); background: var(--panel-2);
   border: 1px solid var(--hairline); border-left: 2px solid var(--hairline-2);
   border-radius: var(--r-sm); padding: 8px 12px;
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
@@ -500,10 +551,21 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    that element (.anchor-target below), wired in src/ui.mjs */
 .comment-item[data-anchor-kind="md"] { cursor: pointer; }
 .comment-item[data-anchor-kind="md"]:hover { border-color: var(--accent); background: var(--panel-3); }
-/* queued locally, not yet sent -- matches the hollow .pin-pending badge */
-.comment-item.comment-pending { border-style: dashed; border-color: var(--accent); border-left-color: var(--accent); }
+/* queued locally, not yet sent -- matches the hollow .pin-pending badge. Ticket
+   02 (SPEC_POLISH.md): only a PENDING entry ever carries a delete control
+   (criterion 3: a sent comment has none), so only it reserves gutter space
+   for one. */
+.comment-item.comment-pending { border-style: dashed; border-color: var(--accent); border-left-color: var(--accent); padding-right: 30px; }
 .comment-item .comment-anchor { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-right: 8px; }
 .comment-item .comment-lost { color: var(--critical); }
+/* ticket 02 (SPEC_POLISH.md) criterion 2: the "x" on a queued comment's own
+   list entry -- removes that one entry, its hollow pin, and (src/ui.mjs's
+   refreshPendingCommentItems) renumbers whatever queued comments are left so
+   the sequence stays contiguous. */
+.comment-delete { position: absolute; top: 6px; right: 6px; background: transparent; border: none;
+  color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 6px; border-radius: var(--r-sm);
+  cursor: pointer; }
+.comment-delete:hover { color: var(--critical); background: var(--panel-3); }
 
 /* "commenting on: <anchor>" -- src/render.mjs emits one per block, always, so it
    MUST be hidden until a comment is actually being composed on that block; without
@@ -529,9 +591,25 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .mermaid-block pre.mermaid svg { max-width: 100%; height: auto; }
 .mermaid-block .missing { color: var(--warning); font-size: 12.5px; }
 
-/* code: a file plus a line range or section, no syntax highlighting */
+/* code: a file plus a line range or section, no syntax highlighting. Ticket 03
+ * (SPEC_POLISH.md): a reference can run to hundreds of lines and previously had
+ * no height cap at all, pushing everything below it off-screen -- capped at
+ * ~480px (roughly 24 lines at this font-size/line-height) with overflow: auto
+ * and resize: vertical. NOT quite the idiom '.html-stage' below uses, despite
+ * the family resemblance and despite what the spec that ordered this said: that
+ * one is FLOORED (min-height: 320px) and resizable, which is a different thing
+ * from capped and resizable, and the difference is the whole reason the next
+ * paragraph exists. A min-height leaves the resize handle free to move the box
+ * in both directions; a max-height does not.
+ * A short block's natural height never reaches the cap, so it renders untouched
+ * (max-height only ever caps, never pads a shorter box out to it) -- but a
+ * genuinely long one needs one more thing THIS rule alone cannot give it:
+ * max-height clamps the box even against the explicit height its own resize
+ * handle sets while dragging, so a capped block would otherwise be undraggable.
+ * src/ui.mjs's unlockCodeCapForDrag converts the cap to a plain height, once,
+ * the moment a block is confirmed to actually be capped -- see its own comment. */
 .code-block pre { background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-md);
-  padding: 12px 14px; overflow-x: auto; margin: 0; }
+  padding: 12px 14px; overflow: auto; margin: 0; max-height: 480px; resize: vertical; }
 .code-block pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; color: var(--code-ink); }
 
 /* html stage: sandboxed iframe so a hand-mocked preview never leaks into the page */
@@ -543,6 +621,14 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
  * badges inside it once the element they point at is resolvable in the live DOM. */
 .stage-wrap { position: relative; }
 .pin-layer { position: absolute; inset: 0; pointer-events: none; }
+/* Ticket 03 (SPEC_POLISH.md): a capped code block's pin-layer is the same div as
+ * every other block's, but src/ui.mjs resizes it (inline style) to exactly the
+ * <pre>'s own box rather than leaving it at inset: 0 over the whole section --
+ * overflow: hidden here is what turns "a pin computed outside that box" into
+ * "not drawn" instead of "drawn over the kicker or the comment list", the safe
+ * failure direction the spec calls for. No effect on any other block kind,
+ * whose pin-layer keeps the plain inset: 0 above. */
+.code-block .pin-layer { overflow: hidden; }
 .anchor-pin { position: absolute; transform: translate(-50%, -50%); pointer-events: auto;
   min-width: 20px; height: 20px; padding: 0 5px; border-radius: var(--r-pill); background: var(--accent);
   color: var(--accent-ink); font-size: 11px; font-weight: 700; line-height: 20px; text-align: center;
@@ -566,6 +652,76 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 body.readonly .stage-hint { display: none; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g')} { cursor: pointer; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* ticket 02 (SPEC_POLISH.md) criterion 12: a node that already carries a SENT
+   comment is no longer a comment target at all while comment mode is on --
+   de-affordanced (not-allowed cursor, no hover outline) rather than marked
+   permanently, riding this same body.comment-mode class rather than a
+   standing state (DESIGN.md decision "de-affordanced in comment mode only").
+   .cb-anchor-sent is stamped onto the live SVG node by src/ui.mjs's
+   wireMermaidBlock, from board.comments -- placed after the two rules above
+   so its equal-specificity override wins by source order. */
+body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent { cursor: not-allowed; }
+body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { outline: none; }
+
+/* --- the diagram lens (ticket 05, SPEC_POLISH.md criteria 10 and 11) ----------
+   A full-viewport <dialog> src/ui.mjs builds once, lazily, and reuses: drag pans,
+   scroll zooms, fit and 1:1 reset the view. Modelled on /explain's lens
+   (~/.claude/skills/explain/template.html), with two differences that are the
+   whole reason this one exists -- it is opened only by the explicit .expand-btn
+   (never by clicking the diagram, which keeps its comment meaning), and its
+   contents are commentable.
+
+   Every value below is a token from :root, and so, now, is the mermaid diagram
+   INSIDE the lens: this comment used to say those colours were 'hardcoded' in
+   src/ui.mjs, which was true when ticket 05 shipped and stopped being true when
+   the light theme landed -- 'mermaidThemeVariables()' reads the live computed
+   value of a CSS token per mermaid variable through MERMAID_TOKEN_MAP (QUIRKS.md
+   "Two stylesheets, one palette", which records the same correction; only the
+   html stage's own injected stylesheet still carries a literal hex, and it is
+   deliberately theme-independent). The lens clones an already-rendered SVG, so it
+   inherits whatever the ACTIVE palette produced and adds no colour of its own --
+   but that also means a clone taken before a theme switch is stale, which is what
+   src/ui.mjs's lensRetheme exists to fix (criterion 15). */
+.diagram-lens { width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh;
+  margin: 0; padding: 0; border: none; background: var(--bg); color: var(--ink); overflow: hidden; }
+.diagram-lens[open] { display: flex; flex-direction: column; }
+.diagram-lens::backdrop { background: var(--bg); }
+.lens-bar { display: flex; align-items: center; gap: var(--space-2); flex: none;
+  padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--hairline);
+  background: var(--panel); font-size: 11px; }
+.lens-title { letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600;
+  color: var(--accent); margin-right: auto; }
+.lens-hint { color: var(--muted); font-style: italic; }
+.lens-pct { color: var(--ink-2); min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; }
+.lens-btn { background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink-2);
+  border-radius: var(--r-sm); padding: 4px 11px; font: inherit; font-size: 11px; font-weight: 600;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.lens-btn:hover { border-color: var(--accent); color: var(--accent); }
+/* The block's OWN comment form is moved in here while the lens is open (src/ui.mjs
+   lensAdopt) rather than duplicated -- criterion 11's "the same comment as one
+   minted inline" is then true of the markup, not just of the anchor: one <form>,
+   one submit handler, one pendingComments queue. Collapses to nothing while the
+   form is closed, which is its state until a node is actually clicked. */
+.lens-form-host { flex: none; padding: 0 var(--space-4); background: var(--panel); }
+.lens-form-host .comment-form { margin: var(--space-2) 0; }
+.lens-form-host .comment-target { margin-top: var(--space-2); }
+.lens-stage { flex: 1; position: relative; overflow: hidden; cursor: grab;
+  touch-action: none; user-select: none; }
+.lens-stage.lens-dragging { cursor: grabbing; }
+/* transform-origin at the top-left is what makes src/lens.mjs's view math mean
+   what it says: a canvas-local point p renders at x + s * p, with no half-size
+   correction anywhere. The pins live INSIDE this transform (src/ui.mjs's
+   renderLensPins) and are counter-scaled per pin, so panning and zooming move
+   them for free while each stays 20px on screen. */
+.lens-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.lens-canvas svg { display: block; max-width: none; }
+${mermaidNodeRule('body.comment-mode:not(.readonly) .lens-canvas svg g')} { cursor: pointer; }
+${mermaidNodeRule('body.comment-mode:not(.readonly) .lens-canvas svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* the clone carries whatever .cb-anchor-sent stamps wireMermaidBlock put on the
+   live diagram, so a node with a sent comment is de-affordanced in the lens for
+   exactly the same reason and by exactly the same mechanism as it is inline */
+body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent { cursor: not-allowed; }
+body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outline: none; }
 
 /* the generic comment-mode hover outline (DESIGN.md anchoring criterion 2: "before
    committing the reviewer can see exactly which element will be anchored"). Set
@@ -576,6 +732,22 @@ ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hov
    deliberately does not reach in there -- see QUIRKS.md "two stylesheets, one
    palette". */
 .cb-anchor-hover { outline: 2px solid var(--accent); outline-offset: 2px; cursor: pointer; }
+/* ticket 02 (SPEC_POLISH.md) criterion 12: applied INSTEAD OF .cb-anchor-hover
+   the moment an element already carries a sent comment -- no outline, and a
+   cursor that says clicking here does nothing.
+
+   Gated on body.comment-mode, and that gate is the whole rule rather than a
+   tidy-up. The class reaches this selector two ways with opposite lifetimes:
+   src/ui.mjs's mouseover listener adds it transiently, and only ever while
+   comment mode is on (the listener returns immediately otherwise), so the gate
+   costs that path nothing; but wireMermaidBlock and the .comment-btn wiring
+   STAMP it permanently, at wire time, on a diagram node and on a heading's
+   anchor button. Unscoped, those permanent stamps put a not-allowed cursor on
+   the READING view of a settled board -- the state most pins are in -- which
+   is exactly what the spec's Decision rules out: "de-affordanced in comment
+   mode only ... the reading view stays unmarked". The two mermaid-specific
+   rules above already carried this gate; this generic one did not. */
+body.comment-mode .cb-anchor-sent { cursor: not-allowed; }
 body.comment-mode .blocks { cursor: crosshair; }
 
 /* compare: the side-by-side stage inherited from /example */
@@ -646,7 +818,10 @@ body.comment-mode .blocks { cursor: crosshair; }
   linear-gradient(to right, var(--warning-soft), transparent 45%), var(--panel); }
 .thread-item.live:hover { border-color: var(--warning); }
 .thread-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.thread-cwd { display: flex; align-items: center; gap: var(--space-2); font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; }
+/* headline: the board title (or, title-less, the project folder name) — was .thread-cwd,
+   which held the full path as the bold headline; the path is now demoted to .thread-path */
+.thread-title { display: flex; align-items: center; gap: var(--space-2); font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; }
+.thread-path { color: var(--muted); font-size: 12.5px; }
 .thread-meta { color: var(--muted); font-size: 12px; }
 .thread-status { display: flex; align-items: center; gap: var(--space-3); flex: none; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); display: inline-block;
@@ -667,6 +842,10 @@ body.comment-mode .blocks { cursor: crosshair; }
   .compare-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
+  /* the header stacks here and grows from 81.4px to 115.4px (measured in
+     Chrome), so every scroll-to-anchor target has to clear that much more --
+     see --head-clear's own comment in :root */
+  :root { --head-clear: 124px; }
   .board-shell, .index-shell { padding-left: var(--space-4); padding-right: var(--space-4); }
   .board-head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
   .block { padding: var(--space-4); border-radius: var(--r-md); }

@@ -700,6 +700,80 @@ await check('mermaid (H4): the OS preference flipping is correctly ignored while
   assert.equal(document.documentElement.getAttribute('data-theme'), 'light', 'the explicit override must remain in force, untouched by the OS');
 });
 
+// =================================================================================
+// 8. SPEC_POLISH.md criterion 15: an OPEN diagram lens rethemes with the page.
+//
+//    The lens (SPEC_POLISH.md ticket 05) holds a cloneNode(true) of the inline
+//    svg, and a redraw REPLACES that svg with a new element. The two features
+//    were built on separate branches, so nothing connected them: measured in
+//    Chrome 2026-07-31, switching to Light with the lens open left the lens's
+//    node rects at rgb(24, 32, 47) with rgb(234, 238, 246) labels -- a dark
+//    diagram inside light chrome -- while the inline diagram behind the dialog
+//    had correctly become light. Fixed by lensRetheme (src/ui.mjs).
+//
+//    Reachable without the control: a modal <dialog> makes it inert, but
+//    src/theme.mjs also dispatches on a live OS switch while System is in force,
+//    which is what `_setSystemPrefersDark` drives below.
+// =================================================================================
+
+await check('the lens: a theme switch while the lens is OPEN re-clones the redrawn diagram, keeps the view, and keeps the pins', async () => {
+  const board = createBoard({ title: 'Lens retheme', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
+  const blockId = board.blocks[0].id;
+  // A SENT comment on node A, so the lens has a real pin to lose.
+  applySubmit(board, {
+    action: 'send',
+    answers: [],
+    comments: [{ blockId, anchor: { kind: 'mermaid', ref: 'A', hint: 'Start' }, text: 'this node needs a name' }],
+  }, 1);
+  const html = renderBoardPage(board);
+  const mock = mockMermaidThemeAware();
+  const document = await loadBoard(html, mock);
+  const window = document.defaultView;
+
+  const inlineBefore = document.querySelector('.mermaid-block pre.mermaid svg');
+  assert.ok(inlineBefore, 'setup failure: the diagram never rendered');
+
+  const expand = document.querySelector('.mermaid-block .expand-btn');
+  assert.ok(expand, 'setup failure: no .expand-btn rendered');
+  expand.dispatchEvent(new StandInEvent('click'));
+  const canvas = document.querySelector('.diagram-lens .lens-canvas');
+  assert.ok(canvas, 'setup failure: the lens did not open');
+  assert.equal(canvas.querySelector('svg').getAttribute('id'), inlineBefore.getAttribute('id'),
+    'setup failure: the lens must open holding a clone of the CURRENT inline svg');
+  const pinsBefore = document.querySelectorAll('.diagram-lens .anchor-pin');
+  assert.equal(pinsBefore.length, 1, 'setup failure: the sent comment must pin inside the lens before any switch');
+  const transformBefore = canvas.style.transform;
+  const pctBefore = document.querySelector('.diagram-lens .lens-pct').textContent;
+  assert.ok(transformBefore, 'setup failure: the lens must have applied a view transform on open');
+
+  // The OS flips while System is in force -- the one path that reaches an open,
+  // modal lens at all.
+  // The stand-in starts dark, so a flip to LIGHT is the one that actually
+  // changes anything -- and it is also the direction the defect was found in.
+  window._setSystemPrefersDark(false);
+  await flush();
+
+  const inlineAfter = document.querySelector('.mermaid-block pre.mermaid svg');
+  assert.notEqual(inlineAfter.getAttribute('id'), inlineBefore.getAttribute('id'),
+    'setup failure: the switch must actually have redrawn the inline diagram');
+
+  const lensSvgs = document.querySelectorAll('.diagram-lens .lens-canvas svg');
+  assert.equal(lensSvgs.length, 1, `the lens canvas must hold exactly one diagram after a retheme, got ${lensSvgs.length}`);
+  assert.equal(lensSvgs[0].getAttribute('id'), inlineAfter.getAttribute('id'),
+    'the open lens is still showing a clone of the svg the redraw replaced -- it must be re-cloned from the freshly redrawn one, or the reviewer sees a dark diagram inside light chrome (SPEC_POLISH.md criterion 15)');
+
+  assert.equal(canvas.style.transform, transformBefore,
+    'the reviewer\'s pan/zoom must survive a retheme they did not ask for -- the source is unchanged, so the layout is unchanged and there is nothing to refit');
+  assert.equal(document.querySelector('.diagram-lens .lens-pct').textContent, pctBefore,
+    'and the zoom readout must agree with the transform it reports');
+
+  const layer = document.querySelector('.diagram-lens .pin-layer');
+  assert.ok(layer && layer.parentElement === canvas,
+    'the pin layer must still be a child of the canvas -- re-cloning must not orphan it inside the replaced svg\'s place');
+  assert.equal(document.querySelectorAll('.diagram-lens .anchor-pin').length, 1,
+    'the pin must be redrawn against the NEW clone: renderLensPins measures positions off the very element the retheme just replaced');
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

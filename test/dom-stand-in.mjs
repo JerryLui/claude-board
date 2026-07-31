@@ -8,6 +8,8 @@
 // touches while wiring an html-stage iframe, handling a click inside it, and (for
 // ticket 02's pin check) queueing the comment that click opens a form for --
 // element/attribute/classList/className/style/dataset plumbing, createTextNode,
+// cloneNode (ticket 05 of SPEC_POLISH.md -- the diagram lens clones an SVG, and
+// the duplicate ids that produces are the whole point of the trap it navigates),
 // innerHTML (ticket 04 -- a real setter, parsing the assigned markup with this
 // file's own parseNodes, not a no-op; see Element's own comment for why that
 // used to matter), firstElementChild/outerHTML (ticket 07 -- see Element's own
@@ -19,7 +21,11 @@
 // small CSS-selector subset (tag, .class, #id, [attr], [attr="value"],
 // [attr^="value"], :not(), comma lists and descendant combinators -- no >, +, ~
 // or nth-child, none of which ui.mjs uses), bubbling addEventListener/
-// dispatchEvent, and (ticket 07) a stand-in EventSource so a 'round'/'submitted'
+// dispatchEvent, `clientHeight`/`scrollHeight` (SPEC_POLISH.md finding D1 -- a
+// deliberately minimal model: 0 when the node is not in a document, and
+// otherwise whatever the fixture declared; see Element's own comment for why
+// that is one true statement about the browser rather than the beginning of a
+// layout engine), and (ticket 07) a stand-in EventSource so a 'round'/'submitted'
 // push can be driven end to end without a real network. Anything ui.mjs touches
 // on a path no check here exercises (fetch, Notification, canvas, DOMParser) is
 // simply left undefined/inert -- `typeof x !== 'undefined'` guards and untaken
@@ -402,11 +408,30 @@ function searchDescendants(root, selectorText) {
 // omission rather than a stub that would have to guess at a shape nothing needs
 // yet.
 
+/** `props` (SPEC_POLISH.md, audit finding D5) carries whatever else the handler
+ * under test reads off the event -- in practice the pointer fields
+ * (`clientX`/`clientY`/`pointerId`/`button`) the diagram lens's pan gesture
+ * needs. Copied on verbatim rather than declared as named parameters, so this
+ * stays the one event class every check in this repo constructs and a handler
+ * that starts reading a new field needs no change here.
+ *
+ * This is deliberately NOT a claim that the stand-in now models pointer input.
+ * There is still no hit-testing, no pointer capture (QUIRKS.md's own entry on
+ * what that steals), no coalescing and no native drag state machine -- a check
+ * dispatches the exact event sequence it wants to assert about, which is the
+ * same ceiling and the same technique as every other synthetic click here. What
+ * it DOES make reachable is the arithmetic the sequence feeds: whether a
+ * gesture that moves 120px in sixty 2px steps is understood as a drag. That is
+ * a question about accumulated numbers, not about layout, and it was the one
+ * thing standing between finding D5 and a check that could see it -- the
+ * existing assertion could only regex-match the handler's SHAPE, which is
+ * precisely how a threshold measuring the wrong quantity survived review. */
 export class StandInEvent {
-  constructor(type) {
+  constructor(type, props) {
     this.type = type;
     this.target = null;
     this.defaultPrevented = false;
+    if (props) for (const k of Object.keys(props)) this[k] = props[k];
   }
   preventDefault() { this.defaultPrevented = true; }
   stopPropagation() { /* not used on any path this check exercises */ }
@@ -915,6 +940,48 @@ export class Element extends EventTarget {
     while (node && node.nodeType !== 9) node = node.parentElement;
     return node || null;
   }
+  // --- box metrics: exactly one true statement, deliberately not a layout model -
+  //
+  // SPEC_POLISH.md audit finding D1 turns on ONE fact about the browser, and it
+  // is not a fact about layout: a node that is not in a document has no box, so
+  // `clientHeight` and `scrollHeight` are both 0 no matter what it contains.
+  // Every push path in src/ui.mjs wires its subtree while it is still DETACHED
+  // (applyRoundPush wires `wrap`/`frag` before appending, applySubmittedPush
+  // wires `replacement` before the swap -- all three deliberately, so listeners
+  // attach without re-wiring the blocks already on the page), so anything that
+  // MEASURES during that pass measures zero. `unlockCodeCapForDrag` claimed its
+  // once-only marker before measuring, which made every code block arriving over
+  // SSE permanently undraggable -- and the whole suite stayed green, because
+  // these two properties simply did not exist here.
+  //
+  // What is modelled: connected -> whatever the FIXTURE declared; detached -> 0.
+  // What is NOT modelled, and must not start being: any relationship between an
+  // element's content, its CSS, and its size. This stand-in cannot compute a box
+  // and must never appear to -- QUIRKS.md's "a mock of someone else's renderer is
+  // an assumption about their output" applies to Chrome's layout engine more than
+  // to anything else in this file. A fixture states a measurement it took (or
+  // that the check's own scenario stipulates); this reports it back, and reports
+  // 0 the moment the node is not in a document, which is the only part the
+  // browser decides on its own.
+  //
+  // An undeclared element reads 0 even when connected -- "this stand-in knows no
+  // box for this node", not "this node is 0px tall". That is why the guard under
+  // test is `if (!pre.clientHeight) return;` (bail, retry later) rather than
+  // anything that treats a zero as a settled answer.
+  //
+  // The numbers a fixture supplies for the code-block case come from a real
+  // measurement, recorded rather than invented: a capped <pre> of 200 lines in
+  // Chrome 150 reports clientHeight 480 / scrollHeight 4478 attached, and 0 / 0
+  // in the identical detached subtree.
+  get isConnected() { return !!this.ownerDocument; }
+  get clientHeight() { return this.declaredBox('data-standin-client-height'); }
+  get scrollHeight() { return this.declaredBox('data-standin-scroll-height'); }
+  declaredBox(attr) {
+    if (!this.isConnected) return 0;
+    const n = Number(this.getAttribute(attr));
+    return Number.isFinite(n) ? n : 0;
+  }
+
   getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   removeAttribute(name) { this.attributes.delete(name); }
@@ -1003,6 +1070,26 @@ export class Element extends EventTarget {
     return '<' + tag + attrs + '>' + inner + '</' + tag + '>';
   }
   appendChild(node) { node.parentElement = this; this.childNodes.push(node); return node; }
+  // SPEC_POLISH.md ticket 05: the diagram lens clones the rendered mermaid SVG
+  // into its own canvas (src/ui.mjs's lensOpen), which is what puts TWO elements
+  // carrying each mermaid node id in the document at once -- the duplicate-id
+  // trap that ticket exists to get right. Previously absent here, so a check
+  // could not drive the lens at all. Real semantics, deliberately including the
+  // part that matters: a deep clone reproduces element ORDER and ATTRIBUTES
+  // exactly (ids included, duplicated on purpose), and carries no listeners, so
+  // src/ui.mjs's structural "mirror this node into the other copy" path is
+  // exercised against the same shape a browser produces rather than a friendlier
+  // one. Detached from any parent, like the real thing.
+  cloneNode(deep) {
+    const copy = new Element(this.tag);
+    this.attributes.forEach((value, name) => copy.setAttribute(name, value));
+    if (deep) {
+      this.childNodes.forEach(n => {
+        copy.appendChild(n.nodeType === 1 ? n.cloneNode(true) : new TextNode(n.data));
+      });
+    }
+    return copy;
+  }
   // Ticket 04: src/ui.mjs's mermaid loader (renderMermaidBlocks) calls
   // `n.replaceWith(wrap)` on its CDN-unreachable/offline fallback path -- the
   // ordinary case in this stand-in, which never has real network access, and

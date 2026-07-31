@@ -33,7 +33,7 @@
 // it; DESIGN.md's anchoring slice 10 log records the transcripts.
 
 import assert from 'node:assert/strict';
-import { createBoard } from '../src/board.mjs';
+import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, CSP } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
@@ -252,6 +252,137 @@ check('S1: the parent ignores malformed and hostile messages that DO carry a cor
   const button = frame.contentDocument.querySelector('button');
   button.dispatchEvent(new StandInEvent('click'));
   assert.equal(form.classList.contains('open'), true, 'a genuine click must still work after a batch of hostile messages was correctly ignored');
+});
+
+// =================================================================================
+// 3b. What the parent TELLS a stage, and what it refuses to let a stage decide.
+// =================================================================================
+
+/** A board with one html stage holding a clickable `<button>` and an
+ * uncommented `<p>` to check the negative against. */
+function sentStageBoard() {
+  const board = createBoard({
+    title: 'isolation: sentRefs',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }],
+  });
+  return { board, blockId: board.blocks[0].id };
+}
+
+check('criterion 12 (stage half): the parent sends a stage the sent REF, never the hint -- or the stage de-affordances nothing and a sent element still reads as a target', () => {
+  const { board, blockId } = sentStageBoard();
+  // First, learn the real ref by clicking the button for real.
+  const probeDoc = loadBoard(renderBoardPage(board));
+  const probeToggle = probeDoc.getElementById('comment-mode-toggle');
+  probeToggle.dispatchEvent(new StandInEvent('click'));
+  const probeFrame = probeDoc.querySelector('.html-stage');
+  probeFrame.loadSrcdoc();
+  probeFrame.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  const ref = probeDoc.getElementById('comment-form-' + blockId).getAttribute('data-anchor-ref');
+  assert.ok(ref, 'setup failure: no ref minted by a real in-stage click');
+
+  // Now send that exact anchor, with a hint that is nothing like the ref.
+  applySubmit(board, {
+    action: 'send',
+    answers: [],
+    // The hint must be the element's own text ('Send') or resolveComment
+    // reports the anchor LOST and the parent correctly stops de-affordancing
+    // for it -- see liveSentComments in src/ui.mjs. That the ref ('1.1') and
+    // the hint ('Send') are nothing alike is the whole point: a parent that
+    // sent hints instead of refs would leave the stage matching neither.
+    comments: [{ blockId, anchor: { kind: 'dom', ref, hint: 'Send' }, text: 'already sent' }],
+  }, 1);
+
+  const document = loadBoard(renderBoardPage(board));
+  document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const stageDoc = frame.contentDocument;
+  const button = stageDoc.querySelector('button');
+  const other = stageDoc.querySelector('p');
+
+  // Hovering the SENT element inside the stage must de-affordance it. The stage
+  // decides this purely from the sentRefs array the parent posted, and compares
+  // it against a ref IT mints -- so a parent that sent hints instead of refs
+  // leaves this matching nothing and the element hovering as an ordinary target.
+  button.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(button.classList.contains('cb-anchor-sent'), true,
+    'an element carrying a sent comment must be de-affordanced on hover inside the stage');
+  assert.equal(button.classList.contains('cb-anchor-hover'), false,
+    'and must NOT also carry the ordinary "you can anchor here" outline');
+
+  // The negative, so this cannot pass against a stage that marks everything.
+  button.dispatchEvent(new StandInEvent('mouseout'));
+  other.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(other.classList.contains('cb-anchor-hover'), true, 'an un-commented element must still hover as a target');
+  assert.equal(other.classList.contains('cb-anchor-sent'), false, 'and must not be de-affordanced');
+});
+
+check('S5: a stage-supplied ref may MINT a comment but may never select an existing one to overwrite -- an agent must not be able to make the reviewer\'s next remark replace their feedback on its own block', () => {
+  const board = createBoard({
+    title: 'isolation: a forged click must not pick an edit target',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }],
+  });
+  const blockId = board.blocks[0].id;
+  const document = loadBoard(renderBoardPage(board));
+  document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const stageWindow = frame.contentWindow;
+  const form = document.getElementById('comment-form-' + blockId);
+
+  // The reviewer queues a real comment through a real click.
+  frame.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  const ref = form.getAttribute('data-anchor-ref');
+  form.querySelector('input[type=text]').value = 'this block is wrong and here is why';
+  form.dispatchEvent(new StandInEvent('submit'));
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1, 'setup failure: nothing queued');
+
+  // The stage now forges a click naming that same ref -- the attack: get the
+  // form stamped as EDITING the reviewer's own critical comment, so whatever
+  // they type next replaces it instead of joining it.
+  document.defaultView.dispatchEvent({
+    type: 'message',
+    data: { cb: 'cb-stage', type: 'click', ref, tag: 'BUTTON', text: 'Send' },
+    origin: 'null',
+    source: stageWindow,
+  });
+  assert.equal(form.getAttribute('data-editing-id'), null,
+    'a ref the STAGE chose must never select an edit target -- minting is forgeable by design, destroying an existing comment must not be');
+
+  form.querySelector('input[type=text]').value = 'a totally different remark';
+  form.dispatchEvent(new StandInEvent('submit'));
+  const items = document.querySelectorAll('.comment-item.comment-pending');
+  assert.equal(items.length, 2, `the original comment must survive: expected 2 queued comments, got ${items.length}`);
+  assert.ok(items.map(i => String(i.textContent || '')).join('').includes('this block is wrong'),
+    'the reviewer\'s original feedback must still be in the queue, word for word');
+});
+
+check('S5: a stage message never clobbers a draft the reviewer is part-way through typing', () => {
+  const board = createBoard({
+    title: 'isolation: a forged click must not interrupt composition',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }],
+  });
+  const blockId = board.blocks[0].id;
+  const document = loadBoard(renderBoardPage(board));
+  document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const form = document.getElementById('comment-form-' + blockId);
+
+  frame.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  const anchoredOn = form.getAttribute('data-anchor-ref');
+  form.querySelector('input[type=text]').value = 'half a sentence so f';
+
+  document.defaultView.dispatchEvent({
+    type: 'message',
+    data: { cb: 'cb-stage', type: 'click', ref: '9.9.9', tag: 'P', text: 'other' },
+    origin: 'null',
+    source: frame.contentWindow,
+  });
+  assert.equal(form.querySelector('input[type=text]').value, 'half a sentence so f',
+    'an unsolicited stage message must not overwrite what the reviewer is typing');
+  assert.equal(form.getAttribute('data-anchor-ref'), anchoredOn,
+    'and must not silently repoint the open form at an anchor of the stage\'s choosing either');
 });
 
 // =================================================================================

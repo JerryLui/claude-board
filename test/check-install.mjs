@@ -21,6 +21,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
 import http from 'node:http';
+// The installer writes the reference allowlist into the plist, and that value is the
+// only place the shipped default exists (audit S3, 2026-07-31 -- src/resolve.mjs reads
+// an absent variable as an empty allowlist on purpose). Imported rather than copied so
+// the two cannot drift.
+import { DEFAULT_REF_ROOTS } from '../src/resolve.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const installScript = path.join(repoRoot, 'install.sh');
@@ -195,6 +200,10 @@ const env = {
   STUB_LAUNCHCTL_LOG: launchctlLog,
   STUB_LAUNCHCTL_STATE: launchctlState,
 };
+// Never inherit this check process's own reference allowlist: the plist assertion
+// below is about install.sh's resolved DEFAULT, and a developer who exports
+// CLAUDE_BOARD_REF_ROOTS in their shell would otherwise fail a check about it.
+delete env.CLAUDE_BOARD_REF_ROOTS;
 
 const commandFile = path.join(commandsDir, 'grill.md');
 // The record install.sh writes beside the secret so it can tell an unmodified command
@@ -332,6 +341,68 @@ async function spawnReloadDaemon(reloadOnChange) {
   } catch (caught) {
     if (child) { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
     rmSync(rWorkDir, { recursive: true, force: true });
+    throw caught;
+  }
+}
+
+/** The EnvironmentVariables dict out of a plist this suite just generated. */
+function plistEnvOf(plistPath) {
+  const r = spawnSync('plutil', ['-convert', 'json', '-o', '-', plistPath], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout).EnvironmentVariables;
+}
+
+/** Spawn a real `bin/daemon.mjs` whose environment is the plist's own
+ * EnvironmentVariables dict and nothing else from this process -- which is the shape
+ * launchd hands a job, since a launchd job inherits nothing from the shell that installed
+ * it. Only three things are added on top, and each for a reason that is not about the
+ * value under test: PATH (launchd supplies one), the store/secret testing seams (so this
+ * never touches the real ~/Library/Application Support or the real secret), and a free
+ * port (the plist's port belongs to this suite's health stub, which is already bound).
+ * CLAUDE_BOARD_RELOAD_ON_CHANGE is dropped: this check edits nothing under src/, and a
+ * daemon that self-exits on an unrelated file event is only a flake source here.
+ *
+ * Resolves once /api/health answers, with the secret the caller needs to speak to it. */
+async function spawnDaemonWithPlistEnv(plistPath) {
+  const dWork = mkdtempSync(path.join(tmpdir(), 'claude-board-plistenv-'));
+  let child;
+  try {
+    const home = path.join(dWork, 'home');
+    mkdirSync(home, { recursive: true });
+    const dSecretFile = path.join(dWork, 'secret');
+    const secret = 'b'.repeat(64);
+    writeFileSync(dSecretFile, secret, { mode: 0o600 });
+    const port = await freePort();
+
+    const dEnv = {
+      ...plistEnvOf(plistPath),
+      PATH: process.env.PATH,
+      CLAUDE_BOARD_HOME: home,
+      CLAUDE_BOARD_SECRET_FILE: dSecretFile,
+      CLAUDE_BOARD_PORT: String(port),
+    };
+    delete dEnv.CLAUDE_BOARD_RELOAD_ON_CHANGE;
+
+    child = spawn(process.execPath, [path.join(repoRoot, 'bin', 'daemon.mjs')], {
+      env: dEnv, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let err = '';
+    child.stderr.on('data', c => { err += c.toString(); });
+
+    if (!await waitForHealthy(port, 8000)) {
+      throw new Error(`plist-env daemon never answered /api/health\nstderr:\n${err}`);
+    }
+    return {
+      port,
+      secret,
+      cleanup() {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        rmSync(dWork, { recursive: true, force: true });
+      },
+    };
+  } catch (caught) {
+    if (child) { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
+    rmSync(dWork, { recursive: true, force: true });
     throw caught;
   }
 }
@@ -484,6 +555,216 @@ async function main() {
     // ECONNREFUSED once the user exports it too.
     assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
     assert.equal(plist.EnvironmentVariables.CLAUDE_BOARD_PORT, String(healthPort));
+  });
+
+  await check('the generated plist carries CLAUDE_BOARD_REF_ROOTS, defaulting to the three DEFAULT_REF_ROOTS', async () => {
+    // The reference allowlist (ADR.md entry 3) is the one knob that moves a security
+    // boundary, and a launchd job inherits nothing from the shell that ran install.sh:
+    // a root that does not reach the daemon through EnvironmentVariables does not
+    // exist as far as the daemon is concerned, and the session still gets the refusal
+    // box the ticket was filed to remove. The runs above set nothing, so this is the
+    // resolved default.
+    //
+    // It is also the ONLY place that default exists (audit S3, 2026-07-31):
+    // src/resolve.mjs reads an absent variable as an empty allowlist, precisely so a
+    // default living in code cannot widen the boundary on machines whose plist predates
+    // it -- the daemon restarts itself on any src/ change, so such a default would go
+    // live on a routine `git pull` with nothing printed and nobody asked. Which makes
+    // this assertion the one that keeps the shipped default from being nothing at all,
+    // and it is written against DEFAULT_REF_ROOTS rather than a second copy of the list,
+    // so the two cannot drift apart silently.
+    //
+    // Three directories, not ~/.claude entire (audit S1): that tree also holds
+    // .credentials.json, settings.json, shell snapshots and every project transcript.
+    assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
+    assert.deepEqual([...DEFAULT_REF_ROOTS], ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents']);
+    assert.equal(
+      plist.EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS,
+      DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2))).join(':'),
+    );
+
+    // ...and an explicit value is carried verbatim, colon-separated list and all.
+    const agents = path.join(workDir, 'LaunchAgents-refroots');
+    const chosen = `${path.join(workDir, 'roots-a')}:${path.join(workDir, 'roots-b')}`;
+    const r = spawnSync('bash', [installScript], {
+      env: {
+        ...env,
+        CLAUDE_BOARD_REF_ROOTS: chosen,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+        CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-refroots'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-refroots', 'claude-board', 'secret'),
+        STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-refroots.log'),
+        STUB_CLAUDE_STATE: path.join(workDir, 'claude-registrations-refroots.json'),
+        STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-refroots.log'),
+        STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-refroots.json'),
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(agents, 'claude-board.plist')], { encoding: 'utf8' });
+    assert.equal(asJson.status, 0, asJson.stderr);
+    assert.equal(JSON.parse(asJson.stdout).EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS, chosen);
+  });
+
+  await check('an upgrade carries the installed plist\'s reference roots forward instead of silently re-widening them', async () => {
+    // SECURITY.md tells the operator to narrow this boundary with
+    // `CLAUDE_BOARD_REF_ROOTS= ./install.sh`. install.sh rewrites the plist
+    // unconditionally and never read the old one back, so the ordinary upgrade -- `git
+    // pull && ./install.sh` from a clean shell, the variable long since out of the
+    // environment -- restored the default and rebooted the job with it, with nothing on
+    // screen saying so (audit NEW-2, 2026-07-31). Ablation: go back to
+    // `REF_ROOTS="${CLAUDE_BOARD_REF_ROOTS-$DEFAULT_REF_ROOTS}"` and step 2 comes back
+    // holding the default.
+    const agents = path.join(workDir, 'LaunchAgents-upgrade');
+    const upgradeEnv = {
+      ...env,
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+      CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-upgrade'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-upgrade', 'claude-board', 'secret'),
+      STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-upgrade.log'),
+      STUB_CLAUDE_STATE: path.join(workDir, 'claude-registrations-upgrade.json'),
+      STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-upgrade.log'),
+      STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-upgrade.json'),
+    };
+    const plistPath = path.join(agents, 'claude-board.plist');
+    const rootsNow = () => plistEnvOf(plistPath).CLAUDE_BOARD_REF_ROOTS;
+
+    // 1. the operator narrows, explicitly, exactly as SECURITY.md says to.
+    const narrowed = spawnSync('bash', [installScript], {
+      env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: '' }, encoding: 'utf8',
+    });
+    assert.equal(narrowed.status, 0, `stdout:\n${narrowed.stdout}\nstderr:\n${narrowed.stderr}`);
+    assert.equal(rootsNow(), '', 'an explicitly empty value must install as empty');
+
+    // 2. ...and an upgrade from a clean shell leaves that decision standing.
+    const upgraded = spawnSync('bash', [installScript], { env: upgradeEnv, encoding: 'utf8' });
+    assert.equal(upgraded.status, 0, `stdout:\n${upgraded.stdout}\nstderr:\n${upgraded.stderr}`);
+    assert.equal(rootsNow(), '', 'an upgrade must not restore the default over an explicit narrowing');
+
+    // 3. ...while an explicit value still wins over the carried-forward one, or the
+    //    knob would be a one-way door.
+    const widened = path.join(workDir, 'roots-upgrade');
+    const rewidened = spawnSync('bash', [installScript], {
+      env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: widened }, encoding: 'utf8',
+    });
+    assert.equal(rewidened.status, 0, `stdout:\n${rewidened.stdout}\nstderr:\n${rewidened.stderr}`);
+    assert.equal(rootsNow(), widened);
+
+    // 4. ...and whichever of the three happened, the resolved value is on screen. The
+    //    boundary moving is exactly the thing that must never be silent.
+    for (const r of [narrowed, upgraded, rewidened]) {
+      assert.match(r.stdout, /reference roots:/, 'the install summary must name the resolved roots');
+    }
+    assert.match(upgraded.stdout, /carried forward from/, 'and say where the value came from');
+  });
+
+  await check('the plist\'s CLAUDE_BOARD_REF_ROOTS confines a RUNNING daemon, not just the plist file', async () => {
+    // The check above this one asserts the plist CONTAINS a key, which is structurally
+    // the same shape as the WatchPaths assertion QUIRKS.md records as "a green check
+    // sitting on top of a dead mechanism" -- true, and about nothing. So this one takes
+    // the EnvironmentVariables dict install.sh just wrote, hands it to a real
+    // bin/daemon.mjs the way launchd hands a job its dict (nothing else inherited), and
+    // asks that daemon to resolve two references over its own gated HTTP route: one
+    // inside the configured root and one outside every root. What is NOT covered is
+    // launchctl's own delivery of the dict, because launchctl is stubbed in this suite
+    // and must be -- everything between install.sh and the daemon's boundary is.
+    const rootDir = path.join(workDir, 'live-root');
+    const outsideDir = path.join(workDir, 'live-outside');
+    const projectDir = path.join(workDir, 'live-project');
+    for (const d of [rootDir, outsideDir, projectDir]) mkdirSync(d, { recursive: true });
+    const allowed = path.join(rootDir, 'SKILL.md');
+    const forbidden = path.join(outsideDir, 'private.md');
+    writeFileSync(allowed, 'CONTENT-INSIDE-THE-CONFIGURED-ROOT\n', 'utf8');
+    writeFileSync(forbidden, 'CONTENT-OUTSIDE-EVERY-ROOT\n', 'utf8');
+
+    const agents = path.join(workDir, 'LaunchAgents-live');
+    const r = spawnSync('bash', [installScript], {
+      env: {
+        ...env,
+        CLAUDE_BOARD_REF_ROOTS: rootDir,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+        CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-live'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-live', 'claude-board', 'secret'),
+        STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-live.log'),
+        STUB_CLAUDE_STATE: path.join(workDir, 'claude-registrations-live.json'),
+        STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-live.log'),
+        STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-live.json'),
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+
+    const daemon = await spawnDaemonWithPlistEnv(path.join(agents, 'claude-board.plist'));
+    try {
+      const posted = await fetch(`http://127.0.0.1:${daemon.port}/api/board`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-claude-board-secret': daemon.secret },
+        body: JSON.stringify({
+          title: 'plist env round trip',
+          cwd: projectDir,
+          blocks: [
+            { kind: 'markdown', source: { path: allowed } },
+            { kind: 'markdown', source: { path: forbidden } },
+          ],
+        }),
+      });
+      const postedBody = await posted.text(); // read once: the failure message needs it too
+      assert.equal(posted.status, 200, postedBody);
+      const { boardId } = JSON.parse(postedBody);
+
+      const page = await fetch(`http://127.0.0.1:${daemon.port}/b/${boardId}`, {
+        headers: { 'x-claude-board-secret': daemon.secret },
+      });
+      assert.equal(page.status, 200);
+      const html = await page.text();
+      assert.ok(
+        html.includes('CONTENT-INSIDE-THE-CONFIGURED-ROOT'),
+        'the root named in the plist must be an allowlisted root in the running daemon',
+      );
+      assert.ok(
+        !html.includes('CONTENT-OUTSIDE-EVERY-ROOT'),
+        'and it must be the ONLY thing it widened -- a reference outside every root is still refused',
+      );
+    } finally {
+      daemon.cleanup();
+    }
+  });
+
+  await check('xml_escape is byte-safe: a non-UTF-8 byte in a path or a root does not abort the install', async () => {
+    // Every value install.sh splices into the plist goes through xml_escape, and a
+    // filename is bytes, not text. Under a UTF-8 locale BSD sed refuses input that is
+    // not valid UTF-8 with "RE error: illegal byte sequence" and exits non-zero -- and
+    // under `set -euo pipefail` that failing command substitution kills the whole
+    // install part-way through, having already written a log directory and possibly
+    // an MCP registration. One stray byte in a clone path or a reference root is
+    // enough (audit S9, 2026-07-31).
+    //
+    // Node cannot put such a byte into a child's environment (env values are UTF-8
+    // strings), so the function is lifted out of install.sh and exercised directly,
+    // under an explicitly UTF-8 locale so the trap is armed. Ablation: drop the
+    // LC_ALL=C from xml_escape and this exits 1 with sed's complaint on stderr.
+    const src = readFileSync(installScript, 'utf8');
+    const fn = src.match(/^xml_escape\(\) \{\n[\s\S]*?^\}$/m);
+    assert.ok(fn, 'install.sh must still define xml_escape as a top-level function');
+
+    const probe = path.join(workDir, 'xml-escape-probe.sh');
+    writeFileSync(probe, [
+      'set -euo pipefail',
+      fn[0],
+      "V=\"$(printf 'a\\xffb&c')\"",
+      'xml_escape "$V" | od -An -tx1 | tr -d " \\n"',
+      '',
+    ].join('\n'), 'utf8');
+
+    const r = spawnSync('bash', [probe], {
+      encoding: 'utf8',
+      env: { ...env, LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' },
+    });
+    assert.equal(r.status, 0, `xml_escape must not abort on a non-UTF-8 byte:\n${r.stderr}`);
+    const expected = Buffer.concat([
+      Buffer.from('a', 'latin1'), Buffer.from([0xff]), Buffer.from('b&amp;c', 'latin1'),
+    ]).toString('hex');
+    assert.equal(r.stdout.trim(), expected, 'the byte must survive untouched, with & still escaped');
   });
 
   await check('install refuses to report success when the daemon never answers /api/health', async () => {

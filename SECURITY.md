@@ -38,6 +38,53 @@ the daemon runs always-on under launchd as the login user, that read would be la
 past macOS TCC, which otherwise gates `~/Documents`, `~/Desktop` and `~/Downloads` per
 application.
 
+**Where a reference can reach.** A board renders file content by reference, and a
+reference resolves in exactly two places: inside the board's own project directory, or
+inside the reference allowlist — `CLAUDE_BOARD_REF_ROOTS`, colon-separated absolute
+paths. Anywhere else is refused, as a visible error on the block rather than a silent
+empty read. Every path is resolved through `realpath` before it is checked, so `../`
+traversal and a symlink aimed out of the project or out of a root are refused alike, and
+an absolute path is refused unless it lands inside a root. Each configured root gets the
+same validation the project directory gets: it must be an existing directory, and `/`,
+`$HOME` and anything above `$HOME` are refused — every project at once, plus keys,
+browser profiles and shell history. That last one is decided on the directory's `dev`
+and `inode`, not on how it is spelled, because macOS gives `$HOME` several equally real
+paths (a case-insensitive volume, and the `/System/Volumes/Data` firmlink) and a string
+comparison sees them as unrelated directories. A root that fails validation is dropped,
+never widened to something broader and never fatal to the daemon; a spec that cannot be
+parsed as written — an entry that is not an absolute path, which is what a directory
+name containing `:` degenerates into — grants nothing at all rather than granting some
+neighbouring directory nobody named.
+
+**What the default allowlist is, and how it gets there.** The installer writes
+`~/.claude/skills`, `~/.claude/commands` and `~/.claude/agents` into the launchd plist —
+three directories, not the whole of `~/.claude`, which also holds `.credentials.json`,
+`settings.json`, shell snapshots and every project's transcripts. An *absent*
+`CLAUDE_BOARD_REF_ROOTS` means an empty allowlist, i.e. the project directory alone, and
+that is deliberate: the daemon restarts itself whenever `src/` changes, so a default
+compiled into the code would take effect on machines that never reinstalled, during an
+ordinary `git pull`, with nothing printed and nobody asked. Running `install.sh` is the
+consent event for widening this boundary. Set the variable and it does exactly what it
+says, including `CLAUDE_BOARD_REF_ROOTS=$HOME/.claude` for the whole tree or
+`CLAUDE_BOARD_REF_ROOTS=` for none.
+
+The allowlist is wider than the project-directory-only boundary this had before it, and
+that was a decision rather than an oversight (`ADR.md` entry 3): resolving a reference is
+only ever a read, and a session that could never show you the skill or command file it
+was discussing was the recurring case that forced it. The cost is worth stating plainly.
+A board embeds what it resolves, so anything under an allowlisted root can end up quoted
+into a board and readable by anyone holding the session credential — the allowlist is the
+set of directories you are willing to have quoted. Neither the daemon nor a reference
+ever writes to any of it.
+
+**The file that is checked is the file that is read.** The boundary above is enforced on
+a path, and a path is a name, not a thing: checking a name and then re-opening it is two
+lookups with a gap in between, and anything that can write inside an allowlisted root can
+change what the name means during that gap. So a reference is opened exactly once,
+refusing to follow a symlink in any component while it does, and every subsequent
+question — is it a regular file, is it under the 512 KiB cap, what are its bytes — is
+asked of that one open descriptor rather than of the name again.
+
 **Another local process reading your boards, or forging an answer on one.** Every route
 but `GET /api/health` and `GET /auth/<token>` requires a credential — the index, a board
 page, archive search, the blocking wait and the event stream alike. (`/auth/<token>` is
@@ -77,6 +124,20 @@ therefore fully trusted by the daemon — it can read every board, answer any of
 mint itself a browser credential. This is not fixable at this layer: it is the same
 posture as an ssh private key or a shell profile, and every gate above is built on that
 file staying yours.
+
+**A hard link into an allowlisted reference root.** The reference boundary is enforced on
+`realpath`, which resolves symlinks and is therefore blind to hard links — a hard link is
+not a pointer to a file, it is a second, equally real name for the same inode, and nothing
+in the filesystem marks one of the two as the original. So `ln ~/Documents/private.md
+~/.claude/skills/x.md` puts a file that is nowhere near an allowlisted root at a path that
+is, and a board can then quote it. This was already true of the project directory before
+the allowlist existed; what is new is that the roots are always present and are exactly
+the directories an agent writes to, so it is worth stating rather than leaving implicit.
+The one candidate fix — refusing any file with a link count above one — was rejected
+because it refuses legitimately hard-linked content (content-addressed stores, `cp -l`,
+some backup tools) and there is no test that separates the two cases. Anything that can
+create such a link is running as you, and so is already inside the boundary directly
+above.
 
 **A browser extension with host permissions on the profile holding the credential.** It
 can read boards and submit as you. `HttpOnly` stops page script, not extensions.
@@ -125,7 +186,7 @@ diagrams do not.
 
 **What a board file contains.** Whatever source you asked the agent to render, snapshotted
 at post time, plus every question and answer. Treat the store as you would treat the
-repository it quotes.
+repository it quotes — and the allowlisted roots it may also quote, above.
 
 ## Open
 

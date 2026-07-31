@@ -27,6 +27,7 @@ import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
+import { badgeLabel } from './badge.mjs';
 
 /** Content-Security-Policy for every board page, both as the HTTP response
  * header src/server.mjs sends on every live request AND (ticket 10,
@@ -104,8 +105,39 @@ const COMMENT_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none
  * as the comment infrastructure it sits beside). */
 const MODE_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>';
 
+/** The back-to-index control's icon: a plain left arrow, distinct from the
+ * comment/mode glyphs above so three chrome controls never read as the same
+ * affordance. Ticket 04 (SPEC_POLISH.md criterion 4): `.board-head` otherwise
+ * has no way back to `/` once a reviewer is on a board page. */
+const BACK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="M11 18l-6-6 6-6"/></svg>';
+
+/** The diagram-expand control's icon (SPEC_POLISH.md ticket 05): four arrowheads
+ * pointing out of the corners, the standard "open this full size" glyph and
+ * distinct from the three above. Inline SVG for the same reason every other icon
+ * here is — the standalone archive has no network to fetch anything from. */
+const EXPAND_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg>';
+
 function commentModeToggle() {
   return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false">${MODE_ICON}<span class="mode-toggle-label">Comment mode: off</span></button>`;
+}
+
+/** SPEC_POLISH.md ticket 05, criterion 10: the explicit control that opens a
+ * diagram in the full-viewport lens. Explicit, and never the diagram itself —
+ * "the click gesture on a diagram keeps its current meaning in both modes" (the
+ * spec's own Decision), so clicking a node still means "comment on this node"
+ * with comment mode on and still means nothing with it off.
+ *
+ * Rendered server-side rather than injected by src/ui.mjs so it is in the
+ * standalone archive's own bytes, where the lens is still expected to pan and
+ * zoom (spec: "The lens is view-only under `body.readonly`" — view-only, not
+ * absent). That is also why src/ui.mjs's readonly pass, which hard-disables
+ * every other button on the page, skips this one by class.
+ *
+ * src/ui.mjs's `wireDiagramExpand` removes it again if mermaid never produced an
+ * SVG (CDN unreachable, invalid chart): a control that opens an empty lens is
+ * worse than no control. */
+function expandButton(blockId) {
+  return `<button type="button" class="expand-btn" data-expand-for="${escAttr(blockId)}" aria-label="Open this diagram in the lens">${EXPAND_ICON}expand</button>`;
 }
 
 function commentButton(blockId, kind, ref, label, inline) {
@@ -367,7 +399,7 @@ function renderMermaidBlock(block, board, commentsByBlock, historical) {
   </div>`;
   return `
 <section class="block mermaid-block" data-block-id="${escAttr(block.id)}" data-block-kind="mermaid">
-  <div class="block-kicker">Mermaid ${commentButton(block.id, 'block')} ${stageHint('turn on comment mode to click a node and comment on it')}</div>
+  <div class="block-kicker">Mermaid ${commentButton(block.id, 'block')} ${block.error ? '' : expandButton(block.id)} ${stageHint('turn on comment mode to click a node and comment on it')}</div>
   ${body}
   ${pageDomPinLayer(block.id)}
   ${commentArea(block.id, commentsByBlock, historical)}
@@ -629,19 +661,46 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
  * exempt from the "no raw literal outside a token block" rule for exactly
  * this reason -- see test/check-pure.mjs, which asserts the isolation
  * property this comment describes (no custom property at all) rather than
- * merely "some hex is present". Hand-kept in sync with --accent's DARK value
- * in src/styles.mjs (QUIRKS.md "Two stylesheets, one palette" -- the stage
- * has no light variant, by the same design tradeoff as before this
- * feature); test/check-pure.mjs asserts that sync too. */
-export const STAGE_ACCENT_HEX = '#7c9cff';
+ * merely "some hex is present".
+ *
+ * Pinned to --accent's LIGHT value, which is not a typo and not the palette
+ * this file's document belongs to. The stage renders on `--stage-bg`, and
+ * that token is '#fff' in BOTH palettes (src/styles.mjs) -- an agent-authored
+ * mock assumes a white canvas, so the stage deliberately does not follow the
+ * page. That makes this outline theme-INDEPENDENT: there is no light variant
+ * to add, only a right and a wrong colour for white. The dark accent is the
+ * wrong one. src/styles.mjs's own LIGHT palette comment already records why
+ * ("#7c9cff on white is ~2.3:1"), which is the reason --accent moves to the
+ * mid-blues under light; the stage was left holding the value that comment
+ * rejects, on the one surface that is always white, so the outline sat at
+ * 2.61:1 -- under the 3:1 WCAG minimum for non-text UI, on the ONLY
+ * per-element targeting feedback the stage gives. The light accent is 6.65:1
+ * against the same white. test/check-pure.mjs asserts the premise (both
+ * palettes' --stage-bg identical), the requirement (contrast >= 3:1 against
+ * it) and the drift guard (equality with --accent's light value), so a
+ * palette change that breaks any of the three fails there rather than here. */
+export const STAGE_ACCENT_HEX = '#3251c9';
 
 export function stageAgentScript() {
   return `<script>(function () {
   var CB = 'cb-stage';
   var HOVER_CLASS = 'cb-anchor-hover';
+  // SPEC_POLISH.md ticket 02, criterion 12: applied instead of HOVER_CLASS to
+  // an element whose own ref is already in 'sentRefs' below -- the stage-side
+  // half of the same de-affordance src/ui.mjs applies page-side via its own
+  // .cb-anchor-sent (same class name, by the convention QUIRKS.md "Two
+  // stylesheets, one palette" already documents for HOVER_CLASS -- two
+  // separate documents, one name).
+  var SENT_CLASS = 'cb-anchor-sent';
   var commentMode = false;
   var hovered = null;
   var styleInjected = false;
+  // The dom refs (this block's own, index-chain form -- stepsToPath's output)
+  // that already carry a SENT comment, as told by the parent's 'mode' message
+  // below. The stage cannot know this on its own: 'sent' is a fact about
+  // board.comments, which lives only in the parent document (ticket 10's
+  // isolation -- this document never sees the board JSON at all).
+  var sentRefs = [];
 
   var buildSteps = ${buildSteps.toString()};
   var stepsToPath = ${stepsToPath.toString()};
@@ -661,8 +720,9 @@ export function stageAgentScript() {
   // not reach in here (isolation is the point), so this injected stylesheet
   // is a literal hex (STAGE_ACCENT_HEX's own comment, above, explains why a
   // custom property would defeat that isolation rather than merely being
-  // redundant with it), kept in step with --accent's DARK value in
-  // src/styles.mjs by hand. Injected LAZILY (only once comment mode has
+  // redundant with it, and why it tracks --accent's LIGHT value: the stage is
+  // white in both palettes, so this outline is theme-independent). Injected
+  // LAZILY (only once comment mode has
   // genuinely turned on at least once) rather than unconditionally at script
   // start -- a read-only archive never sends 'mode' with commentMode true at
   // all, so its stage document never gains this stylesheet, matching this
@@ -673,13 +733,27 @@ export function stageAgentScript() {
     styleInjected = true;
     try {
       var style = document.createElement('style');
-      style.textContent = '.' + HOVER_CLASS + ' { outline: 2px solid ${STAGE_ACCENT_HEX} !important; outline-offset: 2px; cursor: pointer !important; } body { cursor: default; }';
+      // SPEC_POLISH.md ticket 02 criterion 12: a SENT_CLASS rule alongside the
+      // ordinary hover one. The hover rule's colour is STAGE_ACCENT_HEX, kept in
+      // step with src/styles.mjs by hand (QUIRKS.md "Two stylesheets, one
+      // palette") because this stylesheet cannot reach the page's tokens -- one
+      // value for both palettes, since the stage is white in both; the
+      // SENT_CLASS rule needs no colour of its own, only a cursor, so it adds
+      // nothing new to keep in step. No outline at all (not even 'none' -- there
+      // is simply no rule adding one), so an already-sent element reads as inert
+      // rather than as a differently-styled target.
+      style.textContent = '.' + HOVER_CLASS + ' { outline: 2px solid ${STAGE_ACCENT_HEX} !important; outline-offset: 2px; cursor: pointer !important; } '
+        + '.' + SENT_CLASS + ' { cursor: not-allowed !important; } '
+        + 'body { cursor: default; }';
       (document.head || document.body).appendChild(style);
     } catch (e) { /* no hover highlight; the click below still anchors */ }
   }
 
   function clearHover() {
-    if (hovered && hovered.classList) hovered.classList.remove(HOVER_CLASS);
+    if (hovered && hovered.classList) {
+      hovered.classList.remove(HOVER_CLASS);
+      hovered.classList.remove(SENT_CLASS);
+    }
     hovered = null;
   }
 
@@ -689,9 +763,23 @@ export function stageAgentScript() {
     clearHover();
     if (!el || el.nodeType !== 1 || el === document.body || !el.classList) return;
     hovered = el;
-    hovered.classList.add(HOVER_CLASS);
     var steps = buildSteps(document.body, el);
-    post({ type: 'hover', ref: (steps && steps.length) ? stepsToPath(steps) : null, tag: el.tagName, text: el.textContent });
+    var ref = (steps && steps.length) ? stepsToPath(steps) : null;
+    // Criterion 12: an element whose own ref already carries a SENT comment is
+    // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
+    // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
+    // below still posts 'click' unconditionally, exactly as before; "clicking
+    // it does nothing" is already enforced on the other side of the channel
+    // (src/ui.mjs's handleStageClick calls isSentAnchor before ever opening a
+    // form), which is the side that actually holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way
+    // to distinguish on its own.
+    if (ref !== null && sentRefs.indexOf(ref) !== -1) {
+      hovered.classList.add(SENT_CLASS);
+    } else {
+      hovered.classList.add(HOVER_CLASS);
+    }
+    post({ type: 'hover', ref: ref, tag: el.tagName, text: el.textContent });
   });
   document.body.addEventListener('mouseout', function () {
     clearHover();
@@ -723,6 +811,15 @@ export function stageAgentScript() {
     if (!data || typeof data !== 'object' || data.cb !== CB || typeof data.type !== 'string') return;
     if (data.type === 'mode') {
       commentMode = !!data.commentMode;
+      // SPEC_POLISH.md ticket 02: 'sentRefs' widens this message (still 'mode',
+      // not a new type -- sent-ness is exactly the kind of fact that matters
+      // precisely when mode changes). Shape-checked like every other field this
+      // channel carries: an absent or malformed list leaves 'sentRefs'
+      // whatever it already was, rather than guessing or throwing, and a
+      // non-string entry is dropped rather than compared against later.
+      if (Array.isArray(data.sentRefs)) {
+        sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
+      }
       if (commentMode) ensureHoverStyle(); else clearHover();
       return;
     }
@@ -916,6 +1013,13 @@ export function renderBoardPage(board) {
   const commentsByBlock = groupCommentsByBlock(resolvedComments);
   const roundsHtml = board.rounds.map(r => renderRoundSection(board, r.n, commentsByBlock)).join('\n');
   const boardForClient = { ...board, comments: resolvedComments };
+  // The page always loads scrolled to the top, so the topmost round -- the
+  // first entry of `board.rounds`, always `1` (src/board.mjs never reorders or
+  // skips a round number) -- is the correct first-paint value for N before any
+  // client script has run. src/ui.mjs's IntersectionObserver (criterion 7)
+  // takes over the moment it can measure real layout, and corrects this if the
+  // page was opened scrolled elsewhere (e.g. a deep-linked anchor).
+  const initialRoundInView = board.rounds[0] ? board.rounds[0].n : 1;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -930,14 +1034,17 @@ export function renderBoardPage(board) {
 <div class="board-shell">
   <div class="readonly-banner">Read-only: opened from disk, without the daemon running.</div>
   <header class="board-head">
-    <div>
-      <h1>${escHtml(board.title || 'Untitled board')}</h1>
-      <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>
+    <div class="board-head-title">
+      <a class="back-to-index" href="/" aria-label="All threads" title="All threads">${BACK_ICON}</a>
+      <div>
+        <h1>${escHtml(board.title || 'Untitled board')}</h1>
+        <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>
+      </div>
     </div>
     <div class="board-head-actions">
       ${commentModeToggle()}
       ${themeToggle()}
-      <div class="round-badge">round ${board.rounds.length}</div>
+      <button type="button" class="round-badge" id="round-badge">${escHtml(badgeLabel(initialRoundInView, board.rounds.length))}</button>
     </div>
   </header>
   <div class="blocks" id="blocks">
@@ -979,6 +1086,15 @@ export function renderRefusalPage(recoveryCommand) {
 <meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
 <title>claude-board — this browser is not authorized</title>
 <style>
+  /* Self-contained by design (see this function's own comment), so this page
+     cannot reach src/styles.mjs's tokens and cannot read the board's saved
+     theme either -- it has no script, and the preference lives behind one.
+     The OS preference is the only theme signal available here, which is the
+     right one for a standalone error page: it is reached by a browser that,
+     by definition, holds nothing of ours. Hand-maintained against the two
+     palettes, in the same sense as the stage stylesheet (QUIRKS.md "Two
+     stylesheets, one palette") and for the same reason. */
+  :root { color-scheme: dark; }
   body { margin: 0; background: #0f1115; color: #d7dce5; font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   main { max-width: 40rem; margin: 12vh auto; padding: 0 1.5rem; }
   h1 { font-size: 1.35rem; margin: 0 0 .75rem; color: #f2f5fa; }
@@ -986,6 +1102,14 @@ export function renderRefusalPage(recoveryCommand) {
   pre { background: #171a21; border: 1px solid #262b36; border-radius: 6px; padding: .85rem 1rem; overflow-x: auto; user-select: all; }
   code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #9fd0ff; }
   .muted { color: #8b93a3; font-size: .9rem; }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; }
+    body { background: #eef1f7; color: #171c2a; }
+    h1 { color: #0d1220; }
+    pre { background: #f5f6fb; border-color: rgba(0, 0, 0, 0.18); }
+    code { color: #3a4c78; }
+    .muted { color: #515c76; }
+  }
 </style>
 </head>
 <body>

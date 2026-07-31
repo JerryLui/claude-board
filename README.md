@@ -180,9 +180,11 @@ More traps in [QUIRKS.md](QUIRKS.md).
 
 The interactive layer — drag-to-rank, click-to-comment, notifications, live hydration
 — is verified by hand, not by the suite. That is a deliberate limit, not an oversight:
-this project has three recorded instances of green checks accompanying a completely
-dead feature, twice from asserting structure instead of behaviour and once from mocking
-someone else's renderer wrongly.
+this project has a running record of green checks accompanying a completely dead
+feature, most from asserting structure instead of behaviour, one from mocking someone
+else's renderer wrongly, and more from browser mechanisms (pointer capture, layout
+measurement) the suite's DOM stand-in has no model of at all. See [QUIRKS.md](QUIRKS.md)
+for each recorded instance and why the suite missed it.
 
 ## Portability
 

@@ -44,7 +44,12 @@
 // input, and never opens an SSE connection.
 
 import { computeBoardPatch } from './patch.mjs';
-import { composeHint, parseMermaidDomId, MERMAID_NODE_SELECTOR } from './anchor.mjs';
+import {
+  composeHint, parseMermaidDomId, MERMAID_NODE_SELECTOR,
+  findPendingCommentForAnchor, removePendingComment,
+} from './anchor.mjs';
+import { badgeLabel } from './badge.mjs';
+import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
 import { THEME_CHANGE_EVENT } from './theme.mjs';
 
 // Ticket 04 (light theme): mermaid variable -> CSS token, read at call time
@@ -90,8 +95,8 @@ export const ui = `
   // snapshotted from arbitrary files (src/markdown.mjs's own comment on the
   // threat model), and a heading '## Board data' slugifies to a SECOND
   // id="board-data" on an <h2> that renders before this real script tag in
-  // tree order (audit 2026-07-31, finding P1). getElementById('board-data')
-  // used to return that heading, JSON.parse threw on its text, and the whole
+  // tree order (audit 2026-07-31, finding P1). A bare id lookup for
+  // 'board-data' used to return that heading, JSON.parse threw on its text, and the whole
   // client IIFE died before body.readonly was ever applied -- a file:// archive
   // then rendered as if it were a live, writable board. No heading is ever a
   // <script>, so this selector cannot be satisfied by anything markdown emits.
@@ -115,6 +120,14 @@ export const ui = `
   var STAGE_HOVER_CLASS = 'cb-anchor-hover';
 
   var pendingComments = [];
+  // Ticket 02: a stable per-entry id, never reused, so a queued comment can be
+  // addressed for edit/delete even when several on the same block share one
+  // anchor (a whole-block comment carries no ref at all -- see
+  // removePendingComment's own comment, src/anchor.mjs). Never sent to the
+  // server as anything meaningful -- applySubmit (src/board.mjs) only ever
+  // reads blockId/anchor/text off a posted comment, so an extra id field is
+  // silently ignored there.
+  var nextPendingId = 1;
   var selections = {};   // qid -> string (single/text) | string[] (multi/rank)
   var notes = {};
   var deferred = {};     // qid -> bool, the per-question defer affordance
@@ -199,6 +212,22 @@ export const ui = `
   // land on" is not.
   var composeHint = ${composeHint.toString()};
 
+  // Ticket 02 (SPEC_POLISH.md): the two pure functions its own log calls out
+  // for extraction, spliced in the same way and for the same reason as
+  // composeHint just above -- src/anchor.mjs is the module test/check-pure.mjs
+  // imports and checks directly, and this is the exact same code, not a
+  // second hand-written copy that could silently drift. See that module's own
+  // comment for the full design (why 'id', not 'blockId'+'anchor', identifies
+  // a queued comment for removal; why a sent comment can never match).
+  var findPendingCommentForAnchor = ${findPendingCommentForAnchor.toString()};
+  var removePendingComment = ${removePendingComment.toString()};
+
+  // Ticket 04's badge label, same technique again: 'round N of M' is pure
+  // formatting with no DOM, and src/badge.mjs is what test/check-pure.mjs
+  // exercises directly -- embedding its literal source here (not a hand copy)
+  // is what proves this page renders the exact string that was checked.
+  var badgeLabel = ${badgeLabel.toString()};
+
   function seedAnswers(blockIds, boardData) {
     blockIds.forEach(function (id) {
       var a = (boardData.answers || {})[id];
@@ -218,8 +247,23 @@ export const ui = `
   // a real <textarea>/<button> still accepts keyboard input and native HTML5 drag
   // unless actually disabled. Belt and suspenders — every input-capable element is
   // hard-disabled here, on top of every handler's own readonly guard.
+  //
+  // One deliberate exception (SPEC_POLISH.md ticket 05): the diagram's expand
+  // control. 'The lens is view-only under body.readonly. Pan and zoom work in a
+  // standalone archive (pure JS, no network, consistent with the archive's
+  // guarantee); the comment gesture inside it is gated exactly like every other
+  // comment gesture' -- so the control that OPENS it has to stay live, while the
+  // gesture INSIDE it stays gated by the same 'readonly || !commentMode' guard
+  // every other anchor-minting handler carries. Skipped by class here rather
+  // than re-enabled afterwards, so there is never a frame in which it is
+  // disabled. (Ticket 04's round badge is the counter-example this is written
+  // against: it became a <button>, this loop disabled it, and nobody noticed
+  // until review.)
   if (readonly) {
-    qsa('textarea, input, button').forEach(function (el) { el.disabled = true; });
+    qsa('textarea, input, button').forEach(function (el) {
+      if (el.classList && el.classList.contains('expand-btn')) return;
+      el.disabled = true;
+    });
     qsa('.rank-list li[draggable]').forEach(function (li) { li.removeAttribute('draggable'); });
     // Ticket 03 (src/theme.mjs): the theme control is the one exception -- an
     // archive reader is exactly who needs it. Re-enabled right after the
@@ -247,25 +291,55 @@ export const ui = `
   // ever non-empty for anchorKind 'mermaid'; every other caller omits it and the
   // stored attribute is just the empty string, harmless since the submit
   // handler below only reads it for that one kind.
-  // Every id-by-blockId lookup in this file (comment-form-/comment-target-/
-  // comment-list-<blockId>, board-data, theme-toggle, comment-mode-toggle,
-  // send-btn/discuss-btn/send-status, blocks) is tag-qualified rather than a
-  // bare getElementById -- board content is markdown snapshotted from
-  // arbitrary files (src/markdown.mjs's threat-model comment), and a heading
-  // or top-level list item can mint an id identical to any of these
-  // (slugify), including a composed one like 'comment-form-q1'. Only render.mjs's
-  // OWN element ever carries the matching tag (<form>, <div>, <button>, ...)
-  // for one of these ids -- a heading is always <h1>-<h6> and a list item is
-  // always <li>, neither of which any of these lookups' tag qualifiers can
-  // ever match -- so tag-qualifying removes the collision, and the tree-order
-  // dependence it used to rely on, entirely (audit 2026-07-31, findings P1/P2/L1).
-  function openCommentForm(blockId, anchorKind, anchorRef, anchorHint, anchorDomRef) {
+  //
+  // editing (SPEC_POLISH.md ticket 02, criterion 1) is the existing
+  // pendingComments entry this same anchor already matched
+  // (findPendingCommentForAnchor), found by the caller -- never re-derived
+  // here. When present, the form is stamped with the entry's own id and the
+  // input is prefilled with its text, so THIS form's submit handler (below)
+  // replaces that entry rather than queuing a duplicate. Every caller that has
+  // no such entry (including every '.comment-btn' click, which never looked
+  // for one) omits it, which is what clears any stale edit-target left over
+  // from the last anchor this same per-block form happened to be opened for.
+  //
+  // Every id lookup in this file -- the per-block ones (form#comment-form-,
+  // div#comment-target-, div#comment-list-<blockId>) and the page-wide ones
+  // (script#board-data, button#theme-toggle, button#comment-mode-toggle,
+  // button#send-btn/button#discuss-btn/span#send-status, button#round-badge,
+  // div#blocks) -- is tag-qualified rather than a bare getElementById. Board
+  // content is markdown snapshotted from arbitrary files (src/markdown.mjs's
+  // threat-model comment), and a heading or top-level list item can mint an id
+  // identical to any of these (slugify), including a composed one like
+  // 'comment-form-q1'. Only render.mjs's OWN element ever carries the matching
+  // tag (<form>, <div>, <button>, ...) for one of these ids -- a heading is
+  // always <h1>-<h6> and a list item is always <li>, neither of which any of
+  // these lookups' tag qualifiers can ever match -- so tag-qualifying removes
+  // the collision, and the tree-order dependence it used to rely on, entirely
+  // (audit 2026-07-31, findings P1/P2/L1).
+  //
+  // Two of these are not obvious from the id alone and were checked against
+  // src/render.mjs rather than assumed: 'round-badge' is a <button> (ticket 04
+  // promoted it from the <div> it used to be), and 'comment-list-<blockId>' is
+  // a <div>, not a <ul>. And the qualifier survives the diagram lens: lensAdopt
+  // MOVES the real div#comment-target-/form#comment-form- into a <dialog> that
+  // lensOpen appended to document.body, so both stay in this document and a
+  // document-rooted qualified selector still finds exactly one of each while
+  // the lens is open (what it leaves behind is a <span class="lens-slot">,
+  // which carries no id at all).
+  //
+  // test/check-archive-ids.mjs pins both halves: a real board whose markdown
+  // mints every one of these ids as a heading, and a static sweep of all three
+  // client scripts that fails the moment a bare getElementById (or an
+  // unqualified '#id' selector) comes back.
+  function openCommentForm(blockId, anchorKind, anchorRef, anchorHint, anchorDomRef, editing) {
     var form = document.querySelector('form#comment-form-' + blockId);
     if (!form) return;
     form.setAttribute('data-anchor-kind', anchorKind);
     form.setAttribute('data-anchor-ref', anchorRef || '');
     form.setAttribute('data-anchor-label', anchorHint || '');
     form.setAttribute('data-anchor-domref', anchorDomRef || '');
+    if (editing) form.setAttribute('data-editing-id', String(editing.id));
+    else form.removeAttribute('data-editing-id');
     var target = document.querySelector('div#comment-target-' + blockId);
     if (target) {
       target.textContent = anchorKind === 'block' ? 'commenting on: whole block' : 'commenting on: ' + (anchorHint || anchorRef);
@@ -276,7 +350,92 @@ export const ui = `
     }
     form.classList.add('open');
     var input = form.querySelector('input[type=text]');
-    if (input) input.focus();
+    if (input) {
+      // A DRAFT IN PROGRESS IS NEVER SILENTLY THROWN AWAY (finding NEW-3). This
+      // used to be an unconditional 'input.value = editing ? editing.text : """"',
+      // which was harmless while a comment form was only opened by pressing an
+      // explicit button -- but comment mode makes EVERY click on EVERY block
+      // element open it, so one stray click halfway through writing a remark
+      // wiped what had been typed, with no undo and nothing to say it had
+      // happened. New behaviour introduced by this batch, not old behaviour.
+      //
+      // So the field is only ever written when there is something to write:
+      //   - an 'editing' target -- criterion 1's whole point is that reopening a
+      //     queued comment shows that comment's own text; the reviewer clicked
+      //     an element they know already carries one.
+      //   - an empty (or whitespace-only) field, where there is nothing to lose.
+      // A non-empty draft otherwise travels to the newly-clicked anchor
+      // untouched. That is deliberate rather than a compromise: the
+      // 'commenting on:' label directly above the field is rewritten in the same
+      // call and names the new target, so the reviewer can see where the text
+      // will land -- visible reattachment, and reversible (criterion 2's delete
+      // control), rather than invisible destruction.
+      if (editing) input.value = editing.text;
+      else if (!String(input.value || '').trim()) input.value = '';
+      input.focus();
+    }
+  }
+
+  // Every SENT comment whose anchor STILL RESOLVES against the board as it
+  // stands right now. src/board.mjs's resolveComment has already made that
+  // call server-side and stamped its verdict on every embedded comment; this
+  // is where that verdict is honoured rather than ignored.
+  //
+  // The distinction is load-bearing for criterion 12, not bookkeeping: an
+  // amend that replaces a block leaves the comments anchored into its old
+  // content 'resolved: false' with a 'lost' label -- their refs name nothing
+  // on the page any more. A LIVE element that happens to sit at the same
+  // index path in the NEW content is an unrelated element, and treating it as
+  // sent would de-affordance it permanently, with no comment on it and no way
+  // for the reviewer to find out why clicking it does nothing.
+  // src/render.mjs's stageAgentScript delegates exactly this judgement to
+  // here, in its own words: the parent is "the side that actually holds
+  // board.comments and can tell a resolved sent comment from a stale ref this
+  // document has no way to distinguish on its own".
+  //
+  // 'resolved !== false' rather than plain truthiness: every path through
+  // resolveComment sets the field, but a board.comments entry embedded by an
+  // older server build carries no such field at all, and must keep counting
+  // as sent rather than silently becoming invisible here.
+  function liveSentComments() {
+    return (board.comments || []).filter(function (c) { return c && c.resolved !== false; });
+  }
+
+  // SPEC_POLISH.md ticket 02, criterion 12: does blockId+anchor already carry a
+  // SENT comment -- board.comments, never pendingComments. Reuses
+  // findPendingCommentForAnchor's own kind+ref match rule against a different
+  // array rather than a second copy of it (see that function's own comment,
+  // src/anchor.mjs): its name says what it's FOR, not that its match rule is
+  // exclusive to the pending queue. Every one of the anchor-minting
+  // click/hover handlers below calls this before treating an element as a
+  // comment target at all -- a sent comment's element is not prefilled, not
+  // editable, and not even hoverable as a target: it is simply no longer one.
+  // Kind-agnostic on purpose: it matches on whatever kind+ref it is handed, so
+  // the 'md' anchor button, the generic 'dom' click, the diagram node and the
+  // stage all ask it the same question about their own anchor shape.
+  function isSentAnchor(blockId, anchor) {
+    return !!findPendingCommentForAnchor(liveSentComments(), blockId, anchor);
+  }
+
+  // SPEC_POLISH.md ticket 02, criterion 12 (html-stage half): the dom refs
+  // already carrying a SENT comment on blockId, in the ref-only shape the
+  // stage's own postMessage 'mode' message carries (below) -- the parent is
+  // what holds board.comments, and the stage's isolation (ticket 10: no
+  // allow-same-origin, so contentDocument is unreachable) means it has no way
+  // to learn this on its own. Only 'dom'-kind anchors: an html-stage's own
+  // ref shape is always 'dom' (see handleStageClick), so a 'block'/'md'/
+  // 'mermaid' comment on the same block is simply not this stage's concern.
+  //
+  // Sourced from liveSentComments(), not board.comments raw: a ref whose
+  // comment no longer resolves is a STALE index path, and shipping it to the
+  // stage de-affordances whatever unrelated element now happens to sit at that
+  // path -- see liveSentComments' own comment, and src/render.mjs's
+  // stageAgentScript, which names this side as the one that has to make that
+  // call.
+  function sentDomRefsForBlock(blockId) {
+    return liveSentComments()
+      .filter(function (c) { return c.blockId === blockId && c.anchor && c.anchor.kind === 'dom'; })
+      .map(function (c) { return c.anchor.ref; });
   }
 
   // --- element-level anchoring (ticket 06): click an element inside an html    ---
@@ -496,18 +655,151 @@ export const ui = `
     }));
   }
 
+  /** The short label shown next to a pending entry's number -- exactly
+   * src/render.mjs's anchorTag rule for an anchor that is always resolved (a
+   * comment that is merely queued has nothing to have gone lost yet),
+   * duplicated here for the same reason buildHint/extractHint are duplicated
+   * rather than imported: the served page has no import graph at runtime (see
+   * this file's header comment). */
+  function pendingAnchorTag(anchor) {
+    var kind = anchor && anchor.kind;
+    if (kind === 'md') return anchor.label;
+    if (kind === 'dom') return anchor.hint || anchor.ref;
+    if (kind === 'mermaid') return anchor.hint || anchor.ref;
+    return 'block';
+  }
+
+  /** Build one queued comment's '.comment-item.comment-pending' list entry,
+   * numbered 'n' -- SPEC_POLISH.md ticket 02 criteria 2/3: it carries a delete
+   * control ('.comment-delete') a SENT comment's server-rendered entry
+   * (src/render.mjs's commentArea) never emits, and 'data-pending-id' names
+   * exactly which pendingComments entry it is, for the delete listener
+   * below. */
+  function renderPendingCommentItem(entry, n) {
+    var item = document.createElement('div');
+    item.className = 'comment-item comment-pending';
+    item.setAttribute('data-anchor-kind', entry.anchor.kind);
+    if (entry.anchor.ref) item.setAttribute('data-anchor-ref', entry.anchor.ref);
+    item.setAttribute('data-block-id', entry.blockId);
+    item.setAttribute('data-pending-id', String(entry.id));
+    var label = document.createElement('span');
+    label.className = 'comment-anchor';
+    label.textContent = '#' + n + ' · ' + pendingAnchorTag(entry.anchor);
+    item.appendChild(label);
+    item.appendChild(document.createTextNode(entry.text));
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'comment-delete';
+    del.setAttribute('aria-label', 'Delete this comment');
+    del.textContent = '×';
+    item.appendChild(del);
+    return item;
+  }
+
+  /** Re-render every still-queued comment's list entry, EVERYWHERE on the page
+   * -- never just the one block a comment was added to or removed from.
+   * Criterion 2's renumbering is the reason: a provisional number is never
+   * stored on a pendingComments entry, it is 'nextCommentNumber() + index'
+   * (commentsWithPending above), one continuous sequence across the WHOLE
+   * board (PROTOCOL.md "Identifiers"), so deleting the middle of three queued
+   * comments shifts the number of every one that comes after it in
+   * pendingComments -- including one queued on a DIFFERENT block. Called
+   * after every push, edit and delete; a server-rendered (SENT) '.comment-item'
+   * is never touched here. */
+  function refreshPendingCommentItems() {
+    // '.remove()' rather than 'removeChild': this codebase's own DOM stand-in
+    // (test/dom-stand-in.mjs) implements 'replaceWith' (already relied on
+    // elsewhere in this file) but not every ChildNode method, and
+    // 'replaceWith()' with zero replacement nodes is the standard, real-DOM
+    // way to remove an element from its parent -- same technique, no new
+    // surface for the stand-in to be missing.
+    qsa('.comment-item.comment-pending', document).forEach(function (el) { el.replaceWith(); });
+    var base = nextCommentNumber();
+    pendingComments.forEach(function (entry, i) {
+      var list = document.querySelector('div#comment-list-' + entry.blockId);
+      if (list) list.appendChild(renderPendingCommentItem(entry, base + i));
+    });
+  }
+
+  // Half a pin's own minimum size ('.anchor-pin { min-width: 20px; height: 20px }',
+  // src/styles.mjs) -- how far inside a clipping edge its CENTRE has to sit for
+  // the whole badge to stay visible. See renderDomPins below.
+  var PIN_HALF = 10;
+
   function renderDomPins(blockId, stageRoot, layer) {
     layer.innerHTML = '';
     resetStackedOffset(layer);
+    // Ticket 03 (SPEC_POLISH.md): a code block's own <pre> gets a height cap
+    // (src/styles.mjs) and scrolls internally once its content passes it. This
+    // layer otherwise spans the WHOLE section -- fine for markdown/compare/
+    // question, whose content never scrolls on its own, but wrong for a capped
+    // code block: a line scrolled out of the pre's own viewport would still
+    // land somewhere INSIDE the section's box (over the kicker, say) and draw
+    // its pin at the wrong spot instead of the right one. Decision: clip
+    // rather than track. Resizing the layer (inline style) to exactly the
+    // <pre>'s own box -- combined with '.code-block .pin-layer' overflow:
+    // hidden (src/styles.mjs) -- means a line's computed position, once it
+    // falls outside that box, is simply clipped by the browser rather than
+    // drawn somewhere else in the section; no separate "is this line visible"
+    // check needed, and no change at all for a code block that failed to
+    // resolve (no <pre> to measure, so origin stays the whole section, exactly
+    // as every other block kind above). It reappears correctly the instant it
+    // scrolls back into view, since position is recomputed from a live
+    // getBoundingClientRect() on every call -- including the 'scroll' listener
+    // wirePageDomPins attaches to the <pre> below.
+    var pre = stageRoot.classList && stageRoot.classList.contains('code-block')
+      ? stageRoot.querySelector('pre') : null;
+    var originEl = pre || stageRoot;
+    var clipBox = null;
+    if (pre && stageRoot.getBoundingClientRect && pre.getBoundingClientRect) {
+      var sectionBox = stageRoot.getBoundingClientRect();
+      var preBox = pre.getBoundingClientRect();
+      // clientTop/clientLeft, not zero (finding NEW-4): getBoundingClientRect
+      // returns BORDER boxes, but an absolutely-positioned child's top/left
+      // resolve against its containing block's PADDING box. '.block' carries a
+      // 1px border, so every pin in a code block was drawn 1px down and 1px
+      // right of where it belonged -- small, but it is also the exact offset
+      // that pushed a pin anchored at the pre's own origin fully outside the
+      // clipping box. Guarded with '|| 0': the DOM stand-in has no such
+      // property, and an undefined here would turn every offset into NaN.
+      layer.style.top = (preBox.top - sectionBox.top - (stageRoot.clientTop || 0)) + 'px';
+      layer.style.left = (preBox.left - sectionBox.left - (stageRoot.clientLeft || 0)) + 'px';
+      layer.style.width = preBox.width + 'px';
+      layer.style.height = preBox.height + 'px';
+      layer.style.right = 'auto';
+      layer.style.bottom = 'auto';
+      clipBox = preBox;
+    }
     commentsWithPending().forEach(function (c) {
       if (c.blockId !== blockId || !c.anchor || c.anchor.kind !== 'dom') return;
       var steps = pathToSteps(c.anchor.ref);
       var el = steps.length && stageRoot ? resolveSteps(stageRoot, steps) : null;
       var position = null;
-      if (el && el.getBoundingClientRect && stageRoot.getBoundingClientRect) {
-        var stageBox = stageRoot.getBoundingClientRect();
+      if (el && el.getBoundingClientRect && originEl.getBoundingClientRect) {
+        var originBox = originEl.getBoundingClientRect();
         var elBox = el.getBoundingClientRect();
-        position = { left: elBox.left - stageBox.left, top: elBox.top - stageBox.top };
+        position = { left: elBox.left - originBox.left, top: elBox.top - originBox.top };
+        // A pin is drawn centred on its point ('translate(-50%, -50%)',
+        // src/styles.mjs), so a point sitting exactly on the clipping box's own
+        // edge loses three quarters of the pin -- its number included -- to
+        // '.code-block .pin-layer { overflow: hidden }'. Reachable, and not
+        // hypothetically: a <pre> is not in ANCHOR_CHROME_SELECTOR, so a
+        // comment-mode click on its padding gutter anchors the <pre> ITSELF and
+        // lands the pin at exactly {0, 0} (finding NEW-4).
+        //
+        // Nudged inside ONLY when the anchored element genuinely overlaps the
+        // visible box. That condition is what keeps the spec's decision intact
+        // -- "pins in a capped code block are clipped, not repositioned", so a
+        // line scrolled out of the pre's own viewport still HIDES rather than
+        // being drawn at the wrong line. This moves a pin at most half its own
+        // width, and only for an element that really is on screen.
+        if (clipBox && elBox.right > clipBox.left && elBox.left < clipBox.right
+          && elBox.bottom > clipBox.top && elBox.top < clipBox.bottom) {
+          position = {
+            left: Math.min(Math.max(position.left, PIN_HALF), Math.max(clipBox.width - PIN_HALF, PIN_HALF)),
+            top: Math.min(Math.max(position.top, PIN_HALF), Math.max(clipBox.height - PIN_HALF, PIN_HALF)),
+          };
+        }
       }
       placePin(layer, c, !!c.resolved, position);
     });
@@ -598,14 +890,45 @@ export const ui = `
     // A stage that arrives after the reviewer already turned comment mode on
     // (a fresh round pushed over SSE, say) needs to be told the CURRENT state,
     // not just future toggles -- setCommentMode only ever broadcasts to frames
-    // isWiredStage already recognises at the moment it runs.
-    postToStage(frame, { type: 'mode', commentMode: commentMode });
+    // isWiredStage already recognises at the moment it runs. sentRefs travels
+    // in the same message (SPEC_POLISH.md ticket 02, criterion 12): a stage
+    // that has just announced itself needs to know which of ITS OWN elements
+    // are already off-limits before its first hover, same as it needs to know
+    // whether comment mode is even on.
+    postToStage(frame, { type: 'mode', commentMode: commentMode, sentRefs: sentDomRefsForBlock(blockId) });
     if (layer) requestStagePositions(frame, blockId, layer);
   }
 
   function handleStageClick(data, section, blockId) {
     if (readonly || !commentMode) return;
     if (typeof data.ref !== 'string' || !data.ref) return;
+    var anchor = { kind: 'dom', ref: data.ref };
+    // SPEC_POLISH.md ticket 02, criterion 12: an element inside this stage
+    // that already carries a SENT comment is no longer a comment target at
+    // all -- clicking it does nothing (the parent never even opens a form),
+    // one of the three anchor-minting entry points this criterion has to hold
+    // for. The stage's own hover styling is unchanged by this (see QUIRKS.md
+    // "Two stylesheets, one palette" -- that de-affordance would need its own
+    // protocol addition into stageAgentScript, deliberately left out of this
+    // client-side-only slice; noted as a known gap, not silently dropped).
+    if (isSentAnchor(blockId, anchor)) return;
+    // A stage message is ATTACKER-CONTROLLED input, not a user gesture: the
+    // sandboxed document runs agent-supplied script in the same document as
+    // the agent-supplied markup, so a 'click' with any ref it likes can be
+    // posted at any moment, with no reviewer involved at all. Two consequences
+    // are handled right here, before anything downstream treats this ref as
+    // something the reviewer pointed at:
+    //
+    // 1. It must never INTERRUPT composition. If this block's form is already
+    //    open with text in it, the reviewer is mid-sentence; a forged (or even
+    //    an honest, mistimed) message that reopened the form would wipe what
+    //    they had typed. Dropped outright instead -- the stage gets no way to
+    //    make the parent throw away reviewer input.
+    // 2. It must never SELECT AN EDIT TARGET. See the openCommentForm call
+    //    below for the whole of that reasoning.
+    var openForm = document.querySelector('form#comment-form-' + blockId);
+    var openInput = openForm && openForm.querySelector('input[type=text]');
+    if (openForm && openForm.classList.contains('open') && openInput && String(openInput.value || '').trim()) return;
     var text = typeof data.text === 'string' ? data.text : '';
     var tag = typeof data.tag === 'string' ? data.tag : '';
     // buildHint(section, {textContent, tagName}): section (the OUTER-document
@@ -618,7 +941,31 @@ export const ui = `
     // before this ticket. Outside a compare, this is byte-identical to ticket
     // 02's plain extractHint(el.textContent) -- see src/anchor.mjs's design
     // comment.
-    openCommentForm(blockId, 'dom', data.ref, buildHint(section, { textContent: text, tagName: tag }));
+    var hint = buildHint(section, { textContent: text, tagName: tag });
+    // No 'editing' argument, deliberately, and unlike every OTHER caller of
+    // openCommentForm on this page (audit finding S5). Criterion 1's
+    // second-click-edits behaviour is driven by matching a queued comment
+    // against the anchor of the thing that was clicked -- and on this one path
+    // the anchor is a string the stage chose, not something this document
+    // observed. Handing it to findPendingCommentForAnchor would let a stage
+    // pick WHICH of the reviewer's queued comments the next submit REPLACES:
+    // post a click naming the ref of the queued comment that criticises this
+    // block, and the reviewer's next remark silently overwrites it instead of
+    // joining it. That is an agent deleting review feedback about its own
+    // work, through a channel whose whole design assumption is that nothing it
+    // says is trusted.
+    //
+    // Forging the ANCHOR of a new comment was always possible here and is not
+    // what changed: a stage owns its own document and can always lie about
+    // which of its elements was clicked. Destroying a comment that already
+    // exists is a different thing entirely, and is what this refuses. The cost
+    // is that a genuine second click on the same stage element queues a second
+    // comment rather than reopening the first -- the pre-ticket behaviour, and
+    // recoverable (criterion 2's delete control), which is the direction to
+    // fail in. Passing no editing target also CLEARS any stale
+    // data-editing-id left on the form by an earlier, trusted gesture, so a
+    // stage message can never inherit one either.
+    openCommentForm(blockId, 'dom', anchor.ref, hint, '');
   }
 
   function handleStagePositions(data) {
@@ -692,39 +1039,49 @@ export const ui = `
   // live section, or an anchor with no domRef, just skips straight to the
   // id-attribute scan below): position-finding degrades, resolved/lost styling
   // never does (see src/anchor.mjs's "ticket 05 design" comment).
+  //
+  // The live element a stored 'mermaid' anchor points at, or null -- factored out
+  // of renderMermaidPins (below) so the LENS's own pin layer (renderLensPins,
+  // ticket 05 of SPEC_POLISH.md) answers the same question through the same
+  // precedence instead of a second, drifting copy of it. Every lookup here is
+  // scoped to the 'svg'/'section' it is handed and NEVER to 'document': the lens
+  // clones the rendered SVG, and a clone carries duplicate element ids, so a
+  // document-wide id lookup would be ambiguous between the two copies the moment
+  // the lens is open (the spec's own named trap).
+  function mermaidHostFor(anchor, svg, section) {
+    if (!svg || !anchor) return null;
+    // Ticket 05 (DESIGN.md): try the generic domRef first, against the LIVE
+    // rendered SVG (something only the client, not resolveComment's server-side
+    // verdict, can ever do -- see src/anchor.mjs's "ticket 05 design" comment).
+    // Trusted only if the element it lands on ALSO carries the stored node id in
+    // its own generated id -- a cheap cross-check against mermaid's internal SVG
+    // structure having shifted since mint time, which would otherwise silently
+    // position the pin on the wrong node.
+    if (anchor.domRef && section) {
+      var steps = pathToSteps(anchor.domRef);
+      var viaSteps = steps.length ? resolveSteps(section, steps) : null;
+      if (viaSteps && viaSteps.getAttribute && parseMermaidDomId(viaSteps.getAttribute('id')) === anchor.ref) {
+        return viaSteps;
+      }
+    }
+    // Iterate and compare via parseMermaidDomId rather than interpolating the
+    // stored ref into a CSS attribute-selector string: a crafted ref could
+    // otherwise break out of the selector (see DESIGN.md's board slice 06 log).
+    // This is display-positioning only -- resolved/lost styling never depends on
+    // this lookup succeeding, either path.
+    var candidates = svg.querySelectorAll(MERMAID_NODE_SELECTOR);
+    for (var i = 0; i < candidates.length; i++) {
+      if (parseMermaidDomId(candidates[i].getAttribute('id')) === anchor.ref) return candidates[i];
+    }
+    return null;
+  }
+
   function renderMermaidPins(blockId, svg, layer, section) {
     layer.innerHTML = '';
     resetStackedOffset(layer);
     commentsWithPending().forEach(function (c) {
       if (c.blockId !== blockId || !c.anchor || c.anchor.kind !== 'mermaid') return;
-      var host = null;
-      if (svg) {
-        // Ticket 05: try the generic domRef first, against the LIVE rendered
-        // SVG (something only the client, not resolveComment's server-side
-        // verdict, can ever do -- see src/anchor.mjs's "ticket 05 design"
-        // comment). Trusted only if the element it lands on ALSO carries the
-        // stored node id in its own generated id -- a cheap cross-check against
-        // mermaid's internal SVG structure having shifted since mint time,
-        // which would otherwise silently position the pin on the wrong node.
-        if (c.anchor.domRef && section) {
-          var steps = pathToSteps(c.anchor.domRef);
-          var viaSteps = steps.length ? resolveSteps(section, steps) : null;
-          if (viaSteps && viaSteps.getAttribute && parseMermaidDomId(viaSteps.getAttribute('id')) === c.anchor.ref) {
-            host = viaSteps;
-          }
-        }
-        if (!host) {
-          // Iterate and compare via parseMermaidDomId rather than interpolating
-          // the stored ref into a CSS attribute-selector string: a crafted ref
-          // could otherwise break out of the selector (see DESIGN.md's board
-          // slice 06 log). This is display-positioning only -- resolved/lost
-          // styling never depends on this lookup succeeding, either path.
-          var candidates = svg.querySelectorAll(MERMAID_NODE_SELECTOR);
-          for (var i = 0; i < candidates.length; i++) {
-            if (parseMermaidDomId(candidates[i].getAttribute('id')) === c.anchor.ref) { host = candidates[i]; break; }
-          }
-        }
-      }
+      var host = mermaidHostFor(c.anchor, svg, section);
       var position = null;
       if (host && host.getBoundingClientRect && layer.getBoundingClientRect) {
         var wrapBox = layer.getBoundingClientRect();
@@ -735,13 +1092,79 @@ export const ui = `
     });
   }
 
+  // SPEC_POLISH.md ticket 05, criterion 11: "a mermaid node can be commented on
+  // from inside the lens, and that comment is the SAME comment as one minted
+  // inline -- same anchor". That is a property of there being exactly ONE minting
+  // path, not of two paths happening to agree, so this is it: both the inline
+  // gesture (wireMermaidBlock below) and the lens's own click handler
+  // (wireLensStage, further down) call this and nothing else.
+  //
+  // 'section' and 'host' are always the INLINE ones. The lens hands in the
+  // counterpart it mirrored out of its clone (mirrorMermaidNode), never a cloned
+  // element: a domRef built against the lens canvas would name a step-path that
+  // exists nowhere in the block's own server-re-rendered section, so
+  // resolveMermaidAnchorAtRoot (src/anchor.mjs) would fall through to the
+  // node-id half on every lens-minted comment and renderMermaidPins would
+  // position it by the id scan alone -- a silent downgrade, invisible in any
+  // check that only asks which ref won.
+  //
+  // Returns false when the node is not a comment target at all (criterion 12: it
+  // already carries a SENT comment), so a caller can tell "did nothing" from
+  // "opened a form" without re-deriving that.
+  function mintMermaidComment(section, blockId, host, ref) {
+    var anchor = { kind: 'mermaid', ref: ref };
+    // Criterion 12: a node that already carries a SENT comment is no longer a
+    // comment target -- clicking it does nothing, in the lens exactly as inline.
+    if (isSentAnchor(blockId, anchor)) return false;
+    // Ticket 05 (DESIGN.md): mint the SAME generic domRef + hint every other
+    // element-level click mints (buildSteps/buildHint, declared above, already
+    // used by the html stage and the generic listener) -- the node id stays the
+    // fallback ref, not the model (src/anchor.mjs's "ticket 05 design" comment).
+    // A failure to build steps (host somehow not reachable from section) still
+    // mints the anchor with an empty domRef rather than aborting: the node id
+    // alone is enough to comment, exactly as it was before that ticket.
+    var steps = host ? buildSteps(section, host) : null;
+    var domRef = (steps && steps.length) ? stepsToPath(steps) : '';
+    var hint = host ? buildHint(section, host) : '';
+    // SPEC_POLISH.md ticket 02, criterion 1: a second click on a node that
+    // already has a QUEUED (unsent) comment reopens and edits it, rather than
+    // minting a duplicate -- again, in the lens exactly as inline.
+    openCommentForm(blockId, 'mermaid', ref, hint, domRef, findPendingCommentForAnchor(pendingComments, blockId, anchor));
+    return true;
+  }
+
   function wireMermaidBlock(preEl, svg) {
     var section = preEl.closest('.mermaid-block');
     if (!section) return;
     var blockId = section.getAttribute('data-block-id');
     var layer = section.querySelector('.pin-layer');
     if (layer) renderMermaidPins(blockId, svg || null, layer, section);
+    // Before the readonly/no-svg return below, deliberately: the lens is
+    // view-only under body.readonly, not absent (SPEC_POLISH.md ticket 05), so
+    // its expand control has to be wired in an archive too. It removes ITSELF
+    // when there is no rendered SVG to show.
+    wireDiagramExpand(section, blockId, svg || null);
     if (readonly || !svg) return; // nothing live to click without a rendered diagram
+    // SPEC_POLISH.md ticket 02, criterion 12: stamp every node that already
+    // carries a SENT comment so the comment-mode hover/cursor rules
+    // (src/styles.mjs's .cb-anchor-sent) can de-affordance it -- computed once,
+    // here, from board.comments. A node's sent status can only change via a
+    // real Send, which always replaces this whole section (and re-wires it
+    // fresh via renderMermaidBlocks) rather than mutating it in place, so this
+    // never goes stale under an unchanged, already-wired section.
+    // liveSentComments(), not board.comments raw -- same reasoning as
+    // sentDomRefsForBlock's: a node id whose comment no longer resolves is
+    // stale, and a redrawn diagram that reuses that id for a different node
+    // must not inherit the de-affordance.
+    var sentRefs = liveSentComments()
+      .filter(function (c) { return c.blockId === blockId && c.anchor && c.anchor.kind === 'mermaid'; })
+      .map(function (c) { return c.anchor.ref; });
+    if (sentRefs.length) {
+      qsa(MERMAID_NODE_SELECTOR, svg).forEach(function (node) {
+        var nid = parseMermaidDomId(node.getAttribute('id'));
+        if (nid && sentRefs.indexOf(nid) !== -1) node.classList.add('cb-anchor-sent');
+      });
+    }
     // Ticket 04: a theme switch calls this again for the SAME preEl (a fresh
     // <svg> inside it, not a fresh <pre>), purely to refresh the pins above --
     // the click listener itself must attach exactly once per element, ever,
@@ -759,17 +1182,535 @@ export const ui = `
       if (!host) return;
       var ref = parseMermaidDomId(host.getAttribute('id'));
       if (!ref) return;
-      // Ticket 05: mint the SAME generic domRef + hint every other element-level
-      // click mints (buildSteps/buildHint, declared above, already used by the
-      // html stage and the generic listener) -- the node id stays the fallback
-      // ref, not the model (src/anchor.mjs's "ticket 05 design" comment). A
-      // failure to build steps (host somehow not reachable from section) still
-      // mints the anchor with an empty domRef rather than aborting: the node id
-      // alone is enough to comment, exactly as it was before this ticket.
-      var steps = buildSteps(section, host);
-      var domRef = (steps && steps.length) ? stepsToPath(steps) : '';
-      var hint = buildHint(section, host);
-      openCommentForm(blockId, 'mermaid', ref, hint, domRef);
+      mintMermaidComment(section, blockId, host, ref);
+    });
+  }
+
+  // --- the diagram lens (SPEC_POLISH.md ticket 05) -----------------------------
+  //
+  // Criterion 10: "a mermaid block carries an expand control that opens the
+  // diagram in a full-viewport lens: drag pans, scroll zooms, with fit and 1:1
+  // controls." Criterion 11: "a mermaid node can be commented on from inside the
+  // lens, and that comment is the same comment as one minted inline -- same
+  // anchor, and its pin appears on the inline diagram after Send."
+  //
+  // Modelled on /explain's lens (~/.claude/skills/explain/template.html), as the
+  // spec's Decision directs, and differing from it in the three places that
+  // matter here:
+  //
+  //   1. It is opened by the explicit .expand-btn ONLY, never by clicking the
+  //      diagram. /explain has no other meaning for a diagram click; this page
+  //      does (comment on this node), and the spec is explicit that "the click
+  //      gesture on a diagram keeps its current meaning in both modes".
+  //   2. It is COMMENTABLE, through mintMermaidComment above -- the same
+  //      function the inline gesture calls, so criterion 11's "the same comment"
+  //      is structural.
+  //   3. The block's own comment <form> is MOVED in here while it is open rather
+  //      than duplicated (lensAdopt below). A showModal()'d <dialog> makes the
+  //      rest of the document inert, so a form left behind it could be opened
+  //      and never typed into -- and a second form would be a second submit
+  //      handler, i.e. exactly the "second parallel kind of comment" the ticket
+  //      exists to avoid.
+  //
+  // THE CLONED-ID TRAP, which the spec names rather than leaving to be
+  // discovered: /explain's lensOpen clones the SVG, and a clone carries
+  // duplicate element ids -- with the lens open, every mermaid node id exists
+  // TWICE in this document. So nothing in here ever resolves an id against
+  // 'document'. Node identity crosses between the two copies structurally
+  // instead, through mirrorMermaidNode below (index path out of one root,
+  // resolved into the other, then cross-checked on the id), and the two id
+  // lookups that do happen -- ev.target.closest(MERMAID_NODE_SELECTOR) and
+  // mermaidHostFor's scan -- are each scoped to a root that is unambiguously one
+  // copy or the other. This is the same class of bug as QUIRKS.md's "Real
+  // mermaid node ids are prefixed", which killed the whole diagram gesture once
+  // while a 380-line dedicated check stayed green.
+
+  // The view math is pure and lives in src/lens.mjs, spliced in verbatim by
+  // .toString() (same discipline as computeBoardPatch/composeHint/badgeLabel):
+  // "the point under the cursor stays under the cursor" and "fit centres the
+  // whole diagram" are arithmetic invariants a check can hold this to, and are
+  // otherwise the kind of thing verified by eye and wrong by a half-pixel
+  // forever. Anything they need is declared inside their own bodies -- the
+  // embedded copies are function sources, so a module-level helper would not
+  // exist here.
+  var lensZoomAt = ${lensZoomAt.toString()};
+  var lensFit = ${lensFit.toString()};
+  var lensOneToOne = ${lensOneToOne.toString()};
+
+  var LENS_MIN_SCALE = 0.1;
+  var LENS_MAX_SCALE = 8;
+
+  // { x, y, s } -- what 'translate(x, y) scale(s)' on .lens-canvas means, with
+  // that element's transform-origin pinned to its own top-left (src/styles.mjs).
+  var lensView = { x: 0, y: 0, s: 1 };
+  // Built lazily on the first expand and reused for every diagram afterwards:
+  // one <dialog>, whose listeners are registered exactly once. A per-block lens
+  // would re-register pan/zoom handlers on every open, which is the same
+  // stacked-listener failure every wiring loop in this file is scoped to avoid.
+  var lens = null;
+  // Set while a drag is actually moving the canvas, read by the lens's click
+  // handler: a pan that ends over a node still fires a click, and "I dragged the
+  // diagram" must never queue a comment. Reset on the next pointerdown.
+  var lensDragMoved = false;
+
+  /** The counterpart of 'node' in the other copy of the same diagram: its index
+   * path out of 'fromRoot', resolved into 'toRoot'. cloneNode(true) preserves
+   * element order exactly, so the path is the same in both -- and the result is
+   * accepted only if it carries the SAME generated id, which is the cross-check
+   * that turns "the two trees disagree" (the inline SVG re-rendered while the
+   * lens was open, say) into null rather than into a comment silently anchored
+   * on the wrong node. Structural, deliberately: an id lookup is exactly what is
+   * ambiguous here. */
+  function mirrorMermaidNode(fromRoot, toRoot, node) {
+    if (!fromRoot || !toRoot || !node || !node.getAttribute) return null;
+    var steps = buildSteps(fromRoot, node);
+    var twin = steps ? resolveSteps(toRoot, steps) : null;
+    if (!twin || !twin.getAttribute) return null;
+    return twin.getAttribute('id') === node.getAttribute('id') ? twin : null;
+  }
+
+  function lensButton(action, label) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'lens-btn';
+    b.setAttribute('data-lens', action);
+    b.textContent = label;
+    return b;
+  }
+
+  function buildLens() {
+    if (lens) return lens;
+    var dlg = document.createElement('dialog');
+    dlg.className = 'diagram-lens';
+    dlg.setAttribute('aria-label', 'Diagram lens');
+
+    var bar = document.createElement('div');
+    bar.className = 'lens-bar';
+    var title = document.createElement('span');
+    title.className = 'lens-title';
+    title.textContent = 'Diagram lens';
+    var hint = document.createElement('span');
+    hint.className = 'lens-hint';
+    var pct = document.createElement('span');
+    pct.className = 'lens-pct';
+    pct.textContent = '100%';
+    bar.appendChild(title);
+    bar.appendChild(hint);
+    bar.appendChild(pct);
+    bar.appendChild(lensButton('fit', 'fit'));
+    bar.appendChild(lensButton('one', '1:1'));
+    bar.appendChild(lensButton('close', 'close'));
+
+    var formHost = document.createElement('div');
+    formHost.className = 'lens-form-host';
+
+    var stage = document.createElement('div');
+    stage.className = 'lens-stage';
+    var canvas = document.createElement('div');
+    canvas.className = 'lens-canvas';
+    // Criterion 11 / the spec's "Pins in the lens live inside the zoom
+    // transform, counter-scaled": the pin layer is a child of the CANVAS, not of
+    // the stage, so panning and zooming move every pin for free -- no pointer-move
+    // recomputation, which is the scroll-tracking cost ticket 03 just avoided on
+    // code blocks. Each pin then gets scale(1/s) of its own (lensScalePins) so it
+    // stays 20px on screen instead of being buried under itself at high zoom.
+    var layer = document.createElement('div');
+    layer.className = 'pin-layer';
+    canvas.appendChild(layer);
+    stage.appendChild(canvas);
+
+    dlg.appendChild(bar);
+    dlg.appendChild(formHost);
+    dlg.appendChild(stage);
+    document.body.appendChild(dlg);
+
+    lens = { dlg: dlg, bar: bar, hint: hint, pct: pct, formHost: formHost, stage: stage,
+      canvas: canvas, layer: layer, slots: [], open: false,
+      blockId: null, section: null, svg: null, clone: null, size: { w: 1, h: 1 } };
+    wireLensChrome();
+    wireLensStage();
+    return lens;
+  }
+
+  function lensStageRect() {
+    return (lens && lens.stage.getBoundingClientRect)
+      ? lens.stage.getBoundingClientRect()
+      : { left: 0, top: 0, width: 0, height: 0 };
+  }
+
+  /** Push lensView at the DOM: one transform on the canvas, the readout, and the
+   * per-pin counter-scale. Never re-derives a pin POSITION -- those are canvas-
+   * local and a pan/zoom does not change them, which is the whole point of the
+   * pins living inside the transform. */
+  function lensApply() {
+    if (!lens) return;
+    lens.canvas.style.transform = 'translate(' + lensView.x + 'px, ' + lensView.y + 'px) scale(' + lensView.s + ')';
+    lens.pct.textContent = Math.round(lensView.s * 100) + '%';
+    lensScalePins();
+  }
+
+  function lensScalePins() {
+    if (!lens) return;
+    var k = 1 / (lensView.s || 1);
+    qsa('.anchor-pin', lens.layer).forEach(function (pin) {
+      // translate(-50%, -50%) FIRST, then scale: the composite still lands the
+      // pin's own centre exactly on (left, top) whatever k is, so a pin does not
+      // creep off its node as the zoom changes.
+      pin.style.transform = 'translate(-50%, -50%) scale(' + k + ')';
+    });
+  }
+
+  function lensDoFit() {
+    if (!lens) return;
+    var r = lensStageRect();
+    // Clamped into the same band the wheel is clamped into (see lensFit's own
+    // comment, src/lens.mjs): a diagram tall enough to fit BELOW the floor
+    // otherwise makes the first wheel-out zoom in.
+    lensView = lensFit(r.width, r.height, lens.size.w, lens.size.h, LENS_MIN_SCALE, LENS_MAX_SCALE);
+    lensApply();
+  }
+
+  function lensDoOneToOne() {
+    if (!lens) return;
+    var r = lensStageRect();
+    lensView = lensOneToOne(r.width, r.height, lens.size.w, lens.size.h);
+    lensApply();
+  }
+
+  /** Criterion 11, positioning half: the same comments the inline diagram pins,
+   * pinned again on the clone. The HOST lookup runs against the INLINE svg
+   * (mermaidHostFor, so the domRef-first precedence is the one already checked)
+   * and is then mirrored into the clone -- rather than scanning the clone by id,
+   * which is precisely the ambiguous lookup this whole section avoids.
+   * Positions are canvas-local, so they are divided back out of the live scale;
+   * placePin's resolved/lost/pending styling is untouched and still comes from
+   * the server's verdict, exactly as inline. */
+  function renderLensPins() {
+    if (!lens || !lens.open) return;
+    lens.layer.innerHTML = '';
+    resetStackedOffset(lens.layer);
+    var s = lensView.s || 1;
+    var canvasBox = lens.canvas.getBoundingClientRect ? lens.canvas.getBoundingClientRect() : null;
+    commentsWithPending().forEach(function (c) {
+      if (c.blockId !== lens.blockId || !c.anchor || c.anchor.kind !== 'mermaid') return;
+      var inlineHost = mermaidHostFor(c.anchor, lens.svg, lens.section);
+      var host = inlineHost ? mirrorMermaidNode(lens.svg, lens.clone, inlineHost) : null;
+      var position = null;
+      if (host && host.getBoundingClientRect && canvasBox) {
+        var b = host.getBoundingClientRect();
+        position = {
+          left: (b.left - canvasBox.left) / s + (b.width / s) / 2,
+          top: (b.top - canvasBox.top) / s + (b.height / s) / 2,
+        };
+      }
+      placePin(lens.layer, c, !!c.resolved, position);
+    });
+    lensScalePins();
+  }
+
+  function lensUpdateHint() {
+    if (!lens || !lens.hint) return;
+    lens.hint.textContent = (commentMode && !readonly)
+      ? 'drag pans · scroll zooms · click a node to comment on it'
+      : 'drag pans · scroll zooms';
+  }
+
+  /** Move 'el' into the lens, leaving a placeholder where it was so it can be put
+   * back exactly where it came from. Used for the block's own comment form and
+   * its "commenting on:" label -- see this section's design comment for why they
+   * are moved rather than copied. Listeners survive a move, which is the whole
+   * reason this works: the form that submits from inside the lens is the same
+   * element, with the same submit handler, as the one that submits inline. */
+  function lensAdopt(el) {
+    if (!lens || !el) return;
+    var slot = document.createElement('span');
+    slot.className = 'lens-slot';
+    el.replaceWith(slot);
+    lens.slots.push({ slot: slot, el: el });
+    lens.formHost.appendChild(el);
+  }
+
+  function lensReturnAdopted() {
+    if (!lens) return;
+    lens.slots.forEach(function (s) {
+      // Detach from the lens explicitly before re-inserting: a real DOM insert
+      // would move the node for us, but this file's DOM stand-in appends without
+      // unlinking, and a form present in two childNodes lists at once is a bug
+      // that would only ever show up in a check.
+      if (s.el.replaceWith) s.el.replaceWith();
+      s.slot.replaceWith(s.el);
+    });
+    lens.slots = [];
+  }
+
+  function lensOpen(section, blockId, svg) {
+    if (!svg || !svg.cloneNode) return;
+    var l = buildLens();
+    // Already open: refuse rather than re-enter. A modal <dialog> makes the rest
+    // of the document inert, so no second expand control is reachable while one
+    // is open -- and showModal() on an already-open dialog throws, while the
+    // close it would need first fires its 'close' event on a LATER task, so
+    // "close then reopen" here would tear the new lens down a tick after
+    // building it.
+    if (l.open) return;
+    // Natural size: the viewBox if mermaid emitted one (its own coordinate
+    // space, independent of however wide the block happens to be right now),
+    // falling back to the rendered box.
+    var vb = svg.viewBox && svg.viewBox.baseVal;
+    var box = svg.getBoundingClientRect ? svg.getBoundingClientRect() : null;
+    var w = (vb && vb.width) || (box && box.width) || 800;
+    var h = (vb && vb.height) || (box && box.height) || 600;
+    var clone = svg.cloneNode(true);
+    clone.setAttribute('width', w);
+    clone.setAttribute('height', h);
+    if (clone.style) clone.style.maxWidth = 'none';
+
+    l.canvas.innerHTML = '';
+    l.canvas.appendChild(clone);
+    l.canvas.appendChild(l.layer);
+    l.canvas.style.width = w + 'px';
+    l.canvas.style.height = h + 'px';
+
+    l.blockId = blockId;
+    l.section = section;
+    l.svg = svg;
+    l.clone = clone;
+    l.size = { w: w, h: h };
+    l.open = true;
+    // Under readonly there is no comment gesture to host a form for, and every
+    // input on the page is hard-disabled anyway -- so nothing is moved, and the
+    // archive's lens is exactly what the spec asks for: pan and zoom, nothing else.
+    if (!readonly) {
+      lensAdopt(document.querySelector('div#comment-target-' + blockId));
+      lensAdopt(document.querySelector('form#comment-form-' + blockId));
+    }
+    if (l.dlg.showModal) l.dlg.showModal();
+    else l.dlg.setAttribute('open', ''); // no <dialog> support (this repo's DOM stand-in)
+    lensUpdateHint();
+    lensDoFit();
+    renderLensPins();
+  }
+
+  /** SPEC_POLISH.md criterion 15, the two batches' one real collision: a theme
+   * change re-renders every inline diagram (runMermaidRedrawPass, further
+   * down), and mermaid does that by REPLACING each 'pre.mermaid''s svg with a
+   * brand-new element drawn in the new palette. The lens holds a
+   * cloneNode(true) of the OLD one, so an already-open lens went on showing a
+   * dark diagram inside light chrome (or the reverse) until it was closed and
+   * reopened -- measured in Chrome 2026-07-31: after a light switch the lens's
+   * node rects still read rgb(24, 32, 47) (dark --panel-2) with rgb(234, 238,
+   * 246) labels while the inline diagram behind it had correctly become
+   * rgb(245, 246, 251) / rgb(23, 28, 42).
+   *
+   * Reachable WITHOUT the theme control: a modal dialog makes the rest of the
+   * document inert, so the control itself cannot be clicked while the lens is
+   * open -- but src/theme.mjs dispatches the same event on a live OS
+   * light/dark switch while System is in force (its own matchMedia listener),
+   * which is exactly the reader who leaves a diagram open at sunset.
+   *
+   * Re-clones from the fresh svg and keeps the reviewer's current pan and zoom:
+   * the source text is identical across a redraw, so the layout is identical
+   * too and only the colours moved -- resetting the view here would throw away
+   * a position the reviewer had panned to for a change they did not ask for.
+   * The pins have to be redrawn regardless, since renderLensPins measures them
+   * off the clone that was just replaced. wireDiagramExpand already re-reads
+   * the live svg on click, so a lens opened AFTER a redraw was never affected;
+   * this is only ever about one already open. */
+  function lensRetheme() {
+    if (!lens || !lens.open || !lens.section) return;
+    var fresh = lens.section.querySelector('pre.mermaid svg');
+    if (!fresh || fresh === lens.svg || !fresh.cloneNode) return;
+    var vb = fresh.viewBox && fresh.viewBox.baseVal;
+    var box = fresh.getBoundingClientRect ? fresh.getBoundingClientRect() : null;
+    var w = (vb && vb.width) || (box && box.width) || lens.size.w;
+    var h = (vb && vb.height) || (box && box.height) || lens.size.h;
+    var clone = fresh.cloneNode(true);
+    clone.setAttribute('width', w);
+    clone.setAttribute('height', h);
+    if (clone.style) clone.style.maxWidth = 'none';
+    lens.canvas.innerHTML = '';
+    lens.canvas.appendChild(clone);
+    lens.canvas.appendChild(lens.layer);
+    lens.canvas.style.width = w + 'px';
+    lens.canvas.style.height = h + 'px';
+    lens.svg = fresh;
+    lens.clone = clone;
+    lens.size = { w: w, h: h };
+    lensApply();
+    renderLensPins();
+  }
+
+  /** Undo everything lensOpen did. Reached both ways a modal dialog can close --
+   * the close button (lensClose -> dlg.close() -> the 'close' event) and Esc,
+   * which the browser handles itself and which would otherwise strand the
+   * block's comment form inside a hidden dialog. */
+  function lensTeardown() {
+    if (!lens || !lens.open) return;
+    lens.open = false;
+    lensReturnAdopted();
+    lens.dlg.removeAttribute('open');
+    lens.canvas.innerHTML = '';
+    lens.canvas.appendChild(lens.layer);
+    lens.layer.innerHTML = '';
+    lens.blockId = null;
+    lens.section = null;
+    lens.svg = null;
+    lens.clone = null;
+  }
+
+  function lensClose() {
+    if (!lens || !lens.open) return;
+    // close() first, teardown second, and never the other way round: removing the
+    // 'open' attribute by hand hides a modal dialog without taking it out of the
+    // top layer, leaving the whole page inert behind an invisible sheet. The
+    // 'close' event this fires lands on a later task and finds lensTeardown
+    // already done (it is idempotent), which is also what makes the Esc path --
+    // where the browser closes the dialog and only then tells us -- work.
+    if (lens.dlg.close) lens.dlg.close();
+    lensTeardown();
+  }
+
+  function wireLensChrome() {
+    var l = lens;
+    l.dlg.addEventListener('close', function () { lensTeardown(); });
+    qsa('.lens-btn', l.bar).forEach(function (b) {
+      b.addEventListener('click', function () {
+        var act = b.getAttribute('data-lens');
+        if (act === 'close') { lensClose(); return; }
+        if (act === 'one') lensDoOneToOne();
+        else lensDoFit();
+      });
+    });
+  }
+
+  function wireLensStage() {
+    var l = lens;
+    var stage = l.stage;
+
+    stage.addEventListener('wheel', function (ev) {
+      if (!lens.open) return;
+      // Non-passive on purpose: without preventDefault the page behind the
+      // dialog scrolls instead of the diagram zooming.
+      if (ev.preventDefault) ev.preventDefault();
+      var r = lensStageRect();
+      // A trackpad pinch arrives as a wheel event with ctrlKey set, an order of
+      // magnitude coarser per notch than an ordinary scroll.
+      var factor = Math.pow(2, -ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0022));
+      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, factor, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      lensApply();
+    }, { passive: false });
+
+    stage.addEventListener('dblclick', function (ev) {
+      if (!lens.open) return;
+      var r = lensStageRect();
+      lensView = lensZoomAt(lensView, ev.clientX - r.left, ev.clientY - r.top, 2, LENS_MIN_SCALE, LENS_MAX_SCALE);
+      lensApply();
+    });
+
+    // Pointer capture is taken only once a press has become a PAN, never on the
+    // press itself. Measured in Chrome, and it is the whole difference between
+    // this lens being commentable and not: with capture active, the browser
+    // retargets everything that follows -- pointerup, mouseup and the resulting
+    // CLICK -- at the capture element, so the click handler below sees
+    // '.lens-stage' as its target instead of the diagram node the pointer was
+    // actually over, 'closest(MERMAID_NODE_SELECTOR)' finds nothing, and
+    // clicking a node in the lens silently does nothing. Nothing in a DOM
+    // stand-in can see that (there is no such thing as pointer capture there),
+    // which puts it squarely in this repo's own recorded failure pattern:
+    // QUIRKS.md "Real mermaid node ids are prefixed", the same gesture, dead in
+    // every browser under a green suite. Deferring the capture costs nothing --
+    // the first few pixels of a pan are still delivered to the stage because the
+    // pointer is over it -- and a drag that then leaves the stage entirely is
+    // captured by the time it gets there.
+    // TWO points are tracked per press, not one, and the difference is the
+    // whole of whether the threshold below means anything (audit finding D5,
+    // reproduced in Chrome):
+    //
+    //   ox/oy  the PRESS ORIGIN. Never reassigned for the life of the press.
+    //          The 3px threshold is measured from here, so it asks the only
+    //          question worth asking -- 'has the pointer travelled more than
+    //          3px since the button went down'.
+    //   x/y    the LAST MOVE. Reassigned every event, because each frame's pan
+    //          is the delta since the previous frame.
+    //
+    // An earlier version kept one pair and reassigned it on every move, so
+    // 'dx/dy' was the PER-EVENT delta and the gate read 'did this single frame
+    // move more than 3px'. A 120px pan dispatched as 60 moves of 2px -- an
+    // ordinary slow drag, and exactly what a trackpad produces -- never
+    // satisfied it: lensDragMoved stayed false the whole way, the branch below
+    // never ran, so the pointer capture was never taken either (dead code in
+    // the same 'if'), and releasing over a node opened the comment form on
+    // whatever the pan had merely dragged PAST. Measured in Chrome, and
+    // invisible to a structural check, which is why there is now a behavioural
+    // one in test/check-mermaid-anchor.mjs that dispatches exactly that
+    // sequence.
+    var drag = null;
+    stage.addEventListener('pointerdown', function (ev) {
+      if (!lens.open || ev.button) return;
+      drag = { ox: ev.clientX, oy: ev.clientY, x: ev.clientX, y: ev.clientY, id: ev.pointerId, captured: false };
+      lensDragMoved = false;
+    });
+    stage.addEventListener('pointermove', function (ev) {
+      if (!drag) return;
+      // A few pixels of jitter between press and release is a click, not a pan:
+      // only past that does this become a drag at all -- suppressing the comment
+      // gesture below, taking the pointer capture, and showing the grabbing
+      // cursor. Measured from the press origin, never from the last move.
+      if (!lensDragMoved && (Math.abs(ev.clientX - drag.ox) > 3 || Math.abs(ev.clientY - drag.oy) > 3)) {
+        lensDragMoved = true;
+        stage.classList.add('lens-dragging');
+        if (!drag.captured && stage.setPointerCapture && drag.id != null) {
+          try { stage.setPointerCapture(drag.id); } catch (err) { /* no capture available: the pan still works, it just ends at the stage edge */ }
+          drag.captured = true;
+        }
+      }
+      lensView = { x: lensView.x + (ev.clientX - drag.x), y: lensView.y + (ev.clientY - drag.y), s: lensView.s };
+      drag.x = ev.clientX;
+      drag.y = ev.clientY;
+      lensApply();
+    });
+    ['pointerup', 'pointercancel'].forEach(function (type) {
+      stage.addEventListener(type, function () {
+        drag = null;
+        stage.classList.remove('lens-dragging');
+      });
+    });
+
+    // Criterion 11: the comment gesture, gated exactly like every other one --
+    // 'readonly || !commentMode', the same guard wireMermaidBlock's own listener
+    // and the generic page listener carry.
+    stage.addEventListener('click', function (ev) {
+      if (!lens.open || readonly || !commentMode) return;
+      if (lensDragMoved) return; // that was a pan that happened to end on a node
+      var host = ev.target && ev.target.closest ? ev.target.closest(MERMAID_NODE_SELECTOR) : null;
+      if (!host || !lens.clone || !lens.section) return;
+      var ref = parseMermaidDomId(host.getAttribute('id'));
+      if (!ref) return;
+      // 'host' is a CLONED node. Everything downstream needs the inline one, and
+      // it is found structurally rather than by id -- see this section's design
+      // comment on the cloned-id trap.
+      var inlineHost = mirrorMermaidNode(lens.clone, lens.svg, host);
+      mintMermaidComment(lens.section, lens.blockId, inlineHost, ref);
+    });
+  }
+
+  /** Criterion 10's "a mermaid block carries an expand control". The button is
+   * server-rendered (src/render.mjs's expandButton) so it exists in a standalone
+   * archive's own bytes; this only binds it, and removes it outright when mermaid
+   * left no SVG behind (CDN unreachable, invalid chart) rather than leaving a
+   * control that opens an empty lens. */
+  function wireDiagramExpand(section, blockId, svg) {
+    var btn = section.querySelector('.expand-btn');
+    if (!btn) return;
+    if (!svg) { btn.replaceWith(); return; }
+    if (btn.__cbExpandWired) return;
+    btn.__cbExpandWired = true;
+    btn.addEventListener('click', function (ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      // Re-read the live SVG rather than trusting the one captured at wire time:
+      // a re-render (a theme change, an amended block) replaces it.
+      var live = section.querySelector('pre.mermaid svg') || svg;
+      lensOpen(section, blockId, live);
     });
   }
 
@@ -786,8 +1727,22 @@ export const ui = `
    * (async, over postMessage -- ticket 10) rather than reading them directly;
    * only stages isWiredStage recognises (i.e. that have answered 'ready' at
    * least once) are asked, since one that never will can never answer
-   * anyway. */
+   * anyway.
+   *
+   * The queued comments' LIST entries are rebuilt here too (audit finding D3),
+   * rather than at each of this function's call sites. A pin and a list entry
+   * are two renderings of one array, and they were drifting: every push path
+   * (applyRoundPush, applySubmittedPush, applyResync) and the post-Send handler
+   * called refreshPins alone, so an amend that replaced a block left the queued
+   * comment's hollow pin drawn on the new markup with no list entry beside it --
+   * no anchor tag, no text, and, criterion 2's whole point, no delete control,
+   * while the comment itself stayed in pendingComments and went out on the next
+   * Send. Folding the two together is what stops a future call site
+   * reintroducing that by remembering one and forgetting the other; it is
+   * document-wide regardless of 'root' on purpose, since provisional numbering
+   * spans the whole board (refreshPendingCommentItems' own comment). */
   function refreshPins(root) {
+    refreshPendingCommentItems();
     qsa('.html-stage', root).forEach(function (frame) {
       if (!isWiredStage(frame)) return;
       var section = frame.closest('.html-block');
@@ -801,6 +1756,12 @@ export const ui = `
       if (layer) renderMermaidPins(section.getAttribute('data-block-id'), svg || null, layer, section);
     });
     wirePageDomPins(root);
+    // The lens's own pin layer is not under any 'root' -- the dialog is a direct
+    // child of <body> -- so it needs its own line here rather than being found by
+    // the loops above. This is what makes a comment queued from INSIDE the lens
+    // get its hollow pin there immediately, exactly as one queued inline does
+    // (SPEC_POLISH.md ticket 05, criterion 11).
+    renderLensPins();
   }
 
   /** Page-scoped dom pins (ticket 03): every block whose content lives in this
@@ -812,10 +1773,66 @@ export const ui = `
    * of an already-persisted comment's pin off of, so wireRoot has to do it
    * directly or a board reopened with existing element-level comments would show
    * no pins at all until the next resize. */
+  /** Ticket 03 (SPEC_POLISH.md), criterion 5's "can be dragged taller": measured
+   * in real Chrome (not assumed -- the ticket's own warning that resize interacts
+   * with max-height in ways worth checking), CSS max-height clamps the rendered
+   * box PERMANENTLY, including against the explicit inline height the browser's
+   * own resize: vertical drag sets -- a capped <pre> is undraggable for as long
+   * as max-height stays in effect, full stop, regardless of specificity or
+   * origin. So the cap src/styles.mjs applies (max-height: 480px) is exactly
+   * right for the FIRST paint (criteria 5 and 6 alike -- a short block's natural
+   * height never reaches it, so nothing here ever touches one), but a genuinely
+   * capped block needs that ceiling converted to a plain, breakable height once,
+   * so the reviewer's drag actually moves it. Reads the already-rendered box (no
+   * line-counting, no guessing at font metrics) and is a no-op the moment it
+   * runs a second time, since the inline height it sets no longer leaves
+   * anything for max-height to clamp. */
+  function unlockCodeCapForDrag(pre) {
+    if (pre.__cbCapUnlocked) return;
+    // The marker is claimed only once there is a real box to measure (audit
+    // finding D1). wireRoot runs against a DETACHED subtree on every push path
+    // -- applyRoundPush wires 'wrap'/'frag' before appending, applySubmittedPush
+    // wires 'replacement' before the swap, both deliberately (see their own
+    // comments on why listeners are attached pre-attach) -- and a detached <pre>
+    // reports clientHeight and scrollHeight of 0. Setting the marker first meant
+    // the 'scrollHeight > clientHeight' test below was decided as 0 > 0, false,
+    // on a permanently-remembered flag: every code block that arrived over SSE
+    // was undraggable for the life of the page, and the post-attach
+    // refreshPins() that exists precisely to redo detached work (U3) found the
+    // marker already set and did nothing. Bailing WITHOUT marking leaves the
+    // block for that same post-attach pass to measure properly.
+    if (!pre.clientHeight) return;
+    pre.__cbCapUnlocked = true;
+    if (pre.scrollHeight > pre.clientHeight) {
+      var height = pre.getBoundingClientRect().height;
+      pre.style.maxHeight = 'none';
+      pre.style.height = height + 'px';
+    }
+  }
+
   function wirePageDomPins(root) {
     qsa('[data-block-id]', root).forEach(function (section) {
       var layer = directChildPinLayer(section);
       if (layer) renderDomPins(section.getAttribute('data-block-id'), section, layer);
+      // Ticket 03 (SPEC_POLISH.md): renderDomPins' code-block branch clips pins
+      // to the <pre>'s own box, but is otherwise only ever re-run from here --
+      // on resize, a comment queued, or Send (refreshPins above), never on the
+      // pre's own internal scroll. Wired once per <pre> (a marker on the
+      // element itself, not a set here, since this whole function re-runs on
+      // every one of those triggers and must never stack a second listener
+      // inside the same scrolling element).
+      if (section.classList && section.classList.contains('code-block')) {
+        var pre = section.querySelector('pre');
+        if (pre) {
+          unlockCodeCapForDrag(pre);
+          if (layer && !pre.__cbPinsScrollWired) {
+            pre.__cbPinsScrollWired = true;
+            pre.addEventListener('scroll', function () {
+              renderDomPins(section.getAttribute('data-block-id'), section, layer);
+            });
+          }
+        }
+      }
     });
   }
 
@@ -875,6 +1892,10 @@ export const ui = `
     }
     document.body.classList.toggle('comment-mode', commentMode);
     if (!commentMode) clearAnchorHover();
+    // SPEC_POLISH.md ticket 05: the lens rides the same body class for its own
+    // node hover/cursor affordance (src/styles.mjs's .lens-canvas rules), so the
+    // only thing it needs told directly is what its hint line should now say.
+    lensUpdateHint();
     // One gesture, toggle-gated everywhere (the user's decision, relayed by the
     // director): every currently-known html stage is told the CURRENT state on
     // every toggle, on or off -- ticket 10 moved the stage's own hover/click
@@ -889,7 +1910,16 @@ export const ui = `
     // replaced, is simply absent from 'qsa('.html-stage', document)' and never
     // touched.
     qsa('.html-stage', document).forEach(function (frame) {
-      if (isWiredStage(frame)) postToStage(frame, { type: 'mode', commentMode: commentMode });
+      if (!isWiredStage(frame)) return;
+      // SPEC_POLISH.md ticket 02, criterion 12: sentRefs travels alongside
+      // commentMode on every toggle, not just at 'ready' -- the moment mode
+      // turns on is exactly the moment the stage's hover starts mattering, so
+      // it needs the current sent-list right then, not whatever it happened
+      // to hear last. section/blockId re-derived per frame (this loop, unlike
+      // handleStageReady, does not already have one in scope).
+      var section = frame.closest('.html-block');
+      var blockId = section && section.getAttribute('data-block-id');
+      postToStage(frame, { type: 'mode', commentMode: commentMode, sentRefs: blockId ? sentDomRefsForBlock(blockId) : [] });
     });
   }
 
@@ -933,9 +1963,18 @@ export const ui = `
   // change what a click INSIDE either stage mints -- the html stage's own
   // postMessage-minted ref (ticket 10) and mermaid's own node-click ref are
   // untouched; only the wrap's own dead padding stops being anchorable.
+  //
+  // .diagram-lens (ticket 05, SPEC_POLISH.md): the lens dialog is a direct child
+  // of <body>, so nothing inside it has a [data-block-id] ancestor and this
+  // listener would already find no root for a click there -- EXCEPT that the
+  // block's own comment form is moved into the lens while it is open, and that
+  // form does carry data-block-id. Excluding the lens outright keeps the generic
+  // gesture out of it entirely (hover marking included) and leaves the lens's own
+  // listener, which mints the specific mermaid anchor its surface needs, as the
+  // only thing that answers a click in there.
   var ANCHOR_CHROME_SELECTOR = '.block-kicker, .comment-btn, .comment-form, .comment-target, '
     + '.comment-list, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .round-label, '
-    + 'pre.mermaid, .html-stage, .stage-wrap';
+    + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens';
 
   function isAnchorChrome(el) {
     return !!(el.closest && el.closest(ANCHOR_CHROME_SELECTOR));
@@ -953,7 +1992,13 @@ export const ui = `
 
   var anchorHovered = null;
   function clearAnchorHover() {
-    if (anchorHovered && anchorHovered.classList) anchorHovered.classList.remove(STAGE_HOVER_CLASS);
+    if (anchorHovered && anchorHovered.classList) {
+      anchorHovered.classList.remove(STAGE_HOVER_CLASS);
+      // SPEC_POLISH.md ticket 02, criterion 12: the de-affordance class the
+      // mouseover handler below applies instead of STAGE_HOVER_CLASS when the
+      // hovered element already carries a SENT comment.
+      anchorHovered.classList.remove('cb-anchor-sent');
+    }
     anchorHovered = null;
   }
 
@@ -967,7 +2012,14 @@ export const ui = `
     // Marks ONLY ev.target (criterion 2: "that element, and not its ancestors") --
     // never walked up, exactly like the iframe's own hover handler above.
     anchorHovered = el;
-    el.classList.add(STAGE_HOVER_CLASS);
+    // SPEC_POLISH.md ticket 02, criterion 12: an element that already carries a
+    // SENT comment is visibly not a comment target -- de-affordanced (no
+    // outline, cursor: not-allowed via .cb-anchor-sent in src/styles.mjs)
+    // rather than marked with the ordinary "you can anchor here" outline.
+    var steps = buildSteps(root, el);
+    var blockId = root.getAttribute('data-block-id');
+    var sent = steps && steps.length && isSentAnchor(blockId, { kind: 'dom', ref: stepsToPath(steps) });
+    el.classList.add(sent ? 'cb-anchor-sent' : STAGE_HOVER_CLASS);
   });
   document.addEventListener('mouseout', function () { if (commentMode) clearAnchorHover(); });
 
@@ -982,9 +2034,15 @@ export const ui = `
     // Stops an <a href> from navigating, a submit-shaped element from submitting,
     // etc. -- comment mode means clicks anchor, full stop, while it's on.
     ev.preventDefault();
-    clearAnchorHover();
     var blockId = root.getAttribute('data-block-id');
-    openCommentForm(blockId, 'dom', stepsToPath(steps), buildHint(root, el));
+    var anchor = { kind: 'dom', ref: stepsToPath(steps) };
+    // Criterion 12: already carries a SENT comment -- no longer a comment
+    // target, clicking it does nothing.
+    if (isSentAnchor(blockId, anchor)) { clearAnchorHover(); return; }
+    clearAnchorHover();
+    // Criterion 1: a second click on an element that already has a QUEUED
+    // (unsent) comment reopens and edits it, rather than minting a duplicate.
+    openCommentForm(blockId, 'dom', anchor.ref, buildHint(root, el), '', findPendingCommentForAnchor(pendingComments, blockId, anchor));
   });
 
   // --- wiring, factored so it can run once at hydrate (root = document) and again
@@ -1122,14 +2180,56 @@ export const ui = `
   // openCommentForm (declared above wireRoot, alongside the other anchor helpers
   // it's shared with).
 
+  // This loop wires BOTH shapes src/render.mjs's commentButton emits, and they
+  // are not the same gesture (SPEC_POLISH.md criteria 1 and 12, audit findings
+  // P1/P2):
+  //
+  //   kind 'block'  the whole-block "Add comment" affordance. Several separate
+  //                 remarks on one block stay legal -- this codebase's own
+  //                 design says so explicitly (removePendingComment's comment,
+  //                 src/anchor.mjs, is keyed by entry id precisely because
+  //                 several queued comments can legitimately share this
+  //                 anchor), so it never edits and never de-affordances.
+  //   kind 'md'     the inline anchor button injected after a markdown heading
+  //                 or list item (injectAnchorButtons, src/render.mjs). This IS
+  //                 an anchored element, and the ONLY producer of 'md' anchors
+  //                 on the page -- so it takes exactly the same two rules the
+  //                 'dom' and 'mermaid' gestures already take: a second click
+  //                 on one that already carries a QUEUED comment reopens and
+  //                 edits it rather than minting a duplicate (criterion 1), and
+  //                 one that already carries a SENT comment is not a comment
+  //                 target at all (criterion 12).
+  //
+  // Both rules were absent here until finding P1/P2: this handler called
+  // openCommentForm with four arguments -- no editing lookup, no sent gate --
+  // so clicking a heading anchor twice queued two independent comments with two
+  // pins, which is verbatim the Problem statement this batch exists to fix and
+  // is the alternative the spec's Decisions explicitly reject ("a second click
+  // on an anchored element edits, it does not add").
+  //
+  // The sent gate is NOT conditioned on comment mode, unlike the hover
+  // de-affordance below: this button is live in both modes, and a sent comment
+  // is immutable in both. What IS comment-mode-scoped is the VISIBLE half --
+  // .cb-anchor-sent, whose stylesheet rule requires body.comment-mode (the
+  // spec's Decision: "de-affordanced in comment mode only ... the reading view
+  // stays unmarked"). Stamped at wire time from board.comments, and correct for
+  // as long as that stays true of this button: sent-ness only ever changes
+  // through a real Send, which replaces the whole round section server-side and
+  // re-runs this loop over the replacement (applySubmittedPush).
   qsa('.comment-btn', root).forEach(function (btn) {
+    var blockId = btn.getAttribute('data-block-id');
+    var anchorKind = btn.getAttribute('data-anchor-kind') || 'block';
+    var anchorRef = btn.getAttribute('data-anchor-ref') || '';
+    var anchorLabel = btn.getAttribute('data-anchor-label') || '';
+    // Only an ANCHORED kind gets an identity to match a queued or sent comment
+    // against; 'block' deliberately gets none, which is what keeps it additive.
+    var anchor = anchorKind === 'md' ? { kind: 'md', ref: anchorRef } : null;
+    if (anchor && isSentAnchor(blockId, anchor)) btn.classList.add('cb-anchor-sent');
     btn.addEventListener('click', function () {
       if (readonly) return;
-      var blockId = btn.getAttribute('data-block-id');
-      var anchorKind = btn.getAttribute('data-anchor-kind') || 'block';
-      var anchorRef = btn.getAttribute('data-anchor-ref') || '';
-      var anchorLabel = btn.getAttribute('data-anchor-label') || '';
-      openCommentForm(blockId, anchorKind, anchorRef, anchorLabel);
+      if (anchor && isSentAnchor(blockId, anchor)) return;
+      openCommentForm(blockId, anchorKind, anchorRef, anchorLabel, '',
+        anchor ? findPendingCommentForAnchor(pendingComments, blockId, anchor) : null);
     });
   });
 
@@ -1153,30 +2253,35 @@ export const ui = `
         : anchorKind === 'dom' ? { kind: 'dom', ref: anchorRef, hint: anchorLabel }
         : anchorKind === 'mermaid' ? { kind: 'mermaid', ref: anchorRef, domRef: anchorDomRef, hint: anchorLabel }
         : { kind: 'block' };
-      pendingComments.push({ blockId: blockId, anchor: anchor, text: text });
-      var provisionalN = nextCommentNumber() + pendingComments.length - 1;
-      var list = document.querySelector('div#comment-list-' + blockId);
-      if (list) {
-        var item = document.createElement('div');
-        item.className = 'comment-item comment-pending';
-        item.setAttribute('data-anchor-kind', anchor.kind);
-        if (anchor.ref) item.setAttribute('data-anchor-ref', anchor.ref);
-        item.setAttribute('data-block-id', blockId);
-        var tag = anchor.kind === 'md' ? anchor.label
-          : anchor.kind === 'dom' ? (anchor.hint || anchor.ref)
-          : anchor.kind === 'mermaid' ? (anchor.hint || anchor.ref)
-          : 'block';
-        item.innerHTML = '<span class="comment-anchor">#' + provisionalN + ' · ' + String(tag).replace(/</g, '&lt;') + '</span>';
-        item.appendChild(document.createTextNode(text));
-        list.appendChild(item);
+      // SPEC_POLISH.md ticket 02 criterion 1: a form reopened on an anchor that
+      // already has a comment queued (openCommentForm's 'editing' argument
+      // stamped data-editing-id when it did) REPLACES that entry's anchor/text
+      // in place rather than pushing a second, independent one. Keyed by the
+      // entry's own stable id (removePendingComment's own reasoning,
+      // src/anchor.mjs), never by re-matching the anchor here -- the anchor a
+      // submit reads off the form is exactly the one the reopen already
+      // matched, and matching again would go wrong the moment two queued
+      // comments ever shared an anchor (legal for a whole-block comment).
+      var editingId = form.getAttribute('data-editing-id');
+      var editing = editingId ? pendingComments.find(function (c) { return String(c.id) === editingId; }) : null;
+      if (editing) {
+        editing.anchor = anchor;
+        editing.text = text;
+      } else {
+        pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text });
       }
       // The pin lands NOW, not after Send: a queued comment has no server-assigned
       // n, so commentsWithPending mints a provisional one continuing the sequence
       // and placePin draws it hollow (.pin-pending). Re-rendering the whole layer
       // rather than appending one pin is what keeps the provisional numbers
-      // consistent as more comments queue up behind this one.
+      // consistent as more comments queue up behind this one. The comment-list
+      // entries are rebuilt the same way (refreshPins calls
+      // refreshPendingCommentItems -- finding D3), not just appended to --
+      // editing in place must not also produce a stray second list entry for
+      // the same, now-updated queue item.
       refreshPins(document);
       input.value = '';
+      form.removeAttribute('data-editing-id');
       form.classList.remove('open');
       var targetEl = document.querySelector('div#comment-target-' + blockId);
       if (targetEl) targetEl.classList.remove('open');
@@ -1243,8 +2348,44 @@ export const ui = `
   document.addEventListener('click', function (ev) {
     var item = ev.target && ev.target.closest ? ev.target.closest('.comment-item') : null;
     if (!item) return;
+    // SPEC_POLISH.md ticket 02: the delete "x" has its own listener, just below --
+    // it must not ALSO trigger this entry's highlight-on-click behaviour.
+    if (ev.target.closest && ev.target.closest('.comment-delete')) return;
     if (item.getAttribute('data-anchor-kind') !== 'md') return;
     highlightAnchor(item.getAttribute('data-block-id'), item.getAttribute('data-anchor-ref'));
+  });
+
+  // --- delete a queued (unsent) comment from its own list entry -----------------
+  // (SPEC_POLISH.md ticket 02, criterion 2). Delegated from the document, same
+  // reasoning as the highlight listener just above: a pending entry can appear
+  // at any time after hydrate (queued locally, or -- reopened and re-edited --
+  // rebuilt by refreshPendingCommentItems), so there is no single wireRoot pass
+  // that could wire a "delete" button once and for all. A SENT comment's
+  // server-rendered entry never carries a '.comment-delete' at all (criterion 3),
+  // so this can never reach one.
+
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.comment-delete') : null;
+    if (!btn || readonly) return;
+    ev.preventDefault();
+    var item = btn.closest('.comment-item');
+    if (!item) return;
+    var id = Number(item.getAttribute('data-pending-id'));
+    pendingComments = removePendingComment(pendingComments, id);
+    refreshPins(document); // rebuilds the list entries too -- finding D3
+    // A form still open, reopened (criterion 1) on the entry just deleted
+    // instead of resubmitted: close it rather than leaving stale prefilled
+    // text that would otherwise queue right back as a brand-new comment.
+    var openForm = document.querySelector('.comment-form[data-editing-id="' + id + '"]');
+    if (openForm) {
+      openForm.removeAttribute('data-editing-id');
+      openForm.classList.remove('open');
+      var input = openForm.querySelector('input[type=text]');
+      if (input) input.value = '';
+      var openBlockId = openForm.getAttribute('data-block-id');
+      var openTarget = document.querySelector('div#comment-target-' + openBlockId);
+      if (openTarget) openTarget.classList.remove('open');
+    }
   });
 
   // --- mermaid: client-side from the CDN, exactly as /visualize does today ---
@@ -1466,6 +2607,11 @@ export const ui = `
       var svg = n.querySelector('svg');
       if (svg) wireMermaidBlock(n, svg);
     });
+    // An OPEN lens is showing a clone of an svg that no longer exists -- and it
+    // has to happen after the wireMermaidBlock loop above, not before, so the
+    // clone picks up the .cb-anchor-sent stamps that loop puts back on the
+    // fresh nodes (criterion 12 inside the lens). See lensRetheme.
+    lensRetheme();
   }
   function redrawMermaidForTheme() {
     var myGeneration = ++mermaidRedrawGeneration;
@@ -1572,6 +2718,192 @@ export const ui = `
     return n;
   }
 
+  // --- round badge: "round N of M" (ticket 04, SPEC_POLISH.md) -----------------
+  //
+  // N is the topmost round crossing the sticky header line, via
+  // IntersectionObserver with a root margin matching the header -- no scroll
+  // handler (Decisions). Verified in real Chrome (not just this page's own DOM
+  // stand-in, which has no IntersectionObserver at all): a first attempt shrank
+  // the observed band to a literal 1px line at the header's bottom edge, which
+  // is exactly what the spec's wording describes -- and is real-browser-false.
+  // A programmatic scroll (this page sets 'html { scroll-behavior: smooth }',
+  // and criterion 9's own jump uses it) animates over several frames;
+  // IntersectionObserver only samples at rendering steps, not continuously, so
+  // a 1px band can have a .round section's edge land on either side of it
+  // between two consecutive samples without either sample ever reporting
+  // it intersecting -- confirmed by recreating the exact observer mid-scroll
+  // and watching it report every section not-intersecting even though the
+  // header line plainly passed through one of them moments before. ROUND_BAND_PX
+  // below is the fix: a band with real thickness immediately under the header,
+  // not a mathematical line -- thick enough that no realistic scroll step jumps
+  // over it, thin enough to still mean "right at the header", not "anywhere in
+  // the viewport". Since .round sections stack with no overlap, both are
+  // essentially never simultaneously in the band except for the moment the gap
+  // between two rounds passes through it, and the last entry processed in that
+  // rare batch wins (qsa/IntersectionObserver both preserve document order, so
+  // that is the LOWER section, i.e. the one the reviewer is arriving at).
+  //
+  // badgeCurrentRound is set ONLY from the observer callback -- never reset by
+  // an SSE push arriving further down the page, which must not yank the
+  // reviewer's read position back to round 1 -- only M (board.rounds.length)
+  // changes on a push; see renderBadge, and applyRoundPush/applySubmittedPush/
+  // applyResync further down, all of which call it after advancing 'board'.
+  //
+  // Guarded on IntersectionObserver existing at all: neither this page's own
+  // check suite's DOM stand-in nor a very old browser defines it, and the badge
+  // simply keeps whatever text it was last given rather than throwing.
+  var ROUND_BAND_PX = 96;
+  var badgeCurrentRound = (board.rounds && board.rounds[0]) ? board.rounds[0].n : 1;
+  var roundObserver = null;
+
+  function renderBadge() {
+    var el = document.querySelector('button#round-badge');
+    if (el) el.textContent = badgeLabel(badgeCurrentRound, (board.rounds || []).length);
+  }
+
+  function headerHeight() {
+    var header = document.querySelector('.board-head');
+    return header ? Math.round(header.getBoundingClientRect().height) : 0;
+  }
+
+  /** (Re)build the observer against the CURRENT header height and viewport, and
+   * watch every .round section on the page. Called at hydrate and on resize --
+   * the header's own height changes at the narrow-viewport breakpoint
+   * (src/styles.mjs), and IntersectionObserver has no API to edit a live
+   * instance's rootMargin, so a resize means throwing the old one away and
+   * re-observing every section fresh. */
+  /** The last '.round' whose own top edge is at or above the header line -- i.e.
+   * the round you are actually reading, decided by position rather than by
+   * intersection. The fallback for the case the band CANNOT answer (finding
+   * NEW-1): the band is a fixed strip at [h, h + ROUND_BAND_PX] from the
+   * viewport top, but the page cannot scroll past its own end, and there is
+   * ~222px of slack below the last round (the .blocks gap, the send bar, and
+   * .board-shell's 128px bottom padding). So the LAST round has to be taller
+   * than roughly 'innerHeight - 222 - (h + ROUND_BAND_PX)' -- about 414px at an
+   * 813px viewport, ~700px on a large display -- before it can ever reach the
+   * band at all. Measured in Chrome: a 169px round 2 tops out at y=406 at
+   * maximum scroll, never intersects, and the badge sits on 'round 1 of 2' with
+   * the reviewer bottomed out on round 2. That short trailing round is normally
+   * the freshly-pushed OPEN one, i.e. exactly the round the badge exists to name
+   * -- and it also broke criterion 9, since badgeCurrentRound never became the
+   * open round and the click's 'already there' guard therefore never fired.
+   *
+   * The line is roundBandBottom (below), NOT a bare 'headerHeight() +
+   * ROUND_BAND_PX', and that difference is the whole of finding NEW-1 -- see
+   * that variable's own comment.
+   *
+   * qsa preserves document order, so the last match is the lowest qualifying
+   * section: the one the reviewer has scrolled INTO, not one scrolled past.
+   * Since '.round' sections stack without overlapping, "the last one whose top
+   * has crossed the line" IS "the one the line is currently inside", which is
+   * the Decision's own wording computed directly instead of inferred from which
+   * entries the observer happened to include in this batch. */
+  function roundAtHeaderLine() {
+    var found = null;
+    qsa('.round').forEach(function (section) {
+      if (!section.getBoundingClientRect) return;
+      if (section.getBoundingClientRect().top <= roundBandBottom) found = section;
+    });
+    return found;
+  }
+
+  function setBadgeRound(section) {
+    if (!section) return;
+    var n = parseInt(section.getAttribute('data-round'), 10);
+    if (!isFinite(n)) return;
+    badgeCurrentRound = n;
+    renderBadge();
+  }
+
+  /** How far below the viewport's top the "header line" actually sits, in px.
+   * Normally 'headerHeight() + ROUND_BAND_PX' -- but CLAMPED DOWNWARD so the
+   * last round can always reach it, which is finding NEW-1.
+   *
+   * The defect: the band was a fixed strip at [h, h + 96] and the page cannot
+   * scroll past its own end. Below the last round sits ~222px of slack (the
+   * .blocks gap, the send bar, and .board-shell's 128px bottom padding), so a
+   * trailing round has to be roughly 'innerHeight - 222 - (h + 96)' tall --
+   * about 414px at an 813px viewport, ~700px on a large display -- before it can
+   * EVER enter that strip. A shorter one never does, and that is normally the
+   * freshly-pushed OPEN round, i.e. exactly the round the badge exists to name.
+   * Measured in Chrome at innerHeight 913, h 81: a 432px round 2 bottoms out
+   * with its top at y=243 against a line at y=177 and the badge reads
+   * 'round 1 of 2' with the reviewer looking at round 2. Criterion 9 fell over
+   * with it, since badgeCurrentRound never became the open round and the click's
+   * "already there" guard therefore never fired.
+   *
+   * A fallback keyed on "nothing is intersecting" does NOT fix this, and it is
+   * worth recording why: a tall round 1 SPANS the strip the whole way down and
+   * never stops intersecting, so no such callback ever arrives. The line itself
+   * has to move. Clamping it to where the last round's top ends up at maximum
+   * scroll leaves every ordinary page untouched (a tall last round puts that
+   * value far above the line, so the max() keeps the line where it was) and only
+   * ever reaches down for the case that is otherwise unreachable. */
+  var roundBandBottom = ROUND_BAND_PX;
+
+  function measureRoundBand() {
+    var h = headerHeight();
+    var viewport = window.innerHeight || 0;
+    var line = h + ROUND_BAND_PX;
+    var sections = qsa('.round');
+    var last = sections.length ? sections[sections.length - 1] : null;
+    if (last && last.getBoundingClientRect) {
+      var doc = document.documentElement || {};
+      // What is still scrollable from wherever we are right now. 'last.top' is
+      // relative to the CURRENT scroll, so subtracting this gives its top at
+      // maximum scroll regardless of where the reviewer happens to be.
+      var remaining = Math.max((doc.scrollHeight || 0) - viewport - (window.scrollY || 0), 0);
+      // '+ ROUND_BAND_PX' is not padding, it is what makes the observer FIRE.
+      // Clamping the line to exactly where the last round's top comes to rest
+      // leaves the section grazing the band's edge with zero intersection AREA,
+      // and a zero-area overlap is not an intersection -- no callback, no
+      // recompute, and the badge stays wrong for the same reason it was wrong
+      // before, one measurement further along. Measured in Chrome: with the
+      // line at exactly 243 and round 2 resting at 243, nothing fired at all.
+      // Giving the band its ordinary thickness below that resting point means
+      // the section crosses the line while there is still scroll left, so the
+      // crossing is a real event. Costs nothing on any page where the clamp
+      // does not apply, since the max() keeps the ordinary line there.
+      line = Math.max(line, Math.ceil(last.getBoundingClientRect().top - remaining) + ROUND_BAND_PX);
+    }
+    roundBandBottom = Math.min(line, Math.max(viewport - 1, 1));
+    return h;
+  }
+
+  function setupRoundObserver() {
+    if (typeof IntersectionObserver !== 'function') return;
+    if (roundObserver) roundObserver.disconnect();
+    var h = measureRoundBand();
+    var bottom = Math.max((window.innerHeight || 0) - roundBandBottom, 0);
+    roundObserver = new IntersectionObserver(function () {
+      // The observer is the TRIGGER, never the answer: which entries a batch
+      // happens to contain depends on which sections changed state, and the
+      // section that should win may not have changed at all (a tall round 1
+      // stays intersecting while a short round 2 arrives beneath it). The
+      // answer is recomputed positionally instead -- still no scroll handler,
+      // which is what the Decision actually asks for.
+      setBadgeRound(roundAtHeaderLine());
+    }, { rootMargin: '-' + h + 'px 0px -' + bottom + 'px 0px', threshold: 0 });
+    qsa('.round').forEach(function (section) { roundObserver.observe(section); });
+  }
+
+  setupRoundObserver();
+  window.addEventListener('resize', function () { setupRoundObserver(); });
+
+  var roundBadgeBtn = document.querySelector('button#round-badge');
+  if (roundBadgeBtn) {
+    // Criterion 9: jumps to the round that still needs an answer. Inert
+    // exactly when that is already where you are -- "at the open round there
+    // is nothing to take you to" (Decisions) -- and inert when nothing is open
+    // at all (every round already sent, nothing left to jump to).
+    roundBadgeBtn.addEventListener('click', function () {
+      var target = openRoundNumber();
+      if (target == null || target === badgeCurrentRound) return;
+      var section = document.querySelector('.round[data-round="' + target + '"]');
+      if (section && section.scrollIntoView) section.scrollIntoView({ block: 'start' });
+    });
+  }
+
   /** Enable/disable BOTH send-bar buttons together. They live in .send-bar,
    * outside any round section, so markRoundHistory (which disables everything
    * inside the round it collapses) never reaches them -- that is precisely how a
@@ -1606,6 +2938,32 @@ export const ui = `
       if (!r.ok) throw new Error('submit failed: ' + r.status);
       return r.json();
     }).then(function (result) {
+      if (result && result.alreadySent) {
+        // A 409 stored NOTHING (src/board.mjs refuses the submit outright), so
+        // every queued comment is still unsent -- and the queue used to be
+        // emptied here anyway, alongside the success path, destroying all of
+        // them with no undo and no copy anywhere: pendingComments lives only in
+        // this page's memory (audit finding D2). Kept instead, pins and list
+        // entries untouched, and the reviewer told they still have them, so
+        // they go out with the next round rather than having to be retyped from
+        // memory.
+        //
+        // The send bar stays disabled, which is the same call the success path
+        // makes and for the same reason: this round is out, and re-enabling
+        // would only offer a button whose next press earns another 409. What
+        // actually re-enables it is a NEW round arriving -- applyRoundPush's
+        // own setSendBarEnabled(openRoundNumber() !== null) -- which is exactly
+        // the moment the preserved queue becomes sendable again. The tab's
+        // pending mark is left alone too: it counts rounds not yet read, which
+        // a refused submit says nothing about.
+        if (sendStatus) {
+          sendStatus.textContent = pendingComments.length
+            ? 'Already sent by another tab — nothing was submitted. Your '
+              + pendingComments.length + ' queued comment(s) are still here and will go with the next round.'
+            : 'Already sent.';
+        }
+        return;
+      }
       // Queue emptied first, then the pin layers re-rendered: from here the pins
       // come from board.comments alone, so the provisional ones are replaced
       // rather than joined by the server-numbered copies of the same comments.
@@ -1613,8 +2971,7 @@ export const ui = `
       refreshPins(document);
       clearPendingMark();
       if (sendStatus) {
-        sendStatus.textContent = result && result.alreadySent ? 'Already sent.'
-          : (action === 'discuss' ? 'Handed over to chat.' : 'Sent.');
+        sendStatus.textContent = action === 'discuss' ? 'Handed over to chat.' : 'Sent.';
       }
       // Deliberately NOT re-enabled here: the round is out.
     }).catch(function (err) {
@@ -1768,7 +3125,19 @@ export const ui = `
     section.setAttribute('data-round-status', 'sent');
     var label = section.querySelector('.round-label');
     if (label && label.textContent.indexOf('sent') === -1) label.textContent = label.textContent + ' · sent';
-    qsa('textarea, input, button', section).forEach(function (el) { el.disabled = true; });
+    // The diagram's expand control is exempt, exactly as it is in the readonly
+    // pass at the top of this file, and for the same reason (SPEC_POLISH.md
+    // ticket 05: "the lens is view-only under body.readonly ... pan and zoom
+    // work"). A round collapsing into history makes its ANSWERS immutable; it
+    // does not make its diagrams unreadable, and a settled round is precisely
+    // where someone re-reads one. The readonly pass was patched for this and
+    // this loop was not (audit finding D6), so a diagram went permanently
+    // un-expandable the moment its round was sent -- from a page that had been
+    // showing the control a second earlier.
+    qsa('textarea, input, button', section).forEach(function (el) {
+      if (el.classList && el.classList.contains('expand-btn')) return;
+      el.disabled = true;
+    });
     // Mirror renderRoundSection's server-side markup exactly (draggable="false"
     // on a historical rank item), not just "inputs disabled": disabling the
     // li tag's own controls does nothing to its native HTML5 drag capability,
@@ -1793,7 +3162,15 @@ export const ui = `
     });
   }
 
+  // SPEC_POLISH.md ticket 05: close the diagram lens before any of the three
+  // paths below start replacing sections. The lens holds a CLONE of a diagram
+  // that is about to stop existing, and -- until it is closed -- the block's own
+  // comment form, moved in there and due back at a placeholder in markup this is
+  // about to throw away. Closing first returns the form while its slot is still
+  // in the document; leaving it open would strand it inside a dialog and leave
+  // two elements sharing one id the moment the replacement rendered its own.
   function applyRoundPush(data) {
+    lensClose();
     var patch = computeBoardPatch(board, data.board);
     // Advance the closure's board to the post-push state now, BEFORE any DOM
     // work below: wireRoot (via wireHtmlStage/wireMermaidBlock, ticket 06) reads
@@ -1840,6 +3217,14 @@ export const ui = `
         // inserted, never the whole #blocks container, so an already-rendered
         // diagram from an earlier round is never re-scanned.
         nodes.forEach(function (node) { if (node.querySelectorAll) renderMermaidBlocks(node); });
+        // Criterion 7: the round this push just inserted has to be watchable
+        // too, or scrolling into it would never update N. Rebuilt wholesale
+        // rather than observing the one new section: the band's own lower edge
+        // is clamped against how far the page can still scroll (see
+        // measureRoundBand -- finding NEW-1), and inserting a round changes
+        // exactly that. A push that only added an observation would leave the
+        // band measured against the PREVIOUS document height, which is the same
+        // staleness in a new place.
       }
     } else if (data.mode === 'amend') {
       var roundSection = document.querySelector('.round[data-round="' + data.round + '"]');
@@ -1874,7 +3259,20 @@ export const ui = `
     // 'resize' handler and submitBoard().then already do.
     refreshPins(document);
 
+    // Rebuilt for BOTH modes, not just 'new-round': an amend replaces block
+    // markup and therefore changes the document's height, which the band's own
+    // lower edge is measured against (measureRoundBand -- finding NEW-1). It
+    // also re-observes whatever sections now exist, which is what makes a
+    // freshly-inserted round watchable at all (criterion 7).
+    setupRoundObserver();
+
     patch.roundsNowSent.forEach(markRoundHistory);
+
+    // Criterion 8: a round arriving over SSE used to leave the badge reading
+    // whatever the page happened to render at load, stale until reload -- the
+    // badge was written server-side and this push never touched it. board was
+    // already reassigned above, so board.rounds.length (M) is current here.
+    renderBadge();
 
     // The round is in the DOM; now mark the TAB, since this push is the whole
     // reason the tab was not reopened and focus not stolen (DESIGN.md "Open
@@ -1887,6 +3285,7 @@ export const ui = `
   }
 
   function applySubmittedPush(data) {
+    lensClose(); // see applyRoundPush above
     var section = document.querySelector('.round[data-round="' + data.round + '"]');
     var replacedIds = section ? qsa('.block', section).map(function (el) { return el.getAttribute('data-block-id'); }) : [];
     // Advance board before any DOM work -- same reasoning as applyRoundPush
@@ -1918,10 +3317,26 @@ export const ui = `
       // sent, which is exactly why the fragment path above is preferred.
       markRoundHistory(data.round);
     }
+    // Criterion 7, and the exact mirror of what applyRoundPush already does for
+    // its own inserted section (audit finding D4): the round section this push
+    // replaced was the one the observer was watching, and it is GONE -- an
+    // IntersectionObserver holds no claim on the element that took its place.
+    // Without re-observing, scrolling through the just-submitted round stopped
+    // moving N at all, so the badge sat on whatever number it last saw and read
+    // "round 1 of 3" halfway down round 3, which is the very lie criterion 7
+    // exists to end. Looked up fresh from the live document rather than reusing
+    // the local 'replacement', for the same reason applyRoundPush does: only the
+    // document knows what actually landed.
+    setupRoundObserver();
     // U3: same fix as applyRoundPush above -- wireRoot(replacement) ran against
     // a detached node, so any page-scoped pin it drew is positioned wrong now
     // that the section is actually attached. Recompute once, here, after attach.
     refreshPins(document);
+    // M does not change on a submit, but the badge is re-rendered anyway for
+    // the same reason applyRoundPush does: board was just reassigned, and
+    // "never goes stale" is simplest to guarantee by never special-casing
+    // which pushes are allowed to skip it.
+    renderBadge();
     // The round is now sent: nothing in it is worth preserving as "in progress"
     // any more, however this client happened to have it filled in. Both sources
     // are used deliberately -- board.blocks is the TOP level only, so a question
@@ -1958,6 +3373,7 @@ export const ui = `
   function applyResync(fresh, doc) {
     var patch = computeBoardPatch(board, fresh);
     if (!patch.addedBlockIds.length && !patch.changedBlockIds.length && !patch.roundsNowSent.length) return;
+    lensClose(); // see applyRoundPush above -- after the no-op early return, not before
 
     var roundOf = {};
     (fresh.blocks || []).forEach(function (b) { roundOf[b.id] = b.round; });
@@ -1975,6 +3391,7 @@ export const ui = `
       board = fresh;
       clearFieldState(patch.changedBlockIds);
       patch.roundsNowSent.forEach(markRoundHistory);
+      renderBadge();
       setSendBarEnabled(openRoundNumber() !== null);
       refreshPins(document);
       return;

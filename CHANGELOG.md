@@ -25,6 +25,16 @@ this project does not yet follow semantic versioning, because nothing has been r
   session cookie or the secret and nothing weaker. It existed only because reads were
   open; with reads gated it was strictly weaker than the credential a reader had already
   presented.
+- **The reference allowlist's default was too wide, and is narrowed.** References can
+  now resolve inside a configured allowlist (`CLAUDE_BOARD_REF_ROOTS`) as well as a
+  board's own `cwd`, so a session can render the skill, command or agent file it is
+  actually discussing instead of showing a refusal box. An internal audit found the
+  shipped default, the whole `~/.claude` tree, resolves the CLI's own credentials file,
+  its full prompt history and every project's session transcripts alike -- all of it
+  readable through a board, snapshotted into it, and full-text searchable from `/`
+  forever. The default is narrowed to three roots, `~/.claude/skills`,
+  `~/.claude/commands` and `~/.claude/agents`; `CLAUDE_BOARD_REF_ROOTS=~/.claude` still
+  opts back into the whole tree for anyone who wants it. See ADR.md entry 3.
 
 ### Changed
 
@@ -58,6 +68,49 @@ this project does not yet follow semantic versioning, because nothing has been r
   edits, which it leaves and says so), then reports exactly what it leaves behind on
   purpose — the store, the local secret, and the logs, named by path. Safe to run when
   nothing is installed and safe to run twice.
+- **References can resolve inside a configured allowlist, not just a board's `cwd`.**
+  `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths) is validated exactly as
+  `cwd` already is -- realpath'd, must exist, refused if it is `/` or `$HOME` or
+  above -- and a root that fails is dropped rather than widening the gate or taking
+  the daemon down. An explicitly empty value restores the old `cwd`-only boundary, and
+  `install.sh` writes the resolved value into the plist. See the Security entry above
+  for the default this shipped with and why it was narrowed.
+- **A queued comment can be edited and deleted before Send.** Clicking an
+  already-commented element in comment mode reopens and edits its queued comment
+  instead of minting a duplicate, across every anchor-minting path (the page-wide
+  click listener, the html-stage's own click handler, and the mermaid block's own).
+  Each queued entry gets a delete control; deleting one renumbers every remaining
+  entry from its position, not just within one block. An element that already
+  carries a SENT comment is inert in comment mode: click does nothing, and hover
+  shows `cursor: not-allowed` instead of the ordinary anchor affordance, now in the
+  dom, mermaid and html-stage paths alike.
+- **A code block's height is capped, with an internal scroll and a drag handle.** A
+  long reference now scrolls inside its own box (~480px, the same idiom
+  `.html-stage` already used) instead of pushing everything below it off-screen; a
+  short one is unaffected. The cap converts to a plain, breakable height the moment
+  a drag actually needs more room, and the code block's pin layer is clipped to the
+  `<pre>`'s own box, so a pin for a line scrolled out of view is hidden rather than
+  drawn in the wrong place.
+- **The round badge tracks your position, and a back link leaves the board.** The
+  header now reads "round N of M": N is the round currently crossing the sticky
+  header line, tracked with `IntersectionObserver`, M is the board's round count.
+  Clicking the badge jumps to the round still open for an answer. A back-to-index
+  link sits in the header too, absent (not merely disabled) under a read-only
+  archive, since a `file://` load has no daemon behind `/` to reach.
+- **A diagram opens in a pan/zoom lens you can comment inside.** A mermaid block's
+  kicker carries an expand control that opens the diagram full-viewport: drag pans,
+  scroll zooms about the cursor, fit and 1:1 reset the view. A node commented on
+  from inside the lens is the same comment as one minted inline -- the anchor, the
+  queued-comment edit and the sent-comment de-affordance are shared, not separately
+  implemented -- and pan/zoom stay usable read-only in a standalone archive.
+- **The index leads with the thread's title, not its project path.** A row's
+  headline is the board title now; a title-less board falls back to the project's
+  folder name (basename only, full path on hover via a `title` attribute), and a
+  board with neither falls back to a plain label rather than the literal word
+  "untitled". The round count sums across a thread's whole board-doc group, not
+  just the primary board's, and the updated timestamp reads as relative time ("an
+  hour ago"), refreshed by a small inline client script, with the exact ISO value
+  kept on the element's `title` attribute for hover.
 
 ### Fixed
 
@@ -71,6 +124,69 @@ this project does not yet follow semantic versioning, because nothing has been r
   on an unrelated file event. `WatchPaths` is gone from the generated plist. launchd
   will not restart a job more than once per 10s, so two edits inside one 10s window
   collapse into a single restart. See [QUIRKS.md](QUIRKS.md).
+- The diagram lens's own comment gesture was dead in every real browser: taking
+  `setPointerCapture` on `pointerdown` (copied from `/explain`'s lens, the model for
+  this one) makes the browser retarget the following `click` at the capture element,
+  so a click on a node reached the handler as a click on the lens surface and
+  commented on nothing. Invisible to the DOM stand-in, which has no such thing as
+  pointer capture, and found only by driving the lens in real Chrome. The capture is
+  now taken only once a press has actually become a pan, never on the press itself.
+  See [QUIRKS.md](QUIRKS.md).
+- Three title-less threads sharing one project directory rendered as identical rows:
+  the folder-name headline fallback and the suppressed path line both collide on the
+  same text, and nothing else on the row varied. A row now always carries its thread
+  id as a visible discriminator, not only in an attribute nobody reads.
+- The index row's round count summed across every board doc behind a thread, which
+  could show a round number that exists on neither board: a two-board thread (2
+  rounds each) read "round 4" and linked to a board whose own header read "round 1
+  of 2". `src/badge.mjs`'s own doc comment records the board page's version of this
+  exact mistake. The row now states the count of the specific board it links to,
+  worded as a count ("2 rounds"), never as an ordinal ("round 2"), and the segment
+  is omitted rather than reading "0 rounds" for a board with no rounds at all.
+- The relative-time client script (`relTime`) thresholded the raw, unrounded time
+  difference and rounded only for display, so a value that rounds up to the next
+  tier's boundary still printed in the tier below it for one more tick: 44m59s
+  read "45 minutes ago", and one second later, 45m00s, read "an hour ago". Now
+  rounds each unit first and thresholds the rounded value (moment.js's own
+  approach), which removes states like that entirely. Also: a `null` timestamp
+  returned "54 years ago" instead of being left alone (`new Date(null).getTime()`
+  is `0`, not `NaN`, so the previous guard missed it), and the refresh interval
+  polled slower (60s) than its narrowest bucket is wide (45s), so a row could load
+  at an offset that skipped "a minute ago" entirely; now 15s. See
+  [QUIRKS.md](QUIRKS.md) for the check-suite gap that let the wiring itself (not
+  just `relTime`'s own logic) ship unverified.
+- Seven more client-side id lookups were still bare `getElementById`, all of them
+  added after the sweep that tag-qualified the rest: the queued-comment list, the
+  html-stage message guard's form lookup, the diagram lens's two adoption lookups,
+  the comment-delete handler's target lookup, and the round badge twice. Board
+  content is markdown snapshotted from arbitrary files, so a heading or top-level
+  list item can mint any of those ids (including composed ones like
+  `comment-form-q1`) and win tree order. Each now names the tag `src/render.mjs`
+  actually emits — `div#comment-list-`, `form#comment-form-`, `div#comment-target-`,
+  `button#round-badge` — and a sweep of all four client scripts fails if a bare
+  lookup, or an unqualified `#id` selector, ever comes back.
+- Switching theme while the diagram lens was open left a dark diagram inside light
+  chrome (or the reverse): the lens holds a clone of the inline SVG, and a theme
+  change replaces that SVG with a newly drawn one. The two features were built on
+  separate branches, so nothing connected them. Reachable without touching the theme
+  control at all — a modal dialog makes it inert, but the OS switching light/dark
+  while the preference is System fires the same redraw. The open lens now re-clones
+  from the redrawn diagram, keeping the reviewer's pan and zoom and its pins. See
+  [QUIRKS.md](QUIRKS.md), which carried the now-corrected claim that the lens was
+  "downstream of those variables ... nothing extra to keep in step".
+- The html stage's hover outline — the only feedback telling you which element a
+  click will anchor a comment to — sat at 2.61:1 against its background, under the
+  3:1 minimum for non-text UI. The stage always renders on white (its background
+  token is `#fff` in both palettes, because an agent-authored mock assumes a white
+  canvas), but the outline was pinned to the *dark* accent, which the light palette
+  had already rejected for exactly this reason when it moved `--accent` to the
+  mid-blues. Now pinned to the light accent: 6.65:1, still one value for both
+  themes. The checks now assert the contrast directly rather than "matches the
+  token", which was the wrong requirement stated convincingly.
+- The "this browser is not authorized" page had no light theme — a black slab on
+  every light-mode machine, since the credential gate shipped. It carries no
+  stylesheet and no script by design, so it now follows the OS preference, the only
+  theme signal available to it.
 
 ## 0.1.0 — unreleased
 
@@ -127,10 +243,12 @@ Found by internal audit during the initial build, all fixed and covered by check
 
 ### Fixed
 
-Three separate occasions where the checks were green while the feature was completely
-dead — twice from asserting structure instead of behaviour, once from mocking mermaid's
-id scheme wrongly. Click-to-comment inside a stage attached its listeners to an iframe's
-`about:blank` placeholder document; diagram anchoring matched `^flowchart-` while real
-mermaid namespaces node ids with the diagram's own svg id. Both fixed, and the harness
-now exercises the click path end to end against a DOM stand-in rather than asserting on
-rendered strings.
+Three separate occasions in this release where the checks were green while the feature
+was completely dead — twice from asserting structure instead of behaviour, once from
+mocking mermaid's id scheme wrongly. Click-to-comment inside a stage attached its
+listeners to an iframe's `about:blank` placeholder document; diagram anchoring matched
+`^flowchart-` while real mermaid namespaces node ids with the diagram's own svg id. Both
+fixed, and the harness now exercises the click path end to end against a DOM stand-in
+rather than asserting on rendered strings. More of the same family have turned up since
+this release, in later work; [QUIRKS.md](QUIRKS.md) is the running register, not this
+paragraph.

@@ -20,14 +20,25 @@ import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveCom
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, renderRefusalPage, CSP } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
-import { resolveRef, langForPath, resolvePath, MAX_REF_BYTES } from '../src/resolve.mjs';
+import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
+// Both used only by the reference-boundary checks (audit 2026-07-31). The descriptor
+// discipline inside resolveRef is asserted by swapping the file out BETWEEN the check
+// and the read, which means patching the fs namespace src/resolve.mjs imports from --
+// node:module's syncBuiltinESMExports is what propagates such a patch into an ESM
+// module's already-bound named imports.
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { ui } from '../src/ui.mjs';
 import { styles, palettes } from '../src/styles.mjs';
+import { indexScript, buildThreadIndex, renderIndexPage, folderName, roundCount } from '../src/indexpage.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
+import { badgeLabel } from '../src/badge.mjs';
+import { lensZoomAt, lensFit, lensOneToOne } from '../src/lens.mjs';
 import {
   extractHint, stepsToPath, pathToSteps, resolveSteps, buildSteps, composeHint,
   parseHtmlTree, elementText, resolveDomAnchor, resolveDomAnchorInSection,
   parseMermaidDomId, mermaidRefResolves, resolveMermaidAnchor, MERMAID_NODE_SELECTOR,
+  findPendingCommentForAnchor, removePendingComment,
 } from '../src/anchor.mjs';
 
 let failures = 0;
@@ -523,6 +534,150 @@ check('composeHint: every block-kind noun the ticket names, and an unknown kind 
   assert.equal(composeHint('x', 'span', true, 'A', 'compare'), 'x in A comparison');
   assert.equal(composeHint('x', 'span', true, 'A', 'markdown'), 'x in A block');
   assert.equal(composeHint('x', 'span', true, 'A', 'nonsense-kind'), 'x in A block');
+});
+
+// Ticket 04 / criterion 7-8 (SPEC_POLISH.md): the round badge's label, the same
+// toString()-splicing technique again -- see src/badge.mjs's own file comment for
+// why `round ${rounds.length}` (the old, position-blind label) was a real bug,
+// not a wording nitpick.
+
+check('the exact badgeLabel embedded in ui.mjs (via .toString()) is executable and behaves identically to the imported one', () => {
+  const rehydrated = new Function('return (' + badgeLabel.toString() + ')')();
+  assert.equal(rehydrated(1, 1), badgeLabel(1, 1));
+  assert.equal(rehydrated(2, 3), badgeLabel(2, 3));
+});
+
+check('ui.mjs embeds the literal source of badgeLabel, not a hand-copied reimplementation', () => {
+  assert.ok(
+    ui.includes(badgeLabel.toString()),
+    'the client script must contain the exact function source, so the checked behaviour and the browser copy can never drift apart',
+  );
+});
+
+check('badgeLabel: a single-round board reads "round 1 of 1", never just "round 1"', () => {
+  // The exact case the old label got wrong in the other direction (it would have
+  // read "round 1" here, which is not the bug -- the bug was a two-round board
+  // reading "round 2" throughout). Pinned anyway: it is the cheapest case to get
+  // right and the easiest to get wrong with an off-by-one on `total`.
+  assert.equal(badgeLabel(1, 1), 'round 1 of 1');
+});
+
+check('badgeLabel: the post-push shape -- M grows, N (the round still in view) does not', () => {
+  // Criterion 8: a round arriving over SSE grows `total` immediately; the
+  // reviewer's own read position (`current`) is untouched by that arrival. Two
+  // independent numbers, so a one-argument implementation ("round N of N") would
+  // pass the 1-of-1 case above and fail here.
+  assert.equal(badgeLabel(1, 2), 'round 1 of 2');
+  assert.equal(badgeLabel(2, 2), 'round 2 of 2');
+});
+
+// Ticket 05 / criterion 10 (SPEC_POLISH.md): the diagram lens's view math, the
+// same toString()-splicing technique a third time -- see src/lens.mjs's own file
+// comment. Each of these is held to an arithmetic invariant rather than to a
+// remembered constant, which is the only way "scroll zooms" can be checked
+// without a browser at all: the FEEL of a zoom is entirely "did the thing under
+// my cursor stay under my cursor".
+
+check('the exact lens view math embedded in ui.mjs (via .toString()) is executable and behaves identically to the imported functions', () => {
+  const zoom = new Function('return (' + lensZoomAt.toString() + ')')();
+  const fit = new Function('return (' + lensFit.toString() + ')')();
+  const one = new Function('return (' + lensOneToOne.toString() + ')')();
+  assert.deepEqual(zoom({ x: 10, y: 20, s: 1 }, 100, 50, 2, 0.1, 8), lensZoomAt({ x: 10, y: 20, s: 1 }, 100, 50, 2, 0.1, 8));
+  assert.deepEqual(fit(800, 600, 1600, 400), lensFit(800, 600, 1600, 400));
+  assert.deepEqual(one(800, 600, 1600, 400), lensOneToOne(800, 600, 1600, 400));
+});
+
+check('ui.mjs embeds the literal source of lensZoomAt/lensFit/lensOneToOne, not hand-copied reimplementations', () => {
+  for (const fn of [lensZoomAt, lensFit, lensOneToOne]) {
+    assert.ok(
+      ui.includes(fn.toString()),
+      `the client script must contain the exact source of ${fn.name}, so the checked behaviour and the browser copy can never drift apart`,
+    );
+  }
+});
+
+check('lensZoomAt: the canvas point under the cursor is still under the cursor after the zoom -- the invariant that makes scroll-to-zoom feel like zooming', () => {
+  // A canvas-local point p renders at view.x + view.s * p (transform-origin is
+  // the canvas's own top-left -- src/styles.mjs's .lens-canvas). Pick a cursor
+  // position, work out which canvas point is under it, zoom, and demand that the
+  // SAME canvas point still renders there.
+  const before = { x: -240, y: 90, s: 1.75 };
+  const [px, py] = [512, 301];
+  const pointUnder = { x: (px - before.x) / before.s, y: (py - before.y) / before.s };
+  for (const factor of [1.4, 1 / 1.4, 4, 0.25]) {
+    const after = lensZoomAt(before, px, py, factor, 0.1, 8);
+    const nowAt = { x: after.x + after.s * pointUnder.x, y: after.y + after.s * pointUnder.y };
+    assert.ok(Math.abs(nowAt.x - px) < 1e-9, `zoom by ${factor} moved the point under the cursor horizontally: ${nowAt.x} !== ${px}`);
+    assert.ok(Math.abs(nowAt.y - py) < 1e-9, `zoom by ${factor} moved the point under the cursor vertically: ${nowAt.y} !== ${py}`);
+  }
+});
+
+check('lensZoomAt: the same invariant holds AT the clamp, so a zoom that cannot go further is a no-op rather than a pan', () => {
+  // The failure this rules out is specific and easy to write: clamp the scale but
+  // derive the pan from the UNCLAMPED factor, and every wheel notch past the
+  // limit slides the diagram sideways while the percentage readout sits still.
+  const at = { x: -40, y: -70, s: 8 };
+  const [px, py] = [400, 250];
+  const clamped = lensZoomAt(at, px, py, 3, 0.1, 8);
+  assert.equal(clamped.s, 8, 'scale must not pass the maximum');
+  assert.deepEqual(clamped, { x: at.x, y: at.y, s: 8 }, 'a zoom that hits the clamp must not move the diagram at all');
+  const floor = { x: 11, y: 12, s: 0.1 };
+  assert.deepEqual(lensZoomAt(floor, px, py, 0.25, 0.1, 8), { x: 11, y: 12, s: 0.1 });
+});
+
+check('lensFit puts the whole diagram inside the stage and centres it, and never magnifies one that already fits', () => {
+  // Wider than tall against a squarer stage: the width is what binds.
+  const wide = lensFit(800, 600, 1600, 400);
+  assert.equal(wide.s, 0.5);
+  assert.ok(wide.x >= 0 && wide.y >= 0, 'a fitted diagram never starts off the top or left of the stage');
+  assert.ok(wide.x + 1600 * wide.s <= 800 + 1e-9, 'the fitted diagram must end inside the stage horizontally');
+  assert.ok(wide.y + 400 * wide.s <= 600 + 1e-9, 'the fitted diagram must end inside the stage vertically');
+  assert.equal(wide.x, (800 - 1600 * wide.s) / 2, 'centred horizontally');
+  assert.equal(wide.y, (600 - 400 * wide.s) / 2, 'centred vertically');
+  // Taller than wide: the height binds instead.
+  assert.equal(lensFit(800, 600, 400, 2400).s, 0.25);
+  // Already smaller than the stage: fit is not "fill" -- a two-node flowchart
+  // blown up to a 27" display is not what the control is for.
+  const small = lensFit(1200, 900, 300, 200);
+  assert.equal(small.s, 1);
+  assert.equal(small.x, 450);
+  assert.equal(small.y, 350);
+});
+
+check('lensFit clamps into the SAME band lensZoomAt does, so the first wheel-out on a very tall diagram cannot zoom IN (finding D7)', () => {
+  // The defect, stated as arithmetic: a 400x24000 flowchart fits an 800x600
+  // stage at 0.025, well below lensZoomAt's 0.1 floor. Wheel out from there and
+  // `Math.max(min, s * factor)` returns 0.1 -- a LARGER scale than the view
+  // started at, so the control zooms in when asked to zoom out. Only reachable
+  // on diagrams big enough to need the lens in the first place.
+  const unclamped = lensFit(800, 600, 400, 24000);
+  assert.ok(unclamped.s < 0.1, 'setup: with no floor this diagram fits below the zoom floor');
+  const wheelOut = lensZoomAt(unclamped, 400, 300, 0.9, 0.1, 8);
+  assert.ok(wheelOut.s > unclamped.s, 'setup: which is exactly why zooming OUT from there moves the scale UP');
+
+  const fitted = lensFit(800, 600, 400, 24000, 0.1, 8);
+  assert.equal(fitted.s, 0.1, 'fit must not land below the floor the wheel is clamped to');
+  assert.deepEqual(lensZoomAt(fitted, 400, 300, 0.9, 0.1, 8), { x: fitted.x, y: fitted.y, s: 0.1 },
+    'and from a clamped fit, a wheel-out is a no-op rather than a zoom in the wrong direction');
+
+  // The cap stays a cap whatever `max` says -- "fit never magnifies" is a
+  // separate decision from how far the wheel may go.
+  assert.equal(lensFit(1200, 900, 300, 200, 0.1, 8).s, 1, 'fit must still never magnify, even with max 8');
+  // ...and the pre-clamp call shape is untouched, so every other caller and
+  // every assertion above it reads exactly as it did.
+  assert.deepEqual(lensFit(800, 600, 1600, 400), lensFit(800, 600, 1600, 400, 0, 1));
+});
+
+check('lensOneToOne shows the diagram at exactly 100% and centred, going negative when it is bigger than the stage', () => {
+  assert.deepEqual(lensOneToOne(800, 600, 400, 200), { x: 200, y: 200, s: 1 });
+  // The case the "fit" formula would get wrong if 1:1 were implemented as a fit
+  // with the scale forced to 1: a diagram larger than the stage must be centred
+  // on its middle (negative offsets), not pinned to the stage's top-left.
+  const big = lensOneToOne(800, 600, 2000, 1400);
+  assert.equal(big.s, 1);
+  assert.ok(big.x < 0 && big.y < 0, 'a 1:1 view of an oversized diagram centres on its middle');
+  assert.equal(big.x + 2000 / 2, 400, 'the diagram\'s centre sits at the stage\'s centre horizontally');
+  assert.equal(big.y + 1400 / 2, 300, 'the diagram\'s centre sits at the stage\'s centre vertically');
 });
 
 check('packet shape names board, round, and every question status/choice/note', () => {
@@ -1986,6 +2141,82 @@ check('a mermaid node highlights under the cursor, and an html stage gets the sa
   assert.ok(!afterDecl.includes(`'${decl[1]}'`), 'the class name must not be repeated as a literal');
 });
 
+// --- SPEC_POLISH.md ticket 02, criterion 12 (html-stage half) -----------------
+//
+// An element already carrying a SENT comment must be VISIBLY inert inside the
+// stage too, not just click-inert (src/ui.mjs's handleStageClick already
+// covers the click half). The stage cannot know "sent" on its own -- see
+// QUIRKS.md "Two stylesheets, one palette" -- so the parent's 'mode' message
+// now carries a 'sentRefs' array the stage uses to pick SENT_CLASS over
+// HOVER_CLASS on hover.
+
+check('stageAgentScript de-affordances an already-SENT element on hover: a SENT_CLASS rule, chosen instead of HOVER_CLASS for a ref the parent named sent', () => {
+  const script = stageAgentScript();
+
+  // A second class, declared once, with its own rule -- same discipline as
+  // HOVER_CLASS just above, checked the same way so the two can never quietly
+  // drift out of that discipline independently.
+  const sentDecl = /var SENT_CLASS = '([^']+)';/.exec(script);
+  assert.ok(sentDecl, 'SENT_CLASS must be declared once in the stage agent script');
+  assert.ok(script.includes("'.' + SENT_CLASS + ' {"), 'the de-affordance rule must be built from SENT_CLASS');
+  assert.match(script.slice(script.indexOf("'.' + SENT_CLASS + ' {")), /cursor: not-allowed/,
+    'the SENT_CLASS rule must set cursor: not-allowed');
+  // No outline for a de-affordanced element -- it must not merely look like a
+  // DIFFERENT kind of target, it must not look like a target at all. Scoped to
+  // the rule's own declaration block, not the whole script (the HOVER_CLASS
+  // rule right next to it legitimately does set one).
+  const sentRuleBody = /\.' \+ SENT_CLASS \+ ' \{([^}]*)\}/.exec(script);
+  assert.ok(sentRuleBody, 'expected to find the SENT_CLASS rule body');
+  assert.ok(!/outline/.test(sentRuleBody[1]), 'a de-affordanced element must not carry an outline of any kind');
+
+  // The mouseover handler must actually choose between the two classes based
+  // on whether the hovered element's own ref is in sentRefs -- not just declare
+  // the class and never use it.
+  const hoverBody = script.slice(script.indexOf("addEventListener('mouseover'"));
+  const hoverHandlerBody = hoverBody.slice(0, hoverBody.indexOf('});'));
+  assert.match(hoverHandlerBody, /sentRefs\.indexOf\(ref\) !== -1/, 'the hover handler must check the hovered ref against sentRefs');
+  assert.match(hoverHandlerBody, /classList\.add\(SENT_CLASS\)/, 'a sent ref must get SENT_CLASS');
+  assert.match(hoverHandlerBody, /classList\.add\(HOVER_CLASS\)/, 'a non-sent ref must still get the ordinary HOVER_CLASS');
+
+  // clearHover must remove both classes -- leaving SENT_CLASS behind on
+  // mouseout would strand a de-affordanced element in that state forever.
+  const clearHoverBody = script.slice(script.indexOf('function clearHover'), script.indexOf('function clearHover') + 300);
+  assert.match(clearHoverBody, /classList\.remove\(HOVER_CLASS\)/);
+  assert.match(clearHoverBody, /classList\.remove\(SENT_CLASS\)/);
+
+  // The 'mode' handler must read sentRefs off the message, shape-checked like
+  // every other field this channel carries (see this file's own design
+  // comment on shape validation) -- an array of strings, never trusted blind.
+  const modeBody = script.slice(script.indexOf("data.type === 'mode'"), script.indexOf("data.type === 'locate'"));
+  assert.match(modeBody, /Array\.isArray\(data\.sentRefs\)/, "the 'mode' handler must shape-check sentRefs before using it");
+  assert.match(modeBody, /sentRefs = data\.sentRefs\.filter/, "a malformed entry (non-string) must be dropped, not compared against later");
+});
+
+check('the parent tells a stage its sentRefs at both the moments that matter: when it first announces ready, and on every mode toggle', () => {
+  // handleStageReady: a stage that arrives (or re-arrives, after an amend)
+  // needs the CURRENT sent list the moment it is wired, same reasoning as it
+  // already needs the current commentMode (this file's own comment on
+  // handleStageReady).
+  const readyBody = namedFunctionBody(ui, 'handleStageReady');
+  assert.ok(readyBody, 'handleStageReady not found');
+  assert.match(readyBody, /sentRefs:\s*sentDomRefsForBlock\(blockId\)/, "handleStageReady's postToStage must carry sentRefs");
+
+  // setCommentMode: broadcast to every wired stage on every toggle, not just
+  // at ready time -- turning mode ON is exactly the moment the stage's hover
+  // starts mattering.
+  const setModeBody = namedFunctionBody(ui, 'setCommentMode');
+  assert.ok(setModeBody, 'setCommentMode not found');
+  assert.match(setModeBody, /sentRefs:\s*blockId \? sentDomRefsForBlock\(blockId\) : \[\]/,
+    'setCommentMode\'s broadcast to every wired stage must also carry that stage\'s own sentRefs');
+
+  // sentDomRefsForBlock itself: only 'dom'-kind anchors on the named block --
+  // an html-stage's own anchors are always 'dom' (handleStageClick mints
+  // nothing else), so a mermaid/md/block comment elsewhere must never leak in.
+  const helperBody = namedFunctionBody(ui, 'sentDomRefsForBlock');
+  assert.ok(helperBody, 'sentDomRefsForBlock not found');
+  assert.match(helperBody, /c\.anchor\.kind === 'dom'/);
+});
+
 check('a dom-anchored comment renders its hint and number in the block\'s comment list; a lost one names the ref it lost', () => {
   const board = createBoard({
     title: 'dom comment list',
@@ -2220,11 +2451,14 @@ check('the html-stage and mermaid element-click listeners guard on readonly too,
   // Ticket 10 moved the html-stage one behind a postMessage dispatch --
   // `openCommentForm(` no longer appears literally inside an
   // `addEventListener` callback for that case, only inside the named
-  // `handleStageClick` helper the single `message` listener calls -- so the
-  // literal-body count drops to 3 here; `handleStageClick` is asserted
-  // separately, immediately below, for the same property (opens a form,
-  // guards on readonly) the 4th used to prove inline.
-  assert.equal(anchorClickBodies.length, 3, 'expected exactly 3 DIRECT listeners that open a comment form: .comment-btn, the mermaid click, the generic comment-mode click');
+  // `handleStageClick` helper the single `message` listener calls. Ticket 05 of
+  // SPEC_POLISH.md did the same to the mermaid one, for the same kind of reason:
+  // a diagram node can now be clicked in TWO places (inline, and inside the
+  // lens) and both must mint the identical anchor, so both call one named
+  // `mintMermaidComment` instead of each opening a form themselves. The literal
+  // body count is therefore down to 2, and the two extracted helpers are
+  // asserted below for exactly the property the inline versions used to prove.
+  assert.equal(anchorClickBodies.length, 2, 'expected exactly 2 DIRECT listeners that open a comment form: .comment-btn, the generic comment-mode click');
   for (const b of anchorClickBodies) {
     assert.ok(/\breadonly\b/.test(b), `a listener opens a comment form without checking readonly:\n${b}`);
   }
@@ -2233,6 +2467,20 @@ check('the html-stage and mermaid element-click listeners guard on readonly too,
   assert.ok(stageClickBody, 'handleStageClick not found -- the html-stage click is minted here, dispatched from the single window message listener');
   assert.ok(/openCommentForm\(/.test(stageClickBody), 'handleStageClick must open a comment form');
   assert.ok(/\breadonly\b/.test(stageClickBody), 'handleStageClick opens a comment form without checking readonly');
+
+  // SPEC_POLISH.md ticket 05: the mermaid half. One minting function, and every
+  // listener that reaches it carries the same readonly guard the inline mermaid
+  // listener used to carry on its own -- including the lens's, which is the
+  // whole of "the comment gesture inside it is gated exactly like every other
+  // comment gesture" (the spec's own Decision on the readonly lens).
+  const mintBody = namedFunctionBody(ui, 'mintMermaidComment');
+  assert.ok(mintBody, 'mintMermaidComment not found -- both diagram-node click paths mint through it');
+  assert.ok(/openCommentForm\(/.test(mintBody), 'mintMermaidComment must open a comment form');
+  const mintCallers = bodies.filter(b => /mintMermaidComment\(/.test(b));
+  assert.equal(mintCallers.length, 2, `expected exactly 2 listeners minting a mermaid comment -- the inline diagram click and the lens's -- found ${mintCallers.length}`);
+  for (const b of mintCallers) {
+    assert.ok(/\breadonly\b/.test(b), `a diagram-node click listener mints a comment without checking readonly:\n${b}`);
+  }
 });
 
 check('pin rendering is never gated by readonly, only the click/hover gesture is -- an archived (readonly) board still shows its pins', () => {
@@ -2266,6 +2514,48 @@ check('pin rendering is never gated by readonly, only the click/hover gesture is
   assert.ok(requestBody, 'requestStagePositions not found');
   assert.ok(!/\breadonly\b/.test(readyBody), 'handleStageReady must never gate on readonly -- an archived stage still needs its pins positioned');
   assert.ok(!/\breadonly\b/.test(requestBody), 'requestStagePositions must never gate on readonly -- an archived stage still needs its pins positioned');
+});
+
+// --- the lens's pointer capture (SPEC_POLISH.md ticket 05) ---------------------
+//
+// Asserted structurally, and only because the behaviour is genuinely out of
+// reach here: there is no such thing as pointer capture in this repo's DOM
+// stand-in, so a check that drives the lens there cannot tell the two versions
+// apart. It is not a hypothetical -- it was MEASURED in Chrome during this
+// ticket. Taking the capture on 'pointerdown' makes the browser retarget
+// everything after it, the resulting 'click' included, at the capture element,
+// so the lens's click handler saw '.lens-stage' instead of the diagram node the
+// pointer was over and clicking a node in the lens silently did nothing, with
+// every check in test/check-mermaid-anchor.mjs green. Same precedent as ticket
+// 02's stage half (see its log): the shape is pinned here, the behaviour rests
+// on the in-browser drive.
+//
+// The limit of this check, stated rather than left to be discovered a second
+// time: it constrains the ORDER of two lines and nothing else. It passed
+// throughout the period when the threshold those lines sit behind measured the
+// wrong quantity entirely (finding D5 -- `drag.x/y` reassigned every move, so
+// the gate asked "did this ONE FRAME move more than 3px" and a slow pan never
+// crossed it, leaving both lines permanently unreached), and it still passes
+// against a pointermove handler whose first statement is `return;`. The
+// BEHAVIOUR now has behavioural cover: test/check-mermaid-anchor.mjs dispatches
+// a real 120px pan as sixty 2px moves and asserts on the outcome. What is left
+// here is the one property that genuinely has no behavioural reach -- the
+// stand-in has no pointer capture at all -- plus a guard against the no-op case
+// so this can never again be green over a handler that does nothing.
+check('the lens takes pointer capture only once a press has become a pan, never on the press itself -- or the comment gesture inside the lens is dead in every browser', () => {
+  const bodies = listenerBodies(ui);
+  const captureCalls = bodies.filter(b => /setPointerCapture\(/.test(b));
+  assert.equal(captureCalls.length, 1, `exactly one listener may take pointer capture, found ${captureCalls.length}`);
+  const [body] = captureCalls;
+  assert.ok(/pointermove/.test(ui.slice(Math.max(0, ui.indexOf(body) - 200), ui.indexOf(body))),
+    'the capture must be taken from the pointermove handler, not from pointerdown');
+  assert.ok(/lensDragMoved = true;[\s\S]{0,400}setPointerCapture\(/.test(body),
+    'the capture must be taken only after the drag threshold has been crossed -- a plain click must never have capture active');
+  // Not a no-op: the first statement of the handler must not be an
+  // unconditional early return, which would satisfy every assertion above
+  // while the pan gesture did nothing at all.
+  assert.ok(!/^\s*return\s*;/.test(body),
+    'the pointermove handler must not begin with an unconditional return -- the assertions above constrain the order of two lines, not whether either is ever reached');
 });
 
 check('readonly mode hard-disables every input-capable element and strips native drag, not just CSS pointer-events', () => {
@@ -2602,6 +2892,661 @@ check('C2: an ordinary relative reference inside the project still resolves, and
   assert.equal(resolveRef({ path: 'inside.txt' }, { cwd: fixturesDir }).text, 'still works');
   assert.equal(resolvePath({ path: 'inside.txt' }, fixturesDir).error, undefined);
   assert.ok(resolvePath({ path: 'inside.txt' }, fixturesDir).path.endsWith('inside.txt'));
+});
+
+// --- the reference allowlist (ADR.md entry 3, SPEC_POLISH.md criterion 13) -------
+//
+// References now resolve inside `cwd` OR inside a configured root (default
+// `~/.claude`), and nowhere else. This is the one security boundary this batch moves,
+// so both halves are asserted rather than hand-verified: an allowlisted path resolves
+// AND reaches the page, and a path outside both is still refused -- with the same two
+// error strings it was refused with when `cwd` was the whole boundary, spelled out
+// here in full so a quiet rewording cannot pass as "still refused".
+
+const ABSOLUTE_REFUSAL = p => `refusing absolute reference path ${p}: references resolve inside the board's project directory`;
+const OUTSIDE_REFUSAL = p => `refusing reference ${p}: resolves outside the board's project directory`;
+
+/** Run `fn` with CLAUDE_BOARD_REF_ROOTS set to `spec` (or unset, for `undefined`),
+ * restoring whatever this process actually has afterwards. The daemon reads the
+ * variable, so the end-to-end half of criterion 13 has to go through it rather than
+ * through the `roots` parameter. */
+function withRefRoots(spec, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'CLAUDE_BOARD_REF_ROOTS');
+  const prev = process.env.CLAUDE_BOARD_REF_ROOTS;
+  if (spec === undefined) delete process.env.CLAUDE_BOARD_REF_ROOTS;
+  else process.env.CLAUDE_BOARD_REF_ROOTS = spec;
+  try {
+    return fn();
+  } finally {
+    if (had) process.env.CLAUDE_BOARD_REF_ROOTS = prev;
+    else delete process.env.CLAUDE_BOARD_REF_ROOTS;
+  }
+}
+
+check('allowlist: a reference under an allowlisted root resolves, and its content reaches the rendered page', () => {
+  // Ablation: drop the insideRoots() branch in resolvePath and this is the red
+  // refusal box the whole ticket exists to remove -- a session discussing a skill
+  // file cannot show it.
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-refroot-'));
+  const project = mkdtempSync(path.join(tmpdir(), 'claude-board-refproject-'));
+  try {
+    mkdirSync(path.join(root, 'skills', 'explain'), { recursive: true });
+    const skill = path.join(root, 'skills', 'explain', 'SKILL.md');
+    writeFileSync(skill, '# Explain\n\nthe skill file this session is discussing\n', 'utf8');
+
+    // Absolute, because that is how ~/.claude content is addressed: from a project
+    // directory it has no relative spelling that is not a pile of `../`.
+    const resolved = resolvePath({ path: skill }, project, [realpathSync(root)]);
+    assert.equal(resolved.error, undefined);
+    assert.equal(resolved.path, realpathSync(skill));
+
+    // A typo inside a root reads as the missing file it is, not as "absolute paths
+    // are refused" -- the latter would send the agent looking for the wrong fix. The
+    // reason is spelled out rather than lifted from errno; see the oracle check below.
+    const typo = path.join(root, 'skills', 'explain', 'SKILL.mb');
+    assert.match(resolvePath({ path: typo }, project, [realpathSync(root)]).error, /cannot read .*no such file/);
+
+    // ...and end to end, through CLAUDE_BOARD_REF_ROOTS, which is the only way the
+    // daemon under launchd ever learns about a root.
+    withRefRoots(root, () => {
+      const board = createBoard({
+        title: 'allowlisted reference',
+        cwd: project,
+        blocks: [{ kind: 'markdown', source: { path: skill } }],
+      });
+      assert.equal(board.blocks[0].error, undefined, `expected no resolve error, got: ${board.blocks[0].error}`);
+      assert.ok(board.blocks[0].text.includes('the skill file this session is discussing'));
+      const markup = renderedMarkup(renderBoardPage(board));
+      assert.ok(markup.includes('the skill file this session is discussing'), 'the resolved content must render on the page');
+      assert.ok(!markup.includes('class="resolve-error"'), 'an allowlisted reference must not render as a refusal');
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+check('allowlist: a path outside BOTH cwd and the allowlist is still refused, with the existing error', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-refroot-outside-'));
+  const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-outside-both-'));
+  try {
+    writeFileSync(path.join(root, 'allowed.md'), 'allowed', 'utf8');
+    writeFileSync(path.join(outside, 'secret.txt'), 'exfiltrated', 'utf8');
+    const roots = [realpathSync(root)];
+
+    // An absolute path naming nothing inside a root: the refusal that has always
+    // covered /etc/passwd, unchanged, wording included.
+    const abs = resolvePath({ path: '/etc/passwd' }, fixturesDir, roots);
+    assert.equal(abs.path, undefined);
+    assert.equal(abs.error, ABSOLUTE_REFUSAL('/etc/passwd'));
+
+    // ...including one that only *looks* allowlisted until it is normalised. Built by
+    // concatenation, not path.join, which would normalise the `..` away before
+    // resolvePath ever saw it.
+    const sneaky = `${realpathSync(root)}/../${path.basename(realpathSync(outside))}/secret.txt`;
+    assert.equal(resolvePath({ path: sneaky }, fixturesDir, roots).error, ABSOLUTE_REFUSAL(sneaky));
+
+    // A relative path traversing out of the project and landing outside every root.
+    const rel = path.relative(realpathSync(fixturesDir), path.join(realpathSync(outside), 'secret.txt'));
+    const traversal = resolvePath({ path: rel }, fixturesDir, roots);
+    assert.equal(traversal.path, undefined);
+    assert.equal(traversal.error, OUTSIDE_REFUSAL(rel));
+
+    // And the whole way through resolveRef: refused means not read.
+    const r = resolveRef({ path: rel }, { cwd: fixturesDir, roots });
+    assert.equal(r.text, undefined);
+    assert.equal(r.error, OUTSIDE_REFUSAL(rel));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+check('allowlist: a symlink out of cwd, and a symlink out of a root, are both refused -- confinement stays on the REALPATH', () => {
+  // Ablation: check containment on path.resolve() instead of realpathSync() and
+  // either link below reads straight through, since neither link's own spelling
+  // ever leaves the place it sits in.
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-refroot-link-'));
+  const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-linktarget-'));
+  try {
+    const target = path.join(outside, 'secret.txt');
+    writeFileSync(target, 'exfiltrated', 'utf8');
+    const roots = [realpathSync(root)];
+
+    // A file inside cwd, symlinked out of cwd and out of every root.
+    const inProject = path.join(fixturesDir, 'escape-link-allowlist');
+    try { unlinkSync(inProject); } catch { /* not there yet */ }
+    symlinkSync(target, inProject);
+    const fromProject = resolveRef({ path: 'escape-link-allowlist' }, { cwd: fixturesDir, roots });
+    assert.equal(fromProject.text, undefined);
+    assert.equal(fromProject.error, OUTSIDE_REFUSAL('escape-link-allowlist'));
+
+    // The same trick from inside an allowlisted root: lexically allowlisted, really
+    // not. The allowlist must not become a hole the old boundary did not have.
+    const inRoot = path.join(root, 'escape-link');
+    symlinkSync(target, inRoot);
+    const fromRoot = resolveRef({ path: inRoot }, { cwd: fixturesDir, roots });
+    assert.equal(fromRoot.text, undefined);
+    assert.equal(fromRoot.error, OUTSIDE_REFUSAL(inRoot));
+  } finally {
+    try { unlinkSync(path.join(fixturesDir, 'escape-link-allowlist')); } catch { /* already gone */ }
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+check('allowlist: an unusable configured root is dropped, never widened and never fatal', () => {
+  // Every entry gets resolveBoardCwd's treatment, i.e. exactly what the board's own
+  // cwd gets. Ablation: skip the validation and `CLAUDE_BOARD_REF_ROOTS=/` turns the
+  // whole filesystem into an allowlist -- keys, browser profiles, shell history.
+  const good = mkdtempSync(path.join(tmpdir(), 'claude-board-refroot-good-'));
+  try {
+    const home = os.homedir();
+    const aFile = path.join(good, 'not-a-directory.md');
+    writeFileSync(aFile, 'x', 'utf8');
+    const gone = path.join(good, 'no-such-directory');
+
+    assert.deepEqual(resolveRefRoots('/'), [], 'the filesystem root is not an allowlist');
+    assert.deepEqual(resolveRefRoots(home), [], '$HOME is every project at once');
+    assert.deepEqual(resolveRefRoots(path.dirname(home)), [], 'a directory above $HOME is broader still');
+    assert.deepEqual(resolveRefRoots(gone), [], 'a root that does not exist is dropped');
+    assert.deepEqual(resolveRefRoots(aFile), [], 'a regular file is not a root');
+    assert.deepEqual(resolveRefRoots('relative/path'), [], 'a relative root would resolve against the daemon\'s own cwd');
+    assert.deepEqual(resolveRefRoots(''), [], 'an explicitly empty value is the cwd-only boundary, not the default');
+
+    // A bad entry beside a good one drops only itself, and the survivor is the
+    // realpath. Dedup too, so a repeated root is not a repeated stat on every ref.
+    assert.deepEqual(
+      resolveRefRoots(`/:${gone}:${good}:${good}`),
+      [realpathSync(good)],
+      'one unusable entry must not take the usable ones down with it',
+    );
+
+    // ...and a dropped root really is dropped: nothing under it resolves.
+    assert.equal(
+      resolvePath({ path: '/etc/passwd' }, fixturesDir, resolveRefRoots('/')).error,
+      ABSOLUTE_REFUSAL('/etc/passwd'),
+    );
+  } finally {
+    rmSync(good, { recursive: true, force: true });
+  }
+});
+
+// --- the 2026-07-31 audit of that boundary (S1-S4, S7-S9) ------------------------
+//
+// Everything above asserts the allowlist does what ADR.md entry 3 says. Everything
+// below asserts the things it turned out to ALSO do. Each check names the finding it
+// closes and the ablation that reopens it.
+
+check('S1/S3: an absent CLAUDE_BOARD_REF_ROOTS grants nothing, and the default is three directories rather than all of ~/.claude', () => {
+  // S3, the delivery question. Every install predating ADR.md entry 3 has a plist with
+  // no CLAUDE_BOARD_REF_ROOTS key, and the daemon restarts itself whenever src/ changes
+  // (QUIRKS.md, "WatchPaths never restarted the daemon"). A default compiled in HERE
+  // therefore goes live on those machines during a routine `git pull` -- a read boundary
+  // widening with no reinstall, nothing printed and nobody asked. So absent grants
+  // nothing and install.sh writes the default, which makes running the installer the
+  // consent event. Ablation: default to ~/.claude (or to DEFAULT_REF_ROOTS) here and
+  // this goes red while every existing install silently gains reference roots.
+  assert.deepEqual(withRefRoots(undefined, () => resolveRefRoots(process.env.CLAUDE_BOARD_REF_ROOTS)), []);
+  assert.deepEqual(resolveRefRoots(''), [], 'an explicitly empty value means the same thing');
+
+  // S1, the scope question, decided by the ADR's own justification: "render the skill,
+  // command or agent file it is discussing" is these three directories. ~/.claude as a
+  // whole is also .credentials.json, settings.json, shell snapshots, every project's
+  // transcripts and every plugin's private state.
+  assert.deepEqual([...DEFAULT_REF_ROOTS], ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents']);
+  assert.ok(Object.isFrozen(DEFAULT_REF_ROOTS), 'a shared allowlist default must not be mutable by a caller');
+
+  // ...and the narrowing has teeth, asserted against a stand-in tree so it does not
+  // turn into a statement about what this machine happens to have under ~/.claude.
+  const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-fakehome-'));
+  try {
+    const dotClaude = path.join(realpathSync(fakeHome), '.claude');
+    for (const r of DEFAULT_REF_ROOTS) mkdirSync(path.join(dotClaude, path.basename(r)), { recursive: true });
+    const skill = path.join(dotClaude, 'skills', 'SKILL.md');
+    writeFileSync(skill, '# the skill under discussion\n', 'utf8');
+    const credentials = path.join(dotClaude, '.credentials.json');
+    writeFileSync(credentials, '{"token":"exfiltrated"}', 'utf8');
+
+    const roots = resolveRefRoots(DEFAULT_REF_ROOTS.map(r => path.join(dotClaude, path.basename(r))).join(':'));
+    assert.equal(roots.length, 3, 'all three default roots must survive validation');
+    assert.equal(resolvePath({ path: skill }, null, roots).path, skill, 'a skill file still resolves');
+    assert.equal(
+      resolveRef({ path: credentials }, { cwd: null, roots }).text,
+      undefined,
+      'the parent of the three roots is not itself a root',
+    );
+    // ...and it would have, under the old default: allowlist ~/.claude itself and the
+    // same reference reads straight through.
+    assert.equal(
+      resolveRef({ path: credentials }, { cwd: null, roots: resolveRefRoots(dotClaude) }).text,
+      '{"token":"exfiltrated"}',
+    );
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+/** Run `fn` with `fs[name]` patched to `impl`, propagated into the named import
+ * src/resolve.mjs already bound (that is what `syncBuiltinESMExports` is for), and
+ * restored on every exit.
+ *
+ * This is how the check/read gap below is driven deterministically instead of raced: the
+ * attacker's swap happens *inside* a syscall src/resolve.mjs makes, so the step that
+ * follows it is always the second half of a race already lost. WHICH syscall matters,
+ * and the two checks below deliberately pick different ones — see the second for why
+ * hooking the confinement lookup cannot pin the descriptor. */
+function withFsHook(name, impl, fn) {
+  const original = fs[name];
+  const patched = (...args) => impl(original, ...args);
+  if (original.native) patched.native = original.native;
+  fs[name] = patched;
+  syncBuiltinESMExports();
+  try {
+    return fn();
+  } finally {
+    fs[name] = original;
+    syncBuiltinESMExports();
+  }
+}
+
+check('S2: a symlink swapped in between the confinement check and the read cannot change what is read', () => {
+  // resolveRef used to realpath a STRING, statSync that string, then readFileSync that
+  // string -- three lookups of one name, so the boundary was decided on one inode and
+  // the bytes came from whatever the name meant a moment later. A hunter measured a
+  // ~1.2% win rate over 91k attempts against it and carried a private key out. Racing
+  // that in CI would be a flaky check, so the swap is driven from inside realpathSync:
+  // the confinement half gets the honest in-boundary answer, and by the time the read
+  // half runs the name is a symlink pointing out of every root.
+  //
+  // Ablation: put `statSync(abs)` + `readFileSync(abs)` back in resolveRef and this
+  // check reads the secret.
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-toctou-root-'));
+  const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-toctou-target-'));
+  try {
+    const secret = path.join(outside, 'id_ed25519');
+    writeFileSync(secret, '-----BEGIN PRIVATE KEY-----\nexfiltrated\n', 'utf8');
+    const bait = path.join(realpathSync(root), 'SKILL.md');
+    writeFileSync(bait, '# harmless\n', 'utf8');
+    const roots = [realpathSync(root)];
+
+    let swapped = false;
+    const r = withFsHook('realpathSync', (original, p, ...rest) => {
+      const out = original(p, ...rest);
+      if (!swapped && out === bait) {
+        swapped = true; // exactly once, on the lookup that decides the boundary
+        unlinkSync(bait);
+        symlinkSync(secret, bait);
+      }
+      return out;
+    }, () => resolveRef({ path: bait }, { cwd: null, roots }));
+
+    assert.ok(swapped, 'the swap must actually have fired, or this check proves nothing');
+    assert.equal(r.text, undefined, 'the read must not follow a symlink swapped in after the check');
+    assert.ok(!String(r.text ?? '').includes('exfiltrated'));
+    assert.match(r.error, /cannot read/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+check('S2: swapping an ANCESTOR directory for a symlink is refused too -- macOS O_NOFOLLOW_ANY is real and this pins it', () => {
+  // Plain O_NOFOLLOW only protects the last path component, so the same race run one
+  // directory up still wins: replace `<root>/sub` with a symlink and `<root>/sub/SKILL.md`
+  // opens somewhere else entirely. macOS has O_NOFOLLOW_ANY for exactly this, Node does
+  // not export it, and src/resolve.mjs therefore carries the raw number -- which makes
+  // this check the only thing standing between that number and silently meaning nothing.
+  // Ablation: swap O_NOFOLLOW_ANY for constants.O_NOFOLLOW in REF_OPEN_FLAGS.
+  if (process.platform !== 'darwin') return;
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-toctou-dir-'));
+  const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-toctou-dirtarget-'));
+  try {
+    const sub = path.join(realpathSync(root), 'sub');
+    mkdirSync(sub, { recursive: true });
+    const bait = path.join(sub, 'SKILL.md');
+    writeFileSync(bait, '# harmless\n', 'utf8');
+    writeFileSync(path.join(realpathSync(outside), 'SKILL.md'), 'exfiltrated\n', 'utf8');
+    const roots = [realpathSync(root)];
+
+    let swapped = false;
+    const r = withFsHook('realpathSync', (original, p, ...rest) => {
+      const out = original(p, ...rest);
+      if (!swapped && out === bait) {
+        swapped = true;
+        unlinkSync(bait);
+        rmSync(sub, { recursive: true, force: true });
+        symlinkSync(realpathSync(outside), sub);
+      }
+      return out;
+    }, () => resolveRef({ path: bait }, { cwd: null, roots }));
+
+    assert.ok(swapped, 'the swap must actually have fired');
+    assert.equal(r.text, undefined, 'no component of an already-canonical path may be a symlink at open time');
+    assert.match(r.error, /cannot read/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+check('S4: $HOME under another spelling is still $HOME -- refused as a cwd and as a root, on identity not on string equality', () => {
+  // macOS gives $HOME at least two more canonical spellings, and realpathSync collapses
+  // neither: it does not correct case on a case-insensitive volume, and an APFS firmlink
+  // makes /System/Volumes/Data/Users/you a second real path to the same directory. Both
+  // were ACCEPTED, so the one refusal whose whole job is "not every project at once, plus
+  // ssh keys, browser profiles and shell history" could be spelled around.
+  // Ablation: restore `contains(real, home)` as the whole test and every case below
+  // becomes an accepted reference root.
+  const homeReal = realpathSync(os.homedir());
+  const homeId = fs.statSync(homeReal);
+  const aliases = [
+    path.join('/System/Volumes/Data', path.relative('/', homeReal)),
+    homeReal.toUpperCase(),
+    homeReal.toLowerCase(),
+  ];
+  let tested = 0;
+  for (const alias of aliases) {
+    if (alias === homeReal) continue;
+    let st;
+    try { st = fs.statSync(alias); } catch { continue; } // not how this machine is laid out
+    if (st.dev !== homeId.dev || st.ino !== homeId.ino) continue;
+    tested++;
+    assert.match(String(resolveBoardCwd(alias).error), /\$HOME/, `${alias} names $HOME and must be refused as a cwd`);
+    assert.deepEqual(resolveRefRoots(alias), [], `${alias} must not become a reference root`);
+  }
+  assert.ok(tested > 0, 'this machine offers no alternate spelling of $HOME, so the check would prove nothing');
+
+  // And a directory ABOVE $HOME under an alias: /System/Volumes/Data is nobody's
+  // ancestor by inode -- walking up from realpath($HOME) never reaches it -- yet it
+  // contains every home on the machine.
+  if (existsSync(path.join('/System/Volumes/Data', path.relative('/', homeReal)))) {
+    assert.match(String(resolveBoardCwd('/System/Volumes/Data').error), /\$HOME/);
+    assert.deepEqual(resolveRefRoots('/System/Volumes/Data'), []);
+  }
+});
+
+check('S2: a regular file renamed over the path between the open and the read cannot change what is read', () => {
+  // The descriptor half of the S2 fix, pinned on its own, because the two checks above
+  // do NOT pin it. Both of them swap in a SYMLINK, which O_NOFOLLOW_ANY refuses at
+  // openSync before any read is reached -- so they cover the flag and say nothing about
+  // where the bytes come from. Reverting `readFileSync(fd)` to `readFileSync(abs)` left
+  // the entire suite green (found by mutation testing, 2026-07-31): the flag was masking
+  // the descriptor.
+  //
+  // The two defend different attacks. The flag closes the symlink swap. The descriptor
+  // closes the swap that needs no symlink at all -- rename() a different REGULAR file
+  // over the name, which no open flag can see, and which the guards then pass on one
+  // inode while the bytes come from another. So this check hooks openSync rather than
+  // realpathSync: hooking the confinement lookup swaps too early to discriminate, since
+  // the open that follows would pick up the impostor either way.
+  //
+  // Ablation: `raw = readFileSync(abs, 'utf8')` in resolveRef and this reads the impostor.
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-fdread-'));
+  try {
+    const real = realpathSync(root);
+    const bait = path.join(real, 'SKILL.md');
+    const impostor = path.join(real, 'impostor.md');
+    writeFileSync(bait, 'CHECKED-AND-READ\n', 'utf8');
+    writeFileSync(impostor, 'SWAPPED-IN-AFTER-THE-OPEN\n', 'utf8');
+    const roots = [real];
+
+    let swapped = false;
+    const r = withFsHook('openSync', (original, p, ...rest) => {
+      const fd = original(p, ...rest);
+      if (!swapped && p === bait) {
+        swapped = true;
+        // Atomic, and deliberately NOT a symlink: the descriptor already names the old
+        // inode, and rename leaves it perfectly readable through that descriptor while
+        // the NAME now means something else entirely.
+        fs.renameSync(impostor, bait);
+      }
+      return fd;
+    }, () => resolveRef({ path: bait }, { cwd: null, roots }));
+
+    assert.ok(swapped, 'the swap must actually have fired, or this check proves nothing');
+    assert.equal(readFileSync(bait, 'utf8'), 'SWAPPED-IN-AFTER-THE-OPEN\n', 'and the name must really have changed under it');
+
+    assert.equal(r.error, undefined, `expected a clean read from the descriptor, got: ${r.error}`);
+    assert.equal(r.text, 'CHECKED-AND-READ\n', 'the bytes must come from the descriptor the guards ran on, not from the name');
+    assert.ok(!String(r.text ?? '').includes('SWAPPED-IN-AFTER-THE-OPEN'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('S2: the regular-file and byte-cap guards run on the descriptor too, not on the name a second time', () => {
+  // The third piece of the same property, and it needed its own check for the same
+  // reason the one above did: with the read pinned but the GUARDS still asking the name,
+  // `fstatSync(fd)` -> `statSync(abs)` survived every check in this file. That mutant is
+  // a live refusal bug rather than a disclosure one -- the guards would describe a file
+  // the bytes do not come from -- and the shape it restores is exactly the check/read
+  // gap: decide on one inode, act on another.
+  //
+  // Both swaps below replace the name with something the NAME-based guard would refuse
+  // while the descriptor is still a perfectly good small regular file. Shipped, each
+  // reads cleanly. Ablation: `statSync(abs)` in place of `fstatSync(fd)` and each comes
+  // back as a refusal instead.
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-fdguard-'));
+  try {
+    const real = realpathSync(root);
+    const roots = [real];
+
+    // The name becomes a DIRECTORY, which the type guard refuses.
+    // The name becomes an OVERSIZED file, which the byte-cap guard refuses.
+    const swaps = [
+      ['a directory', bait => { unlinkSync(bait); mkdirSync(bait); }],
+      ['a file over the byte cap', bait => { unlinkSync(bait); writeFileSync(bait, 'x'.repeat(MAX_REF_BYTES + 1), 'utf8'); }],
+    ];
+    for (const [what, swap] of swaps) {
+      const bait = path.join(real, `SKILL-${what.replace(/\W+/g, '-')}.md`);
+      writeFileSync(bait, 'READ-FROM-THE-DESCRIPTOR\n', 'utf8');
+
+      let swapped = false;
+      const r = withFsHook('openSync', (original, p, ...rest) => {
+        const fd = original(p, ...rest);
+        if (!swapped && p === bait) {
+          swapped = true;
+          swap(bait);
+        }
+        return fd;
+      }, () => resolveRef({ path: bait }, { cwd: null, roots }));
+
+      assert.ok(swapped, `the swap to ${what} must actually have fired`);
+      assert.equal(r.error, undefined, `after the name became ${what}, expected a clean read, got: ${r.error}`);
+      assert.equal(r.text, 'READ-FROM-THE-DESCRIPTOR\n', `the guards must describe the descriptor, not the ${what} now at that name`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+check('S4/NEW-1: a SYMLINKED $HOME is still $HOME -- both sides are realpath\'d before identity is compared', () => {
+  // The second half of the same defect, and the one string comparison could never have
+  // caught: `homedir()` hands back whatever HOME says, symlink and all, while the
+  // candidate has already been through realpathSync. So with HOME a symlink the two
+  // never matched, and $HOME itself, its realpath, AND the directory above it were all
+  // accepted as reference roots -- every project on the machine, quotable into a board.
+  // Ablation: restore `contains(real, homedir())` as the whole test and all five
+  // assertions below flip to ACCEPTED.
+  const base = realpathSync(mkdtempSync(path.join(tmpdir(), 'claude-board-homelink-')));
+  const prevHome = process.env.HOME;
+  try {
+    mkdirSync(path.join(base, 'real'));
+    symlinkSync(path.join(base, 'real'), path.join(base, 'home'));
+    process.env.HOME = path.join(base, 'home'); // os.homedir() reads $HOME first on POSIX
+
+    assert.deepEqual(resolveRefRoots(path.join(base, 'home')), [], '$HOME by its symlinked spelling');
+    assert.deepEqual(resolveRefRoots(path.join(base, 'real')), [], '$HOME by its realpath');
+    assert.deepEqual(resolveRefRoots(base), [], 'the directory above $HOME');
+    assert.match(String(resolveBoardCwd(path.join(base, 'home')).error), /\$HOME/);
+    assert.match(String(resolveBoardCwd(base).error), /\$HOME/);
+
+    // ...and a directory genuinely UNDER $HOME is still perfectly usable, which is the
+    // whole point of refusing only $HOME and above rather than the tree.
+    const project = path.join(base, 'real', 'project');
+    mkdirSync(project);
+    assert.deepEqual(resolveRefRoots(project), [project]);
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+check('NEW-3: the project directory itself is never a reference target, wherever the project happens to live', () => {
+  // `real !== root` used to be a term of the cwd disjunct only, so the insideRoots
+  // fallback cancelled it whenever the project sat under an allowlisted root -- and
+  // resolvePath then returned `{ path: <a directory> }` as a SUCCESS. Not a read today
+  // (resolveRef refuses it on the descriptor) but the exported contract admitted it, and
+  // the error an agent saw moved depending on where its project happened to live.
+  // Ablation: move `real !== root` back inside the first disjunct.
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-selfref-root-'));
+  const elsewhere = mkdtempSync(path.join(tmpdir(), 'claude-board-selfref-project-'));
+  try {
+    const roots = [realpathSync(root)];
+    const inside = path.join(realpathSync(root), 'project');
+    mkdirSync(inside, { recursive: true });
+
+    for (const [where, project] of [['inside an allowlisted root', inside], ['outside every root', realpathSync(elsewhere)]]) {
+      for (const spelling of ['.', './']) {
+        const r = resolvePath({ path: spelling }, project, roots);
+        assert.equal(r.path, undefined, `a project ${where} must not resolve as its own reference (${spelling})`);
+        assert.equal(r.error, OUTSIDE_REFUSAL(spelling));
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+check('NEW-4: a RELATIVE reference reaches an allowlisted root too, not only an absolute one', () => {
+  // Every positive allowlist check above addresses the root absolutely, because that is
+  // how ~/.claude content is normally spelled. Which left resolvePath's RELATIVE branch
+  // completely unexercised for the allowlist: ablating `insideRoots` out of it alone
+  // kept the whole suite green. `../root/skills/…` from a sibling project directory is
+  // the route, and an agent that knows where the project sits will spell it that way.
+  // Ablation: drop `|| insideRoots(real, roots)` from the relative branch only.
+  const base = realpathSync(mkdtempSync(path.join(tmpdir(), 'claude-board-relroot-')));
+  try {
+    const root = path.join(base, 'root');
+    const project = path.join(base, 'project');
+    const neither = path.join(base, 'neither');
+    mkdirSync(path.join(root, 'skills'), { recursive: true });
+    mkdirSync(project, { recursive: true });
+    mkdirSync(neither, { recursive: true });
+    writeFileSync(path.join(root, 'skills', 'SKILL.md'), 'reached relatively\n', 'utf8');
+    writeFileSync(path.join(neither, 'private.md'), 'exfiltrated', 'utf8');
+    const roots = [root];
+
+    const rel = path.join('..', 'root', 'skills', 'SKILL.md');
+    assert.equal(resolvePath({ path: rel }, project, roots).path, path.join(root, 'skills', 'SKILL.md'));
+    assert.equal(resolveRef({ path: rel }, { cwd: project, roots }).text, 'reached relatively\n');
+
+    // ...and the same relative shape into a sibling that is in NEITHER cwd nor a root is
+    // still refused, so this is the allowlist widening and not `../` going unchecked.
+    const escape = path.join('..', 'neither', 'private.md');
+    const refused = resolveRef({ path: escape }, { cwd: project, roots });
+    assert.equal(refused.text, undefined);
+    assert.equal(refused.error, OUTSIDE_REFUSAL(escape));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+check('S7: which refusal comes back never depends on anything outside the boundary -- no existence-and-errno oracle', () => {
+  // The refusal used to splice err.code from the failed realpathSync into its message,
+  // and picked between two messages on that basis. Since an agent can write inside an
+  // allowlisted root, a planted symlink turned every refused reference into "does this
+  // path exist, and may I read it?" for anywhere on the disk. The docstring above it
+  // claimed the opposite, which is worse than no docstring.
+  // Ablation: restore the `${err.code}` splice and the pairs below diverge.
+  const root = mkdtempSync(path.join(tmpdir(), 'claude-board-oracle-'));
+  const project = mkdtempSync(path.join(tmpdir(), 'claude-board-oracle-project-'));
+  try {
+    const roots = [realpathSync(root)];
+    const present = '/etc/hosts';
+    const absent = '/etc/definitely-not-here-9d2f1a';
+
+    // Absolute: two symlinks inside a root, one aimed at something real and one not.
+    const toPresent = path.join(realpathSync(root), 'probe-present');
+    const toAbsent = path.join(realpathSync(root), 'probe-absent');
+    symlinkSync(present, toPresent);
+    symlinkSync(absent, toAbsent);
+    const hit = resolvePath({ path: toPresent }, project, roots).error;
+    const miss = resolvePath({ path: toAbsent }, project, roots).error;
+    assert.equal(hit, OUTSIDE_REFUSAL(toPresent));
+    assert.equal(miss, OUTSIDE_REFUSAL(toAbsent));
+    assert.equal(
+      hit.replace(toPresent, 'P'), miss.replace(toAbsent, 'P'),
+      'the reply must carry no bit about the target, only the path the caller already knew',
+    );
+
+    // Relative: ../ reaches the same places and leaked the same errno.
+    const relPresent = path.relative(realpathSync(project), present);
+    const relAbsent = path.relative(realpathSync(project), absent);
+    assert.equal(resolvePath({ path: relPresent }, project, roots).error, OUTSIDE_REFUSAL(relPresent));
+    assert.equal(resolvePath({ path: relAbsent }, project, roots).error, OUTSIDE_REFUSAL(relAbsent));
+
+    // What survives is the one distinction that is entirely in-boundary, and the reason
+    // the second message exists at all: a name that is simply not there inside a place
+    // you may already read reads as missing, not as a confinement failure.
+    assert.match(resolvePath({ path: path.join(realpathSync(root), 'typo.md') }, project, roots).error, /no such file/);
+    assert.match(resolvePath({ path: 'typo.md' }, project, roots).error, /no such file/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+check('S9: a root whose name contains a colon fails the whole spec closed instead of granting a sibling', () => {
+  // `:` separates entries and `:` is legal in a directory name, so `/data/my:dir` splits
+  // into `/data/my` and `dir`. The old code dropped the unusable `dir` as "not absolute"
+  // and GRANTED `/data/my` -- an unrelated directory the user never named, everything in
+  // it quotable into any board. There is no spelling that recovers the intent, so the
+  // spec grants nothing. Ablation: drop the isAbsolute fail-closed in resolveRefRoots
+  // and the first assertion comes back holding the sibling.
+  const base = mkdtempSync(path.join(tmpdir(), 'claude-board-colon-'));
+  try {
+    const real = realpathSync(base);
+    const intended = path.join(real, 'my:dir');
+    const sibling = path.join(real, 'my');
+    mkdirSync(intended, { recursive: true });
+    mkdirSync(sibling, { recursive: true });
+    writeFileSync(path.join(sibling, 'not-yours.md'), 'never asked for', 'utf8');
+
+    assert.deepEqual(resolveRefRoots(intended), [], 'an unrepresentable root grants nothing');
+    assert.equal(
+      resolveRef({ path: path.join(sibling, 'not-yours.md') }, { cwd: null, roots: resolveRefRoots(intended) }).text,
+      undefined,
+      'the sibling the split invented must not be readable',
+    );
+
+    // An entry that is merely unusable is unambiguous, and still drops only itself:
+    // DEFAULT_REF_ROOTS names three directories not every machine has, and one absent
+    // must not take the other two with it.
+    const good = path.join(real, 'good');
+    mkdirSync(good, { recursive: true });
+    assert.deepEqual(resolveRefRoots(`${path.join(real, 'absent')}:${good}`), [good]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+check('S8: the hard-link limit is stated in SECURITY.md rather than left for a reader to discover', () => {
+  // Not fixed, deliberately. A hard link inside an allowlisted root, pointing at a file
+  // outside every root, is a second equally real name for one inode -- realpath cannot
+  // tell it from the first and neither can a descriptor, so the confinement above simply
+  // does not see it. (Reproducible in one line: `ln <secret> <root>/x.md`.) Refusing
+  // st.nlink > 1 was the only candidate fix and it refuses legitimately hard-linked
+  // content with nothing to separate the cases. So the deliverable is an honest sentence
+  // in the posture document, and this is the check that it is still there.
+  const security = readFileSync(path.join(repoRoot, 'SECURITY.md'), 'utf8');
+  const notDefended = security.indexOf('### Not defended, by design');
+  assert.ok(notDefended > 0, 'SECURITY.md must still have a "Not defended, by design" section');
+  const section = security.slice(notDefended, security.indexOf('\n## ', notDefended));
+  assert.match(section, /hard link/i, 'the hard-link limit belongs under "Not defended, by design"');
 });
 
 // --- H5: a special or huge file must not wedge the single-threaded daemon --------
@@ -3322,6 +4267,86 @@ check('a pending pin is visually distinguishable from a sent one, in both the cl
   assert.ok(styles.includes('.anchor-pin.pin-pending'), 'src/styles.mjs must style .pin-pending differently from a sent pin');
 });
 
+// --- SPEC_POLISH.md ticket 02: the pending-comment queue, pure -----------------
+//
+// findPendingCommentForAnchor (criterion 1's "reopen and edit", also reused for
+// criterion 12's "already sent") and removePendingComment (criterion 2's delete
+// control) are the two functions this ticket's own log calls out for
+// extraction, exercised here with no DOM at all -- src/ui.mjs only ever embeds
+// this exact src/anchor.mjs source via .toString(), so what is checked here is
+// what actually runs on the page.
+
+check('findPendingCommentForAnchor finds a queued comment by anchor, across every anchor kind actually in use', () => {
+  const pending = [
+    { id: 1, blockId: 'd1', anchor: { kind: 'md', ref: 'findings', label: 'Findings' }, text: 'md one' },
+    { id: 2, blockId: 'h1', anchor: { kind: 'dom', ref: '1.2', hint: 'the Send button' }, text: 'dom one' },
+    { id: 3, blockId: 'm1', anchor: { kind: 'mermaid', ref: 'A', domRef: '1.1', hint: 'Start' }, text: 'mermaid one' },
+    { id: 4, blockId: 'd1', anchor: { kind: 'block' }, text: 'a whole-block remark' },
+  ];
+  assert.equal(findPendingCommentForAnchor(pending, 'd1', { kind: 'md', ref: 'findings' }).id, 1);
+  assert.equal(findPendingCommentForAnchor(pending, 'h1', { kind: 'dom', ref: '1.2' }).id, 2);
+  assert.equal(findPendingCommentForAnchor(pending, 'm1', { kind: 'mermaid', ref: 'A' }).id, 3);
+  assert.equal(findPendingCommentForAnchor(pending, 'd1', { kind: 'block' }).id, 4);
+  // The match is on blockId + anchor kind/ref, not hint/domRef/label -- a
+  // caller re-deriving the SAME clicked element's anchor a second time is not
+  // guaranteed to recompute byte-identical cosmetic fields (composeHint can
+  // legitimately read different live text between two clicks), and criterion
+  // 1 must still recognise it as the same target.
+  assert.equal(findPendingCommentForAnchor(pending, 'h1', { kind: 'dom', ref: '1.2', hint: 'a different hint now' }).id, 2);
+  // A ref/kind/block that was never queued is simply not found.
+  assert.equal(findPendingCommentForAnchor(pending, 'h1', { kind: 'dom', ref: '9.9' }), undefined);
+  assert.equal(findPendingCommentForAnchor(pending, 'd1', { kind: 'md', ref: 'findings' }) !== undefined, true, 'setup sanity');
+  assert.equal(findPendingCommentForAnchor(pending, 'nope', { kind: 'md', ref: 'findings' }), undefined, 'a different blockId must not match');
+});
+
+check('findPendingCommentForAnchor never matches a SENT comment -- criterion 3\'s "no edit path" holds at the function level, not just by caller discipline', () => {
+  // A comment shaped exactly like a sent one (it carries an 'n', the way
+  // board.comments entries do) but living in a list that is NOT the page's
+  // pendingComments -- the point being that this function has no notion of
+  // "sent" at all, it only ever searches the list it is handed. Called with an
+  // EMPTY pendingComments (the real, unsent queue), the sent-shaped comment
+  // sitting elsewhere can never be found through this function.
+  const sentComments = [{ n: 1, blockId: 'h1', anchor: { kind: 'dom', ref: '1.2' }, text: 'already sent' }];
+  const pendingComments = [];
+  assert.equal(findPendingCommentForAnchor(pendingComments, 'h1', { kind: 'dom', ref: '1.2' }), undefined,
+    'a sent comment living outside pendingComments must never be found by this function');
+  // And the SAME function, called with board.comments itself (exactly what
+  // src/ui.mjs's isSentAnchor does for criterion 12), DOES find it -- proving
+  // the function is a plain list search, not silently sent-aware.
+  assert.equal(findPendingCommentForAnchor(sentComments, 'h1', { kind: 'dom', ref: '1.2' }).text, 'already sent');
+});
+
+check('removePendingComment removes the middle of three, and the remaining two renumber contiguously', () => {
+  const pending = [
+    { id: 10, blockId: 'h1', anchor: { kind: 'dom', ref: '1.1' }, text: 'first' },
+    { id: 11, blockId: 'h1', anchor: { kind: 'dom', ref: '1.2' }, text: 'second' },
+    { id: 12, blockId: 'h1', anchor: { kind: 'dom', ref: '1.3' }, text: 'third' },
+  ];
+  const after = removePendingComment(pending, 11);
+  assert.equal(after.length, 2, 'exactly one entry must be removed');
+  assert.deepEqual(after.map(c => c.id), [10, 12], 'the other two must survive, in their original relative order');
+  // Provisional numbers are never stored on an entry -- they are derived from
+  // POSITION (nextCommentNumber() + index, src/ui.mjs's commentsWithPending),
+  // so re-deriving them from the shorter array IS the renumbering criterion 2
+  // requires: what were provisional #2 and #3 become #2 and #3 again (of two),
+  // contiguous, with no gap where the deleted middle one used to be.
+  const base = 1; // as if board.comments is empty, nextCommentNumber() === 1
+  const numbered = after.map((c, i) => ({ id: c.id, n: base + i }));
+  assert.deepEqual(numbered, [{ id: 10, n: 1 }, { id: 12, n: 2 }]);
+  // The original array is untouched -- a pure function, not a mutation.
+  assert.equal(pending.length, 3, 'removePendingComment must not mutate the array it was given');
+});
+
+check('removePendingComment with an id that matches nothing queued is a no-op', () => {
+  const pending = [
+    { id: 1, blockId: 'h1', anchor: { kind: 'dom', ref: '1.1' }, text: 'only one' },
+  ];
+  const after = removePendingComment(pending, 999);
+  assert.deepEqual(after, pending, 'an id already removed, or never queued, must leave the list unchanged');
+  const emptied = removePendingComment([], 1);
+  assert.deepEqual(emptied, [], 'removing from an already-empty queue is also a no-op, not a throw');
+});
+
 // --- P2 (page side): badge the tab and notify, never steal focus ---------------
 //
 // DESIGN.md Decisions -> "Open once, then badge and notify": "pending count in
@@ -3701,6 +4726,304 @@ check('every class the stylesheet rules on is a class something actually emits',
   assert.deepEqual(orphans, [], `src/styles.mjs rules on classes nothing emits: ${orphans.join(', ')}`);
 });
 
+// --- indexpage.mjs: the thread index's own render path (ticket 06) ----------------
+// buildThreadIndex, renderIndexPage, folderName, roundCount and threadRow (the last
+// not exported -- exercised only through renderIndexPage's output, same as every
+// other unexported render helper in this file) were imported by no test at all: the
+// audit's T1. `folderName` and `roundCount` gained an `export` here for exactly this
+// -- neither needed one to do its job inside indexpage.mjs, only to be reached from
+// outside it.
+
+function extractThreadItem(html, boardId) {
+  const re = new RegExp(`<a class="thread-item[^"]*" href="/b/${boardId}"[\\s\\S]*?</a>`);
+  const m = html.match(re);
+  if (!m) throw new Error(`no thread-item found for board ${boardId}`);
+  return m[0];
+}
+
+/** What a person actually sees, not what the markup happens to contain: strips
+ * every tag and attribute (href, data-thread-id, data-pending, the machine
+ * `datetime` value, ...) and collapses whitespace, leaving only rendered text.
+ * A "distinct rows" check comparing raw item HTML instead of this is worthless
+ * -- href and data-thread-id differ by board id on every row regardless of
+ * anything visible, so raw-string comparison passes even when a reviewer would
+ * see three identical rows. This is exactly the shape of check an audit finding
+ * called out: distinctness has to be asserted on what renders, not on markup a
+ * reviewer never looks at. */
+function visibleText(item) {
+  return item.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Tolerates the leading live-dot span every fresh board carries (round 1 is always
+// `status: 'open'`), so a check that only cares about the headline text is not
+// coupled to liveness, which none of these checks are about.
+function headlineRe(text) {
+  return new RegExp(`<div class="thread-title"[^>]*>(?:<span class="live-dot"[^>]*></span> )?${text}</div>`);
+}
+
+check('folderName: the last path segment only, and null for no cwd', () => {
+  assert.equal(folderName('/Users/jerry/Documents/claude-board/sub/dir'), 'dir');
+  assert.equal(folderName(null), null);
+  assert.equal(folderName(''), null);
+});
+
+check('roundCount: a board doc\'s own rounds-array length, zero for a shape that has none', () => {
+  const board = createBoard({ title: 'x', cwd: fixturesDir });
+  assert.equal(roundCount(board), 1);
+  addRound(board, {});
+  assert.equal(roundCount(board), 2);
+  assert.equal(roundCount({}), 0, 'must read as zero, not throw, on a board-shaped object with no rounds at all');
+});
+
+check('an index row headlines the board title; the project is shown as a folder basename only, full path on a title attribute', () => {
+  const sub = path.join(fixturesDir, 'indexpage-fixtures', 'sub', 'dir');
+  mkdirSync(sub, { recursive: true });
+  const board = createBoard({ title: 'Ship the new lens', cwd: sub });
+  const threads = buildThreadIndex([board]);
+  const html = renderIndexPage({ threads });
+  const item = extractThreadItem(html, board.id);
+  assert.match(item, headlineRe('Ship the new lens'), 'the headline is the title');
+  assert.doesNotMatch(item, /thread-title[^>]*>[^<]*\/[^<]*</, 'the headline element must not carry the full path');
+  const pathRe = new RegExp(`<div class="thread-path" title="${board.cwd.replace(/\//g, '\\/')}">dir</div>`);
+  assert.match(item, pathRe, 'the path line shows the folder basename as text, full cwd only on title');
+});
+
+check('a board with no title falls back to the folder name as the headline, and the path line does not then duplicate it', () => {
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'widgets');
+  mkdirSync(dir, { recursive: true });
+  const board = createBoard({ title: '', cwd: dir });
+  const threads = buildThreadIndex([board]);
+  const html = renderIndexPage({ threads });
+  const item = extractThreadItem(html, board.id);
+  assert.match(item, headlineRe('widgets'), 'headline falls back to the folder basename');
+  assert.doesNotMatch(item, /<div class="thread-path"/, 'no second line repeating what the headline already says');
+});
+
+check('a board with neither a title nor a cwd still produces exactly one headline', () => {
+  const board = createBoard({ title: '', cwd: null });
+  const threads = buildThreadIndex([board]);
+  const html = renderIndexPage({ threads });
+  const item = extractThreadItem(html, board.id);
+  const headlineCount = (item.match(/<div class="thread-title"/g) || []).length;
+  assert.equal(headlineCount, 1, 'exactly one headline element, never zero or two');
+  assert.match(item, headlineRe('\\(untitled\\)'), 'falls back to a plain label, not the literal word "untitled" read as if it were a real title, and not an empty headline');
+});
+
+check('three threads sharing one cwd render as three visibly distinct rows, told apart by title', () => {
+  // DESIGN.md's Decisions section calls this out by name: keying by project
+  // directory instead of by thread would collapse these into one row.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'shared');
+  mkdirSync(dir, { recursive: true });
+  const titles = ['Pick a database', 'Pick a queue', 'Pick a cache'];
+  const boards = titles.map(title => createBoard({ title, cwd: dir }));
+  const threads = buildThreadIndex(boards);
+  assert.equal(threads.length, 3, 'three distinct threads, not collapsed by the shared cwd');
+  const html = renderIndexPage({ threads });
+  const items = boards.map(b => extractThreadItem(html, b.id));
+  // On VISIBLE text, not raw markup: href and data-thread-id differ by board id
+  // on every row regardless of anything a reviewer can see, so comparing raw
+  // item strings would pass even for three rows that read identically.
+  assert.equal(new Set(items.map(visibleText)).size, 3, 'each row must actually read differently to a reviewer, not just differ in markup nobody sees');
+  titles.forEach((title, i) => assert.match(items[i], headlineRe(title), `row ${i} headlines its own title`));
+});
+
+check('three TITLE-LESS threads sharing one cwd still render as three distinct rows -- title alone cannot tell them apart here', () => {
+  // The titled check above is satisfied even if the row's only discriminator
+  // were the title itself. An audit finding was a regression here specifically
+  // for title-less boards, where the headline (folder name) AND the path line
+  // (suppressed once the folder IS the headline) collide identically across all
+  // three, leaving nothing visible to vary except whatever else the row carries.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'shared-untitled');
+  mkdirSync(dir, { recursive: true });
+  const boards = [0, 1, 2].map(() => createBoard({ title: '', cwd: dir }));
+  const threads = buildThreadIndex(boards);
+  assert.equal(threads.length, 3, 'three distinct threads, not collapsed by the shared cwd');
+  const html = renderIndexPage({ threads });
+  const items = boards.map(b => extractThreadItem(html, b.id));
+  items.forEach(item => assert.match(item, headlineRe('shared-untitled'), 'headline collides on the folder name, as expected'));
+  items.forEach(item => assert.doesNotMatch(item, /<div class="thread-path"/, 'and the path line is suppressed, as expected -- neither is left to distinguish them'));
+  const texts = items.map(visibleText);
+  assert.equal(new Set(texts).size, 3, 'still three rows that actually READ differently, despite the headline collision -- not just three different href/data-thread-id attributes');
+  boards.forEach((b, i) => assert.ok(texts[i].includes(b.thread), `row ${i}'s VISIBLE text must identify its own thread even when headline and path do not`));
+});
+
+check('.thread-meta carries the thread id unconditionally, not just when a collision makes it necessary', () => {
+  const board = createBoard({ title: 'Has a title, has a cwd', cwd: fixturesDir });
+  const threads = buildThreadIndex([board]);
+  const html = renderIndexPage({ threads });
+  const item = extractThreadItem(html, board.id);
+  assert.ok(visibleText(item).includes(board.thread), 'the thread id must be visible text on every row, unconditionally -- not only in an attribute nobody reads');
+});
+
+check('buildThreadIndex uses the PRIMARY board\'s own round count for a multi-doc thread, never a cross-board sum', () => {
+  // A thread's row links to primary.id, one specific board doc -- so its round
+  // count has to describe THAT board, or it contradicts the page the row opens.
+  // A prior version summed roundCount across the whole group, which could show a
+  // round number that exists on neither board behind the thread.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'multiboard');
+  mkdirSync(dir, { recursive: true });
+  const b1 = createBoard({ title: 'first doc', cwd: dir, thread: 'th_indexpage_shared' });
+  addRound(b1, {});
+  addRound(b1, {}); // b1: 3 rounds
+  const b2 = createBoard({ title: 'second doc', cwd: dir, thread: 'th_indexpage_shared' });
+  addRound(b2, {}); // b2: 2 rounds
+  const threads = buildThreadIndex([b1, b2]);
+  assert.equal(threads.length, 1, 'one thread, even with two board docs behind it');
+  assert.equal(threads[0].boardCount, 2);
+  const primary = threads[0].boardId === b1.id ? b1 : b2;
+  assert.equal(threads[0].rounds, roundCount(primary), 'the row must describe the board it actually links to, not the group');
+  assert.notEqual(threads[0].rounds, roundCount(b1) + roundCount(b2), 'must not be the cross-board sum -- 5 is a round count that exists on neither board');
+  const html = renderIndexPage({ threads });
+  const item = extractThreadItem(html, threads[0].boardId);
+  const n = roundCount(primary);
+  assert.match(item, new RegExp('\\b' + n + ' round' + (n === 1 ? '' : 's') + '\\b'), 'worded as a count ("N rounds"), matching the linked board');
+});
+
+check('the round segment reads as a count, not an ordinal, is pluralized correctly, and is suppressed entirely at zero', () => {
+  // "round N" reads as a POSITION (which round you're on) -- src/badge.mjs's own
+  // doc comment names exactly this confusion as a real bug, not a wording
+  // nitpick, for the board page's own badge. The index row is a total, never a
+  // position, and must not be worded as if it were one.
+  const oneRound = createBoard({ title: 'one round', cwd: fixturesDir });
+  const twoRounds = createBoard({ title: 'two rounds', cwd: fixturesDir });
+  addRound(twoRounds, {});
+  const noRounds = createBoard({ title: 'no rounds', cwd: fixturesDir });
+  noRounds.rounds = [];
+  const threads = buildThreadIndex([oneRound, twoRounds, noRounds]);
+  const html = renderIndexPage({ threads });
+  const oneItem = extractThreadItem(html, oneRound.id);
+  const twoItem = extractThreadItem(html, twoRounds.id);
+  const zeroItem = extractThreadItem(html, noRounds.id);
+  assert.match(oneItem, /\b1 round\b/, 'singular for exactly one round');
+  assert.doesNotMatch(oneItem, /1 rounds\b/, 'never "1 rounds"');
+  assert.match(twoItem, /\b2 rounds\b/, 'plural for more than one');
+  assert.doesNotMatch(html, /\bround \d/i, 'never worded as an ordinal ("round N") anywhere on the page');
+  assert.doesNotMatch(zeroItem, /\b0 rounds?\b/, 'the segment is suppressed, not shown as "0 rounds", for a board with no rounds at all');
+});
+
+check('the row\'s time element carries both a machine-readable datetime and the exact formatted value for hover', () => {
+  const board = createBoard({ title: 'Time check', cwd: fixturesDir });
+  const threads = buildThreadIndex([board]);
+  const html = renderIndexPage({ threads });
+  const item = extractThreadItem(html, board.id);
+  const m = item.match(/<time class="rel-time" datetime="([^"]*)" title="([^"]*)">([^<]*)<\/time>/);
+  assert.ok(m, 'the row must render a .rel-time element carrying both datetime and title');
+  assert.equal(m[1], board.updatedAt, 'datetime carries the raw ISO value the client script parses');
+  assert.equal(m[3], m[2], 'the visible text and the hover title must be the exact same formatted value');
+  assert.notEqual(m[2], board.updatedAt, 'the hover value is the human-formatted date, not the raw ISO string verbatim');
+  assert.match(m[2], /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z$/, 'formatted as "YYYY-MM-DD HH:MM:SSZ"');
+});
+
+// --- the index page's client script (ticket 06) ------------------------------------
+// `node --check` on src/indexpage.mjs only proves the OUTER template literal that
+// wraps `indexScript` is well-formed; it says nothing about whether the CLIENT
+// script embedded inside it parses, exactly the gap QUIRKS.md's backtick entry
+// describes for src/ui.mjs. `new Function(...)` is the only thing that actually
+// runs it, same technique every check that exercises `ui` already relies on.
+
+check('renderIndexPage actually places indexScript on the page, inside a live <script type="module">', () => {
+  // The check below proves indexScript parses and runs IN ISOLATION -- it does
+  // not prove renderIndexPage ever puts it on the page at all. Deleting
+  // `<script type="module">${indexScript}</script>` from renderIndexPage leaves
+  // every other check in this file green: the relative-time feature could ship
+  // entirely disconnected from the page that is supposed to carry it, and
+  // nothing would say so. See QUIRKS.md.
+  const html = renderIndexPage({ threads: [] });
+  const m = html.match(/<script type="module">([\s\S]*?)<\/script>/);
+  assert.ok(m, 'the page must carry a <script type="module"> at all');
+  assert.equal(m[1], indexScript, 'and its contents must be indexScript itself, not a stale or partial copy');
+});
+
+check('indexScript (the relative-time client script) parses and runs against a minimal document/setInterval stand-in', () => {
+  const els = [
+    { _datetime: '2020-01-01T00:00:00.000Z', textContent: '2020-01-01 00:00:00Z', getAttribute(n) { return n === 'datetime' ? this._datetime : null; } },
+  ];
+  const fakeDocument = { querySelectorAll: sel => (sel === '.rel-time' ? els : []) };
+  let intervalFn = null;
+  let intervalMs = null;
+  const fakeSetInterval = (fn, ms) => { intervalFn = fn; intervalMs = ms; return 1; };
+  // Throws (a real syntax error, or a thrown reference to something undefined in
+  // this stand-in) if indexScript does not actually parse and run end to end.
+  new Function('document', 'setInterval', indexScript)(fakeDocument, fakeSetInterval);
+  assert.equal(typeof intervalFn, 'function', 'refresh must be wired through setInterval so an open tab keeps relative times fresh');
+  assert.notEqual(els[0].textContent, '2020-01-01 00:00:00Z', 'refresh() must actually run once up front and overwrite the placeholder text, not wait for the first interval tick');
+  // The narrowest bucket relTime has ("a minute ago", 45s-90s) is 45 seconds
+  // wide. A poll slower than that can step clean over the bucket depending on
+  // where a row's load time happens to land within it -- an audit-caught defect
+  // (60000 used to be the value here). 20000 is a generous margin under 45000,
+  // not a literal restatement of whatever indexScript happens to use today.
+  assert.ok(intervalMs > 0 && intervalMs <= 20000, `refresh must poll often enough to never skip the narrowest bucket -- got ${intervalMs}ms`);
+});
+
+/** Extract `relTime` out of the `indexScript` string by appending a `return`, the
+ * same `new Function(src + '; return name;')()` technique extractUiFunction uses
+ * on `ui` above (test/check-pure.mjs's own anchor-parity section) — safe here
+ * because indexScript declares it as a plain top-level function, not hidden
+ * inside an IIFE. `document`/`setInterval` stand-ins are still required: indexScript's
+ * own top-level `refresh(); setInterval(refresh, ...);` calls run as a side
+ * effect of merely evaluating it, before the appended `return` is ever reached.
+ * Throws loudly, not silently, if extraction ever breaks. */
+function extractRelTime() {
+  const noopDocument = { querySelectorAll: () => [] };
+  const noopSetInterval = () => {};
+  const fn = new Function('document', 'setInterval', indexScript + '; return relTime;')(noopDocument, noopSetInterval);
+  if (typeof fn !== 'function') throw new Error('indexScript extraction did not yield relTime as a function');
+  return fn;
+}
+
+check('relTime: pinned at the exact boundaries its own if-chain names, with a fixed "now" rather than the wall clock', () => {
+  // relTime rounds each unit FIRST and thresholds the ROUNDED value (moment.js's
+  // own algorithm) rather than thresholding the raw ms diff and rounding only for
+  // display -- the former shape had a real bug an audit caught: a diff that
+  // rounds UP to the next tier's boundary still printed in the tier below it for
+  // one more tick (44m59s read "45 minutes ago", 45m00s one second later read
+  // "an hour ago"). These boundaries are pinned at the value where each unit
+  // itself rounds over, not at the round-number-looking-but-wrong spellings
+  // (45min/22h/25d) the old, buggy version used.
+  const relTime = extractRelTime();
+  const SEC = 1000, MIN = 60 * SEC, HOUR = 60 * MIN, DAY = 24 * HOUR;
+  const now = 1_700_000_000_000; // arbitrary fixed instant
+  const at = msAgo => new Date(now - msAgo).toISOString();
+
+  // 45s boundary
+  assert.equal(relTime(at(45 * SEC - 1), now), 'just now');
+  assert.equal(relTime(at(45 * SEC), now), 'a minute ago');
+  // 90s boundary (round(diff/MIN) reaches 2 here, not a hardcoded 90*SEC check)
+  assert.equal(relTime(at(90 * SEC - 1), now), 'a minute ago');
+  assert.equal(relTime(at(90 * SEC), now), '2 minutes ago');
+  // minutes->hour: rounds to 45 minutes at 44min30s, not at the old raw 45min
+  assert.equal(relTime(at(44 * MIN + 30 * SEC - 1), now), '44 minutes ago');
+  assert.equal(relTime(at(44 * MIN + 30 * SEC), now), 'an hour ago');
+  // 90min boundary (round(diff/HOUR) reaches 2 here)
+  assert.equal(relTime(at(90 * MIN - 1), now), 'an hour ago');
+  assert.equal(relTime(at(90 * MIN), now), '2 hours ago');
+  // hours->day: rounds to 22 hours at 21h30m, not at the old raw 22h
+  assert.equal(relTime(at(21 * HOUR + 30 * MIN - 1), now), '21 hours ago');
+  assert.equal(relTime(at(21 * HOUR + 30 * MIN), now), 'a day ago');
+  // 36h boundary (round(diff/DAY) reaches 2 here)
+  assert.equal(relTime(at(36 * HOUR - 1), now), 'a day ago');
+  assert.equal(relTime(at(36 * HOUR), now), '2 days ago');
+  // days->month: rounds to 25 days at 24d12h, not at the old raw 25d
+  assert.equal(relTime(at(24 * DAY + 12 * HOUR - 1), now), '24 days ago');
+  assert.equal(relTime(at(24 * DAY + 12 * HOUR), now), 'a month ago');
+  // months->year: never "12 months ago" -- rounds to 12 at 345 days and becomes
+  // "a year ago" there instead
+  assert.equal(relTime(at(345 * DAY - 1), now), '11 months ago');
+  assert.equal(relTime(at(345 * DAY), now), 'a year ago');
+  // year->years: rounds to 2 years at 547d12h
+  assert.equal(relTime(at(547 * DAY + 12 * HOUR - 1), now), 'a year ago');
+  assert.equal(relTime(at(547 * DAY + 12 * HOUR), now), '2 years ago');
+
+  // future/clock-skew timestamps clamp to "just now" rather than reading negative
+  assert.equal(relTime(new Date(now + 5000).toISOString(), now), 'just now');
+  // an unparseable value is returned verbatim, not "NaN ago" or a thrown error
+  assert.equal(relTime('not-a-date', now), 'not-a-date');
+  // new Date(null).getTime() is 0, not NaN, so isNaN alone does not catch a null
+  // iso -- it used to compute a diff against the Unix epoch and print something
+  // like "54 years ago" instead of leaving the caller's null alone.
+  assert.equal(relTime(null, now), null, 'a null iso must be returned verbatim, not treated as the epoch');
+});
+
 check('no rule outside a token block carries a raw hex or rgba literal', () => {
   // A palette change has to stay a one-block edit (DESIGN.md acceptance criterion
   // 6). This invariant already rotted once -- the header comment above `styles`
@@ -3799,10 +5122,39 @@ check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and t
   // of this one. Also exactly what falsifies the check above as a decoy --
   // changing STAGE_ACCENT_HEX to some other plain hex (e.g. '#ff0000') still
   // declares no custom property and still round-trips through the assertion
-  // just above, so only THIS assertion catches a value that drifted from the
+  // just above, so only THESE assertions catch a value that drifted from the
   // token it is supposed to track.
-  assert.equal(STAGE_ACCENT_HEX, palettes.dark['--accent'],
-    `the stage's hand-maintained literal (STAGE_ACCENT_HEX, src/render.mjs) no longer matches --accent's dark value (${palettes.dark['--accent']}) -- QUIRKS.md "Two stylesheets, one palette" requires updating it by hand when that token changes`);
+  //
+  // Three assertions rather than one, because "stays in step with --accent"
+  // was the wrong requirement and stated it in a way that read as correct:
+  // it tracked the DARK value, on a surface that is white in BOTH palettes,
+  // leaving the outline at 2.61:1 -- under the 3:1 WCAG floor for non-text
+  // UI, on the stage's only per-element targeting feedback. src/styles.mjs's
+  // LIGHT palette comment had already rejected that exact colour on white
+  // ("#7c9cff on white is ~2.3:1"); nothing connected the two. So the premise
+  // and the requirement are now asserted directly, and the palette pin is
+  // kept only as a drift guard on top of them.
+  assert.equal(palettes.dark['--stage-bg'], palettes.light['--stage-bg'],
+    `the stage's premise is gone: --stage-bg now differs between palettes (dark ${palettes.dark['--stage-bg']}, light ${palettes.light['--stage-bg']}), so the stage is no longer theme-independent and STAGE_ACCENT_HEX (src/render.mjs) can no longer be one value for both -- it needs a light/dark story, which the sandboxed stage stylesheet has no way to express (QUIRKS.md "Two stylesheets, one palette")`);
+
+  // WCAG 2.1 relative luminance, the same formula src/styles.mjs's palette
+  // comments quote their ratios from.
+  const luminance = (hex) => {
+    const ch = [1, 3, 5].map((i) => parseInt(hex.substr(i, 2), 16) / 255)
+      .map((c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
+    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+  };
+  const contrast = (a, b) => {
+    const [x, y] = [luminance(a), luminance(b)];
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  };
+  const stageBg = palettes.light['--stage-bg'] === '#fff' ? '#ffffff' : palettes.light['--stage-bg'];
+  const ratio = contrast(STAGE_ACCENT_HEX, stageBg);
+  assert.ok(ratio >= 3,
+    `the stage hover outline (STAGE_ACCENT_HEX, src/render.mjs) is ${ratio.toFixed(2)}:1 against the stage's background ${stageBg} -- under the 3:1 WCAG minimum for non-text UI. This outline is the ONLY per-element targeting feedback the stage gives, so a reviewer who cannot see it can be led to anchor a comment to an element they never saw highlighted (the same failure the '--accent: transparent' hijack caused, reached by a palette choice instead)`);
+
+  assert.equal(STAGE_ACCENT_HEX, palettes.light['--accent'],
+    `the stage's hand-maintained literal (STAGE_ACCENT_HEX, src/render.mjs) no longer matches --accent's LIGHT value (${palettes.light['--accent']}) -- light, not dark, because the stage renders on white in both palettes, so the light accent is the one chosen to have contrast there (src/styles.mjs's LIGHT palette comment). QUIRKS.md "Two stylesheets, one palette" requires updating it by hand when that token changes`);
 });
 
 // --- the handoff, and the credential it hands out ---------------------------------
@@ -3927,6 +5279,23 @@ check('the refusal page names the recovery command and reveals nothing about the
   // It is served for a missing board and an existing one alike, so it must say nothing
   // about either: a "board not found" here would leak existence to an id enumerator.
   assert.doesNotMatch(html, /board-data|boardId|b_[0-9a-f]/);
+
+  // This page shipped dark-only: six hardcoded hex, no light variant, so every
+  // light-mode machine got a black slab. It cannot use tokens (no stylesheet
+  // link) or the saved preference (no script, deliberately), so the OS
+  // preference is the only signal it has, and the values are hand-maintained
+  // against src/styles.mjs the same way the stage's are. Asserted against the
+  // real LIGHT palette so a palette change fails HERE rather than silently
+  // leaving this page on last year's colours.
+  assert.match(html, /@media \(prefers-color-scheme: light\)/,
+    'the refusal page must carry a light variant -- it has no stylesheet link and no script, so this media query is the only theme signal it can act on');
+  assert.match(html, /color-scheme: light/,
+    'and must set color-scheme, or the scrollbar and any form chrome stay dark against a light page');
+  for (const [token, where] of [['--bg', 'the page background'], ['--ink', 'the body text'],
+    ['--panel-2', 'the command block'], ['--code-ink', 'the command itself'], ['--muted', 'the footnote']]) {
+    assert.ok(html.includes(palettes.light[token]),
+      `the refusal page's light variant must use --${token.slice(2)}'s light value (${palettes.light[token]}) for ${where} -- it is hand-copied from src/styles.mjs (QUIRKS.md "Two stylesheets, one palette"), so a palette change that does not reach here leaves this page mismatched with every board it sits in front of`);
+  }
 });
 
 check('the recovery command is one string, read from one place by everything that prints it', () => {

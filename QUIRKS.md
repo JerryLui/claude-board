@@ -95,6 +95,9 @@ throwaway under `/tmp` is the right home. Two things that cost time:
 - An iframe stage's mock content usually fills only a slice of the frame. Clicking
   the frame's empty area correctly anchors nothing, which reads exactly like a dead
   gesture. Probe several points before believing it.
+- `Input.dispatchMouseEvent` with a `mousePressed`/`mouseReleased` pair does produce a
+  real `click`, but if the page took a pointer capture in between, the `click` you
+  get is not the one you meant — see the next entry.
 - This Chrome version's `/json/new` HTTP endpoint (used to open a tab and get its
   `webSocketDebuggerUrl` without hand-rolling `Target.createTarget` over the browser
   socket) rejects a plain `GET` with "Using unsafe HTTP verb GET to invoke /json/new.
@@ -114,6 +117,128 @@ throwaway under `/tmp` is the right home. Two things that cost time:
   widening each diagram (more nodes, so dagre's layout pass actually costs
   milliseconds) is more reliable than guessing at a smaller click interval.
 
+## `setPointerCapture` on pointerdown steals the click from what you clicked
+
+Any drag-to-pan surface will reach for `element.setPointerCapture(ev.pointerId)` in
+its `pointerdown` handler — `/explain`'s lens does exactly that, and this repo's
+diagram lens (SPEC_POLISH.md ticket 05) copied it. While a capture is active Chrome
+retargets **everything that follows** at the capture element: `pointerup`, `mouseup`
+and, crucially, the `click` the pair produces. So a click handler on that same
+surface sees `ev.target === theSurface`, not the thing under the pointer, and any
+`ev.target.closest(...)` walk-up finds nothing. Measured in Chrome 150, 2026-07-31:
+the lens's own comment gesture was dead for exactly this reason, while every check
+in `test/check-mermaid-anchor.mjs` — which drives the whole gesture end to end
+through the DOM stand-in — stayed green, because there is no such thing as pointer
+capture in the stand-in.
+
+The fix is to take the capture **only once the press has actually become a drag**
+(past a few pixels of movement), never on the press itself: a plain click then never
+has capture active and targets normally, and a genuine pan is captured before it can
+leave the element. `test/check-pure.mjs` pins the shape of that ("the lens takes
+pointer capture only once a press has become a pan"), which is as far as a check
+without a browser can go — the behaviour itself rests on driving real Chrome.
+
+This is the same family as the two entries above it: a gesture that is dead in every
+browser under a green suite, because the suite's model of the browser is missing the
+one mechanism that breaks it.
+
+## The stand-in has no layout: no `IntersectionObserver`, no `scrollHeight`, no `clientHeight`
+
+`test/dom-stand-in.mjs` is a DOM, not a browser: nothing in it lays anything out, so an
+API whose whole job is reporting real layout is either absent or permanently zero. Two
+different consequences follow from that, worth telling apart.
+
+- **`IntersectionObserver` is not defined at all.** `setupRoundObserver` (`src/ui.mjs`,
+  the round badge's position-tracking half, SPEC_POLISH.md ticket 04) guards on
+  `typeof IntersectionObserver !== 'function'` and returns immediately when it is
+  missing -- by design, so the stand-in does not throw, but it also means the half of
+  the round badge that decides which round number to show as you scroll runs under no
+  check at all. This one was caught by hand, not by the audit: the long comment above
+  `setupRoundObserver` records a real defect found by recreating the observer in real
+  Chrome (a 1px root-margin band that a smooth-scrolled section can jump clean over
+  between two consecutive samples), since fixed. Not a gap the suite happened to miss;
+  a mechanism the suite cannot see at all short of embedding an actual browser.
+
+- **`scrollHeight` and `clientHeight` model exactly one fact, and nothing more.** They
+  read `0` for a node that is not in a document, and otherwise whatever the fixture
+  declared via `data-standin-client-height` / `data-standin-scroll-height`. Nothing is
+  computed: content, CSS and size stay unrelated, and an undeclared connected element
+  reading `0` means "this stand-in knows no box for this node", never "this node is 0px
+  tall".
+
+  That one fact is modelled because every push path turns on it. `wireRoot` runs against
+  a **detached** subtree by design on all three of them, and a real browser also reports
+  0/0 there -- so anything that measures at wire time measures zero. `unlockCodeCapForDrag`
+  (`src/ui.mjs`) used to claim its one-shot unlock marker *before* the comparison it
+  guards, so the marker was burned with the unlock never having run and the post-attach
+  re-measurement then skipped itself: every code block arriving over SSE was permanently
+  undraggable, and criterion 5 held only for blocks present at first load. Found by the
+  audit reading the function, confirmed in Chrome (0/0 detached, 480/4478 attached), and
+  now driven end to end by two checks in `test/check-anchor-push.mjs` that fail against
+  three separate breakages of the guard. The second of those two checks asserts a SHORT
+  block is left alone, which is what stops the first being satisfied by a version that
+  unlocks everything and quietly takes criterion 6 away.
+
+  Do not grow this into a layout model. Anything whose answer depends on real layout --
+  where a box actually is, how tall content renders -- still belongs in the Chrome drive.
+
+Same rule as `setPointerCapture` above for `IntersectionObserver`: a check that needs it
+has to come from a real browser.
+
+## A harness that imports `src/` serves the code as it was at startup
+
+The throwaway preview server imports `renderBoardPage` once, so `src/ui.mjs`'s
+client-script template literal is captured at boot. Editing `src/` and re-running the CDP
+driver silently re-tests the OLD page -- it cost one agent two rounds of "the fix doesn't
+work" against a fix that did. Restart the server after every `src/` edit.
+
+Related, same session: in headless Chrome a `fetch` from a tab that is not the focused one
+can stay pending indefinitely. A driver that opens and closes several tabs should run any
+fetch-dependent assertion first, or give it its own browser.
+
+## Criterion 12's html-stage half is checked by reading its source, not by running it
+
+`test/check-pure.mjs`'s check on `stageAgentScript()` (SPEC_POLISH.md ticket 02,
+"a SENT element is de-affordanced on hover, in the html stage too") extracts the
+client script as a string and asserts against it with regexes: that `SENT_CLASS` is
+declared once, that the hover handler's body contains a check against `sentRefs`, that
+`clearHover` removes the class again. None of that ever runs the script -- no DOM, no
+dispatched `mouseover`, no read-back of a real `classList`. The mermaid half of the
+same criterion, in `test/check-mermaid-anchor.mjs`, is the opposite: it builds a real
+board with a sent comment, loads the page into the DOM stand-in, dispatches a real
+click, and asserts on the resulting `classList` state.
+
+Not a caught defect (the html-stage half has not been shown to be wrong) -- an audit
+finding about the check's own shape, flagged as a trap the mermaid entry above already
+names by example: an assertion on spelling proves the source says the right thing, not
+that a browser running it does the right thing. If this half is ever rewritten,
+prefer driving it in a DOM the way the mermaid check already does over adding another
+regex.
+
+## A client script that parses is not a client script that is on the page
+
+`src/indexpage.mjs`'s `indexScript` used to be checked exactly one way: extract the
+string, run it through `new Function('document', 'setInterval', indexScript)` against a
+minimal stand-in, and confirm it parses and behaves once invoked directly. That proves
+the script is valid and does what it claims in isolation -- it proves nothing about
+whether `renderIndexPage` ever puts it on the page at all. Deleting
+`<script type="module">${indexScript}</script>` from `renderIndexPage`'s returned markup
+left every check in the file green: the relative-time feature could ship completely
+disconnected from the page that is supposed to carry it, and nothing would say so. Caught
+by an audit reading the check, not by hand verification -- nobody has watched a stripped
+build fail to update in a real tab, only read that the wiring itself had no check pinning
+it. Fixed by a second, separate check that asserts the STRING IDENTITY of what
+`renderIndexPage` embeds against `indexScript` itself, on top of (not instead of) the
+in-isolation one.
+
+Same shape as this file's mermaid-id trap ("Real mermaid node ids are prefixed" above),
+one layer out: that one was a mock of a renderer's output diverging from the real thing;
+this one is a tested unit whose presence on the assembled page was never itself asserted.
+Worth checking on any file that
+exports a string meant to be *embedded* somewhere (`indexScript` here, `stageAgentScript()`
+in `src/render.mjs`, `ui` in `src/ui.mjs`): a check that the string is well-formed is not
+a check that the assembly step actually uses it.
+
 ## No external assets, ever
 
 `renderBoardPage` output must open from Finder with the network off. The page test
@@ -126,7 +251,29 @@ cannot be reached.
 
 The html-stage iframe is sandboxed and the page's tokens deliberately do not reach
 into it. Its hover-highlight rule is built with a hardcoded hex, updated by hand
-when `--accent` / the surface tokens change in `src/styles.mjs`. Mermaid's
+when `--accent` / the surface tokens change in `src/styles.mjs`.
+
+**That hex tracks `--accent`'s LIGHT value, not dark, and the reason generalises.**
+The stage renders on `--stage-bg`, which is `#fff` in *both* palettes — an
+agent-authored mock assumes a white canvas, so the stage deliberately does not
+follow the page. The outline is therefore theme-*independent*: there is no light
+variant to add, only a right and a wrong colour for white. It was pinned to the
+dark accent for as long as the stage existed, which put it at 2.61:1 on white,
+under the 3:1 WCAG floor for non-text UI — on the only per-element targeting
+feedback the stage gives. `src/styles.mjs`'s own LIGHT palette comment had
+already rejected that exact colour on white ("#7c9cff on white is ~2.3:1") when
+it moved `--accent` to the mid-blues; nothing connected the two, because the
+stage's own comment described the requirement as "stay in step with `--accent`"
+without saying *which* palette or *why*. `test/check-pure.mjs` now asserts the
+premise (both palettes' `--stage-bg` identical), the requirement (contrast >= 3:1
+against it) and the drift guard (equality with the light accent) separately, so a
+palette change that breaks any one of them fails on the one it broke.
+
+The lesson worth carrying: on a surface that does not follow the theme, "matches
+the token" is not the requirement — "has contrast on the surface it actually
+renders on" is, and only one of those two is worth writing a check for.
+
+Mermaid's
 `themeVariables` no longer are: `mermaidThemeVariables()` (`src/ui.mjs`) now reads
 live computed style through a mermaid-variable -> CSS-token map
 (`MERMAID_TOKEN_MAP`), so a palette change reaches it with nothing to update by
@@ -136,6 +283,62 @@ dropped `allow-same-origin` from the iframe and moved the hover rule from
 `contentDocument` at all) into `stageAgentScript` (`src/render.mjs`), the
 stage-side agent injected into every html block's `srcdoc`. The hex lives there
 now; the "update by hand" trap is unchanged, only the address moved.
+
+SPEC_POLISH.md ticket 02 added a second stage-side rule next to that one:
+`.cb-anchor-sent` (`cursor: not-allowed`, no outline at all), for an element that
+already carries a *sent* comment — no hex to keep in step this time, just a
+`cursor` value, but it is hand-maintained in the same sense: `stageAgentScript`
+cannot read `src/styles.mjs`'s `.cb-anchor-sent` rule any more than it could read
+`--accent`, so the two are two independent places asserting the same idea, kept
+in sync by convention (same class name) rather than by any shared source. The
+stage cannot know which of its own elements are "already sent" on its own —
+that fact lives in `board.comments`, in the parent document only — so the
+parent's `mode` postMessage (`src/ui.mjs`'s `handleStageReady` and
+`setCommentMode`) now carries a `sentRefs` array alongside `commentMode`,
+recomputed from `board.comments` on every stage-ready and every toggle. Still
+one message type, not a new one: sent-ness is exactly the kind of fact that
+matters precisely when mode changes.
+
+There is a third hand-maintained place, and it is not a stage at all:
+`renderRefusalPage` (`src/render.mjs`), the "this browser is not authorized" page.
+It is deliberately self-contained — no stylesheet link, no script, so it renders
+under the same locked-down CSP as a board and reveals nothing — which means it can
+reach neither `src/styles.mjs`'s tokens nor the reviewer's saved theme (that lives
+behind a script). It shipped dark-only: six hardcoded hex, a black slab on every
+light-mode machine, for as long as the credential gate has existed. The OS
+preference via `@media (prefers-color-scheme: light)` is the only theme signal it
+can act on, and the right one for a page reached by a browser that by definition
+holds nothing of ours. Its light values are hand-copied from the LIGHT palette and
+`test/check-pure.mjs` asserts each against the real token, so a palette change
+fails there rather than quietly leaving this page on the old colours.
+
+SPEC_POLISH.md ticket 05 added no third place: the diagram lens's own chrome is
+written entirely against `:root`'s tokens (no hex anywhere in `.diagram-lens` and
+friends), and the diagram *inside* it is a `cloneNode(true)` of the already-rendered
+SVG, so it simply inherits whatever mermaid's `themeVariables` produced.
+
+That paragraph used to end "the lens is downstream of those variables, so updating
+them by hand updates the lens for free — there is nothing extra to keep in step",
+and both halves of that were written before the light theme landed. Neither
+survived it. The variables are not hand-updated any more (`mermaidThemeVariables()`
+reads live computed style), and "downstream" is only true at the moment the clone
+is taken: a theme change runs `runMermaidRedrawPass`, which REPLACES each inline
+`<svg>` with a new element, and an already-open lens goes on holding a clone of the
+one that was replaced. Measured in Chrome 2026-07-31, System mode with the OS
+flipping to light: the lens's node rects stayed `rgb(24, 32, 47)` with
+`rgb(234, 238, 246)` labels — a dark diagram inside light chrome — while the inline
+diagram behind the dialog had correctly become `rgb(245, 246, 251)` /
+`rgb(23, 28, 42)`. Note the trigger: a modal `<dialog>` makes the rest of the page
+inert, so the theme *control* cannot be clicked while the lens is open — this is
+reachable only through `src/theme.mjs`'s `matchMedia` listener, i.e. the reader who
+leaves a diagram open while macOS switches at sunset. `lensRetheme` (`src/ui.mjs`)
+re-clones from the fresh svg, keeps the pan/zoom, and redraws the pins;
+`test/check-mermaid-theme.mjs` drives it end to end and fails when the call is
+removed.
+
+The general shape is the one this file keeps recording: a value copied out of a
+live source is correct exactly until the source changes, and "there is nothing to
+keep in step" is a claim about a snapshot, not about a mechanism.
 
 ## A backtick inside `export const ui = \`...\`;` ends the client script early
 
@@ -377,3 +580,85 @@ event loop the daemon needs to answer, so the child times out and the check fail
 "daemon is not reachable" — a message that names the wrong problem entirely. Use
 `promisify(execFile)` and `await` it. `test/check-install.mjs` gets away with
 `spawnSync` because its daemon is a separate process.
+
+## A temp dir's spelling is not its realpath, and path confinement compares realpaths
+
+`mkdtempSync(path.join(tmpdir(), …))` hands back `/var/folders/…` on macOS, but `/var`
+is a symlink to `/private/var`, so the same directory has two absolute spellings and
+only one of them survives `realpathSync`. Anything in `src/resolve.mjs` that decides
+containment compares canonical paths, so a check that builds a fixture root out of
+`tmpdir()` and passes the *returned* path as an allowlisted root confines against
+`/private/var/…` while the reference it then resolves is spelled `/var/…` — a
+legitimate path refused, for a reason that has nothing to do with the code under test.
+`realpathSync` the fixture root (and the file, when asserting the resolved path) before
+using either in an assertion. The same trap is live outside the checks: a home
+directory on an external volume is symlinked the same way, which is why the "does this
+absolute path even name a place inside a root" test in `resolvePath` is decided on the
+parent directory's realpath rather than on the path's spelling.
+
+And realpath is not enough on its own for `$HOME`. It does **not** correct case on a
+case-insensitive volume (`/users/you` canonicalises to itself), and APFS firmlinks give
+`/System/Volumes/Data/Users/you` as a second, equally canonical path to the same
+directory — so `realpathSync(a) === realpathSync(b)` is false for two names of one
+directory, routinely, on a stock Mac. `src/resolve.mjs` compares `dev`+`ino` instead
+(`isHomeOrAbove`), and keeps the string test only as a fast path. If you are writing any
+"is this the same directory" test on this OS, assume the string answer is wrong.
+
+## Two open flags macOS will not accept together
+
+`src/resolve.mjs` opens every reference with `O_NOFOLLOW_ANY` — Apple's "refuse if ANY
+component is a symlink", `0x20000000` in `<sys/fcntl.h>`, which Node does not export.
+Two things about it:
+
+- **`O_NOFOLLOW | O_NOFOLLOW_ANY` is `EINVAL`**, on every path including an ordinary
+  regular file. They are alternatives, not a belt and braces; passing both fails every
+  open with an errno that says nothing about symlinks.
+- Because the number is hardcoded, a check has to prove it still *does* something —
+  `test/check-pure.mjs` swaps a directory component for a symlink between the check and
+  the read and asserts the open is refused. Without that, a wrong or retired constant
+  degrades silently into no protection at all, which is the same failure shape as the
+  `WatchPaths` entry above.
+
+`O_NONBLOCK` belongs in the same flag set for a different reason: `open` on a fifo with
+no writer blocks forever, so without it the fifo guard never gets to run.
+
+**A strong outer guard hides a weak inner one from your checks.** Both symlink-swap
+checks were written first, and both are refused by `O_NOFOLLOW_ANY` at `openSync` — so
+reverting `readFileSync(fd)` to `readFileSync(abs)`, and `fstatSync(fd)` to
+`statSync(abs)`, left the whole suite green. The flag was masking the descriptor
+entirely. Two guards that stop the same demo can defend quite different attacks (the
+flag stops a symlink; only the descriptor stops `rename()`ing a plain regular file over
+the name), and a check built on the demo pins whichever one runs first. If two mechanisms
+are meant to be independent, each needs an attack the other cannot stop: here, a swap to
+a regular file for the read, and a swap to a directory or an oversized file for the
+guards. Mutation-test anything layered like this — one green suite is not evidence that
+both layers exist.
+
+## An apostrophe inside `${VAR:-...}` swallows the rest of a bash script
+
+`echo "roots: ${REF_ROOTS:-(none — inside a board's project directory only)}"` is a
+syntax accident, not a string: inside `${par:-word}` bash treats `'` as a quote character
+even though the whole expansion is already inside double quotes. Everything up to the
+next apostrophe — comments included, across any number of lines — becomes part of that
+string. The symptom in `install.sh` was a chunk of comment block printed to stdout and
+`xml_escape: command not found` forty lines later, neither of which points anywhere near
+the real line. `bash -n` does **not** catch it (the file still parses). Write the branch
+out with a plain `if` instead of reaching for a `:-` default.
+
+## A mutation helper that restores with `git checkout` eats uncommitted work
+
+Ablation testing means mutate, run, restore — and the obvious restore is
+`git checkout -- <files>`. That silently discards *any* uncommitted change to those
+files, including the very edits under test. The failure is quiet and reads like a
+result: the first mutation reports its expected failure, and every mutation after it
+reports **nothing**, because the check file holding the new assertions was reverted
+along with the source. "No output" looks like "no finding" rather than like "the
+checks are gone", so a run that destroyed the work can be mistaken for a run that
+cleared it.
+
+Commit before mutating. Then `git checkout` restores to a tree that still contains
+the work, and the helper is safe to loop. If the work genuinely cannot be committed
+yet, copy the files aside and restore from the copies — never from git.
+
+Cheap tell that this has happened: the ablations after the first all come back
+clean. Real ablations rarely do.

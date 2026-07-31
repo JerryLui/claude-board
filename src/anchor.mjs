@@ -981,3 +981,82 @@ export function resolveMermaidAnchorAtRoot(sectionRoot, source, anchor) {
 export function resolveMermaidAnchor(sectionHtml, source, anchor) {
   return resolveMermaidAnchorAtRoot(sectionRootFrom(sectionHtml), source, anchor);
 }
+
+// --- ticket 02 (SPEC_POLISH.md): the pending-comment queue, pure -------------
+//
+// `pendingComments` itself (an array of `{ id, blockId, anchor, text }`) lives
+// only in src/ui.mjs's page-lifetime state -- there is no server shape for it,
+// nothing here persists it, and ADR.md entry 2 is why: deletion and editing
+// apply only to a comment still queued client-side, never to anything in
+// `board.comments`, which stays append-only. These two functions are the ones
+// ticket 02's own log calls out for extraction: the click-to-edit gesture
+// (criterion 1) and the list entry's delete control (criterion 2) used to be
+// logic inline in a click handler, verified only by eye -- this repo's own
+// recorded pattern for how a gesture ships dead under a green suite. Both are
+// embedded verbatim into src/ui.mjs's client script via `.toString()` (the
+// same technique as `composeHint`/`parseMermaidDomId` above), so anything
+// either one needs is declared INSIDE its own body, not as a further
+// module-level helper the embedded copy could never see.
+
+/** The still-QUEUED comment (an entry of `pendingComments`, never
+ * `board.comments`) already anchored at `blockId` + the same clicked-element
+ * identity as `anchor` -- same `kind`, and the same `ref` (`hint`/`domRef` are
+ * cosmetic labels composed for the agent to read, never compared) -- or
+ * `undefined` if none. Ticket 02 criterion 1: every anchor-minting click
+ * handler in src/ui.mjs (the generic page-wide listener, the html-stage's
+ * `handleStageClick`, and `wireMermaidBlock`'s own) calls this BEFORE opening
+ * a blank form, so a second click on an element already carrying a queued
+ * comment reopens and edits it instead of queuing a duplicate.
+ *
+ * A SENT comment can never satisfy this by construction, not merely by
+ * caller discipline (criterion 3, "no edit path" for a sent comment): it
+ * lives in `board.comments`, a different array from `pendingComments` in
+ * every real call site -- this function has no notion of "sent" at all, it
+ * only ever searches whatever list it is given. (src/ui.mjs also calls this
+ * same function with `board.comments` itself, deliberately, to answer a
+ * different question -- criterion 12's "does this element already carry a
+ * SENT comment" -- reusing the one match rule rather than a second copy of
+ * it; that reuse is what "no notion of sent" buys.) */
+export function findPendingCommentForAnchor(pendingComments, blockId, anchor) {
+  function sameTarget(a, b) {
+    if (!a || !b) return false;
+    return a.kind === b.kind && (a.ref || '') === (b.ref || '');
+  }
+  var list = pendingComments || [];
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
+    if (c && c.blockId === blockId && sameTarget(c.anchor, anchor)) return c;
+  }
+  return undefined;
+}
+
+/** `pendingComments` with the entry whose own `id` is `id` removed -- a NEW
+ * array, never a mutation of the one passed in (a caller still holding the
+ * old reference is unaffected). Criterion 2: "using it removes the entry ...
+ * and renumbers the remaining provisional pins so they stay contiguous."
+ * Renumbering needs no extra step here: a provisional comment's number is
+ * never stored ON it, it is derived from its POSITION in this array
+ * (`nextCommentNumber() + index`, src/ui.mjs's `commentsWithPending`) every
+ * time the pin layers and comment lists are redrawn -- so removing one entry
+ * and re-deriving numbers from the shorter array's order is already
+ * contiguous, which is what makes "removing the middle of three" an ordinary
+ * case rather than a special one.
+ *
+ * Keyed by `id`, not by `blockId`+`anchor`: a whole-block comment (`{ kind:
+ * 'block' }`) carries no `ref` at all, and this codebase's own design
+ * explicitly keeps that gesture free to add several separate,
+ * textually-different remarks on one block -- so several legitimate queued
+ * comments can share one anchor, and a caller deleting ONE specific list
+ * entry must not risk removing a different one that merely looks the same.
+ * An `id` matching nothing already queued (already removed, or never queued
+ * at all) is a no-op: the array comes back with the same elements in the
+ * same order. */
+export function removePendingComment(pendingComments, id) {
+  var list = pendingComments || [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].id === id) continue;
+    out.push(list[i]);
+  }
+  return out;
+}

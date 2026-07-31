@@ -39,7 +39,7 @@
 //     itself gating that gesture.
 
 import assert from 'node:assert/strict';
-import { createBoard } from '../src/board.mjs';
+import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
@@ -60,10 +60,8 @@ function check(name, fn) {
 // the diagram node (ticket 05) and the hand-mocked stage on its own (already
 // covered end to end by test/check-click.mjs / test/check-click-pin.mjs -- this
 // file's own criterion-6 check below still exercises it, inside a compare side).
-const board = createBoard({
-  title: 'Ticket 03 -- any element takes a comment',
-  blocks: [
-    {
+const BLOCK_SPEC = [
+  {
       kind: 'markdown',
       text: [
         '# Findings',
@@ -87,9 +85,9 @@ const board = createBoard({
       right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Send</button></div>' } },
     },
     { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
-    { kind: 'question', prompt: 'Explain', widget: 'text', options: [] },
-  ],
-});
+  { kind: 'question', prompt: 'Explain', widget: 'text', options: [] },
+];
+const board = createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC });
 const [mdBlock, codeBlock, compareBlock, choiceBlock, textBlock] = board.blocks;
 const pageHtml = renderBoardPage(board);
 
@@ -713,6 +711,270 @@ check('comment mode: clicking the html-stage iframe element itself (the outer-do
   const form = document.getElementById('comment-form-' + blockId);
   assert.equal(form.classList.contains('open'), false,
     'clicking the iframe element itself must not ALSO open a page-scoped dom-anchor form via the generic page-wide listener');
+});
+
+// --- the markdown anchor button (SPEC_POLISH.md criteria 1 and 12) -----------
+//
+// `.comment-btn[data-anchor-kind="md"]` -- the inline control injectAnchorButtons
+// (src/render.mjs) puts after every markdown heading and list item -- is the ONLY
+// producer of `md` anchors on the page, and it was the one anchor-minting path
+// that never learned either of ticket 02's two rules (audit findings P1/P2): its
+// handler called openCommentForm with four arguments, with no
+// findPendingCommentForAnchor lookup and no isSentAnchor gate. So a second click
+// on a heading queued a SECOND independent comment with a second pin, which is
+// verbatim the Problem statement this batch exists to fix and is the alternative
+// the spec's Decisions explicitly reject; and a heading carrying a SENT comment
+// kept a live, unmarked control. Every other gesture (the generic dom click, the
+// diagram node, the lens) was already covered; these close the last one.
+//
+// The `block`-kind button on the same page is checked alongside, because the
+// distinction is deliberate rather than incidental: "several separate remarks on
+// one block" stays legal, which is exactly why removePendingComment is keyed by
+// entry id (src/anchor.mjs). A fix that made every .comment-btn edit would break
+// that, and nothing else would notice.
+
+/** The md-kind anchor button for `ref` (a heading/list-item id) on `mdBlock`. */
+function mdAnchorButton(document, ref) {
+  const btn = document.querySelectorAll(`.comment-btn[data-anchor-kind="md"][data-block-id="${mdBlock.id}"]`)
+    .find(b => b.getAttribute('data-anchor-ref') === ref);
+  assert.ok(btn, `setup failure: no md anchor button for ref ${JSON.stringify(ref)}`);
+  return btn;
+}
+
+/** Every md ref the page actually rendered an anchor button for. */
+function mdRefs(document) {
+  return document.querySelectorAll(`.comment-btn[data-anchor-kind="md"][data-block-id="${mdBlock.id}"]`)
+    .map(b => b.getAttribute('data-anchor-ref'));
+}
+
+check('criterion 1 (md): clicking a heading\'s anchor button twice reopens the comment already on it -- prefilled, stamped as an edit -- instead of queuing a second one', () => {
+  const document = loadBoard();
+  const refs = mdRefs(document);
+  assert.ok(refs.length, 'setup failure: the markdown block rendered no anchor buttons at all');
+  const ref = refs[0];
+
+  mdAnchorButton(document, ref).dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + mdBlock.id);
+  assert.equal(form.classList.contains('open'), true, 'setup failure: the first click did not open the form');
+  assert.equal(form.getAttribute('data-editing-id'), null, 'a FIRST click has nothing to edit');
+  form.querySelector('input[type=text]').value = 'the heading is wrong';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  const pinsAfterFirst = document.querySelectorAll('.anchor-pin').length;
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1);
+
+  mdAnchorButton(document, ref).dispatchEvent(new StandInEvent('click'));
+  const reopened = document.getElementById('comment-form-' + mdBlock.id);
+  assert.ok(reopened.getAttribute('data-editing-id'),
+    'the reopened form must be stamped with the queued entry it is editing -- without it, submit pushes a duplicate');
+  assert.equal(reopened.querySelector('input[type=text]').value, 'the heading is wrong',
+    'and prefilled with that comment\'s own text (criterion 1, verbatim)');
+
+  reopened.querySelector('input[type=text]').value = 'the heading is fine, the table is wrong';
+  reopened.dispatchEvent(new StandInEvent('submit'));
+
+  const items = document.querySelectorAll('.comment-item.comment-pending');
+  assert.equal(items.length, 1, `submitting must REPLACE, not add -- got ${items.length} queued comments`);
+  assert.ok(String(items[0].textContent || '').indexOf('the table is wrong') !== -1, 'and carry the edited text');
+  assert.equal(document.querySelectorAll('.anchor-pin').length, pinsAfterFirst,
+    'criterion 1: "the pin count on the block does not change"');
+});
+
+check('criterion 1 (md): two DIFFERENT headings still get their own comments -- the edit rule keys on the anchor, not on the block', () => {
+  const document = loadBoard();
+  const refs = mdRefs(document);
+  assert.ok(refs.length >= 2, `setup failure: need at least two anchored elements, got ${refs.length}`);
+
+  for (const ref of [refs[0], refs[1]]) {
+    mdAnchorButton(document, ref).dispatchEvent(new StandInEvent('click'));
+    const form = document.getElementById('comment-form-' + mdBlock.id);
+    assert.equal(form.getAttribute('data-editing-id'), null, `a first click on ${ref} must not inherit the previous anchor's edit target`);
+    form.querySelector('input[type=text]').value = 'about ' + ref;
+    form.dispatchEvent(new StandInEvent('submit'));
+  }
+
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 2,
+    'two distinct anchors are two distinct comments');
+});
+
+check('the whole-block "comment" button stays ADDITIVE -- several separate remarks on one block remain legal, which is why the edit rule is scoped to anchored kinds', () => {
+  const document = loadBoard();
+  const btn = document.querySelector(`.comment-btn[data-block-id="${codeBlock.id}"]`);
+  assert.ok(btn, 'setup failure: no comment button on the code block');
+  assert.equal(btn.getAttribute('data-anchor-kind'), 'block', 'setup failure: expected the whole-block button');
+
+  for (const text of ['first remark', 'second, unrelated remark']) {
+    btn.dispatchEvent(new StandInEvent('click'));
+    const form = document.getElementById('comment-form-' + codeBlock.id);
+    assert.equal(form.getAttribute('data-editing-id'), null, 'a whole-block comment must never be treated as an edit of an earlier one');
+    form.querySelector('input[type=text]').value = text;
+    form.dispatchEvent(new StandInEvent('submit'));
+  }
+
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 2,
+    'the whole-block gesture must still queue two independent comments');
+});
+
+check('criterion 12 (md): a heading that already carries a SENT comment is not a comment target -- the button does nothing and is marked, while its neighbours stay live', () => {
+  // A separate board, because this one has to be rendered with the comment
+  // already SENT -- server-side, through applySubmit, so board.comments carries
+  // the resolveComment verdict the page actually embeds.
+  const sentBoard = createBoard({
+    title: 'criterion 12 -- a sent md comment is immutable',
+    blocks: [{ kind: 'markdown', text: '# Alpha\n\ntext\n\n# Beta\n\nmore text' }],
+  });
+  const sentBlockId = sentBoard.blocks[0].id;
+  const anchors = sentBoard.blocks[0].anchors || [];
+  assert.ok(anchors.length >= 2, `setup failure: expected two md anchors, got ${anchors.length}`);
+  const sentRef = anchors[0].ref;
+  const liveRef = anchors[1].ref;
+  applySubmit(sentBoard, {
+    action: 'send',
+    answers: [],
+    comments: [{ blockId: sentBlockId, anchor: { kind: 'md', ref: sentRef, label: anchors[0].label }, text: 'already sent' }],
+  }, 1);
+
+  const document = parseHTML(renderBoardPage(sentBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', ui)(document, window, { protocol: 'http:' });
+  enableCommentMode(document);
+
+  const buttons = document.querySelectorAll(`.comment-btn[data-anchor-kind="md"][data-block-id="${sentBlockId}"]`);
+  const sentBtn = buttons.find(b => b.getAttribute('data-anchor-ref') === sentRef);
+  const liveBtn = buttons.find(b => b.getAttribute('data-anchor-ref') === liveRef);
+  assert.ok(sentBtn && liveBtn, 'setup failure: expected an anchor button for each heading');
+
+  // "visibly not a comment target": the same de-affordance class every other
+  // surface uses, whose stylesheet rule is gated on body.comment-mode so the
+  // reading view stays unmarked (the spec's Decision).
+  assert.equal(sentBtn.classList.contains('cb-anchor-sent'), true,
+    'a heading with a sent comment must be visibly de-affordanced');
+  assert.equal(liveBtn.classList.contains('cb-anchor-sent'), false,
+    'a heading with no sent comment must not be');
+
+  sentBtn.dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + sentBlockId);
+  assert.equal(form.classList.contains('open'), false, 'criterion 12: "clicking it does nothing"');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0, 'and queues nothing');
+
+  // The negative, so this cannot pass against a dead button: the OTHER heading
+  // is still perfectly clickable.
+  liveBtn.dispatchEvent(new StandInEvent('click'));
+  assert.equal(form.classList.contains('open'), true, 'an un-commented heading must still open the form');
+  assert.equal(form.getAttribute('data-anchor-ref'), liveRef);
+});
+
+// --- criterion 2: the delete control, driven rather than asserted into ---------
+//
+// Nothing exercised this gesture end to end: `.comment-delete` could be removed
+// from renderPendingCommentItem entirely and the whole suite stayed green, which
+// is how criterion 2's only affordance came to have no behavioural cover at all.
+// Driven here through the real listener, on three queued comments so the
+// renumbering half ("the remaining provisional pins stay contiguous") is
+// observable rather than merely claimed -- deleting the MIDDLE one is the case
+// that distinguishes a real renumber from an append-only list.
+
+check('criterion 2: a queued comment\'s delete control removes it, its pin, and renumbers everything after it', () => {
+  const document = loadBoard();
+  enableCommentMode(document);
+  const lines = document.querySelectorAll('.code-block .code-line');
+  assert.ok(lines.length >= 2, 'setup failure: need at least two code lines to anchor on');
+
+  // Three queued comments: two dom-anchored on the code block (so they draw
+  // pins), one whole-block on the markdown block (so renumbering is observed to
+  // cross block boundaries, which is exactly what the shared sequence means).
+  lines[0].dispatchEvent(new StandInEvent('click'));
+  let form = document.querySelector('.comment-form.open');
+  form.querySelector('input[type=text]').value = 'remark-alpha';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  lines[1].dispatchEvent(new StandInEvent('click'));
+  form = document.querySelector('.comment-form.open');
+  form.querySelector('input[type=text]').value = 'remark-beta';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  document.querySelector(`.comment-btn[data-block-id="${mdBlock.id}"][data-anchor-kind="block"]`).dispatchEvent(new StandInEvent('click'));
+  form = document.querySelector('.comment-form.open');
+  form.querySelector('input[type=text]').value = 'remark-gamma';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  // Sorted, because entries live in their OWN block's list and document order
+  // is therefore block order, not queue order -- what criterion 2 promises is
+  // that the numbers stay a contiguous 1..n run, not where they sit on the page.
+  const numbers = () => document.querySelectorAll('.comment-item.comment-pending .comment-anchor')
+    .map(el => Number(/#(\d+)/.exec(el.textContent)[1])).sort((a, b) => a - b);
+  const itemFor = text => document.querySelectorAll('.comment-item.comment-pending')
+    .find(i => String(i.textContent || '').includes(text));
+  const numberOf = text => Number(/#(\d+)/.exec(itemFor(text).textContent)[1]);
+  assert.deepEqual(numbers(), [1, 2, 3], 'setup failure: three queued comments must number 1, 2, 3');
+  assert.equal(numberOf('remark-gamma'), 3, 'setup failure: the third comment queued must be numbered 3');
+  assert.equal(document.querySelectorAll('.code-block .anchor-pin.pin-pending').length, 2,
+    'setup failure: the two dom-anchored comments must each have drawn a pin');
+
+  // Delete the MIDDLE one (by queue number, not by document position -- entries
+  // live in their own block's list), through its own control.
+  const del = itemFor('remark-beta').querySelector('.comment-delete');
+  assert.ok(del, 'criterion 2: every queued comment\'s list entry must carry a delete control');
+  del.dispatchEvent(new StandInEvent('click'));
+
+  const remaining = document.querySelectorAll('.comment-item.comment-pending');
+  assert.equal(remaining.length, 2, `deleting one entry must leave two, got ${remaining.length}`);
+  assert.equal(remaining.map(i => String(i.textContent || '')).join('').includes('remark-beta'), false,
+    'the deleted comment\'s text must be gone from the page');
+  assert.deepEqual(numbers(), [1, 2],
+    'criterion 2: the remaining provisional numbers must stay contiguous after a deletion, with no gap where #2 was');
+  assert.equal(numberOf('remark-gamma'), 2,
+    'criterion 2: deleting #2 must renumber the comment that was #3 down to #2 -- and it lives on a DIFFERENT block, so the renumber has to be board-wide');
+  assert.equal(document.querySelectorAll('.code-block .anchor-pin.pin-pending').length, 1,
+    'the deleted comment\'s hollow pin must be gone too, and the surviving one must remain');
+});
+
+check('criterion 12 (page-scoped half): an element carrying a SENT dom comment is not a comment target, and its neighbours still are', () => {
+  // The generic comment-mode click listener's own isSentAnchor gate -- deleting
+  // it left the whole suite green before this check existed. The ref is minted
+  // by a REAL click first (never hardcoded), then sent, then the page reloaded
+  // with that comment in board.comments, so this asserts against exactly the
+  // anchor shape the gesture itself produces.
+  const probe = loadBoard();
+  enableCommentMode(probe);
+  const probeLines = probe.querySelectorAll('.code-block .code-line');
+  probeLines[0].dispatchEvent(new StandInEvent('click'));
+  const probeForm = probe.querySelector('.comment-form.open');
+  const sentRef = probeForm.getAttribute('data-anchor-ref');
+  const sentHint = probeForm.getAttribute('data-anchor-label');
+  assert.ok(sentRef, 'setup failure: the probe click minted no ref');
+
+  const sentBoard = createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC });
+  const sentCodeId = sentBoard.blocks[1].id;
+  applySubmit(sentBoard, {
+    action: 'send',
+    answers: [],
+    comments: [{ blockId: sentCodeId, anchor: { kind: 'dom', ref: sentRef, hint: sentHint }, text: 'already sent' }],
+  }, 1);
+  assert.equal(sentBoard.comments.length, 1, 'setup failure: the comment was not stored');
+
+  const document = parseHTML(renderBoardPage(sentBoard));
+  new Function('document', 'window', 'location', ui)(document, document.defaultView, { protocol: 'http:' });
+  enableCommentMode(document);
+  const lines = document.querySelectorAll('.code-block .code-line');
+
+  // Hover first: criterion 12 is "visibly not a comment target" as well as inert.
+  lines[0].dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(lines[0].classList.contains('cb-anchor-sent'), true,
+    'the element carrying a sent comment must be de-affordanced on hover, not marked as an ordinary target');
+  assert.equal(lines[0].classList.contains('cb-anchor-hover'), false, 'and must not carry the ordinary outline as well');
+
+  lines[0].dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + sentCodeId);
+  assert.equal(form.classList.contains('open'), false, 'criterion 12: clicking it must do nothing');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0, 'and queue nothing');
+
+  // The negative: the very next line is still an ordinary target, so this cannot
+  // pass against a listener that is simply dead.
+  lines[1].dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(lines[1].classList.contains('cb-anchor-hover'), true, 'a neighbouring line must still hover as a target');
+  lines[1].dispatchEvent(new StandInEvent('click'));
+  assert.equal(form.classList.contains('open'), true, 'and must still open the comment form when clicked');
 });
 
 if (failures) {

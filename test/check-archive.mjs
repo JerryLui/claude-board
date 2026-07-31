@@ -454,6 +454,18 @@ check('archive: ticket 03\'s claim -- the comment-mode toggle is both CSS-hidden
   } finally { restore(); }
 });
 
+check('archive: ticket 04\'s back-to-index control is absent, not merely disabled -- there is no daemon behind "/" in a file:// archive', () => {
+  // The CSS side, read directly rather than assumed.
+  assert.match(styles, /body\.readonly \.back-to-index \{[^}]*display: none/, 'expected a body.readonly rule hiding .back-to-index');
+
+  const { document, restore } = loadArchive();
+  try {
+    const backLink = document.querySelector('.back-to-index');
+    assert.ok(backLink, 'the control is still IN the markup (one byte-identical page, live or archived) -- readonly hides it structurally, not by omitting it');
+    assert.equal(backLink.getAttribute('href'), '/', 'setup failure: expected the control to point at the thread index');
+  } finally { restore(); }
+});
+
 // Audit finding H3: `body.readonly button#theme-toggle { display: inline-flex;
 // }` (src/styles.mjs) is the readonly carve-out that keeps the theme control
 // visible while `body.readonly .mode-toggle { display: none; }` hides every

@@ -320,6 +320,138 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the ATTACHED "alpha" list item (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
 });
 
+// --- ticket 04, criterion 8: the round badge used to be written server-side ---
+// only, and the SSE round-push path never touched it -- stale until reload on a
+// live tab, invisible on a fresh load because a reload always renders the
+// current total. Drives the same subscription every other check in this file
+// drives (never applyRoundPush directly, for the same reason the file header
+// gives: that would prove nothing about whether the badge is wired to the
+// subscription at all), and reads #round-badge's own text back.
+
+check('a round arriving over SSE updates M in the badge immediately, with no reload (ablation: deleting applyRoundPush\'s renderBadge() call)', () => {
+  const board = freshBoard();
+  const pageHtml = renderBoardPage(board);
+  const { document, es } = loadBoardWithEventSource(pageHtml);
+
+  const badge = document.getElementById('round-badge');
+  assert.ok(badge, 'setup failure: no #round-badge rendered');
+  assert.equal(badge.textContent, 'round 1 of 1', 'setup failure: expected the one-round board\'s initial label');
+
+  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: 'round 2, pushed live' }] });
+  const round2BlockId = board.blocks.find(b => b.round === round2).id;
+  const payload = buildRoundPushPayload(board, round2, 'new-round', [round2BlockId]);
+
+  es.dispatch('round', JSON.stringify(payload));
+
+  assert.equal(badge.textContent, 'round 1 of 2',
+    'M must update the instant the round push lands -- no reload, and N (this stand-in has no IntersectionObserver, so it never moves off the hydrate default) is untouched by a round arriving further down the page');
+});
+
+check('a round going sent over SSE (\'submitted\') leaves the badge total unchanged, but still re-renders rather than being special-cased away', () => {
+  const board = freshBoard();
+  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: 'round 2, opened first' }] });
+  const pageHtml = renderBoardPage(board);
+  const { document, es } = loadBoardWithEventSource(pageHtml);
+  const badge = document.getElementById('round-badge');
+  assert.equal(badge.textContent, 'round 1 of 2', 'setup failure: expected the two-round board\'s initial label');
+
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, round2);
+  const payload = buildSubmittedPushPayload(board, round2);
+  es.dispatch('submitted', JSON.stringify(payload));
+
+  assert.equal(badge.textContent, 'round 1 of 2', 'a submit never changes board.rounds.length, so M is unchanged');
+});
+
+// --- the code cap's once-only marker (SPEC_POLISH.md, audit finding D1) -------
+//
+// Same family as every check above it, and the same push paths: something that
+// runs during `wireRoot(wrap)`/`wireRoot(frag)` sees a DETACHED subtree.
+// `unlockCodeCapForDrag` is the one thing in that pass which MEASURES rather
+// than merely wiring -- it converts a `max-height`-capped <pre> to a plain
+// inline height so the native resize handle can move it (criterion 5), but only
+// for a block that is genuinely capped, which it decides from
+// `scrollHeight > clientHeight`. Both are 0 on a detached node, so the
+// once-only marker being claimed BEFORE that test settled the question as
+// "0 > 0, false" and remembered it forever: every code block arriving over SSE
+// was permanently undraggable, and the post-attach `refreshPins(document)` that
+// exists precisely to redo detached work found the marker set and did nothing.
+//
+// This drives the real thing -- a real 'round' payload through the real
+// EventSource listener, so `wireRoot` runs detached and `refreshPins` runs after
+// the attach, exactly as in a browser. The fixture DECLARES the two box metrics
+// on the pushed <pre> (test/dom-stand-in.mjs reports them only once the node is
+// in a document, and 0 before that), which is the one browser fact this bug
+// turns on; the numbers are the ones measured in Chrome 150 for a capped 200-line
+// block, 480 visible against 4478 total.
+
+/** Declare the box metrics of the nth `<pre>` in a pushed HTML fragment -- a
+ * code block's own `<pre><code>`, never `pre.mermaid`, which carries a class. */
+function declarePreBox(html, client, scroll, nth = 0) {
+  let seen = -1;
+  return html.replace(/<pre><code>/g, m => {
+    seen++;
+    return seen === nth
+      ? `<pre data-standin-client-height="${client}" data-standin-scroll-height="${scroll}"><code>`
+      : m;
+  });
+}
+
+check('a CAPPED code block arriving over SSE gets its cap unlocked once it is attached -- the once-only marker must not be claimed while the subtree is still detached and measures 0 (ablation: moving `pre.__cbCapUnlocked = true` above the clientHeight guard in src/ui.mjs)', () => {
+  const board = freshBoard();
+  const pageHtml = renderBoardPage(board);
+  const { document, es } = loadBoardWithEventSource(pageHtml);
+
+  const round2 = addRound(board, { blocks: [{ kind: 'code', text: 'const a = 1;\nconst b = 2;', lang: 'javascript' }] });
+  const codeBlockId = board.blocks.find(b => b.round === round2).id;
+  const payload = buildRoundPushPayload(board, round2, 'new-round', [codeBlockId]);
+  payload.html = declarePreBox(payload.html, 480, 4478);
+
+  es.dispatch('round', JSON.stringify(payload));
+
+  const section = document.querySelector(`[data-block-id="${codeBlockId}"]`);
+  assert.ok(section, 'setup failure: the pushed code block is not in the document');
+  const pre = section.querySelector('pre');
+  assert.ok(pre, 'setup failure: the pushed code block has no <pre>');
+  assert.equal(pre.clientHeight, 480, 'setup failure: the fixture\'s declared box did not reach the attached node');
+  assert.equal(pre.scrollHeight, 4478, 'setup failure: the fixture\'s declared box did not reach the attached node');
+
+  assert.equal(pre.__cbCapUnlocked, true,
+    'the pushed <pre> must have been measured and marked AFTER it was attached -- a marker claimed during the detached wiring pass is never revisited');
+  assert.equal(pre.style.maxHeight, 'none',
+    'a capped block that arrived by push must have its max-height lifted, or the reviewer\'s resize drag is clamped and the block is undraggable for the life of the page (criterion 5)');
+  // The height's VALUE comes from getBoundingClientRect, which this stand-in
+  // derives structurally rather than from layout -- so what is asserted is that
+  // an explicit inline height was set at all, which is the part that removes the
+  // ceiling. The value is verified in real Chrome, not here.
+  assert.match(String(pre.style.height || ''), /^\d+(\.\d+)?px$/,
+    'unlocking must replace the cap with an explicit inline height, not merely delete the cap');
+});
+
+check('...and a SHORT code block arriving the same way is left completely alone -- the unlock must stay conditional, not become "always unlock once attached"', () => {
+  // The negative half, so the check above cannot be satisfied by a version that
+  // simply unlocks everything: criterion 6 is that a block under the cap renders
+  // at its natural height with no handle-induced empty space, which an
+  // unconditional inline height would take away.
+  const board = freshBoard();
+  const pageHtml = renderBoardPage(board);
+  const { document, es } = loadBoardWithEventSource(pageHtml);
+
+  const round2 = addRound(board, { blocks: [{ kind: 'code', text: 'const a = 1;', lang: 'javascript' }] });
+  const codeBlockId = board.blocks.find(b => b.round === round2).id;
+  const payload = buildRoundPushPayload(board, round2, 'new-round', [codeBlockId]);
+  // Content shorter than the cap: scrollHeight === clientHeight, which is what a
+  // browser reports for a box with nothing to scroll.
+  payload.html = declarePreBox(payload.html, 96, 96);
+
+  es.dispatch('round', JSON.stringify(payload));
+
+  const pre = document.querySelector(`[data-block-id="${codeBlockId}"] pre`);
+  assert.ok(pre, 'setup failure: the pushed code block has no <pre>');
+  assert.equal(pre.clientHeight, 96, 'setup failure: the fixture\'s declared box did not reach the attached node');
+  assert.equal(pre.style.maxHeight, undefined, 'a short block\'s cap must never be lifted -- it is not capped in the first place');
+  assert.equal(pre.style.height, undefined, 'a short block must never be given an explicit height');
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

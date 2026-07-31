@@ -64,10 +64,33 @@ agent file it is discussing. Grilling this repo hit the refusal twice in one ses
 since the subject matter *is* `~/.claude` content.
 
 **Decision:** References resolve if they sit under `cwd` **or** under one of a configured
-set of roots, supplied as `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths) and
-defaulting to `~/.claude`. Each root is validated exactly as `resolveBoardCwd` already
-validates `cwd`: realpath'd, must be an existing directory, refused if it is `/` or
-`$HOME` or above.
+set of roots, supplied as `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths),
+defaulting to ~~`~/.claude`~~ **`~/.claude/skills`, `~/.claude/commands` and
+`~/.claude/agents`** (amended 2026-07-31; see below). Each root is validated exactly as
+`resolveBoardCwd` already validates `cwd`: realpath'd, must be an existing directory,
+refused if it is `/` or `$HOME` or above.
+
+**Amendment, 2026-07-31 — the default narrows to three directories.** The justification
+in this entry's own Context is "render the skill, command or agent file it is
+discussing", and that is exactly `~/.claude/skills`, `~/.claude/commands` and
+`~/.claude/agents`. The rest of that tree is `settings.json`, `.credentials.json`, shell
+snapshots, project transcripts and every plugin's private state, none of which the case
+above ever asked for — the old default granted them by writing down a parent directory
+rather than the three the argument named. Two mechanical consequences follow, both
+recorded here because they are the part a reader would otherwise have to reconstruct:
+
+- **An absent `CLAUDE_BOARD_REF_ROOTS` now means an empty allowlist**, not the default.
+  Every install predating this entry has a plist with no such key, and the daemon
+  restarts itself whenever `src/` changes, so a default living in code would have gone
+  live on those machines during an ordinary `git pull` — the boundary widening itself
+  with nothing printed and nobody asked. The default lives in `install.sh` instead, which
+  makes running the installer the consent event.
+- **`install.sh` carries an installed plist's value forward** when the variable is unset,
+  rather than rewriting it from the default. Otherwise an operator who narrowed the
+  boundary deliberately had that decision reverted by their next upgrade.
+
+`CLAUDE_BOARD_REF_ROOTS=$HOME/.claude` still does exactly what it says, for anyone who
+wants the whole tree.
 
 **Consequences:** Widens what a confused or hostile agent can pull into a board, and
 boards embed the content they resolve — so this enlarges the corpus reachable by anyone
@@ -79,7 +102,16 @@ widens the gate, which is the cost of making it configurable at all. Rejected: h
 rejected: dropping confinement entirely, which is more honest about the weak boundary but
 rewrites the security posture for a convenience fix.
 
-## 4. Every command falls back off the board, `/grill` included — 2026-07-31
+One consequence this entry did not anticipate, found by audit on 2026-07-31 and worth
+recording where the decision is: making the allowlist *always populated and always
+agent-writable* changed the value of defects the `cwd`-only boundary also had. The gap
+between checking a path and re-opening it was raceable before, but only by something that
+could already write inside the project; with roots that are always present it became a
+general escape, and was closed by resolving each reference to a descriptor once and
+reading from that. A hard link into a root is the same shape and is not closed — see
+`SECURITY.md`, "Not defended, by design".
+
+## 4. PROPOSED — Every command falls back off the board, `/grill` included — 2026-07-31
 
 **Context:** `SPEC_LAUNCH.md` and `commands/grill.md` both state the opposite, deliberately
 and at length: there is no automatic fallback to the terminal for a board-shaped round,
@@ -111,3 +143,10 @@ command but `/grill` — for `/grill` alone, the fallback genuinely loses the ar
 Rejected: migrated commands fall back and `/grill` does not (two rules, and the VPS case
 still fails for the one command most likely to be run there); rejected: nothing falls back,
 which leaves "the daemon is merely down on your own machine" unanswered.
+
+**Status: proposed, not accepted.** This entry was written as accepted, which the repository
+did not support: neither rewrite it names as required — `commands/grill.md`'s "Fail loudly,
+don't fall back" section and `test/check-grill.mjs`'s `no automatic terminal fallback is
+described` case — has landed, so the shipped behaviour is still the *opposite* rule. Recorded
+as proposed so the file matches the code (audit 2026-07-31 Sp5). Accepting it means doing
+those two rewrites in the same change.

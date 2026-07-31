@@ -150,9 +150,11 @@ string — with `error` set to a human-readable reason. The page renders the blo
 with that reason visible instead of silently dropping it or aborting the whole post.
 A block with no `source` (by-value `text`) never sets `error`.
 
-**`cwd` is bound once, per thread** (additive, audit 2026-07-28). `cwd` is the root every
-reference below is confined to, so it is the single value that decides what a board can
-read — and confinement is vacuous if a later post can move it. It is accepted only on the
+**`cwd` is bound once, per thread** (additive, audit 2026-07-28). `cwd` is the board's own
+project directory, and one of the two places a reference below may resolve — the other
+being the configured reference roots, described under "Reference confinement and caps".
+It is the only one of the two a *caller* chooses, which is what makes pinning it worth
+doing: confinement is vacuous if a later post can move it. So it is accepted only on the
 post that creates the thread, and is validated there (a **400**, since there is a caller
 to tell):
 
@@ -179,19 +181,46 @@ and passed to `createBoard` as `threadCwd` — the caller does not get to assert
 thread is bound to. A post naming an existing `thread` and a different `cwd` is a **400**
 (`cannot retarget thread: ...`) and creates nothing.
 
-**Reference confinement and caps** (additive, audit 2026-07-28). A `Ref.path` names a
-file *inside the board's `cwd`* and nothing else, and every violation is an `error` on
-the block — never a throw, never a read:
+**Reference confinement and caps** (additive, audit 2026-07-28; allowlist added
+2026-07-30, ADR.md entry 3). A `Ref.path` names a file *inside the board's `cwd`, or
+inside one of the configured reference roots*, and nothing else. Every violation is an
+`error` on the block — never a throw, never a read:
 
 ```
-absolute path                        refused outright
-realpath outside cwd                 refused (covers ../ traversal AND symlinks out)
+absolute path                        refused unless it lands inside a reference root
+realpath outside cwd and every root  refused (covers ../ traversal AND symlinks out)
+the project directory itself         refused: a directory is never a reference target
 not a regular file                   refused (a fifo blocks the daemon's only thread
                                       forever; a character device exhausts its heap)
-larger than 512 KiB                  refused, by stat, before anything is opened
+larger than 512 KiB                  refused, before any of it is read
 line range past end of file          refused at BOTH ends (a trailing newline does not
                                       make a phantom last line)
 ```
+
+The last three are decided on the **open file descriptor**, not on the path a second
+time: a reference is opened exactly once, refusing to follow a symlink in any component
+while it does, and the type, size and byte guards all interrogate that descriptor. A path
+is a name, and checking a name and then re-opening it leaves a gap in which anything that
+can write inside the boundary can change what the name means (audit 2026-07-31). Which
+refusal comes back is likewise decided only on names inside the boundary — a reference
+that exists but does not resolve inside it reports the same thing whether its target is
+absent, unreadable or simply elsewhere, so a refusal is never an existence probe for the
+rest of the disk.
+
+The reference roots are `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths). They
+exist so a session can render the skill, command or agent file it is discussing rather
+than a refusal box, and the default `install.sh` writes into the launchd plist is exactly
+those three directories: `~/.claude/skills`, `~/.claude/commands`, `~/.claude/agents`. An
+*absent* variable means no allowlist at all — the `cwd`-only boundary — deliberately, so
+that a default living in code cannot widen the boundary on a machine that never
+reinstalled; an explicitly empty value means the same thing. Each root is validated
+exactly as `cwd` is above — realpath'd, must be an existing directory, refused if it is
+`/` or `$HOME` or above, the last decided on `dev`+`inode` rather than on spelling since
+macOS gives `$HOME` several equally canonical paths. A root failing any of that is dropped
+rather than widened or fatal, and a spec that cannot be parsed as written (an entry that
+is not an absolute path, which is what a directory name containing `:` degenerates into)
+grants nothing at all. The daemon runs under launchd, so the value reaches it through the
+plist `install.sh` generates; see `SECURITY.md`.
 
 A markdown `section` is located with the same fence-aware scan `src/markdown.mjs`
 uses, so the slug the agent is shown for a heading is the slug that resolves.
