@@ -6,8 +6,15 @@
 #
 #   1. MCP registration (Claude Code owns the config): `claude mcp add
 #      --scope user`, pointed at THIS clone's bin/mcp.mjs by absolute path.
+#   1b. ~/Applications/claude-board.app, a launcher bundle compiled from
+#      bin/launcher.c and ad-hoc signed, which exists so macOS TCC has an
+#      application to attribute the daemon's file reads to. Without it the plist
+#      runs `node` directly, TCC has only `node` to ask about, and every
+#      reference into ~/Documents, ~/Desktop or ~/Downloads comes back EPERM.
+#      See step 1b and SECURITY.md "What the launcher bundle is for".
 #   2. The launchd plist in ~/Library/LaunchAgents, running THIS clone's
-#      bin/daemon.mjs (PROTOCOL.md "Layout"), with RunAtLoad + KeepAlive, and
+#      bin/daemon.mjs (PROTOCOL.md "Layout") through that launcher, with
+#      RunAtLoad + KeepAlive, and
 #      CLAUDE_BOARD_RELOAD_ON_CHANGE=1 in EnvironmentVariables so config sync
 #      landing new code restarts the daemon. That env var, not a plist-level
 #      WatchPaths, is what makes it work: WatchPaths only ever *starts* a job
@@ -51,9 +58,17 @@
 #   CLAUDE_BOARD_PLUTIL_CMD          default: plutil
 #   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret
 #   CLAUDE_BOARD_COMMANDS_DIR        default: ~/.claude/commands
+#   CLAUDE_BOARD_APP_DIR             default: ~/Applications
+#   CLAUDE_BOARD_CC                  default: cc
+#   CLAUDE_BOARD_CODESIGN            default: codesign
 #
 # macOS only, zero dependencies: bash + coreutils + launchctl/plutil, nothing
-# this OS doesn't already ship.
+# this OS doesn't already ship — with one soft dependency, the `cc` from the
+# Xcode Command Line Tools, needed only to build the launcher bundle. A machine
+# without it still gets a working install (step 1b degrades to running node
+# directly, exactly as every version before the bundle did); what it does not get
+# is the ability to read a board reference out of ~/Documents, ~/Desktop or
+# ~/Downloads. That is a loud warning, not a failure.
 
 set -euo pipefail
 
@@ -70,6 +85,16 @@ LOG_DIR="${CLAUDE_BOARD_LOG_DIR:-$HOME/Library/Logs/claude-board}"
 PORT="${CLAUDE_BOARD_PORT:-7391}"
 SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
 COMMANDS_DIR="${CLAUDE_BOARD_COMMANDS_DIR:-$HOME/.claude/commands}"
+APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
+CC_CMD="${CLAUDE_BOARD_CC:-cc}"
+CODESIGN_CMD="${CLAUDE_BOARD_CODESIGN:-codesign}"
+
+# TCC records a grant against the bundle identifier and the code signature, so this
+# string is the durable name of the thing the user ticks in System Settings. It is
+# derived from the repository, not from the clone path or the package version — both of
+# which move — because a machine that has already been granted Documents access must not
+# be asked for it again by an install that merely landed new JavaScript.
+BUNDLE_ID="io.github.jerrylui.claude-board"
 
 # The plist's Label MUST be exactly this: the shim's unreachable-daemon
 # message (bin/mcp.mjs) tells users `launchctl kickstart -k
@@ -80,6 +105,9 @@ PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
 OUT_LOG="$LOG_DIR/daemon.out.log"
 ERR_LOG="$LOG_DIR/daemon.err.log"
 COMMAND_FILE="$COMMANDS_DIR/grill.md"
+LAUNCHER_SRC="$REPO_DIR/bin/launcher.c"
+APP_PATH="$APP_DIR/${LABEL}.app"
+APP_EXEC="$APP_PATH/Contents/MacOS/${LABEL}"
 
 # The allowlist a content reference may resolve inside, on top of the board's own
 # project directory (ADR.md entry 3, src/resolve.mjs): colon-separated absolute paths,
@@ -138,8 +166,8 @@ else
 fi
 echo "                     [$REF_ROOTS_FROM]"
 
-if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$GRILL_SRC" ]; then
-  echo "error: bin/daemon.mjs, bin/mcp.mjs or commands/grill.md not found under $REPO_DIR — run this script from a claude-board clone" >&2
+if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$GRILL_SRC" ] || [ ! -f "$LAUNCHER_SRC" ]; then
+  echo "error: bin/daemon.mjs, bin/mcp.mjs, bin/launcher.c or commands/grill.md not found under $REPO_DIR — run this script from a claude-board clone" >&2
   exit 1
 fi
 
@@ -241,6 +269,18 @@ sha256_file() {
   ' "$1"
 }
 
+# The same digest over a string rather than a file, used by step 1b to fold several
+# file hashes and an identifier into the one stamp that decides whether the launcher
+# bundle needs rebuilding. Callers keep the argument ASCII (digests and an identifier,
+# never a raw path), because a process argument reaches node as a UTF-8 string and a
+# filename is not obliged to be one.
+sha256_string() {
+  "$NODE_BIN" -e '
+    const crypto = require("node:crypto");
+    process.stdout.write(crypto.createHash("sha256").update(process.argv[1], "utf8").digest("hex"));
+  ' "$1"
+}
+
 mkdir -p "$COMMANDS_DIR"
 SHIPPED_HASH="$(sha256_file "$GRILL_SRC")"
 
@@ -271,6 +311,180 @@ else
   fi
 fi
 
+# --- escaping helpers -------------------------------------------------------
+# Two destinations, two rules, and a clone path is a filename in both: it may legally
+# contain any byte but NUL and `/`.
+#
+# LC_ALL=C on both, because a filename is bytes and a locale is an opinion about them
+# (audit S9, 2026-07-31). Under a UTF-8 locale BSD sed refuses input that is not valid
+# UTF-8 with "RE error: illegal byte sequence" and exits non-zero — and under `set -euo
+# pipefail` that failing command substitution aborts the entire install, part-way
+# through, on a clone path or a reference root containing one stray byte. In the C locale
+# sed treats the input as bytes and passes it through untouched, which is what a
+# substitution over a handful of ASCII characters wanted all along.
+
+# For XML: `&`, `<` and `>` are all legal in a filename. Unescaped, a path containing `&`
+# produces a plist that plutil rejects while this script still exits 0 and launchd
+# silently has nothing to load.
+xml_escape() {
+  printf '%s' "$1" | LC_ALL=C sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# For a C string literal in the generated launcher_paths.h: a backslash or a double quote
+# in a clone path would otherwise end the literal early and turn a path into a syntax
+# error, or worse, into a different path. Order matters — backslashes first, or the
+# backslash this function just added to escape a quote gets escaped in turn.
+#
+# A newline cannot be escaped this way (sed is line-oriented, and the substitution would
+# have to span lines), so it is refused by the caller instead rather than silently
+# producing a header that will not compile.
+c_escape() {
+  printf '%s' "$1" | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# --- 1b. the launcher app bundle --------------------------------------------
+# What this is for, in one line: macOS TCC gates ~/Documents, ~/Desktop and ~/Downloads
+# per application, and "the application" here is whatever the plist names. Naming
+# `node` means the only grant that unblocks a board is a grant to every node program on
+# the machine — and one that dies at the next `brew upgrade node`, since homebrew's node
+# is ad-hoc signed under a versioned Cellar path. So the plist names a bundle of ours
+# instead: ~/Applications/claude-board.app, compiled from bin/launcher.c, ad-hoc signed
+# under $BUNDLE_ID, which forks the real node. See bin/launcher.c for why it forks
+# rather than execs, and SECURITY.md for what the grant does and does not widen.
+#
+# The user still has to tick the box once; nothing here can grant anything. What this
+# step owes them is that they are asked ONCE. TCC pins a grant to the code signature, so
+# a rebuild resets it and the user gets silently locked out again by an install that
+# landed nothing but JavaScript — which, given install.sh is the routine way to take an
+# update, would be most installs. Hence the stamp: the bundle is rebuilt only when one of
+# its actual inputs changed (the launcher source, either baked-in path, the bundle
+# identifier), and a run that would produce the same bundle touches nothing at all.
+LAUNCHER_STAMP_FILE="$SECRET_DIR/launcher.stamp"
+USE_LAUNCHER=0
+# Only a bundle built by THIS run earns the "grant it in System Settings" notice at the
+# end. A reinstall that left an already-granted bundle alone must not tell the user to go
+# and grant it again, or the notice stops meaning anything.
+LAUNCHER_IS_NEW=0
+
+launcher_degraded() {
+  echo "==> warning: $1."
+  echo "    Installing WITHOUT the launcher bundle: the daemon runs as node itself, so a"
+  echo "    board reference into ~/Documents, ~/Desktop or ~/Downloads will fail with"
+  echo "    'cannot read <path>: EPERM' — macOS has no application of ours to grant."
+  echo "    Everything else works. To fix: xcode-select --install, then re-run this script."
+}
+
+LAUNCHER_BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claude-board-launcher.XXXXXX")"
+trap 'rm -rf "$LAUNCHER_BUILD_DIR"' EXIT
+
+STAGED_APP="$LAUNCHER_BUILD_DIR/${LABEL}.app"
+STAGED_INFO="$STAGED_APP/Contents/Info.plist"
+STAGED_HEADER="$LAUNCHER_BUILD_DIR/launcher_paths.h"
+mkdir -p "$STAGED_APP/Contents/MacOS"
+
+# The one filename byte c_escape cannot handle. Absurd in practice, a broken build if it
+# ever happens, and cheaper to refuse by name than to debug from a compiler error.
+case "$NODE_BIN$DAEMON_PATH" in
+  *$'\n'*) LAUNCHER_NEWLINE_IN_PATH=1 ;;
+  *) LAUNCHER_NEWLINE_IN_PATH=0 ;;
+esac
+
+if [ "$LAUNCHER_NEWLINE_IN_PATH" -eq 1 ]; then
+  launcher_degraded "the node or daemon path contains a newline, which cannot be baked into the launcher"
+else
+  cat > "$STAGED_HEADER" <<HEADER
+/* Generated by install.sh — not checked in, rebuilt from scratch on every run.
+ * These are the only two things bin/launcher.c will ever execute, deliberately: see the
+ * header comment there for why the target is compiled in rather than read from argv. */
+#define CLAUDE_BOARD_NODE "$(c_escape "$NODE_BIN")"
+#define CLAUDE_BOARD_DAEMON "$(c_escape "$DAEMON_PATH")"
+HEADER
+
+  # LSBackgroundOnly, because this is a daemon: without it the launcher takes a Dock
+  # icon and a menu bar at login. No CFBundleVersion tied to package.json's version
+  # either — a version bump would change these bytes, change the signature, and cost the
+  # user their Documents grant for nothing. The bundle's version is the bundle's, and it
+  # only moves when the bundle actually does.
+  cat > "$STAGED_INFO" <<INFO
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>$(xml_escape "$BUNDLE_ID")</string>
+	<key>CFBundleName</key>
+	<string>$(xml_escape "$LABEL")</string>
+	<key>CFBundleDisplayName</key>
+	<string>$(xml_escape "$LABEL")</string>
+	<key>CFBundleExecutable</key>
+	<string>$(xml_escape "$LABEL")</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>LSBackgroundOnly</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+</dict>
+</plist>
+INFO
+
+  # Every input that decides the bundle's bytes, and nothing that does not. Composed out
+  # of hex digests and an ASCII identifier rather than out of the paths themselves, so
+  # this string is safe to hand to node as an argument no matter what bytes the clone
+  # path is made of.
+  LAUNCHER_STAMP="$(sha256_string "$(sha256_file "$LAUNCHER_SRC")|$(sha256_file "$STAGED_HEADER")|$(sha256_file "$STAGED_INFO")|$BUNDLE_ID")"
+
+  RECORDED_LAUNCHER_STAMP=""
+  if [ -f "$LAUNCHER_STAMP_FILE" ]; then
+    RECORDED_LAUNCHER_STAMP="$(cat "$LAUNCHER_STAMP_FILE")"
+  fi
+
+  # "Already current" has to mean the bundle on disk is really there and really signed,
+  # not just that a stamp file says so: the app lives in ~/Applications, where a user is
+  # entitled to drag things to the Trash, and a stamp that outlived its bundle would
+  # otherwise leave the plist pointing at nothing and the daemon never starting.
+  if [ -n "$RECORDED_LAUNCHER_STAMP" ] && [ "$RECORDED_LAUNCHER_STAMP" = "$LAUNCHER_STAMP" ] \
+     && [ -x "$APP_EXEC" ] && "$CODESIGN_CMD" --verify "$APP_PATH" >/dev/null 2>&1; then
+    USE_LAUNCHER=1
+    echo "==> launcher bundle already current at $APP_PATH (untouched, so its Documents grant survives)"
+  elif ! command -v "$CC_CMD" >/dev/null 2>&1; then
+    launcher_degraded "no C compiler ('$CC_CMD') found — the Xcode Command Line Tools are not installed"
+  elif ! command -v "$CODESIGN_CMD" >/dev/null 2>&1; then
+    launcher_degraded "no '$CODESIGN_CMD' found, so the launcher bundle cannot be signed"
+  # -Wall but not -Werror: a future compiler inventing a new warning must not be able to
+  # turn a routine reinstall into a failed one.
+  elif ! "$CC_CMD" -O2 -Wall -o "$STAGED_APP/Contents/MacOS/$LABEL" \
+         -I "$LAUNCHER_BUILD_DIR" "$LAUNCHER_SRC" 2>&1; then
+    launcher_degraded "the launcher failed to compile (output above)"
+  # --force so a re-sign replaces rather than refuses; --identifier explicitly rather
+  # than inherited from Info.plist, because this string IS the grant's name and it should
+  # be impossible to change it by editing a plist alone.
+  elif ! "$CODESIGN_CMD" --force --sign - --identifier "$BUNDLE_ID" "$STAGED_APP" 2>&1; then
+    launcher_degraded "the launcher bundle failed to sign (output above)"
+  elif ! "$CODESIGN_CMD" --verify "$STAGED_APP" >/dev/null 2>&1; then
+    launcher_degraded "the launcher bundle did not verify after signing"
+  else
+    mkdir -p "$APP_DIR"
+    # Signed in the staging directory and swapped in whole, so a compile or sign that
+    # fails leaves the previously installed bundle exactly as it was — including, and
+    # this is the point, its grant. Removing the old bundle while the current daemon is
+    # running from it is safe: the running image holds its inode open, and it is being
+    # booted out and replaced twenty lines below anyway.
+    rm -rf "$APP_PATH"
+    mv "$STAGED_APP" "$APP_PATH"
+    printf '%s' "$LAUNCHER_STAMP" > "$LAUNCHER_STAMP_FILE"
+    USE_LAUNCHER=1
+    echo "==> built and signed $APP_PATH ($BUNDLE_ID)"
+    LAUNCHER_IS_NEW=1
+  fi
+fi
+
 # --- 2. launchd plist -------------------------------------------------------
 # The launchd half runs BEFORE the MCP registration, deliberately. The
 # registration is a remove-then-add on config this repo does not own; if a
@@ -284,21 +498,9 @@ mkdir -p "$LOG_DIR"
 # questions and answers; same owner-only posture as the store itself.
 chmod 700 "$LOG_DIR"
 
-# Every value below is spliced into XML, and a clone path is a filename: `&`, `<`
-# and `>` are all legal in one. Unescaped, a path containing `&` produces a plist
-# that plutil rejects while this script still exits 0 and launchd silently has
-# nothing to load.
-#
-# LC_ALL=C, because a filename is bytes and a locale is an opinion about them (audit
-# S9, 2026-07-31). Under a UTF-8 locale BSD sed refuses input that is not valid UTF-8
-# with "RE error: illegal byte sequence" and exits non-zero — and under `set -euo
-# pipefail` that failing command substitution aborts the entire install, part-way
-# through, on a clone path or a reference root containing one stray byte. In the C
-# locale sed treats the input as bytes and passes it through untouched, which is what
-# a substitution over three ASCII characters wanted all along.
-xml_escape() {
-  printf '%s' "$1" | LC_ALL=C sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
-}
+# Every value below is spliced into XML by xml_escape, defined above step 1b (with
+# c_escape, its C-string counterpart) because the launcher bundle's Info.plist needs it
+# first. The reasoning lives with the function.
 
 # bin/daemon.mjs itself watches src/ and bin/ when CLAUDE_BOARD_RELOAD_ON_CHANGE=1 (set
 # below) and exits on a change there — never on the clone root, so an edit to
@@ -309,6 +511,7 @@ xml_escape() {
 LABEL_X="$(xml_escape "$LABEL")"
 NODE_BIN_X="$(xml_escape "$NODE_BIN")"
 DAEMON_PATH_X="$(xml_escape "$DAEMON_PATH")"
+APP_EXEC_X="$(xml_escape "$APP_EXEC")"
 REPO_DIR_X="$(xml_escape "$REPO_DIR")"
 OUT_LOG_X="$(xml_escape "$OUT_LOG")"
 ERR_LOG_X="$(xml_escape "$ERR_LOG")"
@@ -321,6 +524,17 @@ PORT_X="$(xml_escape "$PORT")"
 # What the value IS was decided up top, including carrying an existing plist's forward.
 REF_ROOTS_X="$(xml_escape "$REF_ROOTS")"
 
+# What launchd actually execs, and therefore what TCC will attribute every file the
+# daemon reads to. The launcher takes no arguments on purpose (bin/launcher.c: the target
+# is compiled in, so holding the Documents grant is not the same as being able to point
+# it at arbitrary code), which is why this is one string where the fallback is two.
+if [ "$USE_LAUNCHER" -eq 1 ]; then
+  PROGRAM_ARGS_XML="		<string>${APP_EXEC_X}</string>"
+else
+  PROGRAM_ARGS_XML="		<string>${NODE_BIN_X}</string>
+		<string>${DAEMON_PATH_X}</string>"
+fi
+
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -330,8 +544,7 @@ cat > "$PLIST_PATH" <<PLIST
 	<string>${LABEL_X}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${NODE_BIN_X}</string>
-		<string>${DAEMON_PATH_X}</string>
+${PROGRAM_ARGS_XML}
 	</array>
 	<key>WorkingDirectory</key>
 	<string>${REPO_DIR_X}</string>
@@ -409,9 +622,33 @@ fi
 # end here otherwise, with the script cheerfully printing "installed and
 # running".
 HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
+
+# A launcher bundle built by THIS run has no TCC grant yet, and if this clone sits in
+# ~/Documents, ~/Desktop or ~/Downloads then reading bin/daemon.mjs is itself a gated
+# read: the daemon cannot start until the user allows it. macOS raises that prompt
+# against the launchd job, so it appears while this loop is waiting — which is why the
+# budget below is a person's budget rather than a process's. Five seconds is plenty for
+# a daemon and nowhere near enough for a dialog nobody has looked at yet.
+case "$REPO_DIR/" in
+  "$HOME/Documents/"*|"$HOME/Desktop/"*|"$HOME/Downloads/"*) REPO_IN_PROTECTED_DIR=1 ;;
+  *) REPO_IN_PROTECTED_DIR=0 ;;
+esac
+
+HEALTH_TRIES=20
+if [ "$LAUNCHER_IS_NEW" -eq 1 ] && [ "$REPO_IN_PROTECTED_DIR" -eq 1 ]; then
+  HEALTH_TRIES=480   # 0.25s apart, i.e. two minutes to notice a dialog and click it
+  echo
+  echo "==> macOS will now ask whether \"$LABEL\" may access files in your"
+  echo "    $(dirname "$REPO_DIR") folder. Click Allow — this clone lives there, so the"
+  echo "    daemon cannot read its own code until you do."
+  echo "    If no dialog appears: System Settings -> Privacy & Security -> Files and Folders,"
+  echo "    find $LABEL, and turn the folder on there."
+  echo
+fi
+
 echo "==> waiting for $HEALTH_URL"
 HEALTHY=0
-for _ in $(seq 1 20); do
+for _ in $(seq 1 "$HEALTH_TRIES"); do
   if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
     HEALTHY=1
     break
@@ -422,6 +659,15 @@ if [ "$HEALTHY" -ne 1 ]; then
   echo "error: the daemon never answered $HEALTH_URL — it is NOT running" >&2
   echo "       logs: $OUT_LOG" >&2
   echo "             $ERR_LOG" >&2
+  # The one failure mode this script can name precisely rather than leave to the logs,
+  # because the logs say "EPERM" and mean "you have not clicked Allow yet".
+  if [ "$USE_LAUNCHER" -eq 1 ] && [ "$REPO_IN_PROTECTED_DIR" -eq 1 ]; then
+    echo >&2
+    echo "       Most likely cause: macOS is refusing $LABEL access to $(dirname "$REPO_DIR")," >&2
+    echo "       which is where this clone lives, so the daemon cannot read its own code." >&2
+    echo "       Fix it in System Settings -> Privacy & Security -> Files and Folders (find" >&2
+    echo "       $LABEL), then: launchctl kickstart -k $TARGET" >&2
+  fi
   exit 1
 fi
 
@@ -456,3 +702,12 @@ echo 'revive:  launchctl kickstart -k gui/$(id -u)/claude-board'
 echo "command: $COMMAND_FILE"
 echo "logs:    $OUT_LOG"
 echo "         $ERR_LOG"
+if [ "$USE_LAUNCHER" -eq 1 ]; then
+  echo "launcher: $APP_PATH ($BUNDLE_ID)"
+  # Named on every successful run, not just the run that built it: this is the answer to
+  # "why can't the board read that file", and the person hitting that is rarely the
+  # person who watched the install scroll past.
+  echo "          macOS attributes the daemon's file reads to this bundle. A reference into"
+  echo "          ~/Documents, ~/Desktop or ~/Downloads needs it ticked in System Settings ->"
+  echo "          Privacy & Security -> Files and Folders."
+fi

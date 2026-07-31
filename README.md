@@ -32,8 +32,12 @@ would take two seconds.
   installer warns if the only node it finds is version-managed, because launchd will
   keep pointing at a path that moves on the next upgrade
 - Claude Code, with the `claude` CLI on your `PATH`
+- The Xcode Command Line Tools (`xcode-select --install`), for `cc` — used once at
+  install time to build the launcher described below. Optional: without them you get a
+  working install that cannot read board references out of `~/Documents`, `~/Desktop` or
+  `~/Downloads`, and the installer says so rather than failing
 
-No dependencies, no build step. Node built-ins only.
+No runtime dependencies. Node built-ins only.
 
 ## Install
 
@@ -43,14 +47,34 @@ cd ~/Documents/claude-board
 bash install.sh
 ```
 
-One idempotent command, no manual step after it. It generates a local secret, installs
-a launchd job running the daemon from this clone, waits for the daemon to actually
-answer before claiming success, registers the MCP server with Claude Code at user
-scope, and installs `/grill` — the board's first caller — to
+One idempotent command, and one click. It generates a local secret, builds the launcher
+bundle, installs a launchd job running the daemon from this clone, waits for the daemon
+to actually answer before claiming success, registers the MCP server with Claude Code at
+user scope, and installs `/grill` — the board's first caller — to
 `~/.claude/commands/grill.md`. Running it again changes nothing that already matches:
-the secret is never rotated, and `/grill` is only overwritten while it still matches
-what install put there last time. Edited your local copy? Install leaves it alone and
-tells you where the shipped version lives instead of clobbering your edit.
+the secret is never rotated, the launcher is not rebuilt unless something it is built
+from changed, and `/grill` is only overwritten while it still matches what install put
+there last time. Edited your local copy? Install leaves it alone and tells you where the
+shipped version lives instead of clobbering your edit.
+
+### The one click: allowing folder access
+
+macOS gates `~/Documents`, `~/Desktop` and `~/Downloads` per application, and the
+daemon is an application it has never heard of. So the installer builds
+`~/Applications/claude-board.app`, a small signed launcher that runs the daemon, and
+macOS asks whether *that* may read the folder — once, the first time it tries.
+
+**Click Allow.** If you clone into one of those three folders (the command above clones
+into `~/Documents`), the daemon cannot read its own code until you do, and the install
+will sit waiting for you. You can change your mind later in **System Settings → Privacy
+& Security → Files and Folders**, under `claude-board`.
+
+Two consequences worth knowing. Refusing is a real option: everything works except
+rendering file references out of those three folders, which show up on the board as
+`cannot read <path>: EPERM`. And the grant belongs to the launcher alone — this is why
+the installer builds a bundle instead of asking you to hand `node` itself the keys to
+your Documents folder, which is the same permission with a vastly wider blast radius.
+See [SECURITY.md](SECURITY.md#defended).
 
 Verify:
 
@@ -138,13 +162,18 @@ review content is never committed.
 bash uninstall.sh
 ```
 
-Removes the launchd job, its plist, the MCP registration, and
-`~/.claude/commands/grill.md` — unless you've edited that file, in which case it's your
-file, not this repo's: uninstall leaves it alone and says so, the same rule install
-follows on the way in. It reports what it deliberately did not touch: the store (your
-review history), the local secret at `~/.config/claude-board/secret`, and the logs in
-`~/Library/Logs/claude-board/`. Remove those yourself if you want them gone. Safe to run
-on a machine that never had the service installed, and safe to run twice.
+Removes the launchd job, its plist, the MCP registration, the launcher bundle in
+`~/Applications`, and `~/.claude/commands/grill.md` — unless you've edited that file, in
+which case it's your file, not this repo's: uninstall leaves it alone and says so, the
+same rule install follows on the way in. It reports what it deliberately did not touch:
+the store (your review history), the local secret at `~/.config/claude-board/secret`,
+and the logs in `~/Library/Logs/claude-board/`. Remove those yourself if you want them
+gone. Safe to run on a machine that never had the service installed, and safe to run
+twice.
+
+One leftover no script can remove: `claude-board` may still be listed under System
+Settings → Privacy & Security → Files and Folders. The bundle it refers to is gone, so
+the entry grants nothing, but macOS offers no way to delete it programmatically.
 
 ## Development
 

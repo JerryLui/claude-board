@@ -662,3 +662,36 @@ yet, copy the files aside and restore from the copies — never from git.
 
 Cheap tell that this has happened: the ablations after the first all come back
 clean. Real ablations rarely do.
+
+## macOS TCC gates the daemon by *application*, and launchd's application is not yours
+
+A LaunchAgent gets no folder access by inheritance the way a process started from
+Terminal does. If the plist runs `/opt/homebrew/bin/node bin/daemon.mjs`, then the
+application macOS is deciding about is **node**, and every read under `~/Documents`,
+`~/Desktop` or `~/Downloads` comes back **EPERM** — which surfaces on the board as
+`cannot read <path>: EPERM` and looks exactly like a missing file. A clone that lives in
+one of those three folders cannot even start: `bin/daemon.mjs` is itself a gated read.
+
+Two traps inside the trap:
+
+- **Granting node is not a fix.** It is a grant to every node program on the machine,
+  and homebrew's node is ad-hoc signed under a versioned Cellar path, so `brew upgrade
+  node` silently revokes it. Hence `bin/launcher.c` and the app bundle: TCC gets an
+  application of ours to decide about, and the user grants that one folder to that one
+  thing. The launcher must **fork** node, never `exec` it — TCC decides against the
+  *responsible process*, a child inherits its parent's, and an exec would replace this
+  identity with node's in the same pid and undo the entire arrangement.
+- **The grant is pinned to the code signature.** Rebuild the bundle and the user is
+  silently locked out again, with no error but the same EPERM. `install.sh` therefore
+  stamps the inputs (`~/.config/claude-board/launcher.stamp`) and skips the rebuild when
+  nothing that decides the bundle's bytes has changed — a routine `git pull &&
+  ./install.sh` must not cost someone their grant. This is also why the bundle's
+  `CFBundleVersion` is a fixed `1` rather than `package.json`'s version.
+
+Diagnosing it: run the read from a throwaway LaunchAgent rather than from your shell.
+The same node, the same flags and the same file behave differently under launchd than
+under Terminal, and testing from the shell will tell you everything is fine.
+
+`readdir` on `~/Library/Application Support/com.apple.TCC` is a cheap probe for whether
+a process holds Full Disk Access — it is FDA-only, so EPERM there alongside a successful
+read of `~/Documents` means the narrow folder grant is present and FDA is not.

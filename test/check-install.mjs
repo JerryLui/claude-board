@@ -120,6 +120,12 @@ const launchAgentsDir = path.join(workDir, 'LaunchAgents');
 const logDir = path.join(workDir, 'Logs');
 const binDir = path.join(workDir, 'bin');
 const commandsDir = path.join(workDir, 'Commands');
+// Where install.sh builds the launcher bundle. A seam like every other one here, and
+// load-bearing for the same reason: without it these runs would build, sign and delete
+// a real ~/Applications/claude-board.app on the machine running the suite -- and the
+// uninstall check below would remove the developer's own working launcher along with
+// the TCC grant attached to it.
+const appDir = path.join(workDir, 'Applications');
 mkdirSync(binDir, { recursive: true });
 
 // The store: install.sh/uninstall.sh never write to it, but uninstall.sh has to
@@ -191,6 +197,7 @@ const env = {
   CLAUDE_BOARD_LAUNCH_AGENTS_DIR: launchAgentsDir,
   CLAUDE_BOARD_LOG_DIR: logDir,
   CLAUDE_BOARD_COMMANDS_DIR: commandsDir,
+  CLAUDE_BOARD_APP_DIR: appDir,
   CLAUDE_BOARD_HOME: storeDir,
   CLAUDE_BOARD_MCP_CMD: claudeStub,
   CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,
@@ -213,6 +220,19 @@ const hashFile = path.join(path.dirname(secretFile), 'grill.sha256');
 
 function runInstall() {
   return spawnSync('bash', [installScript], { env, encoding: 'utf8' });
+}
+
+/** Stub log/state paths of a check's own, for an install run that exists to prove
+ * something else entirely. The reconciliation checks below count `mcp add` and `bootout`
+ * invocations in the SHARED logs and assert exactly one per install run, so any extra
+ * run sharing those files turns a real guarantee into an arithmetic accident. */
+function quietStubs(tag) {
+  return {
+    STUB_CLAUDE_LOG: path.join(workDir, `claude-invocations-${tag}.log`),
+    STUB_CLAUDE_STATE: path.join(workDir, `claude-registrations-${tag}.json`),
+    STUB_LAUNCHCTL_LOG: path.join(workDir, `launchctl-invocations-${tag}.log`),
+    STUB_LAUNCHCTL_STATE: path.join(workDir, `launchctl-state-${tag}.json`),
+  };
 }
 
 // --- reload on change (SPEC_LAUNCH.md criterion 17) -------------------------------
@@ -479,10 +499,107 @@ async function main() {
     assert.equal(plist.Label, 'claude-board');
   });
 
-  await check('ProgramArguments points node at this clone\'s bin/daemon.mjs, by absolute path', async () => {
-    assert.equal(plist.ProgramArguments.length, 2);
-    assert.ok(path.isAbsolute(plist.ProgramArguments[0]), 'node interpreter path must be absolute');
-    assert.equal(plist.ProgramArguments[1], path.join(repoRoot, 'bin', 'daemon.mjs'));
+  await check('ProgramArguments runs the launcher bundle, by absolute path and with no arguments', async () => {
+    // The bundle is what macOS attributes the daemon's file reads to, so the plist has
+    // to name it rather than node -- see install.sh step 1b and bin/launcher.c. One
+    // element, not two: the daemon path is compiled into the launcher precisely so that
+    // rewriting this plist cannot retarget an application the user granted a folder to.
+    assert.equal(plist.ProgramArguments.length, 1, `expected just the launcher, got ${JSON.stringify(plist.ProgramArguments)}`);
+    assert.ok(path.isAbsolute(plist.ProgramArguments[0]), 'the launcher path must be absolute');
+    assert.equal(plist.ProgramArguments[0], path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
+  });
+
+  await check('the launcher bundle is built, signed, and actually starts this clone\'s daemon', async () => {
+    const appPath = path.join(appDir, 'claude-board.app');
+    const exec = path.join(appPath, 'Contents', 'MacOS', 'claude-board');
+    assert.ok(existsSync(exec), 'install.sh must build the launcher executable');
+
+    const info = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(appPath, 'Contents', 'Info.plist')], { encoding: 'utf8' });
+    assert.equal(info.status, 0, info.stderr);
+    const infoPlist = JSON.parse(info.stdout);
+    assert.equal(infoPlist.CFBundleIdentifier, 'io.github.jerrylui.claude-board', 'the bundle id IS the name of the TCC grant; changing it silently costs every user their grant');
+    assert.equal(infoPlist.LSBackgroundOnly, true, 'a daemon must not take a Dock icon at login');
+
+    // Ad-hoc signed, and verifiably so: an unsigned bundle gets no stable TCC identity
+    // at all, which is the entire reason this bundle exists.
+    const verify = spawnSync('codesign', ['--verify', '--verbose', appPath], { encoding: 'utf8' });
+    assert.equal(verify.status, 0, `the bundle must verify:\n${verify.stderr}`);
+    const display = spawnSync('codesign', ['-dv', appPath], { encoding: 'utf8' });
+    assert.match(display.stderr, /Identifier=io\.github\.jerrylui\.claude-board/, 'the signed identifier must be the bundle id, not a name derived from the file');
+
+    // And it must really run the daemon: the launcher forks node (never execs it -- see
+    // bin/launcher.c) and the compiled-in path has to be this clone's. Proven by
+    // running it, rather than by reading the binary: CLAUDE_BOARD_PORT=0 would have the
+    // real daemon bind an ephemeral port, so instead this asserts on the one thing a
+    // wrong path produces, which is the launcher's own exec failure.
+    const ran = spawnSync(exec, [], {
+      encoding: 'utf8',
+      timeout: 5000,
+      env: { ...process.env, CLAUDE_BOARD_PORT: String(healthPort) }, // already bound: the daemon exits, fast
+    });
+    assert.doesNotMatch(ran.stderr || '', /cannot exec/, `the launcher must be able to exec its compiled-in node:\n${ran.stderr}`);
+  });
+
+  await check('a reinstall leaves an unchanged launcher bundle byte-identical (a rebuild would reset its TCC grant)', async () => {
+    // The whole point of the stamp in install.sh step 1b. macOS pins a Files-and-Folders
+    // grant to the code signature, so rebuilding the bundle on a run that changed
+    // nothing would silently revoke the user's grant -- on every routine `git pull &&
+    // ./install.sh`, which is the ordinary way to take an update.
+    //
+    // (Ablation: delete the stamp comparison and rebuild unconditionally, and the
+    // digest below changes between the two runs this suite already made.)
+    const exec = path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+    const before = readFileSync(exec);
+    const r = spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('rebuild-noop') }, encoding: 'utf8' });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.deepEqual(readFileSync(exec), before, 'a no-op reinstall must not rewrite the launcher');
+    assert.match(r.stdout, /already current/, 'and it must say so, rather than rebuilding silently');
+  });
+
+  await check('a launcher built from different inputs IS rebuilt', async () => {
+    // The other half of the same rule: the stamp must not be a way to get stuck on a
+    // stale binary. A changed node path is a changed launcher, because the path is
+    // compiled in.
+    const exec = path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+    const before = readFileSync(exec);
+    const fakeNode = path.join(binDir, 'node-alias');
+    cpSync(process.execPath, fakeNode);
+    chmodSync(fakeNode, 0o755);
+    const r = spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('rebuild-node'), CLAUDE_BOARD_NODE: fakeNode }, encoding: 'utf8' });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.notDeepEqual(readFileSync(exec), before, 'a launcher whose baked-in node path changed must be rebuilt');
+    // Put the bundle back the way the rest of the suite expects to find it.
+    spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('rebuild-restore') }, encoding: 'utf8' });
+  });
+
+  await check('install still succeeds without a compiler, degrading loudly instead of failing', async () => {
+    // A machine with no Xcode Command Line Tools must still get a working daemon --
+    // just one that cannot read a reference out of ~/Documents. Loud, and not fatal.
+    const noCcAppDir = path.join(workDir, 'Applications-nocc');
+    const r = spawnSync('bash', [installScript], {
+      env: {
+        ...env,
+        CLAUDE_BOARD_APP_DIR: noCcAppDir,
+        CLAUDE_BOARD_CC: path.join(binDir, 'definitely-not-a-compiler'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-nocc', 'claude-board', 'secret'),
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(workDir, 'LaunchAgents-nocc'),
+        ...quietStubs('nocc'),
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `a missing compiler must not fail the install:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(r.stdout, /warning: no C compiler/, 'it must say why, in as many words');
+    assert.match(r.stdout, /EPERM/, 'and name the symptom the user will otherwise hit with no explanation');
+    assert.ok(!existsSync(path.join(noCcAppDir, 'claude-board.app')), 'no bundle should have been built');
+
+    // ...and the plist it wrote falls back to running node directly, so the daemon
+    // still comes up.
+    const fallback = spawnSync('plutil', ['-convert', 'json', '-o', '-',
+      path.join(workDir, 'LaunchAgents-nocc', 'claude-board.plist')], { encoding: 'utf8' });
+    assert.equal(fallback.status, 0, fallback.stderr);
+    const args = JSON.parse(fallback.stdout).ProgramArguments;
+    assert.equal(args.length, 2, 'the fallback plist runs node with the daemon script');
+    assert.equal(args[1], path.join(repoRoot, 'bin', 'daemon.mjs'));
   });
 
   await check('RunAtLoad and KeepAlive are set', async () => {
@@ -817,6 +934,10 @@ async function main() {
   mkdirSync(path.join(grillCloneDir, 'commands'), { recursive: true });
   writeFileSync(path.join(grillCloneDir, 'bin', 'daemon.mjs'), '// stub\n');
   writeFileSync(path.join(grillCloneDir, 'bin', 'mcp.mjs'), '// stub\n');
+  // The real launcher source, not a stub: install.sh compiles this one, and a clone
+  // that cannot build its launcher would degrade to the node-direct plist and quietly
+  // stop exercising the path every OTHER check in this file now takes.
+  writeFileSync(path.join(grillCloneDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
   writeFileSync(path.join(grillCloneDir, 'install.sh'), readFileSync(installScript, 'utf8'));
   const grillSrc = path.join(grillCloneDir, 'commands', 'grill.md');
   const GRILL_V1 = '# grill v1\nshipped content, version 1\n';
@@ -841,6 +962,7 @@ async function main() {
         CLAUDE_BOARD_LOG_DIR: grillLogs,
         CLAUDE_BOARD_COMMANDS_DIR: grillCommands,
         CLAUDE_BOARD_SECRET_FILE: grillSecretFile,
+        CLAUDE_BOARD_APP_DIR: path.join(workDir, 'Applications-grillclone'),
       },
       encoding: 'utf8',
     });
@@ -898,12 +1020,14 @@ async function main() {
     chmodSync(shim, 0o755);
 
     const agents = path.join(workDir, 'LaunchAgents-nvm');
+    const nvmAppDir = path.join(workDir, 'Applications-nvm');
     const r = spawnSync('bash', [installScript], {
       env: {
         ...env,
         PATH: `${fakeNvm}:${process.env.PATH}`,
         CLAUDE_BOARD_NODE: '',
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+        CLAUDE_BOARD_APP_DIR: nvmAppDir,
         CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-nvm'),
         CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-nvm', 'claude-board', 'secret'),
         STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-nvm.log'),
@@ -915,24 +1039,29 @@ async function main() {
     });
     assert.equal(r.status, 0, `install must succeed with only a version-managed node on PATH\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
 
-    const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(agents, 'claude-board.plist')], { encoding: 'utf8' });
-    assert.equal(asJson.status, 0, asJson.stderr);
-    const baked = JSON.parse(asJson.stdout).ProgramArguments[0];
+    // "Baked in" now means compiled into the launcher rather than written into the
+    // plist -- the plist names the bundle, and the bundle holds the interpreter path as
+    // a C string literal (bin/launcher.c). Same guarantee, one indirection further
+    // along: read the bytes of the thing launchd will actually run.
+    const launcher = readFileSync(path.join(nvmAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
+    const bakedIn = p => launcher.includes(Buffer.from(`${p}\0`, 'utf8'));
 
     const stable = ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node'].find(p => existsSync(p));
     if (stable) {
-      assert.equal(baked, stable, 'a stable interpreter must win over the version-managed one');
+      assert.ok(bakedIn(stable), 'a stable interpreter must win over the version-managed one');
+      assert.ok(!bakedIn(shim), 'and the version-managed path must not be what the launcher runs');
       assert.match(r.stdout, /version-managed/, 'the substitution must be announced, not silent');
     } else {
       // No stable interpreter anywhere: baking the version-managed path is the only
       // option left, but it must come with the warning that says why it may break.
-      assert.equal(baked, shim);
+      assert.ok(bakedIn(shim));
       assert.match(r.stdout, /warning: only a version-managed node/);
     }
   });
 
-  await check('CLAUDE_BOARD_NODE overrides the interpreter, in the plist and the registration alike', async () => {
+  await check('CLAUDE_BOARD_NODE overrides the interpreter, in the launcher and the registration alike', async () => {
     const agents = path.join(workDir, 'LaunchAgents-override');
+    const overrideAppDir = path.join(workDir, 'Applications-override');
     const chosen = path.join(workDir, 'home', 'chosen-node');
     writeFileSync(chosen, `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
     chmodSync(chosen, 0o755);
@@ -943,6 +1072,7 @@ async function main() {
         ...env,
         CLAUDE_BOARD_NODE: chosen,
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+        CLAUDE_BOARD_APP_DIR: overrideAppDir,
         CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-override'),
         CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-override', 'claude-board', 'secret'),
         STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-override.log'),
@@ -956,7 +1086,11 @@ async function main() {
 
     const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(agents, 'claude-board.plist')], { encoding: 'utf8' });
     assert.equal(asJson.status, 0, asJson.stderr);
-    assert.equal(JSON.parse(asJson.stdout).ProgramArguments[0], chosen);
+    assert.equal(JSON.parse(asJson.stdout).ProgramArguments[0],
+      path.join(overrideAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board'),
+      'the plist names the launcher; the interpreter override lands inside it');
+    const launcher = readFileSync(path.join(overrideAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
+    assert.ok(launcher.includes(Buffer.from(`${chosen}\0`, 'utf8')), 'the override must be the interpreter the launcher execs');
     assert.equal(JSON.parse(readFileSync(registrations, 'utf8'))['claude-board'].command[0], chosen);
   });
 
@@ -973,6 +1107,10 @@ async function main() {
     writeFileSync(path.join(oddDir, 'bin', 'daemon.mjs'), '// stub\n');
     writeFileSync(path.join(oddDir, 'bin', 'mcp.mjs'), '// stub\n');
     writeFileSync(path.join(oddDir, 'commands', 'grill.md'), '# stub grill\n');
+    // The real launcher source: this clone's path is the one with `&` and `<>` in it, so
+    // it is also the case that proves c_escape holds up where xml_escape does -- the
+    // same bytes have to survive into a C string literal and compile.
+    writeFileSync(path.join(oddDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
     writeFileSync(path.join(oddDir, 'install.sh'), readFileSync(installScript, 'utf8'));
 
     const oddAgents = path.join(workDir, 'LaunchAgents-odd');
@@ -989,6 +1127,7 @@ async function main() {
         CLAUDE_BOARD_LOG_DIR: oddLogs,
         CLAUDE_BOARD_COMMANDS_DIR: path.join(workDir, 'Commands-odd'),
         CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-odd', 'claude-board', 'secret'),
+        CLAUDE_BOARD_APP_DIR: path.join(workDir, 'Applications-odd'),
       },
       encoding: 'utf8',
     });
@@ -1005,7 +1144,17 @@ async function main() {
     const oddPlistJson = JSON.parse(asJson.stdout);
     // escaped on the way in, and back to the literal path on the way out -- not mangled
     assert.equal(oddPlistJson.WorkingDirectory, oddDir);
-    assert.equal(oddPlistJson.ProgramArguments[1], path.join(oddDir, 'bin', 'daemon.mjs'));
+
+    // The daemon path is no longer in the plist at all -- it is compiled into the
+    // launcher -- so the same "survived escaping intact" claim is made against the
+    // binary's bytes. This is c_escape's assertion, and the ablation is the same shape:
+    // splice the path into launcher_paths.h unescaped and a clone under a path with a
+    // quote or backslash in it produces a header that will not compile.
+    assert.ok(existsSync(path.join(workDir, 'Applications-odd', 'claude-board.app')),
+      `the launcher must build from a path with XML metacharacters in it:\n${r.stdout}`);
+    const oddLauncher = readFileSync(path.join(workDir, 'Applications-odd', 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
+    assert.ok(oddLauncher.includes(Buffer.from(`${path.join(oddDir, 'bin', 'daemon.mjs')}\0`, 'utf8')),
+      'the odd clone path must reach the launcher intact');
   });
 
   await check('install fails loudly rather than exiting 0 when the generated plist does not lint', async () => {
@@ -1080,6 +1229,18 @@ async function main() {
 
   await check('uninstall removes the plist', async () => {
     assert.ok(!existsSync(plistPath), 'the plist must be gone after uninstall');
+  });
+
+  await check('uninstall removes the launcher bundle and its build record', async () => {
+    // install.sh authored this bundle outright, so unlike the store, the secret and the
+    // logs it is uninstall's to take away -- leaving a signed launchd binary in
+    // ~/Applications pointing at a daemon that is gone is the kind of leftover
+    // criterion 11 exists to prevent.
+    assert.ok(!existsSync(path.join(appDir, 'claude-board.app')), 'the launcher bundle must be gone after uninstall');
+    assert.ok(!existsSync(path.join(path.dirname(secretFile), 'launcher.stamp')), 'the stamp recording what it was built from must go with it');
+    // The TCC entry it may have left in System Settings cannot be removed by any
+    // script, so the one honest thing to do is say so.
+    assert.match(uninstallResult.stdout, /Privacy & Security/, 'uninstall must tell the user about the settings entry it cannot remove');
   });
 
   await check('uninstall removes the MCP registration', async () => {

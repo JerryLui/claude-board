@@ -38,6 +38,25 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ### Changed
 
+- **The daemon now runs under a launcher bundle of its own, so macOS can grant it a
+  folder without granting `node` one.** `install.sh` compiles `bin/launcher.c` into
+  `~/Applications/claude-board.app` (ad-hoc signed, `io.github.jerrylui.claude-board`)
+  and the launchd plist runs that instead of `node bin/daemon.mjs`. Without it, TCC has
+  only `node` to decide about, and every board reference into `~/Documents`, `~/Desktop`
+  or `~/Downloads` failed with `cannot read <path>: EPERM` — indistinguishable, from the
+  reviewer's side, from a missing file. The alternative was asking users to hand their
+  Documents folder to every node program on the machine, in a grant that `brew upgrade
+  node` then silently revokes.
+
+  What this means in practice: **a first install now asks you to click Allow once**, and
+  if your clone lives in one of those three folders the daemon cannot start until you
+  do (the installer waits, and says why). A reinstall does not ask again — the bundle is
+  rebuilt only when something it is built from actually changed, because TCC pins the
+  grant to the code signature and a needless rebuild would revoke it silently. Building
+  the launcher wants `cc` from the Xcode Command Line Tools; a machine without them
+  still installs and runs, minus the ability to read those three folders, and says so
+  rather than failing. `uninstall.sh` removes the bundle. See SECURITY.md "What the
+  launcher bundle is for" and QUIRKS.md.
 - The store default moved from `~/Documents/renders/board` to
   `~/Library/Application Support/claude-board`. `CLAUDE_BOARD_HOME` is now documented as
   configuration rather than as a test seam. No migration: there is no installed base.

@@ -10,8 +10,11 @@ in the same commit that uses it, additively. Do not repurpose or rename an exist
 ## Layout
 
 ```
-bin/daemon.mjs      launchd entry point; boots the HTTP server
+bin/daemon.mjs      the HTTP server's entry point
 bin/mcp.mjs         stdio MCP shim, one per Claude session
+bin/launcher.c      launchd entry point: compiled by install.sh into a signed app bundle
+                     that forks bin/daemon.mjs, so macOS TCC has an application of ours
+                     to attribute the daemon's file reads to (see SECURITY.md)
 src/store.mjs       board JSON persistence: read, write, list, search
 src/board.mjs       model: id minting, block normalisation, rounds, packet assembly
 src/markdown.mjs    markdown -> HTML + anchor extraction (runs in node and the browser)

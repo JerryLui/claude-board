@@ -7,6 +7,8 @@
 #   3. the installed `/grill` command file — unless it has been edited since
 #      install put it there, in which case it is the user's file and is left
 #      alone, same rule install.sh itself follows on the way in.
+#   4. ~/Applications/claude-board.app, the launcher bundle, and the stamp that
+#      records what it was built from.
 #
 # Order, and why: launchd first (bootout, then delete its plist) so nothing is
 # actively supervised while the rest of the teardown runs. The MCP registration is
@@ -41,6 +43,7 @@
 #   CLAUDE_BOARD_COMMANDS_DIR        default: ~/.claude/commands
 #   CLAUDE_BOARD_HOME                default: ~/Library/Application Support/claude-board
 #                                     (report only — this script never writes to it)
+#   CLAUDE_BOARD_APP_DIR             default: ~/Applications
 #
 # macOS only, zero dependencies: bash + coreutils + launchctl, nothing this OS
 # doesn't already ship.
@@ -58,11 +61,15 @@ SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
 COMMANDS_DIR="${CLAUDE_BOARD_COMMANDS_DIR:-$HOME/.claude/commands}"
 STORE_DIR="${CLAUDE_BOARD_HOME:-$HOME/Library/Application Support/claude-board}"
 
+APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
+
 LABEL="claude-board"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
 COMMAND_FILE="$COMMANDS_DIR/grill.md"
 SECRET_DIR="$(dirname "$SECRET_FILE")"
 HASH_FILE="$SECRET_DIR/grill.sha256"
+APP_PATH="$APP_DIR/${LABEL}.app"
+LAUNCHER_STAMP_FILE="$SECRET_DIR/launcher.stamp"
 
 # A working node is needed only to hash the command file for the modified-vs-not
 # check below — never baked into anything durable, so none of install.sh's
@@ -98,6 +105,27 @@ if [ -f "$PLIST_PATH" ]; then
   echo "==> removed $PLIST_PATH"
 else
   echo "==> no plist at $PLIST_PATH"
+fi
+
+# --- 1b. the launcher app bundle ----------------------------------------------
+# After the bootout, for the same reason the plist goes after it: this is the binary the
+# job was running. install.sh built it (see step 1b there), so it is this script's to
+# remove — unlike the store, the secret and the logs, none of which install.sh authored
+# the CONTENTS of.
+#
+# The TCC grant that may be attached to it is deliberately NOT touched, and could not be
+# without `tccutil reset` blowing away that whole privacy category for every app on the
+# machine. It is inert once the bundle is gone — a grant naming an application that no
+# longer exists grants nothing — so it is named in the summary rather than chased.
+if [ -d "$APP_PATH" ]; then
+  rm -rf "$APP_PATH"
+  echo "==> removed $APP_PATH"
+else
+  echo "==> no launcher bundle at $APP_PATH"
+fi
+if [ -f "$LAUNCHER_STAMP_FILE" ]; then
+  rm -f "$LAUNCHER_STAMP_FILE"
+  echo "==> removed $LAUNCHER_STAMP_FILE (the record of what that bundle was built from)"
 fi
 
 # --- 2. MCP registration -------------------------------------------------------
@@ -174,3 +202,10 @@ if [ "$HASH_FILE_LEFT" -eq 1 ] && [ -f "$HASH_FILE" ]; then
   echo "  its install record:           $HASH_FILE"
 fi
 echo "Remove them yourself if you want them gone."
+echo
+# Not in the list above, because it is not a path and not something to delete — but a
+# user who granted a folder to an application that no longer exists is entitled to know
+# the entry is still sitting in their settings.
+echo "One thing to tidy by hand if you want to: System Settings -> Privacy & Security ->"
+echo "Files and Folders may still list '$LABEL'. The bundle it named is gone, so the"
+echo "entry grants nothing; macOS offers no way for a script to remove it."

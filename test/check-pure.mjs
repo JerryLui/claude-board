@@ -4775,6 +4775,64 @@ check('roundCount: a board doc\'s own rounds-array length, zero for a shape that
   assert.equal(roundCount({}), 0, 'must read as zero, not throw, on a board-shaped object with no rounds at all');
 });
 
+check('the pending badge counts only what the reviewer still owes: deferred and never-submitted, NOT unanswered', () => {
+  // Regression, from real use: a fully-submitted 4-round board showed "5 pending"
+  // — 3 `unanswered` plus 2 `deferred`. `unanswered` is an explicit signal the
+  // reviewer sent (PROTOCOL.md: status is the only thing that says whether a
+  // question was decided), so counting it left a badge nothing could clear:
+  // leaving an optional "anything else?" blank IS answering it.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'pending');
+  mkdirSync(dir, { recursive: true });
+  const board = createBoard({
+    title: 'four states',
+    cwd: dir,
+    blocks: [
+      { kind: 'question', prompt: 'decided', widget: 'text' },
+      { kind: 'question', prompt: 'left blank on purpose', widget: 'text' },
+      { kind: 'question', prompt: 'revisit later', widget: 'text' },
+      { kind: 'question', prompt: 'never submitted at all', widget: 'text' },
+    ],
+  });
+  const ids = board.blocks.filter(b => b.kind === 'question').map(b => b.id);
+  board.answers = {
+    [ids[0]]: { status: 'answered', choice: 'yes', note: '' },
+    [ids[1]]: { status: 'unanswered', choice: null, note: '' },
+    // ids[2] deferred WITH a populated choice: the shape PROTOCOL.md pins as
+    // legal, so the count must key on status and not on choice being non-null.
+    [ids[2]]: { status: 'deferred', choice: 'leaning this way', note: '' },
+    // ids[3] deliberately absent.
+  };
+
+  const [thread] = buildThreadIndex([board]);
+  assert.equal(thread.pending, 2, 'exactly the deferred one and the missing one');
+
+  const item = extractThreadItem(renderIndexPage({ threads: [thread] }), board.id);
+  assert.match(item, /2 pending/, 'and the badge a reviewer actually reads says 2');
+  assert.doesNotMatch(item, /4 pending/, 'never the raw question count');
+});
+
+check('a board whose every question is answered or explicitly left blank reads as zero pending', () => {
+  // The state the reviewer must be able to reach. Before the fix above, a board
+  // carrying one blank optional question could never show a clear badge.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'pending-zero');
+  mkdirSync(dir, { recursive: true });
+  const board = createBoard({
+    title: 'done',
+    cwd: dir,
+    blocks: [
+      { kind: 'question', prompt: 'the real question', widget: 'text' },
+      { kind: 'question', prompt: 'anything else?', widget: 'text' },
+    ],
+  });
+  const ids = board.blocks.filter(b => b.kind === 'question').map(b => b.id);
+  board.answers = {
+    [ids[0]]: { status: 'answered', choice: 'yes', note: '' },
+    [ids[1]]: { status: 'unanswered', choice: null, note: '' },
+  };
+  const [thread] = buildThreadIndex([board]);
+  assert.equal(thread.pending, 0, 'a submitted board with nothing outstanding must be able to read zero');
+});
+
 check('an index row headlines the board title; the project is shown as a folder basename only, full path on a title attribute', () => {
   const sub = path.join(fixturesDir, 'indexpage-fixtures', 'sub', 'dir');
   mkdirSync(sub, { recursive: true });

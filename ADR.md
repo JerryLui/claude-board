@@ -121,8 +121,15 @@ shim enforces it by refusing a non-interactive session before posting anything. 
 commands that do have a terminal path — and the reviewer wants these runnable headless, on a
 VPS, where the shim refuses by design.
 
-**Decision:** Every command carries a non-board path and takes it when the board is
-unreachable or the session is headless, announcing that it did. A fallback is **degraded, not
+**Decision:** Every command carries a non-board path and takes it on three triggers,
+announcing that it did: the board is unreachable, the session is headless, or **the daemon
+cannot open a tab**. The third was added in round 7 and is the VPS case the reviewer actually
+meant — SSH gives `CLAUDE_CODE_ENTRYPOINT=cli`, so the interactive check passes and the daemon
+is reachable, but `openBoardTab` returns silently off darwin without `CLAUDE_BOARD_OPEN_CMD`
+(`bin/mcp.mjs:328`); the board posts where nobody can see it and `ask` blocks for the full two
+hours. The shim refuses that case up front so it surfaces as an `isError` like the other two.
+`CLAUDE_BOARD_HEADLESS=1` — which already exists (`bin/mcp.mjs:94`) — is documented as the
+manual opt-out for a machine that *could* open a tab. A fallback is **degraded, not
 equivalent**: it promises a path exists, never the same experience. `/grill` falls back to
 `AskUserQuestion` and loses multi-select, ranking, attached context and comment anchoring.
 `/example` writes its HTML and says the visual choice was unavailable. `/audit` writes the
@@ -150,3 +157,36 @@ don't fall back" section and `test/check-grill.mjs`'s `no automatic terminal fal
 described` case — has landed, so the shipped behaviour is still the *opposite* rule. Recorded
 as proposed so the file matches the code (audit 2026-07-31 Sp5). Accepting it means doing
 those two rewrites in the same change.
+
+## 5. PROPOSED — This repo ships the protocol, not its callers — 2026-07-31
+
+**Context:** `install.sh` has always installed three things: the LaunchAgent, the local secret,
+and `commands/grill.md` copied to `~/.claude/commands/`. That third step made sense while
+`/grill` was the board's only caller and this repo had written it. `SPEC_MIGRATION.md` then
+grew four skills and a second command as callers, none of which this repo wrote, and asked
+whether they should move in. Round 9 said no for the skills. Round 10 said no for `/wayfind`,
+then went further than the question asked: *"Move grill out of repo, let's keep all the skills
+and commands out of repo I know this is a big change."*
+
+**Decision:** `claude-board` ships the daemon, the shim, the protocol and the shared prose
+checker. It ships **no callers**. `commands/grill.md` is deleted from the repo and lives only
+at `~/.claude/commands/grill.md`; `install.sh` drops its third install step and no longer
+requires that file to exist. Skills and commands are personal, versioned in `~/.claude`'s own
+git repo, and evolve on their own schedule.
+
+**Consequences:** The repo gets a clean boundary — one artifact, one job — and callers stop
+being coupled to this project's release cycle. What it costs is the thing that made the
+boundary safe: `test/check-grill.mjs` is the only check in this repo that binds prose to
+mechanism, and its subject leaves. After the move, **nothing in this repo's suite proves any
+prose matches the shim**; the repo ships a library and trusts callers to run it. That inverts
+the dependency too — personal skills now import a path inside this repo and stop working
+standalone if it moves. `SPEC_MIGRATION.md` criterion 12 owns that seam and round 10 left it
+`deferred`, so the shape is chosen but not settled.
+Rejected: callers move IN (checkable in CI, but this repo starts shipping ~110KB of templates
+it did not author, and your skills couple to its releases); rejected: the status quo, one
+caller in and five out, which is a rule with no principle behind it.
+
+**Status: proposed, not accepted.** Nothing has moved yet: `commands/grill.md` is still in the
+repo and `install.sh` still installs it. Accepting means doing the move, the `install.sh`
+edit, and answering criterion 12 in the same change — otherwise the repo loses its only prose
+binding and gains nothing in exchange.

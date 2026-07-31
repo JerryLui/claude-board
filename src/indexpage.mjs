@@ -31,15 +31,31 @@ export function folderName(cwd) {
   return path.basename(cwd) || cwd;
 }
 
-/** A question block counts as pending until it has an *answered* entry: missing
- * (never submitted), explicit `unanswered`, and `deferred` are all still open work
- * from the reviewer's point of view. */
+/** A question block is pending while the reviewer still owes it something:
+ * **missing** (never submitted) or **`deferred`** (they explicitly said "revisit
+ * later"). `answered` and `unanswered` are both finished states.
+ *
+ * `unanswered` used to count here, on the reasoning that a blank is still open
+ * work. It is not, and counting it produced a badge the reviewer could not clear
+ * by any legitimate action: leaving an optional catch-all ("anything else?")
+ * blank IS the answer to it, so the row sat at a permanent non-zero count for the
+ * whole life of the thread. Reported from real use — a fully-submitted 4-round
+ * board reading `5 pending`, which was 3 `unanswered` plus 2 `deferred`.
+ * PROTOCOL.md ("`status` is the only thing that says whether a question was
+ * decided") backs the split: `unanswered` is an explicit signal the reviewer sent,
+ * not an absence of one. `deferred` is the only status that means "come back".
+ *
+ * Known limitation, deliberately not papered over: a `deferred` question resolved
+ * in a LATER round — or outside the board entirely — still counts here, because
+ * nothing in the protocol can mark one settled. The count is honest about the
+ * board's own record rather than guessing at intent. */
 function pendingCount(board) {
   const answers = board.answers || {};
   return (board.blocks || []).filter(b => {
     if (b.kind !== 'question') return false;
     const a = answers[b.id];
-    return !a || a.status !== 'answered';
+    if (!a) return true;                    // never submitted
+    return a.status === 'deferred';         // explicitly "revisit later"
   }).length;
 }
 
