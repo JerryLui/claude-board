@@ -420,6 +420,16 @@ function renderWidget(block, answer, historical, board, commentsByBlock) {
   }
 }
 
+/** No commentButton/commentArea/pageDomPinLayer here (ADR "Commenting is
+ * confined to content blocks", 2026-08-01): `question` is a card around a
+ * widget, not content of its own -- a comment anchored to the whole card
+ * names no item the agent can act on, and says strictly less than the `note`
+ * field on the same card already says. The nested `context` blocks below
+ * still go through renderBlock and keep their own comment button/area/
+ * pin-layer untouched; only the wrapper loses the affordance, and nothing on
+ * the wrapper (prompt text, note field, defer button, status line) is content
+ * a page-scoped dom anchor was ever meant to target on its own, so its pin
+ * layer would be permanently empty markup here too. */
 function renderQuestionBlock(block, board, commentsByBlock, historical) {
   const answer = board.answers[block.id];
   const statusText = `status: ${answer ? answer.status : 'unanswered'}`;
@@ -429,7 +439,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
   return `
 <section class="block question-block" data-block-id="${escAttr(block.id)}" data-block-kind="question" data-widget="${escAttr(block.widget)}">
   <div class="question-main">
-    <div class="block-kicker">Question · ${escHtml(block.widget)} ${commentButton(block.id, 'block')}</div>
+    <div class="block-kicker">Question · ${escHtml(block.widget)}</div>
     <p class="question-prompt">${escHtml(block.prompt)}</p>
     ${widgetHtml}
     <div class="note-field">
@@ -440,10 +450,8 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
       <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
       <span class="answer-status" data-status="${escAttr(answer ? answer.status : 'unanswered')}">${escHtml(statusText)}</span>
     </div>
-    ${commentArea(block.id, commentsByBlock, historical)}
   </div>
   ${contextHtml ? `<div class="question-context">${contextHtml}</div>` : ''}
-  ${pageDomPinLayer(block.id)}
 </section>`;
 }
 
@@ -1002,25 +1010,24 @@ function renderCompareSide(side, board, commentsByBlock, historical) {
  * content anchors against that nested block's own pin-layer, found first by
  * closest('[data-block-id]') in src/ui.mjs.
  *
- * `.compare-side`/`.compare-grid` themselves are deliberately NOT chrome-excluded
- * (ANCHOR_CHROME_SELECTOR, src/ui.mjs): criterion 1 names "one side of a
- * comparison" as its own commentable unit, not just a wrapper around one, and a
- * side with no content (`renderCompareSide`'s "no content" fallback) has nothing
- * else to anchor to. So this section carries its own page-scoped
- * `pageDomPinLayer` (audit finding C4) -- without it, `directChildPinLayer`
- * (src/ui.mjs) found nothing here, `wirePageDomPins` skipped the section, and a
- * click on a compare side minted a `dom` anchor the server resolved (`resolved:
- * true`) with no pin anywhere on the page. */
+ * No commentButton/commentArea/pageDomPinLayer on the wrapper itself (ADR
+ * "Commenting is confined to content blocks", 2026-08-01): `compare` is a grid
+ * around two nested blocks, not content of its own. This is a narrowing from
+ * the audit-C4-era design this comment used to describe -- `.compare-side`'s
+ * label and a side with no content block (`renderCompareSide`'s "no content"
+ * fallback) were previously anchorable via a page-scoped pin-layer on this
+ * outer section; that is an accepted, documented cost now (a comparison can no
+ * longer be commented on as a whole, only one side or the other), not an
+ * oversight -- there is nothing left on this wrapper that could ever populate
+ * a pin here, so the layer itself would be permanently empty markup. */
 function renderCompareBlock(block, board, commentsByBlock, historical) {
   return `
 <section class="block compare-block" data-block-id="${escAttr(block.id)}" data-block-kind="compare">
-  <div class="block-kicker">Compare ${commentButton(block.id, 'block')}</div>
+  <div class="block-kicker">Compare</div>
   <div class="compare-grid">
     ${renderCompareSide(block.left, board, commentsByBlock, historical)}
     ${renderCompareSide(block.right, board, commentsByBlock, historical)}
   </div>
-  ${pageDomPinLayer(block.id)}
-  ${commentArea(block.id, commentsByBlock, historical)}
 </section>`;
 }
 

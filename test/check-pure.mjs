@@ -1917,22 +1917,24 @@ check('interactive controls inside a history round are rendered disabled, so a l
   assert.ok(/class="card-choice choice-single selected"[^>]*disabled/.test(historySection) || /disabled[^>]*class="card-choice choice-single selected"/.test(historySection));
 });
 
-check('a history round\'s comment form is disabled too, on every block kind -- not just the question widgets', () => {
+check('a history round\'s comment form is disabled too, on every CONTENT block kind -- not just markdown', () => {
   // Audit finding: commentArea() didn't originally take `historical` at all, so a
   // fresh page load of a board with a sent round left every comment form fully
   // live even though the round's answer controls were correctly disabled --
   // divergent from what the client-side collapse (markRoundHistory) already did.
-  // Covers markdown too, not just question, since renderBlock now threads
-  // `historical` into every block kind's commentArea call, not only question's.
+  // Covers code too, not just markdown, since renderBlock threads `historical`
+  // into every CONTENT kind's commentArea call. `question` is deliberately not
+  // one of the two fixture blocks any more (ADR "Commenting is confined to
+  // content blocks", 2026-08-01): it carries no commentArea at all, so it would
+  // prove nothing about historical-threading here.
   const board = createBoard({
     title: 'Comment form disabled',
     blocks: [
       { kind: 'markdown', text: '# Notes' },
-      { kind: 'question', prompt: 'Q1', widget: 'single', options: [{ label: 'Yes' }] },
+      { kind: 'code', text: 'const x = 1;', lang: 'javascript' },
     ],
   });
-  const q1 = board.blocks[1].id;
-  applySubmit(board, { action: 'send', answers: [{ id: q1, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   addRound(board, { blocks: [{ kind: 'markdown', text: '# more' }] });
 
   const html = renderBoardPage(board);
@@ -2018,6 +2020,140 @@ check('all five context kinds render into the page: markdown, code, mermaid, htm
   assert.ok(markup.includes('<div class="compare-label">After</div>'));
   assert.ok(markup.includes('old copy'));
   assert.ok(markup.includes('new copy'));
+});
+
+// --- ADR "Commenting is confined to content blocks", 2026-08-01 ------------------
+//
+// Two block kinds render no content of their own -- `question` is a card around
+// a widget, `compare` is a grid around two nested blocks -- and lose the
+// whole-block comment affordance entirely: no commentButton in the kicker, and
+// (since a button-less commentArea would just be dead, unreachable markup -- an
+// "Add a comment" input and empty comment-list with no button to open them, and
+// an empty page-scoped pin-layer nothing can ever populate, since the click
+// gesture over these two kinds is inert too) no commentArea/pageDomPinLayer
+// either. The four content kinds -- markdown, mermaid, html, code -- are
+// unaffected: same commentButton, same commentArea, same pin-layer as before
+// this ADR entry, on a block that renders nothing at all (criterion 7).
+
+check('criterion 2: a question block renders no comment button, no comment form, no comment area, and no page-scoped pin-layer', () => {
+  const board = createBoard({
+    title: 'No comment chrome on question',
+    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+  });
+  const qId = board.blocks[0].id;
+  const markup = renderedMarkup(renderBoardPage(board));
+  // Nothing else on this single-block board, so the first </section> reached is
+  // this block's own closing tag (no nested context here to worry about).
+  const section = markup.slice(markup.indexOf('<section class="block question-block"'), markup.indexOf('</section>') + '</section>'.length);
+
+  assert.ok(!section.includes('comment-btn'), 'a question block must render no .comment-btn at all');
+  assert.ok(!section.includes(`comment-form-${qId}`), 'a question block must render no comment-form for its own id');
+  assert.ok(!section.includes(`comment-target-${qId}`), 'a question block must render no comment-target for its own id');
+  assert.ok(!section.includes(`comment-list-${qId}`), 'a question block must render no comment-list for its own id');
+  // Every content kind's own top-level section still carries a direct-child
+  // .pin-layer (pageDomPinLayer) -- a question's wrapper carries none, since
+  // nothing can ever populate one: no button/gesture ever mints an anchor
+  // against the wrapper itself any more.
+  assert.ok(!section.includes('class="pin-layer"'), 'a question block\'s own section must carry no page-scoped pin-layer');
+});
+
+check('criterion 2: a compare block renders no comment button, no comment form, no comment area, and no page-scoped pin-layer on the wrapper -- only its two nested sides may carry one', () => {
+  const board = createBoard({
+    title: 'No comment chrome on compare',
+    blocks: [{
+      kind: 'compare',
+      left: { label: 'Before', block: { kind: 'markdown', text: '# Before' } },
+      right: { label: 'After', block: { kind: 'markdown', text: '# After' } },
+    }],
+  });
+  const compareId = board.blocks[0].id;
+  const markup = renderedMarkup(renderBoardPage(board));
+  const outerKicker = /<section class="block compare-block"[^>]*>\s*<div class="block-kicker">([\s\S]*?)<\/div>/.exec(markup)[1];
+
+  assert.equal(outerKicker.trim(), 'Compare', 'the compare wrapper\'s own kicker must carry no comment button, just its label');
+  assert.ok(!markup.includes(`comment-form-${compareId}`), 'a compare block must render no comment-form for its own id');
+  assert.ok(!markup.includes(`comment-target-${compareId}`), 'a compare block must render no comment-target for its own id');
+  assert.ok(!markup.includes(`comment-list-${compareId}`), 'a compare block must render no comment-list for its own id');
+  // No direct-child pin-layer between the wrapper's own kicker and its grid --
+  // the only place a page-scoped pin-layer belonging to the OUTER section
+  // (rather than one of the two nested sides) could ever sit.
+  const wrapperStart = markup.indexOf(`data-block-id="${compareId}" data-block-kind="compare"`);
+  const gridStart = markup.indexOf('class="compare-grid"', wrapperStart);
+  assert.ok(!markup.slice(wrapperStart, gridStart).includes('class="pin-layer"'), 'no pin-layer between the compare wrapper\'s kicker and its grid');
+});
+
+check('criterion 1 + the ADR\'s wrapper/content split: markdown, mermaid, html and code keep their comment button, form and pin-layer exactly as before -- unaffected by the question/compare narrowing', () => {
+  const board = createBoard({
+    title: 'Content kinds keep their button',
+    blocks: [
+      { kind: 'markdown', text: '# Prose' },
+      { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
+      { kind: 'html', html: '<div class="mock"></div>' },
+      { kind: 'code', text: 'const x = 1;', lang: 'javascript' },
+    ],
+  });
+  const [mdId, mermaidId, htmlId, codeId] = board.blocks.map(b => b.id);
+  const markup = renderedMarkup(renderBoardPage(board));
+
+  for (const id of [mdId, mermaidId, htmlId, codeId]) {
+    assert.ok(markup.includes(`data-block-id="${id}" data-anchor-kind="block"`), `expected a whole-block comment button for ${id}`);
+    assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${id}"`), `expected a comment-form for ${id}`);
+    assert.ok(markup.includes(`id="comment-target-${id}"`), `expected a comment-target for ${id}`);
+    assert.ok(markup.includes(`id="comment-list-${id}"`), `expected a comment-list for ${id}`);
+  }
+});
+
+check('criterion 7: the whole-block comment button still opens the comment form when a content block has nothing to point at -- a failed reference, and an empty stage', () => {
+  // A reference that failed to resolve: markdown and code both render a
+  // .resolve-error note instead of content, but the button/form survive --
+  // they live in the kicker/commentArea, outside the `block.error` branch.
+  const board = createBoard({
+    title: 'Blank content, button still works',
+    cwd: fixturesDir,
+    blocks: [
+      { kind: 'code', source: { path: 'does-not-exist.js' } },
+      { kind: 'html', html: '' }, // a stage that came up blank
+    ],
+  });
+  const codeId = board.blocks[0].id;
+  const htmlId = board.blocks[1].id;
+  const markup = renderedMarkup(renderBoardPage(board));
+
+  assert.ok(markup.includes('class="resolve-error"'), 'setup failure: the code block must have failed to resolve');
+  assert.ok(markup.includes(`data-block-id="${codeId}" data-anchor-kind="block"`), 'a code block with a failed reference must still render its whole-block comment button');
+  assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${codeId}"`), 'and still render the form that button opens');
+
+  assert.ok(markup.includes(`data-block-id="${htmlId}" data-anchor-kind="block"`), 'an html block with a blank stage must still render its whole-block comment button');
+  assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${htmlId}"`), 'and still render the form that button opens');
+});
+
+check('a question\'s nested context block and a compare side\'s nested block keep their own comment button/form/pin-layer untouched -- the rule is about the wrapper, not what is inside it', () => {
+  const board = createBoard({
+    title: 'Nested blocks stay commentable',
+    blocks: [
+      {
+        kind: 'question',
+        prompt: 'Ship it?',
+        widget: 'single',
+        options: [{ label: 'Yes' }],
+        context: [{ kind: 'markdown', text: '# Context' }],
+      },
+      {
+        kind: 'compare',
+        left: { label: 'Before', block: { kind: 'markdown', text: '# Before' } },
+        right: { label: 'After', block: { kind: 'markdown', text: '# After' } },
+      },
+    ],
+  });
+  const contextId = board.blocks[0].context[0].id;
+  const leftId = board.blocks[1].left.block.id;
+  const rightId = board.blocks[1].right.block.id;
+  const markup = renderedMarkup(renderBoardPage(board));
+
+  for (const id of [contextId, leftId, rightId]) {
+    assert.ok(markup.includes(`data-block-id="${id}" data-anchor-kind="block"`), `expected a whole-block comment button for nested block ${id}`);
+    assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${id}"`), `expected a comment-form for nested block ${id}`);
+  }
 });
 
 // --- ticket 06: numbered pins on the element, in html-stage and mermaid blocks ----

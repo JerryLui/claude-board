@@ -1999,6 +1999,30 @@ export const ui = `
     return el.closest ? el.closest('[data-block-id]') : null;
   }
 
+  // ADR "Commenting is confined to content blocks" (2026-08-01): question and
+  // compare are wrappers, not content -- a comment anchored to either names no
+  // item the agent can act on. This is a kind check on the ROOT the click/hover
+  // actually landed on, not a chrome-selector addition, because a chrome
+  // selector can only exclude specific elements *within* a section; it can't
+  // stop the section itself from being a valid anchorRootFor result. And
+  // anchorRootFor's closest('[data-block-id]') already finds the NESTED
+  // section first, so this only ever fires when 'root' IS the question/compare
+  // section itself: a click on a question's prompt, an option card, a rank
+  // item, the answer textarea, the note field or the status line, or on a
+  // compare's kicker, grid, a side's label, or a side with no content block,
+  // all resolve 'root' to that wrapper section directly, since none of them
+  // sit inside a nested [data-block-id] of their own. A block nested one level
+  // in -- a question's context entry, a compare side's content -- renders
+  // through the same renderBlock dispatch as every other block (src/render.mjs)
+  // and so carries its OWN data-block-id/data-block-kind, which
+  // closest('[data-block-id]') finds first, before ever reaching the wrapper;
+  // its root's kind is markdown/mermaid/html/code, not question/compare, so it
+  // stays fully live and untouched by this check.
+  var NON_ANCHORABLE_BLOCK_KINDS = { question: true, compare: true };
+  function isNonAnchorableRoot(root) {
+    return !!(root && NON_ANCHORABLE_BLOCK_KINDS[root.getAttribute('data-block-kind')]);
+  }
+
   var anchorHovered = null;
   function clearAnchorHover() {
     if (anchorHovered && anchorHovered.classList) {
@@ -2017,7 +2041,7 @@ export const ui = `
     clearAnchorHover();
     if (!el || el.nodeType !== 1 || isAnchorChrome(el)) return;
     var root = anchorRootFor(el);
-    if (!root || el === root) return;
+    if (!root || el === root || isNonAnchorableRoot(root)) return;
     // Marks ONLY ev.target (criterion 2: "that element, and not its ancestors") --
     // never walked up, exactly like the iframe's own hover handler above.
     anchorHovered = el;
@@ -2037,7 +2061,7 @@ export const ui = `
     var el = ev.target;
     if (!el || el.nodeType !== 1 || isAnchorChrome(el)) return;
     var root = anchorRootFor(el);
-    if (!root || el === root) return;
+    if (!root || el === root || isNonAnchorableRoot(root)) return;
     var steps = buildSteps(root, el);
     if (!steps || !steps.length) return;
     // Stops an <a href> from navigating, a submit-shaped element from submitting,

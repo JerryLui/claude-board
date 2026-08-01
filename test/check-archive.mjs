@@ -18,7 +18,7 @@
 //
 // The board carries one already-resolved comment per acceptance-criterion-1
 // content kind (prose, a list item, a table cell, a line of a code reference, one
-// side of a comparison, a question's own widget, a hand-mocked stage, the
+// side of a comparison, a question's own `context` entry, a hand-mocked stage, the
 // diagram), each minted through the REAL client script in a separate, ordinary
 // (`http:`) session first -- exactly test/check-http.mjs's own ticket-04 round-trip
 // pattern -- so every ref/hint this file submits is a genuine one the client would
@@ -28,6 +28,14 @@
 // submitted server-side with no HTTP involved (src/board.mjs's own applySubmit --
 // there is no daemon in this file, on purpose), then re-rendered, written to disk,
 // and read back for the actual archive pass.
+//
+// ADR.md entry 6 ("Commenting is confined to content blocks", 2026-08-01):
+// `question` and `compare` lost the comment affordance on their own wrapper
+// entirely -- no button, no form, no page-scoped pin-layer of their own. The
+// question fixture below carries a `context` entry precisely so this file still
+// covers a page-scoped anchor nested one level inside a question -- the block
+// this ADR says stays fully live -- rather than the question's own widget, which
+// no longer has anywhere to mint a comment onto at all.
 //
 // Mermaid is ticket 05's territory (wireMermaidBlock, renderMermaidPins,
 // renderMermaidBlocks, the `mermaid` anchor kind, the `body:not(.readonly)
@@ -196,7 +204,18 @@ const board = createBoard({
     },
     { kind: 'html', html: '<div class="mock"><button>Launch</button></div>' },
     { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' },
-    { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+    {
+      kind: 'question',
+      prompt: 'Pick one',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      // ADR.md entry 6: the wrapper itself lost the comment affordance, but a
+      // `context` entry renders through the same renderBlock dispatch as any
+      // other block, with its own id and its own comment area -- the still-live
+      // case this fixture needs to cover a page-scoped anchor nested inside a
+      // question.
+      context: [{ kind: 'markdown', text: 'Context for the question, nested one level in.' }],
+    },
   ],
 });
 const mdBlockId = board.blocks[0].id;
@@ -206,6 +225,7 @@ const compareRightId = board.blocks[2].right.block.id;
 const stageBlockId = board.blocks[3].id;
 const mermaidBlockId = board.blocks[4].id;
 const questionId = board.blocks[5].id;
+const questionContextId = board.blocks[5].context[0].id;
 
 // Mint every `dom` anchor through the real gesture, in an ordinary (`http:`) live
 // session -- comment mode on, one click per content kind -- exactly as a reviewer
@@ -219,8 +239,8 @@ const listItem = mintDoc.querySelectorAll('.md-content li').find(el => el.textCo
 const tableCell = mintDoc.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42');
 const codeLine = mintDoc.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;');
 const compareProse = mintDoc.querySelectorAll('.compare-side .md-content p').find(el => el.textContent.indexOf('old copy') !== -1);
-const option = mintDoc.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
-assert.ok(prose && listItem && tableCell && codeLine && compareProse && option, 'setup failure: could not find every fixture element to mint an anchor on');
+const questionContext = mintDoc.querySelectorAll('.question-context .md-content p').find(el => el.textContent.indexOf('Context for the question') !== -1);
+assert.ok(prose && listItem && tableCell && codeLine && compareProse && questionContext, 'setup failure: could not find every fixture element to mint an anchor on');
 
 const mintedPairs = [
   captureAnchor(mintDoc, prose, mdBlockId, 'prose comment'),
@@ -228,7 +248,7 @@ const mintedPairs = [
   captureAnchor(mintDoc, tableCell, mdBlockId, 'table-cell comment'),
   captureAnchor(mintDoc, codeLine, codeBlockId, 'code-line comment'),
   captureAnchor(mintDoc, compareProse, compareLeftId, 'compare-side comment'),
-  captureAnchor(mintDoc, option, questionId, 'question-widget comment'),
+  captureAnchor(mintDoc, questionContext, questionContextId, 'question-context comment'),
 ];
 
 const compareFrame = mintDoc.querySelectorAll('.html-stage')[0];
@@ -368,11 +388,11 @@ function loadArchiveThemed(storage) {
 // 1. Every pin in the right place, including a lost one.
 // =================================================================================
 
-check('archive: the page-scoped pins (prose, list item, table cell, code line, compare side, question widget) all land resolved, in their own block\'s pin-layer', () => {
+check('archive: the page-scoped pins (prose, list item, table cell, code line, compare side, a question\'s own context entry) all land resolved, in their own block\'s pin-layer', () => {
   const { document, restore } = loadArchive();
   try {
     assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
-    const pageScoped = mintedPairs.filter(p => [mdBlockId, codeBlockId, compareLeftId, questionId].includes(p.blockId));
+    const pageScoped = mintedPairs.filter(p => [mdBlockId, codeBlockId, compareLeftId, questionContextId].includes(p.blockId));
     const byBlock = new Map();
     for (const p of pageScoped) byBlock.set(p.blockId, (byBlock.get(p.blockId) || 0) + 1);
     for (const [blockId, expectedCount] of byBlock) {
@@ -577,7 +597,7 @@ check('archive: hovering inside the isolated html-stage document adds no outline
   } finally { restore(); }
 });
 
-check('archive: clicking prose, a list item, a table cell, a code line, a compare side, and a question widget opens no comment form', () => {
+check('archive: clicking prose, a list item, a table cell, a code line, a compare side, and a question\'s own context entry opens no comment form', () => {
   const { document, restore } = loadArchive();
   try {
     const cases = [
@@ -586,7 +606,7 @@ check('archive: clicking prose, a list item, a table cell, a code line, a compar
       [document.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42'), mdBlockId],
       [document.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;'), codeBlockId],
       [document.querySelectorAll('.compare-side .md-content p').find(el => el.textContent.indexOf('old copy') !== -1), compareLeftId],
-      [document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1), questionId],
+      [document.querySelectorAll('.question-context .md-content p').find(el => el.textContent.indexOf('Context for the question') !== -1), questionContextId],
     ];
     for (const [el, blockId] of cases) {
       assert.ok(el, 'setup failure: a click target was not found');
@@ -594,6 +614,28 @@ check('archive: clicking prose, a list item, a table cell, a code line, a compar
       const form = document.getElementById('comment-form-' + blockId);
       assert.equal(form.classList.contains('open'), false, `clicking must not open block ${blockId}'s comment form in a read-only archive`);
     }
+  } finally { restore(); }
+});
+
+// ADR.md entry 6 ("Commenting is confined to content blocks", 2026-08-01): this
+// used to also assert that clicking the question's own `.choice-single` widget
+// opened no comment form in the archive -- one more case alongside the others
+// above. That assumed a comment-form existed for the question block at all,
+// closed pending a click; there is now no such element, live or archived, since
+// renderQuestionBlock no longer emits a commentButton/commentArea for the
+// wrapper. Retired as a per-element case in the loop above (nothing there can
+// distinguish "readonly disabled it" from "there was never anything to
+// disable") and replaced with the structural assertion it actually reduces to:
+// no comment-form exists for the question wrapper at all, in the archive same
+// as live.
+check('archive: a question wrapper carries no comment-form element at all -- not merely a disabled/closed one (ADR.md entry 6)', () => {
+  const { document, restore } = loadArchive();
+  try {
+    assert.equal(document.getElementById('comment-form-' + questionId), null, 'a question block must render no comment-form of its own, in the archive same as live');
+    const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
+    assert.ok(yes, 'setup failure: no choice-single option rendered');
+    yes.dispatchEvent(new StandInEvent('click'));
+    assert.equal(document.getElementById('comment-form-' + questionId), null, 'clicking the question\'s own widget must not conjure a comment-form into existence either');
   } finally { restore(); }
 });
 

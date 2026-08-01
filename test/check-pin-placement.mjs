@@ -77,11 +77,29 @@ function clickAndSubmit(document, el, blockId, text) {
   return form;
 }
 
-// --- C4: a compare block's own chrome (.compare-side/.compare-grid) --------------
+// --- C4 (retired by ADR.md entry 6): a compare side's own chrome ----------------
+//
+// This check used to prove that clicking a compare side's own chrome (not the
+// content nested inside it) minted a page-scoped `dom` anchor into the OUTER
+// compare section's own pin-layer. ADR.md entry 6, "Commenting is confined to
+// content blocks" (2026-08-01), reverses that: `compare` is a wrapper, not
+// content, and loses the comment affordance entirely, including this outer
+// pin-layer -- src/render.mjs's renderCompareBlock no longer renders one at
+// all -- and the click-to-anchor gesture over the wrapper's own surfaces,
+// which src/ui.mjs's isNonAnchorableRoot now stands down. The exact case this
+// check exercised -- a compare side's own chrome being anchorable, button or
+// no button -- is named in the ADR as "the middle position on `compare`
+// (button gone, side-level clicks kept)... rejected as the one option
+// inconsistent with every other wrapper". Nothing in the old assertion
+// survives as a positive case, so it is retired outright (same style as
+// ADR.md entry 5's retirement of test/check-grill.mjs's assertions) and
+// replaced below with a check that the new behaviour actually holds, plus a
+// re-pointed case proving the wrapper's own nested content did NOT lose the
+// guarantee this file exists to protect.
 
-check('C4: clicking a compare side\'s own chrome (not content inside it) is genuinely anchorable -- the pin lands in the OUTER compare section\'s own pin-layer, positioned at the clicked side, not lost with resolved:true and no pin anywhere', () => {
+check('C4 (retired by ADR.md entry 6): a compare block renders no page-scoped pin-layer of its own, and clicking a side\'s own chrome mints no comment at all', () => {
   const board = createBoard({
-    title: 'Ticket 09 -- a compare side is its own commentable unit',
+    title: 'Ticket 09 / ADR entry 6 -- a compare wrapper has no comment affordance of its own',
     blocks: [{
       kind: 'compare',
       left: { label: 'Before', block: { kind: 'markdown', text: 'old copy' } },
@@ -97,22 +115,61 @@ check('C4: clicking a compare side\'s own chrome (not content inside it) is genu
   const side = document.querySelectorAll('.compare-side')[0];
   assert.ok(side, 'setup failure: no .compare-side rendered');
 
-  const layer = directChildPinLayer(section);
-  assert.ok(layer, 'setup failure: the compare block has no direct-child page-scoped pin-layer -- C4 is unfixed');
+  assert.equal(directChildPinLayer(section), null, 'a compare block must no longer carry a direct-child page-scoped pin-layer of its own (ADR.md entry 6)');
+  assert.equal(document.getElementById('comment-form-' + compareBlockId), null, 'a compare block must no longer carry a comment-form of its own');
+
+  // Click the side's own chrome -- its label, structural not authored --
+  // rather than anything nested inside it.
+  const label = side.querySelector('.compare-label');
+  assert.ok(label, 'setup failure: no .compare-label rendered');
+  label.dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(document.getElementById('comment-form-' + compareBlockId), null, 'clicking a compare side\'s own chrome must mint no comment form -- the gesture is inert over the wrapper\'s own surfaces');
+  assert.equal(document.querySelectorAll('.anchor-pin').length, 0, 'clicking a compare side\'s own chrome must draw no pin anywhere on the page');
+});
+
+check('C4, re-pointed: a block NESTED inside a compare side is still genuinely anchorable in ITS OWN pin-layer -- gating the compare wrapper did not take its child with it', () => {
+  const board = createBoard({
+    title: 'Ticket 09 -- a compare side\'s nested content block stays commentable',
+    blocks: [{
+      kind: 'compare',
+      left: { label: 'Before', block: { kind: 'markdown', text: 'old copy' } },
+      right: { label: 'After', block: { kind: 'markdown', text: 'new copy' } },
+    }],
+  });
+  const document = loadBoard(renderBoardPage(board));
+  enableCommentMode(document);
+
+  const compareSection = document.querySelector('.compare-block');
+  assert.ok(compareSection, 'setup failure: no .compare-block section rendered');
+  const nestedSection = compareSection.querySelector('.markdown-block');
+  assert.ok(nestedSection, 'setup failure: no nested .markdown-block rendered inside the compare side');
+  const nestedBlockId = nestedSection.getAttribute('data-block-id');
+  assert.notEqual(nestedBlockId, board.blocks[0].id, 'setup failure: the nested block must carry its OWN id, not the compare wrapper\'s');
+
+  const layer = directChildPinLayer(nestedSection);
+  assert.ok(layer, 'setup failure: the nested markdown block has no direct-child page-scoped pin-layer of its own');
   assert.equal(layer.querySelectorAll('.anchor-pin').length, 0, 'setup failure: a pin already exists before anything was queued');
 
-  clickAndSubmit(document, side, compareBlockId, 'a comment on the whole side');
+  const content = nestedSection.querySelector('.md-content');
+  assert.ok(content, 'setup failure: no .md-content rendered inside the nested markdown block');
+
+  clickAndSubmit(document, content, nestedBlockId, 'a comment on the nested block itself');
 
   const pins = layer.querySelectorAll('.anchor-pin');
-  assert.equal(pins.length, 1, `expected exactly one pin in the compare block's OWN pin-layer, got ${pins.length} -- a resolved comment with no pin anywhere on the page is exactly the C4 defect`);
+  assert.equal(pins.length, 1, `expected exactly one pin in the nested block's OWN pin-layer, got ${pins.length}`);
   assert.equal(pins[0].classList.contains('pin-lost'), false);
 
-  const sideBox = side.getBoundingClientRect();
-  const sectionBox = section.getBoundingClientRect();
-  const expectedLeft = sideBox.left - sectionBox.left;
-  const expectedTop = sideBox.top - sectionBox.top;
-  assert.equal(pins[0].style.left, expectedLeft + 'px', `expected the pin positioned at the compare side itself (${expectedLeft}px), got ${JSON.stringify(pins[0].style.left)}`);
-  assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the compare side itself (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)}`);
+  const elBox = content.getBoundingClientRect();
+  const sectionBox = nestedSection.getBoundingClientRect();
+  const expectedLeft = elBox.left - sectionBox.left;
+  const expectedTop = elBox.top - sectionBox.top;
+  assert.equal(pins[0].style.left, expectedLeft + 'px', `expected the pin positioned at the nested content itself (${expectedLeft}px), got ${JSON.stringify(pins[0].style.left)}`);
+  assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the nested content itself (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)}`);
+
+  // And the OUTER compare section still has no pin-layer of its own -- the
+  // nested block's pin is not mistakenly attributed to the wrapper.
+  assert.equal(directChildPinLayer(compareSection), null, 'the compare wrapper must still carry no page-scoped pin-layer of its own even once its nested content has a live pin');
 });
 
 // --- C4: a markdown block's own resolve-error branch -----------------------------

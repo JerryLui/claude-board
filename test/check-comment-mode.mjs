@@ -10,10 +10,15 @@
 // Covers, against the REAL src/ui.mjs client script run in the stand-in:
 //   - criterion 1 (partial): one content kind per acceptance-criterion example --
 //     prose, a list item, a table cell, a line of a code reference, one side of a
-//     comparison, a question's own widget -- each clicked in comment mode, each
-//     opening its block's comment form with a `dom` reference and a hint naming
-//     it. Table-driven, over the SAME rendered board, rather than six near-copies
-//     of check-click.mjs.
+//     comparison -- each clicked in comment mode, each opening its block's
+//     comment form with a `dom` reference and a hint naming it. Table-driven,
+//     over the SAME rendered board, rather than six near-copies of
+//     check-click.mjs. ("a question's own widget" used to be a seventh, opening
+//     row here -- moved out and inverted by the ADR "Commenting is confined to
+//     content blocks" (2026-08-01), further down: a question is a wrapper, not
+//     content, so that same click now mints nothing. See that section for the
+//     full question/compare wrapper-gating coverage, including nested blocks
+//     staying live one level in.)
 //   - criterion 2: with comment mode on, hovering marks the exact element under
 //     the cursor and never an ancestor.
 //   - criterion 3: with comment mode OFF (the default -- these checks never touch
@@ -173,13 +178,6 @@ const KIND_CASES = [
     // nested block's kind noun -- see src/anchor.mjs's design comment).
     hintIncludes: ['old copy', 'before', 'block'],
   },
-  {
-    name: "a question's own widget",
-    blockId: choiceBlock.id,
-    find: doc => doc.querySelectorAll('.choice-single')
-      .find(el => el.textContent.indexOf('Yes') !== -1),
-    hintIncludes: ['yes'],
-  },
 ];
 
 for (const kindCase of KIND_CASES) {
@@ -288,8 +286,17 @@ check('comment mode off: choosing a single-select option still selects it (and d
   yes.dispatchEvent(new StandInEvent('click'));
 
   assert.equal(yes.classList.contains('selected'), true, 'clicking an option with comment mode off must still select it');
-  const form = document.getElementById('comment-form-' + choiceBlock.id);
-  assert.equal(form.classList.contains('open'), false, 'choosing an option must not open a comment form when comment mode is off');
+  // Ticket 01 (ADR "Commenting is confined to content blocks", sibling ticket,
+  // src/render.mjs): a question block renders no comment-form of its own any
+  // more at all, so there is no single element left to ask "did THIS one stay
+  // closed". Proven instead the same way the wrapper-gating checks further
+  // down this file prove it -- driving the real gesture and checking its
+  // effect on the page as a whole, not on markup that may or may not exist:
+  // no comment form anywhere ends up open, and nothing gets queued.
+  assert.equal(document.querySelectorAll('.comment-form.open').length, 0,
+    'choosing an option must not open any comment form when comment mode is off');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0,
+    'choosing an option must mint no comment when comment mode is off');
 });
 
 check('comment mode off: typing into a text-answer widget still records the text', () => {
@@ -652,21 +659,41 @@ check('comment mode: clicking a block\'s own "comment" kicker chrome (not the bu
     'clicking the kicker chrome around the comment button (not the button itself) must not open any comment form -- with the kicker unexcluded, the generic listener mints a dom anchor against it instead, since the kicker itself carries no data-block-id to trip the self-guard the button has');
 });
 
-check('comment mode: clicking a compare side\'s own label opens no comment form -- it is structural chrome, not authored content. Its nearest [data-block-id] ancestor is the COMPARE block\'s own section (not either side\'s nested block), so an ablated selector mints a dom anchor there (ablation: dropping .compare-label from ANCHOR_CHROME_SELECTOR)', () => {
+// Ablation note (ticket 02, ADR "Commenting is confined to content blocks"):
+// dropping `.compare-label` from ANCHOR_CHROME_SELECTOR used to be the thing
+// that made this check fail -- .compare-label's nearest [data-block-id]
+// ancestor is the compare block's own OUTER section (it sits inside
+// .compare-side, which carries no data-block-id of its own), so an unexcluded
+// click there minted a dom anchor against the compare block itself. That
+// ablation is now dead: `isNonAnchorableRoot` (src/ui.mjs) excludes any click
+// whose resolved root's own data-block-kind is `compare` (or `question`)
+// regardless of ANCHOR_CHROME_SELECTOR, so a click on `.compare-label` still
+// mints nothing even with the selector entry removed -- confirmed by actually
+// running that ablation against this check post-ticket-02: nothing in the
+// suite goes red. Reported rather than silently dropped, exactly like the
+// `.round-label` finding a few checks below (which was already dead for an
+// unrelated reason -- anchorRootFor finding no block there at all). What IS
+// checked below is the real, current, correct behaviour, proved the same way
+// the wrapper-gating checks further down this file do: driving the gesture
+// and checking the page as a whole, not a specific block's form (the compare
+// block itself renders no comment-form any more either, sibling ticket 01).
+check('comment mode: clicking a compare side\'s own label opens no comment form anywhere on the page and mints no comment', () => {
   const document = loadBoard();
   enableCommentMode(document);
   const label = document.querySelector('.compare-label');
   assert.ok(label, 'setup failure: no .compare-label rendered');
 
+  label.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(label.classList.contains('cb-anchor-hover'), false,
+    'hovering a compare side\'s label must show no hover affordance');
+
   label.dispatchEvent(new StandInEvent('click'));
 
-  const compareForm = document.getElementById('comment-form-' + compareBlock.id);
-  const leftForm = document.getElementById('comment-form-' + compareBlock.left.block.id);
-  const rightForm = document.getElementById('comment-form-' + compareBlock.right.block.id);
-  assert.equal(compareForm.classList.contains('open'), false,
-    'clicking a compare side\'s label must not open the outer compare block\'s own comment form -- .compare-label\'s nearest [data-block-id] ancestor is the compare block\'s SECTION, not either side, so this (not the side forms) is where an unexcluded click would mint a dom anchor');
-  assert.equal(leftForm.classList.contains('open'), false);
-  assert.equal(rightForm.classList.contains('open'), false);
+  const anyOpen = document.querySelectorAll('.comment-form').some(f => f.classList.contains('open'));
+  assert.equal(anyOpen, false,
+    'clicking a compare side\'s label must not open any block\'s comment form');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0,
+    'clicking a compare side\'s label must mint no comment at all');
 });
 
 // NOT independently observable through a click, and reported rather than papered
@@ -975,6 +1002,262 @@ check('criterion 12 (page-scoped half): an element carrying a SENT dom comment i
   assert.equal(lines[1].classList.contains('cb-anchor-hover'), true, 'a neighbouring line must still hover as a target');
   lines[1].dispatchEvent(new StandInEvent('click'));
   assert.equal(form.classList.contains('open'), true, 'and must still open the comment form when clicked');
+});
+
+// =================================================================================
+// ADR "Commenting is confined to content blocks" (2026-08-01): `question` and
+// `compare` render no content of their own -- a card around a widget, a grid
+// around two nested blocks. With comment mode on, THEIR OWN surfaces must stop
+// inviting a click or minting a comment: no hover affordance, no anchor. A block
+// nested one level in -- a question's `context` entry, a compare side's content
+// -- renders through the same renderBlock dispatch as every other block and
+// keeps its own [data-block-id]/[data-block-kind], so it stays fully live.
+// `markdown`, `mermaid`, `html` and `code` are unaffected -- every check above
+// this section already proves that, unchanged.
+//
+// Driven the same way as the rest of this file: the real click/mouseover
+// gesture through the real src/ui.mjs, never the gating logic underneath it.
+// =================================================================================
+
+const WRAPPER_BOARD = createBoard({
+  title: 'Ticket 02 -- question/compare are wrappers, not content',
+  blocks: [
+    {
+      kind: 'question',
+      prompt: 'Pick a favorite',
+      widget: 'single',
+      options: [{ label: 'Red' }, { label: 'Blue' }],
+      context: [{ kind: 'markdown', text: 'Some supporting prose.' }],
+    },
+    {
+      kind: 'question',
+      prompt: 'Order these',
+      widget: 'rank',
+      options: [{ label: 'First' }, { label: 'Second' }, { label: 'Third' }],
+    },
+    {
+      kind: 'compare',
+      left: { label: 'Left', block: { kind: 'markdown', text: 'left side prose' } },
+      right: { label: 'Right' }, // no `block` -- "a side that carries no content block"
+    },
+  ],
+});
+const [wrapperChoiceBlock, wrapperRankBlock, wrapperCompareBlock] = WRAPPER_BOARD.blocks;
+const wrapperContextBlock = wrapperChoiceBlock.context[0];
+const wrapperCompareLeftBlock = wrapperCompareBlock.left.block;
+
+/** Fresh document/window for WRAPPER_BOARD, same pattern as loadBoard() -- never
+ * shared across checks. */
+function loadWrapperBoard() {
+  const document = parseHTML(renderBoardPage(WRAPPER_BOARD));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', ui)(document, window, { protocol: 'http:' });
+  return document;
+}
+
+/** Hovers then clicks `el` in comment mode and asserts BOTH halves of "mints no
+ * comment and shows no hover affordance": no cb-anchor-hover class from the
+ * hover, and no comment minted from the click. Checked over the page as a
+ * whole (no comment-form anywhere ends up open, no comment gets queued) rather
+ * than by looking up a specific block's own comment-form element -- question
+ * and compare blocks render none at all any more (sibling ticket 01, ADR
+ * "Commenting is confined to content blocks"), so a blockId-keyed lookup would
+ * find null on exactly the wrapper surfaces this helper exists to check. */
+function assertNotAnchorable(document, el, name) {
+  assert.ok(el, `setup failure: could not find the fixture element for "${name}"`);
+
+  el.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(el.classList.contains('cb-anchor-hover'), false,
+    `hovering "${name}" in comment mode must show no hover affordance`);
+
+  el.dispatchEvent(new StandInEvent('click'));
+  const anyOpen = document.querySelectorAll('.comment-form').some(f => f.classList.contains('open'));
+  assert.equal(anyOpen, false,
+    `clicking "${name}" in comment mode must not open any comment form`);
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0,
+    `clicking "${name}" in comment mode must mint no comment at all`);
+}
+
+// --- a question block's own surface: prompt, option card, note field, status --
+// line, rank item, answer textarea (the six the ADR names by name) -------------
+
+const QUESTION_WRAPPER_CASES = [
+  { name: "a question's prompt", find: doc => doc.querySelector('.question-prompt') },
+  {
+    name: 'an option card',
+    find: doc => doc.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Red') !== -1),
+  },
+  { name: 'the note field', find: doc => doc.querySelector('textarea[data-note-for]') },
+  { name: 'the status line', find: doc => doc.querySelector('.answer-status') },
+];
+
+for (const c of QUESTION_WRAPPER_CASES) {
+  check(`comment mode: clicking a question block's own ${c.name} mints no comment and shows no hover affordance`, () => {
+    const document = loadWrapperBoard();
+    enableCommentMode(document);
+    assertNotAnchorable(document, c.find(document), c.name);
+  });
+}
+
+check("comment mode: clicking a question block's own rank item mints no comment and shows no hover affordance", () => {
+  const document = loadWrapperBoard();
+  enableCommentMode(document);
+  assertNotAnchorable(document, document.querySelector('.rank-list li'), 'a rank item');
+});
+
+check("comment mode: clicking a question block's own answer textarea mints no comment and shows no hover affordance", () => {
+  const document = loadBoard(); // the shared fixture's text-widget question
+  enableCommentMode(document);
+  const textarea = document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]');
+  assertNotAnchorable(document, textarea, 'the answer textarea');
+});
+
+// --- a compare block's own wrapper: kicker, grid, a side's label, a side with --
+// no content block --------------------------------------------------------------
+
+const COMPARE_WRAPPER_CASES = [
+  { name: 'the kicker', find: doc => doc.querySelectorAll('.compare-block .block-kicker')[0] },
+  { name: 'the grid', find: doc => doc.querySelector('.compare-grid') },
+  { name: "a side's label", find: doc => doc.querySelectorAll('.compare-label')[0] },
+  { name: 'a side that carries no content block', find: doc => doc.querySelectorAll('.compare-side .unsupported-widget')[0] },
+];
+
+for (const c of COMPARE_WRAPPER_CASES) {
+  check(`comment mode: clicking a compare block's own ${c.name} mints no comment and shows no hover affordance`, () => {
+    const document = loadWrapperBoard();
+    enableCommentMode(document);
+    assertNotAnchorable(document, c.find(document), c.name);
+  });
+}
+
+// --- nested blocks stay fully live one level in --------------------------------
+
+check("comment mode: a markdown block nested inside a question's context still mints a comment against that nested block, even though the question's own prompt (a sibling in the same section) does not", () => {
+  const document = loadWrapperBoard();
+  enableCommentMode(document);
+
+  const contextParagraph = document.querySelectorAll('.question-context .md-content p')
+    .find(el => el.textContent.indexOf('supporting prose') !== -1);
+  assert.ok(contextParagraph, 'setup failure: no rendered paragraph found inside the question\'s context block');
+
+  contextParagraph.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(contextParagraph.classList.contains('cb-anchor-hover'), true,
+    "a question's context entry must still show the ordinary hover affordance -- it is content, not chrome");
+
+  contextParagraph.dispatchEvent(new StandInEvent('click'));
+  const nestedForm = document.getElementById('comment-form-' + wrapperContextBlock.id);
+  assert.ok(nestedForm, "setup failure: the question's own context block (a markdown block) must still render its own comment form");
+  assert.equal(nestedForm.classList.contains('open'), true,
+    "clicking inside a question's context block must still mint a comment against that NESTED block's own id");
+  assert.equal(nestedForm.getAttribute('data-anchor-kind'), 'dom');
+
+  // And the wrapper itself is still inert in the SAME document/click sequence.
+  // The question wrapper renders no comment-form of its own at all any more
+  // (sibling ticket 01), so this is checked the same way the wrapper-gating
+  // checks above do: no hover affordance, and no ADDITIONAL open form/queued
+  // comment appears anywhere on the page beyond the nested one that already
+  // opened -- proving the prompt's click did nothing, not that a particular
+  // element is missing.
+  const prompt = document.querySelector('.question-prompt');
+  prompt.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(prompt.classList.contains('cb-anchor-hover'), false,
+    "the question's own prompt must show no hover affordance, in the same document where its context block just did");
+  prompt.dispatchEvent(new StandInEvent('click'));
+  const openForms = document.querySelectorAll('.comment-form.open');
+  assert.equal(openForms.length, 1,
+    "clicking the question's own prompt must not open any additional comment form");
+  assert.equal(openForms[0].id, nestedForm.id,
+    "the only open form afterward must still be the nested context block's own -- the prompt minted nothing");
+});
+
+check("comment mode: a block nested inside a compare side still mints a comment against that nested block, even though the compare's own kicker/grid (a sibling in the same section) does not", () => {
+  const document = loadWrapperBoard();
+  enableCommentMode(document);
+
+  const sideParagraph = document.querySelectorAll('.compare-side .md-content p')
+    .find(el => el.textContent.indexOf('left side prose') !== -1);
+  assert.ok(sideParagraph, 'setup failure: no rendered paragraph found inside the compare side\'s nested block');
+
+  sideParagraph.dispatchEvent(new StandInEvent('click'));
+  const nestedForm = document.getElementById('comment-form-' + wrapperCompareLeftBlock.id);
+  assert.ok(nestedForm, "setup failure: the compare side's own nested block (a markdown block) must still render its own comment form");
+  assert.equal(nestedForm.classList.contains('open'), true,
+    "clicking inside a compare side's own content must still mint a comment against that NESTED block's own id");
+
+  // The compare wrapper renders no comment-form of its own at all any more
+  // (sibling ticket 01), so this is checked the same way the wrapper-gating
+  // checks above do: no hover affordance, and no ADDITIONAL open form/queued
+  // comment appears anywhere on the page beyond the nested one that already
+  // opened -- proving the grid's click did nothing, not that a particular
+  // element is missing.
+  const grid = document.querySelector('.compare-grid');
+  grid.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(grid.classList.contains('cb-anchor-hover'), false,
+    "the compare block's own grid must show no hover affordance, in the same document where its left side just did");
+  grid.dispatchEvent(new StandInEvent('click'));
+  const openForms = document.querySelectorAll('.comment-form.open');
+  assert.equal(openForms.length, 1,
+    "clicking the compare block's own grid must not open any additional comment form");
+  assert.equal(openForms[0].id, nestedForm.id,
+    "the only open form afterward must still be the compare side's own nested block -- the grid minted nothing");
+});
+
+// --- a round of only question blocks: no anchorable content anywhere, but -----
+// answering and sending it (and toggling comment mode itself) behave exactly as
+// before this ticket -------------------------------------------------------------
+
+check('a round with only question blocks: the comment-mode toggle still renders and still toggles, and answering/sending behaves exactly as before this ticket', () => {
+  const onlyQuestionsBoard = createBoard({
+    title: 'Ticket 02 -- an all-question round',
+    blocks: [
+      { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      { kind: 'question', prompt: 'Say something', widget: 'text', options: [] },
+    ],
+  });
+  const [qChoice, qText] = onlyQuestionsBoard.blocks;
+  const document = parseHTML(renderBoardPage(onlyQuestionsBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', ui)(document, window, { protocol: 'http:' });
+
+  // The toggle is page-global chrome, never conditional on what the board can
+  // anchor -- it must render and flip both ways even here.
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.ok(toggle, 'the comment-mode toggle must render even on a board with no anchorable content');
+  enableCommentMode(document); // asserts inside the helper that clicking it actually turns comment mode on
+  toggle.dispatchEvent(new StandInEvent('click'));
+  assert.equal(toggle.classList.contains('active'), false,
+    'the toggle must still turn back off on a board with no anchorable content');
+
+  // Answering and sending proceed exactly as they did before this ticket.
+  const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
+  yes.dispatchEvent(new StandInEvent('click'));
+  assert.equal(yes.classList.contains('selected'), true, 'choosing an option must still work on an all-question board');
+
+  const textarea = document.querySelector('textarea[data-answer-for="' + qText.id + '"]');
+  textarea.value = 'a free-text answer';
+  textarea.dispatchEvent(new StandInEvent('input'));
+
+  const originalFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = (url, opts) => {
+    captured = { url, method: opts.method, body: JSON.parse(opts.body) };
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ board: onlyQuestionsBoard }) });
+  };
+  try {
+    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(captured, 'pressing Send must still call the submit route on an all-question board');
+  assert.equal(captured.method, 'POST');
+  assert.match(captured.url, /\/api\/board\/.+\/submit$/);
+  assert.equal(captured.body.action, 'send');
+  const choiceAnswer = captured.body.answers.find(a => a.id === qChoice.id);
+  assert.ok(choiceAnswer, 'the choice question must be in the collected answers');
+  assert.equal(choiceAnswer.choice, 'Yes');
+  const textAnswer = captured.body.answers.find(a => a.id === qText.id);
+  assert.ok(textAnswer, 'the text question must be in the collected answers');
+  assert.equal(textAnswer.choice, 'a free-text answer');
 });
 
 if (failures) {

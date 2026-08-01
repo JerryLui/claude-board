@@ -322,11 +322,19 @@ element reports lost.
 
 A `dom` anchor's root depends on which block it names (DESIGN.md ticket 03/04):
 for an `html` block, root is that stage's sandboxed iframe body, resolved by
-`resolveDomAnchor`; for every other block kind (markdown, code, question, compare, and a
-`mermaid` block's own chrome), root is the anchored block's own `<section
-data-block-id>`, re-rendered from its stored content (`src/render.mjs`'s `renderBlock`)
-and resolved by `resolveDomAnchorInSection`. This is what makes a `dom` anchor page-wide —
-any element the board renders can carry one, not only content inside an html stage.
+`resolveDomAnchor`; for the other content kinds (markdown, code, and a `mermaid` block's
+own chrome), root is the anchored block's own `<section data-block-id>`, re-rendered from
+its stored content (`src/render.mjs`'s `renderBlock`) and resolved by
+`resolveDomAnchorInSection`. This is what makes a `dom` anchor page-wide — any element the
+board renders as content can carry one, not only content inside an html stage.
+
+**A `question` or `compare` section is never a `dom` anchor root.** Those two kinds render
+no content of their own — a card around a widget, a grid around two nested blocks — and
+carry no comment area, no pin-layer and no click-to-anchor gesture at all; `src/ui.mjs`
+refuses the root by `data-block-kind` before minting. What is nested inside them is
+unaffected: a question's `context` entry and a compare side's block go through the same
+`renderBlock` dispatch with their own `data-block-id`, and each is a root in its own right
+under the rule above. See `ADR.md` entry 6, "Commenting is confined to content blocks".
 
 `hint` is not a bare text snippet either. `composeHint` (`src/anchor.mjs`, mirrored
 client-side in `src/ui.mjs`) starts from the clicked element's own text, falling back to a

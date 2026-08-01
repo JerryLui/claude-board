@@ -1277,7 +1277,20 @@ async function main() {
             left: { label: 'Before', block: { kind: 'markdown', text: 'the old copy, unchanged' } },
             right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Send</button></div>' } },
           },
-          { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+          {
+            kind: 'question',
+            prompt: 'Pick one',
+            widget: 'single',
+            options: [{ label: 'Yes' }, { label: 'No' }],
+            // ADR.md entry 6 ("Commenting is confined to content blocks",
+            // 2026-08-01): the question wrapper itself (its prompt, its
+            // options, its note field) lost the comment affordance entirely.
+            // Its `context` entries did not -- they render through the same
+            // renderBlock dispatch as any other block, with their own id and
+            // their own comment area, so a page-scoped anchor rooted here is
+            // exactly the still-live case ticket 04 needs covered.
+            context: [{ kind: 'markdown', text: 'Context for the question, nested one level in.' }],
+          },
         ],
       }),
     });
@@ -1288,7 +1301,7 @@ async function main() {
     const codeBlockId = rrStored.blocks[1].id;
     const compareLeftId = rrStored.blocks[2].left.block.id;
     const compareRightId = rrStored.blocks[2].right.block.id;
-    const questionId = rrStored.blocks[3].id;
+    const questionContextId = rrStored.blocks[3].context[0].id;
 
     /** Loads a served page through the real client script, exactly like
      * check-comment-mode.mjs's loadBoard -- a fresh document per call. */
@@ -1332,8 +1345,8 @@ async function main() {
     const tableCell = doc1.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42');
     const codeLine = doc1.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;');
     const compareProse = doc1.querySelectorAll('.compare-side .md-content p').find(el => el.textContent.indexOf('old copy') !== -1);
-    const option = doc1.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
-    assert.ok(prose && listItem && tableCell && codeLine && compareProse && option, 'setup failure: could not find every fixture element on the first-rendered page');
+    const questionContext = doc1.querySelectorAll('.question-context .md-content p').find(el => el.textContent.indexOf('Context for the question') !== -1);
+    assert.ok(prose && listItem && tableCell && codeLine && compareProse && questionContext, 'setup failure: could not find every fixture element on the first-rendered page');
 
     const pairs = [
       captureAnchor(doc1, prose, mdBlockId),
@@ -1341,7 +1354,7 @@ async function main() {
       captureAnchor(doc1, tableCell, mdBlockId),
       captureAnchor(doc1, codeLine, codeBlockId),
       captureAnchor(doc1, compareProse, compareLeftId),
-      captureAnchor(doc1, option, questionId),
+      captureAnchor(doc1, questionContext, questionContextId),
     ];
     // The html-stage side of the compare, still element (2) of ticket 03's TWO
     // roots (DESIGN.md / src/anchor.mjs's design comment) -- included so
