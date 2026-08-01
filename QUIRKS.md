@@ -871,3 +871,13 @@ message's ORIGIN and IDENTITY being provably a real stage says nothing about WHE
 ACTED — those are orthogonal questions, and only the second one decides whether a message may
 ever be allowed to make a decision (an answer, a selection) rather than merely propose one (a
 comment anchor a human still has to submit, geometry, a hover hint).
+
+## `git tag <name>` fails with "no tag message?" — `tag.gpgsign` is on
+
+A bare, lightweight `git tag backup/pre-squash-main main` dies with `fatal: no tag message?`
+even though no `-a`/`-m` was passed. The cause is global config `tag.gpgsign true`: signing
+forces the tag to be an annotated object, and an annotated tag with no message is an error.
+The message names the missing message, never the config, so it reads like a syntax mistake.
+Either pass `-m` (`git tag -m 'why' <name> <commit>`), or — for a throwaway safety ref before
+a history rewrite — use `git branch <name> <commit>` instead, which takes no message and is
+just as easy to delete afterwards.
