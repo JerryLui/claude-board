@@ -34,11 +34,18 @@ the one route that resolves a path, and it requires a secret written to
 CSPRNG, never rotated on reinstall) and sent in a request header by the session's own
 MCP shim. Without this gate, any process that could open a socket to the port could post
 a board naming any directory and read the result back off the served page — and it would
-be reading with the daemon's privileges, not its own. That matters most for the three
-directories macOS TCC gates per application (`~/Documents`, `~/Desktop`, `~/Downloads`):
-a caller that TCC refuses could ask a daemon that TCC permits, and get the bytes back
-off the served page. The credential is what keeps "can reach the port" from meaning "can
-spend the daemon's grants".
+be reading with the daemon's privileges, not its own. The credential is what keeps "can
+reach the port" from meaning "can spend the daemon's grants".
+
+Be precise about who that actually stops. It bounds callers that can reach loopback but
+**cannot read your home directory** — a sandboxed process, a container publishing on host
+loopback. It does **not** bound a process that TCC refused: TCC gates `~/Documents`,
+`~/Desktop` and `~/Downloads`, not `~/.config`, so such a process reads the secret file
+directly and then names whatever `cwd` it likes. An earlier version of this section used
+the TCC-refused caller as the justifying example, which contradicted the "any process
+running as you" paragraph below. Related: the shim presents the secret to whatever holds
+`127.0.0.1:7391` without authenticating the peer first, so a process that squats the port
+during a restart window is handed the credential it could not read.
 
 **What the launcher bundle is for.** Those same three directories are why the plist runs
 `~/Applications/claude-board.app` rather than `node` directly. TCC identifies an
@@ -57,12 +64,29 @@ The launcher takes no arguments, and the path it runs is compiled in rather than
 from the plist. That is deliberate: the bundle is an identity the user has granted a
 folder to, and if it would run whatever the plist named, then anything able to rewrite a
 file in `~/Library/LaunchAgents` — which is to say any process running as you, including
-one TCC has refused — could spend that grant on its own code. Retargeting the launcher
-takes a recompile and a re-sign.
+one TCC has refused — could spend that grant on its own code. Retargeting the launcher's
+**argv** takes a recompile and a re-sign.
+
+**Known limits of that, stated plainly rather than implied away.** Compiling in the argv
+does not make the grant unspendable by a process running as you, and three routes are
+open today:
+
+- The launcher `execv`s, so node inherits launchd's **environment** unfiltered, and the
+  plist is mode 644. A `NODE_OPTIONS=--require ...` key in the existing
+  `EnvironmentVariables` dict runs chosen code inside the granted process with the bundle
+  and its signature untouched. `CLAUDE_BOARD_SECRET_FILE` and `CLAUDE_BOARD_REF_ROOTS` are
+  reachable the same way, and the latter is carried forward across future reinstalls.
+- The code the bundle runs — `bin/daemon.mjs` and everything under `src/` — lives in the
+  clone, is not inside the signed bundle, and is not covered by the rebuild stamp. Anything
+  that can write the clone owns the grant, without recompiling anything.
+- `bin/launcher.c` includes its generated header with a quoted `#include` and is compiled
+  in place, so a `bin/launcher_paths.h` dropped into the clone shadows the real one and
+  `install.sh` will compile, sign and install it for you.
 
 This narrows the blast radius; it does not make the grant free. A board can still render
 any file inside the board's project directory or the reference allowlist, and the
-launcher holds whatever folder access you gave it while it is running.
+launcher holds whatever folder access you gave it while it is running. Treat the clone
+directory and the LaunchAgents plist as inside the trust boundary.
 
 **Where a reference can reach.** A board renders file content by reference, and a
 reference resolves in exactly two places: inside the board's own project directory, or
@@ -199,8 +223,13 @@ index lives at `/`. What is done instead is bounding it:
 - a cookie-authenticated request must also look same-origin (`Origin` / `Sec-Fetch-Site`),
   which stops a *web page* on another origin using it through your browser. It does not
   stop the case above, because a local process sets its own headers;
-- rotating the secret revokes every cookie immediately, and now genuinely does — the
-  daemon re-reads the secret per request rather than at startup.
+- rotating the secret revokes every cookie on the next *request* — the daemon re-reads the
+  secret per request rather than at startup. It does **not** close connections already
+  open: the read gate is evaluated once, when a request starts, so an SSE stream
+  (`/api/board/:id/events`) established before the rotation keeps receiving every later
+  round and every submitted answer for that board, and an in-flight `/wait` still returns
+  its packet. Both last until the daemon restarts. If you are rotating because a cookie
+  leaked, restart the daemon as well — `launchctl kickstart -k gui/$(id -u)/claude-board`.
 
 If you run other services on loopback and this matters to you, use a separate browser
 profile for boards. Found and documented 2026-07-31; it was previously listed as
@@ -242,11 +271,13 @@ Two properties of the fix are worth stating so nobody has to reverse-engineer th
 
 - **The browser credential is derived from the secret, not stored.** So restarting the
   daemon does not log your browser out, and *rotating the secret invalidates every
-  browser at once*. That is the intended way to revoke, and it works on a running daemon:
-  the secret is re-read per request. It was captured once at startup until 2026-07-31,
-  which made rotation do the opposite of what this paragraph promised — the running daemon
-  kept honouring the old secret while newly started shims read the new one and were
-  refused.
+  browser at once*. That is the intended way to revoke, and it works on a running daemon
+  for anything that has to make a new request: the secret is re-read per request. It was
+  captured once at startup until 2026-07-31, which made rotation do the opposite of what
+  this paragraph promised — the running daemon kept honouring the old secret while newly
+  started shims read the new one and were refused. The remaining gap, found 2026-08-01: a
+  connection already open when you rotate is not re-checked, so revoking a leaked cookie
+  means rotating **and** restarting the daemon.
 - **An archived board still opens from disk with no credential at all.** `pages/*.html`
   is a standalone file; the gate is on the daemon, not on the archive. Anything that can
   read that directory can read those boards, which is the same statement as "the store is

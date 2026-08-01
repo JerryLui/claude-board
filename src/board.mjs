@@ -68,6 +68,11 @@ function nextBlockId(kind, counters) {
 // re-derive the same guard.
 const BLOCK_ID_RE = /^([a-z]+)(\d+)$/;
 
+/** Digits allowed in a block id's ordinal. Nine keeps every ordinal a safe integer
+ * with room to spare; see resolveBlockId for what an unbounded one does to the mint
+ * loop. No real board approaches four digits. */
+const MAX_ID_ORDINAL_DIGITS = 9;
+
 /** The uniqueness ledger one normalisation pass (one createBoard/addRound/amendRound
  * call) mints against. `taken` maps every id ALREADY on the board to the round it
  * belongs to; `replaceable` is the subset a caller-supplied id is allowed to name
@@ -93,10 +98,20 @@ function emptyIdLedger() {
  * *first* question against the *second* question's prompt -- the agent is told,
  * confidently, something the reviewer never said. Ids are the board's only join
  * key; a duplicate is a wrong answer, not a cosmetic clash. */
-function resolveBlockId(raw, kind, counters, ids) {
+function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
   if (raw.id != null) {
     const m = typeof raw.id === 'string' ? BLOCK_ID_RE.exec(raw.id) : null;
     if (!m) throw new Error(`invalid block id: ${JSON.stringify(raw.id)}`);
+    // The ordinal has to stay a safe integer (audit). `BLOCK_ID_RE` accepts `\d+` of
+    // any length, and past 2^53 `counters[letter] + 1` is a no-op -- `nextBlockId`
+    // then returns the same string forever and the re-mint loop below never
+    // terminates. A 21-digit ordinal also round-trips through `parseInt` as `1e+21`,
+    // which is minted as a literal `q1e+21`: an id that fails BLOCK_ID_RE, is stored
+    // anyway, and breaks every `querySelector` built from it. The board persists
+    // before the spin, so the poisoned file re-wedges the daemon on the next ask.
+    if (m[2].length > MAX_ID_ORDINAL_DIGITS) {
+      throw new Error(`invalid block id: ${JSON.stringify(raw.id)} has an implausible ordinal`);
+    }
     // The id's kind letter must be THIS kind's letter (audit). `counters` is keyed
     // by kind letter while the ordinal is read off the id string, so accepting
     // `{ kind: 'markdown', id: 'q2' }` left the `q` counter untouched: a later
@@ -110,7 +125,14 @@ function resolveBlockId(raw, kind, counters, ids) {
     if (ids.minted.has(id)) {
       throw new Error(`duplicate block id ${id}: two blocks in this post claim it`);
     }
-    if (ids.taken.has(id) && !ids.replaceable.has(id)) {
+    // `replaceable` holds the open round's TOP-LEVEL ids, so only a top-level block
+    // may claim one (audit). The check used to ask solely where the id's existing
+    // owner sat, never where the claiming block sat: a question nested in a `compare`
+    // side or another question's `context` could name a live top-level id, and
+    // `amendRound` -- which splices on top-level ids only -- appended it instead of
+    // substituting. Two live blocks then shared one id, `answers` is keyed by id, and
+    // the packet reported the reviewer's single "yes" against BOTH prompts.
+    if (ids.taken.has(id) && !(topLevel && ids.replaceable.has(id))) {
       const owner = ids.taken.get(id);
       throw new Error(ids.openRound != null && owner !== ids.openRound
         ? `cannot amend: id ${id} belongs to round ${owner}, not the open round ${ids.openRound}`
@@ -169,14 +191,14 @@ function byValueText(value, field) {
  * resolves. `ids` is the pass's id ledger (see `emptyIdLedger`); it is threaded
  * through the recursion so a nested context/compare block competes for ids with
  * every other block in the same post, not just its siblings. */
-export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLedger()) {
+export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLedger(), topLevel = true) {
   if (!raw || typeof raw !== 'object' || !raw.kind) {
     throw new Error('block requires a kind');
   }
   const base = { round };
   switch (raw.kind) {
     case 'markdown': {
-      const id = resolveBlockId(raw, 'markdown', counters, ids);
+      const id = resolveBlockId(raw, 'markdown', counters, ids, topLevel);
       const { text, sha, error } = resolveContent(raw, cwd);
       const { html, anchors } = mdToHtmlAndAnchors(text);
       return {
@@ -192,7 +214,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       };
     }
     case 'mermaid': {
-      const id = resolveBlockId(raw, 'mermaid', counters, ids);
+      const id = resolveBlockId(raw, 'mermaid', counters, ids, topLevel);
       const { text, sha, error } = resolveContent(raw, cwd);
       return {
         ...base,
@@ -205,7 +227,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       };
     }
     case 'code': {
-      const id = resolveBlockId(raw, 'code', counters, ids);
+      const id = resolveBlockId(raw, 'code', counters, ids, topLevel);
       const { text, sha, error } = resolveContent(raw, cwd);
       const lang = raw.lang ?? (raw.source ? langForPath(raw.source.path) : '');
       return {
@@ -220,11 +242,11 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       };
     }
     case 'html': {
-      const id = resolveBlockId(raw, 'html', counters, ids);
+      const id = resolveBlockId(raw, 'html', counters, ids, topLevel);
       return { ...base, id, kind: 'html', html: byValueText(raw.html ?? '', 'html') };
     }
     case 'compare': {
-      const id = resolveBlockId(raw, 'compare', counters, ids);
+      const id = resolveBlockId(raw, 'compare', counters, ids, topLevel);
       return {
         ...base,
         id,
@@ -234,7 +256,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       };
     }
     case 'question': {
-      const id = resolveBlockId(raw, 'question', counters, ids);
+      const id = resolveBlockId(raw, 'question', counters, ids, topLevel);
       // An unrecognised widget is a rejection, not a silent fallback to 'single'
       // (audit L2). `{ widget: 'freetext' }` -- one word off the spec's 'text' --
       // used to render a question with no cards and no textarea: literally
@@ -248,7 +270,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       }
       const widget = raw.widget ?? 'single';
       const context = Array.isArray(raw.context)
-        ? raw.context.map(c => normalizeBlock(c, round, counters, cwd, ids))
+        ? raw.context.map(c => normalizeBlock(c, round, counters, cwd, ids, false))
         : [];
       // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2) is the one widget whose
       // options are not a { preview } string: each option's `block` is a real
@@ -263,10 +285,15 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       // (src/render.mjs) shows the same "no content" fallback a compare side
       // with no block does. Every other widget keeps the old string-preview
       // shape unchanged.
+      // `label`/`description`/`preview`/`prompt` go through byValueText for the same
+      // reason `text` and `html` do (audit): they were bounded only by the 25MB body
+      // limit, and `preview` additionally feeds a URL sniff in src/render.mjs whose
+      // cost is quadratic in its length -- a 400KB preview measured ~46s per render,
+      // paid again on every read because the board persists first.
       const options = Array.isArray(raw.options)
         ? raw.options.map(o => widget === 'choose-between-rendered-variants'
-          ? { label: o.label, description: o.description ?? '', block: o.block ? normalizeBlock(o.block, round, counters, cwd, ids) : null }
-          : { label: o.label, description: o.description ?? '', preview: o.preview ?? null })
+          ? { label: byValueText(o.label ?? '', 'option label'), description: byValueText(o.description ?? '', 'option description'), block: o.block ? normalizeBlock(o.block, round, counters, cwd, ids, false) : null }
+          : { label: byValueText(o.label ?? '', 'option label'), description: byValueText(o.description ?? '', 'option description'), preview: o.preview == null ? null : byValueText(o.preview, 'option preview') })
         : [];
       if (widget !== 'text' && options.length === 0) {
         throw new Error(`question widget '${widget}' requires at least one option`);
@@ -275,7 +302,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         ...base,
         id,
         kind: 'question',
-        prompt: raw.prompt ?? '',
+        prompt: byValueText(raw.prompt ?? '', 'prompt'),
         context,
         widget,
         options,
@@ -290,7 +317,7 @@ function normalizeCompareSide(side, round, counters, cwd, ids) {
   if (!side) return { label: '', block: null };
   return {
     label: side.label ?? '',
-    block: side.block ? normalizeBlock(side.block, round, counters, cwd, ids) : null,
+    block: side.block ? normalizeBlock(side.block, round, counters, cwd, ids, false) : null,
   };
 }
 
@@ -582,6 +609,12 @@ export function questionBlocks(board) {
 // than being stored verbatim -- see sanitizeAnchor below (audit V3).
 const ANCHOR_KINDS = new Set(['block', 'md', 'dom', 'mermaid']);
 
+/** Ceiling on every stored anchor string. `extractHint` caps a hint at 80 and
+ * `composeHint` adds a short frame around it; a node id or a step chain is tens of
+ * bytes. 1024 cannot truncate anything the client legitimately mints, and bounds the
+ * quadratic scan in mermaidRefResolves. */
+const MAX_ANCHOR_FIELD = 1024;
+
 /** Reduce an untrusted, client-supplied `anchor` to one of the shapes
  * src/anchor.mjs actually knows how to resolve, dropping anything else rather
  * than persisting it verbatim (audit V3: `applySubmit` used to store `anchor`
@@ -598,13 +631,23 @@ function sanitizeAnchor(anchor) {
   const kind = ANCHOR_KINDS.has(anchor.kind) ? anchor.kind : 'block';
   if (kind === 'block') return { kind: 'block' };
   if (typeof anchor.ref !== 'string' || !anchor.ref) return { kind: 'block' };
+  // Length is part of the shape (audit). Nothing bounded these, and
+  // `mermaidRefResolves` costs (len(text) - len(ref)) * len(ref): one stored comment
+  // carrying a 256KiB `ref` against a 512KiB mermaid block measured ~23s per
+  // renderBoardPage, per SSE resolve and per buildPacket -- for the life of the
+  // board, since comments are append-only and there is no in-product way to remove
+  // one. A real node id, step chain or hint is tens of bytes.
+  if (anchor.ref.length > MAX_ANCHOR_FIELD) return { kind: 'block' };
   const out = { kind, ref: anchor.ref };
   if (kind === 'md') {
-    if (typeof anchor.label === 'string') out.label = anchor.label;
+    if (typeof anchor.label === 'string') out.label = anchor.label.slice(0, MAX_ANCHOR_FIELD);
     return out;
   }
-  if (typeof anchor.hint === 'string') out.hint = anchor.hint;
-  if (kind === 'mermaid' && typeof anchor.domRef === 'string') out.domRef = anchor.domRef;
+  if (typeof anchor.hint === 'string') out.hint = anchor.hint.slice(0, MAX_ANCHOR_FIELD);
+  // Dropped rather than truncated: a shortened step chain is still a WELL-FORMED
+  // chain, so it would resolve confidently against the wrong element. Absent is
+  // honest -- resolveMermaidAnchorAtRoot just falls through to the id scan.
+  if (kind === 'mermaid' && typeof anchor.domRef === 'string' && anchor.domRef.length <= MAX_ANCHOR_FIELD) out.domRef = anchor.domRef;
   return out;
 }
 
@@ -700,6 +743,12 @@ export function applySubmit(board, { action, answers, comments }, round) {
   if (r) {
     r.status = 'sent';
     r.sentAt = now;
+    // Recorded on the round, not just board-wide (audit). `board.state` is reset to
+    // 'open' by addRound, so a concurrent `ask` landing inside the waiter's 120ms
+    // poll erased 'discuss' before buildPacket read it -- the blocked call then
+    // reported "Board submitted." and the agent never got the stop instruction.
+    // The round's own outcome cannot be overwritten by a later round.
+    r.action = action === 'discuss' ? 'discuss' : 'submitted';
   }
   board.state = action === 'discuss' ? 'discuss' : 'submitted';
   board.updatedAt = now;
@@ -915,12 +964,16 @@ export function buildPacket(board, round, url) {
       return { id: b.id, round: b.round, prompt: b.prompt, widget: b.widget, status: a.status, choice: a.choice, note: a.note };
     });
   const comments = resolveComments(board, board.comments.filter(c => (c.round ?? round) === round));
+  // The round's own recorded outcome wins over the board-wide state, which a later
+  // round resets to 'open' (audit). Falls back to board.state for rounds sent before
+  // `action` was recorded, and for a round that has not been sent at all.
+  const sentRound = board.rounds.find(r => r.n === round);
   return {
     board: board.id,
     thread: board.thread,
     title: board.title,
     round,
-    status: board.state,
+    status: sentRound?.action ?? board.state,
     answers,
     comments,
     url,

@@ -257,8 +257,22 @@ function renderMarkdownBlock(block, board, commentsByBlock, historical) {
  * URL, otherwise as a small preformatted snippet. No markdown/code rendering here —
  * a preview is a glance, not a second content block. */
 function renderOptionPreview(preview) {
-  if (/^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?\S*)?$/i.test(preview.trim())) {
-    return `<img class="opt-preview opt-preview-img" src="${escAttr(preview)}" alt="">`;
+  const trimmed = String(preview ?? '').trim();
+  // Parsed, not pattern-matched (audit). The old sniff
+  // `^https?://\S+\.(png|...)(\?\S*)?$` let `\S+` and `\S*` compete for a `$` a
+  // trailing newline made unreachable, so a crafted `.png?`-repeated string cost
+  // O(n^2) -- ~46s at 400KB, and paid again on every read because the board is
+  // persisted after the render. URL parsing is linear and answers the same question.
+  let looksLikeImage = false;
+  try {
+    const u = new URL(trimmed);
+    looksLikeImage = (u.protocol === 'http:' || u.protocol === 'https:')
+      && /\.(png|jpe?g|gif|webp|svg)$/i.test(u.pathname);
+  } catch { /* not a URL: render as a snippet, same as before */ }
+  if (looksLikeImage) {
+    // The emitted src is the string that was vetted, not the raw one -- same
+    // discipline as stripUrlControls in src/markdown.mjs.
+    return `<img class="opt-preview opt-preview-img" src="${escAttr(trimmed)}" alt="">`;
   }
   return `<pre class="opt-preview opt-preview-code">${escHtml(preview)}</pre>`;
 }

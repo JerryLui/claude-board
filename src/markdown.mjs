@@ -27,10 +27,28 @@ export const SYNTHETIC_SECTION = '_body';
  * carried. Two elements then shared an id, and src/render.mjs's last-wins
  * `labelByRef` map labelled the reviewer's comment on the bullet with the heading's
  * text. Ids are the join key; they have to be unique across BOTH kinds of anchor. */
-function reserveRef(base, used) {
+function reserveRef(base, used, ordinals) {
+  return disambiguate(base, used, ordinals);
+}
+
+/** Append `-2`, `-3`, ... until `base` is free in `used`, then reserve it.
+ *
+ * `ordinals` is an optional `Map<base, nextOrdinalToTry>` carried alongside `used`
+ * (audit: N headings sharing one base cost O(N^2), because every call re-probed from
+ * `-2`. 131072 headings — 512KiB of `# a`, i.e. the by-value cap — took 10.5 minutes
+ * of a single-threaded daemon, and `src/resolve.mjs`'s independent pass the same).
+ * Skipping ordinals already observed as taken is safe and output-identical: `used`
+ * only ever grows within a pass, so a suffix seen taken can never come free again.
+ * Omitting the map keeps the old linear probe, which is correct but quadratic. */
+function disambiguate(base, used, ordinals) {
   let ref = base;
-  let n = 2;
-  while (used.has(ref)) ref = `${base}-${n++}`;
+  let n = ordinals?.get(base) ?? 2;
+  if (used.has(ref)) {
+    ref = `${base}-${n}`;
+    while (used.has(ref)) ref = `${base}-${++n}`;
+    n++;
+  }
+  ordinals?.set(base, n);
   used.add(ref);
   return ref;
 }
@@ -115,7 +133,7 @@ function emphasize(s, delim, tag) {
 // string that was vetted, not the raw one.
 const stripUrlControls = u => String(u).replace(/[\x00-\x1f\x7f]+/g, '');
 
-export function slugify(text, used) {
+export function slugify(text, used, ordinals) {
   let base = text
     .toLowerCase()
     .replace(/[`*_~[\]()]/g, '')
@@ -125,11 +143,7 @@ export function slugify(text, used) {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   if (!base) base = 'section';
-  let slug = base;
-  let n = 2;
-  while (used.has(slug)) slug = `${base}-${n++}`;
-  used.add(slug);
-  return slug;
+  return disambiguate(base, used, ordinals);
 }
 
 /**
@@ -201,6 +215,10 @@ export function mdToHtmlAndAnchors(md) {
 
   const anchors = [];
   const usedSlugs = new Set();
+  // Carried beside usedSlugs so duplicate-slug disambiguation stays O(1) amortised;
+  // see disambiguate() above. Must be shared by the heading and list-item passes,
+  // because they disambiguate against the same set.
+  const slugOrdinals = new Map();
   let currentSlug = null;
   let liCounter = 0;
 
@@ -212,7 +230,14 @@ export function mdToHtmlAndAnchors(md) {
    * src/resolve.mjs (which sees no blockquotes at all) while `section: 'plan'`
    * returned the real body under an id pointing at the quotation. */
   const blocks = (text, quoted = false) => {
-    const lines = text.split('\n');
+    // A trailing CR is stripped per line rather than left for the block regexes to
+    // trip over (audit): `.` and `$` do not match `\r`, so `- a\r` passed the list
+    // guard, failed the item pattern, matched no continuation, and broke out of the
+    // item loop WITHOUT advancing `i` -- an infinite loop that pinned a core and took
+    // the whole daemon with it, on nothing more exotic than a CRLF file in the
+    // project. `## Plan\r` separately yielded zero anchors. src/resolve.mjs does the
+    // same, so the two heading passes stay byte-identical.
+    const lines = text.split('\n').map(s => (s.endsWith('\r') ? s.slice(0, -1) : s));
     let html = '', i = 0;
     while (i < lines.length) {
       const l = lines[i];
@@ -237,7 +262,7 @@ export function mdToHtmlAndAnchors(md) {
           i++;
           continue;
         }
-        const slug = slugify(sourceText, usedSlugs);
+        const slug = slugify(sourceText, usedSlugs, slugOrdinals);
         currentSlug = slug;
         liCounter = 0;
         anchors.push({ kind: 'md', ref: slug, label: sourceText });
@@ -282,6 +307,12 @@ export function mdToHtmlAndAnchors(md) {
           else if (items.length && /^\s+\S/.test(lines[i])) { items[items.length - 1].text += ' ' + lines[i++].trim(); }
           else break;
         }
+        // Unconditional progress. The guard above and the item pattern here disagree
+        // for any line the guard admits but `(.*)$` rejects -- a stray CR (now
+        // normalised away) or a U+2028/U+2029 line separator, which `.` also refuses.
+        // Without this the loop re-enters on the same `i` forever; rendering the line
+        // as a paragraph is both terminating and closer to what it looks like.
+        if (!items.length) { html += '<p>' + inline(l) + '</p>'; i++; continue; }
         let out = ''; const stack = [];
         for (const it of items) {
           let topLevel;
@@ -302,7 +333,7 @@ export function mdToHtmlAndAnchors(md) {
           let ref = null;
           if (!quoted && topLevel && currentSlug) {
             liCounter++;
-            ref = reserveRef(currentSlug + '-li' + liCounter, usedSlugs);
+            ref = reserveRef(currentSlug + '-li' + liCounter, usedSlugs, slugOrdinals);
             // label from the PRE-escape source text, same as the heading above (L1)
             anchors.push({ kind: 'md', ref, label: unesc(it.text) });
           }

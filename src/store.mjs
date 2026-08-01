@@ -80,7 +80,19 @@ function atomicWrite(targetPath, contents) {
   const tmp = `${targetPath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   const fd = openSync(tmp, 'wx', FILE_MODE);
   try {
-    writeSync(fd, contents, null, 'utf8');
+    // Looped on the returned count (audit). `fs.writeSync` issues exactly one
+    // write(2) and returns the byte count -- it does not loop, and a short write
+    // returns a partial count WITHOUT throwing. fsync+rename would then publish a
+    // truncated file as the authoritative board: readBoard throws SyntaxError,
+    // listBoards drops the file, and the thread disappears from the index. Node's
+    // own writeFileSync loops in C++ for the same reason.
+    const buf = Buffer.from(contents, 'utf8');
+    let off = 0;
+    while (off < buf.length) {
+      const n = writeSync(fd, buf, off, buf.length - off);
+      if (!(n > 0)) throw new Error(`short write to ${tmp}: wrote ${off} of ${buf.length} bytes`);
+      off += n;
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);

@@ -455,7 +455,7 @@ The browser cannot read a 0600 file, so it holds this instead:
 
 ```
 Set-Cookie: cb_session=<HMAC-SHA256(secret, "claude-board/session/v1")>;
-            Path=/; Max-Age=34560000; HttpOnly; SameSite=Strict
+            Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict
 ```
 
 Host-only (no `Domain`), `HttpOnly`, `SameSite=Strict`, and **not** a session cookie: a
@@ -688,8 +688,9 @@ and would otherwise post a board nobody can see and block for the full wall-cloc
 
 The shim tracks one thread per process (one shim per Claude session): the first `ask` call
 starts a new thread and opens its tab; every later `ask` call in the same process pushes a
-round into the same live board (`POST /api/board` with `boardId` set) and does not reopen
-the tab.
+round into the same live board (`POST /api/board` with `boardId` set) and reopens the tab
+only when no client is connected to that board at all — see "Open once, then badge and
+notify". It never reopens a tab the reviewer already has open.
 
 ### MCP shim environment (additive to `CLAUDE_BOARD_HOME` / `CLAUDE_BOARD_PORT` above)
 

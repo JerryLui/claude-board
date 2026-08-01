@@ -382,6 +382,24 @@ const NAMED_ENTITIES = {
   ne: '≠', le: '≤', ge: '≥', asymp: '≈', infin: '∞',
   check: '✓', cross: '✗', star: '☆', hearts: '♥',
   shy: '­', iexcl: '¡', iquest: '¿',
+  // The Latin-1 accented letters. The table already carried this block's punctuation
+  // and symbols but none of its letters, so a mock spelling an accent as a named
+  // entity -- `G&aring;r vidare` -- left the server holding the literal text while the
+  // browser's textContent read `Går vidare`, and a live, on-screen element was
+  // reported lost. Numeric (`&#229;`) and literal UTF-8 already worked; only the named
+  // spelling was missing (audit).
+  Agrave: 'À', Aacute: 'Á', Acirc: 'Â', Atilde: 'Ã', Auml: 'Ä', Aring: 'Å', AElig: 'Æ',
+  Ccedil: 'Ç', Egrave: 'È', Eacute: 'É', Ecirc: 'Ê', Euml: 'Ë',
+  Igrave: 'Ì', Iacute: 'Í', Icirc: 'Î', Iuml: 'Ï',
+  ETH: 'Ð', Ntilde: 'Ñ', Ograve: 'Ò', Oacute: 'Ó', Ocirc: 'Ô', Otilde: 'Õ', Ouml: 'Ö',
+  Oslash: 'Ø', Ugrave: 'Ù', Uacute: 'Ú', Ucirc: 'Û', Uuml: 'Ü',
+  Yacute: 'Ý', THORN: 'Þ', szlig: 'ß',
+  agrave: 'à', aacute: 'á', acirc: 'â', atilde: 'ã', auml: 'ä', aring: 'å', aelig: 'æ',
+  ccedil: 'ç', egrave: 'è', eacute: 'é', ecirc: 'ê', euml: 'ë',
+  igrave: 'ì', iacute: 'í', icirc: 'î', iuml: 'ï',
+  eth: 'ð', ntilde: 'ñ', ograve: 'ò', oacute: 'ó', ocirc: 'ô', otilde: 'õ', ouml: 'ö',
+  oslash: 'ø', ugrave: 'ù', uacute: 'ú', ucirc: 'û', uuml: 'ü',
+  yacute: 'ý', thorn: 'þ', yuml: 'ÿ',
 };
 
 // --- tag omission ------------------------------------------------------------
@@ -583,7 +601,14 @@ export function parseHtmlTree(html) {
   // immediately followed by `>`, `/`, whitespace or a quote, none of which are
   // `[\w-]`, so the lookahead is already satisfied by the same maximal match the
   // greedy quantifier picks first.
-  const tokenRe = /<![^>]*>|<\/([a-zA-Z][\w-]*)(?![\w-])[^>]*>|<([a-zA-Z][\w-]*)(?![\w-])((?:"[^"<]*"|'[^'<]*'|[^><"'])*?)(\/?)>|([^<]+)|(<)/g;
+  // A quoted attribute value may contain `<`: per HTML's attribute-value states it is
+  // an ordinary character there, not a parse error (audit). Excluding it ended the tag
+  // early, so `<div title="x<y">` swallowed a sibling and every index after it shifted
+  // -- either a live element misreported lost, or, with repeated sibling text, a
+  // confident resolve against the WRONG element. `onclick="if(a<b)f()"` and
+  // `aria-label="< Back"` are ordinary agent markup, not hostile. Still unambiguously
+  // terminated by the closing quote, so no backtracking is reintroduced.
+  const tokenRe = /<![^>]*>|<\/([a-zA-Z][\w-]*)(?![\w-])[^>]*>|<([a-zA-Z][\w-]*)(?![\w-])((?:"[^"]*"|'[^']*'|[^><"'])*?)(\/?)>|([^<]+)|(<)/g;
   let m;
   while ((m = tokenRe.exec(src)) != null) {
     if (m[1]) {
@@ -623,11 +648,25 @@ export function parseHtmlTree(html) {
  * `Element.textContent`'s equivalent over the tree parseHtmlTree builds. */
 export function elementText(node) {
   if (!node) return '';
-  let out = '';
-  for (const child of node.content || []) {
-    out += child.tag === '#text' ? child.text : elementText(child);
+  // Iterative, because this parser's contract is that it never throws (see the file
+  // header) and recursion broke it: ~5000 levels of nesting -- well inside the
+  // by-value cap, and cheap for an agent to emit -- threw RangeError out of
+  // resolveComment. On the submit path that surfaced as a bare 500 the reviewer's
+  // Send could never get past, and because handleSubmit resolves a second time for
+  // the SSE broadcast, a board could persist and then throw on every later /wait.
+  const parts = [];
+  const stack = [];
+  // Seeded from node.content, not node, so a `#text` passed in directly still yields
+  // '' exactly as the recursive form did.
+  const seed = node.content || [];
+  for (let k = seed.length - 1; k >= 0; k--) stack.push(seed[k]);
+  while (stack.length) {
+    const cur = stack.pop();
+    if (cur.tag === '#text') { parts.push(cur.text); continue; }
+    const content = cur.content || [];
+    for (let k = content.length - 1; k >= 0; k--) stack.push(content[k]);
   }
-  return out;
+  return parts.join('');
 }
 
 /** Common-prefix length of two strings, ordinal comparison. Helper for
@@ -949,6 +988,16 @@ export function mermaidRefResolves(source, ref) {
     const before = i === 0 ? '' : text[i - 1];
     const after = i + needle.length >= text.length ? '' : text[i + needle.length];
     if (!isWordChar(before) && !isWordChar(after)) return true;
+    // Deliberately +1, not +needle.length. Skipping the whole failed occurrence looks
+    // like the obvious linearisation and is WRONG: needles that overlap themselves can
+    // start again inside one, and the inner start can be the one that passes the
+    // boundary test. `a.a` in `za.a.a` is the smallest case -- the occurrence at 1
+    // fails on `z`, the one at 3 passes, and skipping to 4 misses it, reporting a live
+    // anchor lost. That is the one direction this function may never err in.
+    //
+    // The cost this leaves -- (len(text) - len(needle)) * len(needle) -- is bounded
+    // instead at the door: sanitizeAnchor caps a stored `ref` at MAX_ANCHOR_FIELD, so
+    // the long-needle case that made this quadratic can no longer be persisted.
     from = i + 1;
   }
 }

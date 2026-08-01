@@ -811,6 +811,20 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     return packetResult(text, packet);
   }
 
+  // A `timeout` packet is the DAEMON's cap expiring, not the shim's, so `waited.
+  // timedOut` above is false and this used to fall through to "Board submitted."
+  // (audit) -- the agent was told the reviewer had answered when the answers were
+  // all synthesised `unanswered` and the round is still open, so the reviewer's
+  // later Send answers into nothing. Same wording as the shim-side cap, which is
+  // the same event seen from the other side.
+  if (packet.status === 'timeout') {
+    const text =
+      `No response before the daemon's wall-clock cap. Explicit no-response, not a hang. ` +
+      `The round is still open at ${packet.url} — reopen it or post a fresh round to continue.\n` +
+      `${summarizeAnswers(packet)}`;
+    return packetResult(text, packet);
+  }
+
   const text = `Board submitted.\n${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
   return packetResult(text, packet);
 }

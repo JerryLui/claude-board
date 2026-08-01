@@ -47,6 +47,16 @@ archive.
 prefilled; a second click on an element with a *sent* comment does nothing and is
 de-affordanced in comment mode. Nothing removes or renumbers a comment after Send.
 
+_Amended 2026-08-01 after the audit._ The reopen-prefilled half excludes elements inside
+an `html` stage. The anchor on that path is a string the stage chose rather than something
+the page observed, so looking up a queued comment by it would let agent-authored markup
+pick **which** of the reviewer's queued comments the next submit replaces — the stage can
+already mint a comment, but it must never be able to select an existing one to overwrite.
+A repeat click on a stage element therefore queues a second comment, removable with the
+delete control. Every other path — plain DOM, markdown anchors, mermaid nodes — keeps the
+full edit behaviour. Recorded in DESIGN.md ("Criterion 1 excludes html-stage elements",
+product call, approved) and pinned by `test/check-stage-isolation.mjs`.
+
 **Consequences:** No delete endpoint, no protocol change, no renumbering of anything the
 agent has already read, and the archive stays a faithful record of the exchange — which
 is what criteria 4 and 14 rest on. In exchange, a typo noticed one second after Send is

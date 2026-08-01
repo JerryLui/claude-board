@@ -460,8 +460,14 @@ function isFence(line) {
  * including the next heading of equal or shallower level. Fenced code is skipped on
  * both scans, exactly as markdown.mjs skips it. */
 function sliceSection(text, section) {
-  const lines = text.split('\n');
+  // Trailing CR stripped per line, matching src/markdown.mjs's identical pass: `$`
+  // does not match `\r`, so every heading in a CRLF file failed this regex and every
+  // `section` ref against one reported "not found" (audit).
+  const lines = text.split('\n').map(s => (s.endsWith('\r') ? s.slice(0, -1) : s));
   const used = new Set();
+  // Beside `used`, for the same reason markdown.mjs carries one: without it a file of
+  // N same-slug headings costs O(N^2), and a 512KiB one took 8.8 minutes here (audit).
+  const ordinals = new Map();
   let startIdx = -1;
   let startLevel = 0;
   let inFence = false;
@@ -471,7 +477,7 @@ function sliceSection(text, section) {
     const h = lines[i].match(/^(#{1,6})\s+(.*)$/);
     if (!h) continue;
     const level = h[1].length;
-    const slug = slugify(h[2], used);
+    const slug = slugify(h[2], used, ordinals);
     if (slug === section) {
       startIdx = i;
       startLevel = level;

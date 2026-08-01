@@ -14,6 +14,7 @@
 import path from 'node:path';
 import { styles } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
+import { questionBlocks } from './board.mjs';
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -49,10 +50,20 @@ export function folderName(cwd) {
  * in a LATER round — or outside the board entirely — still counts here, because
  * nothing in the protocol can mark one settled. The count is honest about the
  * board's own record rather than guessing at intent. */
+/** A board's `updatedAt` as a sortable string, with anything non-string treated as
+ * absent (i.e. oldest) rather than stringified. `String(undefined)` is "undefined",
+ * which sorts above every ISO timestamp. */
+const stamp = b => (typeof b?.updatedAt === 'string' ? b.updatedAt : '');
+
 function pendingCount(board) {
   const answers = board.answers || {};
-  return (board.blocks || []).filter(b => {
-    if (b.kind !== 'question') return false;
+  // questionBlocks, not a top-level walk of board.blocks (audit). Questions nest
+  // inside a compare side, another question's `context`, and an option's block; the
+  // top-level-only version reported "0 pending" for a board whose only question was
+  // nested and explicitly deferred -- the reviewer's own recall surface saying
+  // nothing was owed on a thread that was waiting on them. Every other traversal
+  // (findBlock, countersFromBoard, the packet, the patch) already recurses.
+  return questionBlocks(board).filter(b => {
     const a = answers[b.id];
     if (!a) return true;                    // never submitted
     return a.status === 'deferred';         // explicitly "revisit later"
@@ -83,12 +94,18 @@ export function buildThreadIndex(boards) {
 
   const threads = [];
   for (const [thread, group] of byThread) {
-    group.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    // `stamp` rather than String(...) throughout (audit): a board whose `updatedAt`
+    // is missing stringified to "undefined", which collates ABOVE every ISO date --
+    // it sorted first, hijacked `primary`, and seeded the reduce below with a value
+    // no real timestamp could ever beat, freezing the whole thread's date. Absent
+    // now collates last, as oldest. Only reachable from a hand-edited or
+    // foreign-version store file; createBoard always sets the field.
+    group.sort((a, b) => stamp(b).localeCompare(stamp(a)));
     const liveBoards = group.filter(isLiveBoard);
     const primary = liveBoards[0] || group[0];
     const pending = group.reduce((sum, b) => sum + pendingCount(b), 0);
     const cwd = (group.find(b => b.cwd) || {}).cwd || null;
-    const updatedAt = group.reduce((max, b) => (String(b.updatedAt) > max ? b.updatedAt : max), group[0].updatedAt);
+    const updatedAt = group.reduce((max, b) => (stamp(b) > max ? stamp(b) : max), '');
     // NOT summed across the group, unlike `pending` above: the row links to
     // `primary.id`, one specific board doc, so its round count has to describe
     // THAT board, or it contradicts the page the row opens. A two-board thread
@@ -113,7 +130,7 @@ export function buildThreadIndex(boards) {
 
   threads.sort((a, b) => {
     if (a.live !== b.live) return a.live ? -1 : 1;
-    return String(b.updatedAt).localeCompare(String(a.updatedAt));
+    return stamp(b).localeCompare(stamp(a));
   });
   return threads;
 }

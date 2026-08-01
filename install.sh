@@ -145,6 +145,23 @@ else
   REF_ROOTS_FROM="default"
 fi
 
+# CLAUDE_BOARD_HOME, resolved the same way and for the same reason (audit). It is
+# documented configuration (README.md, PROTOCOL.md), but it was never written into
+# the plist -- and a launchd job inherits nothing from the shell that ran this
+# script, so pointing the store at an encrypted volume produced a green install and
+# boards at the default path anyway. Unlike REF_ROOTS there is no default to write:
+# absent means the key is omitted and src/store.mjs picks its own default, so an
+# install that never set it keeps exactly today's plist.
+if [ -n "${CLAUDE_BOARD_HOME+set}" ]; then
+  BOARD_HOME="$CLAUDE_BOARD_HOME"
+  BOARD_HOME_FROM="CLAUDE_BOARD_HOME"
+elif BOARD_HOME="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_HOME raw -o - "$PLIST_PATH" 2>/dev/null)"; then
+  BOARD_HOME_FROM="carried forward from $PLIST_PATH"
+else
+  BOARD_HOME=""
+  BOARD_HOME_FROM=""
+fi
+
 echo "==> claude-board install"
 echo "    repo:   $REPO_DIR"
 echo "    daemon: $DAEMON_PATH"
@@ -158,6 +175,14 @@ else
   echo "    reference roots: none (a reference resolves inside the board project directory only)"
 fi
 echo "                     [$REF_ROOTS_FROM]"
+# Printed for the same reason the roots are: the store is where the reviewer's answers
+# end up, and an operator who redirected it should be able to see that it took.
+if [ -n "$BOARD_HOME_FROM" ]; then
+  echo "    store:  $BOARD_HOME"
+  echo "                     [$BOARD_HOME_FROM]"
+else
+  echo "    store:  ~/Library/Application Support/claude-board [default]"
+fi
 
 if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$LAUNCHER_SRC" ]; then
   echo "error: bin/daemon.mjs, bin/mcp.mjs or bin/launcher.c not found under $REPO_DIR — run this script from a claude-board clone" >&2
@@ -478,6 +503,19 @@ else
 		<string>${DAEMON_PATH_X}</string>"
 fi
 
+# Emitted only when the operator actually chose a store root, so an install that
+# never mentions CLAUDE_BOARD_HOME produces a byte-identical plist to before and the
+# daemon keeps picking its own default. The trailing newline is part of the value:
+# the template interpolates it immediately before the closing </dict>.
+if [ -n "$BOARD_HOME_FROM" ]; then
+  BOARD_HOME_X="$(xml_escape "$BOARD_HOME")"
+  BOARD_HOME_XML="		<key>CLAUDE_BOARD_HOME</key>
+		<string>${BOARD_HOME_X}</string>
+"
+else
+  BOARD_HOME_XML=""
+fi
+
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -505,7 +543,7 @@ ${PROGRAM_ARGS_XML}
 		<string>${PORT_X}</string>
 		<key>CLAUDE_BOARD_REF_ROOTS</key>
 		<string>${REF_ROOTS_X}</string>
-	</dict>
+${BOARD_HOME_XML}	</dict>
 </dict>
 </plist>
 PLIST

@@ -5,6 +5,63 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ## [Unreleased]
 
+### Fixed
+
+- **A CRLF markdown file no longer wedges the daemon.** `.` and `$` do not match `\r`, so
+  a line like `- alpha\r` passed the list guard, failed the item pattern, matched no
+  continuation and broke out of the item loop without advancing the line index — an
+  infinite loop that pinned a core and stopped the daemon answering anything, `launchd`
+  included, since the process stayed alive. Triggered by an ordinary CRLF file in the
+  project, by value or by reference, with no attacker involved. Headings in such a file
+  also yielded no anchors, so every `section:` ref against one reported "not found". Both
+  passes now strip a trailing CR, and the list loop always makes progress.
+- **Duplicate-slug disambiguation is no longer quadratic.** Every duplicate re-probed from
+  `-2`, so N headings sharing a base cost O(N²): 512 KiB of `# a` took 10.5 minutes in
+  `mdToHtmlAndAnchors` and 8.8 minutes in `sliceSection`, inline on the request. Both now
+  carry an ordinal map beside the used-slug set; the same input takes ~0.2s and ~0.08s.
+  Output is unchanged.
+- **A nested block can no longer claim a top-level block's id.** The check asked where the
+  id's existing owner sat, never where the claiming block sat, so a question nested in a
+  `compare` side or another question's `context` could name a live top-level id.
+  `amendRound` splices on top-level ids only, so it appended instead of substituting and
+  two live blocks shared one id — `answers` is keyed by id, and the packet reported the
+  reviewer's single choice against both prompts.
+- **A repeated round is no longer answered from the previous one.** The idempotency key is
+  derived from a round's content and `lastRequestId` was never cleared, so the ordinary
+  fix-and-reconfirm loop posted a byte-identical body and was treated as a lost-response
+  retry: no round was created and `/wait` returned the earlier round's answer in
+  milliseconds. The guard is now scoped to the round it protected.
+- **A block id with an implausible ordinal is refused.** Past 2^53 the mint counter stops
+  incrementing, so the re-mint loop never terminated — and the board persisted before the
+  spin, so the stored file re-wedged the daemon on every later `ask`.
+- **Deep agent markup no longer 500s the reviewer's Send.** `elementText` recursed and threw
+  `RangeError` out of a parser documented as never throwing; it is now iterative.
+- **`<` inside a quoted attribute no longer drops an element.** It is an ordinary character
+  there per the HTML parsing spec, but the tokenizer ended the tag early, shifting every
+  later sibling index — reporting live anchors lost, or resolving against the wrong element.
+- **Latin-1 letter entities decode.** `G&aring;r vidare` left the server holding the literal
+  text while the browser read `Går vidare`, so a live element was reported lost.
+- **A `timeout` packet is no longer reported as "Board submitted."** The daemon-side cap
+  produced answers that were all synthesised `unanswered` on a still-open round, and the
+  shim rendered it as a completed review.
+- **"Discuss in chat" survives a concurrent round.** The packet read the board-wide state,
+  which `addRound` resets to `open`, so a second `ask` landing inside the waiter's poll
+  erased the reviewer's decision. The outcome is now recorded on the round.
+- **`cwd` sent alongside `boardId` is refused rather than ignored.** The value was never
+  forwarded, so the documented 400 could not fire and the caller got a 200.
+- **The index counts nested questions.** `pendingCount` walked top-level blocks only, so a
+  board whose only question sat in a `compare` side and was explicitly deferred showed
+  "0 pending".
+- **Option and prompt fields are size-capped**, and stored anchor strings are bounded. Both
+  were limited only by the 25 MB body cap; an oversized `preview` additionally fed a
+  quadratic URL sniff (now a parse), and an oversized anchor `ref` made every render of
+  that board cost seconds, permanently, because comments are append-only.
+- **Short writes cannot publish a truncated board.** `writeSync` issues one `write(2)` and
+  returns a partial count without throwing; the store now loops.
+- **`CLAUDE_BOARD_HOME` reaches the daemon.** It is documented configuration, but was never
+  written into the launchd plist, so a redirected store silently stayed at the default path.
+  The installer now propagates and prints it.
+
 ### Security
 
 - **A rendered variant cannot pick itself.** The new `choose-between-rendered-variants`

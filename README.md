@@ -141,7 +141,8 @@ claude-board:ask(title, blocks[])
 Questions carry their prompt by value; content blocks carry a reference to a file plus
 an optional section or line range, which the daemon resolves and snapshots at post
 time. Block kinds are `markdown`, `mermaid`, `code`, `html`, `compare` and `question`;
-answer widgets are single-choice cards, multi-select, free text and drag-to-rank. See
+answer widgets are single-choice cards, multi-select, free text, drag-to-rank and a
+choice between rendered variants. See
 [PROTOCOL.md](PROTOCOL.md) for the full wire format.
 
 ## How it works
@@ -182,7 +183,7 @@ the entry grants nothing, but macOS offers no way to delete it programmatically.
 ## Development
 
 ```sh
-npm run check      # 21 checks, node only, no browser and no network
+npm run check      # the full suite, node only, no browser and no network
 ```
 
 Every check is also runnable alone, and each runs under a deadline in its own process

@@ -469,7 +469,16 @@ async function handlePostBoard(req, res, home, sse) {
       // the caller told it failed. The agent then retries, and amendRound APPENDS a second
       // copy of every block: the reviewer sees the same question twice in one round. A
       // retry carrying the same `requestId` is answered from what that id already did.
-      if (body.requestId && board.lastRequestId === body.requestId) {
+      // Scoped to the round it guarded (audit). `lastRequestId` used to persist for
+      // the life of the board, and `requestId` is derived from the round's CONTENT --
+      // so the ordinary fix-and-reconfirm loop ("show file, ask, fix, show the same
+      // file, ask again") posted a byte-identical body and was answered as a retry.
+      // No round was created, nothing was pushed, and the shim's /wait returned the
+      // PREVIOUS round's answer in milliseconds: the agent was handed a decision the
+      // reviewer never made. The lost-response retry this defends against always
+      // targets a still-open round, so gating on that costs nothing.
+      const guarded = board.rounds[board.rounds.length - 1];
+      if (body.requestId && board.lastRequestId === body.requestId && guarded && guarded.status === 'open') {
         return sendJson(res, 200, {
           boardId: board.id,
           thread: board.thread,
@@ -491,12 +500,17 @@ async function handlePostBoard(req, res, home, sse) {
         // an unlabelled "Round 2". Storing it on the round object is src/board.mjs's
         // half and rendering it is src/render.mjs's — both owned elsewhere; this side
         // stops throwing the value away.
-        const result = amendRound(board, { blocks: body.blocks, title: body.title });
+        // `cwd` is forwarded so assertCwdNotRetargeted can actually refuse it (audit).
+        // It was dropped here, so the guard only ever saw `undefined` and returned at
+        // once: a post naming a different `cwd` alongside `boardId` got a 200 and the
+        // caller believed it had retargeted the board. PROTOCOL.md and the guard's own
+        // comment both specify a loud 400 instead of a silent no-op.
+        const result = amendRound(board, { blocks: body.blocks, title: body.title, cwd: body.cwd });
         round = result.round;
         touchedBlockIds = result.blockIds;
         pushMode = 'amend';
       } else {
-        round = addRound(board, { blocks: body.blocks, title: body.title });
+        round = addRound(board, { blocks: body.blocks, title: body.title, cwd: body.cwd });
         touchedBlockIds = board.blocks.filter(b => b.round === round).map(b => b.id);
         pushMode = 'new-round';
       }
