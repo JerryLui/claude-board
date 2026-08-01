@@ -217,3 +217,35 @@ the shipped file, an unmodified copy updates, an edited copy survives, uninstall
 all three) are retired the same way, replaced by assertions that the removed machinery
 (`GRILL_SRC`, `COMMAND_FILE`, the hash record) is actually gone from both scripts' source,
 and that a file sitting at the old command-file path survives an uninstall untouched.
+
+## 6. Commenting is confined to content blocks — 2026-08-01
+
+**Context:** All six block kinds carried a comment button in their kicker and, independently
+of it, responded to comment mode's click-to-anchor gesture. Two of them render no content of
+their own: `question` is a card around a widget, `compare` is a grid around two nested blocks.
+A comment anchored to either names no item the agent can act on, and on a question it says
+strictly less than the `note` field on the same card already says. `DESIGN.md` "Anchoring
+criteria" 1 had closed on the opposite promise — "in every kind of content the board renders
+… one side of a comparison, and a question's own widget" — verified in real Chrome on
+2026-07-30, so narrowing it is a reversal, not a gap being filled.
+
+**Decision:** The split is wrapper versus content, not a list of kinds. `markdown`, `mermaid`,
+`html` and `code` keep the button and the gesture. `question` and `compare` lose both. Nested
+blocks are untouched: a question's `context` entry and a compare side render through the same
+`renderBlock` dispatch with their own ids and their own comment areas, and keep them, so the
+material actually worth commenting on stays reachable one level in. The whole-block button
+survives on the four content kinds rather than being narrowed to element-level anchors only.
+Criteria 1 and 7 are amended to match; boards already on disk are dropped rather than
+supported.
+
+**Consequences:** One rule covers both wrappers with no exception to remember, and a board of
+pure questions carries no comment affordance at all. The costs are real and accepted: a
+comparison can no longer be commented on as a whole (only one side or the other), a compare
+side's label and a side with no content block become unanchorable, and comments already stored
+against question or compare blocks in archived boards are not a supported case. The button
+staying on the four content kinds is what keeps a block that failed to render — an unresolved
+reference, a diagram the CDN never drew, a blank stage — from becoming silently uncommentable;
+element-level-only was rejected for exactly that. Also rejected: removing the button while
+leaving the gesture live, which narrows nothing because comment mode mints anchors on its own;
+and the middle position on `compare` (button gone, side-level clicks kept), rejected as the one
+option inconsistent with every other wrapper.
