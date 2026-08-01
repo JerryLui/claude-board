@@ -158,6 +158,19 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ### Fixed
 
+- The 401 refusal page now reads the real palettes instead of a hand-copy, so it matches
+  whatever board it sits in front of. It shipped dark-only — six hardcoded hex, no light
+  variant — which put a black slab in front of a light-mode reader on the one page they
+  reach holding nothing else. Adding a light variant by hand fixed the half that had been
+  looked at and left the dark half on its original literals, none of which were a value in
+  either palette, so the mismatch simply moved. `renderRefusalPage` now emits both token
+  blocks from `src/styles.mjs`'s `palettes` at render time and paints every rule through a
+  `var()`. The page stays self-contained — no stylesheet link, no script, no network, same
+  locked-down CSP as a board — because self-containment ruled out *linking* the stylesheet,
+  never reading the same data. The OS preference remains the only theme signal it can act
+  on: the saved override lives in `localStorage`, behind the boot script this page
+  deliberately does not carry. The raw-literal check that guards `src/styles.mjs` now runs
+  against this stylesheet too. See [QUIRKS.md](QUIRKS.md).
 - The plist's `WatchPaths` never restarted the daemon: it coexists with `KeepAlive`,
   and launchd only uses a watch to *start* a job that is not running, so editing `src/`
   or `bin/` did nothing. Replaced with a mechanism that composes with `KeepAlive`

@@ -273,6 +273,32 @@ The lesson worth carrying: on a surface that does not follow the theme, "matches
 the token" is not the requirement — "has contrast on the surface it actually
 renders on" is, and only one of those two is worth writing a check for.
 
+**The 401 refusal page used to be filed under this entry, and should never have
+been.** `renderRefusalPage` is self-contained by design — no stylesheet link, no
+script, no network, so it renders under the same locked-down CSP a board does —
+and that was read as "therefore its colours are hand-maintained, like the
+stage's". It drifted twice in two days. First it shipped dark-only, six literals
+and no light variant, so a light-mode reader got a black slab on the one page
+they reach holding nothing else (2026-07-31 audit, R5). Then the light variant
+was added by hand, which fixed the half that had just been looked at and left
+the dark half on its original six — none of them a value in *either* palette —
+so the page went on mismatching every dark board it fronted, and the check
+written at the time asserted only the light values, so nothing caught it.
+
+The distinction the stage earns and this page does not: the stage is injected
+into a sandboxed `srcdoc` the page's tokens never reach, *and* a custom property
+is the one mechanism that would reach through that boundary anyway (properties
+inherit, so agent-authored HTML could declare its own `--accent`). The refusal
+page renders in the page's own document, on the page's own background. So it now
+emits both token blocks from `palettes` at render time and paints through
+`var()`: self-containment ruled out *linking* `src/styles.mjs`, never reading the
+same data out of it. `test/check-pure.mjs` runs the raw-literal check against
+this stylesheet as well as `styles` now.
+
+Before hand-maintaining a second copy of a colour, check which of the two
+properties actually applies — "cannot link the stylesheet" is not "cannot read
+the palette", and only the stage has ever needed the stronger one.
+
 Mermaid's
 `themeVariables` no longer are: `mermaidThemeVariables()` (`src/ui.mjs`) now reads
 live computed style through a mermaid-variable -> CSS-token map

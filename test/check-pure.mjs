@@ -5477,56 +5477,62 @@ check('relTime: pinned at the exact boundaries its own if-chain names, with a fi
   assert.equal(relTime(null, now), null, 'a null iso must be returned verbatim, not treated as the epoch');
 });
 
+// A palette change has to stay a one-block edit (DESIGN.md acceptance criterion
+// 6). This invariant already rotted once -- the header comment above `styles`
+// asserted it while 21 rules quietly reached past the token block for a raw
+// literal -- so it is enforced here instead of merely claimed in prose.
+const RAW_COLOR = /#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{4}\b|#[0-9a-fA-F]{3}\b|\brgba?\([^)]*\)/;
+
+// A "token block" is any rule -- :root, or :root nested inside a @media query
+// (ticket 02's light palette), or any future selector -- whose declarations are
+// ALL either a custom property (`--name: value;`) or `color-scheme` (the one
+// non-custom-property declaration a palette's :root carries alongside it).
+// Blanking every such leaf rule out (character-for-character, so line numbers
+// still line up) before scanning is what lets this check not know the token
+// block's selector in advance -- it stays correct however many get added, and
+// it does not require special-casing ticket 02's second block by name.
+//
+// The regex below matches leaf declaration blocks only (no braces inside the
+// body): run globally left-to-right over CSS that nests a rule inside a
+// @media/@keyframes wrapper, a failed match at the wrapper's own `{` makes the
+// engine retry at the next character, so the first successful match is always
+// the innermost rule -- exactly the block whose declarations this needs to see.
+function isTokenBlockBody(body) {
+  const decls = body.split(';').map(d => d.trim()).filter(Boolean);
+  if (decls.length === 0) return false;
+  return decls.every(d => {
+    const prop = d.slice(0, d.indexOf(':')).trim();
+    return prop.startsWith('--') || prop === 'color-scheme';
+  });
+}
+
+/** Finds the first raw color literal outside any token block in `css` (comments
+ * and token blocks both blanked to whitespace first, character-for-character,
+ * so the reported line number still lines up with the source), or null if the
+ * rest of the sheet is clean.
+ *
+ * Module scope rather than closed over one check, because there are now two
+ * stylesheets this rule binds: src/styles.mjs's, and the refusal page's inline
+ * one. The refusal page is not an exception to the rule -- it is a second
+ * stylesheet that has to obey it, for the reason the stage does not (see 'the
+ * refusal page follows the theme' below). */
+function firstLeakOutsideTokenBlocks(css) {
+  const noComments = css.replace(/\/\*[\s\S]*?\*\//g, s => s.replace(/[^\n]/g, ' '));
+  let sawTokenBlock = false;
+  const stripped = noComments.replace(/[^{}]+\{[^{}]*\}/g, block => {
+    const body = block.slice(block.indexOf('{') + 1, block.lastIndexOf('}'));
+    if (!isTokenBlockBody(body)) return block;
+    sawTokenBlock = true;
+    return block.replace(/[^\n]/g, ' ');
+  });
+  assert.ok(sawTokenBlock, 'no token block (a rule of only custom properties) found');
+  const m = RAW_COLOR.exec(stripped);
+  if (!m) return null;
+  const line = css.slice(0, m.index).split('\n').length;
+  return `'${m[0]}' on line ${line}`;
+}
+
 check('no rule outside a token block carries a raw hex or rgba literal', () => {
-  // A palette change has to stay a one-block edit (DESIGN.md acceptance criterion
-  // 6). This invariant already rotted once -- the header comment above `styles`
-  // asserted it while 21 rules quietly reached past the token block for a raw
-  // literal -- so it is enforced here instead of merely claimed in prose.
-  const RAW_COLOR = /#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{4}\b|#[0-9a-fA-F]{3}\b|\brgba?\([^)]*\)/;
-
-  // A "token block" is any rule -- :root, or :root nested inside a @media query
-  // (ticket 02's light palette), or any future selector -- whose declarations are
-  // ALL either a custom property (`--name: value;`) or `color-scheme` (the one
-  // non-custom-property declaration a palette's :root carries alongside it).
-  // Blanking every such leaf rule out (character-for-character, so line numbers
-  // still line up) before scanning is what lets this check not know the token
-  // block's selector in advance -- it stays correct however many get added, and
-  // it does not require special-casing ticket 02's second block by name.
-  //
-  // The regex below matches leaf declaration blocks only (no braces inside the
-  // body): run globally left-to-right over CSS that nests a rule inside a
-  // @media/@keyframes wrapper, a failed match at the wrapper's own `{` makes the
-  // engine retry at the next character, so the first successful match is always
-  // the innermost rule -- exactly the block whose declarations this needs to see.
-  function isTokenBlockBody(body) {
-    const decls = body.split(';').map(d => d.trim()).filter(Boolean);
-    if (decls.length === 0) return false;
-    return decls.every(d => {
-      const prop = d.slice(0, d.indexOf(':')).trim();
-      return prop.startsWith('--') || prop === 'color-scheme';
-    });
-  }
-
-  // Finds the first raw color literal outside any token block in `css` (comments
-  // and token blocks both blanked to whitespace first, character-for-character,
-  // so the reported line number still lines up with the source), or null if the
-  // rest of the sheet is clean.
-  function firstLeakOutsideTokenBlocks(css) {
-    const noComments = css.replace(/\/\*[\s\S]*?\*\//g, s => s.replace(/[^\n]/g, ' '));
-    let sawTokenBlock = false;
-    const stripped = noComments.replace(/[^{}]+\{[^{}]*\}/g, block => {
-      const body = block.slice(block.indexOf('{') + 1, block.lastIndexOf('}'));
-      if (!isTokenBlockBody(body)) return block;
-      sawTokenBlock = true;
-      return block.replace(/[^\n]/g, ' ');
-    });
-    assert.ok(sawTokenBlock, 'no token block (a rule of only custom properties) found');
-    const m = RAW_COLOR.exec(stripped);
-    if (!m) return null;
-    const line = css.slice(0, m.index).split('\n').length;
-    return `'${m[0]}' on line ${line}`;
-  }
-
   const pageLeak = firstLeakOutsideTokenBlocks(styles);
   assert.equal(pageLeak, null, `src/styles.mjs has a raw color literal outside its token blocks: ${pageLeak}`);
 });
@@ -5733,21 +5739,53 @@ check('the refusal page names the recovery command and reveals nothing about the
   // about either: a "board not found" here would leak existence to an id enumerator.
   assert.doesNotMatch(html, /board-data|boardId|b_[0-9a-f]/);
 
-  // This page shipped dark-only: six hardcoded hex, no light variant, so every
-  // light-mode machine got a black slab. It cannot use tokens (no stylesheet
-  // link) or the saved preference (no script, deliberately), so the OS
-  // preference is the only signal it has, and the values are hand-maintained
-  // against src/styles.mjs the same way the stage's are. Asserted against the
-  // real LIGHT palette so a palette change fails HERE rather than silently
-  // leaving this page on last year's colours.
   assert.match(html, /@media \(prefers-color-scheme: light\)/,
     'the refusal page must carry a light variant -- it has no stylesheet link and no script, so this media query is the only theme signal it can act on');
   assert.match(html, /color-scheme: light/,
     'and must set color-scheme, or the scrollbar and any form chrome stay dark against a light page');
-  for (const [token, where] of [['--bg', 'the page background'], ['--ink', 'the body text'],
-    ['--panel-2', 'the command block'], ['--code-ink', 'the command itself'], ['--muted', 'the footnote']]) {
-    assert.ok(html.includes(palettes.light[token]),
-      `the refusal page's light variant must use --${token.slice(2)}'s light value (${palettes.light[token]}) for ${where} -- it is hand-copied from src/styles.mjs (QUIRKS.md "Two stylesheets, one palette"), so a palette change that does not reach here leaves this page mismatched with every board it sits in front of`);
+});
+
+check('the refusal page follows the theme, from the palettes rather than a hand-copy', () => {
+  // Two separate failures, one after the other, on the page a reader sees at
+  // exactly the moment they hold nothing else. First it shipped dark-only --
+  // six hardcoded hex, no light variant, so a light-mode machine got a black
+  // slab where every other route rendered #eef1f7 (2026-07-31 audit, R5).
+  // Then the light variant was added the same way it was diagnosed: by hand.
+  // Which left the DARK half still on its original six literals, none of them
+  // a value in either palette, so the page went on mismatching every dark
+  // board it sat in front of and no check noticed -- the drift had simply
+  // moved to the side nobody had just been looking at.
+  //
+  // So the requirement asserted here is not "these values are right" but "no
+  // value is written down here at all": src/render.mjs reads `palettes` at
+  // render time. Self-containment (no stylesheet link, no script, no network,
+  // so it renders under the same locked-down CSP a board does) rules out
+  // LINKING src/styles.mjs; it never ruled out reading the same data.
+  //
+  // Contrast the stage stylesheet, which keeps its literal for a reason that
+  // does not apply here: it is injected into a sandboxed srcdoc the page's
+  // tokens deliberately never reach, and a custom property is the one thing
+  // that WOULD reach through that boundary (QUIRKS.md "Two stylesheets, one
+  // palette"). This page renders on the page's own background, in the page's
+  // own document. It has no such excuse.
+  const html = renderRefusalPage(recoveryCommand());
+  const css = html.slice(html.indexOf('<style>') + 7, html.indexOf('</style>'));
+  assert.ok(css.length > 0, 'setup failure: could not isolate the refusal page stylesheet');
+
+  const leak = firstLeakOutsideTokenBlocks(css);
+  assert.equal(leak, null,
+    `the refusal page's stylesheet has a raw color literal outside its token blocks: ${leak} -- every colour it paints must come from src/styles.mjs's palettes through a var(), or it drifts from the boards it sits in front of`);
+
+  // The token blocks themselves must hold the real values, both palettes. The
+  // check above only proves nothing is painted outside them; this proves what
+  // is inside them was not typed by hand.
+  for (const [token, where] of [['--bg', 'the page background'], ['--ink', 'the heading'],
+    ['--ink-2', 'the body text'], ['--panel-2', 'the command block'],
+    ['--hairline-2', 'its border'], ['--code-ink', 'the command itself'], ['--muted', 'the footnote']]) {
+    for (const theme of ['dark', 'light']) {
+      assert.ok(css.includes(`${token}: ${palettes[theme][token]};`),
+        `the refusal page's ${theme} block must declare ${token} at its ${theme} value (${palettes[theme][token]}), for ${where} -- it is read from src/styles.mjs at render time, so a missing declaration means the page is painting that surface from an inherited default instead`);
+    }
   }
 });
 

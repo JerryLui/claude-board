@@ -22,7 +22,7 @@
 // src/server.mjs), so the pin src/ui.mjs draws and the comment list beside it can
 // never disagree about whether an anchor still resolves.
 
-import { styles } from './styles.mjs';
+import { styles, palettes } from './styles.mjs';
 import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
@@ -1191,6 +1191,19 @@ export function renderBoardPage(board) {
  * anything that could enumerate ids. Self-contained (inline style only, no script, no
  * network) so it renders under the same locked-down CSP every board page carries. */
 export function renderRefusalPage(recoveryCommand) {
+  // The seven tokens this page actually uses, emitted inline from the real palettes
+  // rather than hand-copied out of them. Self-containment (see above) rules out a
+  // link to src/styles.mjs's stylesheet, but it does not rule out reading the same
+  // data at render time -- and that is the difference between a page that cannot
+  // drift and one that merely has not yet. The first version of this page WAS
+  // hand-maintained, in the sense QUIRKS.md "Two stylesheets, one palette"
+  // describes, and it drifted exactly as that entry predicts: six literals that
+  // matched no token in either palette, so the refusal sat in front of boards it
+  // did not match. The stage keeps its literal because it renders on a surface the
+  // page's tokens deliberately never reach; this page renders on the page's own
+  // background, so it has no such excuse.
+  const tokens = ['--bg', '--ink', '--ink-2', '--panel-2', '--hairline-2', '--code-ink', '--muted'];
+  const block = (palette) => tokens.map(t => `    ${t}: ${palette[t]};`).join('\n');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1199,30 +1212,30 @@ export function renderRefusalPage(recoveryCommand) {
 <meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
 <title>claude-board — this browser is not authorized</title>
 <style>
-  /* Self-contained by design (see this function's own comment), so this page
-     cannot reach src/styles.mjs's tokens and cannot read the board's saved
-     theme either -- it has no script, and the preference lives behind one.
-     The OS preference is the only theme signal available here, which is the
-     right one for a standalone error page: it is reached by a browser that,
-     by definition, holds nothing of ours. Hand-maintained against the two
-     palettes, in the same sense as the stage stylesheet (QUIRKS.md "Two
-     stylesheets, one palette") and for the same reason. */
-  :root { color-scheme: dark; }
-  body { margin: 0; background: #0f1115; color: #d7dce5; font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  main { max-width: 40rem; margin: 12vh auto; padding: 0 1.5rem; }
-  h1 { font-size: 1.35rem; margin: 0 0 .75rem; color: #f2f5fa; }
-  p { margin: 0 0 1rem; }
-  pre { background: #171a21; border: 1px solid #262b36; border-radius: 6px; padding: .85rem 1rem; overflow-x: auto; user-select: all; }
-  code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #9fd0ff; }
-  .muted { color: #8b93a3; font-size: .9rem; }
-  @media (prefers-color-scheme: light) {
-    :root { color-scheme: light; }
-    body { background: #eef1f7; color: #171c2a; }
-    h1 { color: #0d1220; }
-    pre { background: #f5f6fb; border-color: rgba(0, 0, 0, 0.18); }
-    code { color: #3a4c78; }
-    .muted { color: #515c76; }
+  /* The board's saved theme is unreachable here -- it lives in localStorage,
+     behind the boot script this page deliberately does not carry. The OS
+     preference is therefore the only theme signal available, which is the
+     right one for a standalone error page anyway: it is reached by a browser
+     that, by definition, holds nothing of ours. So: two token blocks, no
+     data-theme branch, and every rule below reads var() exactly like a
+     board's does. */
+  :root {
+    color-scheme: dark;
+${block(palettes.dark)}
   }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+${block(palettes.light).replace(/^/gm, '  ')}
+    }
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink-2); font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 40rem; margin: 12vh auto; padding: 0 1.5rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 .75rem; color: var(--ink); }
+  p { margin: 0 0 1rem; }
+  pre { background: var(--panel-2); border: 1px solid var(--hairline-2); border-radius: 6px; padding: .85rem 1rem; overflow-x: auto; user-select: all; }
+  code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--code-ink); }
+  .muted { color: var(--muted); font-size: .9rem; }
 </style>
 </head>
 <body>
