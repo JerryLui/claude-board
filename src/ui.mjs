@@ -2974,18 +2974,27 @@ export const ui = `
   setupRoundObserver();
   window.addEventListener('resize', function () { setupRoundObserver(); });
 
+  /** Scroll to the round that still needs an answer. Inert exactly when that is
+   * already where you are -- "at the open round there is nothing to take you to"
+   * (Decisions) -- and inert when nothing is open at all (every round already
+   * sent, nothing left to jump to).
+   *
+   * Shared by the round badge (DESIGN.md:520, its whole job) and the
+   * notification's click handler, which wants the same destination for the same
+   * reason: both are the reviewer saying "take me to the thing that needs an
+   * answer". One implementation, so the two can never drift into disagreeing
+   * about where that is. */
+  function jumpToOpenRound() {
+    var target = openRoundNumber();
+    if (target == null || target === badgeCurrentRound) return;
+    var section = document.querySelector('.round[data-round="' + target + '"]');
+    if (section && section.scrollIntoView) section.scrollIntoView({ block: 'start' });
+  }
+
   var roundBadgeBtn = document.querySelector('button#round-badge');
   if (roundBadgeBtn) {
-    // Criterion 9: jumps to the round that still needs an answer. Inert
-    // exactly when that is already where you are -- "at the open round there
-    // is nothing to take you to" (Decisions) -- and inert when nothing is open
-    // at all (every round already sent, nothing left to jump to).
-    roundBadgeBtn.addEventListener('click', function () {
-      var target = openRoundNumber();
-      if (target == null || target === badgeCurrentRound) return;
-      var section = document.querySelector('.round[data-round="' + target + '"]');
-      if (section && section.scrollIntoView) section.scrollIntoView({ block: 'start' });
-    });
+    // Criterion 9: jumps to the round that still needs an answer.
+    roundBadgeBtn.addEventListener('click', jumpToOpenRound);
   }
 
   /** Enable/disable BOTH send-bar buttons together. They live in .send-bar,
@@ -3064,9 +3073,27 @@ export const ui = `
     });
   }
 
+  /** A second entry point into the SAME permission dance notifyRound runs, fired
+   * from the one moment the tab is definitely focused: Chrome only raises the
+   * prompt in the foreground on a focused tab, and notifyRound's own request
+   * happens from the hidden-tab branch -- the one moment it CAN'T. A reviewer
+   * stranded at "default" would otherwise have no way to reach "granted" short
+   * of a round landing while they happen to be looking away. Request only, never
+   * a Notification -- that stays notifyRound's job alone. */
+  function requestNotifyPermissionFromSend() {
+    if (readonly) return;
+    if (typeof Notification === 'undefined') return;
+    try {
+      if (Notification.permission !== 'default') return; // granted: nothing to do; denied: never re-prompt
+      var req = Notification.requestPermission();
+      if (req && typeof req.then === 'function') req.then(function () {}, function () { /* ignore */ });
+    } catch (e) { /* degrade silently -- must never block or delay the submit */ }
+  }
+
   if (sendBtn) {
     sendBtn.addEventListener('click', function () {
       if (readonly) return;
+      requestNotifyPermissionFromSend();
       submitBoard('send');
     });
   }
@@ -3256,7 +3283,9 @@ export const ui = `
 
   /** A notification INSTEAD of a focus steal, and only when the reviewer isn't
    * already looking: a visible, focused tab already shows the round, so notifying
-   * would be noise. Nothing here ever pulls the window forward. */
+   * would be noise. Nothing here ever pulls the window forward UNBIDDEN -- the
+   * one exception is the notification's own click handler below, because a
+   * click on it is the reviewer asking to be brought back. */
   function notifyRound(n) {
     if (readonly) return;
     if (typeof Notification === 'undefined') return;
@@ -3264,7 +3293,19 @@ export const ui = `
     if (!unfocused) return;
     var body = 'Round ' + n + ' is waiting for you.';
     function fire() {
-      try { new Notification(baseTitle, { body: body, tag: 'claude-board-' + boardId }); } catch (e) { /* denied or unsupported */ }
+      // The tag carries the round number so round 3 gets its own entry in
+      // Notification Center instead of silently replacing round 2's -- only a
+      // genuine re-delivery of the SAME round should collapse into one.
+      try {
+        var notif = new Notification(baseTitle, { body: body, tag: 'claude-board-' + boardId + '-' + n });
+        // Focus, then land on the round that needs an answer, then dismiss. The
+        // jump is the round badge's own helper, not a second implementation of
+        // it: a reviewer who clicks a notification is asking the same question
+        // the badge answers, and arriving at whatever they last scrolled to
+        // makes them ask it again by hand. Ordering matters -- the scroll must
+        // happen on a window already brought forward.
+        notif.onclick = function () { window.focus(); jumpToOpenRound(); notif.close(); };
+      } catch (e) { /* denied or unsupported */ }
     }
     try {
       if (Notification.permission === 'granted') { fire(); return; }

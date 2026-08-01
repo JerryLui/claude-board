@@ -585,10 +585,19 @@ which `body.readonly` hides wholesale — so the standalone `file:` archive offe
 `round` push: a pending count in `document.title`, a badge drawn onto a data-URI favicon (canvas,
 no asset file — the page must stay a single self-contained file), and, only when the document is
 hidden or unfocused, a `Notification`. Permission is requested lazily on the first round that
-would actually notify, a denial is never re-prompted, and every part degrades silently: a failure
-anywhere leaves the round pushed and the page working, just unmarked. The page never calls
-`window.focus()` — the notification is what replaces the focus steal. All of it is inert in
-readonly mode. Shim/daemon side, unchanged: reopening the tab when no client is connected at all,
+would actually notify, and also on a Send click — the one moment the tab is definitely focused,
+so Chrome raises the prompt in the foreground instead of queuing it. A denial is never re-prompted,
+and every part degrades silently: a failure anywhere leaves the round pushed and the page working,
+just unmarked. The page never pulls itself forward unbidden; the one exception is the
+notification's own click, which calls `window.focus()` because a click on it is the reviewer
+asking. That click then scrolls to the open round before dismissing itself, through the same
+`jumpToOpenRound` the round badge uses — the badge's job is "take me to the thing that needs
+an answer" and a notification click is the same request, so they share one implementation
+rather than two that can disagree. It stays inert when the open round is already in view.
+All of it is inert in readonly mode. The notification's `tag` carries the round number
+(`claude-board-<boardId>-<n>`), so two unread rounds are two entries rather than one replacing the
+other; only a genuine re-delivery of the same round collapses.
+Shim/daemon side, unchanged: reopening the tab when no client is connected at all,
 and printing the board URL in chat as the fallback that cannot fail.
 
 ## SSE events

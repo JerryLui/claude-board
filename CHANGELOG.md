@@ -47,6 +47,22 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ### Changed
 
+- **A board notification is now one entry per round, and clicking it opens the tab.** The
+  `tag` carries the round number (`claude-board-<boardId>-<n>`) instead of the board id
+  alone, so rounds 2 and 3 arriving at a tab you are not looking at leave two entries in
+  Notification Center rather than the second silently replacing the first; only a genuine
+  re-delivery of the same round still collapses. A click on the notification focuses the
+  board's tab, scrolls to the round waiting for an answer, and dismisses itself — the one
+  place the page may pull itself forward, because the click is the reviewer asking for it.
+  The jump is the round badge's, shared rather than reimplemented: clicking a notification
+  asks the same question the badge answers, and landing on whatever you had last scrolled
+  to made you ask it again by hand. Permission is also requested when you press
+  **Send**, which is the one click guaranteed to happen on a focused tab: the previous
+  sole request site was the hidden-tab branch, where Chrome queues the prompt instead of
+  raising it, and a reviewer who dismissed that queued prompt was stranded at `default`
+  with no other way back. Still never requested at page load, still never re-prompted
+  after a denial, and still inert in the standalone `file:` archive.
+
 - **The daemon now runs under a launcher bundle of its own, so macOS can grant it a
   folder without granting `node` one.** `install.sh` compiles `bin/launcher.c` into
   `~/Applications/claude-board.app` (ad-hoc signed, `io.github.jerrylui.claude-board`)

@@ -4556,6 +4556,24 @@ check('Discuss posts the same body as Send through one shared submit path, diffe
   assert.match(discussListener, /\breadonly\b/, 'Discuss must be inert in readonly mode');
 });
 
+check('Send also requests notification permission -- the one click guaranteed to be on a focused tab', () => {
+  // notifyRound's own requestPermission() call only fires from the hidden-tab
+  // branch, i.e. the one moment Chrome will NOT raise the prompt in the
+  // foreground (it queues it instead). Send is the fix: the tab is definitely
+  // focused there, so a reviewer stuck at "default" permission has a way in.
+  const listeners = listenerBodies(ui);
+  const sendListener = listeners.find(b => /submitBoard\('send'\)/.test(b));
+  assert.ok(sendListener, "expected the Send click listener");
+  assert.match(sendListener, /requestNotifyPermissionFromSend\(\)|requestPermission\(\)/, 'Send must request notification permission');
+  const permFn = namedFunctionBody(ui, 'requestNotifyPermissionFromSend');
+  assert.ok(permFn, 'expected a requestNotifyPermissionFromSend helper in src/ui.mjs');
+  assert.match(permFn, /if \(readonly\) return;/, 'must be inert in the file:// archive -- it requests nothing');
+  assert.match(permFn, /typeof Notification === 'undefined'/, 'must degrade silently where Notification does not exist');
+  assert.match(permFn, /Notification\.permission !== 'default'/, 'granted must be left alone and denied must never be re-prompted');
+  assert.match(permFn, /requestPermission\(\)/);
+  assert.ok(!/new Notification\(/.test(permFn), 'the Send path requests permission only -- creating a Notification stays notifyRound\'s job');
+});
+
 // --- P6: a queued comment gets its pin immediately ------------------------------
 //
 // DESIGN.md calls the batching the win ("queue a dozen comments, send once");
@@ -4762,9 +4780,24 @@ check('the notification fires only when the tab is unfocused, degrades silently,
   assert.match(notify, /Notification\.permission === 'denied'/, 'a denied permission must never be re-prompted');
   assert.match(notify, /requestPermission\(\)/, 'permission is requested lazily, on the first round that would notify');
   assert.match(notify, /if \(readonly\) return;/, 'the standalone file:// archive must never ask for notification permission');
+  // The tag carries the round number: round 3 must not silently replace round
+  // 2's entry in Notification Center. Only a genuine re-delivery of the SAME
+  // round (same n) should collapse into one.
+  assert.match(notify, /tag: 'claude-board-' \+ boardId \+ '-' \+ n/, 'the notification tag must be unique per round, not per board');
+  // A click on the notification brings the tab forward, lands on the round that
+  // needs an answer, and dismisses itself -- the one deliberate exception to
+  // "never steal focus" (see below). The order is asserted, not just the three
+  // calls: scrolling a window that has not been brought forward yet is what the
+  // reviewer would experience as the jump silently not happening.
+  assert.match(notify, /\.onclick\s*=\s*function\s*\(\)\s*\{\s*window\.focus\(\);\s*jumpToOpenRound\(\);\s*\S*\.close\(\);?\s*\}/, 'a click on the notification must focus the tab, jump to the open round, then dismiss itself -- in that order');
   // The focus steal is exactly what this replaces: nothing in the client script
-  // may pull the window forward.
-  assert.ok(!/window\.focus\(/.test(ui), 'the page must never steal focus -- the notification is what replaces that');
+  // may pull the window forward UNBIDDEN. "Never" means never unbidden, not
+  // never at all -- a click on the notification IS the reviewer asking, which
+  // is why the assertion below allows exactly one occurrence, and only inside
+  // the click handler just asserted above.
+  const focusCalls = ui.match(/window\.focus\(/g) || [];
+  assert.equal(focusCalls.length, 1, 'window.focus( must appear exactly once in the whole file -- inside the notification click handler and nowhere else');
+  assert.match(notify, /window\.focus\(\)/, 'the sole window.focus( call in the file must live inside notifyRound (the click handler built above)');
 });
 
 check('coming back to the tab clears the marks', () => {
