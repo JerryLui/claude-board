@@ -41,8 +41,8 @@
 // the board while the daemon is down, so a client whose connection drops on
 // restart just reconnects (EventSource does this natively) and picks up live
 // pushes again with nothing missed in between — see DESIGN.md "Always on under
-// launchd" (bin/daemon.mjs reloads itself on a source change under
-// CLAUDE_BOARD_RELOAD_ON_CHANGE=1; KeepAlive restarts it either way).
+// launchd" (KeepAlive restarts the daemon on a crash; ./install.sh restarts it to
+// take an update).
 
 import http from 'node:http';
 import { readFileSync } from 'node:fs';

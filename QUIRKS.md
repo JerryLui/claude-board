@@ -60,20 +60,20 @@ instance on this project of a green check sitting on top of a dead mechanism, an
 second where the check asserted structure while the behaviour was absent.
 
 **Fixed (SPEC_LAUNCH.md criterion 17):** `WatchPaths` is gone from the generated plist.
-In its place, `bin/daemon.mjs` watches its own `src/` and `bin/` and exits the moment
-either changes — the one thing that actually composes with `KeepAlive`, which then
-brings it straight back up running whatever is now on disk. Opt-in via
-`CLAUDE_BOARD_RELOAD_ON_CHANGE=1`, which only `install.sh`'s generated plist sets;
-every other caller of `bin/daemon.mjs` (this check suite, a shim's own daemon spawns,
-running it by hand) gets the old behaviour — no self-exit — because a daemon that
-vanishes on any file event under an unrelated harness is a new flake source, not a fix.
-launchd will not restart a job more than once per 10s, so two edits inside one 10s
-window collapse into a single restart; the second edit's reload waits out the rest of
-that window rather than happening immediately. `test/check-install.mjs` now spawns a
-real daemon with the env var set, touches a file under a temp copy of `src/`, and
-asserts the process actually exits — and asserts the negative (env var unset, no exit)
-— rather than reading the plist. If you still want the daemon back on your own
-schedule rather than waiting on a save:
+
+**And then reload-on-change went too (2026-08-01).** The replacement was
+`bin/daemon.mjs` watching its own `src/` and `bin/` and exiting on a change, opt-in via
+`CLAUDE_BOARD_RELOAD_ON_CHANGE=1` in the installed plist, with `KeepAlive` bringing the
+new code up. It worked exactly as designed and was still wrong: a save during a review
+dropped every open event stream and every held-open wait, editor temp files tripped it
+(entry below), launchd's 10s restart throttle turned a burst of writes into a visible
+outage, and an edit landing half-written took the daemon down for real. Nothing now
+restarts the daemon on a code change — `./install.sh` does, when somebody runs it. The
+variable is not read anywhere any more; a stale plist or an exported shell value does
+nothing, which `test/check-install.mjs` pins by setting it and asserting the daemon
+survives an edit to a temp copy of `src/`.
+
+To restart the daemon on your own schedule:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/claude-board
@@ -726,18 +726,29 @@ read of `~/Documents` means the narrow folder grant is present and FDA is not.
 
 The LaunchAgent's `ProgramArguments` is a single path into a bundle the installer
 compiles: `~/Applications/claude-board.app/Contents/MacOS/claude-board`. If the plist
-exists but that bundle does not — an `install.sh` run interrupted after it rewrote the
-plist and before it finished staging the app, which is a narrow but real window —
-launchd cannot exec anything and parks the job:
+exists but that bundle does not, launchd cannot exec anything and parks the job:
 
     state = spawn scheduled
     runs = 3
     last exit code = 78: EX_CONFIG
 
+**The cause, found 2026-08-01: running the check suite deleted it.**
+`test/check-install.mjs` redirects everything install.sh/uninstall.sh touch into a temp
+dir through seam env vars, and one env object — the "uninstall is safe to run on a
+machine with nothing installed" check — was missing `CLAUDE_BOARD_APP_DIR`.
+`uninstall.sh` fell back to its default, `$HOME/Applications`, and `rm -rf`'d the
+developer's own launcher bundle, killing their daemon and the TCC grant pinned to that
+bundle's signature. The suite reported all green. A narrow interrupted-install window
+can produce the same state, but it is not what did. Fixed by adding the seam, plus a
+final check that asserts the real `~/Applications/claude-board.app`,
+`~/Library/LaunchAgents/claude-board.plist` and `~/.config/claude-board/secret` are
+exactly as they were before the suite ran — a guard on the paths rather than on any one
+env object, so the next spawn that forgets a seam is caught whichever seam it forgets.
+
 `EX_CONFIG` here is launchd's, not the daemon's. Do not go looking for it in
 `bin/daemon.mjs`: that file never exits 78, and grepping for it wastes a pass. The
 daemon's own logs are no help either — the last lines in
-`~/Library/Logs/claude-board/daemon.err.log` will be ordinary reload-on-change exits from
+`~/Library/Logs/claude-board/daemon.err.log` will be an ordinary clean shutdown from
 whenever it last ran successfully, which reads like a healthy service and is not.
 
 `launchctl kickstart -k gui/$(id -u)/claude-board` does **not** revive it, and worse, it
@@ -761,22 +772,21 @@ an `ask` call that posts nothing. There is no clue in either that the problem is
 LaunchAgent, so treat "Failed to fetch" from a board as "check the daemon is running"
 before anything else.
 
-## Reload-on-change fires on editor temp files, not just source edits
+## Reload-on-change fired on editor temp files, not just source edits (removed)
 
-Under `CLAUDE_BOARD_RELOAD_ON_CHANGE=1` the daemon exits on any write beneath the repo,
-and launchd's 10s throttle means a burst of writes leaves it down for a while. The watch
-is not limited to tracked source, so atomic-save temp files trip it too. Real lines from
-`daemon.err.log`:
+Historical, and part of why the mechanism is gone (entry above). Under
+`CLAUDE_BOARD_RELOAD_ON_CHANGE=1` the daemon exited on any write beneath `src/` or
+`bin/`, not just on a tracked source file, so atomic-save temp files tripped it. Real
+lines from `daemon.err.log`:
 
     claude-board daemon exiting to reload: src/.!77431!render.mjs changed
     claude-board daemon exiting to reload: src/XXck9Zx4 changed
     claude-board daemon exiting to reload: bin/mcp.mjs.tmp.83112.78f737854daf changed
 
-So a single logical save can bounce the daemon two or three times, and an
-`install.sh` run — which stages through temp files inside the repo — bounces it
-repeatedly while it works. If a board goes unreachable mid-session, check this log before
-assuming anything is broken: the daemon is probably just mid-throttle and will return
-within 10s. Sustained thrash during heavy editing is expected, not a bug to chase.
+A single logical save bounced the daemon two or three times, and an `install.sh` run —
+which stages through temp files inside the repo — bounced it repeatedly while it worked.
+If you are reading an old `daemon.err.log`, that is what those lines are; a current
+daemon never writes them.
 
 ## The board's notification works; macOS Focus is what hides it
 

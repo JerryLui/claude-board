@@ -20,10 +20,9 @@
 //     deadline are per call, never stored on the shared session — auto-backgrounding
 //     means a second `ask` routinely runs while the first is still blocked, and a
 //     call whose notifications get redirected dies to the MCP idle-abort timer.
-//   * The daemon restarting is routine, not fatal. It restarts on a crash, on a
-//     kickstart, and — under CLAUDE_BOARD_RELOAD_ON_CHANGE=1, which install.sh sets —
-//     on its own source changing (bin/daemon.mjs exits itself; KeepAlive brings it
-//     back). The store is on disk either way, so a wait that loses its socket
+//   * The daemon restarting is routine, not fatal. It restarts on a crash (KeepAlive),
+//     on a kickstart, and on an ./install.sh run taking an update. The store is on disk
+//     either way, so a wait that loses its socket
 //     reattaches by board id instead of reporting a failure that strands answers.
 //
 // stdout carries protocol traffic ONLY. Every log line goes to stderr, or it
@@ -56,8 +55,8 @@ const OPEN_CMD = process.env.CLAUDE_BOARD_OPEN_CMD || 'open';
 // this machine to exercise the non-darwin branch on for real. Checks only, never set
 // by a user, same footing as CLAUDE_BOARD_NO_OPEN just below it.
 const ASSUME_PLATFORM = process.env.CLAUDE_BOARD_ASSUME_PLATFORM || process.platform;
-// Reattach backoff after the daemon drops a held-open wait (restart / kickstart /
-// reload-on-change). Starts short because a launchd restart is back in well under
+// Reattach backoff after the daemon drops a held-open wait (crash restart / kickstart /
+// install). Starts short because a launchd restart is back in well under
 // a second, then doubles up to RETRY_MAX_MS so a longer outage is not a hot loop.
 const RETRY_MS = Number(process.env.CLAUDE_BOARD_RETRY_MS) || 250;
 const RETRY_MAX_MS = Number(process.env.CLAUDE_BOARD_RETRY_MAX_MS) || 2_000;
@@ -432,8 +431,8 @@ async function reopenIfNoClient(posted, url) {
 // impose our own idle timeout on it.
 //
 // The GET is re-issued, not abandoned, when the socket dies. A daemon restart is
-// routine (a reload-on-change exit, a crash under KeepAlive, a kickstart from the
-// revive command) and tears every open connection down; the board is untouched on
+// routine (a crash under KeepAlive, a kickstart from the revive command, an install
+// taking an update) and tears every open connection down; the board is untouched on
 // disk and still open, so the only correct move is to reattach by board id and
 // round — DESIGN.md
 // "Always on under launchd": "the shim reattaches by board id and the page

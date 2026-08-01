@@ -5130,7 +5130,11 @@ check('every class the stylesheet rules on is a class something actually emits',
 // outside it.
 
 function extractThreadItem(html, boardId) {
-  const re = new RegExp(`<a class="thread-item[^"]*" href="/b/${boardId}"[\\s\\S]*?</a>`);
+  // The href tolerates a trailing fragment: a live row links to
+  // `/b/<id>#open-round` so the board opens at the round still owed an answer
+  // (its own check below), and every check here is about the row's CONTENT, not
+  // about which of the two href shapes it happens to carry.
+  const re = new RegExp(`<a class="thread-item[^"]*" href="/b/${boardId}(?:#[^"]*)?"[\\s\\S]*?</a>`);
   const m = html.match(re);
   if (!m) throw new Error(`no thread-item found for board ${boardId}`);
   return m[0];
@@ -5365,6 +5369,38 @@ check('the row\'s time element carries both a machine-readable datetime and the 
   assert.equal(m[3], m[2], 'the visible text and the hover title must be the exact same formatted value');
   assert.notEqual(m[2], board.updatedAt, 'the hover value is the human-formatted date, not the raw ISO string verbatim');
   assert.match(m[2], /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z$/, 'formatted as "YYYY-MM-DD HH:MM:SSZ"');
+});
+
+check('a live row opens the board AT the round still owed an answer; a settled row does not', () => {
+  // Reported from real use: clicking a thread several rounds deep landed the
+  // reviewer at round 1 -- history they had already sent -- and made them scroll
+  // past all of it to reach the question actually waiting for them.
+  const live = createBoard({ title: 'three rounds, last one open', cwd: fixturesDir });
+  applySubmit(live, { action: 'send', answers: [], comments: [] }, 1);
+  addRound(live, {});
+  applySubmit(live, { action: 'send', answers: [], comments: [] }, 2);
+  addRound(live, {}); // round 3 open
+  const settled = createBoard({ title: 'everything sent', cwd: fixturesDir });
+  applySubmit(settled, { action: 'send', answers: [], comments: [] }, 1);
+
+  const threads = buildThreadIndex([live, settled]);
+  const html = renderIndexPage({ threads });
+  assert.match(html, new RegExp(`href="/b/${live.id}#open-round"`), 'the live row must carry the fragment that takes the reviewer to the open round');
+  assert.match(html, new RegExp(`href="/b/${settled.id}"`), 'a settled row keeps the bare href -- nothing is open, so there is nowhere to jump to');
+
+  // Not a per-round id (`#round-3`): board content is markdown snapshotted from
+  // arbitrary files, and its headings mint ids on the same page (a `## Round 3`
+  // heading slugifies to exactly that), so a native fragment jump is hijackable.
+  // The sentinel is resolved by src/ui.mjs instead -- and it has to actually be
+  // wired there, through the same jumpToOpenRound the round badge uses.
+  assert.doesNotMatch(html, /href="\/b\/[^"]*#round-\d/, 'never a per-round element id, which board content can mint for itself');
+  assert.match(ui, /location\.hash === '#open-round'/, 'src/ui.mjs must recognise the sentinel the index links to');
+  assert.match(ui, /function jumpToOpenRoundAfterPaint\(\)\s*\{[\s\S]{0,200}?jumpToOpenRound\)?\(?\)?/, 'and resolve it through jumpToOpenRound, not through a second definition of where the open round is');
+  // Verified in Chrome: run inline at hydrate, the jump is overwritten by the
+  // browser's own post-load scroll positioning and the reviewer stays at the top
+  // -- which is exactly how this shipped broken the first time. The wiring, not
+  // just the intent, has to survive.
+  assert.match(ui, /window\.addEventListener\('load', jumpToOpenRoundAfterPaint\)/, 'the jump must be deferred to the load event, not issued inline while the document is still loading');
 });
 
 // --- the index page's client script (ticket 06) ------------------------------------

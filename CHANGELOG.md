@@ -45,8 +45,42 @@ this project does not yet follow semantic versioning, because nothing has been r
   `~/.claude/commands` and `~/.claude/agents`; `CLAUDE_BOARD_REF_ROOTS=~/.claude` still
   opts back into the whole tree for anyone who wants it. See ADR.md entry 3.
 
+### Removed
+
+- **The daemon no longer restarts itself when its source changes.** `install.sh` stops
+  setting `CLAUDE_BOARD_RELOAD_ON_CHANGE=1`, and `bin/daemon.mjs` no longer watches
+  `src/` and `bin/` at all — the variable is read nowhere, so a stale plist or an
+  exported shell value does nothing. The mechanism worked; it was the wrong thing to
+  want. A save during a review dropped every open event stream and every held-open wait,
+  editor temp files counted as changes, launchd's 10s restart throttle turned a burst of
+  writes into a visible outage, and a half-written edit could take the daemon down for
+  real. Updates are taken by re-running `./install.sh` (or `launchctl kickstart -k
+  gui/$(id -u)/claude-board` for a plain restart), at a moment somebody chose.
+
+### Fixed
+
+- **Running the check suite deleted the developer's own launcher bundle.**
+  `test/check-install.mjs` redirects everything `install.sh`/`uninstall.sh` touch into a
+  temp directory, and one env object was missing `CLAUDE_BOARD_APP_DIR`: `uninstall.sh`
+  fell back to `$HOME/Applications` and `rm -rf`'d the real
+  `~/Applications/claude-board.app`. The daemon then died with launchd's "Missing
+  executable" (`exit 78`, and a `kickstart` that hangs rather than saying why), and the
+  TCC grant pinned to that bundle's signature went with it — while the suite reported
+  all green. The seam is added, and a final check now asserts the real bundle, plist and
+  secret are exactly as the suite found them, so the next spawn that forgets a seam is
+  caught whichever seam it forgets.
+
 ### Changed
 
+- **Opening a live thread from the index lands on the round still owed an answer.** A row
+  whose board has an open round links to `#open-round`, a sentinel the board page resolves
+  through the same jump the round badge and the notification click already use — one
+  definition of "the thing that needs an answer", not one per entry point. A thread several
+  rounds deep used to open at round 1, history the reviewer had already sent, and made them
+  scroll past all of it. Deliberately not a per-round element id (`#round-3`): board content
+  is markdown snapshotted from arbitrary files whose headings mint ids on the same page, so
+  a `## Round 3` heading would hijack a native fragment jump. A settled thread keeps the
+  bare link — nothing is open, so there is nowhere to jump to.
 - **A board notification is now one entry per round, and clicking it opens the tab.** The
   `tag` carries the round number (`claude-board-<boardId>-<n>`) instead of the board id
   alone, so rounds 2 and 3 arriving at a tab you are not looking at leave two entries in

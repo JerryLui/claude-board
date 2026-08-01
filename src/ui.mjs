@@ -2979,11 +2979,11 @@ export const ui = `
    * (Decisions) -- and inert when nothing is open at all (every round already
    * sent, nothing left to jump to).
    *
-   * Shared by the round badge (DESIGN.md:520, its whole job) and the
-   * notification's click handler, which wants the same destination for the same
-   * reason: both are the reviewer saying "take me to the thing that needs an
-   * answer". One implementation, so the two can never drift into disagreeing
-   * about where that is. */
+   * Shared by the round badge (DESIGN.md:520, its whole job), the
+   * notification's click handler, and arrival from the index (below), all of
+   * which want the same destination for the same reason: each is the reviewer
+   * saying "take me to the thing that needs an answer". One implementation, so
+   * they can never drift into disagreeing about where that is. */
   function jumpToOpenRound() {
     var target = openRoundNumber();
     if (target == null || target === badgeCurrentRound) return;
@@ -2995,6 +2995,40 @@ export const ui = `
   if (roundBadgeBtn) {
     // Criterion 9: jumps to the round that still needs an answer.
     roundBadgeBtn.addEventListener('click', jumpToOpenRound);
+  }
+
+  // Arriving from the index, whose live rows link to '#open-round'
+  // (src/indexpage.mjs): land on the round that still needs an answer rather
+  // than on round 1 of a thread the reviewer has already answered most of. A
+  // sentinel resolved here, not a native fragment jump to a per-round id --
+  // markdown blocks are snapshotted from arbitrary files and their headings mint
+  // ids on this very page (test/check-archive-ids.mjs), so no id this page emits
+  // for its own structure is safe to navigate by. Inert when nothing is open, and
+  // inert when the open round IS the first one (jumpToOpenRound's own guard,
+  // badgeCurrentRound still being the first round at hydrate) -- which is the top
+  // of the page the browser already put us at. Read defensively: location is
+  // whatever scope the script runs in supplies, and a hash-less stand-in
+  // (test/dom-stand-in.mjs) must not throw here.
+  //
+  // Deferred past 'load' and one frame, NOT run inline here, which is where this
+  // first shipped and did nothing at all: a module script runs before the
+  // document finishes loading, and the browser's own post-load scroll
+  // positioning for the navigation then overwrites whatever the page scrolled
+  // itself to. Verified in Chrome against a three-round board -- inline, the page
+  // sat at the top with the badge still reading "round 1 of 3"; the identical
+  // scrollIntoView issued after load lands on round 3 every time. The frame is
+  // what keeps the smooth scroll (src/styles.mjs: html { scroll-behavior:
+  // smooth }) from being started and immediately cancelled by that same
+  // positioning pass. Both fallbacks matter for the DOM stand-in, which has
+  // neither requestAnimationFrame nor a load event: there, the jump simply
+  // happens straight away.
+  function jumpToOpenRoundAfterPaint() {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(jumpToOpenRound);
+    else jumpToOpenRound();
+  }
+  if (location && location.hash === '#open-round') {
+    if (document.readyState === 'complete') jumpToOpenRoundAfterPaint();
+    else window.addEventListener('load', jumpToOpenRoundAfterPaint);
   }
 
   /** Enable/disable BOTH send-bar buttons together. They live in .send-bar,
@@ -3341,8 +3375,8 @@ export const ui = `
   // --- SSE: a follow-up round pushes into this already-open tab ---------------
   //
   // "Open once, then badge and notify" / "Always on under launchd" (DESIGN.md):
-  // the daemon can restart mid-review -- on a crash, a kickstart, or its own
-  // reload-on-change exit under CLAUDE_BOARD_RELOAD_ON_CHANGE=1 -- so the page
+  // the daemon can restart mid-review -- on a crash, a kickstart, or an install
+  // taking an update -- so the page
   // must reconnect rather than lose the thread. EventSource does that natively
   // (automatic retry on drop); since nothing can mutate the board while the daemon
   // is down, a bare reconnect is enough to catch back up — no resync fetch needed.

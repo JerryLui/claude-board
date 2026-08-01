@@ -188,22 +188,22 @@ npm run check      # 21 checks, node only, no browser and no network
 Every check is also runnable alone, and each runs under a deadline in its own process
 group, so a check that hangs fails by name instead of stalling the run.
 
-One gotcha worth knowing before you debug anything: the installed daemon reloads
-itself on a code change, but not through the plist. `install.sh` sets
-`CLAUDE_BOARD_RELOAD_ON_CHANGE=1` in the plist's environment, which tells
-`bin/daemon.mjs` to watch its own `src/` and `bin/` and exit the moment either
-changes; `KeepAlive` is what actually brings it back up. A plist-level `WatchPaths`
-can't do this — it only ever *starts* a job that isn't running, and `KeepAlive`
-guarantees this one always already is, so the two fight instead of composing (see
-[QUIRKS.md](QUIRKS.md)). launchd also will not restart a job more than once per
-10 seconds, so two edits inside one 10s window collapse into a single restart — if
-you save twice in a row, the second edit's reload waits out the rest of that window.
-A reload drops every open event stream and every held-open wait, so saving a file
-mid-review costs the tab a reconnect: the page's `EventSource` reattaches on its own
-and a waiting shim reattaches by board id, but a board mid-answer is a board whose
-live updates paused for a moment.
-If the daemon is ever unresponsive and you want it back immediately rather than
-waiting on a save to land, kick it yourself:
+One gotcha worth knowing before you debug anything: **nothing picks up your changes on
+its own.** The installed daemon runs this clone's `bin/daemon.mjs` straight from disk,
+but it loads that code once, at start. Editing a file changes nothing until the daemon
+is restarted, and the way to restart it is to re-run `./install.sh` (or kickstart it,
+below). This is deliberate. The daemon used to watch its own `src/` and `bin/` and exit
+on any write there, letting `KeepAlive` bring the new code up — which meant a save
+during a review dropped every open event stream and every held-open wait, an atomic-save
+temp file counted as a change, and a half-written edit could take the daemon down for
+real and leave launchd throttling a crash loop. A plist-level `WatchPaths` was never an
+option either: it only ever *starts* a job that isn't running, and `KeepAlive` guarantees
+this one always already is, so the two fight instead of composing (see
+[QUIRKS.md](QUIRKS.md)).
+
+To take a code change, or to revive an unresponsive daemon, restart the job yourself
+(`./install.sh` does this too, and is what you want after changing anything the plist or
+the launcher bundle is built from):
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/claude-board

@@ -14,16 +14,14 @@
 #      See step 1b below and SECURITY.md "What the launcher bundle is for".
 #   2. The launchd plist in ~/Library/LaunchAgents, running THIS clone's
 #      bin/daemon.mjs (PROTOCOL.md "Layout") through that launcher, with
-#      RunAtLoad + KeepAlive, and
-#      CLAUDE_BOARD_RELOAD_ON_CHANGE=1 in EnvironmentVariables so config sync
-#      landing new code restarts the daemon. That env var, not a plist-level
-#      WatchPaths, is what makes it work: WatchPaths only ever *starts* a job
-#      that isn't running, and KeepAlive guarantees this one always already
-#      is, so the two fight rather than compose. CLAUDE_BOARD_RELOAD_ON_CHANGE
-#      makes the daemon itself watch src/ and bin/ and exit on a change —
-#      KeepAlive is what brings it back, which DOES compose. See
-#      bin/daemon.mjs and QUIRKS.md "WatchPaths does not restart the daemon".
-#      The same dict carries CLAUDE_BOARD_PORT and CLAUDE_BOARD_REF_ROOTS: a
+#      RunAtLoad + KeepAlive. New code does NOT restart the daemon by itself:
+#      this script's own bootout/bootstrap at the end is what takes an update,
+#      so a running review is never interrupted by somebody's save. (A
+#      plist-level WatchPaths could not have done it anyway — it only ever
+#      *starts* a job that isn't running, and KeepAlive guarantees this one
+#      always already is, so the two fight rather than compose; see QUIRKS.md
+#      "WatchPaths does not restart the daemon".)
+#      The dict carries CLAUDE_BOARD_PORT and CLAUDE_BOARD_REF_ROOTS: a
 #      launchd job inherits nothing from your shell, so any knob the daemon
 #      reads from the environment has to be written here or it may as well
 #      not exist.
@@ -449,12 +447,10 @@ chmod 700 "$LOG_DIR"
 # c_escape, its C-string counterpart) because the launcher bundle's Info.plist needs it
 # first. The reasoning lives with the function.
 
-# bin/daemon.mjs itself watches src/ and bin/ when CLAUDE_BOARD_RELOAD_ON_CHANGE=1 (set
-# below) and exits on a change there — never on the clone root, so an edit to
-# DESIGN.md, findings/ or a scratch file does not cost a
-# restart. A restart mid-review drops every SSE stream and every held-open wait, which
-# then has to reattach, so the daemon's own watch is deliberately narrower than "the
-# whole clone" for the same reason a plist-level WatchPaths would have been.
+# No reload-on-change key here, and none in bin/daemon.mjs either: a daemon that exits
+# on every write under src/ restarts mid-review, and a restart drops every SSE stream
+# and every held-open wait, which then has to reattach. Taking an update is this
+# script's job (the bootout/bootstrap below), at a moment somebody chose.
 LABEL_X="$(xml_escape "$LABEL")"
 NODE_BIN_X="$(xml_escape "$NODE_BIN")"
 DAEMON_PATH_X="$(xml_escape "$DAEMON_PATH")"
@@ -509,8 +505,6 @@ ${PROGRAM_ARGS_XML}
 		<string>${PORT_X}</string>
 		<key>CLAUDE_BOARD_REF_ROOTS</key>
 		<string>${REF_ROOTS_X}</string>
-		<key>CLAUDE_BOARD_RELOAD_ON_CHANGE</key>
-		<string>1</string>
 	</dict>
 </dict>
 </plist>

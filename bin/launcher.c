@@ -141,10 +141,9 @@ int main(void) {
     }
   }
 
-  /* launchd reads the exit status, and the daemon exits deliberately: on a src/ change
-   * under CLAUDE_BOARD_RELOAD_ON_CHANGE it exits so KeepAlive brings the new code up.
-   * Reporting the child's status rather than a flat 0 is what keeps that decision the
-   * daemon's to make. */
+  /* launchd reads the exit status, and the daemon can exit deliberately: a clean
+   * shutdown on SIGTERM is a 0 it chose, not a crash. Reporting the child's status
+   * rather than a flat 0 is what keeps that decision the daemon's to make. */
   if (WIFSIGNALED(status)) {
     return 128 + WTERMSIG(status);
   }

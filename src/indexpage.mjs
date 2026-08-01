@@ -163,8 +163,20 @@ function threadRow(t) {
   // here for exactly that: a discriminator that survives however the headline
   // and path happen to collide, matching how the search-results row (below)
   // already carries it.
+  // A live row opens the board AT the round that still needs an answer, not at
+  // round 1: a thread several rounds deep otherwise lands the reviewer on
+  // history they already sent and makes them scroll past it to reach the
+  // question. `#open-round` is a sentinel the board page resolves in JS
+  // (src/ui.mjs) through the same jumpToOpenRound the round badge uses -- NOT a
+  // per-round element id, which board content can mint itself: a markdown block
+  // is snapshotted from an arbitrary file and its headings slugify into ids on
+  // the same page (src/markdown.mjs, test/check-archive-ids.mjs), so a heading
+  // reading "Round 3" would hijack a native `#round-3` jump. A settled row keeps
+  // the bare href: with nothing open there is nowhere to jump to, and a hash
+  // that resolves to nothing is worse than no hash.
+  const href = `/b/${escAttr(t.boardId)}${t.live ? '#open-round' : ''}`;
   return `
-<a class="thread-item${liveCls}" href="/b/${escAttr(t.boardId)}" data-thread-id="${escAttr(t.thread)}" data-pending="${t.pending}" data-live="${t.live}">
+<a class="thread-item${liveCls}" href="${href}" data-thread-id="${escAttr(t.thread)}" data-pending="${t.pending}" data-live="${t.live}">
   <div class="thread-main">
     <div class="thread-title"${headlineIsFolder ? ` title="${escAttr(t.cwd)}"` : ''}>${liveDot}${escHtml(headline)}</div>
     ${pathLine}

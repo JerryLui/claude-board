@@ -1063,9 +1063,9 @@ async function main() {
   });
 
   // --- the wait reattaches across a real daemon restart ---------------------
-  // A restart is routine: KeepAlive restarts on crash, a reload-on-change exit under
-  // CLAUDE_BOARD_RELOAD_ON_CHANGE=1 restarts on a source edit, and the revive command
-  // in every unreachable message is a kickstart. The board stays open on disk
+  // A restart is routine: KeepAlive restarts on crash, ./install.sh boots the job out
+  // and back in to take an update, and the revive command in every unreachable message
+  // is a kickstart. The board stays open on disk
   // throughout, so the wait must reattach by board id rather than report a failure
   // and strand whatever the reviewer submits next.
 

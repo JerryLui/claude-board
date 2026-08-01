@@ -227,23 +227,19 @@ function quietStubs(tag) {
   };
 }
 
-// --- reload on change (SPEC_LAUNCH.md criterion 17) -------------------------------
+// --- a source edit must not restart the daemon --------------------------------
 //
-// The structural plist check above only proves install.sh ASKS for reload-on-change.
-// This is the check that proves the mechanism it asks for exists at all: a real
-// bin/daemon.mjs, spawned with CLAUDE_BOARD_RELOAD_ON_CHANGE=1, watching a real src/
-// directory and exiting when a file under it changes -- and, with the env var unset
-// (the default, and the state every OTHER caller of this file runs under, including
-// the rest of this suite), NOT doing that on the identical edit. That negative is as
-// load-bearing as the positive: a daemon that self-exits on any file event under an
-// unrelated harness is a new flake source, which is exactly why the mechanism is
-// opt-in rather than always-on.
+// This section used to prove the opposite: a daemon spawned with
+// CLAUDE_BOARD_RELOAD_ON_CHANGE=1 watching src/ and exiting on a change there. That
+// mechanism is gone (see the check below and bin/daemon.mjs), and what is proved here
+// now is that a real bin/daemon.mjs stays up when its own source changes underneath it,
+// even with the old env var set.
 //
 // Runs against a TEMP COPY of src/ and bin/, never this repo's own tree -- touching a
-// tracked file to prove a watcher fires would be a side effect on the actual worktree,
-// and "revert it afterwards" is one uncaught exception away from leaving a dirty tree
-// behind. bin/daemon.mjs only imports from '../src/*.mjs' and nothing outside that
-// pair (checked: no src/*.mjs file reads anything by a path outside src/ except
+// tracked file to prove anything about a watcher would be a side effect on the actual
+// worktree, and "revert it afterwards" is one uncaught exception away from leaving a
+// dirty tree behind. bin/daemon.mjs only imports from '../src/*.mjs' and nothing outside
+// that pair (checked: no src/*.mjs file reads anything by a path outside src/ except
 // server.mjs's own-version read of package.json, which is wrapped in try/catch and
 // defaults to '0.0.0' when absent), so the copy is a fully working daemon on its own.
 
@@ -302,14 +298,14 @@ function waitForExit(child, deadlineMs) {
  * own ephemeral port, CLAUDE_BOARD_HOME and CLAUDE_BOARD_SECRET_FILE -- isolated from
  * every other check in this suite and from the real repo tree. Resolves once
  * /api/health answers; throws (after cleaning up) if it never does. */
-async function spawnReloadDaemon(reloadOnChange) {
+async function spawnSourceEditDaemon() {
   // Everything from here down is wrapped so ANY failure -- a full disk on cpSync, a
   // port race in freePort(), spawn() itself throwing -- still removes rWorkDir and
   // kills whatever child made it as far as spawning, rather than leaking either. The
   // alternative (only cleaning up the "never got healthy" case) misses exactly the
   // failures that are least expected, which is the shape of leak that turns into a
-  // pile of /tmp/claude-board-reload-* directories nobody notices until disk pressure.
-  const rWorkDir = mkdtempSync(path.join(tmpdir(), 'claude-board-reload-'));
+  // pile of /tmp/claude-board-srcedit-* directories nobody notices until disk pressure.
+  const rWorkDir = mkdtempSync(path.join(tmpdir(), 'claude-board-srcedit-'));
   let child;
   try {
     cpSync(path.join(repoRoot, 'src'), path.join(rWorkDir, 'src'), { recursive: true });
@@ -327,8 +323,10 @@ async function spawnReloadDaemon(reloadOnChange) {
       CLAUDE_BOARD_SECRET_FILE: rSecretFile,
       CLAUDE_BOARD_PORT: String(port),
     };
-    delete rEnv.CLAUDE_BOARD_RELOAD_ON_CHANGE; // never inherit this check process's own env
-    if (reloadOnChange) rEnv.CLAUDE_BOARD_RELOAD_ON_CHANGE = '1';
+    // Set, not deleted: the point of the check this feeds is that the variable the
+    // daemon once honoured is inert now, wherever it survives -- a stale plist, a
+    // developer's exported shell env.
+    rEnv.CLAUDE_BOARD_RELOAD_ON_CHANGE = '1';
 
     child = spawn(process.execPath, [daemonCopy], { env: rEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -338,7 +336,7 @@ async function spawnReloadDaemon(reloadOnChange) {
 
     const healthy = await waitForHealthy(port, 8000);
     if (!healthy) {
-      throw new Error(`reload-check daemon never answered /api/health\nstdout:\n${out}\nstderr:\n${err}`);
+      throw new Error(`source-edit-check daemon never answered /api/health\nstdout:\n${out}\nstderr:\n${err}`);
     }
 
     return {
@@ -371,8 +369,8 @@ function plistEnvOf(plistPath) {
  * value under test: PATH (launchd supplies one), the store/secret testing seams (so this
  * never touches the real ~/Library/Application Support or the real secret), and a free
  * port (the plist's port belongs to this suite's health stub, which is already bound).
- * CLAUDE_BOARD_RELOAD_ON_CHANGE is dropped: this check edits nothing under src/, and a
- * daemon that self-exits on an unrelated file event is only a flake source here.
+ * The old CLAUDE_BOARD_RELOAD_ON_CHANGE is dropped from the inherited env for tidiness
+ * only: nothing honours it any more.
  *
  * Resolves once /api/health answers, with the secret the caller needs to speak to it. */
 async function spawnDaemonWithPlistEnv(plistPath) {
@@ -418,6 +416,22 @@ async function spawnDaemonWithPlistEnv(plistPath) {
     throw caught;
   }
 }
+
+// What this machine's OWN installation looks like before a single script runs, so the
+// last check in main() can prove the suite left it alone. A seam that is merely
+// DOCUMENTED is not a seam that holds: one env object below forgot
+// CLAUDE_BOARD_APP_DIR, uninstall.sh fell back to $HOME/Applications, and running the
+// check suite deleted the developer's own launcher bundle — taking their daemon
+// (launchd: "Missing executable", exit 78) and the TCC grant pinned to that bundle's
+// signature with it. Nothing in the suite failed; it reported all green. The guard is
+// deliberately about the real paths rather than about any one env object, so the NEXT
+// spawn that forgets a seam is caught by the same assertion, whichever seam it forgets.
+const REAL_PATHS = [
+  path.join(process.env.HOME || '/nonexistent', 'Applications', 'claude-board.app'),
+  path.join(process.env.HOME || '/nonexistent', 'Library', 'LaunchAgents', 'claude-board.plist'),
+  path.join(process.env.HOME || '/nonexistent', '.config', 'claude-board', 'secret'),
+];
+const realPathsBefore = REAL_PATHS.map(p => existsSync(p));
 
 async function main() {
   const first = runInstall();
@@ -599,18 +613,20 @@ async function main() {
     assert.equal(plist.KeepAlive, true);
   });
 
-  await check('the plist sets the reload env var and does not carry WatchPaths (SPEC_LAUNCH.md criterion 17)', async () => {
-    // Secondary, structural guard only. The real assertion — that the mechanism this
-    // env var turns on actually works — lives in the "reload on change" section below,
-    // which spawns a real daemon and watches it exit.
+  await check('the plist asks for no automatic reload at all: no WatchPaths, no reload env var', async () => {
+    // Structural half of the decision that the installed daemon only restarts when
+    // somebody asks it to (./install.sh, or a kickstart). The behavioural half — that
+    // a running daemon does NOT die when src/ changes underneath it — is the check
+    // further below, which spawns a real daemon over a temp copy and edits it.
     //
     // (Ablation: reintroducing a `WatchPaths` array here beside `KeepAlive: true` is
-    // exactly the dead-mechanism claim criterion 17 forbids — see QUIRKS.md
+    // the dead-mechanism claim SPEC_LAUNCH.md criterion 17 forbids — see QUIRKS.md
     // "WatchPaths does not restart the daemon" — so this fails on purpose if it comes
-    // back.)
+    // back. So does re-adding CLAUDE_BOARD_RELOAD_ON_CHANGE, which is the live
+    // mechanism that WAS shipped and is now deliberately gone.)
     assert.ok(!('WatchPaths' in plist), 'WatchPaths is inert beside KeepAlive and must not be in the generated plist');
     assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
-    assert.equal(plist.EnvironmentVariables.CLAUDE_BOARD_RELOAD_ON_CHANGE, '1', 'install.sh must opt the installed daemon into reload-on-change');
+    assert.ok(!('CLAUDE_BOARD_RELOAD_ON_CHANGE' in plist.EnvironmentVariables), 'the installed daemon must not be opted into reload-on-change: a restart mid-review drops every SSE stream and every held-open wait');
   });
 
   await check('stdout/stderr are redirected to absolute log paths', async () => {
@@ -1087,36 +1103,27 @@ async function main() {
     assert.match(r.stderr, /not valid/);
   });
 
-  // --- reload on change: the behaviour, not the plist key ----------------------
+  // --- a source edit does not restart the daemon: the behaviour, not the plist key ---
 
-  await check('CLAUDE_BOARD_RELOAD_ON_CHANGE=1: editing a file under src/ makes the daemon exit', async () => {
-    const d = await spawnReloadDaemon(true);
+  await check('editing a file under src/ does NOT make a running daemon exit, with or without the old reload env var', async () => {
+    // The daemon used to watch src/ and bin/ and exit on a write there, and that is
+    // what this section proved. It is gone: a save should never cost a restart, which
+    // drops every SSE stream and every held-open wait mid-review, and an edit landing
+    // half-written could take the daemon down for real and leave launchd throttling a
+    // crash loop. Updates go through ./install.sh instead.
+    //
+    // The old opt-in variable is set here on purpose: a leftover
+    // CLAUDE_BOARD_RELOAD_ON_CHANGE=1 in somebody's shell, or in a plist installed
+    // before this change, must now do nothing at all rather than quietly resurrect the
+    // behaviour. (Ablation: restoring watchForReload in bin/daemon.mjs fails this.)
+    const d = await spawnSourceEditDaemon();
     try {
-      // A harmless content edit to the TEMP COPY made by spawnReloadDaemon -- never
-      // the real src/store.mjs -- shaped like an editor's atomic save landing a line.
-      writeFileSync(d.srcFile, '\n// touched by check-install.mjs reload check\n', { flag: 'a' });
-      const exited = await waitForExit(d.child, 5000);
-      // (Ablation: this is the assertion the brief asks to prove genuinely fails --
-      // revert bin/daemon.mjs's watchForReload/the CLAUDE_BOARD_RELOAD_ON_CHANGE branch
-      // and this check times out and fails, because nothing is watching src/ anymore.)
-      assert.ok(exited, `daemon must exit within 5s of a src/ change under CLAUDE_BOARD_RELOAD_ON_CHANGE=1\nstderr:\n${d.stderr()}`);
-      assert.match(d.stderr(), /exiting to reload/, 'the daemon must log why it is exiting');
-      assert.match(d.stderr(), /store\.mjs/, 'the log line must name the file that triggered the exit');
-    } finally {
-      d.cleanup();
-    }
-  });
-
-  await check('CLAUDE_BOARD_RELOAD_ON_CHANGE unset: the identical edit does NOT make the daemon exit', async () => {
-    const d = await spawnReloadDaemon(false);
-    try {
-      writeFileSync(d.srcFile, '\n// touched by check-install.mjs reload check\n', { flag: 'a' });
+      // A harmless content edit to the TEMP COPY -- never the real src/store.mjs --
+      // shaped like an editor's atomic save landing a line.
+      writeFileSync(d.srcFile, '\n// touched by check-install.mjs source-edit check\n', { flag: 'a' });
       const exited = await waitForExit(d.child, 2500);
-      // (Ablation: making the watcher unconditional -- dropping the env-var gate in
-      // bin/daemon.mjs -- flips this to true, which is exactly the new flake source the
-      // brief calls out: every OTHER caller of bin/daemon.mjs, including the rest of
-      // this suite and check-mcp.mjs, spawns it without this var set.)
-      assert.ok(!exited, 'the daemon must not self-exit on a src/ change when the reload env var is unset');
+      assert.ok(!exited, `the daemon must stay up when src/ changes underneath it\nstderr:\n${d.stderr()}`);
+      assert.doesNotMatch(d.stderr(), /exiting to reload/, 'and must not log a reload exit it no longer performs');
     } finally {
       d.cleanup();
     }
@@ -1220,6 +1227,17 @@ async function main() {
         CLAUDE_BOARD_SECRET_FILE: path.join(freshWorkDir, 'config', 'claude-board', 'secret'),
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(freshWorkDir, 'LaunchAgents'),
         CLAUDE_BOARD_LOG_DIR: path.join(freshWorkDir, 'Logs'),
+        // The seam this env object was missing, and the damage was not hypothetical:
+        // uninstall.sh defaults APP_DIR to $HOME/Applications and `rm -rf`s the bundle
+        // it finds there, so THIS check -- "safe to run on a machine with nothing
+        // installed" -- deleted the real ~/Applications/claude-board.app of whoever ran
+        // the suite. Their daemon then died with launchd's "Missing executable" (exit
+        // 78, and a `kickstart` that hangs rather than saying why), and the TCC grant
+        // pinned to that bundle's signature went with it. Observed on this machine
+        // 2026-08-01. Every other seam was already here; this one is the only one that
+        // reaches outside the temp dir when omitted, because it is the only one whose
+        // fallback is a path the developer actually uses.
+        CLAUDE_BOARD_APP_DIR: path.join(freshWorkDir, 'Applications'),
         CLAUDE_BOARD_HOME: path.join(freshWorkDir, 'Store'),
         CLAUDE_BOARD_MCP_CMD: claudeStub, // still stubbed -- never touches the real `claude`
         CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,
@@ -1236,6 +1254,14 @@ async function main() {
     } finally {
       rmSync(freshWorkDir, { recursive: true, force: true });
     }
+  });
+
+  // Last, so it sees the state every check above left behind. See REAL_PATHS.
+  await check('the suite left this machine\'s own installation exactly as it found it', async () => {
+    REAL_PATHS.forEach((p, i) => {
+      assert.equal(existsSync(p), realPathsBefore[i],
+        `${p} ${realPathsBefore[i] ? 'existed before this suite ran and must still exist' : 'did not exist before this suite ran and must not have been created'} -- a spawn of install.sh or uninstall.sh above is missing a testing-seam env var and reached the real machine`);
+    });
   });
 }
 
