@@ -2993,6 +2993,113 @@ export const ui = `
     });
   }
 
+  // --- Cmd+Enter board traversal ---------------------------------------------
+  //
+  // A single document-level keydown listener is the whole keyboard path through
+  // a board -- there was none before this. Plain Enter is deliberately left
+  // alone everywhere: both textareas on a board (the answer box for a 'text'
+  // widget, and every question's note field) legitimately take newlines, so
+  // only the modified chord (meta or ctrl -- no platform detection, that exact
+  // test on every platform) is ever intercepted.
+  //
+  // Advancing to Send is a two-step confirm, not a one-shot send: the first
+  // chord at the last question (or already on Send) ARMS the button -- focuses
+  // it, relabels it, submits nothing -- and only a SECOND chord while armed
+  // calls submitBoard('send'), identically to a mouse click. The deliberate
+  // second keystroke is the confirmation, the same way a single click is a
+  // deliberate act. Escape disarms without sending. Discuss has no keyboard
+  // path at all: it ends board posting for the whole session and is
+  // irreversible, so it stays mouse-only by design.
+  //
+  // Advance always targets the NEXT question's note field, never "the next
+  // unanswered one" -- a key that jumps a different distance depending on
+  // invisible state is worse than a predictable one.
+
+  var sendArmed = false;
+  var sendOriginalLabel = sendBtn ? sendBtn.textContent : '';
+
+  function armSend() {
+    if (!sendBtn) return;
+    sendBtn.focus();
+    sendBtn.textContent = 'Press Enter again to send';
+    sendArmed = true;
+  }
+
+  function disarmSend() {
+    if (!sendBtn) return;
+    sendBtn.textContent = sendOriginalLabel;
+    sendArmed = false;
+  }
+
+  /** Focus a question block's note field and bring it on screen -- the same
+   * guarded scrollIntoView shape highlightAnchor and the round-badge click
+   * handler above already use, so a DOM stand-in with no scrollIntoView at
+   * all still runs this without throwing. */
+  function focusNoteField(block) {
+    var el = block && block.querySelector ? block.querySelector('[data-note-for]') : null;
+    if (!el) return;
+    el.focus();
+    if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+  }
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') {
+      if (sendArmed) disarmSend();
+      return; // not swallowed -- Escape has no other job on this page yet, but nothing here owns it either
+    }
+    if (ev.key !== 'Enter') return;
+    if (!ev.metaKey && !ev.ctrlKey) return; // plain Enter is never intercepted, anywhere
+    if (readonly) return; // no keyboard path at all in a read-only file:// archive
+    // One guard covers two cases: no send button, or it disabled -- which is
+    // true both when no round is open (the send bar starts disabled there)
+    // and mid-submit (submitBoard's first act is setSendBarEnabled(false), so
+    // a second chord mid-flight cannot double-send).
+    if (!sendBtn || sendBtn.disabled) return;
+    var target = ev.target;
+    // Discuss is mouse-only by design -- it ends board posting for the whole
+    // session and is irreversible, so no keyboard path may reach it.
+    //
+    // preventDefault is what actually enforces that, and returning bare here
+    // was a real hole (director /check finding): #discuss-btn is a genuine
+    // <button>, and a browser's default action for Enter on a focused button
+    // is to ACTIVATE it -- held modifiers do not suppress that the way they
+    // change an <a href>'s behaviour. So a bare return handed the chord
+    // straight back to the platform, which fired the button's own click
+    // listener and posted submitBoard('discuss'): the exact irreversible
+    // keyboard path this guard exists to forbid. The DOM stand-in cannot see
+    // this (it does not model native activation at all -- see its own header),
+    // so test/check-enter.mjs pins the guard's defaultPrevented instead.
+    if (target && target.closest && target.closest('button#discuss-btn')) {
+      ev.preventDefault();
+      return;
+    }
+
+    if (sendArmed) {
+      disarmSend();
+      ev.preventDefault();
+      submitBoard('send');
+      return;
+    }
+
+    ev.preventDefault(); // every branch below either arms Send or moves focus -- never leave the chord to the textarea
+    var blocks = qsa('.round-open .question-block'); // the exact set, exact order, collectAnswers itself walks
+    if ((target && target.closest && target.closest('button#send-btn')) || blocks.length === 0) {
+      armSend();
+      return;
+    }
+    var current = target && target.closest ? target.closest('.question-block') : null;
+    var idx = current ? blocks.indexOf(current) : -1;
+    if (idx === -1) {
+      // Focus is on the body, the header, etc. -- not inside any open
+      // question block. Start the traversal from the top.
+      focusNoteField(blocks[0]);
+    } else if (idx === blocks.length - 1) {
+      armSend();
+    } else {
+      focusNoteField(blocks[idx + 1]);
+    }
+  });
+
   // --- "Open once, then badge and notify" (DESIGN.md Decisions) ------------
   //
   // The tab is opened exactly once, for a thread's first board; every later round

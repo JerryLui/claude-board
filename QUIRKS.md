@@ -695,3 +695,94 @@ under Terminal, and testing from the shell will tell you everything is fine.
 `readdir` on `~/Library/Application Support/com.apple.TCC` is a cheap probe for whether
 a process holds Full Disk Access — it is FDA-only, so EPERM there alongside a successful
 read of `~/Documents` means the narrow folder grant is present and FDA is not.
+
+## A missing launcher bundle wedges launchd at `exit 78` and `kickstart` cannot fix it
+
+The LaunchAgent's `ProgramArguments` is a single path into a bundle the installer
+compiles: `~/Applications/claude-board.app/Contents/MacOS/claude-board`. If the plist
+exists but that bundle does not — an `install.sh` run interrupted after it rewrote the
+plist and before it finished staging the app, which is a narrow but real window —
+launchd cannot exec anything and parks the job:
+
+    state = spawn scheduled
+    runs = 3
+    last exit code = 78: EX_CONFIG
+
+`EX_CONFIG` here is launchd's, not the daemon's. Do not go looking for it in
+`bin/daemon.mjs`: that file never exits 78, and grepping for it wastes a pass. The
+daemon's own logs are no help either — the last lines in
+`~/Library/Logs/claude-board/daemon.err.log` will be ordinary reload-on-change exits from
+whenever it last ran successfully, which reads like a healthy service and is not.
+
+`launchctl kickstart -k gui/$(id -u)/claude-board` does **not** revive it, and worse, it
+blocks: it waits for a service that will never come up, so it looks like a hang. `runs`
+does not increment. The fix is to re-run `./install.sh`, which rebuilds and ad-hoc signs
+the bundle (`install.sh:383-462`).
+
+Diagnosing it takes three commands, in this order — the third is the one that actually
+names the fault, and the first two only tell you something is wrong:
+
+    curl -s -m 3 -o /dev/null -w "%{http_code}\n" http://127.0.0.1:7391/   # 000 = nothing listening
+    launchctl print gui/$(id -u)/claude-board | grep -E "^\tstate|last exit|runs ="
+    ls -la "$(launchctl print gui/$(id -u)/claude-board | grep -A2 'arguments = {' | tail -1 | xargs)"
+
+Read the program path out of `launchctl print` rather than assuming it — the plist is
+rewritten on every install and pointing at a stale path is the same failure with a
+different cause.
+
+Page-side, this presents as a bare **`Error: Failed to fetch`** in the board tab and as
+an `ask` call that posts nothing. There is no clue in either that the problem is a
+LaunchAgent, so treat "Failed to fetch" from a board as "check the daemon is running"
+before anything else.
+
+## Reload-on-change fires on editor temp files, not just source edits
+
+Under `CLAUDE_BOARD_RELOAD_ON_CHANGE=1` the daemon exits on any write beneath the repo,
+and launchd's 10s throttle means a burst of writes leaves it down for a while. The watch
+is not limited to tracked source, so atomic-save temp files trip it too. Real lines from
+`daemon.err.log`:
+
+    claude-board daemon exiting to reload: src/.!77431!render.mjs changed
+    claude-board daemon exiting to reload: src/XXck9Zx4 changed
+    claude-board daemon exiting to reload: bin/mcp.mjs.tmp.83112.78f737854daf changed
+
+So a single logical save can bounce the daemon two or three times, and an
+`install.sh` run — which stages through temp files inside the repo — bounces it
+repeatedly while it works. If a board goes unreachable mid-session, check this log before
+assuming anything is broken: the daemon is probably just mid-throttle and will return
+within 10s. Sustained thrash during heavy editing is expected, not a bug to chase.
+
+## The board's notification works; macOS Focus is what hides it
+
+`notifyRound` (`src/ui.mjs:3069`) fires on an SSE round push into a hidden or unfocused
+tab. When a reviewer reports it "never fires", check the OS before the code — Chrome keeps
+the receipts and they settle it in one read:
+
+    ~/Library/Application Support/Google/Chrome/Default/Preferences
+
+`profile.content_settings.exceptions.notifications` holds the grant per origin
+(`"setting": 1` is allow), and `notification_interactions` holds a per-day
+`display_count`. A nonzero `display_count` with no interactions means Chrome displayed the
+notification and the reviewer never saw it — which is Focus, not JavaScript.
+
+Focus config lives in `~/Library/DoNotDisturb/DB/`: `ModeConfigurations.json` for the
+schedules, `ModeConfigurationsSecure.json` for the per-mode allow-list, and
+`Assertions.json` for whether a mode is active *right now* (empty file = none active). A
+mode in allow-list mode that does not list Google Chrome routes every board notification
+straight to Notification Center with no banner and no sound.
+
+Two things that will mislead you while chasing this:
+
+- Permission is **per origin**. `http://127.0.0.1:7391`, `http://localhost:7391` and
+  `http://board.localhost:7391` are three separate grants, and the daemon reflects the
+  `Host` header into the board URL, so which one you get depends on how the tab was
+  opened. It is also **per Chrome profile** — a grant on `Default` does nothing for
+  `Profile 1`.
+- `notifyRound` requests permission only from the hidden/unfocused branch, the one moment
+  Chrome will not raise a foreground prompt. Chrome queues it until the tab is next shown,
+  so it does eventually appear — but a reviewer who dismisses that queued prompt is stuck
+  at `default` with no other request site in the codebase. See `SPEC_NOTIFY.md`.
+
+Verifying it end to end takes a hidden tab: post a second round to an existing board while
+the reviewer is in another app. A round pushed into a visible, focused tab correctly
+notifies nothing, so testing with the board in front of you proves the wrong thing.

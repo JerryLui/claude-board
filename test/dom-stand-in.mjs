@@ -425,7 +425,13 @@ function searchDescendants(root, selectorText) {
  * a question about accumulated numbers, not about layout, and it was the one
  * thing standing between finding D5 and a check that could see it -- the
  * existing assertion could only regex-match the handler's SHAPE, which is
- * precisely how a threshold measuring the wrong quantity survived review. */
+ * precisely how a threshold measuring the wrong quantity survived review.
+ *
+ * The same verbatim-copy path is also how a keyboard event's modifier flags
+ * reach a handler here -- `new StandInEvent('keydown', { key: 'Enter',
+ * metaKey: true })` needs no dedicated support, `metaKey`/`ctrlKey`/etc. ride
+ * `props` exactly like the pointer fields above. Don't add named parameters
+ * for them. */
 export class StandInEvent {
   constructor(type, props) {
     this.type = type;
@@ -914,8 +920,11 @@ export class Element extends EventTarget {
     this.childNodes = [];
     this.parentElement = null;
     this.value = '';
-    this.disabled = false;
     this._style = {};
+    // Back `scrollIntoView` below -- a count plus the most recent options
+    // object, not a simulation. See that method's own comment for why.
+    this.scrollIntoViewCallCount = 0;
+    this.scrollIntoViewLastOptions = null;
   }
   // Real CSSStyleDeclaration coerces every assigned value to a string and ignores
   // unrecognised properties; this stand-in only needs property assignment
@@ -987,6 +996,28 @@ export class Element extends EventTarget {
   removeAttribute(name) { this.attributes.delete(name); }
   hasAttribute(name) { return this.attributes.has(name); }
   get id() { return this.getAttribute('id') || ''; }
+  // `disabled` is a boolean IDL-reflected attribute -- narrowly, deliberately
+  // narrower than a claim that this stand-in reflects attributes onto
+  // properties in general (it does not: `value`/`checked`/etc. stay plain
+  // fields, same as every other property on this class). This one earns the
+  // real reflection because the rendered page and the client script disagree
+  // about WHICH mechanism sets it: src/render.mjs emits a bare `disabled`
+  // content attribute on `#send-btn` whenever no round is open
+  // (`renderBoardPage`), while src/ui.mjs's setSendBarEnabled flips the same
+  // control with a PROPERTY write (`sendBtn.disabled = !on`) once a round
+  // opens over SSE -- exactly like a real browser, where those are two
+  // spellings of one underlying state, not two states. A plain `this.disabled
+  // = false` field (this class's old shape) made them two worlds here: the
+  // rendered attribute was invisible to `.disabled`, so a guard reading
+  // `sendBtn.disabled` -- the one Cmd+Enter traversal's "do nothing when the
+  // send bar is already disabled" criterion depends on -- read `false` against
+  // a button a real browser reports as disabled. Presence, not truthiness of
+  // the stored value, is what real DOM tests: a bare `disabled` attribute's
+  // value is the empty string (`getAttribute('disabled') === ''`), which is
+  // itself falsy, so this must check `hasAttribute`, never the attribute's
+  // VALUE.
+  get disabled() { return this.hasAttribute('disabled'); }
+  set disabled(v) { if (v) this.setAttribute('disabled', ''); else this.removeAttribute('disabled'); }
   // className is a reflected property, same attribute classList reads/writes --
   // src/ui.mjs's placePin sets it directly (`pin.className = 'anchor-pin ...'`)
   // rather than going through classList, exactly like real DOM code often does.
@@ -1119,7 +1150,44 @@ export class Element extends EventTarget {
     }
     return null;
   }
-  focus() { /* no-op: nothing in this check asserts on focus */ }
+  // Cmd+Enter board traversal needs to assert WHAT got focused, which the old
+  // no-op here (`/* nothing in this check asserts on focus */`) could never
+  // answer. Real semantics, via `ownerDocument` (this file's existing
+  // on-demand back-reference to the owning StandInDocument, computed above --
+  // no separate wiring needed at parse/append time): moves the owning
+  // document's `activeElement` to `this`. Two things a real browser also
+  // refuses, modelled here because a check leans on both:
+  //  - an element not currently in any document (`ownerDocument` null) can't
+  //    become the active element of a document it isn't part of -- a no-op,
+  //    not a throw, exactly like calling `.focus()` on a detached real node.
+  //  - a `disabled` element never becomes `document.activeElement`, no matter
+  //    how `.focus()` is called on it.
+  focus() {
+    const doc = this.ownerDocument;
+    if (!doc || this.disabled) return;
+    doc.activeElement = this;
+  }
+  // Real semantics: only resets `activeElement` back to `document.body` (via
+  // the getter's own fallback -- see StandInDocument's `_activeElement`
+  // comment) when THIS element is the one currently focused. Blurring an
+  // element that isn't focused, or one that's detached, does nothing --
+  // same as a real browser.
+  blur() {
+    const doc = this.ownerDocument;
+    if (doc && doc.activeElement === this) doc.activeElement = null;
+  }
+  // No layout engine here (this file's own header comment; QUIRKS.md "The
+  // stand-in has no layout") so there is no scroll position to actually
+  // move -- this records that the call happened and with what, which is all
+  // Cmd+Enter traversal's own check needs to assert ("scrolled the newly
+  // focused block into view, asking for the options it asked for"). Same
+  // shape as `getBoundingClientRect`'s own comment just below: deterministic
+  // and inspectable stands in for a real geometric effect this stand-in
+  // cannot compute.
+  scrollIntoView(options) {
+    this.scrollIntoViewCallCount++;
+    this.scrollIntoViewLastOptions = options === undefined ? null : options;
+  }
   // Ticket 07 (DESIGN.md), audit finding V1 (director-verified
   // separately): this used to return an unconditional all-zero box for every
   // element, attached or not -- so a pin placed correctly and a pin placed at
@@ -1174,6 +1242,18 @@ export class StandInDocument extends EventTarget {
     this.parentElement = null; // bubbling terminus: an element's ancestor chain ends here
     htmlEl.parentElement = this;
     this.hidden = false;
+    // Backs `activeElement` below. Real DOM: `document.activeElement` is
+    // `document.body` when nothing has been explicitly focused, and is never
+    // null once the document exists. `this.body` itself, two lines up, can
+    // still be null at this exact point -- an explicit `<html>` with no
+    // `<body>` inside leaves `findChildByTag` nothing to find -- so this only
+    // tracks WHAT has been focused (null = nothing) and the `activeElement`
+    // getter falls back to `this.body` lazily on every read, rather than
+    // caching a (possibly stale-or-null) body reference now. Same ordering
+    // discipline Element's own `ownerDocument` uses above: compute on demand
+    // from whatever is true right now, don't stamp in a snapshot taken before
+    // the document was necessarily finished being assembled.
+    this._activeElement = null;
     const titleEl = findChildByTag(this.head, 'title');
     this._title = titleEl ? titleEl.textContent : '';
     // Audit 2026-07-31 (H2): defaults to 'loading', matching a real browser's
@@ -1207,6 +1287,12 @@ export class StandInDocument extends EventTarget {
   }
   get title() { return this._title; }
   set title(v) { this._title = v; }
+  // See `_activeElement`'s own comment in the constructor for why this falls
+  // back to `this.body` on every read instead of being initialised once.
+  // Element.focus()/blur() (below) are the only writers; nothing else should
+  // assign this directly.
+  get activeElement() { return this._activeElement || this.body; }
+  set activeElement(el) { this._activeElement = el; }
   hasFocus() { return true; }
   /** Audit 2026-07-31 (H2): simulates the HTML parser reaching the end of the
    * document -- flips `readyState` to 'complete' and dispatches a real
