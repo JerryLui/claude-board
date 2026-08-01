@@ -40,6 +40,7 @@ import {
   parseMermaidDomId, mermaidRefResolves, resolveMermaidAnchor, MERMAID_NODE_SELECTOR,
   findPendingCommentForAnchor, removePendingComment,
 } from '../src/anchor.mjs';
+import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -3790,8 +3791,8 @@ check('L2: an unrecognised widget is rejected instead of silently becoming "sing
   );
 });
 
-check('L2: a single/multi/rank question with zero options is rejected; a text question with none is fine', () => {
-  for (const widget of ['single', 'multi', 'rank']) {
+check('L2: a single/multi/rank/choose-between-rendered-variants question with zero options is rejected; a text question with none is fine', () => {
+  for (const widget of ['single', 'multi', 'rank', 'choose-between-rendered-variants']) {
     assert.throws(
       () => createBoard({ title: 't', blocks: [{ kind: 'question', prompt: 'Pick', widget, options: [] }] }),
       /requires at least one option/,
@@ -3800,6 +3801,367 @@ check('L2: a single/multi/rank question with zero options is rejected; a text qu
   }
   const ok = createBoard({ title: 't', blocks: [{ kind: 'question', prompt: 'Say', widget: 'text', options: [] }] });
   assert.equal(ok.blocks[0].widget, 'text');
+});
+
+// --- SPEC_MIGRATION.md criterion 2: choose-between-rendered-variants --------------
+
+check('choose-between-rendered-variants: each option carries a nested block normalized through the same path as a compare side\'s, minting a real, unique id', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which mockup?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', description: 'first cut', block: { kind: 'html', html: '<button>A</button>' } },
+        { label: 'B', block: { kind: 'markdown', text: '# B' } },
+      ],
+    }],
+  });
+  const q = board.blocks[0];
+  assert.equal(q.options.length, 2);
+  assert.equal(q.options[0].label, 'A');
+  assert.equal(q.options[0].description, 'first cut');
+  assert.equal(q.options[0].block.kind, 'html');
+  assert.equal(q.options[1].block.kind, 'markdown');
+  // Real, unique, kind-letter-prefixed ids -- not inert strings, and never
+  // colliding with each other or with the question's own id.
+  assert.match(q.options[0].block.id, /^h\d+$/);
+  assert.match(q.options[1].block.id, /^d\d+$/);
+  assert.notEqual(q.options[0].block.id, q.options[1].block.id);
+  assert.notEqual(q.options[0].block.id, q.id);
+  // No 'preview' field at all on this widget's options -- that shape belongs
+  // to every OTHER widget only.
+  assert.equal(q.options[0].preview, undefined);
+});
+
+check('choose-between-rendered-variants: an option with no block is null-tolerant, exactly like a compare side with none', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which?',
+      widget: 'choose-between-rendered-variants',
+      options: [{ label: 'Empty' }],
+    }],
+  });
+  assert.equal(board.blocks[0].options[0].block, null);
+});
+
+check('choose-between-rendered-variants: a duplicate id across two options\' blocks is rejected, the same protection a compare side\'s block already gets', () => {
+  // Ablation: skip walking `options[].block` in resolveBlockId's `ids` ledger
+  // (idLedgerFromBoard/emptyIdLedger's `minted` set within one normalizeBoard
+  // pass) and this passes when it must throw -- two option blocks would
+  // silently share an id, corrupting whichever one a comment or answer later
+  // addresses.
+  assert.throws(
+    () => createBoard({
+      title: 'variants',
+      blocks: [{
+        kind: 'question',
+        prompt: 'Which?',
+        widget: 'choose-between-rendered-variants',
+        options: [
+          { label: 'A', block: { id: 'h1', kind: 'html', html: '<p>a</p>' } },
+          { label: 'B', block: { id: 'h1', kind: 'html', html: '<p>b</p>' } },
+        ],
+      }],
+    }),
+    /duplicate block id/,
+  );
+});
+
+check('choose-between-rendered-variants: renders each option\'s nested block through the real renderBlock dispatch, inside a selectable div (not a button)', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which mockup?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'Card A', description: 'the safe one', block: { kind: 'html', html: '<button>Send</button>' } },
+        { label: 'Card B', block: { kind: 'markdown', text: '# heading B' } },
+      ],
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+
+  assert.ok(markup.includes('class="options options-variants"'));
+  assert.ok(markup.includes('class="variant-card choice-variant"') || /class="variant-card choice-variant[" ]/.test(markup));
+  assert.ok(markup.includes('role="button"'));
+  // The nested blocks' OWN rendered markup is present -- proof renderBlock
+  // actually ran for each option, not a fallback: an html option is a real
+  // sandboxed iframe, a markdown option is real md-content, each with its own
+  // block-kind class and its own data-block-id distinct from the question's.
+  assert.ok(markup.includes('class="block html-block"'));
+  assert.ok(markup.includes('class="html-stage"'));
+  assert.ok(markup.includes('&lt;button&gt;Send&lt;/button&gt;'));
+  assert.ok(markup.includes('class="block markdown-block"'));
+  assert.ok(markup.includes('id="heading-b"'), 'the markdown option\'s own heading must carry its real anchor id');
+  assert.ok(markup.includes('heading B'));
+  assert.ok(markup.includes('Card A'));
+  assert.ok(markup.includes('the safe one'));
+  assert.ok(markup.includes('Card B'));
+  // Never a <button> wrapping the card's content -- that is exactly what an
+  // iframe cannot legally nest inside.
+  assert.ok(!/<button[^>]*class="variant-card/.test(markup));
+});
+
+check('choose-between-rendered-variants: an html option\'s iframe is rendered pointer-events: none -- a real click can never reach it, only the card around it can ever record a pick', () => {
+  // SECURITY, not polish (director review): without this, a real, trusted
+  // click over the visible mock content of an html-kind option would land
+  // INSIDE the iframe rather than on the card, and the stage is untrusted,
+  // agent-authored content -- see src/render.mjs's "NO 'select' MESSAGE,
+  // DELIBERATELY" design comment for the two paths that made a stage-
+  // reported click-to-select message unsafe. This is the one half of the fix
+  // no DOM stand-in can exercise directly (QUIRKS.md: no real layout, no
+  // pointer-events hit-testing); test/check-stage-isolation.mjs proves the
+  // other half -- that even a message the stage manages to get out carries
+  // no path back to a selection.
+  assert.match(styles, /\.choice-variant\s+\.html-stage\s*\{[^}]*pointer-events:\s*none/,
+    'src/styles.mjs must render an html option\'s iframe pointer-events: none inside a .choice-variant card');
+});
+
+check('choose-between-rendered-variants: a click dispatched INSIDE an html option\'s own mock document never selects the option, whether genuine or self-dispatched by the mock\'s own script', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [{ label: 'A', block: { kind: 'html', html: '<div class="mock"><button>A</button></div>' } }],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const card = document.querySelector('.choice-variant');
+  // Simulates the exact scenario the fix exists for: content that clicks
+  // itself (an autoplaying demo, an animation), ordinary for /example's real
+  // interactive mockups, with no reviewer involved at all.
+  frame.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  assert.equal(card.classList.contains('selected'), false,
+    'a click originating inside the mock -- genuine or script-dispatched -- must never select the option');
+});
+
+check('choose-between-rendered-variants: an option with no block falls back to "no content", the same fallback a contentless compare side shows', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{ kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants', options: [{ label: 'Empty' }] }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('class="unsupported-widget">no content</p>'));
+});
+
+check('choose-between-rendered-variants: the picked option stays visible and the card is disabled once its round is sent, the same contract every other widget honours', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'Yes', block: { kind: 'markdown', text: 'yes copy' } },
+        { label: 'No', block: { kind: 'markdown', text: 'no copy' } },
+      ],
+    }],
+  });
+  applySubmit(board, { action: 'send', answers: [{ id: board.blocks[0].id, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  const markup = renderedMarkup(renderBoardPage(board));
+  const historySection = markup.slice(markup.indexOf('round-history'));
+  assert.match(historySection, /class="variant-card choice-variant selected"[^>]*aria-disabled="true"/);
+  assert.match(historySection, /tabindex="-1"/);
+  assert.ok(historySection.includes('yes copy'), 'the picked option\'s own rendered content must stay visible once sent');
+});
+
+check('choose-between-rendered-variants: findBlock and resolveComment reach an option\'s nested block, exactly as they already reach a compare side\'s', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'html', html: '<button>Old</button>' } },
+        { label: 'B', block: { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' } },
+      ],
+    }],
+  });
+  const q = board.blocks[0];
+  const htmlBlockId = q.options[0].block.id;
+  const mermaidBlockId = q.options[1].block.id;
+
+  assert.equal(findBlock(board, htmlBlockId)?.kind, 'html');
+  assert.equal(findBlock(board, mermaidBlockId)?.kind, 'mermaid');
+
+  board.comments.push(
+    { n: 1, blockId: htmlBlockId, anchor: { kind: 'dom', ref: '1', hint: 'Old' }, text: 'update this', createdAt: new Date().toISOString(), round: 1 },
+    { n: 2, blockId: mermaidBlockId, anchor: { kind: 'mermaid', ref: 'A' }, text: 'rename', createdAt: new Date().toISOString(), round: 1 },
+  );
+  const domResolved = resolveComment(board, board.comments[0]);
+  assert.equal(domResolved.resolved, true, 'a real anchor nested inside an option must not report lost');
+  assert.equal(domResolved.blockKind, 'html');
+
+  const mermaidResolved = resolveComment(board, board.comments[1]);
+  assert.equal(mermaidResolved.resolved, true);
+  assert.equal(mermaidResolved.blockKind, 'mermaid');
+});
+
+check('choose-between-rendered-variants: a question nested inside an option\'s own block is findable by questionBlocks and its answer reaches the packet', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which?',
+      widget: 'choose-between-rendered-variants',
+      options: [{ label: 'A', block: { kind: 'question', prompt: 'Nested?', widget: 'single', options: [{ label: 'Yes' }] } }],
+    }],
+  });
+  const outer = board.blocks[0];
+  const nested = outer.options[0].block;
+  const ids = questionBlocks(board).map(b => b.id);
+  assert.deepEqual(ids.sort(), [outer.id, nested.id].sort());
+
+  applySubmit(board, {
+    action: 'send',
+    answers: [{ id: outer.id, status: 'answered', choice: 'A', note: '' }, { id: nested.id, status: 'answered', choice: 'Yes', note: '' }],
+    comments: [],
+  }, 1);
+  const packet = buildPacket(board, 1, 'http://x');
+  assert.deepEqual(packet.answers.map(a => a.id).sort(), [outer.id, nested.id].sort());
+});
+
+check('renderWidget throws for a widget with no render case, rather than silently rendering renderSingleChoice\'s empty cards (ablation: this must fail against a `default: return renderSingleChoice(...)`)', () => {
+  // Constructed directly, bypassing createBoard/normalizeBlock's own WIDGETS
+  // validation (which would reject this widget before it ever reached render)
+  // -- this proves renderWidget's OWN defence, the one that matters if a
+  // future WIDGETS entry is ever added without a matching render case.
+  const board = createBoard({ title: 't', blocks: [{ kind: 'question', prompt: 'Q', widget: 'single', options: [{ label: 'Yes' }] }] });
+  board.blocks[0].widget = 'nonsense-widget';
+  assert.throws(() => renderBoardPage(board), /no render case for widget/);
+});
+
+check('computeBoardPatch reports an option\'s nested block, by its own id, when a choose-between-rendered-variants question is amended', () => {
+  const q = (text) => ({
+    id: 'q1', round: 1, kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+    options: [
+      { label: 'A', block: { id: 'd1', round: 1, kind: 'markdown', text, html: `<p>${text}</p>`, anchors: [] } },
+      { label: 'B', block: { id: 'd2', round: 1, kind: 'markdown', text: 'unchanged', html: '<p>unchanged</p>', anchors: [] } },
+    ],
+  });
+  const prev = { blocks: [q('old copy')], rounds: [{ n: 1, status: 'open' }] };
+  const next = { blocks: [q('new copy')], rounds: [{ n: 1, status: 'open' }] };
+  const patch = computeBoardPatch(prev, next);
+  assert.ok(patch.changedBlockIds.includes('d1'), 'the changed option\'s own block must be reported by its own id');
+  assert.ok(!patch.changedBlockIds.includes('d2'), 'the untouched sibling option must not be reported');
+  assert.ok(!patch.changedBlockIds.includes('q1'), 'the container question did not itself change');
+});
+
+// choose-between-rendered-variants: the actual click/keyboard gesture, driven
+// through the real client script in the DOM stand-in -- the same discipline
+// test/check-click.mjs's own header comment names ("exercising the real
+// gesture rather than the pieces underneath it").
+
+function loadVariantBoard(board, protocol = 'http:') {
+  const document = parseHTML(renderBoardPage(board));
+  const window = document.defaultView;
+  const location = { protocol };
+  new Function('document', 'window', 'location', ui)(document, window, location);
+  return document;
+}
+
+check('choose-between-rendered-variants: clicking a card selects it and deselects its sibling (ablation: this must fail if selectVariant is never wired to \'.choice-variant\')', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'markdown', text: 'copy A' } },
+        { label: 'B', block: { kind: 'markdown', text: 'copy B' } },
+      ],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const cards = document.querySelectorAll('.choice-variant');
+  assert.equal(cards.length, 2, 'setup failure: expected two rendered variant cards');
+  cards[0].dispatchEvent(new StandInEvent('click'));
+  assert.equal(cards[0].classList.contains('selected'), true, 'clicking a card must select it');
+  assert.equal(cards[1].classList.contains('selected'), false);
+  cards[1].dispatchEvent(new StandInEvent('click'));
+  assert.equal(cards[0].classList.contains('selected'), false, 'selecting a sibling must deselect the previous pick');
+  assert.equal(cards[1].classList.contains('selected'), true);
+});
+
+check('choose-between-rendered-variants: Enter/Space while the card has focus selects it -- the keyboard-operable half of a container that cannot be a real <button>', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [{ label: 'A', block: { kind: 'markdown', text: 'copy A' } }],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const card = document.querySelector('.choice-variant');
+  assert.equal(card.getAttribute('tabindex'), '0', 'an open round\'s card must be in the tab order');
+  assert.equal(card.getAttribute('role'), 'button');
+  card.dispatchEvent(new StandInEvent('keydown', { key: 'Enter' }));
+  assert.equal(card.classList.contains('selected'), true, 'Enter must select the focused card');
+  card.dispatchEvent(new StandInEvent('keydown', { key: 'Tab' }));
+  // no assertion needed beyond "did not throw" -- Tab must not be treated as a select key
+});
+
+check('choose-between-rendered-variants: a click on the option\'s own comment button opens the comment form and does NOT select the card', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [{ label: 'A', block: { kind: 'markdown', text: '# heading' } }],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const card = document.querySelector('.choice-variant');
+  const nestedBlockId = board.blocks[0].options[0].block.id;
+  const commentBtn = document.querySelector('button.comment-btn[data-block-id="' + nestedBlockId + '"]');
+  assert.ok(commentBtn, 'setup failure: no comment button rendered for the nested block');
+  commentBtn.dispatchEvent(new StandInEvent('click'));
+  assert.equal(card.classList.contains('selected'), false, 'clicking the nested block\'s own comment button must not select the variant');
+  const form = document.getElementById('comment-form-' + nestedBlockId);
+  assert.equal(form.classList.contains('open'), true, 'the comment button\'s own gesture must still work, undisturbed by the card wrapping it');
+});
+
+check('choose-between-rendered-variants: turning comment mode on makes a plain card click do nothing, the same stand-down every other choice widget already honours', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [{ label: 'A', block: { kind: 'markdown', text: 'copy A' } }],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
+  const card = document.querySelector('.choice-variant');
+  card.dispatchEvent(new StandInEvent('click'));
+  assert.equal(card.classList.contains('selected'), false, 'a plain click must not select while comment mode is on');
+});
+
+check('choose-between-rendered-variants: a historical (sent) round\'s card ignores both a click and Enter, and the picked option stays visibly selected', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'markdown', text: 'copy A' } },
+        { label: 'B', block: { kind: 'markdown', text: 'copy B' } },
+      ],
+    }],
+  });
+  applySubmit(board, { action: 'send', answers: [{ id: board.blocks[0].id, status: 'answered', choice: 'A', note: '' }], comments: [] }, 1);
+  const document = loadVariantBoard(board);
+  const cards = document.querySelectorAll('.choice-variant');
+  assert.equal(cards[0].classList.contains('selected'), true, 'the picked option must still render selected once sent');
+  assert.equal(cards[0].getAttribute('aria-disabled'), 'true');
+  assert.equal(cards[0].getAttribute('tabindex'), '-1', 'a historical card must be out of the tab order');
+  cards[1].dispatchEvent(new StandInEvent('click'));
+  assert.equal(cards[1].classList.contains('selected'), false, 'a historical round must never accept a new pick');
+  assert.equal(cards[0].classList.contains('selected'), true, 'and must not lose the original pick either');
 });
 
 // --- C3: an answer must name a real question of the round being submitted ---------

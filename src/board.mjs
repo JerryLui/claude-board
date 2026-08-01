@@ -25,7 +25,7 @@ export const KIND_LETTER = {
   compare: 'x',
 };
 
-export const WIDGETS = ['single', 'multi', 'text', 'rank'];
+export const WIDGETS = ['single', 'multi', 'text', 'rank', 'choose-between-rendered-variants'];
 
 function hex(n) {
   return randomBytes(n).toString('hex');
@@ -250,8 +250,23 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       const context = Array.isArray(raw.context)
         ? raw.context.map(c => normalizeBlock(c, round, counters, cwd, ids))
         : [];
+      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2) is the one widget whose
+      // options are not a { preview } string: each option's `block` is a real
+      // content block, normalized the SAME way normalizeCompareSide (below)
+      // normalizes a compare side's own `block` -- same normalizeBlock/
+      // resolveBlockId path, same shared `ids` ledger threaded through, so an
+      // option's block mints a real, unique id and competes for ids with
+      // every other block in the same post (findBlock/questionBlocks/
+      // countersFromBoard/idLedgerFromBoard all walk `options[].block` below,
+      // the same way they already walk a compare side's `block`). Null-
+      // tolerant like a compare side, not required -- renderVariantOption
+      // (src/render.mjs) shows the same "no content" fallback a compare side
+      // with no block does. Every other widget keeps the old string-preview
+      // shape unchanged.
       const options = Array.isArray(raw.options)
-        ? raw.options.map(o => ({ label: o.label, description: o.description ?? '', preview: o.preview ?? null }))
+        ? raw.options.map(o => widget === 'choose-between-rendered-variants'
+          ? { label: o.label, description: o.description ?? '', block: o.block ? normalizeBlock(o.block, round, counters, cwd, ids) : null }
+          : { label: o.label, description: o.description ?? '', preview: o.preview ?? null })
         : [];
       if (widget !== 'text' && options.length === 0) {
         throw new Error(`question widget '${widget}' requires at least one option`);
@@ -290,7 +305,14 @@ function countersFromBoard(board) {
       const n = m ? parseInt(m[1], 10) : 0;
       counters[letter] = Math.max(counters[letter] || 0, n);
     }
-    if (blk.kind === 'question') (blk.context || []).forEach(visit);
+    if (blk.kind === 'question') {
+      (blk.context || []).forEach(visit);
+      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's nested block
+      // mints an id too, and has to keep the same kind-letter counter ahead of
+      // it as a context block or a compare side's block already does -- see
+      // this widget's own comment in normalizeBlock above.
+      (blk.options || []).forEach(o => { if (o.block) visit(o.block); });
+    }
     if (blk.kind === 'compare') {
       if (blk.left?.block) visit(blk.left.block);
       if (blk.right?.block) visit(blk.right.block);
@@ -314,7 +336,15 @@ function idLedgerFromBoard(board, replaceRound = null) {
   const visit = blk => {
     if (!blk) return;
     ledger.taken.set(blk.id, blk.round);
-    if (blk.kind === 'question') (blk.context || []).forEach(visit);
+    if (blk.kind === 'question') {
+      (blk.context || []).forEach(visit);
+      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): without this, an option's
+      // nested block id would be absent from `ledger.taken` and a subsequent
+      // addRound/amendRound could mint a duplicate against it -- exactly the
+      // silent-id-collision failure mode resolveBlockId's own comment warns
+      // about, just reached through a path this function used to miss.
+      (blk.options || []).forEach(o => visit(o.block));
+    }
     if (blk.kind === 'compare') {
       visit(blk.left?.block);
       visit(blk.right?.block);
@@ -490,6 +520,15 @@ export function findBlock(board, blockId) {
         const hit = search(c);
         if (hit) return hit;
       }
+      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's nested block
+      // is exactly as findable as a context block above -- a comment can
+      // anchor to it (renderVariantOption, src/render.mjs, renders it through
+      // the same renderBlock dispatch a context block or a compare side's
+      // block already gets), so it has to resolve here too.
+      for (const o of b.options || []) {
+        const hit = search(o.block);
+        if (hit) return hit;
+      }
     }
     if (b.kind === 'compare') {
       const hit = search(b.left?.block) || search(b.right?.block);
@@ -522,6 +561,12 @@ export function questionBlocks(board) {
     if (b.kind === 'question') {
       out.push(b);
       (b.context || []).forEach(visit);
+      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's own block can
+      // itself be a nested question (the same generality context/compare
+      // already allow), so its answer has to reach applySubmit's answerable
+      // set and buildPacket the same way a context/compare-nested question's
+      // does.
+      (b.options || []).forEach(o => visit(o.block));
     }
     if (b.kind === 'compare') {
       visit(b.left?.block);

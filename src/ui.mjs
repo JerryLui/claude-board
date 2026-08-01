@@ -1972,8 +1972,17 @@ export const ui = `
   // gesture out of it entirely (hover marking included) and leaves the lens's own
   // listener, which mints the specific mermaid anchor its surface needs, as the
   // only thing that answers a click in there.
+  //
+  // .variant-label (SPEC_MIGRATION.md criterion 2): a choose-between-rendered-variants option's own
+  // caption (its label/description) -- structural chrome naming the option, not
+  // authored content, exactly the same reasoning as .compare-label just above
+  // it. Without this, clicking the caption would fall through to the enclosing
+  // QUESTION block's own section (the nearest [data-block-id] above it, since
+  // .variant-card itself carries no data-block-id of its own) and mint a
+  // page-scoped anchor there -- harmless, but not what a click on a caption
+  // should mean.
   var ANCHOR_CHROME_SELECTOR = '.block-kicker, .comment-btn, .comment-form, .comment-target, '
-    + '.comment-list, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .round-label, '
+    + '.comment-list, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
     + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens';
 
   function isAnchorChrome(el) {
@@ -2085,6 +2094,78 @@ export const ui = `
       selections[qid] = arr;
       touched[qid] = true;
       btn.classList.toggle('selected', idx === -1);
+    });
+  });
+
+  // --- choose-between-rendered-variants: each option is a fully rendered content
+  // block (src/render.mjs's renderVariantOption), so the selectable unit is a
+  // plain, focusable '.choice-variant' div (role="button") rather than a real
+  // <button> -- an 'html' option's iframe cannot legally nest inside one. Wired
+  // by hand for the click + keyboard contract a real <button> gives for free.
+  // Answer shape is otherwise identical to '.choice-single' (one label, read
+  // generically by currentAnswer's default branch below), which is why there is
+  // no separate case there.
+  //
+  // No stage-message path feeds this. An earlier version had the html-stage
+  // agent (stageAgentScript, src/render.mjs) report every click over
+  // postMessage so one landing on the visible mock content could select the
+  // card too -- reverted before this ticket merged: that message is
+  // STAGE-AUTHORED input (the mock's own script can dispatch a click on
+  // itself with no reviewer involved, and separately can forge the message
+  // directly, since origin/identity validation only prove SOME live stage
+  // sent it, never that a human did), and letting it pick an answer is the
+  // agent handing itself the answer to its own question -- see
+  // stageAgentScript's own "NO 'select' MESSAGE, DELIBERATELY" comment. An
+  // 'html' option's iframe is instead rendered 'pointer-events: none' inside
+  // a '.choice-variant' card (src/styles.mjs), so a real click over the mock
+  // can never reach the iframe at all -- it lands on THIS card, in the parent
+  // document, exactly like a click on the option's label already does.
+
+  /** Select 'card''s option, deselecting every sibling under the same question.
+   * 'aria-disabled' is this div's equivalent of a real <button>'s 'disabled'
+   * attribute (src/render.mjs sets it once the block's round is historical) --
+   * there is no native disabled state for a plain div to enforce on its own,
+   * so every entry point checks for it here rather than relying on the
+   * browser to refuse the click/keydown the way it would for an actual
+   * disabled button. */
+  function selectVariant(card) {
+    if (readonly || commentMode || card.getAttribute('aria-disabled') === 'true') return;
+    var qid = card.getAttribute('data-question-id');
+    var choice = card.getAttribute('data-choice');
+    selections[qid] = choice;
+    touched[qid] = true;
+    qsa('.choice-variant[data-question-id="' + qid + '"]').forEach(function (c) {
+      c.classList.toggle('selected', c === card);
+    });
+  }
+
+  qsa('.choice-variant', root).forEach(function (card) {
+    var qid = card.getAttribute('data-question-id');
+    var choice = card.getAttribute('data-choice');
+    if (selections[qid] === choice) card.classList.add('selected');
+    card.addEventListener('click', function (ev) {
+      // A click landing on interactive chrome nested inside this option's OWN
+      // rendered block (its comment button/form, a nested defer button, an
+      // inline markdown anchor button, an existing comment-list entry, ...)
+      // keeps its own meaning -- selecting the variant is this card's own
+      // affordance, not a replacement for the content's.
+      if (ev.target !== card && ev.target.closest
+        && ev.target.closest('button, textarea, input, a, .comment-form, .comment-item')) return;
+      selectVariant(card);
+    });
+    card.addEventListener('keydown', function (ev) {
+      if (ev.target !== card) return; // a nested focusable's own key handling owns this
+      // The MODIFIED chord belongs to board traversal (the document-level
+      // Cmd+Enter listener at the bottom of this script), never to picking a
+      // variant. Without this, a focused card turned one 'advance to the next
+      // question' chord into two acts: this listener recorded a pick, and the
+      // document listener then advanced off it -- so the reviewer committed an
+      // answer they never chose, on whichever card happened to hold focus.
+      // Plain Enter/Space stay this card's own affordance.
+      if (ev.metaKey || ev.ctrlKey) return;
+      if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+      ev.preventDefault();
+      selectVariant(card);
     });
   });
 
@@ -2675,7 +2756,10 @@ export const ui = `
     if (widget === 'rank') {
       return { choice: touched[qid] ? (raw || null) : null, answered: !!touched[qid] };
     }
-    // single
+    // single, and choose-between-rendered-variants: both are one label picked
+    // by clicking a card, so both share this same branch -- see
+    // renderVariantChoice/renderSingleChoice (src/render.mjs), which write the
+    // identical answer shape for either widget.
     return { choice: raw != null ? raw : null, answered: raw != null };
   }
 

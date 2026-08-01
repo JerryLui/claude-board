@@ -466,6 +466,55 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .opt-preview-code { background: var(--panel); border: 1px solid var(--hairline); padding: 8px 10px;
   font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
 
+/* choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): each option wraps a fully
+   rendered block instead of living inside a <button> -- an iframe cannot nest
+   inside one. .options-variants overrides .options' single-column flex layout
+   (source order after it decides the tie, same specificity) with a grid, since
+   this widget's options are rendered content meant to sit side by side, not a
+   list of short labels. .variant-card is the div src/ui.mjs wires by hand for
+   the click + keyboard contract .card-choice gets from a real <button>;
+   :focus-visible's outline (near the top of this file) already covers its
+   keyboard-focus ring for free, the same way it does for every other
+   focusable element here. */
+.options-variants { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-3); }
+.variant-card { display: block; cursor: pointer; background: var(--panel-2); border: 1px solid var(--hairline);
+  border-radius: var(--r-md); padding: var(--space-3) var(--space-4);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+.variant-card:hover { border-color: var(--hairline-2); background: var(--panel-3); }
+.variant-card.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+/* the div equivalent of .card-choice:disabled above -- a plain <div> has no
+   native disabled state, so src/render.mjs stamps this attribute instead (see
+   renderVariantOption's own comment) and this is its only visual expression.
+   An attribute selector, deliberately: QUIRKS.md's "every .class-name..." is
+   the escape hatch for a state with no class of its own. */
+.variant-card[aria-disabled="true"] { cursor: default; opacity: 0.75; }
+.variant-label { margin-bottom: var(--space-2); }
+.variant-label .opt-label { font-weight: 600; font-size: 13.5px; }
+.variant-label .opt-desc { color: var(--muted); font-size: 12.5px; margin-top: 2px; line-height: 1.45; display: block; }
+/* the nested block renders through the same renderBlock dispatch a compare
+   side's own block does, and is stripped of its own card chrome for exactly
+   the same reason .compare-side .block is (below): without this, an option
+   would render as a card nested inside a card. */
+.variant-card .block { border: none; background: none; padding: 0; box-shadow: none; }
+.variant-card .block:hover { box-shadow: none; }
+/* SECURITY, not polish (director review, before this ticket merged): an
+   option's rendered block is untrusted, agent-authored content -- exactly
+   like any other block on the page, EXCEPT that here a click deciding which
+   option gets picked is a decision only the reviewer may make. An 'html'
+   option is a sandboxed iframe that can run the agent's own script
+   (renderHtmlBlock), and that script can dispatch a click on itself with no
+   human involved at all -- an autoplaying demo, an animation, a mock that
+   clicks its own button, all ordinary content for /example's real mockups.
+   'pointer-events: none' makes the iframe unreachable by any real pointer
+   input, so a genuine, trusted click over the visible mock can never land
+   inside it -- it falls through to the card underneath in the parent
+   document instead (the same one a click on the option's label already
+   selects), which is the ONLY thing that can ever record a pick. See
+   src/render.mjs's stageAgentScript design comment ("NO 'select' MESSAGE,
+   DELIBERATELY") for the two paths this closes and why guarding a message
+   instead of deleting the channel would not have been enough. */
+.choice-variant .html-stage { pointer-events: none; }
+
 /* free text: a comfortable writing surface, not a cramped input */
 .answer-textarea { width: 100%; min-height: 220px; resize: vertical; background: var(--panel-2);
   border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--r-md); padding: 14px 16px;

@@ -1,22 +1,22 @@
 #!/bin/bash
-# uninstall.sh — the reverse of install.sh. Removes the three things install.sh puts
-# outside this repository (SPEC_LAUNCH.md criterion 11):
+# uninstall.sh — the reverse of install.sh. Removes the two things install.sh puts
+# outside this repository:
 #
 #   1. the launchd job (bootout) and its plist in ~/Library/LaunchAgents,
 #   2. the MCP registration (`claude mcp remove --scope user`),
-#   3. the installed `/grill` command file — unless it has been edited since
-#      install put it there, in which case it is the user's file and is left
-#      alone, same rule install.sh itself follows on the way in.
-#   4. ~/Applications/claude-board.app, the launcher bundle, and the stamp that
+#   3. ~/Applications/claude-board.app, the launcher bundle, and the stamp that
 #      records what it was built from.
 #
 # Order, and why: launchd first (bootout, then delete its plist) so nothing is
 # actively supervised while the rest of the teardown runs. The MCP registration is
 # next — once the daemon is on its way out, there is no reason to keep telling
-# Claude Code to talk to it. The command file is last, because deciding whether to
-# touch it takes a real check (unmodified vs. user-edited) rather than an
-# unconditional remove, and doing it last means every other removal has already
-# finished by the time that check runs, regardless of what it decides.
+# Claude Code to talk to it. The launcher bundle is last, since it is the binary
+# the job was running and there is no reason to keep it once the job is gone.
+#
+# It does NOT remove `/grill` or any other command file (ADR.md entry 5): this
+# repo no longer installs one, so it has nothing of its own to take back. Whatever
+# a user has under ~/.claude/commands is theirs, versioned in their own repo on
+# their own schedule — uninstalling the board must not reach into it.
 #
 # Three things are left ON PURPOSE and named by path in the summary this script
 # prints at the end: the store (the user's review history), the local secret, and
@@ -25,10 +25,10 @@
 # secret, just pointed the other way.
 #
 # Safe to run when nothing is installed: a bootout of a job that was never loaded,
-# an `mcp remove` of a registration that was never added, and an `rm` of a plist or
-# command file that was never written all fail harmlessly rather than aborting the
-# script, so a machine install.sh never touched still gets exit 0. Safe to run
-# twice for the same reason — the second run just finds nothing left to remove.
+# an `mcp remove` of a registration that was never added, and an `rm` of a plist
+# that was never written all fail harmlessly rather than aborting the script, so a
+# machine install.sh never touched still gets exit 0. Safe to run twice for the
+# same reason — the second run just finds nothing left to remove.
 #
 # Testing seams (env vars) — identical meaning to install.sh's, so a check can point
 # both scripts at the very same temp dir:
@@ -37,10 +37,7 @@
 #   CLAUDE_BOARD_LOG_DIR             default: ~/Library/Logs/claude-board (report only)
 #   CLAUDE_BOARD_MCP_CMD             default: claude
 #   CLAUDE_BOARD_LAUNCHCTL_CMD       default: launchctl
-#   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret (report
-#                                     only; also where the command-file hash record
-#                                     lives, beside the secret — see install.sh)
-#   CLAUDE_BOARD_COMMANDS_DIR        default: ~/.claude/commands
+#   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret (report only)
 #   CLAUDE_BOARD_HOME                default: ~/Library/Application Support/claude-board
 #                                     (report only — this script never writes to it)
 #   CLAUDE_BOARD_APP_DIR             default: ~/Applications
@@ -50,39 +47,20 @@
 
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-GRILL_SRC="$REPO_DIR/commands/grill.md"
-
 MCP_CMD="${CLAUDE_BOARD_MCP_CMD:-claude}"
 LAUNCHCTL_CMD="${CLAUDE_BOARD_LAUNCHCTL_CMD:-launchctl}"
 LAUNCH_AGENTS_DIR="${CLAUDE_BOARD_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 LOG_DIR="${CLAUDE_BOARD_LOG_DIR:-$HOME/Library/Logs/claude-board}"
 SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
-COMMANDS_DIR="${CLAUDE_BOARD_COMMANDS_DIR:-$HOME/.claude/commands}"
 STORE_DIR="${CLAUDE_BOARD_HOME:-$HOME/Library/Application Support/claude-board}"
 
 APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
 
 LABEL="claude-board"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
-COMMAND_FILE="$COMMANDS_DIR/grill.md"
 SECRET_DIR="$(dirname "$SECRET_FILE")"
-HASH_FILE="$SECRET_DIR/grill.sha256"
 APP_PATH="$APP_DIR/${LABEL}.app"
 LAUNCHER_STAMP_FILE="$SECRET_DIR/launcher.stamp"
-
-# A working node is needed only to hash the command file for the modified-vs-not
-# check below — never baked into anything durable, so none of install.sh's
-# version-manager care applies here. Any node on PATH (or CLAUDE_BOARD_NODE) does.
-NODE_BIN="${CLAUDE_BOARD_NODE:-$(command -v node || true)}"
-
-sha256_file() {
-  "$NODE_BIN" -e '
-    const fs = require("node:fs");
-    const crypto = require("node:crypto");
-    process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));
-  ' "$1"
-}
 
 echo "==> claude-board uninstall"
 
@@ -137,54 +115,7 @@ else
   echo "==> no MCP registration for '$LABEL' to remove"
 fi
 
-# --- 3. the installed /grill command file --------------------------------------
-# Same evidence-based rule as install.sh's own step 1, run in reverse: a file that
-# still matches the hash install recorded (or still matches this clone's own
-# shipped copy) is safe to delete. Anything else is the user's edit, and this
-# script is exactly as careful about destroying it on the way out as install.sh
-# is about overwriting it on the way in (SPEC_LAUNCH.md criterion 11).
-HASH_FILE_LEFT=0
-if [ ! -f "$COMMAND_FILE" ]; then
-  echo "==> no command file at $COMMAND_FILE"
-  # The record outlives the file it describes: a user who deleted the command file by
-  # hand a month ago still has this, and it used to be removed only on the branch that
-  # removed the file, so it was left behind and named nowhere (audit 2026-07-31 Sp1).
-  if [ -f "$HASH_FILE" ]; then rm -f "$HASH_FILE"; echo "==> removed $HASH_FILE (the record of a file that is already gone)"; fi
-elif [ -z "$NODE_BIN" ]; then
-  # No node on PATH to hash with: refuse to guess, leave the file, say why. This is
-  # reachable in an ordinary setup, not just a broken one -- `command -v node` finds
-  # nothing in a non-interactive shell when node comes from an nvm shell function, which
-  # install.sh says to expect on this machine. So it is named in the summary rather than
-  # mentioned once and scrolled past.
-  echo "==> $COMMAND_FILE left in place (no node on PATH to verify it is unmodified)"
-  HASH_FILE_LEFT=1
-else
-  INSTALLED_HASH="$(sha256_file "$COMMAND_FILE")"
-  RECORDED_HASH=""
-  if [ -f "$HASH_FILE" ]; then
-    RECORDED_HASH="$(cat "$HASH_FILE")"
-  fi
-  SHIPPED_HASH=""
-  if [ -f "$GRILL_SRC" ]; then
-    SHIPPED_HASH="$(sha256_file "$GRILL_SRC")"
-  fi
-
-  UNMODIFIED=0
-  if [ -n "$RECORDED_HASH" ] && [ "$INSTALLED_HASH" = "$RECORDED_HASH" ]; then UNMODIFIED=1; fi
-  if [ -n "$SHIPPED_HASH" ] && [ "$INSTALLED_HASH" = "$SHIPPED_HASH" ]; then UNMODIFIED=1; fi
-
-  if [ "$UNMODIFIED" -eq 1 ]; then
-    rm -f "$COMMAND_FILE"
-    rm -f "$HASH_FILE"
-    echo "==> removed $COMMAND_FILE"
-  else
-    echo "==> $COMMAND_FILE has local edits — leaving it (it is your file, not this repo's)"
-    echo "    remove it yourself if you want it gone: rm \"$COMMAND_FILE\""
-    HASH_FILE_LEFT=1
-  fi
-fi
-
-# --- 4. report what is deliberately left behind --------------------------------
+# --- 3. report what is deliberately left behind --------------------------------
 # The whole point of this section: an uninstall that silently destroyed a review
 # archive would be a far worse bug than one that leaves too much. Name every path
 # so the user can remove it by hand if they actually want it gone.
@@ -195,12 +126,6 @@ echo "left in place on purpose:"
 echo "  store (your review history):  $STORE_DIR"
 echo "  local secret:                 $SECRET_FILE"
 echo "  logs:                         $LOG_DIR"
-if [ -f "$COMMAND_FILE" ]; then
-  echo "  your edited command file:     $COMMAND_FILE"
-fi
-if [ "$HASH_FILE_LEFT" -eq 1 ] && [ -f "$HASH_FILE" ]; then
-  echo "  its install record:           $HASH_FILE"
-fi
 echo "Remove them yourself if you want them gone."
 echo
 # Not in the list above, because it is not a path and not something to delete — but a

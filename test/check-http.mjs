@@ -2551,6 +2551,220 @@ async function main() {
     assert.match(markup, /<div class="round-label">Round 1 · feat\/round-one-branch · sent<\/div>/, 'a sent round keeps its title alongside the sent marker');
   });
 
+  // --- SPEC_MIGRATION.md criterion 11: a fixture round trip per migrated shape ------
+  // Three shapes, not five: the visual-choice board (/example), the artifact-only board
+  // that returns without an answer (/visualize, /explain, /gamify), and the single-
+  // question-with-map-context board (/wayfind). Same cycle as the round trip above
+  // (:284, :325) -- post, render, answer where the shape has one, read the packet back
+  // -- against a payload in the exact shape each real caller now posts (PROTOCOL.md's
+  // `choose-between-rendered-variants` section; skills/visualize/SKILL.md's "Post to
+  // the board"; commands/wayfind.md's Mode: Work step 1). Every assertion below is on
+  // the resolved, rendered, read-back result, never on a bare 200 -- see the next check's
+  // own comment for why that distinction is the entire point.
+
+  await check('visual-choice round trip (criterion 11, /example\'s shape): post a choose-between-rendered-variants question, render both options\' own rendered blocks, pick one, and read the pick back off the packet', async () => {
+    const r = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Which mockup?',
+        blocks: [{
+          kind: 'question',
+          prompt: 'Which mockup should we build?',
+          widget: 'choose-between-rendered-variants',
+          options: [
+            { label: 'Sidebar nav', description: 'nav rail on the left', block: { kind: 'markdown', text: '# Sidebar nav\n\nNav rail pinned to the left edge.' } },
+            { label: 'Top nav', description: 'nav bar across the top', block: { kind: 'html', html: '<div class="mock"><nav>Top nav mockup</nav></div>' } },
+          ],
+        }],
+      }),
+    });
+    assert.equal(r.status, 200);
+    const posted = await r.json();
+    const variantBoardId = posted.boardId;
+
+    const stored = readBoard(variantBoardId, home);
+    const qBlock = stored.blocks.find(b => b.kind === 'question');
+    assert.equal(qBlock.widget, 'choose-between-rendered-variants');
+    assert.equal(qBlock.options.length, 2);
+    // Each option's block minted a real, unique id through the same path a compare
+    // side's own block does (PROTOCOL.md) -- not an inert string.
+    assert.notEqual(qBlock.options[0].block.id, qBlock.options[1].block.id);
+
+    // render: both options' own rendered content is on the page, not just their labels.
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${variantBoardId}`)).text());
+    assert.match(markup, /data-choice="Sidebar nav"/);
+    assert.match(markup, /data-choice="Top nav"/);
+    assert.ok(markup.includes('Nav rail pinned to the left edge.'), 'the markdown option\'s own rendered block must be on the page');
+    assert.ok(markup.includes('Top nav mockup'), 'the html option\'s own mock content must be on the page');
+
+    // answer: pick one, following the same /wait + /submit shape as the round trip above.
+    const waitPromise = fetch(`${base}/api/board/${variantBoardId}/wait?round=1`).then(res => res.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submitRes = await fetch(`${base}/api/board/${variantBoardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [{ id: qBlock.id, status: 'answered', choice: 'Top nav', note: '' }],
+        comments: [],
+      }),
+    });
+    assert.equal(submitRes.status, 200);
+
+    // read the packet back: the pick is reported, not just the post.
+    const packet = await waitPromise;
+    assert.equal(packet.status, 'submitted');
+    assert.equal(packet.answers.length, 1);
+    assert.equal(packet.answers[0].id, qBlock.id);
+    assert.equal(packet.answers[0].choice, 'Top nav', 'the packet must report which rendered option was picked');
+  });
+
+  await check('artifact-only round trip (criterion 11, /visualize + /explain + /gamify\'s shape): post an html-only board with no question, render the artifact, and prove the packet a caller reads back reports the post rather than an answer nobody was ever asked for', async () => {
+    const html = '<!doctype html><html><body><h1>ARTIFACT_ONLY_MARKER dashboard</h1></body></html>';
+    const r = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Rendered dashboard',
+        blocks: [{ kind: 'html', html }],
+      }),
+    });
+    assert.equal(r.status, 200);
+    const posted = await r.json();
+    const artifactBoardId = posted.boardId;
+
+    // render: the artifact itself, byte for byte, inside a sandboxed stage.
+    const stored = readBoard(artifactBoardId, home);
+    assert.equal(stored.blocks[0].kind, 'html');
+    assert.equal(stored.blocks[0].html, html, 'the stored block must be byte-for-byte what was posted');
+    // Stripped, not raw: the raw page also embeds `block.html` verbatim inside the
+    // #board-data JSON payload for client hydration, so a bare .includes() on raw
+    // markup would pass even if the iframe's own srcdoc never carried the content at
+    // all -- the same needle-must-be-found-where-the-renderer-put-it trap this file's
+    // own renderedMarkup() exists for (see its doc comment above).
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${artifactBoardId}`)).text());
+    assert.ok(markup.includes('<iframe class="html-stage" sandbox="allow-scripts" srcdoc="'), 'the artifact must render as a sandboxed html stage');
+    assert.ok(markup.includes('ARTIFACT_ONLY_MARKER'), 'the artifact\'s own content must be on the page, inside the rendered iframe\'s srcdoc');
+
+    // no answer: this is criterion 1's (ticket 01) caller -- a round with no question
+    // block anywhere in it has nothing a human is ever asked to submit. Prove that from
+    // the STORED, normalized board, not the raw payload: no question block exists
+    // anywhere on this round, and nothing has ever been answered.
+    assert.equal(stored.blocks.filter(b => b.kind === 'question').length, 0);
+    assert.deepEqual(stored.answers, {}, 'nothing was ever answered -- there was no question to answer');
+
+    // read the packet back: everything a caller needs to report the post is already in
+    // the POST response alone -- board id, round, url, thread -- with no /wait required.
+    // This is the exact packet bin/mcp.mjs's askTool constructs for this shape
+    // (packetResult, status 'posted'), reconstructed here from nothing but that response.
+    const packet = {
+      board: posted.boardId,
+      thread: posted.thread,
+      round: posted.round,
+      status: 'posted',
+      answers: [],
+      comments: [],
+      url: posted.url,
+    };
+    assert.equal(packet.status, 'posted', 'the packet must report the post, not an answer nobody was ever asked for');
+    assert.equal(packet.answers.length, 0);
+
+    // and prove the negative directly, the same technique H1's hang-up-mid-wait check
+    // above uses (node:http, not fetch, to get a handle on the socket): /wait genuinely
+    // starts polling this round -- it is not somehow pre-closed -- and nothing ever
+    // resolves it, because nothing here ever submits. A round with no question is never
+    // implicitly "answered" by the server; it simply has nothing that will ever complete
+    // a wait, which is exactly why a caller for this shape must not wait at all.
+    const before = activeWaitCount();
+    const waitReq = http.request(
+      { host: '127.0.0.1', port, method: 'GET', path: `/api/board/${artifactBoardId}/wait?round=1`, headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET } },
+      res => res.resume(),
+    );
+    waitReq.on('error', () => { /* the hang-up below is the point */ });
+    waitReq.end();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(activeWaitCount(), before + 1, 'a caller who does choose to wait must still find something real to poll');
+    waitReq.destroy();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(activeWaitCount(), before, 'no submit ever landed on this round -- the only way out was the client leaving');
+  });
+
+  await check('map-context question round trip (criterion 11, /wayfind\'s shape): post one question whose context references a map section by its heading SLUG, render it, answer it, and prove the referenced content actually resolved -- not merely that the post returned 200', async () => {
+    // The trap this migration already got bitten by once (ticket 09, SPEC_MIGRATION.md):
+    // `section` is the heading's SLUG, never its text. Get it wrong and the block is
+    // minted with an `error` and resolves to nothing while the POST still returns 200 --
+    // a silently empty context box the reviewer sees with no error anywhere in chat. So
+    // every assertion below is on the RESOLVED, stored content, never on the status code.
+    const mapDir = projectDir('wayfind-map');
+    writeFileSync(path.join(mapDir, 'MAP_ROUTING.md'), [
+      '# MAP: Routing investigation',
+      '',
+      '## Destination',
+      'Ship one router for the SPA.',
+      '',
+      '## Open questions',
+      '- [ ] Which router library should the SPA use?',
+      '',
+      '## Not yet specified',
+      'fog',
+      '',
+    ].join('\n'), 'utf8');
+
+    const r = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'MAP: Routing investigation',
+        cwd: mapDir,
+        blocks: [{
+          kind: 'question',
+          prompt: 'Which router library should the SPA use?',
+          widget: 'single',
+          options: [{ label: 'react-router' }, { label: 'tanstack-router' }],
+          context: [{ kind: 'markdown', source: { path: 'MAP_ROUTING.md', section: 'open-questions' } }],
+        }],
+      }),
+    });
+    assert.equal(r.status, 200);
+    const posted = await r.json();
+    const mapBoardId = posted.boardId;
+
+    const stored = readBoard(mapBoardId, home);
+    const qBlock = stored.blocks.find(b => b.kind === 'question');
+    const contextBlock = qBlock.context[0];
+    assert.equal(contextBlock.error, undefined, `the map section must resolve cleanly, not fall back to an error (got: ${contextBlock.error})`);
+    assert.ok(contextBlock.text.length > 0, 'the resolved context must carry real text, not an empty snapshot');
+    assert.ok(contextBlock.text.includes('Which router library should the SPA use?'), 'the resolved section must be the actual "Open questions" content');
+    assert.ok(!contextBlock.text.includes('Ship one router'), 'the resolved section must be scoped to "Open questions", not the whole file');
+
+    // render: the resolved map section is really on the page, not just in the store.
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${mapBoardId}`)).text());
+    assert.ok(markup.includes('Which router library should the SPA use?'), 'the rendered page must carry the resolved map context, not an empty or errored box');
+
+    // answer: pick one, same /wait + /submit shape as the round trip above.
+    const waitPromise = fetch(`${base}/api/board/${mapBoardId}/wait?round=1`).then(res => res.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submitRes = await fetch(`${base}/api/board/${mapBoardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [{ id: qBlock.id, status: 'answered', choice: 'tanstack-router', note: 'newer, typesafe' }],
+        comments: [],
+      }),
+    });
+    assert.equal(submitRes.status, 200);
+
+    // read the packet back.
+    const packet = await waitPromise;
+    assert.equal(packet.status, 'submitted');
+    assert.equal(packet.answers[0].choice, 'tanstack-router');
+    assert.equal(packet.answers[0].note, 'newer, typesafe');
+  });
+
   await check('L5: store directories are 0700 and store files 0600', async () => {
     // The store holds every question, answer, note and snapshotted source file from
     // every project, indefinitely; it must not rely on its parent directory's mode.

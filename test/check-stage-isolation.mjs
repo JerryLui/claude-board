@@ -417,6 +417,168 @@ check('S2: renderBoardPage emits a <meta http-equiv="Content-Security-Policy"> c
 // hand, reverted immediately after (DESIGN.md's ablation discipline);
 // the transcript is recorded in DESIGN.md's anchoring slice 10 log.
 
+// =================================================================================
+// 5. SPEC_MIGRATION.md criterion 2: a stage nested inside a choose-between-
+//    rendered-variants option must never be able to select itself.
+//
+//    An earlier version of this widget had the stage report every click over
+//    postMessage -- a content-free 'select' message, posted unconditionally,
+//    comment mode or not -- so a click landing on the visible mock content of
+//    an html-kind option (not just the card's own chrome outside the iframe)
+//    could pick that option. Reverted before this ticket merged: that message
+//    is STAGE-AUTHORED input, no different in kind from the mock's own HTML
+//    or the agent's own script inside it. Two paths made it unsafe, and
+//    neither is exotic for /example's real callers (interactive rendered
+//    mockups):
+//
+//      1. The stage's OWN script could dispatch a click on itself -- an
+//         autoplaying demo, an animation, a mock that clicks its own button
+//         -- with no reviewer involved at all.
+//      2. `cb: 'cb-stage'` is a fixed, documented public string, and origin/
+//         identity validation only prove a message came from SOME live,
+//         correctly-addressed stage, never that a human acted on it -- so
+//         any stage's own script could call
+//         `window.parent.postMessage({cb:'cb-stage', type:'select'}, '*')`
+//         directly, skipping stageAgentScript's click handling (and this
+//         file's own checks above) entirely. Both parent-side checks this
+//         file exists to defend -- origin 'null', source a live mounted
+//         stage -- pass BY CONSTRUCTION for a message the stage forges about
+//         itself; there is no third check that could catch it.
+//
+//    Guarding the message (an `ev.isTrusted` check on the stage's own click
+//    listener, say) would have closed only path 1 -- path 2 forges the
+//    message itself, upstream of any such guard. Fixed by deleting the
+//    channel instead of guarding it: there is no 'select' message left at
+//    all (data.type === 'select' matches no branch in src/ui.mjs's message
+//    listener, same as any other unrecognised type), and an html option's
+//    iframe is rendered `pointer-events: none` inside a '.choice-variant'
+//    card (src/styles.mjs, asserted in test/check-pure.mjs), so a genuine,
+//    trusted click over the visible mock can never reach the iframe at all --
+//    it lands on the card in the parent document instead, which already
+//    handles it. See src/render.mjs's stageAgentScript design comment ("NO
+//    'select' MESSAGE, DELIBERATELY") for the fuller account.
+// =================================================================================
+
+function variantsBoard(mocks) {
+  return createBoard({
+    title: 'isolation: variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which mockup?',
+      widget: 'choose-between-rendered-variants',
+      options: mocks.map((html, i) => ({ label: 'Option ' + (i + 1), block: { kind: 'html', html } })),
+    }],
+  });
+}
+
+check('criterion 2: a stage cannot pick its own option -- a "select"-shaped message from a live, correctly-addressed mounted stage records no pick', () => {
+  const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
+  const document = loadBoard(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const card = document.querySelector('.choice-variant');
+
+  // Both parent-side checks the rest of this file exists to defend pass here
+  // BY CONSTRUCTION: 'null' is exactly the origin an opaque srcdoc frame
+  // reports, and frame.contentWindow is a REAL, live, currently-mounted
+  // stage -- precisely what the stage's own script could forge directly.
+  // What stops this is that there is no handler left for this message type
+  // at all, not an origin or identity check -- ablation: reintroducing
+  // `if (data.type === 'select') { var card = frame.closest('.choice-
+  // variant'); if (card) selectVariant(card); }` in src/ui.mjs's message
+  // listener makes this fail.
+  document.defaultView.dispatchEvent({
+    type: 'message',
+    data: { cb: 'cb-stage', type: 'select' },
+    origin: 'null',
+    source: frame.contentWindow,
+  });
+  assert.equal(card.classList.contains('selected'), false,
+    'a stage must never be able to select its own option -- the agent would be handing itself the answer to its own question');
+});
+
+// Merge guard, not a criterion: `main` grew a document-level Cmd+Enter board
+// traversal (test/check-enter.mjs) after this branch forked, and this widget's
+// cards are the only new element on the branch with their own Enter handler.
+// Both listeners fired on one chord -- the card's (which checked `ev.key`
+// alone, never the modifiers) recorded a pick, and the document's then
+// advanced off it -- so 'advance to the next question' silently committed an
+// answer on whichever card held focus. Ablation: deleting the
+// `if (ev.metaKey || ev.ctrlKey) return;` guard in src/ui.mjs's card keydown
+// makes this fail.
+check('criterion 2 x Cmd+Enter: the modified chord traverses the board, it never picks the focused variant -- plain Enter still does', () => {
+  const board = variantsBoard([
+    '<div class="mock"><button>A</button></div>',
+    '<div class="mock"><button>B</button></div>',
+  ]);
+  const document = loadBoard(renderBoardPage(board));
+  const cards = document.querySelectorAll('.choice-variant');
+
+  for (const mod of [{ metaKey: true }, { ctrlKey: true }]) {
+    const ev = new StandInEvent('keydown', { key: 'Enter', ...mod });
+    cards[0].dispatchEvent(ev);
+    assert.equal(cards[0].classList.contains('selected'), false,
+      `Cmd/Ctrl+Enter (${Object.keys(mod)[0]}) on a focused variant card must never record a pick -- the chord belongs to board traversal`);
+    // Consumed, but by the DOCUMENT listener (which prevents the chord on
+    // every traversal branch), not by the card. This assertion cannot tell the
+    // two apart on its own -- the 'selected' assertion above is the one that
+    // discriminates -- it only pins that the chord never falls through to the
+    // platform unhandled.
+    assert.equal(ev.defaultPrevented, true,
+      'the modified chord must be consumed by board traversal, not handed back to the browser');
+  }
+
+  // The card's own affordance is untouched -- this is what stops the guard
+  // above from being "disable the keyboard path" by accident.
+  cards[0].dispatchEvent(new StandInEvent('keydown', { key: 'Enter' }));
+  assert.equal(cards[0].classList.contains('selected'), true,
+    'plain Enter on a focused card must still select it');
+});
+
+check('criterion 2: a click landing inside a nested html stage never selects the option, however it got there -- the stage has no live channel back to a pick', () => {
+  const board = variantsBoard([
+    '<div class="mock"><button>A</button></div>',
+    '<div class="mock"><button>B</button></div>',
+  ]);
+  const document = loadBoard(renderBoardPage(board));
+  const frames = document.querySelectorAll('.html-stage');
+  frames.forEach(f => f.loadSrcdoc());
+  const cards = document.querySelectorAll('.choice-variant');
+
+  // stageAgentScript's own listeners still run inside the mock's document --
+  // this dispatch reaches them exactly as a genuine click (or the mock's own
+  // script calling .click() on itself) would. test/dom-stand-in.mjs does not
+  // model real pointer-events hit-testing (QUIRKS.md), so this cannot prove
+  // a genuine mouse click never physically reaches the iframe in a real
+  // browser -- that half is src/styles.mjs's `pointer-events: none` alone,
+  // asserted structurally in test/check-pure.mjs. What this DOES prove is
+  // the other half: even a click that somehow lands inside the stage's own
+  // document carries no path back to a selection anymore.
+  frames[0].contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  assert.equal(cards[0].classList.contains('selected'), false, 'a click inside stage A\'s mock must never select option A');
+  assert.equal(cards[1].classList.contains('selected'), false, 'and must not select option B either');
+
+  frames[1].contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  assert.equal(cards[0].classList.contains('selected'), false);
+  assert.equal(cards[1].classList.contains('selected'), false, 'nor must a click inside stage B\'s mock ever select option B');
+});
+
+check('criterion 2: the existing element-level comment-anchor gesture into an html option\'s own stage still works exactly as before -- removing "select" did not collaterally break "click"', () => {
+  const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
+  const document = loadBoard(renderBoardPage(board));
+  enableCommentMode(document);
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const card = document.querySelector('.choice-variant');
+  const blockId = board.blocks[0].options[0].block.id;
+
+  frame.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+
+  const form = document.getElementById('comment-form-' + blockId);
+  assert.equal(form.classList.contains('open'), true, 'the pre-existing comment-anchor gesture must still work unchanged');
+  assert.equal(card.classList.contains('selected'), false, 'and must never also pick the option');
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

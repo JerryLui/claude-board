@@ -7,6 +7,15 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ### Security
 
+- **A rendered variant cannot pick itself.** The new `choose-between-rendered-variants`
+  widget renders each option as a real block, which may be an HTML stage — agent-authored
+  script inside the control the reviewer decides with. Inside an option's card that iframe
+  is `pointer-events: none`, so the selecting click lands on the card in the parent
+  document, and no stage-to-parent message can select anything. An earlier draft of the
+  widget did give stages a `select` message, and it was removed before merge: origin and
+  frame-identity validation proves a message came from *a stage*, never that *a human*
+  acted, so a mock that clicks itself — or one that simply posts the message — would have
+  answered the reviewer's question for them.
 - **Read routes now require a credential.** The index, a board page, archive search, the
   blocking wait and the event stream all refuse a caller holding neither the local secret
   nor the browser session cookie, with **401**. Two routes stay open: `GET /api/health`,
@@ -63,6 +72,13 @@ this project does not yet follow semantic versioning, because nothing has been r
 - `GET /b/:id` no longer sets any cookie. The served page's bytes stay a pure function of
   the board JSON, so the standalone archive is unchanged and still opens from disk with no
   daemon and no credential.
+- **`install.sh` no longer installs `/grill`, or any other command, and `uninstall.sh` no
+  longer removes one.** Both briefly did, back when `/grill` was the board's only caller
+  and this repo had written it. `SPEC_MIGRATION.md` grew five more callers this repo did
+  not write and asked whether they should move in too; the answer was no, for any of them
+  — `claude-board` ships the daemon, the shim and the protocol, and nothing that calls
+  them. `commands/grill.md` is deleted from this repo and lives only at
+  `~/.claude/commands/grill.md`, versioned on its own schedule. See ADR.md entry 5.
 
 ### Added
 
@@ -76,17 +92,10 @@ this project does not yet follow semantic versioning, because nothing has been r
   second profile, a different browser — without reinstalling, restarting the service or
   touching the store. `--print` emits the URL instead. Every refusal page names this
   command with an absolute path.
-- `install.sh` now installs `/grill` itself, to `~/.claude/commands/grill.md` — the
-  board's only caller, previously a manual `cp` step in the README. Idempotent: an
-  unmodified copy is overwritten with fixes, but a copy the user has edited is left
-  alone, with install saying so and continuing rather than dying. "Unmodified" is
-  decided by a sha256 recorded at install time, kept beside the local secret in
-  `~/.config/claude-board/`.
-- `uninstall.sh`, symmetric to `install.sh`: removes the launchd job, its plist, the
-  MCP registration, and the installed `/grill` command file (unless it has local
-  edits, which it leaves and says so), then reports exactly what it leaves behind on
-  purpose — the store, the local secret, and the logs, named by path. Safe to run when
-  nothing is installed and safe to run twice.
+- `uninstall.sh`, symmetric to `install.sh`: removes the launchd job, its plist, and
+  the MCP registration, then reports exactly what it leaves behind on purpose — the
+  store, the local secret, and the logs, named by path. Safe to run when nothing is
+  installed and safe to run twice.
 - **References can resolve inside a configured allowlist, not just a board's `cwd`.**
   `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths) is validated exactly as
   `cwd` already is -- realpath'd, must exist, refused if it is `/` or `$HOME` or

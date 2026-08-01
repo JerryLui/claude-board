@@ -329,12 +329,94 @@ function renderRankWidget(block, answer, historical) {
   return `<ul class="rank-list" data-question-id="${escAttr(block.id)}">${items}</ul>`;
 }
 
-function renderWidget(block, answer, historical) {
+/** choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): each option carries a nested,
+ * fully rendered content block instead of the plain string `preview` every
+ * other widget's option has (renderOptionBody/renderOptionPreview above are
+ * for those; this widget bypasses both). The reviewer picks by clicking the
+ * option's own card, which cannot be a `<button>` the way every other
+ * card-choice widget's is: an option's block can be `html`, a sandboxed
+ * iframe (renderHtmlBlock below), and interactive content nested inside a
+ * `<button>` is invalid HTML the browser will not let the reviewer click
+ * through to. So the selectable unit is a plain, focusable `<div
+ * role="button">`, wired by hand in src/ui.mjs for the same click + keyboard
+ * contract a real `<button>` gives for free -- see that file's own comment on
+ * `.choice-variant` for the keyboard half and the guard against stealing a
+ * click meant for the option's own comment button/form.
+ *
+ * An `html` option's iframe is rendered `pointer-events: none` inside a
+ * `.choice-variant` card (src/styles.mjs) -- deliberately, not an oversight:
+ * see stageAgentScript's own design comment ("NO 'select' MESSAGE,
+ * DELIBERATELY") for why the stage must never be able to influence its own
+ * selection. The option's block is untrusted, agent-authored content, same as
+ * any other block on the page; unlike everywhere else that content renders,
+ * here a click deciding WHICH option gets picked is a decision only the
+ * reviewer may make. So a real click over the mock's visible content can
+ * never reach the iframe at all -- it lands on the card in the parent
+ * document instead, the same as a click on the option's label or border
+ * already does. The block-level comment button/form still work exactly like
+ * any other block's (they render in the parent document, not the iframe); an
+ * `html` option's own element-level comment-anchor gesture does not, as the
+ * same consequence of being unclickable -- a lesser loss than the one it
+ * closes, and the other content kinds (markdown/code/mermaid/compare) render
+ * inline with no iframe at all, so theirs is unaffected.
+ *
+ * `historical` renders the card `aria-disabled="true"` and out of the tab
+ * order (`tabindex="-1"`) -- the div equivalent of every other widget's
+ * `disabled` attribute, since a plain `<div>` has no native disabled state a
+ * browser enforces on its own the way `<button disabled>` does; src/ui.mjs's
+ * click/keydown handlers both check for it before acting. The picked
+ * option's `.selected` class is driven by `answer.choice` exactly like every
+ * other widget, so it stays visible once the round is sent (PROTOCOL.md
+ * "Board document" -- answers are keyed at board level).
+ *
+ * The nested block renders through the exact same `renderBlock` dispatch a
+ * compare side or a question's own `context` block already goes through --
+ * its own id (src/board.mjs's normalizeBlock, competing for ids in the same
+ * shared ledger a compare side's `block` does), its own comment button/form/
+ * pin-layer, all for free. That is a deliberate choice, not an oversight: an
+ * option's block is exactly as commentable AT BLOCK LEVEL as a compare side's
+ * block already is (src/board.mjs's findBlock/questionBlocks walk
+ * `options[].block` the same way they walk `left`/`right`), rather than this
+ * one widget inventing a suppressed, comment-free rendering path of its own. */
+function renderVariantOption(opt, isSelected, board, commentsByBlock, historical, questionId) {
+  const body = opt.block
+    ? renderBlock(opt.block, board, commentsByBlock, historical)
+    : '<p class="unsupported-widget">no content</p>';
+  return `<div class="variant-card choice-variant${isSelected ? ' selected' : ''}" role="button" tabindex="${historical ? '-1' : '0'}"${historical ? ' aria-disabled="true"' : ''} data-question-id="${escAttr(questionId)}" data-choice="${escAttr(opt.label)}">
+    <div class="variant-label">
+      <span class="opt-label">${escHtml(opt.label)}</span>
+      ${opt.description ? `<span class="opt-desc">${escHtml(opt.description)}</span>` : ''}
+    </div>
+    ${body}
+  </div>`;
+}
+
+function renderVariantChoice(block, answer, historical, board, commentsByBlock) {
+  const selected = answer && typeof answer.choice === 'string' ? answer.choice : null;
+  const cards = block.options
+    .map(opt => renderVariantOption(opt, selected === opt.label, board, commentsByBlock, historical, block.id))
+    .join('');
+  return `<div class="options options-variants">${cards}</div>`;
+}
+
+function renderWidget(block, answer, historical, board, commentsByBlock) {
   switch (block.widget) {
+    case 'single': return renderSingleChoice(block, answer, historical);
     case 'multi': return renderMultiChoice(block, answer, historical);
     case 'text': return renderTextWidget(block, answer, historical);
     case 'rank': return renderRankWidget(block, answer, historical);
-    default: return renderSingleChoice(block, answer, historical);
+    case 'choose-between-rendered-variants': return renderVariantChoice(block, answer, historical, board, commentsByBlock);
+    // Unreachable through createBoard/addRound/amendRound: src/board.mjs's
+    // normalizeBlock rejects any `widget` not in WIDGETS before a block is ever
+    // minted (audit L2), so every block renderWidget ever sees already named
+    // one of the five cases above. This used to be `default: return
+    // renderSingleChoice(...)` -- permissive, so a SIXTH WIDGETS entry added
+    // without a matching case here would render silently as an empty list of
+    // single-choice cards, indistinguishable from a data bug rather than a
+    // renderer gap. Thrown instead, matching board.mjs's own "a 400 naming the
+    // widget is recoverable; a silent fallback is not" reasoning -- loud, at
+    // the one place that can name which widget's case is missing.
+    default: throw new Error(`renderWidget: no render case for widget ${JSON.stringify(block.widget)}`);
   }
 }
 
@@ -342,7 +424,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
   const answer = board.answers[block.id];
   const statusText = `status: ${answer ? answer.status : 'unanswered'}`;
   const isDeferred = !!(answer && answer.status === 'deferred');
-  const widgetHtml = renderWidget(block, answer, historical);
+  const widgetHtml = renderWidget(block, answer, historical, board, commentsByBlock);
   const contextHtml = (block.context || []).map(c => renderBlock(c, board, commentsByBlock, historical)).join('');
   return `
 <section class="block question-block" data-block-id="${escAttr(block.id)}" data-block-kind="question" data-widget="${escAttr(block.widget)}">
@@ -565,6 +647,37 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
 //                                          again whenever src/ui.mjs's
 //                                          `refreshPins` runs (resize, a comment
 //                                          queued, a submit landing).
+//
+// NO 'select' MESSAGE, DELIBERATELY (SPEC_MIGRATION.md criterion 2,
+// choose-between-rendered-variants). An earlier version of this widget had
+// the stage post an unconditional, content-free 'select' on every click, so
+// clicking the visible mock content of an html-kind OPTION -- not just the
+// card's own chrome outside the iframe -- could pick that option; the parent
+// acted on it whenever the frame sat inside a '.choice-variant' card. Reverted
+// (director review, before this ticket merged): every message on this channel is
+// STAGE-AUTHORED input, no different in kind from the mock's own HTML or the
+// agent's own script inside it -- and unlike 'click'/'hover' (which only ever
+// PROPOSE an anchor a human still has to submit) or 'positions' (pure
+// geometry), a message that could pick an option is the agent handing itself
+// the answer to its own question. Two paths made that concrete: the stage's
+// OWN script could dispatch a click on itself (an autoplaying demo, an
+// animation, a mock that clicks its own button) with no human involved at
+// all, and separately -- since `cb: 'cb-stage'` is a fixed, documented public
+// string and origin/identity validation only prove a message came from SOME
+// live stage, never that a human acted on it -- any stage's own script could
+// call `window.parent.postMessage({cb:'cb-stage', type:'select'}, '*')`
+// directly, skipping stageAgentScript's click handling entirely. Guarding the
+// message (an `ev.isTrusted` check, say) would have closed only the first
+// path; the second forges the message itself, upstream of any such guard.
+// Deleted instead of guarded: an option's stage is a THUMBNAIL to choose
+// between, not a surface to operate, so it is rendered `pointer-events: none`
+// inside a '.choice-variant' card (src/styles.mjs) -- a real, trusted click
+// over the visible mock can then never reach the iframe at all, and lands on
+// the card in the parent document instead, which already handles it (see
+// renderVariantOption's own comment). See test/check-stage-isolation.mjs's
+// own tests for this: a forged 'select'-shaped message from a live,
+// correctly-addressed stage is inert, because there is no handler left to
+// act on it.
 //
 // ORIGIN VALIDATION -- an opaque-origin `srcdoc` frame has no real origin to
 // check against, so "just compare to our own origin" (the usual same-origin

@@ -111,7 +111,7 @@ general escape, and was closed by resolving each reference to a descriptor once 
 reading from that. A hard link into a root is the same shape and is not closed — see
 `SECURITY.md`, "Not defended, by design".
 
-## 4. PROPOSED — Every command falls back off the board, `/grill` included — 2026-07-31
+## 4. Every command falls back off the board, `/grill` included — 2026-07-31
 
 **Context:** `SPEC_LAUNCH.md` and `commands/grill.md` both state the opposite, deliberately
 and at length: there is no automatic fallback to the terminal for a board-shaped round,
@@ -151,14 +151,19 @@ Rejected: migrated commands fall back and `/grill` does not (two rules, and the 
 still fails for the one command most likely to be run there); rejected: nothing falls back,
 which leaves "the daemon is merely down on your own machine" unanswered.
 
-**Status: proposed, not accepted.** This entry was written as accepted, which the repository
-did not support: neither rewrite it names as required — `commands/grill.md`'s "Fail loudly,
-don't fall back" section and `test/check-grill.mjs`'s `no automatic terminal fallback is
-described` case — has landed, so the shipped behaviour is still the *opposite* rule. Recorded
-as proposed so the file matches the code (audit 2026-07-31 Sp5). Accepting it means doing
-those two rewrites in the same change.
+**Status: accepted.** Both rewrites this entry named as the condition for accepting it have
+now landed, in the same change (ticket 07 / `SPEC_MIGRATION.md`). `commands/grill.md`'s fail
+section, renamed "Fail loudly, then take the degraded path", now names all three triggers,
+relays the `isError` message verbatim including which one fired, and continues through
+`AskUserQuestion` for the rest of the session, stating plainly what that costs: multi-select,
+ranking, attached context and comment anchoring. `test/check-grill.mjs`'s case, renamed from
+`no automatic terminal fallback is described` to assert that a fallback IS described, now binds
+that shape: it fails against the pre-rewrite prose this entry was written against (missing the
+`headless` and `cannot open a tab` trigger names, and still carrying the disavowed `no automatic
+fallback` sentence) and passes against the rewrite. Only the command's response to the error
+changed: `bin/mcp.mjs` still returns `isError` on all three triggers, untouched.
 
-## 5. PROPOSED — This repo ships the protocol, not its callers — 2026-07-31
+## 5. This repo ships the protocol, not its callers — 2026-07-31
 
 **Context:** `install.sh` has always installed three things: the LaunchAgent, the local secret,
 and `commands/grill.md` copied to `~/.claude/commands/`. That third step made sense while
@@ -186,7 +191,29 @@ Rejected: callers move IN (checkable in CI, but this repo starts shipping ~110KB
 it did not author, and your skills couple to its releases); rejected: the status quo, one
 caller in and five out, which is a rule with no principle behind it.
 
-**Status: proposed, not accepted.** Nothing has moved yet: `commands/grill.md` is still in the
-repo and `install.sh` still installs it. Accepting means doing the move, the `install.sh`
-edit, and answering criterion 12 in the same change — otherwise the repo loses its only prose
-binding and gains nothing in exchange.
+**Status: accepted.** The move, the `install.sh` edit and criterion 12 have all landed
+(ticket 04 / `SPEC_MIGRATION.md`). `commands/grill.md` is deleted from this repo (`git rm`,
+not left behind for a stale copy to drift from) and lives only at
+`~/.claude/commands/grill.md`. `install.sh` no longer references `GRILL_SRC`,
+`COMMAND_FILE` or the hash file and comparison branch that decided whether to overwrite a
+user's edited copy — the whole step is gone, not merely skipped, and the preflight error
+no longer requires `commands/grill.md` to exist. `uninstall.sh` follows: it no longer
+deletes (or claims to delete) a command file, because doing so now would mean destroying a
+file this repo did not install and does not own.
+
+Criterion 12 was already answered, before this ticket: ticket 03 shipped
+`src/prose-check.mjs`, proved against a fixture it owns. So the boundary this entry drew —
+"nothing in this repo's suite proves any prose matches the shim" — never actually opened;
+the generic mechanism existed before `test/check-grill.mjs`'s subject left. What DID
+disappear with that file was checked one assertion at a time rather than assumed: every
+grill-prose-specific assertion (no HTML template, the one-question rule being gone, the
+context-reference field name, install.sh shipping *this* file) had nowhere left to bind and
+was retired with it. The one assertion in that file that was never about grill's prose —
+`bin/mcp.mjs` returns `isError` on an unreachable daemon — was already independently
+asserted in `test/check-mcp.mjs` ("an unreachable daemon reports the revive command and
+writes nothing"), so it lost no coverage: flipping that `isError` to `false` still fails
+that check today. `test/check-install.mjs`'s grill-install-step tests (fresh install writes
+the shipped file, an unmodified copy updates, an edited copy survives, uninstall mirrors
+all three) are retired the same way, replaced by assertions that the removed machinery
+(`GRILL_SRC`, `COMMAND_FILE`, the hash record) is actually gone from both scripts' source,
+and that a file sitting at the old command-file path survives an uninstall untouched.

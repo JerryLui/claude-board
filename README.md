@@ -49,13 +49,15 @@ bash install.sh
 
 One idempotent command, and one click. It generates a local secret, builds the launcher
 bundle, installs a launchd job running the daemon from this clone, waits for the daemon
-to actually answer before claiming success, registers the MCP server with Claude Code at
-user scope, and installs `/grill` — the board's first caller — to
-`~/.claude/commands/grill.md`. Running it again changes nothing that already matches:
-the secret is never rotated, the launcher is not rebuilt unless something it is built
-from changed, and `/grill` is only overwritten while it still matches what install put
-there last time. Edited your local copy? Install leaves it alone and tells you where the
-shipped version lives instead of clobbering your edit.
+to actually answer before claiming success, and registers the MCP server with Claude Code
+at user scope. Running it again changes nothing that already matches: the secret is never
+rotated and the launcher is not rebuilt unless something it is built from changed.
+
+This installs the service and its credential — nothing that calls them. `claude-board`
+ships the daemon, the shim and the protocol; it ships no commands or skills (see
+[ADR.md](ADR.md) entry 5). `/grill`, the board's original caller, now lives at
+`~/.claude/commands/grill.md`, versioned in your own `~/.claude` alongside whatever else
+you point at the board — install that separately, on its own schedule.
 
 ### The one click: allowing folder access
 
@@ -90,7 +92,10 @@ launchctl kickstart -k gui/$(id -u)/claude-board
 
 ## Use
 
-Run `/grill` on a decision, a design, or a spec. When it has more than a couple of
+Any command or skill that calls the `ask` tool can post a board — this repo does not ship
+one. `/grill`, the original caller, lives at `~/.claude/commands/grill.md`; see its own
+file for the source of truth on what it does. As an example: run it on a decision, a
+design, or a spec. When it has more than a couple of
 questions it posts a board and a tab opens. Answer what you want, leave the rest
 unanswered — unanswered comes back explicitly marked, never defaulted — add a note
 beside any answer, click **comment mode** and click any element on the page to attach a
@@ -162,14 +167,13 @@ review content is never committed.
 bash uninstall.sh
 ```
 
-Removes the launchd job, its plist, the MCP registration, the launcher bundle in
-`~/Applications`, and `~/.claude/commands/grill.md` — unless you've edited that file, in
-which case it's your file, not this repo's: uninstall leaves it alone and says so, the
-same rule install follows on the way in. It reports what it deliberately did not touch:
-the store (your review history), the local secret at `~/.config/claude-board/secret`,
-and the logs in `~/Library/Logs/claude-board/`. Remove those yourself if you want them
-gone. Safe to run on a machine that never had the service installed, and safe to run
-twice.
+Removes the launchd job, its plist, the MCP registration, and the launcher bundle in
+`~/Applications`. It does not touch `~/.claude/commands/grill.md` or any other command
+file — this repo does not install one, so it has nothing of its own to take back there.
+It reports what it deliberately did not touch: the store (your review history), the local
+secret at `~/.config/claude-board/secret`, and the logs in `~/Library/Logs/claude-board/`.
+Remove those yourself if you want them gone. Safe to run on a machine that never had the
+service installed, and safe to run twice.
 
 One leftover no script can remove: `claude-board` may still be listed under System
 Settings → Privacy & Security → Files and Folders. The bundle it refers to is gone, so

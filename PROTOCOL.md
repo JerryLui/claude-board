@@ -44,9 +44,15 @@ src/patch.mjs       pure board-JSON diff (added/changed block ids, rounds now se
                      walking nested blocks too; imported directly by the checks AND
                      spliced verbatim into src/ui.mjs via computeBoardPatch.toString(),
                      so one implementation runs in node and in the page
-commands/grill.md   the /grill command; the first caller of the `ask` tool
+src/prose-check.mjs the shared prose-vs-shim checker (SPEC_MIGRATION.md ticket 03):
+                     parse a prose file, compare what it says it posts against the shim's
+                     live tools/list and PROTOCOL.md's own block/widget/status vocabulary.
+                     Ships from `src/`, not `test/`, because every real caller — a skill's
+                     or command's own check.mjs — lives outside this repo; see
+                     "The prose-vs-shim checker" below and test/check-prose-check.mjs,
+                     which proves it against a fixture this repo owns
 test/check-pure.mjs test/check-http.mjs test/check-mcp.mjs
-test/check-install.mjs test/check-grill.mjs test/run.mjs
+test/check-install.mjs test/check-prose-check.mjs test/run.mjs
 install.sh
 ```
 
@@ -113,8 +119,9 @@ Answers are keyed at board level rather than nested in rounds; every block carri
 `round`, which is what the history rail groups by.
 
 **Round `title`** (additive, audit 2026-07-28). Every round carries the `title` of the post
-that created it — `ask` requires a non-empty one on every call and `commands/grill.md` tells
-the agent to make it the branch name. `createBoard` seeds round 1's from the board title,
+that created it — `ask` requires a non-empty one on every call, and `/grill` (which lives in
+the caller's own repo, [ADR 5](ADR.md)) tells the agent to make it the branch name.
+`createBoard` seeds round 1's from the board title,
 `addRound` takes the post's (falling back to the board title), and `amendRound` may refine
 the open round's but never blanks it. `src/render.mjs` renders it in the round heading:
 `Round 2 · fix/some-branch`, plus ` · sent` once the round is out. Previously the value was
@@ -136,15 +143,45 @@ snapshot — `text` and `sha` — written once at post time and never re-read (s
 { kind: 'question', prompt, context: [ContentBlock], widget, options: [Option] }
 
 Ref    = { path, section?, lines? }               // lines is [from, to], 1-based inclusive
-Option = { label, description?, preview? }
-widget = 'single' | 'multi' | 'text' | 'rank'
+Option = { label, description?, preview? }                  // every widget except the one below
+       | { label, description?, block: ContentBlock|null }  // widget 'choose-between-rendered-variants' only
+widget = 'single' | 'multi' | 'text' | 'rank' | 'choose-between-rendered-variants'
 ```
 
 A widget outside that list is a **400**, not a silent fallback to `single` (additive, audit
 2026-07-28) — `{ widget: 'freetext' }` rendered a question with no cards and no textarea,
 which Send then reported back as `unanswered`, so the agent misreported an unanswerable
-question as "the reviewer left it blank". A `single`/`multi`/`rank` question with zero
-options is a 400 for the same reason; `text` needs none.
+question as "the reviewer left it blank". A `single`/`multi`/`rank`/
+`choose-between-rendered-variants` question with zero options is a 400 for the same reason;
+`text` needs none.
+
+**`choose-between-rendered-variants`** (additive, SPEC_MIGRATION.md criterion 2) is the one
+widget whose options are not `{ preview }` strings: each option's `block` is a real content
+block of any kind, normalized the same way a `compare` side's own `block` is — same
+`normalizeBlock`/`resolveBlockId` path, the same shared id ledger a post's other blocks
+compete against, so it mints a real, unique block id rather than an inert string. It renders
+through the same block dispatch every other content block does, so a comment can anchor to
+an option's block, at least at the whole-block level, exactly like a `compare` side's or a
+question's own `context` block's. The reviewer picks by clicking the option's own rendered
+block rather than a label on a text prompt, but the answer shape does not change: `choice` is
+still the picked option's `label`, a plain string, identical to `single`.
+
+An option's block is untrusted, agent-authored content, same as any block on the page — but
+here a click deciding WHICH option gets picked is a decision only the reviewer may make, and
+an `html` option is a sandboxed iframe that can run the agent's own script. So the iframe is
+rendered non-interactive (`pointer-events: none`) wherever it renders as an option: a real
+click over the visible mock can never reach it, only the card around it, which is the sole
+thing that can ever record a pick. The html-stage postMessage protocol (`src/render.mjs`,
+`src/ui.mjs`) carries no message that could select an option on the stage's own say-so — that
+was tried and reverted before this shipped; see `src/render.mjs`'s "NO 'select' MESSAGE,
+DELIBERATELY" design comment. One consequence: an `html` option's own element-level
+comment-anchor gesture is unreachable too, the same way its click is — the other content
+kinds (markdown/code/mermaid/compare) render inline with no iframe at all, so theirs is
+unaffected, and every option's whole-block comment button still works regardless of kind (it
+renders in the parent document, not the iframe).
+
+No caller in this repo posts this widget yet — `/example` is its real caller, and ships
+outside this repo (see "The skills stay personal" in SPEC_MIGRATION.md).
 
 `error` (additive, ticket 03): when a block carries `source` and `src/resolve.mjs`
 fails to resolve it (missing file, out-of-range lines, section not found), the block
@@ -305,16 +342,21 @@ not just `"Send"`), and the whole identity is suffixed with `" in <context>"`, w
 ```js
 {
   board, thread, title, round,
-  status,                           // 'submitted' | 'discuss' | 'timeout' | 'error'
+  status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'error'
   answers:  [ { id, round, prompt, widget, status, choice, note } ],
   comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, resolved, lost? } ],
   url,
 }
 ```
 
-`discuss` means the reviewer chose Discuss in chat: partial answers are included and the
-agent must stop posting boards for the rest of the session. `timeout` is the wall-clock cap
-(default 2h) and carries an explicit no-response.
+`posted` (additive, ticket 01) means the round carried no question block anywhere in it —
+top-level, or nested in a question's `context` or a `compare` side — so there was nothing to
+submit and the shim returned the instant the post succeeded rather than waiting on
+`/api/board/:id/wait` at all. `answers` and `comments` are always empty on a `posted` packet:
+nobody has answered or commented yet, because nobody was asked to. `discuss` means the
+reviewer chose Discuss in chat: partial answers are included and the agent must stop posting
+boards for the rest of the session. `timeout` is the wall-clock cap (default 2h) and carries
+an explicit no-response.
 
 **Scope: one packet is one round** (additive, audit 2026-07-28 — this was previously
 unpinned, which is why it diverged). `answers` holds exactly the question blocks whose
@@ -607,13 +649,25 @@ rule.
 
 ## MCP surface
 
-One tool, `ask`, on the stdio shim. It posts a board, opens the tab on the thread's first
-board, and blocks on `/api/board/:id/wait`, emitting `notifications/progress` throughout so
-the idle timer never fires. Arguments mirror the board document: `{ title, blocks }`, where
-question blocks carry their questions by value and content blocks carry a `source` ref.
+One tool, `ask`, on the stdio shim. It posts a board and opens the tab on the thread's first
+board. Whether it then waits is derived from the round just posted, not from a mode flag or a
+"no questions" guard: a round carrying a question block anywhere in it (top-level, or nested
+in a question's `context` or a `compare` side) blocks on `/api/board/:id/wait`, emitting
+`notifications/progress` throughout so the idle timer never fires; a round of content blocks
+only returns the instant the post succeeds, packet `status: 'posted'` (see "Packet" above) —
+there is nothing left to wait for. Round 7 pinned this on the post succeeding rather than on
+the tab opening, which was the return condition originally written and was never
+implementable: `open` is spawned detached and this process never learns whether a tab
+actually appeared, so "the tab is open" was not a state it could observe. Opening a tab stays
+best-effort and its failure stays non-fatal either way. Arguments mirror the board document:
+`{ title, blocks }`, where question blocks carry their questions by value and content blocks
+carry a `source` ref.
 
-Failure is loud and writes nothing: an unreachable daemon returns the revive command, and a
-non-interactive session is refused before anything is posted.
+Failure is loud and writes nothing, on three triggers: an unreachable daemon (returns the
+revive command), a non-interactive session (refused before anything is posted — see
+"Detecting a session with no human in it"), or a session on which nothing can open a tab at
+all (same section) — an SSH session on a machine with no display passes the first two checks
+and would otherwise post a board nobody can see and block for the full wall-clock cap.
 
 The shim tracks one thread per process (one shim per Claude session): the first `ask` call
 starts a new thread and opens its tab; every later `ask` call in the same process pushes a
@@ -625,10 +679,23 @@ the tab.
 ```
 CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 2h (7_200_000)
 CLAUDE_BOARD_PROGRESS_MS      notifications/progress cadence, default 20_000 (20s)
-CLAUDE_BOARD_HEADLESS=1       forces the non-interactive refusal regardless of entrypoint
-CLAUDE_BOARD_NO_OPEN=1        skip opening a tab at all (checks only; never set by a user)
+CLAUDE_BOARD_HEADLESS=1       forces the non-interactive refusal regardless of entrypoint --
+                               also the documented manual opt-out (ticket 01, criterion 10a):
+                               set it deliberately on a machine that COULD open a tab, to use
+                               the terminal for this session instead of ask
+CLAUDE_BOARD_NO_OPEN=1        skip opening a tab at all (checks only; never set by a user) --
+                               opening deliberately SUPPRESSED, which is why this does not
+                               also trip the "cannot open a tab" refusal below: a real caller
+                               never sets it, so that refusal only ever fires where it is unset
 CLAUDE_BOARD_OPEN_CMD         command used to open the board URL, default `open` (checks
-                               override this to something other than a real browser)
+                               override this to something other than a real browser). Setting
+                               this on a non-darwin machine is also what satisfies the
+                               "cannot open a tab" refusal for real: it is the one way a
+                               caller states that something CAN show a human the board
+CLAUDE_BOARD_ASSUME_PLATFORM  overrides process.platform for the "cannot open a tab" decision
+                               only (checks only; never set by a user) -- there is no second
+                               OS on the machine that runs this suite to exercise the
+                               non-darwin branch on for real
 CLAUDE_BOARD_POST_TIMEOUT_MS  timeout on POST /api/board only, default 10_000; never applied
                                to the /wait call, which must survive the full wall-clock cap
 CLAUDE_BOARD_SECRET_FILE      where the local secret lives, default
@@ -653,10 +720,149 @@ interactive session, so the entrypoint still reads `cli` and no env check can se
 half of acceptance criterion 11 is a rule those commands must carry (set
 `CLAUDE_BOARD_HEADLESS=1`, or do not call `ask`), not a mechanism the shim can enforce.
 
+**A third, distinct refusal: the daemon cannot open a tab.** SSH onto a machine with no
+display is neither of the two cases above: it exports
+`CLAUDE_CODE_ENTRYPOINT=cli`, which passes the interactivity check, and the daemon it talks
+to over loopback is perfectly reachable. But `openBoardTab` (`bin/mcp.mjs`) silently no-ops on
+a non-darwin platform with no `CLAUDE_BOARD_OPEN_CMD` configured — there is no mechanism at
+all on that machine to put a tab in front of a human. Unrefused, that posts a board nobody can
+see and blocks for the full wall-clock cap with nothing to report, so `ask` refuses it up
+front instead, before anything is posted: platform is `darwin` (the `open` command always
+exists), or `CLAUDE_BOARD_OPEN_CMD` names an explicit opener, or refuse. This is checked
+independently of the interactivity allowlist above — a session can be interactive and still
+have nowhere to show the board — and, symmetrically with `CLAUDE_BOARD_HEADLESS=1`, is not
+tripped by `CLAUDE_BOARD_NO_OPEN=1` (see "MCP shim environment"): that flag means opening was
+deliberately suppressed for this run, never that no way to open exists, and a real caller
+never sets it.
+
+## The prose-vs-shim checker
+
+Prose drifts from the tool it describes and nothing catches it — a skill's `SKILL.md` or a
+command's `.md` file says it posts an argument, a block kind or a widget that the shim no
+longer has, and it silently stops being true. `src/prose-check.mjs` is this repo's one shared
+checker: parse a prose file, compare what it says it posts against the shim's live
+`tools/list` (and PROTOCOL.md's own "### Blocks" vocabulary), and fail loudly on drift. It
+generalises what was `test/check-grill.mjs`'s hand-rolled version of the same idea before
+`/grill` and its check moved out of this repo (ticket 04 / ADR.md entry 5), mining out the
+parts that apply to any caller: the tool is named, its real argument names appear, no
+argument/block-kind/widget is claimed that the shim does not have. The parts that were
+specific to `/grill`'s own history (no HTML template, the old "one question per call" rule
+being gone, the exact revive command) left with that command's prose — each caller's own
+`check.mjs`, wherever it lives, is where its command-specific assertions belong now.
+
+**An argument counts as named in either of two conventions, not one.** `commands/grill.md`
+backticks each argument on its own (`` `title` ``); `/visualize`, `/explain` and `/gamify`
+instead show a fenced worked example whose object keys ARE the argument names — either
+`title: 'value'` or the ES6 shorthand `title,` (the local variable doubling as the key, e.g.
+`ask({ title, blocks: [...] })`). The first version of this checker recognised only the
+backtick convention, which failed all three of those real callers on arguments they name in
+the clearest possible form (structure, not behaviour — see "Testing" in SPEC_MIGRATION.md).
+Neither form is a bare substring match: both require the name to appear in object-literal
+position (bounded by `:`, `,` or `}`) inside a fenced code block, or backticked — `title` and
+`blocks` are ordinary English words, and matching them unscoped would make the assertion
+vacuous.
+
+**Ships from `src/`, not `test/`.** Every real caller — a skill's `~/.claude/skills/<name>/
+check.mjs`, a command's own check script — lives in a *different* git repo from this one and
+has to keep working standalone. A test helper reaching across that boundary would be a
+coupling defect; a module this repo ships and its consumers import is a normal library. This
+repo proves only the checker itself, against a fixture prose file it owns
+(`test/fixtures/prose-check-good.md` / `-drifted.md` for the backtick convention,
+`-good-fenced.md` / `-drifted-fenced.md` for the fenced-object-key one, run by
+`test/check-prose-check.mjs`) —
+each real caller proves its own prose against its own `SKILL.md` or command file.
+
+**API** (all named exports of `src/prose-check.mjs`):
+
+```
+checkProseFile(proseFilePath, options?)   the one-call entry point: reads the file, spins up
+                                           a throwaway daemon + shim (never a real install),
+                                           gets the live tools/list, reads this same clone's
+                                           own PROTOCOL.md, and returns
+                                           { ok, failures, claims, schemaProps }
+assertProseMatchesShim(path, options?)    same, but prints each assertion and throws one
+                                           summary Error if anything failed — the one-liner
+                                           for a caller's own check.mjs. The thrown Error's
+                                           `.message` is the full readable summary (see
+                                           formatFailures below), not just a count
+formatFailures(failures)                  renders `result.failures` (an array of
+                                           `{ name, message }`) as readable text — use this
+                                           rather than printing the array directly, which
+                                           renders `[object Object]`
+checkProse({ proseText, tools, protocolText?, toolName?, minLength?, claimedArgNames? })
+                                           the pure assertion battery, given text you already
+                                           have (no process spawned) — what checkProseFile
+                                           calls after it gathers those three things
+getLiveTools({ mcpPath, env? })           spawn a shim binary, initialize + tools/list,
+                                           return the live tools array
+parseBlockShapes(protocolText)            { blockKinds, widgets } off PROTOCOL.md's own
+                                           "### Blocks" section
+parsePacketStatuses(protocolText)         every status the Packet can carry, off PROTOCOL.md's
+                                           own `status,` line
+extractClaims(proseText, toolName?)       { blockKinds, widgets, args } auto-detected from the
+                                           prose's own worked examples (`kind: '...'`,
+                                           `widget: '...'`, and a "`tool` with `{ a, b }`"
+                                           sentence for the argument list)
+extractFencedCode(proseText)              every fenced code block's contents, concatenated —
+                                           what the object-key argument convention is scoped to
+argumentNamedInProse(proseText, argName, fencedCode?)
+                                           true when argName is backticked anywhere, or an
+                                           object key (explicit or ES6 shorthand) inside a
+                                           fenced code block
+resolveInstalledRoot(opts?)               the resolution story below, callable directly
+loadInstalledChecker(opts?)               resolve + dynamically import, or null — see below
+```
+
+**Resolution story: how a caller outside this repo finds this file.** The module cannot be
+imported by a hardcoded, user-specific absolute path baked into each caller — the clone can
+live anywhere, and can move. `install.sh` already writes the one thing that durably names the
+clone's location: the LaunchAgent plist at `~/Library/LaunchAgents/claude-board.plist`
+(`CLAUDE_BOARD_LAUNCH_AGENTS_DIR` overrides the directory), whose `WorkingDirectory` key is
+this clone's absolute root (`install.sh` step 2, "launchd plist"). That is the one source of
+truth this checker reuses rather than inventing a second one — there is no repo-path file
+anywhere under `~/.config/claude-board`, only the secret lives there.
+
+A caller *inside* this repo just imports `../src/prose-check.mjs` directly, same as any other
+sibling module. A caller *outside* this repo cannot import this file to reach
+`resolveInstalledRoot()`/`loadInstalledChecker()`, because finding this file is the problem
+those functions solve — so the same handful of lines have to live once in the caller's own
+`check.mjs`, copied from here (kept in sync with `resolveInstalledRoot`/`loadInstalledChecker`
+in `src/prose-check.mjs` — if one changes, change the other):
+
+```js
+import { readFileSync, existsSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+/** Degrade, not explode: a machine with no claude-board installed gets `null`, never a
+ * thrown error, so a skill's own check suite can skip this one check and keep going. */
+async function loadClaudeBoardChecker() {
+  const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'claude-board.plist');
+  let xml;
+  try { xml = readFileSync(plistPath, 'utf8'); } catch { return null; }
+  const m = xml.match(/<key>WorkingDirectory<\/key>\s*<string>([^<]*)<\/string>/);
+  const root = m && m[1].trim();
+  if (!root) return null;
+  const modulePath = path.join(root, 'src', 'prose-check.mjs');
+  if (!existsSync(modulePath)) return null;
+  try { return await import(pathToFileURL(modulePath).href); } catch { return null; }
+}
+```
+
+Once pasted, using it is a one-liner:
+
+```js
+const checker = await loadClaudeBoardChecker();
+if (!checker) { console.log('skip: claude-board not installed'); process.exit(0); }
+await checker.assertProseMatchesShim(new URL('./SKILL.md', import.meta.url).pathname);
+```
 ## Checks
 
-`node test/run.mjs` runs all five checks — `check-pure`, `check-http`, `check-mcp`,
-`check-install`, `check-grill` — and each is also runnable alone. No browser, no
+`node test/run.mjs` runs every `test/check-*.mjs` — among them `check-pure`, `check-http`,
+`check-mcp`, `check-install` and `check-prose-check` — and each is also
+runnable alone. The count is deliberately not written down here; it was "five" for long
+enough to go stale twice. No browser, no
 network, no writes outside a temp `CLAUDE_BOARD_HOME`. Every check that touches the local
 secret points `CLAUDE_BOARD_SECRET_FILE` at its own temp dir first: the real
 `~/.config/claude-board/secret` is never read, written, or rotated by a check run.

@@ -52,6 +52,10 @@ const PROGRESS_MS = Number(process.env.CLAUDE_BOARD_PROGRESS_MS) || 20_000; // ~
 const POST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
 const NO_OPEN = process.env.CLAUDE_BOARD_NO_OPEN === '1';
 const OPEN_CMD = process.env.CLAUDE_BOARD_OPEN_CMD || 'open';
+// Overrides process.platform for canOpenTab() below ONLY -- there is no second OS on
+// this machine to exercise the non-darwin branch on for real. Checks only, never set
+// by a user, same footing as CLAUDE_BOARD_NO_OPEN just below it.
+const ASSUME_PLATFORM = process.env.CLAUDE_BOARD_ASSUME_PLATFORM || process.platform;
 // Reattach backoff after the daemon drops a held-open wait (restart / kickstart /
 // reload-on-change). Starts short because a launchd restart is back in well under
 // a second, then doubles up to RETRY_MAX_MS so a longer outage is not a hot loop.
@@ -108,6 +112,50 @@ function headlessRefusalMessage(reason) {
     `A board is never posted where no human is watching. Nothing was posted or written. ` +
     `If this is an unattended run (a scheduled routine, /nightly, /loop), it must not call ` +
     `ask — set CLAUDE_BOARD_HEADLESS=1 or avoid the board entirely.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The third refusal trigger (SPEC_MIGRATION.md criterion 10, the VPS case):
+// CLAUDE_CODE_ENTRYPOINT=cli and a reachable daemon both look fine over SSH, but
+// openBoardTab (below) silently no-ops on non-darwin with no CLAUDE_BOARD_OPEN_CMD
+// configured -- there is simply no mechanism on that machine to put a tab in front
+// of anyone. Left unrefused, that posts a board nobody can see and blocks the full
+// wall-clock cap with nothing to report. Refusing it up front is the same shape as
+// the headless refusal just above: loud, before anything is posted.
+// ---------------------------------------------------------------------------
+
+/** Whether this environment could possibly open a tab at all -- independent of
+ * whether opening is administratively suppressed (NO_OPEN, used by assertCanOpenTab
+ * and openBoardTab below). True on macOS, where the `open` command always exists, or
+ * anywhere CLAUDE_BOARD_OPEN_CMD names an explicit opener; false otherwise. */
+function canOpenTab() {
+  return ASSUME_PLATFORM === 'darwin' || Boolean(process.env.CLAUDE_BOARD_OPEN_CMD);
+}
+
+/** Deliberately NOT triggered by CLAUDE_BOARD_NO_OPEN=1, and that relationship is the
+ * whole design here, not an oversight: NO_OPEN is documented (PROTOCOL.md "MCP shim
+ * environment") as "checks only; never set by a user" -- every check in this suite
+ * sets it to stand in for a browser that would otherwise really open, i.e. it means
+ * "opening is deliberately suppressed for this run," never "no way to open exists."
+ * A real caller never sets it, so keying this refusal on NO_OPEN alone is safe: it
+ * only ever actually fires in reality (a VPS with no CLAUDE_BOARD_OPEN_CMD configured),
+ * and every check that drives the shim headless via NO_OPEN=1 keeps exercising the
+ * normal post-and-wait path rather than tripping a refusal that exists for a
+ * completely different machine shape. Getting this backwards either way breaks
+ * something real: refusing through NO_OPEN=1 fails every check in this suite that
+ * never touches a browser; ignoring NO_OPEN entirely would make opening-suppressed
+ * checks indistinguishable from a genuinely tab-less VPS. */
+function assertCanOpenTab() {
+  if (NO_OPEN) return;
+  if (canOpenTab()) return;
+  throw new ToolError(
+    `ask refused: this session cannot open a browser tab (platform is '${ASSUME_PLATFORM}' and ` +
+    `CLAUDE_BOARD_OPEN_CMD is not set, so nothing on this machine can show a human the board). ` +
+    `A board is never posted where no human can see it. Nothing was posted or written. ` +
+    `If this is expected (an SSH session on a machine with no display), set ` +
+    `CLAUDE_BOARD_HEADLESS=1 and use the terminal for this session instead of ask; ` +
+    `otherwise set CLAUDE_BOARD_OPEN_CMD to a command that can put the URL in front of a human.`
   );
 }
 
@@ -325,7 +373,7 @@ async function openAuthorizedTab(boardId, url) {
 
 function openBoardTab(url) {
   if (NO_OPEN) return;
-  if (process.platform !== 'darwin' && !process.env.CLAUDE_BOARD_OPEN_CMD) return;
+  if (!canOpenTab()) return;
   // Second gate, deliberately redundant with safeBoardUrl: every caller has to be
   // handing us a loopback http URL for this daemon, and nothing else ever reaches
   // an argv slot that a GUI launcher will act on.
@@ -487,10 +535,12 @@ async function blockingWait({ boardId, round, timeoutMs, progressMs, onProgress,
 const ASK_TOOL = {
   name: 'ask',
   description:
-    'Post a board (questions plus artifact context) to the local claude-board daemon and ' +
-    'block until the reviewer submits. Opens a browser tab on the first board of this ' +
-    'session; later rounds push into the same tab. Returns a packet naming each question\'s ' +
-    'status, choice and note, and every comment with its anchor.',
+    'Post a board (questions plus artifact context) to the local claude-board daemon. ' +
+    'Blocks until the reviewer submits when the round carries any question block; a round ' +
+    'of content blocks only returns as soon as the post succeeds, nothing to wait for. Opens ' +
+    'a browser tab on the first board of this session; later rounds push into the same tab. ' +
+    'Returns a packet naming each question\'s status, choice and note, and every comment ' +
+    'with its anchor.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -642,6 +692,28 @@ async function postThisRound(session, title, blocks) {
   return { posted, isFirstBoard: false };
 }
 
+/** Whether `blocks` — this call's raw, not-yet-normalized input — carries a question
+ * anywhere in it: top-level, or nested inside a question's own `context` array or a
+ * `compare` block's `left`/`right` side, the same three places src/board.mjs's own
+ * traversals (`countersFromBoard`, `idLedgerFromBoard`, `findBlock`, `questionBlocks`)
+ * walk on the normalized board — a block is minted in exactly the shape it arrives, so
+ * checking the raw input finds the same set an already-posted board would.
+ *
+ * This is the entire "does this call have anything to wait for" decision (criterion 1):
+ * a round with a question anywhere in it blocks until submit; a round with none returns
+ * as soon as the post lands. One call, one shape — no mode flag, no separate
+ * "no-questions" guard, just this. */
+function hasQuestionBlock(blocks) {
+  const found = b => {
+    if (!b || typeof b !== 'object') return false;
+    if (b.kind === 'question') return true;
+    if (Array.isArray(b.context) && b.context.some(found)) return true;
+    if (b.kind === 'compare' && (found(b.left && b.left.block) || found(b.right && b.right.block))) return true;
+    return false;
+  };
+  return Array.isArray(blocks) && blocks.some(found);
+}
+
 /** `session` carries the in-memory, per-shim-process state a live thread needs:
  * the board id to push follow-up rounds into, and the in-flight thread-creation
  * guard. One shim == one Claude session == one thread. Everything belonging to a
@@ -651,6 +723,7 @@ async function postThisRound(session, title, blocks) {
  * leaving A with nothing holding the MCP idle-abort timer off. */
 async function askTool(args, session, { sendProgress, cancelled }) {
   assertInteractive(); // before anything is posted or written
+  assertCanOpenTab(); // the third refusal trigger — see its own comment above
   // Refused here rather than discovered as a 401 three requests in: the daemon would
   // refuse the post anyway, and this way the message names the actual fix and no
   // request is made at all.
@@ -676,6 +749,27 @@ async function askTool(args, session, { sendProgress, cancelled }) {
 
   if (isFirstBoard) await openAuthorizedTab(posted.boardId, url);
   else await reopenIfNoClient(posted, url);
+
+  // Criterion 1: a round with no question block anywhere in it has nothing a human
+  // needs to submit, so there is nothing left to wait for — return the instant the
+  // post lands. Opening the tab above stays best-effort either way: the shim spawns
+  // the opener detached and never learns whether a tab actually appeared (see
+  // openBoardTab), so "the tab opened" was never a state this could return on; "the
+  // post succeeded" is. This is also why it is checked against the round just posted
+  // rather than against `posted` (the daemon's response carries no block list back).
+  if (!hasQuestionBlock(blocks)) {
+    const text = `Board posted; no response needed (no question blocks in this round).\nBoard: ${url}`;
+    return packetResult(text, {
+      board: posted.boardId,
+      thread: posted.thread,
+      title,
+      round: posted.round,
+      status: 'posted',
+      answers: [],
+      comments: [],
+      url,
+    });
+  }
 
   let waited;
   try {

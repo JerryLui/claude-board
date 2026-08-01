@@ -786,3 +786,88 @@ Two things that will mislead you while chasing this:
 Verifying it end to end takes a hidden tab: post a second round to an existing board while
 the reviewer is in another app. A round pushed into a visible, focused tab correctly
 notifies nothing, so testing with the board in front of you proves the wrong thing.
+
+## A `check-mcp.mjs` fixture with no question block no longer blocks on `/wait` (ticket 01)
+
+Since `ask`'s return condition is derived from the round's own blocks (SPEC_MIGRATION.md
+criterion 1: a round carrying a question block blocks until submit, a content-only round
+returns the instant the post succeeds), any check that means to exercise `blockingWait` —
+a timeout path, a restart-reattach, a cancellation, anything that expects the call to still
+be pending after the post — MUST include at least one `kind: 'question'` block among what it
+posts, or the call returns immediately with `status: 'posted'` before ever reaching
+`/api/board/:id/wait`. This bit the wall-clock-timeout check directly: it posted
+`blocks: [{ kind: 'markdown', text: '# never answered' }]` (content only, no question) to
+prove the call still resolves after `CLAUDE_BOARD_TIMEOUT_MS`, and after ticket 01 that call
+now resolves near-instantly with `status: 'posted'` instead — the timeout path was never
+reached, and the assertion on `result.status === 'timeout'` failed for a reason that has
+nothing to do with the timeout mechanism itself. Fixed by adding `QUESTION` to that fixture's
+blocks. The general form: a fixture's *shape*, not just its content, can be load-bearing for
+which return path a check exercises — same family as this file's other "the check's own
+model of the system stopped matching reality" entries, just one level more mundane.
+
+## A function declared inside `wireRoot` is invisible from a page-scoped listener, and the failure is silent
+
+Historical record of a real trap, kept even though the specific code that surfaced it is gone
+(see the next entry for why it went): `src/ui.mjs`'s `window.addEventListener('message', ...)`
+(the parent's half of the html-stage postMessage protocol) is registered ONCE, at the client
+script's outer scope — deliberately outside `wireRoot(root)`, since a stage's `'ready'` can
+arrive at any time, not just at a `wireRoot` pass (see that listener's own comment). `wireRoot`
+itself is a separate, nested function, re-run on every hydrate and every SSE push. An earlier
+version of the `choose-between-rendered-variants` widget (SPEC_MIGRATION.md criterion 2) had a
+stage-reported message call `selectVariant`, the widget's shared selection path — and since
+BOTH the message listener and something inside `wireRoot` needed to call it, it had to be
+declared at the OUTER scope too, or the message listener's own call to it throws
+`ReferenceError: selectVariant is not defined`. Declaring it inside `wireRoot` alongside the
+`.choice-variant` click/keydown wiring (the natural-looking place, since that was its other
+caller at the time) compiled fine and the plain-click/keyboard paths worked perfectly — only
+the stage-message path was broken, and silently: `stageAgentScript`'s (`src/render.mjs`)
+`post()` helper wraps every `window.parent.postMessage(...)` call in a `try/catch` meant for
+"no parent reachable", but `test/dom-stand-in.mjs`'s postMessage delivery is **synchronous**
+(dispatched inline, not queued — same as a real same-process `srcdoc` frame), so the parent
+listener's `ReferenceError` unwound straight back through `postMessage` into that same `catch`,
+several stack frames away from where it was thrown, and vanished with no trace. The symptom was
+not a crash: a real click inside a nested html stage's mock simply selected nothing, no error
+anywhere, while the identical plain click directly on the card's own chrome worked correctly —
+caught only by running the actual end-to-end gesture and bisecting with `console.log`
+statements planted on both sides of the suspected call, since nothing in the failure pointed at
+scope. A regex-only structural check (asserting the call site's source text, never executing
+it) would not have caught this at all. The general lesson, one layer past QUIRKS.md's own
+"Criterion 12's html-stage half is checked by reading its source" entry above, survives the
+feature that taught it: a helper shared between a page-scoped listener and `wireRoot`'s
+per-pass wiring has to live at the scope BOTH of them can reach, and the one caller that's easy
+to forget is the one registered furthest from where the helper naturally reads like it belongs.
+`selectVariant` itself is back inside `wireRoot` now (its only caller once the entry below took
+the stage-message path away), so nothing in the current code demonstrates this trap directly —
+the next feature that shares a helper between `wireRoot` and a page-scoped listener will.
+
+## A stage-posted message is agent-authored input, never evidence a human did anything
+
+Directly downstream of the entry above, and the reason its own feature no longer exists: the
+`selectVariant` call the previous entry describes was reachable from `window.addEventListener
+('message', ...)` because an earlier version of `choose-between-rendered-variants`
+(SPEC_MIGRATION.md criterion 2) had `stageAgentScript` (`src/render.mjs`) report every click
+inside an html-kind option's mock over `postMessage`, unconditionally, so a click on the
+visible mock content — not just the card's own chrome outside the iframe — could pick that
+option. Caught in director review before the ticket merged, not by any check: every message on
+this channel is content the AGENT authored (the mock's own HTML, and the script this project
+deliberately lets it run — `sandbox="allow-scripts"`), so the html stage's own script can
+dispatch a click on itself with no reviewer involved at all (an autoplaying demo, an animation,
+a mock that clicks its own button — ordinary content for `/example`'s real interactive
+mockups), and separately, `cb: 'cb-stage'` is a fixed, documented public string, so the stage's
+own script can call `window.parent.postMessage({cb:'cb-stage', type:'select'}, '*')` directly,
+skipping the click handler entirely. This project's whole origin/identity validation
+(`src/render.mjs`'s "ORIGIN VALIDATION" design comment) proves a message came from a live,
+correctly-addressed stage — it was never designed to, and cannot, prove a human clicked
+anything; an `ev.isTrusted` check on the stage's OWN click listener would have closed only the
+first path, since the second forges the message itself, upstream of any such guard. The fix was
+to delete the channel rather than guard it: there is no message type left that could ever
+select an option, and an html option's iframe is rendered `pointer-events: none` inside a
+`.choice-variant` card (`src/styles.mjs`) so a genuine, trusted click over the visible mock
+lands on the card in the parent document instead, which is the only thing that can ever record
+a pick. `test/check-stage-isolation.mjs` proves a forged message from a live, correctly-
+addressed stage — the exact shape that would have exploited this — is now inert. The general
+form, worth carrying into anything this project ever lets a stage report to the parent: a
+message's ORIGIN and IDENTITY being provably a real stage says nothing about WHETHER A HUMAN
+ACTED — those are orthogonal questions, and only the second one decides whether a message may
+ever be allowed to make a decision (an answer, a selection) rather than merely propose one (a
+comment anchor a human still has to submit, geometry, a hover hint).

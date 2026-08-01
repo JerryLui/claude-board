@@ -140,6 +140,18 @@ escaped in both HTML text and attribute positions. Hand-mocked HTML stages rende
 a sandboxed iframe that the parent never evaluates or trusts, with an isolation check
 asserting the parent ignores hostile messages that carry a correct origin.
 
+**The agent answering its own question.** The `choose-between-rendered-variants` widget
+puts a rendered block inside each option, and that block may be an HTML stage — an
+iframe running script the *agent* wrote, sitting inside the control the *reviewer* uses
+to decide. So the stage is given no way to reach that decision: inside an option's card
+the iframe is `pointer-events: none`, the selecting click lands on the card in the parent
+document, and no stage-to-parent message can select anything. The distinction this rests
+on is worth stating, because it is the one that is easy to lose: validating a message's
+origin and re-deriving its frame from the live DOM proves only that *a stage* sent it,
+never that *a human* did. A stage may propose (mint a comment); it may never decide.
+Checks assert both halves — a forged select-shaped message records no pick, and a click
+inside the stage's own document never selects the option.
+
 **Your review content at rest.** The store and the daemon logs are owner-only (0700);
 the logs carry your own questions and answers, so they get the same posture as the store.
 

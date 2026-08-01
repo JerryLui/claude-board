@@ -8,7 +8,7 @@
 // everything install.sh owns while leaving everything it does not
 // (SPEC_LAUNCH.md criteria 9 and 11).
 //
-// Never touches the real ~/Library/LaunchAgents, ~/Library/Logs, ~/.claude/commands,
+// Never touches the real ~/Library/LaunchAgents, ~/Library/Logs,
 // ~/Library/Application Support/claude-board, or Claude MCP config, and never calls
 // the real `launchctl` — everything install.sh/uninstall.sh would otherwise touch
 // outside the repo is redirected into a temp dir via the testing-seam env vars both
@@ -119,7 +119,6 @@ const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-install-check-'));
 const launchAgentsDir = path.join(workDir, 'LaunchAgents');
 const logDir = path.join(workDir, 'Logs');
 const binDir = path.join(workDir, 'bin');
-const commandsDir = path.join(workDir, 'Commands');
 // Where install.sh builds the launcher bundle. A seam like every other one here, and
 // load-bearing for the same reason: without it these runs would build, sign and delete
 // a real ~/Applications/claude-board.app on the machine running the suite -- and the
@@ -196,7 +195,6 @@ const env = {
   CLAUDE_BOARD_SECRET_FILE: secretFile,
   CLAUDE_BOARD_LAUNCH_AGENTS_DIR: launchAgentsDir,
   CLAUDE_BOARD_LOG_DIR: logDir,
-  CLAUDE_BOARD_COMMANDS_DIR: commandsDir,
   CLAUDE_BOARD_APP_DIR: appDir,
   CLAUDE_BOARD_HOME: storeDir,
   CLAUDE_BOARD_MCP_CMD: claudeStub,
@@ -211,12 +209,6 @@ const env = {
 // below is about install.sh's resolved DEFAULT, and a developer who exports
 // CLAUDE_BOARD_REF_ROOTS in their shell would otherwise fail a check about it.
 delete env.CLAUDE_BOARD_REF_ROOTS;
-
-const commandFile = path.join(commandsDir, 'grill.md');
-// The record install.sh writes beside the secret so it can tell an unmodified command
-// file from one the user edited. Same directory as the secret, by install.sh's own
-// $SECRET_DIR/grill.sha256.
-const hashFile = path.join(path.dirname(secretFile), 'grill.sha256');
 
 function runInstall() {
   return spawnSync('bash', [installScript], { env, encoding: 'utf8' });
@@ -914,92 +906,18 @@ async function main() {
     assert.equal(statSync(logDir).mode & 0o777, 0o700);
   });
 
-  // --- the /grill command file (SPEC_LAUNCH.md criterion 9) --------------------
-  //
-  // The two install() runs above already installed it into `commandsDir` -- confirmed
-  // first here. Then the trickier half, which needs the shipped copy itself to change
-  // between runs: a THROWAWAY clone (its own bin/daemon.mjs + bin/mcp.mjs, never
-  // executed -- launchctl is stubbed and the claude stub only logs its args -- and its
-  // own commands/grill.md) so a "new version shipped" can be simulated without ever
-  // touching this repo's own tracked commands/grill.md.
+  // Ticket 04 / ADR.md entry 5: install.sh no longer installs `/grill` or any other
+  // command file -- that whole step, and the hash-comparison guard that decided
+  // whether to overwrite a user's edited copy, is gone. What used to be asserted here
+  // (a fresh install writes the shipped file, an unmodified copy is updated when the
+  // shipped copy changes, a user edit is never clobbered) had no mechanism left to test
+  // it against, so it went with the step rather than surviving as dead assertions.
 
-  await check('the command file is installed after both runs, matching the shipped copy', async () => {
-    assert.ok(existsSync(commandFile), 'install.sh must install commands/grill.md to CLAUDE_BOARD_COMMANDS_DIR');
-    const shipped = readFileSync(path.join(repoRoot, 'commands', 'grill.md'), 'utf8');
-    assert.equal(readFileSync(commandFile, 'utf8'), shipped, 'the installed file must match the repo copy install.sh shipped');
-  });
-
-  const grillCloneDir = path.join(workDir, 'grill-clone');
-  mkdirSync(path.join(grillCloneDir, 'bin'), { recursive: true });
-  mkdirSync(path.join(grillCloneDir, 'commands'), { recursive: true });
-  writeFileSync(path.join(grillCloneDir, 'bin', 'daemon.mjs'), '// stub\n');
-  writeFileSync(path.join(grillCloneDir, 'bin', 'mcp.mjs'), '// stub\n');
-  // The real launcher source, not a stub: install.sh compiles this one, and a clone
-  // that cannot build its launcher would degrade to the node-direct plist and quietly
-  // stop exercising the path every OTHER check in this file now takes.
-  writeFileSync(path.join(grillCloneDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
-  writeFileSync(path.join(grillCloneDir, 'install.sh'), readFileSync(installScript, 'utf8'));
-  const grillSrc = path.join(grillCloneDir, 'commands', 'grill.md');
-  const GRILL_V1 = '# grill v1\nshipped content, version 1\n';
-  const GRILL_V2 = '# grill v2\nshipped content, version 2 -- a fix landed\n';
-  writeFileSync(grillSrc, GRILL_V1);
-
-  const grillAgents = path.join(workDir, 'LaunchAgents-grillclone');
-  const grillLogs = path.join(workDir, 'Logs-grillclone');
-  const grillCommands = path.join(workDir, 'Commands-grillclone');
-  const grillInstalledFile = path.join(grillCommands, 'grill.md');
-  // Isolated from the shared secretFile too: the hash record lives beside the secret
-  // (CLAUDE_BOARD_SECRET_FILE), and this clone's grill.md content is deliberately
-  // different from the real repo's, so its hash record must never share a file with
-  // (and overwrite the record for) the shared commandFile the checks above installed.
-  const grillSecretFile = path.join(workDir, 'config-grillclone', 'claude-board', 'secret');
-
-  function runGrillCloneInstall() {
-    return spawnSync('bash', [path.join(grillCloneDir, 'install.sh')], {
-      env: {
-        ...env,
-        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: grillAgents,
-        CLAUDE_BOARD_LOG_DIR: grillLogs,
-        CLAUDE_BOARD_COMMANDS_DIR: grillCommands,
-        CLAUDE_BOARD_SECRET_FILE: grillSecretFile,
-        CLAUDE_BOARD_APP_DIR: path.join(workDir, 'Applications-grillclone'),
-      },
-      encoding: 'utf8',
-    });
-  }
-
-  const firstGrillRun = runGrillCloneInstall();
-  await check('a fresh install writes the shipped command file and says so', async () => {
-    assert.equal(firstGrillRun.status, 0, `stdout:\n${firstGrillRun.stdout}\nstderr:\n${firstGrillRun.stderr}`);
-    assert.equal(readFileSync(grillInstalledFile, 'utf8'), GRILL_V1);
-    assert.match(firstGrillRun.stdout, /installed/i);
-  });
-
-  // The shipped copy changes (this throwaway clone's own file -- never the real
-  // repo's) and install runs again: the previously-installed copy was never touched
-  // by a user, so it must be replaced. This is how a user gets fixes.
-  writeFileSync(grillSrc, GRILL_V2);
-  const secondGrillRun = runGrillCloneInstall();
-  await check('an unmodified installed copy IS updated when the shipped copy changes', async () => {
-    assert.equal(secondGrillRun.status, 0, `stdout:\n${secondGrillRun.stdout}\nstderr:\n${secondGrillRun.stderr}`);
-    // (Ablation: an install.sh that only ever writes when the target is MISSING --
-    // i.e. drops the "matches shipped OR matches the recorded hash" reconciliation --
-    // leaves v1 here forever, which fails this exact assertion.)
-    assert.equal(readFileSync(grillInstalledFile, 'utf8'), GRILL_V2, 'the unmodified copy must pick up the new shipped version');
-  });
-
-  // Now the user edits their installed copy by hand. A THIRD reinstall (shipped copy
-  // unchanged from v2) must leave it exactly alone, exit 0, and say what it skipped.
-  const userEdit = GRILL_V2 + '\n<!-- I added my own note here -->\n';
-  writeFileSync(grillInstalledFile, userEdit);
-  const thirdGrillRun = runGrillCloneInstall();
-  await check('a user-modified command file is NOT clobbered, and install still exits 0 and says what it skipped', async () => {
-    assert.equal(thirdGrillRun.status, 0, `install must not die on a modified command file\nstdout:\n${thirdGrillRun.stdout}\nstderr:\n${thirdGrillRun.stderr}`);
-    // (Ablation: one of the brief's two headline assertions -- dropping the
-    // hash-comparison guard in install.sh's command-file step and always
-    // overwriting makes this fail: the file below reverts to the shipped v2 text.)
-    assert.equal(readFileSync(grillInstalledFile, 'utf8'), userEdit, 'a user edit must survive a reinstall untouched');
-    assert.match(thirdGrillRun.stdout, /(local edits|leaving it)/i, 'install must say it skipped the file, not stay silent');
+  await check("install.sh no longer ships a command file (ADR.md entry 5): no GRILL_SRC/COMMAND_FILE machinery remains", async () => {
+    const installSrc = readFileSync(installScript, 'utf8');
+    assert.doesNotMatch(installSrc, /GRILL_SRC/, 'install.sh must not resolve a commands/grill.md source path');
+    assert.doesNotMatch(installSrc, /COMMAND_FILE/, 'install.sh must not resolve a command-file install target');
+    assert.doesNotMatch(installSrc, /commands\/grill\.md/, 'install.sh must not reference commands/grill.md at all');
   });
 
   // --- the interpreter baked into the plist ------------------------------------
@@ -1103,10 +1021,8 @@ async function main() {
   await check('a clone path containing XML metacharacters still produces a plist launchd can parse, and install exits 0', async () => {
     const oddDir = path.join(workDir, 'clone & <play>');
     mkdirSync(path.join(oddDir, 'bin'), { recursive: true });
-    mkdirSync(path.join(oddDir, 'commands'), { recursive: true });
     writeFileSync(path.join(oddDir, 'bin', 'daemon.mjs'), '// stub\n');
     writeFileSync(path.join(oddDir, 'bin', 'mcp.mjs'), '// stub\n');
-    writeFileSync(path.join(oddDir, 'commands', 'grill.md'), '# stub grill\n');
     // The real launcher source: this clone's path is the one with `&` and `<>` in it, so
     // it is also the case that proves c_escape holds up where xml_escape does -- the
     // same bytes have to survive into a C string literal and compile.
@@ -1115,17 +1031,12 @@ async function main() {
 
     const oddAgents = path.join(workDir, 'LaunchAgents-odd');
     const oddLogs = path.join(workDir, 'Logs-odd');
-    // Isolated CLAUDE_BOARD_COMMANDS_DIR and CLAUDE_BOARD_SECRET_FILE (the hash record
-    // lives beside the secret), same as the LaunchAgents/Logs isolation above -- this
-    // clone's own commands/grill.md is unrelated stub content, and must never be
-    // reconciled against (or overwrite) the real repo copy the checks above this one
-    // already installed into the shared commandsDir.
+    // Isolated CLAUDE_BOARD_SECRET_FILE, same as the LaunchAgents/Logs isolation above.
     const r = spawnSync('bash', [path.join(oddDir, 'install.sh')], {
       env: {
         ...env,
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: oddAgents,
         CLAUDE_BOARD_LOG_DIR: oddLogs,
-        CLAUDE_BOARD_COMMANDS_DIR: path.join(workDir, 'Commands-odd'),
         CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-odd', 'claude-board', 'secret'),
         CLAUDE_BOARD_APP_DIR: path.join(workDir, 'Applications-odd'),
       },
@@ -1248,10 +1159,6 @@ async function main() {
     assert.ok(!('claude-board' in state), 'the MCP registration must be removed');
   });
 
-  await check('uninstall removes the (unmodified) installed command file', async () => {
-    assert.ok(!existsSync(commandFile), 'an unmodified command file must be removed by uninstall');
-  });
-
   await check('uninstall leaves the store untouched -- directory and contents survive', async () => {
     // This is the brief's OTHER headline assertion, alongside the modified-file
     // refusal above. (Ablation: an uninstall.sh that `rm -rf`s CLAUDE_BOARD_HOME "to
@@ -1269,39 +1176,35 @@ async function main() {
     assert.ok(uninstallResult.stdout.includes(logDir), 'must name the logs path');
   });
 
-  await check('uninstall does NOT delete a user-edited command file, and names it and its record as left behind', async () => {
-    // The install-side mirror of this has had a dedicated check since the feature
-    // landed; the uninstall side had none, so the branch that decides whether to
-    // DELETE a user's customized /grill was never exercised (audit 2026-07-31, T2 and
-    // Sp1). Ablation: replace uninstall.sh's UNMODIFIED test with an unconditional
-    // `rm -f "$COMMAND_FILE"` and this reds.
-    mkdirSync(path.dirname(commandFile), { recursive: true });
-    writeFileSync(commandFile, '# my own grill\n\nedited by hand\n');
-    mkdirSync(path.dirname(hashFile), { recursive: true });
-    writeFileSync(hashFile, 'a'.repeat(64));
+  // Ticket 04 / ADR.md entry 5: install.sh no longer installs `/grill` or any other
+  // command file, so uninstall.sh has nothing of its own to take back at
+  // ~/.claude/commands -- deleting anything there now would mean destroying a file the
+  // user owns, not one this repo put there. The old checks here (an unmodified command
+  // file is removed, an edited one survives with its hash record, an orphaned hash
+  // record is cleaned up) all tested the hash-comparison guard that shipped that
+  // deletion; with the guard gone, this proves the negative instead: a file sitting at
+  // the path install.sh used to manage is left completely alone, and uninstall.sh's own
+  // source has no code path that could reach it.
 
-    const edited = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
-    assert.equal(edited.status, 0, `uninstall must succeed against an edited command file\nstdout:\n${edited.stdout}\nstderr:\n${edited.stderr}`);
-    assert.ok(existsSync(commandFile), 'a user-edited command file must survive uninstall');
-    assert.equal(readFileSync(commandFile, 'utf8'), '# my own grill\n\nedited by hand\n', 'and survive byte-for-byte');
-    assert.ok(edited.stdout.includes(commandFile), 'the summary must name the file it left');
-    assert.ok(edited.stdout.includes(hashFile), 'and name the install record it left beside it');
+  await check("uninstall.sh does not touch a file at the path install.sh used to manage (ADR.md entry 5)", async () => {
+    const formerCommandFile = path.join(workDir, 'Commands', 'grill.md');
+    mkdirSync(path.dirname(formerCommandFile), { recursive: true });
+    const untouchedContent = '# not this repo\'s file anymore\n';
+    writeFileSync(formerCommandFile, untouchedContent);
 
-    rmSync(commandFile, { force: true });
-    rmSync(hashFile, { force: true });
+    const r = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `uninstall must succeed\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.ok(existsSync(formerCommandFile), 'uninstall must not delete a file at the old command-file path');
+    assert.equal(readFileSync(formerCommandFile, 'utf8'), untouchedContent, 'and must not modify it either');
+
+    rmSync(formerCommandFile, { force: true });
   });
 
-  await check('uninstall removes the install record even when the command file is already gone', async () => {
-    // The record used to be deleted only on the branch that deleted the file, so a user
-    // who removed ~/.claude/commands/grill.md by hand kept an orphan record forever,
-    // named in no summary (audit 2026-07-31 Sp1).
-    mkdirSync(path.dirname(hashFile), { recursive: true });
-    writeFileSync(hashFile, 'b'.repeat(64));
-    assert.ok(!existsSync(commandFile), 'precondition: no command file');
-
-    const orphan = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
-    assert.equal(orphan.status, 0, `uninstall must succeed\nstdout:\n${orphan.stdout}\nstderr:\n${orphan.stderr}`);
-    assert.ok(!existsSync(hashFile), 'the orphaned install record must be removed, not left unnamed');
+  await check("uninstall.sh's own source carries no command-file removal machinery to claim it does not use", async () => {
+    const uninstallSrc = readFileSync(uninstallScript, 'utf8');
+    assert.doesNotMatch(uninstallSrc, /GRILL_SRC/, 'uninstall.sh must not reference a commands/grill.md source path');
+    assert.doesNotMatch(uninstallSrc, /COMMAND_FILE/, 'uninstall.sh must not reference an installed command-file target');
+    assert.doesNotMatch(uninstallSrc, /grill\.sha256/, 'uninstall.sh must not reference the retired hash record');
   });
 
   await check('uninstall is safe to run twice', async () => {
@@ -1317,7 +1220,6 @@ async function main() {
         CLAUDE_BOARD_SECRET_FILE: path.join(freshWorkDir, 'config', 'claude-board', 'secret'),
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(freshWorkDir, 'LaunchAgents'),
         CLAUDE_BOARD_LOG_DIR: path.join(freshWorkDir, 'Logs'),
-        CLAUDE_BOARD_COMMANDS_DIR: path.join(freshWorkDir, 'Commands'),
         CLAUDE_BOARD_HOME: path.join(freshWorkDir, 'Store'),
         CLAUDE_BOARD_MCP_CMD: claudeStub, // still stubbed -- never touches the real `claude`
         CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,

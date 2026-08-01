@@ -1,6 +1,6 @@
 #!/bin/bash
 # install.sh — one idempotent command from a fresh clone of claude-board to a
-# running service. Owns the three things that sit outside this repository (see
+# running service. Owns the two things that sit outside this repository (see
 # DESIGN.md Decisions -> "One install command, because a clone is not
 # enough"):
 #
@@ -11,7 +11,7 @@
 #      application to attribute the daemon's file reads to. Without it the plist
 #      runs `node` directly, TCC has only `node` to ask about, and every
 #      reference into ~/Documents, ~/Desktop or ~/Downloads comes back EPERM.
-#      See step 1b and SECURITY.md "What the launcher bundle is for".
+#      See step 1b below and SECURITY.md "What the launcher bundle is for".
 #   2. The launchd plist in ~/Library/LaunchAgents, running THIS clone's
 #      bin/daemon.mjs (PROTOCOL.md "Layout") through that launcher, with
 #      RunAtLoad + KeepAlive, and
@@ -27,20 +27,19 @@
 #      launchd job inherits nothing from your shell, so any knob the daemon
 #      reads from the environment has to be written here or it may as well
 #      not exist.
-#   3. The `/grill` command file, THIS clone's commands/grill.md, copied to
-#      ~/.claude/commands/grill.md — the board's only caller (README "Use").
-#      Without it a fresh clone yields a daemon and an MCP registration with no
-#      way to reach either (SPEC_LAUNCH.md criterion 9).
+#
+# That is the whole boundary (ADR.md entry 5): this script installs the
+# service and its credential, and nothing that calls them. `/grill` and every
+# other caller are personal, versioned in ~/.claude's own git repo, and evolve
+# on their own schedule — a fresh clone yields a daemon and an MCP
+# registration, and pointing something at them is a separate, later act.
 #
 # Running this script again on a machine that already has the service must
 # change nothing and break nothing: no duplicate MCP registration, no
 # duplicate launchd job, no clobbered logs, exit 0 both times. Reconciliation
 # is unconditional remove-then-add / bootout-then-bootstrap rather than
 # diffing prior state, so the result is the same regardless of what was there
-# before (e.g. a stale registration pointing at a different clone path). The
-# `/grill` command file is the one exception to "unconditional": it is
-# overwritten only while the copy on disk is still the one install put there
-# (see step 1 below) — a user's own edit is deliberately NOT unconditional.
+# before (e.g. a stale registration pointing at a different clone path).
 #
 # Testing seams (env vars): not user-facing configuration, defaults are the real
 # paths, exist so test/check-install.mjs can point everything at a temp dir and a
@@ -57,7 +56,6 @@
 #   CLAUDE_BOARD_LAUNCHCTL_CMD       default: launchctl
 #   CLAUDE_BOARD_PLUTIL_CMD          default: plutil
 #   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret
-#   CLAUDE_BOARD_COMMANDS_DIR        default: ~/.claude/commands
 #   CLAUDE_BOARD_APP_DIR             default: ~/Applications
 #   CLAUDE_BOARD_CC                  default: cc
 #   CLAUDE_BOARD_CODESIGN            default: codesign
@@ -75,7 +73,6 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 DAEMON_PATH="$REPO_DIR/bin/daemon.mjs"
 MCP_PATH="$REPO_DIR/bin/mcp.mjs"
-GRILL_SRC="$REPO_DIR/commands/grill.md"
 
 MCP_CMD="${CLAUDE_BOARD_MCP_CMD:-claude}"
 LAUNCHCTL_CMD="${CLAUDE_BOARD_LAUNCHCTL_CMD:-launchctl}"
@@ -84,7 +81,6 @@ LAUNCH_AGENTS_DIR="${CLAUDE_BOARD_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 LOG_DIR="${CLAUDE_BOARD_LOG_DIR:-$HOME/Library/Logs/claude-board}"
 PORT="${CLAUDE_BOARD_PORT:-7391}"
 SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
-COMMANDS_DIR="${CLAUDE_BOARD_COMMANDS_DIR:-$HOME/.claude/commands}"
 APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
 CC_CMD="${CLAUDE_BOARD_CC:-cc}"
 CODESIGN_CMD="${CLAUDE_BOARD_CODESIGN:-codesign}"
@@ -104,7 +100,6 @@ LABEL="claude-board"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
 OUT_LOG="$LOG_DIR/daemon.out.log"
 ERR_LOG="$LOG_DIR/daemon.err.log"
-COMMAND_FILE="$COMMANDS_DIR/grill.md"
 LAUNCHER_SRC="$REPO_DIR/bin/launcher.c"
 APP_PATH="$APP_DIR/${LABEL}.app"
 APP_EXEC="$APP_PATH/Contents/MacOS/${LABEL}"
@@ -166,8 +161,8 @@ else
 fi
 echo "                     [$REF_ROOTS_FROM]"
 
-if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$GRILL_SRC" ] || [ ! -f "$LAUNCHER_SRC" ]; then
-  echo "error: bin/daemon.mjs, bin/mcp.mjs, bin/launcher.c or commands/grill.md not found under $REPO_DIR — run this script from a claude-board clone" >&2
+if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$LAUNCHER_SRC" ]; then
+  echo "error: bin/daemon.mjs, bin/mcp.mjs or bin/launcher.c not found under $REPO_DIR — run this script from a claude-board clone" >&2
   exit 1
 fi
 
@@ -240,26 +235,8 @@ else
   echo "==> generated local secret at $SECRET_FILE"
 fi
 
-# --- 1. the /grill command file ---------------------------------------------
-# ~/.claude/commands/grill.md is the board's only caller (README "Use") — without
-# it a fresh clone yields a daemon and an MCP registration with no way to reach
-# either. Idempotent, but not the same "unconditional" idempotence as the rest of
-# this script: a routine reinstall legitimately needs to OVERWRITE this file to
-# ship a fix, but a user who edited their own copy did it on purpose, and losing
-# that edit to a routine reinstall is exactly the failure SPEC_LAUNCH.md criterion
-# 9 exists to prevent. So the file is overwritten only when the copy on disk is
-# still the one install put there; a genuinely different copy is left alone, and
-# the rest of install still runs rather than dying here.
-#
-# "Still the one install put there" is decided by evidence, not by hope: a sha256
-# of whatever install last wrote is recorded in HASH_FILE, kept beside the local
-# secret ($SECRET_DIR is already 0700, already holds one machine credential, so a
-# hash of a public file needs no seam of its own — it rides along with
-# CLAUDE_BOARD_SECRET_FILE). The file on disk counts as unmodified iff its own
-# hash matches that record, OR it is already byte-identical to the copy this run
-# would install anyway — the latter covers a fresh clone with no record yet, and
-# a plain no-op reinstall.
-HASH_FILE="$SECRET_DIR/grill.sha256"
+# --- content hashing helpers -------------------------------------------------
+# Used below by the launcher bundle step to decide whether it needs rebuilding.
 
 sha256_file() {
   "$NODE_BIN" -e '
@@ -280,36 +257,6 @@ sha256_string() {
     process.stdout.write(crypto.createHash("sha256").update(process.argv[1], "utf8").digest("hex"));
   ' "$1"
 }
-
-mkdir -p "$COMMANDS_DIR"
-SHIPPED_HASH="$(sha256_file "$GRILL_SRC")"
-
-if [ ! -f "$COMMAND_FILE" ]; then
-  cp "$GRILL_SRC" "$COMMAND_FILE"
-  echo "$SHIPPED_HASH" > "$HASH_FILE"
-  echo "==> installed $COMMAND_FILE"
-else
-  INSTALLED_HASH="$(sha256_file "$COMMAND_FILE")"
-  RECORDED_HASH=""
-  if [ -f "$HASH_FILE" ]; then
-    RECORDED_HASH="$(cat "$HASH_FILE")"
-  fi
-  if [ "$INSTALLED_HASH" = "$SHIPPED_HASH" ]; then
-    # Already exactly what this run would install (fresh clone with no record
-    # yet, or a plain no-op reinstall) — keep the record fresh and move on.
-    echo "$SHIPPED_HASH" > "$HASH_FILE"
-    echo "==> $COMMAND_FILE already up to date"
-  elif [ -n "$RECORDED_HASH" ] && [ "$INSTALLED_HASH" = "$RECORDED_HASH" ]; then
-    # Unmodified since the last install: this is how a user gets fixes.
-    cp "$GRILL_SRC" "$COMMAND_FILE"
-    echo "$SHIPPED_HASH" > "$HASH_FILE"
-    echo "==> updated $COMMAND_FILE"
-  else
-    echo "==> $COMMAND_FILE has local edits — leaving it as is"
-    echo "    shipped copy: $GRILL_SRC"
-    echo "    to take the update anyway (this overwrites your edits): cp \"$GRILL_SRC\" \"$COMMAND_FILE\""
-  fi
-fi
 
 # --- escaping helpers -------------------------------------------------------
 # Two destinations, two rules, and a clone path is a filename in both: it may legally
@@ -699,7 +646,6 @@ echo "authorize a browser:  $NODE_BIN $REPO_DIR/bin/authorize.mjs"
 # (gui/\$(id -u), not the resolved uid) — same command, same shell semantics,
 # copy-pasteable either place it's printed.
 echo 'revive:  launchctl kickstart -k gui/$(id -u)/claude-board'
-echo "command: $COMMAND_FILE"
 echo "logs:    $OUT_LOG"
 echo "         $ERR_LOG"
 if [ "$USE_LAUNCHER" -eq 1 ]; then

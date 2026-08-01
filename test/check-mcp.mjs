@@ -593,6 +593,48 @@ async function main() {
 
   client.close();
 
+  // --- criterion 1: a round with no question blocks returns as soon as the post lands ---
+  // Ticket 01 (SPEC_MIGRATION.md). No mode flag, no "no questions" guard: whether `ask`
+  // waits is derived entirely from whether the round's blocks contain a `kind: 'question'`
+  // block anywhere. A round of content blocks only has nothing a human needs to submit, so
+  // there is nothing left to wait for. On the unmodified shim this call blocks on
+  // /api/board/:id/wait exactly like a question round does -- nobody ever submits a board
+  // nobody was asked to answer, so it would sit past the 5s budget below and time out.
+
+  await check('a round with no question blocks returns as soon as the post succeeds, without waiting', async () => {
+    const knownIds = listBoardIds(home);
+    const contentClient = spawnShim(baseEnv);
+    try {
+      const start = Date.now();
+      const res = await withTimeout(contentClient.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'Content-only round',
+          blocks: [
+            { kind: 'markdown', text: '# Dashboard\n\nsome rendered artifact, nothing to answer' },
+            { kind: 'html', html: '<div>rendered artifact</div>' },
+          ],
+        },
+      }), 5000, 'a content-only round must return promptly, not block for the wall clock');
+      const elapsed = Date.now() - start;
+
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      assert.ok(elapsed < 3000, `must return as soon as the post lands, took ${elapsed}ms`);
+
+      const result = res.result;
+      assert.equal(result.isError, false);
+      assert.equal(result.status, 'posted', 'a no-question round is packet status "posted", not "submitted"');
+      assert.equal(result.board, boardId);
+      assert.equal(result.round, 1);
+      assert.deepEqual(result.answers, []);
+      assert.deepEqual(result.comments, []);
+      assert.ok(result.url && result.url.includes(boardId), 'the board URL must still be reported');
+      assert.match(result.content[0].text, /no question/i);
+    } finally {
+      contentClient.close();
+    }
+  });
+
   // --- discuss path: returns immediately with partial answers ------------
 
   await check('discuss-in-chat returns immediately with partial answers and a stop-posting status', async () => {
@@ -636,9 +678,11 @@ async function main() {
   await check('the wall-clock cap returns an explicit timeout status rather than hanging', async () => {
     const timeoutClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_TIMEOUT_MS: '150', CLAUDE_BOARD_PROGRESS_MS: '40' });
     const start = Date.now();
+    // Must carry a question block: a content-only round now returns as soon as the post
+    // succeeds (criterion 1) and never reaches the wait this test means to exercise.
     const res = await timeoutClient.request('tools/call', {
       name: 'ask',
-      arguments: { title: 'Timeout check', blocks: [{ kind: 'markdown', text: '# never answered' }] },
+      arguments: { title: 'Timeout check', blocks: [{ kind: 'markdown', text: '# never answered' }, QUESTION] },
     });
     const elapsed = Date.now() - start;
 
@@ -768,6 +812,88 @@ async function main() {
     assert.equal(countBoardFiles(home), before, 'a forced-headless refusal must write nothing');
 
     forcedClient.close();
+  });
+
+  // --- the third refusal trigger: the daemon cannot open a tab (SPEC_MIGRATION.md
+  // criterion 10, the VPS case) -------------------------------------------------------
+  // SSH onto a machine with no display passes the interactive-entrypoint check and
+  // reaches a live daemon -- neither of the first two refusal triggers fires -- but
+  // openBoardTab silently no-ops on a non-darwin platform with no CLAUDE_BOARD_OPEN_CMD
+  // configured. CLAUDE_BOARD_ASSUME_PLATFORM stands in for a second OS (checks only,
+  // never set by a user): there is no real non-darwin machine to run this suite on.
+
+  await check('a session that cannot open a tab is refused up front (assumed non-darwin, no opener configured)', async () => {
+    const before = countBoardFiles(home);
+    const vpsClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_ASSUME_PLATFORM: 'linux',
+      CLAUDE_BOARD_NO_OPEN: undefined, // opening is NOT suppressed here -- this IS the "cannot" case
+      CLAUDE_BOARD_OPEN_CMD: undefined,
+    });
+    const start = Date.now();
+    const res = await vpsClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'VPS check', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 2000, `refusal must be immediate, took ${elapsed}ms`);
+    const result = res.result;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /refused/i);
+    assert.match(result.content[0].text, /cannot open a browser tab/i);
+    assert.doesNotMatch(result.content[0].text, /kickstart/, 'nothing was contacted: this must not read as a dead daemon');
+    assert.doesNotMatch(result.content[0].text, /local secret/i, 'this is not a credential problem');
+    assert.equal(countBoardFiles(home), before, 'a refused session must post nothing');
+
+    vpsClient.close();
+  });
+
+  await check('CLAUDE_BOARD_OPEN_CMD alone satisfies the cannot-open-a-tab check, regardless of platform', async () => {
+    const dir = tempHome('vps-opener');
+    const recorder = makeOpenRecorder(dir);
+    const knownIds = listBoardIds(home);
+    const vpsOpenerClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_ASSUME_PLATFORM: 'linux',
+      CLAUDE_BOARD_NO_OPEN: undefined,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      const call = vpsOpenerClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'VPS with opener', blocks: [QUESTION] },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'a configured opener must still be used, even assumed non-darwin');
+      await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
+      const res = await withTimeout(call, 8000, 'the call must return normally, not be refused');
+      assert.equal(res.result.isError, false, 'a configured opener means this is not the "cannot open a tab" case');
+      assert.equal(res.result.status, 'submitted');
+    } finally {
+      vpsOpenerClient.close();
+    }
+  });
+
+  await check('CLAUDE_BOARD_NO_OPEN=1 suppresses the cannot-open-a-tab refusal too (suppressed, not absent)', async () => {
+    const knownIds = listBoardIds(home);
+    const suppressedClient = spawnShim({
+      ...baseEnv, // baseEnv already carries CLAUDE_BOARD_NO_OPEN: '1'
+      CLAUDE_BOARD_ASSUME_PLATFORM: 'linux',
+      CLAUDE_BOARD_OPEN_CMD: undefined,
+    });
+    try {
+      const call = suppressedClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Suppressed not absent', blocks: [QUESTION] },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
+      const res = await withTimeout(call, 8000, 'a NO_OPEN=1 session must proceed normally, not be refused');
+      assert.equal(res.result.isError, false);
+      assert.equal(res.result.status, 'submitted');
+    } finally {
+      suppressedClient.close();
+    }
   });
 
   // --- two concurrent asks: each call keeps ITS OWN progress stream ---------

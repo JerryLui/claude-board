@@ -47,6 +47,13 @@ export function computeBoardPatch(prevBoard, nextBoard) {
       if (b.context) flattenBlocks(b.context, out);
       if (b.left && b.left.block) flattenBlocks([b.left.block], out);
       if (b.right && b.right.block) flattenBlocks([b.right.block], out);
+      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's own `block`
+      // is a nested block with its own id, its own rendered widget and its own
+      // comment form, exactly like a compare side's -- walked here for the
+      // same reason the two lines above are, or an amend that replaced only an
+      // option's block would report nothing changed and the reviewer's stale
+      // field state against the OLD option content would ride along.
+      if (b.options) flattenBlocks(b.options.map(function (o) { return o.block; }).filter(Boolean), out);
     });
     return out;
   }
@@ -56,15 +63,26 @@ export function computeBoardPatch(prevBoard, nextBoard) {
    * nested inside it changed, and the client would then clear field state for a
    * block that did not actually change. Each nested block is compared on its own
    * account instead, under its own id. The two `label`s are pulled up because
-   * they belong to the compare block itself, not to either nested block. */
+   * they belong to the compare block itself, not to either nested block.
+   * `options` (choose-between-rendered-variants) is handled the same way: each
+   * option's own `block` is dropped from the comparison (compared separately,
+   * under its own id, by the flattened walk above) and replaced with just the
+   * nested block's id, so the SET of options / which block each one points at
+   * is still compared, without re-comparing either option's entire nested
+   * content a second time. */
   function ownContent(block) {
     var copy = {};
     Object.keys(block).forEach(function (k) {
-      if (k === 'context' || k === 'left' || k === 'right') return;
+      if (k === 'context' || k === 'left' || k === 'right' || k === 'options') return;
       copy[k] = block[k];
     });
     if (block.left) copy.leftLabel = block.left.label;
     if (block.right) copy.rightLabel = block.right.label;
+    if (block.options) {
+      copy.options = block.options.map(function (o) {
+        return { label: o.label, description: o.description, preview: o.preview, blockId: o.block ? o.block.id : null };
+      });
+    }
     return copy;
   }
 
