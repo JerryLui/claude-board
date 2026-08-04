@@ -80,6 +80,19 @@ this project does not yet follow semantic versioning, because nothing has been r
   unfocused tab still names the round exactly as before. Knowing you owe an answer is
   worth a glance; knowing it's three answers wasn't worth a second mark that could drift
   out of sync with the round count.
+- **An `html` block can carry a `source` instead of the markup itself.** `{ kind: 'html',
+  source: { path } }` resolves through the same reader, confinement, 512 KiB cap and sha
+  snapshotting as `markdown`, `code` and `mermaid`, with the same block-level `error` on a
+  failed resolve. `html` was the one kind stuck by value, on the reasoning that a
+  hand-mocked stage has no file to point at — that stopped holding once agents started
+  rendering real pages to disk, where the only way onto a board was re-emitting the whole
+  file as generated tokens (~25-30K of them for one 80 KB document). One exception: `lines`
+  and `section` are refused with a block-level error naming markup slicing as the reason,
+  because cutting markup at a line boundary yields unclosed tags and orphaned `<style>`
+  where cutting text the same way still yields text. See ADR.md entry 7.
+
+### Changed
+
 - **The mark is an amber slab, and the pending state inverts it.** The tab tile moved from
   `--accent` to `DARK['--warning']` — the one hue the palette holds at nearly the same value
   in either theme, so a single tile now serves both instead of reading as the darkest thing
@@ -93,18 +106,6 @@ this project does not yet follow semantic versioning, because nothing has been r
   control, same `aria-label`, still hidden under `body.readonly` — and now leads the index
   title. The hue is shared with `.live-dot` and `.pending-badge.has-pending` from here on;
   `ADR.md` entry 12 records what that costs.
-- **An `html` block can carry a `source` instead of the markup itself.** `{ kind: 'html',
-  source: { path } }` resolves through the same reader, confinement, 512 KiB cap and sha
-  snapshotting as `markdown`, `code` and `mermaid`, with the same block-level `error` on a
-  failed resolve. `html` was the one kind stuck by value, on the reasoning that a
-  hand-mocked stage has no file to point at — that stopped holding once agents started
-  rendering real pages to disk, where the only way onto a board was re-emitting the whole
-  file as generated tokens (~25-30K of them for one 80 KB document). One exception: `lines`
-  and `section` are refused with a block-level error naming markup slicing as the reason,
-  because cutting markup at a line boundary yields unclosed tags and orphaned `<style>`
-  where cutting text the same way still yields text. See ADR.md entry 7.
-
-### Changed
 
 - **The prose-vs-shim checker is no longer something every caller pastes a bootstrap for.**
   Its subject moved into this repo with the manual, so `PROTOCOL.md`'s copy-paste resolution
