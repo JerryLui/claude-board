@@ -47,10 +47,10 @@ src/patch.mjs       pure board-JSON diff (added/changed block ids, rounds now se
 src/prose-check.mjs the shared prose-vs-shim checker (SPEC_MIGRATION.md ticket 03):
                      parse a prose file, compare what it says it posts against the shim's
                      live tools/list and PROTOCOL.md's own block/widget/status vocabulary.
-                     Ships from `src/`, not `test/`, because every real caller — a skill's
-                     or command's own check.mjs — lives outside this repo; see
-                     "The prose-vs-shim checker" below and test/check-prose-check.mjs,
-                     which proves it against a fixture this repo owns
+                     Ships from `src/`, not `test/`, so a caller outside this repo can
+                     still import it; see "The prose-vs-shim checker" below and
+                     test/check-prose-check.mjs, which proves it against a fixture this
+                     repo owns
 src/pomodoro.mjs    the global pomodoro clock: the pure boundary rule (settleBoundary,
                      startWork, the cycle and its two resets), the document's shape on
                      disk, and the impure shell the daemon boots. Absolute deadlines, so
@@ -62,10 +62,16 @@ src/pomodoro-widget.mjs
                      the timer's server-rendered markup for the index page (countdown,
                      pause/resume, the two-step reset and the settings panel); the client
                      half of it extends src/indexpage.mjs's script by concatenation
+skills/claude-board/SKILL.md
+                     the manual for the `ask` tool, and the only prose statement of the
+                     protocol a caller reads. install.sh step 6 copies it to
+                     ~/.claude/skills/claude-board/ (ADR.md entry 11); every caller names
+                     it instead of restating it, and test/check-skill-prose.mjs binds it
+                     to the live shim
 test/check-pure.mjs test/check-http.mjs test/check-mcp.mjs
-test/check-install.mjs test/check-prose-check.mjs test/check-pomodoro.mjs
-test/check-notify.mjs test/check-pomodoro-page.mjs test/check-install-doc.mjs
-test/run.mjs
+test/check-install.mjs test/check-prose-check.mjs test/check-skill-prose.mjs
+test/check-pomodoro.mjs test/check-notify.mjs test/check-pomodoro-page.mjs
+test/check-install-doc.mjs test/run.mjs
 install.sh
 ```
 
@@ -451,6 +457,31 @@ form encodings are CORS simple requests and need no preflight. Non-browser clien
 shim, curl, the checks) send neither header and are unaffected. Every HTML response also
 carries `X-Frame-Options: DENY` and a `frame-ancestors 'none'` CSP.
 
+### `GET /file/<path>` — a file served as-is
+
+`/file/<path>` answers with the bytes of a file inside `CLAUDE_BOARD_SERVE_ROOTS`, unchanged:
+no board chrome, no block wrapping, no slicing, no byte cap. It exists for the documents the
+render skills write, which are whole HTML pages with their own vendored diagram engine — a
+thing a board block cannot carry, because a stage is floored at 320px and the board CSP names
+no `'self'` for the engine to load from. A board links to one; it does not embed it.
+
+- `CLAUDE_BOARD_SERVE_ROOTS` is colon-separated absolute directories, `~` expanded, validated
+  exactly as `CLAUDE_BOARD_REF_ROOTS` is (realpath, must exist, never `/` or `$HOME`, an
+  unusable entry dropped, a non-absolute entry failing the whole spec closed). **Absent means
+  empty, so the route is off**; `install.sh` writes the default (`~/Documents/renders`).
+- It is a **separate** allowlist from the reference roots, and the escalation is why: a
+  referenced file is escaped into a block, a served one is a live document at the daemon's own
+  origin. One shared list would have widened every existing install on a `git pull`.
+- The path resolves against each root in order, first regular file wins. A directory resolves
+  to `index.html` inside it — the daemon serves files, it never enumerates a directory.
+- Behind the read gate like every other non-open route: an authorized browser only.
+- Every refusal is the same bare 404 — traversal, an escaping symlink, a fifo, a missing file
+  and an unconfigured allowlist are indistinguishable, so the route is not an existence oracle.
+- Served responses carry their own CSP, not the board's: `script-src 'self'` (so the document
+  loads its own engine) but `connect-src 'none'` and `form-action 'none'`, which is what stops
+  a served page from riding the same-origin session cookie into `/api/board/<id>/submit`.
+  Plus `nosniff`, `X-Frame-Options: DENY` and `Cache-Control: no-store`.
+
 ### The local secret
 
 Additive, audit 2026-07-28; `DESIGN.md` Decisions → "A loopback Host check, an origin
@@ -689,8 +720,12 @@ mark on a tab lost its number, not its mark"): knowing you owe an answer is wort
 knowing it is three answers was not worth a second mark that could drift out of step with the
 round count. Unmarked, the tab carries the board mark every page emits
 in its `<head>` (`faviconLink`, `src/styles.mjs`): an inline `data:image/svg+xml` link, painted
-from the dark palette's `--accent`/`--accent-ink`, so the same rule holds and the `file:` archive
-shows the mark with the network off. Clearing the pending mark restores that one rather than
+from the dark palette's `--warning`/`--accent-ink`, so the same rule holds and the `file:` archive
+shows the mark with the network off. The pending mark is that same tile inverted — a `--bg` ground
+carrying a `--warning` pip, no digit — rather than anything added on top of it, because
+`--warning` is also the "waiting on you" hue and at 16px the two states have to differ in value,
+not merely in contents (ADR.md entry 12). The same mark, from the same rects, is what the board head's back control and the
+index title carry (`markSvg`). Clearing the pending mark restores the unbadged one rather than
 blanking the href. Permission is requested lazily on the first round that
 would actually notify, and also on a Send click — the one moment the tab is definitely focused,
 so Chrome raises the prompt in the foreground instead of queuing it. A denial is never re-prompted,
@@ -879,15 +914,34 @@ position (bounded by `:`, `,` or `}`) inside a fenced code block, or backticked 
 `blocks` are ordinary English words, and matching them unscoped would make the assertion
 vacuous.
 
-**Ships from `src/`, not `test/`.** Every real caller — a skill's `~/.claude/skills/<name>/
-check.mjs`, a command's own check script — lives in a *different* git repo from this one and
-has to keep working standalone. A test helper reaching across that boundary would be a
-coupling defect; a module this repo ships and its consumers import is a normal library. This
-repo proves only the checker itself, against a fixture prose file it owns
+**Its subject now lives here** (ADR.md entry 11, 2026-08-04). The checker was written for
+callers outside this repo, each of which restated the protocol in its own words and needed
+its own binding. That premise is gone: `skills/claude-board/SKILL.md` is the one place the
+protocol is stated in prose, this repo ships it, and `test/check-skill-prose.mjs` runs the
+battery below against it on every `node test/run.mjs`. The callers name that skill and claim
+nothing of their own, so they have nothing left to drift.
+
+That check goes one way further than this battery does. `checkProse` only rejects vocabulary
+the prose **invents**; the manual has the opposite duty, since a widget it omits is a widget
+no caller will ever reach for. So `check-skill-prose.mjs` also asserts **absence**: every
+block kind, widget and packet status this document defines must appear in the manual. The
+defect that motivates it is real — `/grill`'s prose documented four widgets for as long as
+there were five, and nothing was checking.
+
+This repo still proves the checker itself against fixtures it owns
 (`test/fixtures/prose-check-good.md` / `-drifted.md` for the backtick convention,
 `-good-fenced.md` / `-drifted-fenced.md` for the fenced-object-key one, run by
-`test/check-prose-check.mjs`) —
-each real caller proves its own prose against its own `SKILL.md` or command file.
+`test/check-prose-check.mjs`), because a checker with one real subject is still a checker
+that has to fail in both directions.
+
+**Ships from `src/`, not `test/`.** A caller outside this repo that *does* make a protocol
+claim of its own can still bind it — `/example` names the `choose-between-rendered-variants`
+widget and is the widget's only caller. A test helper reaching across the repo boundary
+would be a coupling defect; a module this repo ships and its consumers import is a normal
+library. But that path is now the exception rather than the shape every caller takes, and
+the cheapest version of it imports nothing: `/example`'s own `check.mjs` asserts its widget
+against the **installed manual** at `~/.claude/skills/claude-board/SKILL.md`, which the
+absence check above guarantees is complete. Reading a file beats resolving a repo.
 
 **API** (all named exports of `src/prose-check.mjs`):
 
@@ -930,7 +984,8 @@ resolveInstalledRoot(opts?)               the resolution story below, callable d
 loadInstalledChecker(opts?)               resolve + dynamically import, or null — see below
 ```
 
-**Resolution story: how a caller outside this repo finds this file.** The module cannot be
+**Resolution story: how a caller outside this repo finds this file.** Kept, but no longer the
+recommended path — see the two cheaper options first. The module cannot be
 imported by a hardcoded, user-specific absolute path baked into each caller — the clone can
 live anywhere, and can move. `install.sh` already writes the one thing that durably names the
 clone's location: the LaunchAgent plist at `~/Library/LaunchAgents/claude-board.plist`
@@ -938,6 +993,12 @@ clone's location: the LaunchAgent plist at `~/Library/LaunchAgents/claude-board.
 this clone's absolute root (`install.sh` step 2, "launchd plist"). That is the one source of
 truth this checker reuses rather than inventing a second one — there is no repo-path file
 anywhere under `~/.config/claude-board`, only the secret lives there.
+
+**Reach for this last.** In order of cost: a caller that restates no protocol needs no check
+at all, which is now every caller but one; a caller making a single vocabulary claim asserts
+it against the installed manual, a plain file read (`/example`); and only a caller that needs
+the full battery against a live shim pays for the bootstrap below. Four skills carried this
+paste when four skills each carried their own copy of the protocol. None do now.
 
 A caller *inside* this repo just imports `../src/prose-check.mjs` directly, same as any other
 sibling module. A caller *outside* this repo cannot import this file to reach
@@ -977,7 +1038,7 @@ await checker.assertProseMatchesShim(new URL('./SKILL.md', import.meta.url).path
 ## Checks
 
 `node test/run.mjs` runs every `test/check-*.mjs` — among them `check-pure`, `check-http`,
-`check-mcp`, `check-install` and `check-prose-check` — and each is also
+`check-mcp`, `check-install`, `check-prose-check` and `check-skill-prose` — and each is also
 runnable alone. The count is deliberately not written down here; it was "five" for long
 enough to go stale twice. No browser, no
 network, no writes outside a temp `CLAUDE_BOARD_HOME`. Every check that touches the local

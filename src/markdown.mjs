@@ -203,7 +203,13 @@ export function mdToHtmlAndAnchors(md) {
     let t = s
       .replace(/`([^`]+)`/g, (m, c) => stash('<code>' + c + '</code>'))
       .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, a, u) => stash('<img alt="' + escAttr(a) + '" src="' + escAttr(safeUrl(u)) + '">'))
-      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t2, u) => stash('<a href="' + escAttr(safeUrl(u) || '#') + '">' + t2 + '</a>'))
+      // Every link leaves in a new tab. A board is a thing the reviewer is in the middle
+      // of -- unsubmitted answers, comments half typed -- and a same-tab navigation
+      // discards all of it with no warning and no way back to the draft. `noopener`
+      // comes with `_blank` in modern browsers, but is spelled out because the reason it
+      // is wanted here is specific: the opened document must not hold a live
+      // `window.opener` handle back into a page that is authorized against the daemon.
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t2, u) => stash('<a href="' + escAttr(safeUrl(u) || '#') + '" target="_blank" rel="noopener noreferrer">' + t2 + '</a>'))
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/\*([^*]+)\*/g, '<em>$1</em>');
     // underscore emphasis opens only after start/space/( and closes only before

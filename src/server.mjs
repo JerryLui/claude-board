@@ -45,17 +45,18 @@
 // take an update).
 
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readBoard, writeBoard, writePage, boardHome, listBoards, searchBoards } from './store.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments } from './board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP } from './render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary } from './notify.mjs';
+import { openServed, resolveRefRoots } from './resolve.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -382,6 +383,99 @@ function sendHtml(res, status, html, extraHeaders = null) {
 function sendText(res, status, text) {
   res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
   res.end(text);
+}
+
+// `/file/` serves bytes the daemon did not author, so it gets its own policy rather than
+// the board `CSP` above. Three clauses are load-bearing and the rest is habit:
+//
+//   script-src 'self'   a rendered document loads its own vendored engine (the whole
+//                       complaint that started this: the board CSP names no 'self', so a
+//                       document embedded in a stage lost its diagrams to a CDN fallback)
+//   connect-src 'none'  and this is the one that matters. The session cookie is
+//                       HttpOnly and SameSite=Strict, so a served document cannot READ
+//                       it -- but it is same-origin with /api/board, and a plain
+//                       `fetch('/api/board/<id>/submit', {credentials:'same-origin'})`
+//                       would carry that cookie and answer a question as the reviewer.
+//                       'none' is what makes a served file inert toward the daemon.
+//   form-action 'none'  the same escalation, spelled as a <form> instead of a fetch.
+//
+// What this deliberately does NOT stop: a top-level navigation from a served page to a
+// daemon URL. Those are GETs against read routes, they land in a visible tab rather than
+// in script, and blocking them would need `navigate-to`, which no shipping browser has.
+const SERVE_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "media-src 'self'",
+  "connect-src 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+].join('; ');
+
+// Enough types for a rendered document and the assets one carries. An unknown extension
+// is served as a download rather than guessed at: `nosniff` is on every response, so an
+// octet-stream is inert in a way a mis-guessed `text/html` would not be.
+const SERVE_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/plain; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+};
+
+/** The serve allowlist, read per request for the same reason `resolveRefRoots` is:
+ * a handful of syscalls, and a user who edits the env var sees the effect without a
+ * fresh daemon. Absent means empty, which means `/file/` is a 404 for everything. */
+function serveRoots() {
+  return resolveRefRoots(process.env.CLAUDE_BOARD_SERVE_ROOTS);
+}
+
+/** `GET /file/<path>` — a file from a serve root, byte for byte.
+ *
+ * Behind the read gate like every other non-open route, so only a browser holding the
+ * session cookie gets here. Streamed from the descriptor `openServed` already opened and
+ * fstat'd, never re-opened by name: the file that passed the guards is the file that is
+ * sent. There is no byte cap, unlike a reference — the point of this route is a whole
+ * document plus a multi-megabyte diagram engine, and nothing is buffered to reach it. */
+function handleServeFile(req, res, relPath) {
+  const opened = openServed(relPath, serveRoots());
+  if (opened.error) return sendText(res, 404, 'not found');
+
+  const stream = createReadStream('', { fd: opened.fd, autoClose: true });
+  stream.on('error', () => {
+    // Mid-stream failure: the head is already out, so there is no status left to send
+    // and the honest move is a truncated body rather than a lie about its length.
+    res.destroy();
+  });
+  res.writeHead(200, {
+    'content-type': SERVE_TYPES[path.extname(opened.path).toLowerCase()] || 'application/octet-stream',
+    'content-length': String(opened.size),
+    'content-security-policy': SERVE_CSP,
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    // These are local files a generator rewrites in place under a stable name; a
+    // reviewer reloading after a re-render must not get yesterday's document.
+    'cache-control': 'no-store',
+  });
+  stream.pipe(res);
 }
 
 function boardUrl(req, id) {
@@ -954,7 +1048,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         const boards = listBoards(home);
         const threads = buildThreadIndex(boards);
         const results = query.trim() ? searchBoards(query, home, boards) : [];
-        return sendHtml(res, 200, renderIndexPage({ threads, query, results }));
+        // INDEX_CSP, not the board CSP: the search box is a plain GET form back to
+        // this same route, and `form-action 'none'` makes the browser refuse to
+        // submit it. See render.mjs's comment on INDEX_CSP.
+        return sendHtml(res, 200, renderIndexPage({ threads, query, results }), {
+          'content-security-policy': INDEX_CSP,
+        });
       }
 
       if (req.method === 'GET' && url.pathname === '/api/search') {
@@ -969,6 +1068,24 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
         return handleGetPage(req, res, parts[1], home);
+      }
+
+      if (req.method === 'GET' && parts[0] === 'file') {
+        // `url.pathname` is still percent-encoded, so it is decoded HERE, once, and the
+        // result is handed over as an ordinary relative path. Decoding can reintroduce
+        // separators (`%2F`) and dot segments (`%2e%2e`), which is precisely why
+        // `openServed` splits and re-validates what it is given rather than trusting a
+        // caller to have done it: an encoded traversal arrives as the literal `..`
+        // segment it always was and is refused there. Decoding once, before any of that,
+        // is what keeps it from being a second thing to get right. A malformed escape
+        // throws, and is a 404 like every other refusal on this route.
+        let relPath;
+        try {
+          relPath = parts.slice(1).map(decodeURIComponent).join('/');
+        } catch {
+          return sendText(res, 404, 'not found');
+        }
+        return handleServeFile(req, res, relPath);
       }
 
       if (parts[0] === 'api' && parts[1] === 'board' && parts.length === 4) {

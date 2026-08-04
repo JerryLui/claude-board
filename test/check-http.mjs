@@ -982,6 +982,25 @@ async function main() {
     const uiHtml = await (await fetch(`${base}/?q=${encodeURIComponent('checkout redesign')}`)).text();
     assert.ok(uiHtml.includes('Should we ship the checkout redesign?'), 'the index page must render the matching search result inline');
     assert.ok(uiHtml.includes(`href="/b/${posted.boardId}"`), 'the index search result must link to the board');
+
+    // ...and the box a REAL browser uses to get here must actually submit. Every
+    // assertion above fetches `/?q=` directly, which is not what a user does and does
+    // not feel the CSP at all -- under `form-action 'none'` the whole search UI was
+    // dead in the browser ("violates the following Content Security Policy directive")
+    // while all of the above still passed. Ablation: put 'none' back on GET / and this
+    // check fails (along with the per-path form-action assertion further down).
+    const indexRes = await fetch(`${base}/`);
+    const indexHtml = await indexRes.text();
+    const form = indexHtml.match(/<form class="search-form"[^>]*>/);
+    assert.ok(form, 'the index must ship a search form');
+    const action = form[0].match(/action="([^"]*)"/);
+    assert.ok(action && action[1].startsWith('/'), 'the search form must post same-origin');
+    const formAction = (indexRes.headers.get('content-security-policy') || '')
+      .split(';').map(c => c.trim()).find(c => c.startsWith('form-action'));
+    assert.ok(
+      formAction && !formAction.includes("'none'"),
+      `the index CSP must let its own search form submit, got: ${formAction}`,
+    );
   });
 
   let widgetsBoardId;
@@ -2132,7 +2151,14 @@ async function main() {
       assert.ok(csp, `${pathName} must carry a CSP`);
       assert.ok(csp.includes("frame-ancestors 'none'"), 'the CSP must forbid framing too');
       assert.ok(csp.includes("default-src 'none'"), 'the CSP must be deny-by-default');
-      assert.ok(csp.includes("form-action 'none'"));
+      // A board page's html stage is untrusted content and may not post a form anywhere.
+      // The index is the daemon's own chrome and its search box IS a same-origin GET
+      // form, so it gets 'self' -- 'none' there is not "stricter", it is a dead search
+      // box (the browser refuses the submit outright). See render.mjs INDEX_CSP.
+      assert.ok(
+        csp.includes(pathName === '/' ? "form-action 'self'" : "form-action 'none'"),
+        `${pathName} carries the wrong form-action: ${csp}`,
+      );
       // ...and still allow what the page genuinely needs, or the whole UI is dead:
       assert.ok(/script-src[^;]*'unsafe-inline'/.test(csp), 'the page inlines its own module script');
       assert.ok(/script-src[^;]*cdn\.jsdelivr\.net/.test(csp), 'mermaid is a dynamic import from the CDN');
@@ -3087,6 +3113,63 @@ async function main() {
     assert.equal(reread.settings.longEvery, 5, 'longEvery must survive a daemon restart');
     assert.equal(reread.settings.notify, false, 'the notify toggle must survive a daemon restart');
     assert.equal(reread.settings.sound, true, 'the sound toggle must survive a daemon restart');
+  });
+
+  await check('GET /file serves a whole document as-is, only from a configured root', () => {
+    // The route exists so a rendered document opens at full size in its own tab instead
+    // of inside a 320px stage under a CSP that blocks its own diagram engine. What it
+    // must NOT become is a way to read the disk, or a way for that document to act as
+    // the reviewer against the daemon it shares an origin with.
+    const serveDir = path.join(home, 'serve-fixtures');
+    mkdirSync(serveDir, { recursive: true });
+    const doc = '<!doctype html><h1>render</h1><script src="assets/engine.js"></script>';
+    writeFileSync(path.join(serveDir, 'doc.html'), doc);
+    mkdirSync(path.join(serveDir, 'assets'), { recursive: true });
+    writeFileSync(path.join(serveDir, 'assets', 'engine.js'), 'export const x = 1;\n');
+
+    return (async () => {
+      // Unconfigured is off: absent means an empty allowlist, so the route 404s before
+      // it is opted into, exactly as an absent CLAUDE_BOARD_REF_ROOTS grants nothing.
+      delete process.env.CLAUDE_BOARD_SERVE_ROOTS;
+      assert.equal((await fetch(`${base}/file/doc.html`)).status, 404, 'serving is off until a root is named');
+
+      process.env.CLAUDE_BOARD_SERVE_ROOTS = serveDir;
+      try {
+        const r = await fetch(`${base}/file/doc.html`);
+        assert.equal(r.status, 200);
+        assert.equal(await r.text(), doc, 'bytes come back untouched -- no board chrome, no rewriting');
+        assert.match(r.headers.get('content-type'), /^text\/html/);
+
+        // The three clauses that make a served document inert toward the daemon. The
+        // session cookie is HttpOnly, but it is also SAME-ORIGIN with /api/board, so
+        // without connect-src a served file could fetch a submit as the reviewer.
+        const csp = r.headers.get('content-security-policy');
+        assert.match(csp, /connect-src 'none'/, 'a served document must not be able to call the API');
+        assert.match(csp, /form-action 'none'/, 'nor post a form at it');
+        assert.match(csp, /script-src [^;]*'self'/, "but it must still load its own vendored engine");
+        assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+        assert.equal(r.headers.get('cache-control'), 'no-store', 're-rendered documents reuse their name');
+
+        // A sibling asset resolves relatively, which is the point of serving the folder
+        // rather than the one file -- and is what the board CSP could never allow.
+        const asset = await fetch(`${base}/file/assets/engine.js`);
+        assert.equal(asset.status, 200);
+        assert.match(asset.headers.get('content-type'), /javascript/);
+
+        // Traversal, encoded traversal and an absolute path are all the same 404 as a
+        // simple miss: nothing here distinguishes "refused" from "not there".
+        for (const bad of ['../secret', '..%2Fsecret', '%2e%2e/secret', '/etc/passwd', 'nope.html']) {
+          assert.equal((await fetch(`${base}/file/${bad}`)).status, 404, `${bad} must be refused indistinguishably`);
+        }
+
+        // And it is behind the read gate like every other non-open route: a caller
+        // holding no credential gets the refusal, not the document.
+        const bare = await rawFetch(`${base}/file/doc.html`);
+        assert.notEqual(bare.status, 200, 'the serve route is not an open route');
+      } finally {
+        delete process.env.CLAUDE_BOARD_SERVE_ROOTS;
+      }
+    })();
   });
 }
 

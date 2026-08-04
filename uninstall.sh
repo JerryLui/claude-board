@@ -5,7 +5,9 @@
 #   1. the launchd job (bootout) and its plist in ~/Library/LaunchAgents,
 #   2. the MCP registration (`claude mcp remove --scope user`),
 #   3. ~/Applications/claude-board.app, the launcher bundle, and the stamp that
-#      records what it was built from.
+#      records what it was built from,
+#   4. ~/.claude/skills/claude-board/SKILL.md, the manual install.sh step 6 copied
+#      there out of this clone.
 #
 # Order, and why: launchd first (bootout, then delete its plist) so nothing is
 # actively supervised while the rest of the teardown runs. The MCP registration is
@@ -14,9 +16,11 @@
 # the job was running and there is no reason to keep it once the job is gone.
 #
 # It does NOT remove `/grill` or any other command file (ADR.md entry 5): this
-# repo no longer installs one, so it has nothing of its own to take back. Whatever
+# repo does not install one, so it has nothing of its own to take back. Whatever
 # a user has under ~/.claude/commands is theirs, versioned in their own repo on
-# their own schedule — uninstalling the board must not reach into it.
+# their own schedule — uninstalling the board must not reach into it. Step 4 above
+# is not a counter-example: that file is a copy of one in this clone, written by
+# install.sh, and taking back what you put there is the opposite of reaching in.
 #
 # It also does NOT touch ~/.claude/settings.json, and never reads or writes that path
 # — same shape as `/grill`. The `SessionStart` hook snippet INSTALL.md documents for it
@@ -59,6 +63,7 @@
 #                                     see step 2b — and otherwise only reports the path;
 #                                     boards/ and pages/ are never touched)
 #   CLAUDE_BOARD_APP_DIR             default: ~/Applications
+#   CLAUDE_BOARD_SKILLS_DIR          default: ~/.claude/skills
 #
 # macOS only, zero dependencies: bash + coreutils + launchctl, nothing this OS
 # doesn't already ship.
@@ -73,12 +78,15 @@ SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
 STORE_DIR="${CLAUDE_BOARD_HOME:-$HOME/Library/Application Support/claude-board}"
 
 APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
+SKILLS_DIR="${CLAUDE_BOARD_SKILLS_DIR:-$HOME/.claude/skills}"
 
 LABEL="claude-board"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
 SECRET_DIR="$(dirname "$SECRET_FILE")"
 APP_PATH="$APP_DIR/${LABEL}.app"
 LAUNCHER_STAMP_FILE="$SECRET_DIR/launcher.stamp"
+SKILL_DIR="$SKILLS_DIR/${LABEL}"
+SKILL_FILE="$SKILL_DIR/SKILL.md"
 
 echo "==> claude-board uninstall"
 
@@ -151,6 +159,23 @@ if [ -f "$POMODORO_FILE" ]; then
   echo "==> removed $POMODORO_FILE"
 else
   echo "==> no pomodoro state at $POMODORO_FILE"
+fi
+
+# --- 2c. the manual ------------------------------------------------------------
+# install.sh step 6 wrote ~/.claude/skills/claude-board/SKILL.md, so this script takes
+# it back — the same rule the launcher bundle follows: what this repo installed, it
+# removes. It is not the command file entry 5 forbids reaching into; that file was never
+# ours, and this one is ours by definition (it is a copy of skills/claude-board/SKILL.md
+# in the clone, and says so in its own first line).
+#
+# The directory goes only if the copy left it empty, so a `check.mjs` or a note the user
+# put beside it survives.
+if [ -f "$SKILL_FILE" ]; then
+  rm -f "$SKILL_FILE"
+  rmdir "$SKILL_DIR" 2>/dev/null || true
+  echo "==> removed $SKILL_FILE"
+else
+  echo "==> no board manual at $SKILL_FILE"
 fi
 
 # --- 3. report what is deliberately left behind --------------------------------

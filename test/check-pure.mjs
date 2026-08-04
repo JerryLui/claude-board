@@ -20,7 +20,7 @@ import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveCom
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, renderRefusalPage, CSP } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
-import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
+import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, openServed, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
 // Both used only by the reference-boundary checks (audit 2026-07-31). The descriptor
 // discipline inside resolveRef is asserted by swapping the file out BETWEEN the check
 // and the read, which means patching the fs namespace src/resolve.mjs imports from --
@@ -112,7 +112,7 @@ check('mdToHtml carries the visualize renderer\'s pinned behaviour', () => {
     '<strong>bold</strong>',
     '<code>x &lt; y</code>',
     'about 75 % done',
-    '<a href="https://x.se">link</a>',
+    '<a href="https://x.se" target="_blank" rel="noopener noreferrer">link</a>',
     '<img alt="alt" src="img.png">',
     '<em>Findings for MAP_AUTH.md, method census.</em>',
     'plain ssn_country stay literal',
@@ -222,8 +222,10 @@ check('a crafted image src cannot break out of the src="..." attribute to inject
 check('a crafted link url cannot break out of the href="..." attribute to inject a live handler', () => {
   const out = mdToHtml('[t](https://x.se/"onmouseover=alert(1)x=")');
   const tag = soleTag(out, /<a[^]*?>/);
-  assert.ok(/^<a href="[^"]*">$/.test(tag), `a tag is not exactly href, a live attribute leaked in: ${tag}`);
-  assert.equal(out, '<p><a href="https://x.se/&quot;onmouseover=alert(1">t</a>x=")</p>');
+  // href plus the two FIXED attributes every link now carries, spelled literally rather
+  // than as a wildcard: a crafted `onmouseover=` still has nowhere to land.
+  assert.ok(/^<a href="[^"]*" target="_blank" rel="noopener noreferrer">$/.test(tag), `a tag is not exactly href+target+rel, a live attribute leaked in: ${tag}`);
+  assert.equal(out, '<p><a href="https://x.se/&quot;onmouseover=alert(1" target="_blank" rel="noopener noreferrer">t</a>x=")</p>');
 });
 
 check('a crafted heading cannot break out of the id="..." attribute its anchor slug is rendered into', () => {
@@ -244,7 +246,7 @@ check('a crafted heading cannot break out of the id="..." attribute its anchor s
 check('a javascript: link URL is neutralised, not rendered as a live href', () => {
   const out = mdToHtml('[t](javascript:alert(1))');
   assert.ok(!/href="javascript:/i.test(out), `javascript: URL rendered live: ${out}`);
-  assert.equal(out, '<p><a href="#">t</a>)</p>');
+  assert.equal(out, '<p><a href="#" target="_blank" rel="noopener noreferrer">t</a>)</p>');
 });
 
 check('a javascript: image src is neutralised, not rendered as a live src', () => {
@@ -259,10 +261,10 @@ check('a data: image src is neutralised too -- the allowlist is http(s)/mailto/r
 });
 
 check('http, https, mailto, relative and fragment URLs still render as live links -- the javascript: fix does not neuter ordinary markdown', () => {
-  assert.equal(mdToHtml('[h](https://x.se/path)'), '<p><a href="https://x.se/path">h</a></p>');
-  assert.equal(mdToHtml('[m](mailto:a@b.com)'), '<p><a href="mailto:a@b.com">m</a></p>');
-  assert.equal(mdToHtml('[r](/a/b)'), '<p><a href="/a/b">r</a></p>');
-  assert.equal(mdToHtml('[f](#sec)'), '<p><a href="#sec">f</a></p>');
+  assert.equal(mdToHtml('[h](https://x.se/path)'), '<p><a href="https://x.se/path" target="_blank" rel="noopener noreferrer">h</a></p>');
+  assert.equal(mdToHtml('[m](mailto:a@b.com)'), '<p><a href="mailto:a@b.com" target="_blank" rel="noopener noreferrer">m</a></p>');
+  assert.equal(mdToHtml('[r](/a/b)'), '<p><a href="/a/b" target="_blank" rel="noopener noreferrer">r</a></p>');
+  assert.equal(mdToHtml('[f](#sec)'), '<p><a href="#sec" target="_blank" rel="noopener noreferrer">f</a></p>');
 });
 
 // --- board.mjs: block normalisation, rounds, packet assembly ----------------------
@@ -5078,6 +5080,18 @@ check('the favicon mark is drawn inline as a data URI, with no digit -- countles
   assert.match(draw, /toDataURL\(/, 'the mark must be a data URI the page draws, not a fetched or bundled file');
   assert.ok(!/fillText/.test(draw), 'no digit may be drawn onto the favicon any more -- the mark is countless');
   assert.ok(!/9\+/.test(draw), 'the old "9+" overflow text must be gone along with every other digit');
+  // The pending mark INVERTS the tile rather than adding to it: dark ground where the
+  // page mark is amber, same rx 9. --warning is already the product's "waiting on you"
+  // hue, so at 16px idle and pending have to differ in VALUE, not merely in contents,
+  // and a circle would have made pending a different shape rather than a second state.
+  assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--bg']}'`),
+    'the pending tile must be the dark --bg, off the palette rather than hand-copied');
+  assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--warning']}'`),
+    'and the pip must be --warning -- the exact inverse of the page mark, which is what makes this a value flip');
+  assert.ok(!draw.includes(palettes.dark['--accent-ink']),
+    `--accent-ink on the --bg tile is ${palettes.dark['--accent-ink']} on ${palettes.dark['--bg']}: a pip nobody can see`);
+  assert.match(draw, /roundRect\(0, 0, 32, 32, 9\)/,
+    'same tile as the page mark, same corner: pending is a state of it, not a different drawing');
   const set = namedFunctionBody(ui, 'setFaviconBadge');
   assert.match(set, /baseFavicon/, 'clearing the mark must restore the page\'s own mark, not leave the badge on it');
   assert.match(set, /removeAttribute\('href'\)/, 'and with no mark to restore it must still unmark rather than keep the badge');
@@ -5095,7 +5109,7 @@ check('a countless mark applies while a round is pending, and the page\'s own ma
   assert.ok(drawBody && setBody, 'expected drawFavicon and setFaviconBadge in src/ui.mjs');
   function run(pending) {
     const link = { rel: 'icon', href: 'data:image/svg+xml,BASE', getAttribute(n) { return this[n]; }, setAttribute(n, v) { this[n] = v; }, removeAttribute(n) { this[n] = undefined; } };
-    const doc = { querySelector: () => link, createElement: () => ({ getContext: () => ({ fillStyle: '', beginPath() {}, arc() {}, fill() {} }), toDataURL: () => 'data:image/png,PIP' }), head: { appendChild() {} } };
+    const doc = { querySelector: () => link, createElement: () => ({ getContext: () => ({ fillStyle: '', beginPath() {}, arc() {}, roundRect() {}, fill() {} }), toDataURL: () => 'data:image/png,PIP' }), head: { appendChild() {} } };
     // ui.mjs's `${palettes.dark[...]}` interpolations already resolved to literal
     // hex strings when the `ui` template literal itself was evaluated at import
     // time, so the extracted bodies below reference no free `palettes` variable.
@@ -5121,13 +5135,38 @@ check('every page carries the same inline mark, and unbadging has something to r
   assert.ok(!faviconLink.includes('#'),
     'an unescaped # truncates a data URI at the first colour -- the href must be percent-encoded');
   const svg = decodeURIComponent(faviconLink.slice(faviconLink.indexOf(',') + 1, -2));
-  assert.ok(svg.includes(palettes.dark['--accent']) && svg.includes(palettes.dark['--accent-ink']),
+  assert.ok(svg.includes(palettes.dark['--warning']) && svg.includes(palettes.dark['--accent-ink']),
     'the mark paints the palette, not a hand-copied hex that a palette edit would leave behind');
+  assert.ok(!svg.includes(palettes.light['--warning']),
+    'light --warning is a brown tuned for text contrast -- the tile must name DARK explicitly or it turns to mud');
 
   const board = renderBoardPage(createBoard({ title: 'Fav', blocks: [{ kind: 'markdown', text: '# A' }] }));
   assert.ok(board.includes(faviconLink), 'the board page must carry the mark');
   assert.ok(renderIndexPage({ threads: [] }).includes(faviconLink), 'the index must carry the mark');
   assert.ok(renderRefusalPage().includes(faviconLink), 'the refusal page must carry the mark');
+});
+
+check('the tab mark and the in-page mark are one drawing, at two sizes', () => {
+  // The tile in the board head's home control and the one leading the index title
+  // are the favicon's own rects, not a second copy that a geometry edit would
+  // leave behind. Compare shapes, not whole documents: the favicon carries xmlns
+  // and no width/height, the in-page mark the reverse.
+  const shapes = decodeURIComponent(faviconLink.slice(faviconLink.indexOf(',') + 1, -2))
+    .replace(/^<svg[^>]*>/, '').replace(/<\/svg>$/, '');
+  assert.ok(shapes.startsWith('<rect'), `expected the favicon body to be bare rects: ${shapes.slice(0, 40)}`);
+
+  const board = renderBoardPage(createBoard({ title: 'Mark', blocks: [{ kind: 'markdown', text: '# A' }] }));
+  const home = board.match(/<a class="back-to-index"[^>]*>(.*?)<\/a>/s);
+  assert.ok(home, 'expected the home control in the board head');
+  assert.ok(home[1].includes(shapes), 'the home control must hold the mark itself, not its own copy of the geometry');
+  assert.match(home[1], /width="30" height="30"/, 'sized to the 30px slot it took over');
+  assert.match(home[0], /aria-label="All threads"/,
+    'the mark replaced a labelled arrow -- losing the label would leave a screen reader an unnamed link');
+
+  const index = renderIndexPage({ threads: [] });
+  const head = index.match(/<div class="index-head-titles">(.*?)<h1>/s);
+  assert.ok(head && head[1].includes(shapes), 'the index mark must lead the title, and be the same drawing');
+  assert.match(head[1], /width="36" height="36"/);
 });
 
 check('the notification fires only when the tab is unfocused, degrades silently, and never steals focus', () => {
@@ -5592,6 +5631,50 @@ check('a board whose every question is answered or explicitly left blank reads a
   assert.equal(thread.pending, 0, 'a submitted board with nothing outstanding must be able to read zero');
 });
 
+check('a round that asks nothing never reads as live -- there is no gesture that could clear it', () => {
+  // `applySubmit` is the only thing that marks a round `sent`, and a reviewer submits by
+  // answering. So a round with no question block had no reachable way out of `open`, and
+  // its row pulsed a live dot forever right beside its own honest `0 pending`.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'asks-nothing');
+  mkdirSync(dir, { recursive: true });
+
+  // The shape every render skill now posts: a pointer to a document, asking nothing.
+  const pointer = createBoard({
+    title: 'An html block that names a file',
+    cwd: dir,
+    blocks: [{ kind: 'markdown', text: 'http://127.0.0.1:7391/file/doc.html' }],
+  });
+  assert.equal(pointer.rounds[0].status, 'open', 'the round really is open -- nothing submitted it');
+  const [pointerThread] = buildThreadIndex([pointer]);
+  assert.equal(pointerThread.live, false, 'but nobody owes it anything, so it is not live');
+  assert.equal(pointerThread.pending, 0);
+  assert.doesNotMatch(extractThreadItem(renderIndexPage({ threads: [pointerThread] }), pointer.id), /live-dot/);
+
+  // A round that DOES ask is still live -- the fix must not silence a real prompt.
+  const asking = createBoard({
+    title: 'needs an answer',
+    cwd: dir,
+    blocks: [{ kind: 'question', prompt: 'which one?', widget: 'text' }],
+  });
+  const [askingThread] = buildThreadIndex([asking]);
+  assert.equal(askingThread.live, true, 'an unanswered question is exactly what the dot is for');
+  assert.match(extractThreadItem(renderIndexPage({ threads: [askingThread] }), asking.id), /live-dot/);
+
+  // And the case from the reported screenshot: a thread whose questions were all answered
+  // and sent, then closed out with a summary round that asks nothing.
+  const closed = createBoard({
+    title: 'IBKR trade history',
+    cwd: dir,
+    blocks: [{ kind: 'question', prompt: 'scope?', widget: 'text' }],
+  });
+  const qid = closed.blocks.find(b => b.kind === 'question').id;
+  closed.answers = { [qid]: { status: 'answered', choice: 'yes', note: '' } };
+  closed.rounds[0].status = 'sent';
+  addRound(closed, { title: 'wrap-up', blocks: [{ kind: 'markdown', text: 'here is the summary' }] });
+  const [closedThread] = buildThreadIndex([closed]);
+  assert.equal(closedThread.live, false, 'a closing summary must not re-arm the dot on a finished thread');
+});
+
 check('an index row headlines the board title; the project is shown as a folder basename only, full path on a title attribute', () => {
   const sub = path.join(fixturesDir, 'indexpage-fixtures', 'sub', 'dir');
   mkdirSync(sub, { recursive: true });
@@ -5739,7 +5822,10 @@ check('a live row opens the board AT the round still owed an answer; a settled r
   applySubmit(live, { action: 'send', answers: [], comments: [] }, 1);
   addRound(live, {});
   applySubmit(live, { action: 'send', answers: [], comments: [] }, 2);
-  addRound(live, {}); // round 3 open
+  // Round 3 open AND asking something. The question is what makes the row live at all
+  // (a round nobody can answer is not waiting on anyone), and it is also the thing this
+  // check is about: the fragment exists to land the reviewer on the prompt still owed.
+  addRound(live, { blocks: [{ kind: 'question', prompt: 'the one still waiting', widget: 'text' }] });
   const settled = createBoard({ title: 'everything sent', cwd: fixturesDir });
   applySubmit(settled, { action: 'send', answers: [], comments: [] }, 1);
 
@@ -6565,6 +6651,68 @@ await checkAsync('pomodoro widget: submitting the settings form posts all six fi
   // Applied back, not merely echoed: re-reading the form after the response
   // shows the daemon's own saved value, proving the round trip is real.
   assert.equal(document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value, 50);
+});
+
+check('openServed confines a served file to its roots, and refuses everything else alike', () => {
+  // The serve route hands whole documents to a browser at the daemon's own origin, so
+  // its boundary gets the same treatment resolvePath's does -- and every refusal has to
+  // be the SAME refusal (audit S7), or the route is an existence oracle for the disk.
+  const root = realpathSync(mkdtempSync(path.join(fixturesDir, 'serve-root-')));
+  const outside = realpathSync(mkdtempSync(path.join(fixturesDir, 'serve-outside-')));
+  writeFileSync(path.join(root, 'doc.html'), '<h1>ok</h1>');
+  writeFileSync(path.join(outside, 'secret.txt'), 'not yours');
+  mkdirSync(path.join(root, 'sub'));
+  writeFileSync(path.join(root, 'sub', 'index.html'), '<h1>listing</h1>');
+
+  const read = rel => {
+    const r = openServed(rel, [root]);
+    if (r.error) return r;
+    const text = readFileSync(r.fd, 'utf8');
+    fs.closeSync(r.fd);
+    return text;
+  };
+
+  assert.equal(read('doc.html'), '<h1>ok</h1>');
+  // A directory resolves to the index.html inside it -- the folder listing a generator
+  // already wrote. The daemon never enumerates a directory itself.
+  assert.equal(read('sub'), '<h1>listing</h1>');
+
+  // Traversal, an absolute path, and a symlink aimed out of the root are all refused,
+  // and all refused IDENTICALLY -- no errno, no "exists but", nothing to probe with.
+  symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'escape.txt'));
+  const refusals = [
+    '../' + path.basename(outside) + '/secret.txt',
+    path.join(outside, 'secret.txt'),
+    'escape.txt',
+    'nope.html',
+    'sub',                                  // asserted separately below with no index
+    '',
+  ].map(rel => openServed(rel, [root]).error);
+  assert.deepEqual(new Set(refusals.filter(Boolean)), new Set(['not found']));
+
+  // An unconfigured allowlist serves nothing at all: absent means empty, the same
+  // answer resolveRefRoots gives, so the route is off until someone opts in.
+  assert.equal(openServed('doc.html', []).error, 'not found');
+  assert.equal(openServed('doc.html', resolveRefRoots(undefined)).error, 'not found');
+
+  // A fifo would wedge the daemon's single thread on open, and a directory with no
+  // index.html is a 404 rather than a listing.
+  mkdirSync(path.join(root, 'bare'));
+  assert.equal(openServed('bare', [root]).error, 'not found');
+});
+
+check('a markdown link opens in a new tab and drops its opener', () => {
+  // A board is a thing the reviewer is in the middle of: a same-tab navigation throws
+  // away unsubmitted answers and half-typed comments with no warning. The `noopener`
+  // half is the security one -- the opened document must not hold a window handle back
+  // into a page that is authorized against the daemon.
+  const html = mdToHtml('see [the render](http://127.0.0.1:7391/file/doc.html)');
+  assert.match(html, /<a href="http:\/\/127\.0\.0\.1:7391\/file\/doc\.html" target="_blank" rel="noopener noreferrer">the render<\/a>/);
+  // A refused scheme still collapses to `#`, and still carries the same attributes --
+  // the neutralised link must not become the one that navigates the board away.
+  const bad = mdToHtml('[x](javascript:alert(1))');
+  assert.match(bad, /<a href="#" target="_blank" rel="noopener noreferrer">/);
+  assert.ok(!bad.includes('javascript:'));
 });
 
 if (asyncFailures) failures += asyncFailures;

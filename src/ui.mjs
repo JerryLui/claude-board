@@ -3296,14 +3296,25 @@ export const ui = `
   var faviconLink = null;
   var baseFavicon = null;
 
-  /** Draw the countless pending mark as a data URI: the accent tile with a
-   * smaller ink-coloured pip on top, no digit anywhere. Canvas, not a file:
-   * PROTOCOL.md's zero-dependency / single-self-contained-file rule means no new
-   * asset can ship beside the page. Returns null if canvas is unavailable, and
-   * the caller just leaves the favicon alone. Same two colours as the page's own
-   * unbadged mark, interpolated from src/styles.mjs's dark palette so the pip and
-   * the tile it replaces can't drift apart (they had: this used to paint a
-   * hardcoded blue that was two palette edits behind --accent). */
+  /** Draw the countless pending mark as a data URI: no digit anywhere -- it is the
+   * page's own mark with the two colours SWAPPED, an ink tile carrying an amber
+   * pip. Canvas, not a file: PROTOCOL.md's zero-dependency /
+   * single-self-contained-file rule means no new asset can ship beside the page.
+   * Returns null if canvas is unavailable, and the caller just leaves the favicon
+   * alone. Both colours are interpolated from src/styles.mjs's dark palette so the
+   * pip and the tile it replaces can't drift apart (they had: this used to paint a
+   * hardcoded blue that was two palette edits behind --accent).
+   *
+   * Inverted rather than drawn on the amber tile, because --warning is already how
+   * the product says "waiting on you" everywhere else (.live-dot,
+   * .pending-badge.has-pending): an amber pip on an amber tile is the same object
+   * as idle at 16px, and the tab this has to work in is by definition the
+   * unfocused one, where a value flip is the only change peripheral vision
+   * reliably catches. Same rx 9 as the mark, so idle and pending are one object in
+   * two states rather than two shapes -- which is also why the tile is a roundRect
+   * and not the circle this used to draw. roundRect needs Safari 16.4+ /
+   * Chrome 99+, fine for a macOS-only tool, and where it is missing the catch
+   * below returns null and the tab keeps its unbadged mark. See ADR.md entry 12. */
   function drawFavicon() {
     try {
       var canvas = document.createElement('canvas');
@@ -3311,11 +3322,11 @@ export const ui = `
       canvas.height = 32;
       var ctx = canvas.getContext && canvas.getContext('2d');
       if (!ctx) return null;
-      ctx.fillStyle = '${palettes.dark['--accent']}';
+      ctx.fillStyle = '${palettes.dark['--bg']}';
       ctx.beginPath();
-      ctx.arc(16, 16, 16, 0, Math.PI * 2);
+      ctx.roundRect(0, 0, 32, 32, 9);
       ctx.fill();
-      ctx.fillStyle = '${palettes.dark['--accent-ink']}';
+      ctx.fillStyle = '${palettes.dark['--warning']}';
       ctx.beginPath();
       ctx.arc(16, 16, 6, 0, Math.PI * 2);
       ctx.fill();

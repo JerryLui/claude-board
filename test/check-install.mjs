@@ -197,8 +197,15 @@ for (let i = 0; i < 50; i++) {
 // ever broke, rotate) the REAL ~/.config/claude-board/secret on this machine.
 const secretFile = path.join(workDir, 'config', 'claude-board', 'secret');
 
+// install.sh step 6 copies the board's manual into a personal skills directory. Seamed
+// for the same reason the secret above is: without it, every run of this suite would
+// write into the real ~/.claude/skills on the developer's machine.
+const skillsDir = path.join(workDir, 'skills');
+const installedSkill = path.join(skillsDir, 'claude-board', 'SKILL.md');
+
 const env = {
   ...process.env,
+  CLAUDE_BOARD_SKILLS_DIR: skillsDir,
   CLAUDE_BOARD_SECRET_FILE: secretFile,
   CLAUDE_BOARD_LAUNCH_AGENTS_DIR: launchAgentsDir,
   CLAUDE_BOARD_LOG_DIR: logDir,
@@ -437,6 +444,12 @@ const REAL_PATHS = [
   path.join(process.env.HOME || '/nonexistent', 'Applications', 'claude-board.app'),
   path.join(process.env.HOME || '/nonexistent', 'Library', 'LaunchAgents', 'claude-board.plist'),
   path.join(process.env.HOME || '/nonexistent', '.config', 'claude-board', 'secret'),
+  // Added with install.sh step 6, and immediately earned: the first run of the suite
+  // after that step landed deleted this developer's real manual, because the
+  // "nothing installed" uninstall below was spawned without CLAUDE_BOARD_SKILLS_DIR and
+  // fell back to ~/.claude/skills. Exactly the APP_DIR incident of 2026-08-01, one seam
+  // later. A new seam belongs on this list the moment it exists, not after it bites.
+  path.join(process.env.HOME || '/nonexistent', '.claude', 'skills', 'claude-board', 'SKILL.md'),
 ];
 const realPathsBefore = REAL_PATHS.map(p => existsSync(p));
 
@@ -951,6 +964,44 @@ async function main() {
   // exists, which surfaces as "daemon is not reachable" in every session, with
   // nothing naming the cause. install.sh prefers a stable interpreter and says so.
 
+  // ADR.md entry 11: the manual is the one file install.sh puts under ~/.claude, and it
+  // is repo-owned rather than user-owned -- which is exactly what entry 5 refused for
+  // `/grill`. The distinction the two checks below bind: this file is a copy, kept
+  // byte-identical to the clone's, and an edit to the copy is overwritten rather than
+  // detected and preserved. No hash record, no did-they-edit-it branch -- the machinery
+  // entry 5 deleted stays deleted, and prose that quietly stops matching the shim is the
+  // failure this step exists to prevent.
+  await check('install copies the board manual into the skills directory, byte-identical to the clone\'s', async () => {
+    assert.ok(existsSync(installedSkill), `install.sh must write ${installedSkill}`);
+    const shipped = readFileSync(path.join(repoRoot, 'skills', 'claude-board', 'SKILL.md'), 'utf8');
+    assert.equal(readFileSync(installedSkill, 'utf8'), shipped, 'the installed manual must be a byte-for-byte copy of the clone\'s');
+  });
+
+  await check('a reinstall overwrites an edited copy of the manual rather than preserving it', async () => {
+    writeFileSync(installedSkill, '# drifted\n');
+    const r = spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('skill-overwrite') }, encoding: 'utf8' });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    const shipped = readFileSync(path.join(repoRoot, 'skills', 'claude-board', 'SKILL.md'), 'utf8');
+    assert.equal(readFileSync(installedSkill, 'utf8'), shipped, 'an edited copy must be replaced by the clone\'s');
+  });
+
+  await check('a missing manual warns without failing the install', async () => {
+    // The daemon and the registration are the install. A clone with no skills/ directory
+    // (an old checkout, a partial copy) must still produce a working board.
+    const emptyClone = path.join(workDir, 'clone-without-skill');
+    mkdirSync(emptyClone, { recursive: true });
+    for (const entry of ['bin', 'src', 'package.json']) {
+      cpSync(path.join(repoRoot, entry), path.join(emptyClone, entry), { recursive: true });
+    }
+    cpSync(installScript, path.join(emptyClone, 'install.sh'));
+    const r = spawnSync('bash', [path.join(emptyClone, 'install.sh')], {
+      env: { ...env, ...quietStubs('skill-missing'), CLAUDE_BOARD_SKILLS_DIR: path.join(workDir, 'skills-missing') },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `a clone with no manual must still install:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(r.stderr, /warning/i, 'a missing manual must be announced, not silent');
+  });
+
   await check('a version-managed node on PATH is not baked into the plist when a stable one exists', async () => {
     const fakeNvm = path.join(workDir, 'home', '.nvm', 'versions', 'node', 'v0.0.0', 'bin');
     mkdirSync(fakeNvm, { recursive: true });
@@ -1233,6 +1284,13 @@ async function main() {
   // launchctlLog/launchctlState for counting, so appending more invocations here (the
   // way the odd-path and lint-fail installs above already do) is safe.
 
+  // Dropped beside the manual before uninstall runs, so the assertion below can tell
+  // "removed the file we wrote" from "removed the directory it happened to sit in".
+  const neighbourSkillFile = path.join(skillsDir, 'claude-board', 'notes.md');
+  const neighbourSkillContent = 'mine, not the installer\'s\n';
+  mkdirSync(path.dirname(neighbourSkillFile), { recursive: true });
+  writeFileSync(neighbourSkillFile, neighbourSkillContent);
+
   const uninstallResult = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
 
   await check('uninstall exits 0', async () => {
@@ -1253,6 +1311,15 @@ async function main() {
     // The TCC entry it may have left in System Settings cannot be removed by any
     // script, so the one honest thing to do is say so.
     assert.match(uninstallResult.stdout, /Privacy & Security/, 'uninstall must tell the user about the settings entry it cannot remove');
+  });
+
+  await check('uninstall removes the manual it installed, and only that', async () => {
+    // Symmetric with the launcher bundle above: what install.sh authored at that path,
+    // uninstall takes back. The directory itself is not this repo's, so a neighbour file
+    // must survive -- and does, because the rmdir is the non-forcing kind.
+    assert.ok(!existsSync(installedSkill), 'the installed manual must be gone after uninstall');
+    assert.ok(existsSync(neighbourSkillFile), 'a file the user put beside it must survive');
+    assert.equal(readFileSync(neighbourSkillFile, 'utf8'), neighbourSkillContent, 'and be untouched');
   });
 
   await check('uninstall removes the MCP registration', async () => {
@@ -1353,6 +1420,10 @@ async function main() {
         // reaches outside the temp dir when omitted, because it is the only one whose
         // fallback is a path the developer actually uses.
         CLAUDE_BOARD_APP_DIR: path.join(freshWorkDir, 'Applications'),
+        // The second seam with that property: uninstall.sh defaults SKILLS_DIR to
+        // $HOME/.claude/skills and removes the manual it finds there, so omitting this
+        // deletes the real one. It did, on the first suite run after step 6 shipped.
+        CLAUDE_BOARD_SKILLS_DIR: path.join(freshWorkDir, 'skills'),
         CLAUDE_BOARD_HOME: path.join(freshWorkDir, 'Store'),
         CLAUDE_BOARD_MCP_CMD: claudeStub, // still stubbed -- never touches the real `claude`
         CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,

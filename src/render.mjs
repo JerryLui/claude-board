@@ -22,7 +22,7 @@
 // src/server.mjs), so the pin src/ui.mjs draws and the comment list beside it can
 // never disagree about whether an anchor still resolves.
 
-import { styles, palettes, faviconLink } from './styles.mjs';
+import { styles, palettes, faviconLink, markSvg } from './styles.mjs';
 import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
@@ -52,7 +52,7 @@ import { badgeLabel } from './badge.mjs';
  * is load-bearing, not laziness), mermaid's dynamic `import()` from jsdelivr
  * (src/ui.mjs), and same-origin fetch/EventSource — nothing else can load, no
  * form can post anywhere, no `<base>` can re-point a relative URL. */
-export const CSP = [
+const CSP_CLAUSES = [
   "default-src 'none'",
   "script-src 'unsafe-inline' https://cdn.jsdelivr.net",
   "style-src 'unsafe-inline'",
@@ -61,8 +61,20 @@ export const CSP = [
   "connect-src 'self'",
   "frame-ancestors 'none'",
   "base-uri 'none'",
-  "form-action 'none'",
-].join('; ');
+];
+
+export const CSP = [...CSP_CLAUSES, "form-action 'none'"].join('; ');
+
+/** The index page's policy: the board `CSP` above with the one clause the index
+ * genuinely needs relaxed. The index is the daemon's own chrome, and its archive
+ * search is a plain `<form method="get" action="/">` round trip (see
+ * src/indexpage.mjs) — under `form-action 'none'` the browser blocks the
+ * submission outright and the search box is dead, which is exactly what it did
+ * until this split existed. `'self'` allows that one same-origin GET and nothing
+ * else: no cross-origin post, and every state-changing route is a POST behind the
+ * origin check and the local secret regardless. This does NOT apply to board
+ * pages, whose `html` stages are untrusted content and keep `'none'`. */
+export const INDEX_CSP = [...CSP_CLAUSES, "form-action 'self'"].join('; ');
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -104,12 +116,6 @@ const COMMENT_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none
  * never anchors anything (excluded from the click-to-anchor gesture by class, same
  * as the comment infrastructure it sits beside). */
 const MODE_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>';
-
-/** The back-to-index control's icon: a plain left arrow, distinct from the
- * comment/mode glyphs above so three chrome controls never read as the same
- * affordance. Ticket 04 (DESIGN.md polish criterion 4): `.board-head` otherwise
- * has no way back to `/` once a reviewer is on a board page. */
-const BACK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="M11 18l-6-6 6-6"/></svg>';
 
 /** The diagram-expand control's icon (DESIGN.md polish ticket 05): four arrowheads
  * pointing out of the corners, the standard "open this full size" glyph and
@@ -1187,7 +1193,7 @@ ${faviconLink}
   <div class="readonly-banner">Read-only: opened from disk, without the daemon running.</div>
   <header class="board-head">
     <div class="board-head-title">
-      <a class="back-to-index" href="/" aria-label="All threads" title="All threads">${BACK_ICON}</a>
+      <a class="back-to-index" href="/" aria-label="All threads" title="All threads">${markSvg(30)}</a>
       <div>
         <h1>${escHtml(board.title || 'Untitled board')}</h1>
         <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>

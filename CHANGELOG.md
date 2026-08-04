@@ -34,9 +34,41 @@ this project does not yet follow semantic versioning, because nothing has been r
   `INSTALL.md`, applied by hand: `install.sh` reads and writes nothing under
   `~/.claude/settings.json` (ADR entry 5), and `uninstall.sh` leaves that snippet exactly
   where it found it while removing `pomodoro.json` from the store by exact name.
+- **The board ships its own manual, and `install.sh` installs it.**
+  `skills/claude-board/SKILL.md` states the `ask` tool once — call shape, every block kind and
+  widget, the packet, and what to do when the board is unavailable — and step 6 copies it to
+  `~/.claude/skills/claude-board/`. Callers name the skill and keep only what is theirs. It
+  replaces 148 lines of protocol restated across six caller files, three of which had gone
+  word-for-word identical; the drift that duplication had already produced is fixed with it
+  (five of the six never relayed the recovery command the tool prints, and `/grill` documented
+  four widgets for as long as there were five). Unconditional copy, no hash record, non-fatal
+  if it fails: a daemon and a registration are the install. `uninstall.sh` takes the file back
+  and leaves anything else in that directory alone. `CLAUDE_BOARD_SKILLS_DIR` seams the
+  destination for tests. See ADR.md entry 11, which amends entry 5.
+- **`test/check-skill-prose.mjs`** binds that manual to the live shim on every `node
+  test/run.mjs` — the first time since entry 5 that this repo's suite proves any prose against
+  its own mechanism. It checks for **absence** as well as invention: every block kind, widget
+  and packet status `PROTOCOL.md` defines must appear in the manual, which is the check that
+  would have caught the four-widget drift. Both directions covered, so it cannot go vacuous.
+
+- **The daemon serves a rendered file at `GET /file/<path>`.** Bytes from a directory named
+  in the new `CLAUDE_BOARD_SERVE_ROOTS`, back verbatim: no board chrome, no block, no slice,
+  no cap, and no generated listing (a directory answers with the `index.html` already there).
+  It exists so a board can *link* to a rendered document instead of embedding one — a whole
+  page with a vendored diagram engine never fit in a 320px stage under a CSP naming no
+  `'self'`. Absent means empty, so the route is off until `install.sh` writes the default
+  (`~/Documents/renders`) or you name a directory yourself. Deliberately a **separate**
+  allowlist from `CLAUDE_BOARD_REF_ROOTS`: a referenced file is escaped into a block, a served
+  one is a live document at the daemon's origin, and one shared list would have widened every
+  existing install on a `git pull`. Behind the read gate; every refusal is the same bare 404,
+  so it cannot be used to probe the disk. Served responses carry their own CSP —
+  `script-src 'self'` so the document loads its engine, `connect-src 'none'` and
+  `form-action 'none'` so it cannot ride the same-origin session cookie into a submit. See
+  ADR.md entry 10 and the SECURITY.md entry on what that CSP does and does not hold.
 - **A tab mark.** The board, the index and the refusal page all emit the same inline
   `data:image/svg+xml` favicon (a board with two quiet rows and one emphasised row),
-  painted from the dark palette so it never drifts from `--accent`, and inline so the
+  painted from the dark palette (`--warning`, the one hue this palette holds at nearly the
+  same value in either theme) so it never drifts from the tokens, and inline so the
   standalone `file:` archive shows it with the network off. Clearing the pending-round
   badge now restores that mark instead of leaving the tab blank, and the badge itself
   is drawn in the real accent rather than the two-edits-stale blue it had been using.
@@ -48,6 +80,19 @@ this project does not yet follow semantic versioning, because nothing has been r
   unfocused tab still names the round exactly as before. Knowing you owe an answer is
   worth a glance; knowing it's three answers wasn't worth a second mark that could drift
   out of sync with the round count.
+- **The mark is an amber slab, and the pending state inverts it.** The tab tile moved from
+  `--accent` to `DARK['--warning']` — the one hue the palette holds at nearly the same value
+  in either theme, so a single tile now serves both instead of reading as the darkest thing
+  on a light tab strip — with the rows fattened from 3.4 to 4.6/4.6/5.4 so the two quiet bars
+  still separate after the downsample to 16px, and the corner opened from `rx 8` to `rx 9` to
+  match. The countless pending mark is now that same tile with its two colours swapped (an
+  amber pip on a `--bg` ground, `roundRect` rather than the circle it used to draw) instead
+  of a pip added to an unchanged tile: `--warning` is already the product's "waiting on you"
+  hue, so at 16px in an unfocused tab the states have to differ in value, not in contents.
+  The mark also took over the board head's 30 × 30 back control — brand and home in one
+  control, same `aria-label`, still hidden under `body.readonly` — and now leads the index
+  title. The hue is shared with `.live-dot` and `.pending-badge.has-pending` from here on;
+  `ADR.md` entry 12 records what that costs.
 - **An `html` block can carry a `source` instead of the markup itself.** `{ kind: 'html',
   source: { path } }` resolves through the same reader, confinement, 512 KiB cap and sha
   snapshotting as `markdown`, `code` and `mermaid`, with the same block-level `error` on a
@@ -58,6 +103,22 @@ this project does not yet follow semantic versioning, because nothing has been r
   and `section` are refused with a block-level error naming markup slicing as the reason,
   because cutting markup at a line boundary yields unclosed tags and orphaned `<style>`
   where cutting text the same way still yields text. See ADR.md entry 7.
+
+### Changed
+
+- **The prose-vs-shim checker is no longer something every caller pastes a bootstrap for.**
+  Its subject moved into this repo with the manual, so `PROTOCOL.md`'s copy-paste resolution
+  story is documented as the last resort rather than the shape every caller takes: a caller
+  restating no protocol needs no check, and a caller making one vocabulary claim can assert it
+  against the installed manual with a plain file read. The three renderer skills dropped the
+  18-line launchd-plist loader entirely; `/example` keeps its one assertion (it posts
+  `choose-between-rendered-variants`) and now checks it that cheaper way.
+
+- **A markdown link opens in a new tab.** Every rendered link now carries
+  `target="_blank" rel="noopener noreferrer"`. A board is a thing the reviewer is in the
+  middle of, and a same-tab navigation discarded unsubmitted answers and half-typed comments
+  with no warning and no way back to the draft. Neutralised URLs still collapse to `href="#"`
+  exactly as before.
 
 ### Fixed
 

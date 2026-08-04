@@ -147,8 +147,15 @@ Questions carry their prompt by value; content blocks carry a reference to a fil
 an optional section or line range, which the daemon resolves and snapshots at post
 time. Block kinds are `markdown`, `mermaid`, `code`, `html`, `compare` and `question`;
 answer widgets are single-choice cards, multi-select, free text, drag-to-rank and a
-choice between rendered variants. See
-[PROTOCOL.md](PROTOCOL.md) for the full wire format.
+choice between rendered variants.
+
+Agents do not learn that from this file. `install.sh` copies
+[`skills/claude-board/SKILL.md`](skills/claude-board/SKILL.md) — the manual for the tool:
+call shape, every block kind and widget, the packet that comes back, and what to do when
+the board is unavailable — into `~/.claude/skills/claude-board/`, and a skill or command
+that posts boards names it rather than restating any of it (ADR.md entry 11). It is the
+one thing this repo installs beyond the daemon and its registration. See
+[PROTOCOL.md](PROTOCOL.md) for the full wire format underneath.
 
 ## How it works
 

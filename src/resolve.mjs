@@ -227,10 +227,11 @@ function contains(parent, child) {
  * **An absent variable is an EMPTY allowlist** (audit S3, 2026-07-31), and the choice is
  * deliberate enough to spell out. The alternative — absent meaning `DEFAULT_REF_ROOTS` —
  * reads better in a dev shell and is wrong here, because of how this daemon updates:
- * every install predating ADR.md entry 3 has a plist carrying no such key, and the daemon
- * restarts itself the moment `src/` changes. A default compiled in HERE therefore takes
- * effect on those machines on the next `git pull`, with no reinstall, nothing printed and
- * nobody asked — a security boundary widening itself during a routine sync. A default
+ * every install predating ADR.md entry 3 has a plist carrying no such key, and the running
+ * daemon loads whatever `src/` says the next time launchd starts it — on a reboot or a
+ * login, not just on a deliberate restart. A default compiled in HERE therefore takes
+ * effect on those machines some time after a `git pull`, with no reinstall, nothing printed
+ * and nobody asked — a security boundary widening itself during a routine sync. A default
  * written by `install.sh` cannot do that: it takes effect when someone runs the installer,
  * which is a thing a person does on purpose. So the value that ships is `DEFAULT_REF_ROOTS`
  * spelled into the plist, and the code's own answer to "nothing configured" is the
@@ -562,6 +563,98 @@ export function resolveRef(ref, { cwd, roots } = {}) {
   if (sliced.error) return { error: sliced.error };
 
   return { text: sliced.text, sha: sha256(sliced.text) };
+}
+
+/** Open a file for the daemon to serve back verbatim, confined to `roots`.
+ *
+ * This is `resolveRef`'s sibling for a DIFFERENT job, and the difference is the whole
+ * reason it is a separate function rather than a flag. `resolveRef` reads bytes to put
+ * INSIDE a board — confined to the board's `cwd`, capped, sliceable, and rendered under
+ * the board's own CSP. This one hands back a descriptor whose bytes leave untouched, so
+ * a rendered document opens at full size in its own tab instead of inside a 320px stage.
+ * Nothing here slices, caps or transcodes: "as-is" is the feature.
+ *
+ * Consequently the allowlist is its OWN env var (`CLAUDE_BOARD_SERVE_ROOTS`), never
+ * `CLAUDE_BOARD_REF_ROOTS`, and absent still means empty — i.e. serving is off until
+ * someone names a directory on purpose. Serving is a strictly larger grant than
+ * referencing: a referenced HTML file is escaped into a board block, while a served one
+ * is a live document at the daemon's own origin, which is the escalation src/server.mjs's
+ * `frame-ancestors` comment already worries about. Sharing one allowlist would have
+ * widened every existing install's reference roots into serve roots on a `git pull`,
+ * which is exactly the silent-widening failure `resolveRefRoots` refuses to commit.
+ *
+ * `relPath` is the already-percent-decoded path from the URL, resolved against each root
+ * in order; the first root that yields a regular file wins. A collision between two roots
+ * is therefore decided by their order in the env var and nothing else (ponytail: no
+ * disambiguation, since the expected configuration is one directory. The upgrade path, if
+ * a second root ever earns its keep, is a root name as the URL's first segment).
+ *
+ * A directory resolves to `index.html` inside it, so the folder listing a generator
+ * already writes is what `/file/` answers with. There is no generated listing here: the
+ * daemon serves files, it does not enumerate them.
+ *
+ * Every refusal is the SAME refusal — `{ error }` with no detail, which the caller turns
+ * into a bare 404. Traversal, a symlink aimed out of a root, a fifo, a missing file and a
+ * root nobody configured are indistinguishable from outside, for audit S7's reason: a
+ * route that answers differently for "not there" and "there but refused" is an
+ * existence oracle for the whole disk, and this one is reachable by any page the browser
+ * has already been authorized to load.
+ *
+ * Returns `{ fd, size }` — the CALLER owns that descriptor and must close it. */
+export function openServed(relPath, roots) {
+  const refused = { error: 'not found' };
+  if (!Array.isArray(roots) || roots.length === 0) return refused;
+  if (typeof relPath !== 'string' || relPath.includes('\0')) return refused;
+
+  // Lexical rejection before any syscall. `path.join` would happily collapse `../` into
+  // an escape, and while the realpath containment check below catches that anyway, a
+  // path that SPELLS an escape is never a legitimate request -- refusing it here means
+  // the containment check is a backstop rather than the only line.
+  const segments = relPath.split('/').filter(Boolean);
+  if (segments.some(s => s === '..' || s === '.')) return refused;
+  if (path.isAbsolute(relPath)) return refused;
+
+  for (const root of roots) {
+    let real;
+    try {
+      real = realpathSync(path.join(root, ...segments));
+    } catch {
+      continue; // dangling, unreadable, a loop -- all one answer, and try the next root
+    }
+    if (real !== root && !contains(root, real)) continue; // symlink aimed out of the root
+
+    let target = real;
+    try {
+      if (statSync(real).isDirectory()) {
+        target = realpathSync(path.join(real, 'index.html'));
+        if (!contains(root, target)) continue;
+      }
+    } catch {
+      continue; // a directory with no index.html is not a listing, it is a 404
+    }
+
+    // From here it is resolveRef's discipline exactly: one descriptor, opened with
+    // symlinks refused (so an ELOOP means the tree moved between the realpath above and
+    // this line), and every guard interrogating that descriptor rather than the name.
+    let fd;
+    try {
+      fd = openSync(target, REF_OPEN_FLAGS);
+    } catch {
+      continue;
+    }
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) {
+        closeSync(fd);
+        continue; // a fifo would wedge the daemon's only thread; a device would eat it
+      }
+      return { fd, size: st.size, path: target };
+    } catch {
+      try { closeSync(fd); } catch { /* already gone */ }
+      continue;
+    }
+  }
+  return refused;
 }
 
 // Best-effort file-extension -> language guess for a resolved code block's `lang`

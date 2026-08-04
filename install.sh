@@ -26,11 +26,15 @@
 #      reads from the environment has to be written here or it may as well
 #      not exist.
 #
-# That is the whole boundary (ADR.md entry 5): this script installs the
-# service and its credential, and nothing that calls them. `/grill` and every
-# other caller are personal, versioned in ~/.claude's own git repo, and evolve
-# on their own schedule — a fresh clone yields a daemon and an MCP
-# registration, and pointing something at them is a separate, later act.
+# Plus one file, added in step 6 below: skills/claude-board/SKILL.md, the manual
+# for the `ask` tool, copied to ~/.claude/skills/claude-board/.
+#
+# That is the whole boundary (ADR.md entries 5 and 11): this script installs the
+# service, its credential and the manual for its one tool, and nothing that
+# calls them. `/grill` and every other caller are personal, versioned in
+# ~/.claude's own git repo, and evolve on their own schedule — a fresh clone
+# yields a daemon, an MCP registration and a manual, and pointing something at
+# them is a separate, later act.
 #
 # Running this script again on a machine that already has the service must
 # change nothing and break nothing: no duplicate MCP registration, no
@@ -57,6 +61,7 @@
 #   CLAUDE_BOARD_APP_DIR             default: ~/Applications
 #   CLAUDE_BOARD_CC                  default: cc
 #   CLAUDE_BOARD_CODESIGN            default: codesign
+#   CLAUDE_BOARD_SKILLS_DIR          default: ~/.claude/skills
 #
 # macOS only, zero dependencies: bash + coreutils + launchctl/plutil, nothing
 # this OS doesn't already ship — with one soft dependency, the `cc` from the
@@ -82,6 +87,9 @@ SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
 APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
 CC_CMD="${CLAUDE_BOARD_CC:-cc}"
 CODESIGN_CMD="${CLAUDE_BOARD_CODESIGN:-codesign}"
+SKILLS_DIR="${CLAUDE_BOARD_SKILLS_DIR:-$HOME/.claude/skills}"
+SKILL_SRC="$REPO_DIR/skills/claude-board/SKILL.md"
+SKILL_DEST_DIR="$SKILLS_DIR/claude-board"
 
 # TCC records a grant against the bundle identifier and the code signature, so this
 # string is the durable name of the thing the user ticks in System Settings. It is
@@ -145,6 +153,32 @@ else
   REF_ROOTS_FROM="default"
 fi
 
+# CLAUDE_BOARD_SERVE_ROOTS: where `GET /file/<path>` may read from. Resolved with the
+# same precedence as the reference roots above, and for the same reasons — an explicit
+# variable wins (empty included), otherwise the installed plist is carried forward, and
+# only a machine with no plist gets the default. src/resolve.mjs reads an absent value as
+# an empty allowlist, i.e. the route is off, so the default lives here and nowhere else.
+#
+# It is a SEPARATE variable from the reference roots, deliberately, and the difference is
+# a real escalation rather than bookkeeping: a referenced file is escaped into a board
+# block, while a served file is a live document at the daemon's own origin. Sharing one
+# list would have turned every existing install's reference roots into serve roots on the
+# next `git pull`, which is precisely the silent widening the paragraph above refuses.
+#
+# The default is the one directory the render skills write into. A machine without it
+# installs fine and serves nothing: src/resolve.mjs drops a root that does not exist,
+# rather than failing the install or widening to its parent.
+DEFAULT_SERVE_ROOTS="$HOME/Documents/renders"
+if [ -n "${CLAUDE_BOARD_SERVE_ROOTS+set}" ]; then
+  SERVE_ROOTS="$CLAUDE_BOARD_SERVE_ROOTS"
+  SERVE_ROOTS_FROM="CLAUDE_BOARD_SERVE_ROOTS"
+elif SERVE_ROOTS="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_SERVE_ROOTS raw -o - "$PLIST_PATH" 2>/dev/null)"; then
+  SERVE_ROOTS_FROM="carried forward from $PLIST_PATH"
+else
+  SERVE_ROOTS="$DEFAULT_SERVE_ROOTS"
+  SERVE_ROOTS_FROM="default"
+fi
+
 # CLAUDE_BOARD_HOME, resolved the same way and for the same reason (audit). It is
 # documented configuration (README.md, PROTOCOL.md), but it was never written into
 # the plist -- and a launchd job inherits nothing from the shell that ran this
@@ -175,6 +209,12 @@ else
   echo "    reference roots: none (a reference resolves inside the board project directory only)"
 fi
 echo "                     [$REF_ROOTS_FROM]"
+if [ -n "$SERVE_ROOTS" ]; then
+  echo "    serve roots:     $SERVE_ROOTS"
+else
+  echo "    serve roots:     none (/file serves nothing)"
+fi
+echo "                     [$SERVE_ROOTS_FROM]"
 # Printed for the same reason the roots are: the store is where the reviewer's answers
 # end up, and an operator who redirected it should be able to see that it took.
 if [ -n "$BOARD_HOME_FROM" ]; then
@@ -491,6 +531,9 @@ PORT_X="$(xml_escape "$PORT")"
 # reads an absent key as no allowlist at all, which is why this key is never omitted.
 # What the value IS was decided up top, including carrying an existing plist's forward.
 REF_ROOTS_X="$(xml_escape "$REF_ROOTS")"
+# Same treatment for the serve roots, and never omitted for the same reason: an absent
+# key reads as an empty allowlist, which is the OFF state, so the key always says which.
+SERVE_ROOTS_X="$(xml_escape "$SERVE_ROOTS")"
 
 # What launchd actually execs, and therefore what TCC will attribute every file the
 # daemon reads to. The launcher takes no arguments on purpose (bin/launcher.c: the target
@@ -543,6 +586,8 @@ ${PROGRAM_ARGS_XML}
 		<string>${PORT_X}</string>
 		<key>CLAUDE_BOARD_REF_ROOTS</key>
 		<string>${REF_ROOTS_X}</string>
+		<key>CLAUDE_BOARD_SERVE_ROOTS</key>
+		<string>${SERVE_ROOTS_X}</string>
 ${BOARD_HOME_XML}	</dict>
 </dict>
 </plist>
@@ -663,6 +708,28 @@ if ! "$MCP_CMD" mcp add "$LABEL" --scope user -- "$NODE_BIN" "$MCP_PATH"; then
   echo "error: '$MCP_CMD mcp add' failed — the daemon is running, but Claude Code has no" >&2
   echo "       registration for it. Re-run this script once that command works." >&2
   exit 1
+fi
+
+# --- 6. The manual ---------------------------------------------------------
+# skills/claude-board/SKILL.md copied to ~/.claude/skills/claude-board/, which is
+# where Claude Code looks for a personal skill. This is not a caller (ADR.md entry 5,
+# amended by entry 11): it teaches the `ask` tool's call shape, block kinds, widgets,
+# packet and failure modes, and decides nothing about when to ask. Callers name it and
+# keep only what is specific to them, so the protocol has one statement instead of one
+# per caller.
+#
+# Unconditional overwrite, no hash record and no did-they-edit-it branch — the machinery
+# entry 5 deleted along with the old command-file step. The file is this repo's, says so
+# in its own first line, and a copy that quietly stops matching the shim is the whole
+# failure this step exists to prevent. Non-fatal: a daemon and a registration are the
+# install, and a missing manual must not fail a run that produced both.
+echo "==> installing the board's manual to $SKILL_DEST_DIR/SKILL.md"
+if [ ! -f "$SKILL_SRC" ]; then
+  echo "warning: $SKILL_SRC is missing — skills that name the claude-board skill will not" >&2
+  echo "         find it. The daemon and the MCP registration are unaffected." >&2
+elif ! (mkdir -p "$SKILL_DEST_DIR" && cp "$SKILL_SRC" "$SKILL_DEST_DIR/SKILL.md"); then
+  echo "warning: could not write $SKILL_DEST_DIR/SKILL.md. The daemon and the MCP" >&2
+  echo "         registration are unaffected." >&2
 fi
 
 echo

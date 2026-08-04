@@ -12,7 +12,7 @@
 // of keying by project directory instead.
 
 import path from 'node:path';
-import { styles, faviconLink } from './styles.mjs';
+import { styles, faviconLink, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { questionBlocks } from './board.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
@@ -78,10 +78,30 @@ function pendingCount(board) {
   }).length;
 }
 
-/** A board is "live and waiting" while it has a posted round nobody has sent yet —
- * the same signal `POST /api/board/:id/submit` clears. */
+/** A board is "live and waiting" while it has a posted round nobody has sent yet **that
+ * actually asks something** — the same signal `POST /api/board/:id/submit` clears.
+ *
+ * The question clause is not a refinement, it is what keeps the state reachable. A round
+ * is marked `sent` in exactly one place (`applySubmit`), and a reviewer submits by
+ * answering — so a round carrying no question block has no gesture that could ever clear
+ * it, and the row pulsed forever. That used to be a corner case and is now the common one:
+ * a skill that renders a document and posts a pointer to it asks nothing by design, so
+ * every `/explain`, `/visualize` and `/gamify` post was a permanent false alarm, and a
+ * thread that had genuinely finished kept the dot because its closing summary was a round
+ * with nothing to answer.
+ *
+ * The row was already contradicting itself out loud — `pendingCount` counts question
+ * blocks, so these rows rendered a pulsing "someone owes you something" dot immediately
+ * beside their own `0 pending`. This makes `live` agree with the count next to it: both
+ * now mean "the reviewer owes this board something", and neither invents work.
+ *
+ * Deliberately NOT a "visited" flag. Tracking whether someone had opened the page needs
+ * per-reader state the store does not have, and a GET that writes; nothing is owed here
+ * regardless of whether anyone looked, so the honest signal is the question, not the
+ * visit. */
 function isLiveBoard(board) {
-  return (board.rounds || []).some(r => r.status === 'open');
+  const roundsThatAsk = new Set(questionBlocks(board).map(b => b.round));
+  return (board.rounds || []).some(r => r.status === 'open' && roundsThatAsk.has(r.n));
 }
 
 /** How many rounds one board doc has reached. */
@@ -583,8 +603,11 @@ ${faviconLink}
 <div class="index-shell">
   <header class="index-head">
     <div class="index-head-titles">
-      <h1>claude-board</h1>
-      <div class="meta">one thread per Claude session</div>
+      ${markSvg(36)}
+      <div>
+        <h1>claude-board</h1>
+        <div class="meta">one thread per Claude session</div>
+      </div>
     </div>
     <div class="index-head-actions">
       ${pomodoroWidget()}

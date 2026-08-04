@@ -179,16 +179,39 @@ export const palettes = { dark: DARK, light: LIGHT };
 // same mark with the network off and the daemon gone.
 //
 // A favicon gets no CSS, so both colours are literals here rather than var()s --
-// read straight off DARK so a palette edit stays a one-block edit. DARK's accent
-// in both themes on purpose: the tile is the accent, and the browser paints it
-// against its own chrome, not against the page. (An icon that followed
-// prefers-color-scheme would vanish into whichever tab strip it matched.)
-const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">`
-  + `<rect width="32" height="32" rx="8" fill="${DARK['--accent']}"/>`
-  + `<rect x="7" y="8" width="18" height="3.4" rx="1.7" fill="${DARK['--accent-ink']}" opacity=".5"/>`
-  + `<rect x="7" y="14" width="11" height="3.4" rx="1.7" fill="${DARK['--accent-ink']}" opacity=".5"/>`
-  + `<rect x="7" y="20.2" width="18" height="4.4" rx="2.2" fill="${DARK['--accent-ink']}"/>`
-  + `</svg>`;
+// read straight off DARK so a palette edit stays a one-block edit. DARK's
+// --warning in BOTH themes on purpose, and it is the one token that can be: amber
+// is the only hue the palette carries at nearly the same value in either theme's
+// usable range, so the mark needs no light variant to keep in sync. It must be
+// named off DARK explicitly, though -- light's --warning is #805300, a brown tuned
+// for contrast against text, which would turn the tile to mud. (An icon that
+// followed prefers-color-scheme would vanish into whichever tab strip it matched.)
+//
+// Rows are 4.6/4.6/5.4, not the 3.4 this shipped with: below ~4 the two quiet bars
+// merge into one after the browser's downsample to 16px, and 16px is the only size
+// that matters. The open row is the only one at full opacity -- the single piece of
+// hierarchy the mark carries. rx 9 rather than 8 to match the heavier bars.
+//
+// --warning is also how the product says "waiting on you" (.live-dot,
+// .pending-badge.has-pending, .thread-item.live), so the pending badge in
+// src/ui.mjs INVERTS this tile rather than drawing a count on it: an amber count
+// on an amber tile makes idle and pending the same object at 16px, whereas a value
+// flip is the one change peripheral vision catches in the unfocused tab that is
+// the only tab this has to work in. ADR.md records what that costs.
+const MARK_SHAPES =
+  `<rect width="32" height="32" rx="9" fill="${DARK['--warning']}"/>`
+  + `<rect x="7" y="6.6" width="18" height="4.6" rx="2.3" fill="${DARK['--accent-ink']}" opacity=".34"/>`
+  + `<rect x="7" y="13.4" width="11" height="4.6" rx="2.3" fill="${DARK['--accent-ink']}" opacity=".34"/>`
+  + `<rect x="7" y="20" width="18" height="5.4" rx="2.7" fill="${DARK['--accent-ink']}"/>`;
+
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">${MARK_SHAPES}</svg>`;
+
+/** The same mark sized for the page rather than the tab: the board head's home
+ * control (30, the slot it now fills outright) and the index title (36). Shares
+ * MARK_SHAPES with the favicon so the tab and the page can never drift. No
+ * `xmlns` -- this is inlined into HTML, not a standalone document. */
+export const markSvg = (size) =>
+  `<svg viewBox="0 0 32 32" width="${size}" height="${size}" aria-hidden="true">${MARK_SHAPES}</svg>`;
 
 /** The `<link rel="icon">` every page emits, href inlined. `encodeURIComponent`
  * rather than a hand-escaped string: `#` in a data URI would otherwise cut the
@@ -312,14 +335,20 @@ svg { flex: none; }
    archive has no daemon behind "/" to navigate to -- same idiom as
    .mode-toggle/.send-bar just above/below: kept in the markup (one
    byte-identical page, live or archived) and hidden structurally, not merely
-   disabled. */
+   disabled.
+
+   The slot holds the mark itself (markSvg, above), not an arrow in a framed
+   button: it was already at favicon proportions, so brand and home became one
+   control instead of two sitting side by side. That means no panel fill and no
+   hairline -- a frame around the tile would read as a second, competing corner
+   radius -- so hover is carried by value alone. The global :focus-visible
+   outline near the top of this file still lands on it, keyboard reach unchanged. */
 .back-to-index {
   flex: none; display: inline-flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px; border-radius: var(--r-md); color: var(--ink-2);
-  background: var(--panel-2); border: 1px solid var(--hairline);
-  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
+  width: 30px; height: 30px; padding: 0; border: 0; background: none;
+  opacity: 0.88; transition: opacity var(--dur) var(--ease);
 }
-.back-to-index:hover { border-color: var(--hairline-2); color: var(--ink); background: var(--panel-3); }
+.back-to-index:hover { opacity: 1; }
 body.readonly .back-to-index { display: none; }
 /* font: inherit is not decoration -- ticket 04 turned this from a <span> into a
    <button> (src/render.mjs), and a button does NOT inherit font-family from its
@@ -855,7 +884,14 @@ body.comment-mode .blocks { cursor: crosshair; }
 .index-shell { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: var(--space-6) var(--space-5) 96px; }
 .index-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);
   margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--hairline); }
-.index-head-titles { min-width: 0; }
+/* The mark leads the index title rather than taking a control over: this page has
+   no back control to absorb it, and it is the one page whose h1 IS the product
+   name, so the two belong in a single lockup. The inner div carries min-width: 0
+   so a long meta line wraps instead of shoving the mark out of the row. */
+.index-head-titles { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.index-head-titles > svg { flex: none; }
+.index-head-titles > div { min-width: 0; }
+/* the gap separates the pomodoro widget from the theme toggle beside it */
 .index-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 .index-head h1 { font-size: 22px; margin: 0 0 var(--space-1); font-weight: 650; letter-spacing: -0.02em; }
 .index-head .meta { color: var(--muted); font-size: 12.5px; }

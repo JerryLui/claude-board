@@ -229,6 +229,21 @@ For `html` (`SPEC_HTMLREF.md`, `ADR.md` entry 7), quoting it means its markup is
 inside the sandboxed stage — still opaque-origin, still under the page CSP, so this is not
 a new hole, but it is a bigger one to fall into by the same route.
 
+**A document served from a serve root, beyond what its CSP holds.** `GET /file/<path>`
+(`PROTOCOL.md`, `ADR.md` entry 10) hands a file to the browser as-is, so anything under
+`CLAUDE_BOARD_SERVE_ROOTS` runs as a live page at the daemon's own origin — a strictly larger
+grant than the reference boundary, which is why it is a separate allowlist and why an absent
+value means the route is off. The session cookie is `HttpOnly` (page script cannot read it) and
+`SameSite=Strict`, but same-origin is same-origin: a served page could otherwise `fetch` a
+submit and answer a question as you. The served response's `connect-src 'none'` and
+`form-action 'none'` are what close that, and they are load-bearing rather than defence in
+depth. What remains open, deliberately: a served page can still trigger a **top-level
+navigation** to a daemon URL. Those reach read routes only, by GET, and land in a tab the
+reviewer can see; the header that would stop them (`navigate-to`) exists in no shipping
+browser. The practical boundary is therefore the allowlist itself — a serve root is a directory
+whose contents you are choosing to execute, and the shipped default is the one directory the
+render skills generate into.
+
 **A browser extension with host permissions on the profile holding the credential.** It
 can read boards and submit as you. `HttpOnly` stops page script, not extensions.
 

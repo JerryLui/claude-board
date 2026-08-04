@@ -228,6 +228,12 @@ all three) are retired the same way, replaced by assertions that the removed mac
 (`GRILL_SRC`, `COMMAND_FILE`, the hash record) is actually gone from both scripts' source,
 and that a file sitting at the old command-file path survives an uninstall untouched.
 
+**Amended by entry 11, 2026-08-04.** "It ships **no callers**" stands; "it ships no files under
+`~/.claude`" does not. `install.sh` installs one — `skills/claude-board/SKILL.md`, the manual for
+the `ask` tool — on the argument that a manual is the protocol in the form an agent reads, and
+that this repo wrote the protocol. The hash-comparison machinery this entry deleted stays
+deleted: the copy is unconditional.
+
 ## 6. Commenting is confined to content blocks — 2026-08-01
 
 **Context:** All six block kinds carried a comment button in their kicker and, independently
@@ -340,3 +346,141 @@ Rejected: a second, separate bundle for the menu bar, which leaves `launcher.c` 
 alone but needs its own compile, ad-hoc signature, launchd agent and uninstall path — a lot of new
 installer surface for a countdown. If the menu bar is ever revisited, that is the shape to revisit,
 not AppKit in the launcher.
+
+## 10. The daemon serves a rendered file, it does not render one — 2026-08-04
+
+**Context:** Entry 7 left `/explain` posting a pointer: an absolute path as plain text. A path
+is not clickable, and the two obvious ways to make it so are both dead. Markdown deliberately
+allows only `http(s)` and `mailto`, so a `file://` link renders as `href="#"`; and even if it
+did not, no browser will navigate from an `http://127.0.0.1` page to `file://`. The daemon also
+could not read `~/Documents/renders` at all — not under any board's `cwd`, not in
+`DEFAULT_REF_ROOTS`.
+
+**Decision:** A `GET /file/<path>` route that streams a file from `CLAUDE_BOARD_SERVE_ROOTS`
+byte for byte, and markdown links that open in a new tab. The board does no processing: it
+does not wrap the document in a block, slice it, cap it, or generate a listing for a directory
+(a directory answers with the `index.html` a generator already wrote there). Rejected: having
+the daemon `spawn` an opener on the path, which is ~15 lines against this route's ~80 but adds
+an exec surface reachable by anything that can reach the daemon; and a copy-to-clipboard
+affordance, which is not a link. Serving gets its OWN allowlist rather than reusing the
+reference roots, because a referenced file is escaped into a block while a served one is a live
+document at the daemon's origin — sharing one list would have widened every existing install's
+boundary on a `git pull`, the exact failure entry 3 was written to prevent.
+
+**Consequences:** A served document is same-origin with `/api/board`, and the session cookie is
+`SameSite=Strict`, so a `fetch` from one would carry it — the served response's CSP therefore
+sets `connect-src 'none'` and `form-action 'none'`, which is the clause the route's safety
+rests on rather than a hardening flourish. What it does not stop is a top-level navigation from
+a served page to a daemon URL; those are GETs against read routes, landing in a visible tab,
+and `navigate-to` does not exist in any shipping browser. Every refusal collapses to a bare 404
+so the route cannot be used to probe the disk, which means a genuine misconfiguration (a root
+that was dropped for not existing) looks exactly like a typo — the install script prints the
+resolved roots for that reason. `~/Documents/renders` as the shipped default is a convention
+this repo does not own and cannot enforce; a machine without that directory installs fine and
+serves nothing.
+
+## 11. The repo ships one caller-facing file: the manual — 2026-08-04
+
+**Context:** Entry 5 drew the boundary at "the protocol, not its callers", and it held for the
+callers. It did not hold for the protocol. Six files outside this repo — `commands/grill.md`,
+`commands/wayfind.md` and the `example`, `explain`, `gamify` and `visualize` skills — each
+carried their own statement of how to call `ask`: 148 lines between them, three of them
+word-for-word identical on the `posted`/`isError` paragraph. That duplication then grew its own
+infrastructure: `src/prose-check.mjs` exists to catch drift in those copies, and four of the six
+pasted the same 18-line launchd-plist bootstrap into a `check.mjs` to reach it, a copy-paste this
+repo documented as a maintenance contract (PROTOCOL.md, "Resolution story"). Six copies, six
+chances to drift, and they had: five of the six never told the agent to relay the recovery
+command the tool prints, `grill.md` documented four widgets for as long as there were five, and
+its "html has no source" sentence went stale the day entry 7 landed.
+
+**Decision:** `skills/claude-board/SKILL.md` — the manual for the `ask` tool — ships from this
+repo, and `install.sh` step 6 copies it to `~/.claude/skills/claude-board/`. Callers name the
+skill and keep only what is theirs: which blocks they post, and what their own degraded path is.
+A manual is not a caller. It teaches the call shape, the block kinds, the widgets, the packet and
+the failure modes, and decides nothing about when to ask or what to ask about — it is the
+protocol in the form an agent reads, which is the thing entry 5 already said this repo ships.
+
+Copy, not symlink, and unconditional: no hash record, no did-they-edit-it branch. That machinery
+is what entry 5 deleted along with the old command-file step, and it is not coming back — the
+file is this repo's, says so in its own first line, and the failure this step exists to prevent
+is a copy that quietly stops matching the shim. The copy is non-fatal: a daemon and a
+registration are the install, and a missing manual must not fail a run that produced both.
+
+**Consequences:** The boundary moves from "no files" to "one file, and it is ours" — a weaker
+line than entry 5's, and one that needs defending every time something else asks to ship. The
+test is authorship, not usefulness: this repo wrote the protocol, so it writes the manual; it did
+not write `/grill`, so `/grill` stays out. What that buys is the thing entry 5's own consequences
+paragraph called the cost of the move: `test/check-skill-prose.mjs` binds prose to mechanism
+again, in the same repo as the shim, on the commit that breaks it. It goes further than
+`test/check-grill.mjs` ever did — it also checks for *absence*, failing when a widget, block kind
+or packet status PROTOCOL.md defines is missing from the manual, which is the check that would
+have caught the four-widget drift. The plist bootstrap loses its last real caller; `/example`
+keeps one assertion of its own (it posts `choose-between-rendered-variants`) and now proves it
+against the installed manual, reading a file rather than resolving a repo.
+Rejected: a symlink, which keeps one source of truth and updates with `git pull` — the reviewer
+chose the copy, and the drift it risks is now bounded by the check above. Rejected: folding the
+protocol into the `ask` tool's own description, which needs no install step at all but puts the
+whole protocol in the context window of every session, board or no board. Rejected: leaving the
+manual in `~/.claude`, which deduplicates the callers but leaves this repo unable to prove its
+own manual — the exact gap entry 5 opened and this entry closes.
+
+**Status: accepted.** Shipped with the deduplication it exists for: the six callers now name the
+skill instead of restating it, and the three `check.mjs` bootstraps went with the prose they
+guarded. `install.sh` step 6 and `uninstall.sh` step 2b are covered by four checks in
+`test/check-install.mjs` (byte-identical copy, an edited copy is overwritten, a clone with no
+manual still installs, uninstall removes its own file and leaves a neighbour alone).
+
+## 12. The mark is amber, so the brand shares a hue with "waiting on you" — 2026-08-04
+
+**Context:** The tab mark was an `--accent` tile: periwinkle on dark, and a different blue on
+light, because `--accent` is one of the tokens whose two theme values sit far apart in value. A
+favicon gets no CSS and no `prefers-color-scheme` worth having — an icon that followed the
+scheme vanishes into whichever tab strip it matched — so it read `DARK['--accent']` in both
+themes, and on a light tab strip the tile was noticeably darker than anything else there. The
+rows were 3.4 tall and merged into one bar after the browser's downsample to 16px, which is the
+only size the mark is ever seen at. The redesign moved the tile to `DARK['--warning']`: amber is
+the one hue this palette carries at nearly the same value in either theme's usable range, so one
+tile serves both, and against near-black rows it is the highest value contrast the palette can
+produce, which is what buys legibility at 16px.
+
+**Decision:** The mark takes `--warning`, and the pending mark inverts the same tile — ink ground
+where the mark is amber, an amber pip where the mark is ink — rather than adding anything to it.
+
+Amber is not a free colour here. `--warning` is already how the product says *waiting on you*:
+`.live-dot`, `.pending-badge.has-pending`, `.thread-item.live`, `.btn-defer.active`. An amber pip
+on an amber tile would make idle and pending the same object at 16px, which is the whole job the
+pending mark exists to do — the tab that needs marking is by definition the unfocused one, and in
+peripheral vision a value flip is the only change that reliably lands. Inverting also puts the
+pending mark on the same `rx 9` tile as the idle one, where it used to be a circle: idle and
+pending are now one object in two states rather than two shapes at two corner radii.
+
+The sibling decision — that the tab stops counting, so the mark carries no digit and the title
+takes no `(n)` prefix (CHANGELOG, "The pending-round mark on a tab lost its number, not its
+mark") — landed independently and is untouched here. The two compose: with no digit to carry,
+the whole signal is the value flip, which is exactly what the inversion is for. The design this
+came from had specified a numeral on the inverted tile; the count was dropped between the two,
+and the inversion was kept because its argument was never the digit.
+
+**Consequences:** The brand now permanently shares a hue with a state colour, and the sharing
+runs one way only. A future palette edit to `--warning` — retuning the live dot, say — moves the
+tile and the mark with it, silently, because both read the token rather than a literal. That is
+the cost, and it is accepted in exchange for the token discipline: no new hex enters the tree,
+`test/check-pure.mjs`'s raw-literal check has nothing to catch, and a palette edit stays a
+one-block edit. What must not be undone is the explicit `DARK` naming — light's `--warning` is
+`#805300`, a brown tuned for contrast against text, and a well-meaning switch to the active
+theme's token would turn the tile to mud on exactly half the machines.
+
+Two smaller consequences fell out. The tile now needs `roundRect` rather than `arc` (Safari
+16.4+, Chrome 99+ — fine for a macOS-only tool, and where it is missing `drawFavicon`'s existing
+`try/catch` returns null and the tab keeps its unbadged mark, which is the correct degradation).
+And the mark took over the board head's 30 × 30 `.back-to-index` slot, which was already at
+favicon proportions: brand and home are one control now instead of two side by side, it still
+disappears under `body.readonly` where there is no daemon to go home to, and it keeps the arrow's
+`aria-label`, so nothing changed for a screen reader. On the index — the one page with no back
+control, and the one page whose `h1` is the product name — the mark leads the title instead.
+
+**Status: accepted.** Covered by three checks in `test/check-pure.mjs`: the favicon paints
+`DARK['--warning']` and never light's, the pending mark paints a `--warning` pip on a `--bg` tile
+at the same `rx 9` (and never `--accent-ink`, which on `--bg` is a pip nobody can see — the state
+this landed in straight out of the merge), and the marks in the board head and the index head are
+the favicon's own rects rather than a second copy of the geometry.
