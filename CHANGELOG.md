@@ -7,12 +7,47 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ### Added
 
+- **A pomodoro timer, owned by the daemon.** A Claude Code session starting begins a work
+  interval; from there it is a self-sustaining loop — work rolls into break, break rolls
+  into work — until you pause or reset it, and every fourth break is a long one. Each
+  boundary fires a native macOS notification through `osascript`, so it reaches you with
+  no browser tab open, no browser running and no permission prompt; sound, off by default,
+  rides the same call as a `/System/Library/Sounds` name rather than an audio file this
+  repo would have to ship. The index page carries the countdown, pause/resume and a
+  settings panel for the three durations, the long-break interval and the two toggles.
+
+  The daemon holds the clock rather than the browser — a deliberate departure from ADR 1's
+  client-side-only precedent, on the grounds that a theme is a per-reader preference while
+  a pomodoro is a single fact about the human (ADR entry 8). What it stores is the
+  interval's **absolute wall deadline**, not remaining seconds, which is what makes a
+  daemon restart invisible and what makes the sleep rule expressible at all: a deadline
+  already past by more than 30 seconds is discarded silently instead of fired, so
+  reopening a lid after four hours does not stack up reminders for breaks you took by
+  being asleep.
+
+  The timer is **advisory only**. No tool learns of it, no `ask` is delayed, blocked or
+  annotated, and no board post is gated at a boundary — Claude works straight through it.
+  There is no menu bar item, because the launcher bundle is ad-hoc signed and changing its
+  bytes would cost the user their TCC Documents grant (ADR entry 9).
+
+  The `SessionStart` hook that starts the loop ships as a documented snippet in
+  `INSTALL.md`, applied by hand: `install.sh` reads and writes nothing under
+  `~/.claude/settings.json` (ADR entry 5), and `uninstall.sh` leaves that snippet exactly
+  where it found it while removing `pomodoro.json` from the store by exact name.
 - **A tab mark.** The board, the index and the refusal page all emit the same inline
   `data:image/svg+xml` favicon (a board with two quiet rows and one emphasised row),
   painted from the dark palette so it never drifts from `--accent`, and inline so the
   standalone `file:` archive shows it with the network off. Clearing the pending-round
   badge now restores that mark instead of leaving the tab blank, and the badge itself
   is drawn in the real accent rather than the two-edits-stale blue it had been using.
+- **The pending-round mark on a tab lost its number, not its mark.** `document.title`
+  no longer takes a `(n) ` prefix and the favicon no longer has a digit drawn on it —
+  `setTitleBadge` is deleted outright rather than left assigning the base title back to
+  itself. The favicon still shows a countless pip (the same two accent colours, no
+  `fillText`) whenever a round is pending, and the Web Notification on a hidden or
+  unfocused tab still names the round exactly as before. Knowing you owe an answer is
+  worth a glance; knowing it's three answers wasn't worth a second mark that could drift
+  out of sync with the round count.
 - **An `html` block can carry a `source` instead of the markup itself.** `{ kind: 'html',
   source: { path } }` resolves through the same reader, confinement, 512 KiB cap and sha
   snapshotting as `markdown`, `code` and `mermaid`, with the same block-level `error` on a

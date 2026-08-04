@@ -18,6 +18,21 @@
 # a user has under ~/.claude/commands is theirs, versioned in their own repo on
 # their own schedule — uninstalling the board must not reach into it.
 #
+# It also does NOT touch ~/.claude/settings.json, and never reads or writes that path
+# — same shape as `/grill`. The `SessionStart` hook snippet INSTALL.md documents for it
+# is applied by the user, by hand; install.sh does not write it, so uninstall.sh has no
+# more business deleting it than it does deleting a command file it never installed.
+#
+# It also removes ONE file the daemon — not install.sh — writes into the store at
+# runtime: $CLAUDE_BOARD_HOME/pomodoro.json, the pomodoro timer's absolute deadline,
+# long-break cycle count, durations and toggles (ADR.md entry 8, "the daemon owns the
+# pomodoro clock"). That narrows the invariant stated two paragraphs down — this
+# script never writes to the store — so the narrowing is spelled out here rather than
+# left to be noticed: a timer deadline and a break length are configuration this repo
+# authored, not review history the user accumulated, so removing that one file is
+# correct. It is removed BY EXACT NAME, never the directory and never a glob —
+# `boards/` and `pages/`, the actual review history, are untouched. See step 2b.
+#
 # Three things are left ON PURPOSE and named by path in the summary this script
 # prints at the end: the store (the user's review history), the local secret, and
 # the logs. Deleting any of those silently would be a worse bug than leaving too
@@ -39,7 +54,10 @@
 #   CLAUDE_BOARD_LAUNCHCTL_CMD       default: launchctl
 #   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret (report only)
 #   CLAUDE_BOARD_HOME                default: ~/Library/Application Support/claude-board
-#                                     (report only — this script never writes to it)
+#                                     (this script removes exactly one file inside it —
+#                                     $CLAUDE_BOARD_HOME/pomodoro.json, by exact name,
+#                                     see step 2b — and otherwise only reports the path;
+#                                     boards/ and pages/ are never touched)
 #   CLAUDE_BOARD_APP_DIR             default: ~/Applications
 #
 # macOS only, zero dependencies: bash + coreutils + launchctl, nothing this OS
@@ -115,6 +133,26 @@ else
   echo "==> no MCP registration for '$LABEL' to remove"
 fi
 
+# --- 2b. the pomodoro timer's state and settings --------------------------------
+# ADR.md entry 8: the daemon persists the whole pomodoro document -- timer state AND
+# settings -- in ONE file beside the board store, $CLAUDE_BOARD_HOME/pomodoro.json.
+# This is the one deliberate exception to "this script never writes to the store"
+# (see the header comment above): a timer deadline and a break length are
+# configuration this repo authored, not review history the user accumulated, so this
+# script takes it back the same way it takes back the launcher bundle in step 1b.
+#
+# Removed by EXACT NAME, never `rm -rf "$STORE_DIR"` and never a glob -- STORE_DIR
+# also holds boards/ and pages/, the user's actual review history, and those are
+# named in the "left in place on purpose" summary below precisely so a mistake here
+# would be a regression a check could catch, not a silent taste call.
+POMODORO_FILE="$STORE_DIR/pomodoro.json"
+if [ -f "$POMODORO_FILE" ]; then
+  rm -f "$POMODORO_FILE"
+  echo "==> removed $POMODORO_FILE"
+else
+  echo "==> no pomodoro state at $POMODORO_FILE"
+fi
+
 # --- 3. report what is deliberately left behind --------------------------------
 # The whole point of this section: an uninstall that silently destroyed a review
 # archive would be a far worse bug than one that leaves too much. Name every path
@@ -134,3 +172,9 @@ echo
 echo "One thing to tidy by hand if you want to: System Settings -> Privacy & Security ->"
 echo "Files and Folders may still list '$LABEL'. The bundle it named is gone, so the"
 echo "entry grants nothing; macOS offers no way for a script to remove it."
+echo
+# Named, not touched — same reason /grill is named in the header comment above rather
+# than reached for: this script did not put it there, so it is the user's to remove.
+echo "Also not touched: the SessionStart hook snippet in ~/.claude/settings.json, if you"
+echo "added the one INSTALL.md documents. This repo did not install it and this script"
+echo "never reads or writes that file — remove the snippet yourself if you want it gone."

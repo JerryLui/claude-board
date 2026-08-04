@@ -856,9 +856,44 @@ body.comment-mode .blocks { cursor: crosshair; }
 .index-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);
   margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--hairline); }
 .index-head-titles { min-width: 0; }
-.index-head-actions { flex: none; display: flex; align-items: center; }
+.index-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 .index-head h1 { font-size: 22px; margin: 0 0 var(--space-1); font-weight: 650; letter-spacing: -0.02em; }
 .index-head .meta { color: var(--muted); font-size: 12.5px; }
+
+/* the pomodoro widget (ticket 04, SPEC_POMODORO.md): src/pomodoro-widget.mjs
+   is the markup, src/indexpage.mjs's indexScript is the behaviour -- see that
+   module's own header comment for the split, the same one theme.mjs draws
+   between themeToggle() and themeBootScript. Pause/Resume reuses .mode-toggle's
+   own chrome directly (no new class); everything below is new because nothing
+   in this file styled a settings popover or a two-step confirm button before. */
+.pomodoro-widget { display: flex; align-items: center; gap: var(--space-2); position: relative; }
+.pomodoro-status { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pomodoro-settings-summary { list-style: none; cursor: pointer; font-size: 11px; color: var(--muted);
+  padding: 4px 8px; border-radius: var(--r-sm); transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.pomodoro-settings-summary::-webkit-details-marker { display: none; }
+.pomodoro-settings-summary:hover { color: var(--ink); background: var(--panel-2); }
+/* a native <details>/<summary> needs no JS to open or close -- the spec's own
+   "lazy correct answer" for a settings panel collapsed by default. Popover
+   positioning, not inline: opening it must not shove the countdown/theme
+   controls sideways in the same header row. */
+.pomodoro-settings-form { position: absolute; right: 0; top: 100%; margin-top: 6px; z-index: 5;
+  display: flex; flex-direction: column; gap: var(--space-2); min-width: 220px;
+  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-md);
+  padding: var(--space-3); box-shadow: var(--shadow-2); }
+.pomodoro-field { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+  font-size: 11.5px; color: var(--ink-2); }
+.pomodoro-field-check { justify-content: flex-start; }
+.pomodoro-field input[type="number"] { width: 60px; background: var(--panel-2); border: 1px solid var(--hairline);
+  color: var(--ink); border-radius: var(--r-sm); padding: 4px 6px; font: inherit; }
+.pomodoro-settings-actions { display: flex; gap: var(--space-2); margin-top: var(--space-1); }
+.pomodoro-btn { background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink-2);
+  font-size: 11px; font-weight: 600; border-radius: var(--r-pill); padding: 6px 12px; font: inherit;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.pomodoro-btn:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
+/* the reset button's armed ("Really reset?") state -- indexScript toggles this
+   class alongside the label swap, on the same element the two-step confirm
+   already relabels, never a second control. */
+.pomodoro-reset-btn.armed { border-color: var(--critical); color: var(--critical); }
 
 .search-form { display: flex; gap: var(--space-2); margin: 0 0 var(--space-5); }
 .search-input { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink);

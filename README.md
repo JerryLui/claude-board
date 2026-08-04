@@ -59,6 +59,11 @@ ships the daemon, the shim and the protocol; it ships no commands or skills (see
 `~/.claude/commands/grill.md`, versioned in your own `~/.claude` alongside whatever else
 you point at the board — install that separately, on its own schedule.
 
+Same reasoning keeps one more thing out of this script: a `SessionStart` hook that
+starts a pomodoro work interval when your session does. `install.sh` never touches
+`~/.claude/settings.json`, so that hook is a snippet you (or your agent) apply by hand —
+see [INSTALL.md](INSTALL.md).
+
 ### The one click: allowing folder access
 
 macOS gates `~/Documents`, `~/Desktop` and `~/Downloads` per application, and the

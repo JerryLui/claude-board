@@ -15,6 +15,14 @@ import path from 'node:path';
 import { styles, faviconLink } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { questionBlocks } from './board.mjs';
+// formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
+// clock are owned by other tickets and stay untouched here (ticket 04 consumes
+// the API, it does not extend it). Reused rather than reimplemented in
+// indexScript below, via the same Function.prototype.toString() embedding
+// src/ui.mjs already uses for computeBoardPatch/composeHint/badgeLabel (see
+// that file's own comment) -- one mm:ss formatter, not two that can drift.
+import { formatCountdown } from './pomodoro.mjs';
+import { pomodoroWidget } from './pomodoro-widget.mjs';
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -302,6 +310,246 @@ refresh();
 // minute ago" for that row entirely. 15s comfortably undersamples every bucket
 // here, including the narrowest one.
 setInterval(refresh, 15000);
+` + '\n' + formatCountdown.toString() + '\n' + `
+// =================================================================================
+// The pomodoro widget (ticket 04, SPEC_POMODORO.md). Everything below this line
+// is appended by '+' concatenation, never dollar-brace interpolation, exactly like
+// the formatCountdown embedding just above -- this file's own header comment
+// bans a literal backtick or interpolation ANYWHERE inside the indexScript
+// template literal itself (a stray one would terminate the string early and
+// turn the rest of this file into a syntax error, QUIRKS.md). formatCountdown's
+// OWN source (spliced in above) happens to contain real template-literal
+// syntax -- that is safe here because splicing happens at MODULE LOAD time, as
+// a plain string value, never as literal text typed inside this backtick
+// block; see this export's header comment for the fuller version of the same
+// reasoning src/ui.mjs's own dollar-brace fn.toString() embeddings rely on.
+//
+// Design, matching SPEC_POMODORO.md's own decisions:
+//  - The page owns no clock. Every rendered countdown comes from
+//    'pomodoroRemainingMs(timer, offset, Date.now())' below, where 'offset' is
+//    computed ONCE PER FETCH from the DAEMON's own 'now' (never the bare
+//    browser clock) -- see fetchPomodoro's comment. Two tabs polling the same
+//    daemon each compute their own offset from the same server clock, which is
+//    what makes their rendered countdowns agree regardless of either browser's
+//    own clock skew (criterion 6).
+//  - Nothing here ever decides a work interval became a break or a break
+//    became work -- that is settleBoundary's job (src/pomodoro.mjs), and it
+//    runs on the daemon, never in this script. tickPomodoro below only asks
+//    the daemon what happened, once, when the local countdown reaches zero.
+//  - 'timer: null' (no pomodoro running) is a real, calm state, not an error
+//    and not a reason to offer a Start button here -- starting one is a
+//    session-start signal owned by another slice (criterion 1). This widget
+//    only ever offers Pause/Resume/Reset against a timer that already exists.
+
+var POMODORO_POLL_MS = 15000; // same order of magnitude as refresh's own poll above
+var pomodoroDoc = null; // last-fetched { settings, cycle, cycleDate, timer, now }
+var pomodoroOffset = 0; // serverNow - Date.now(), recomputed on every successful fetch
+var pomodoroZeroFetched = false; // debounces the zero-crossing re-fetch below
+var pomodoroResetArmed = false;
+var pomodoroResetTimer = null;
+
+// Pure: given a timer snapshot from the daemon, the clock offset computed at
+// the last successful fetch, and the browser's current clock, returns the
+// remaining ms. Deliberately never reads doc.now or Date.now() a second time
+// on its own -- every caller passes browserNow explicitly, which is what lets
+// a check pin this against a fixed clock instead of racing the wall clock
+// (same shape as indexScript's own relTime(iso, now) above). A paused timer
+// ignores offset/browserNow entirely: pauseTimer (src/pomodoro.mjs) already
+// froze remainingMs server-side, and there is no live deadline left to
+// subtract anything from.
+function pomodoroRemainingMs(timer, offset, browserNow) {
+  if (!timer) return 0;
+  if (timer.paused) return Math.max(0, timer.remainingMs || 0);
+  return Math.max(0, timer.deadline - (browserNow + offset));
+}
+
+function pomodoroPhaseLabel(phase) {
+  if (phase === 'work') return 'Work';
+  if (phase === 'longBreak') return 'Long break';
+  return 'Break';
+}
+
+// Render only -- never decides anything. No branch here mutates
+// pomodoroDoc.timer or invents a next phase: an expired countdown just prints
+// 00:00 (formatCountdown's own clamp) until the next fetchPomodoro() call
+// replaces pomodoroDoc with whatever the daemon actually settled on.
+function renderPomodoro() {
+  var statusEl = document.querySelector('span#pomodoro-status');
+  var toggleBtn = document.querySelector('button#pomodoro-toggle');
+  if (!pomodoroDoc) return;
+  var timer = pomodoroDoc.timer;
+  if (!timer) {
+    // No timer running is a real state, not an error: show the configured
+    // work length as a calm, honest default, never a countdown and never a
+    // Start affordance (see this section's header comment).
+    if (statusEl) statusEl.textContent = 'Pomodoro: idle (' + pomodoroDoc.settings.workMin + ' min)';
+    if (toggleBtn) toggleBtn.hidden = true;
+  } else {
+    var ms = pomodoroRemainingMs(timer, pomodoroOffset, Date.now());
+    var text = 'Pomodoro: ' + pomodoroPhaseLabel(timer.phase) + ' ' + formatCountdown(ms);
+    if (timer.paused) text += ' (paused)';
+    if (statusEl) statusEl.textContent = text;
+    if (toggleBtn) {
+      toggleBtn.hidden = false;
+      toggleBtn.textContent = timer.paused ? 'Resume' : 'Pause';
+    }
+  }
+  pomodoroSyncForm();
+}
+
+// Keeps the (collapsed-by-default) settings panel showing the daemon's actual
+// values, not just whatever was there at page load -- a reader who opens it
+// after another tab changed a duration should see the current numbers. Skips
+// whichever field is currently focused, so a background poll landing mid-edit
+// never yanks the cursor or overwrites an in-progress keystroke.
+function pomodoroSyncForm() {
+  var form = document.querySelector('form#pomodoro-settings-form');
+  if (!form || !pomodoroDoc) return;
+  var s = pomodoroDoc.settings;
+  var active = document.activeElement;
+  // form.querySelector('input[name="..."]'), never the bare named-form-control
+  // shorthand ('form.workMin') a real browser also supports -- this repo's own
+  // comment forms (src/ui.mjs) already look fields up this same explicit way,
+  // and it is what test/dom-stand-in.mjs's selector engine actually implements.
+  var workMin = form.querySelector('input[name="workMin"]');
+  var breakMin = form.querySelector('input[name="breakMin"]');
+  var longBreakMin = form.querySelector('input[name="longBreakMin"]');
+  var longEvery = form.querySelector('input[name="longEvery"]');
+  var notify = form.querySelector('input[name="notify"]');
+  var sound = form.querySelector('input[name="sound"]');
+  if (workMin && active !== workMin) workMin.value = s.workMin;
+  if (breakMin && active !== breakMin) breakMin.value = s.breakMin;
+  if (longBreakMin && active !== longBreakMin) longBreakMin.value = s.longBreakMin;
+  if (longEvery && active !== longEvery) longEvery.value = s.longEvery;
+  if (notify && active !== notify) notify.checked = !!s.notify;
+  if (sound && active !== sound) sound.checked = !!s.sound;
+}
+
+// fetch/credentials: 'same-origin', matching src/ui.mjs's own submitBoard --
+// the session cookie a browser holds after /auth/:token is what authorises
+// GET /api/pomodoro and the pause/resume/reset/settings writes
+// (POMODORO_COOKIE_ACTIONS, src/server.mjs); this widget carries no secret of
+// its own and needs none.
+function fetchPomodoro() {
+  return fetch('/api/pomodoro', { credentials: 'same-origin' }).then(function (r) {
+    if (!r.ok) throw new Error('pomodoro fetch failed: ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    // Recomputed on every successful read, not just once at page load: the
+    // daemon's own 'now' (src/server.mjs sendPomodoro) is what makes this
+    // correct regardless of how far the browser's wall clock has drifted --
+    // never 'deadline - Date.now()' directly. See this section's header
+    // comment for why that is what makes two tabs agree (criterion 6).
+    pomodoroOffset = data.now - Date.now();
+    pomodoroDoc = data;
+    pomodoroZeroFetched = false;
+    renderPomodoro();
+  });
+}
+
+function postPomodoro(action, body) {
+  return fetch('/api/pomodoro/' + action, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  }).then(function (r) {
+    if (!r.ok) throw new Error('pomodoro ' + action + ' failed: ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    pomodoroOffset = data.now - Date.now();
+    pomodoroDoc = data;
+    renderPomodoro();
+    return data;
+  });
+}
+
+// The one place a boundary crossing is noticed client-side, and all it does is
+// ask the daemon what actually happened -- never advance pomodoroDoc.timer
+// itself (settleBoundary, src/pomodoro.mjs, is the only code that ever decides
+// a phase changed, and it runs on the daemon). ponytail: fetches once per
+// zero-crossing (pomodoroZeroFetched guards the repeat) rather than retrying
+// every tick while offline -- the POMODORO_POLL_MS interval below is the
+// backstop if that one fetch is lost to a network hiccup.
+function tickPomodoro() {
+  if (!pomodoroDoc) return;
+  renderPomodoro();
+  var timer = pomodoroDoc.timer;
+  if (!timer || timer.paused) return;
+  var ms = pomodoroRemainingMs(timer, pomodoroOffset, Date.now());
+  if (ms <= 0 && !pomodoroZeroFetched) {
+    pomodoroZeroFetched = true;
+    fetchPomodoro();
+  }
+}
+
+function onPomodoroToggleClick() {
+  if (!pomodoroDoc || !pomodoroDoc.timer) return; // no timer: the button is hidden, never reachable
+  postPomodoro(pomodoroDoc.timer.paused ? 'resume' : 'pause');
+}
+
+function pomodoroDisarmReset(btn) {
+  pomodoroResetArmed = false;
+  if (pomodoroResetTimer) { clearTimeout(pomodoroResetTimer); pomodoroResetTimer = null; }
+  if (btn) { btn.textContent = 'Reset'; btn.classList.remove('armed'); }
+}
+
+// Two-step confirm, not confirm() -- see pomodoro-widget.mjs's own comment on
+// the reset button for why a blocking modal was rejected. First click arms
+// it (relabels, adds .armed, starts a revert timer); a second real click
+// inside that window is what actually posts the reset. setTimeout here is
+// the one timer in this file NOT routed through indexScript's injected
+// 'setInterval' param (that seam exists for the refresh/tick/poll intervals a
+// check wants to drive by hand) -- unref'd, matching src/pomodoro.mjs's own
+// timeoutHandle.unref() comment, so a lingering armed-reset window is never
+// the reason an in-process check's node process fails to exit on its own.
+function onPomodoroResetClick() {
+  var btn = document.querySelector('button#pomodoro-reset');
+  if (!pomodoroResetArmed) {
+    pomodoroResetArmed = true;
+    if (btn) { btn.textContent = 'Really reset?'; btn.classList.add('armed'); }
+    pomodoroResetTimer = setTimeout(function () { pomodoroDisarmReset(btn); }, 4000);
+    if (pomodoroResetTimer && typeof pomodoroResetTimer.unref === 'function') pomodoroResetTimer.unref();
+    return;
+  }
+  pomodoroDisarmReset(btn);
+  postPomodoro('reset');
+}
+
+function onPomodoroSettingsSubmit(ev) {
+  ev.preventDefault();
+  var form = ev.target;
+  postPomodoro('settings', {
+    workMin: parseInt(form.querySelector('input[name="workMin"]').value, 10),
+    breakMin: parseInt(form.querySelector('input[name="breakMin"]').value, 10),
+    longBreakMin: parseInt(form.querySelector('input[name="longBreakMin"]').value, 10),
+    longEvery: parseInt(form.querySelector('input[name="longEvery"]').value, 10),
+    notify: !!form.querySelector('input[name="notify"]').checked,
+    sound: !!form.querySelector('input[name="sound"]').checked,
+  });
+}
+
+function initPomodoroWidget() {
+  var widget = document.querySelector('div#pomodoro-widget');
+  if (!widget) return;
+  var toggleBtn = document.querySelector('button#pomodoro-toggle');
+  if (toggleBtn) toggleBtn.addEventListener('click', onPomodoroToggleClick);
+  var resetBtn = document.querySelector('button#pomodoro-reset');
+  if (resetBtn) resetBtn.addEventListener('click', onPomodoroResetClick);
+  var form = document.querySelector('form#pomodoro-settings-form');
+  if (form) form.addEventListener('submit', onPomodoroSettingsSubmit);
+  fetchPomodoro();
+  // Local repaint (no fetch): recomputes the countdown text from the already-
+  // cached doc + offset every second, so the widget visibly ticks between
+  // polls. Also the trigger for the single zero-crossing re-fetch above --
+  // never a phase decision of its own.
+  setInterval(tickPomodoro, 1000);
+  // Modest re-fetch interval (same order of magnitude as refresh's 15s poll
+  // above) to notice a boundary the daemon crossed even if the zero-crossing
+  // fetch above was lost -- see tickPomodoro's own comment.
+  setInterval(fetchPomodoro, POMODORO_POLL_MS);
+}
+initPomodoroWidget();
 `;
 
 /** Render the complete index page: the thread list (with pending counts, round
@@ -339,6 +587,7 @@ ${faviconLink}
       <div class="meta">one thread per Claude session</div>
     </div>
     <div class="index-head-actions">
+      ${pomodoroWidget()}
       ${themeToggle()}
     </div>
   </header>

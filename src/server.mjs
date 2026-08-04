@@ -54,6 +54,8 @@ import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, D
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
+import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
+import { notifyBoundary } from './notify.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -227,26 +229,49 @@ function isSameOriginRead(req) {
   return true;
 }
 
+/** The pomodoro writes a cookie-holding browser may perform, and NOT a moment more.
+ * Named and enumerated exactly like `isSubmit` below, on purpose — never a
+ * `parts[1] === 'pomodoro'` prefix match, which would silently hand the cookie every
+ * pomodoro write this file ever grows, including ones that should stay secret-only.
+ * `ensure` is the proof such a route can exist: it is deliberately left OUT of this
+ * set, because its one caller (ticket 05's session-start hook) is a shell script
+ * holding the secret, never a browser — widening the cookie to cover it would grow
+ * what the cookie is worth for no caller that needs the extra reach. */
+const POMODORO_COOKIE_ACTIONS = new Set(['pause', 'resume', 'reset', 'settings']);
+
+function isPomodoroCookieWrite(parts) {
+  return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
+}
+
 /** True iff this write may proceed. Two ways to hold a credential, and they are not
  * interchangeable:
  *
  *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and it
- *    is what EVERY write except submit demands — including `POST /api/board`, the only
- *    route that resolves a file, and `POST /api/handoff`, which mints browser
- *    credentials and so must never be reachable with one.
- *  - the session cookie an authorized browser holds, which is accepted on submit and
- *    only on submit. With reads gated, anything that can render the page to press Send
- *    already presented that cookie to fetch the page, so submit needs nothing weaker —
- *    and the board-scoped fallback token that used to sit here is deleted rather than
- *    kept beside it (SPEC_LAUNCH.md: "Submit collapses into the read credential").
+ *    is what EVERY write except submit and the four pomodoro actions below demands —
+ *    including `POST /api/board`, the only route that resolves a file, and
+ *    `POST /api/handoff`, which mints browser credentials and so must never be
+ *    reachable with one.
+ *  - the session cookie an authorized browser holds, accepted on submit, and — as of
+ *    the pomodoro slice — on `pause`/`resume`/`reset`/`settings` too. The index page's
+ *    pause button is a browser holding only the cookie: under the old rule it could
+ *    render the board but could not press pause. The justification is the same one that
+ *    already let submit in: the cookie is worth "may read every board in the store and
+ *    may answer any open round" (src/secret.mjs `sessionToken`'s own comment), and
+ *    pausing an advisory clock that never touches a board, never gates an `ask`, and
+ *    never reaches a tool is strictly less than that — `isSameOriginWrite` still stands
+ *    in front of it, exactly as it does for submit. The board-scoped fallback token that
+ *    used to sit here is deleted rather than kept beside it (SPEC_LAUNCH.md: "Submit
+ *    collapses into the read credential").
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
- * route added later is then gated by default instead of by remembering to add it. */
+ * route added later is then gated by default instead of by remembering to add it. The
+ * pomodoro exception is itself a closed, named list for the same reason — see
+ * POMODORO_COOKIE_ACTIONS above. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
   const isSubmit = parts[0] === 'api' && parts[1] === 'board' && parts.length === 4 && parts[3] === 'submit';
-  if (!isSubmit) return false;
+  if (!isSubmit && !isPomodoroCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
@@ -773,12 +798,78 @@ function handleEvents(req, res, id, home, sse) {
   res.on('error', cleanup);
 }
 
+/** `{ ...doc, now: Date.now() }` for every pomodoro response, write or read alike. The
+ * page renders a countdown by subtracting a deadline from a clock, and the client's
+ * clock is not the daemon's (a laptop's wall clock can be minutes off, and even a
+ * correct one is a separate process): handing back the SERVER's own `now` alongside the
+ * document lets the page compute `serverNow - Date.now()` once on load and keep
+ * subtracting that same offset from its own clock forever after, rather than trusting
+ * whatever the browser's `Date.now()` says the deadline is `deadline - now` away. */
+function sendPomodoro(res, doc) {
+  return sendJson(res, 200, { ...doc, now: Date.now() });
+}
+
+/** Every `/api/pomodoro*` route. `pomo` is the ONE createPomodoro instance for this
+ * daemon (see createRequestHandler) — every write below goes through it rather than a
+ * bare readDoc/writeDoc pair, specifically so the live setTimeout it owns gets
+ * re-armed (or cleared) as part of the same call, never as an afterthought a route
+ * handler could forget. See PROTOCOL.md "HTTP surface" for the route table this
+ * implements. */
+async function handlePomodoro(req, res, parts, pomo, home) {
+  // GET /api/pomodoro: read straight off disk, not through `pomo`. This is safe — not
+  // merely convenient — because reconciliation happens SYNCHRONOUSLY in this same
+  // single-threaded event loop the instant a deadline is crossed (the armed
+  // setTimeout's own callback), so by the time any request handler runs, a deadline
+  // that has already passed has already been settled and written back. There is
+  // nothing left for a GET to reconcile.
+  if (req.method === 'GET' && parts.length === 2) {
+    return sendPomodoro(res, readPomodoroDoc(home));
+  }
+  if (req.method === 'POST' && parts.length === 3) {
+    const action = parts[2];
+    // Bodyless by design: `readJsonBody` is never called on this branch, which is what
+    // makes a curl-shaped `POST /api/pomodoro/ensure` with no body and no
+    // `content-type` succeed rather than 415 — ticket 05's session-start hook is a
+    // one-line shell `curl`, and it must not have to construct or parse anything.
+    if (action === 'ensure') return sendPomodoro(res, pomo.ensureTimer());
+    if (action === 'pause') return sendPomodoro(res, pomo.pause());
+    if (action === 'resume') return sendPomodoro(res, pomo.resume());
+    if (action === 'reset') return sendPomodoro(res, pomo.reset());
+    if (action === 'settings') {
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+      }
+      try {
+        return sendPomodoro(res, pomo.settings(body));
+      } catch (err) {
+        // mergeSettings (src/pomodoro.mjs) throws naming the offending field; a rejected
+        // body is a 400 with that message, never a silent partial write — nothing in
+        // `pomo.settings` persists anything before every field in the patch validates.
+        return sendJson(res, 400, { error: String(err.message || err) });
+      }
+    }
+  }
+  return sendText(res, 404, 'not found');
+}
+
 /** Build the daemon's request handler as a plain `node:http` listener, without
  * binding a port — used directly by the check and by `startServer` below. Each
  * call gets its own SSE subscriber registry (createSseHub), so two independent
  * handlers built in the same process — as the checks do — never share subscribers. */
-export function createRequestHandler({ home = boardHome(), secret: pinnedSecret } = {}) {
+export function createRequestHandler({ home = boardHome(), secret: pinnedSecret, pomodoro } = {}) {
   const sse = createSseHub();
+  // A caller-supplied instance (startServer's, below) is what makes pause/resume/reset/
+  // settings and the boot-time clock share the ONE live setTimeout for this daemon —
+  // two independent createPomodoro() instances against the same home would each arm
+  // their own timeout off the same file, and whichever fired second would stomp the
+  // first's write. Defaulted rather than required only so createRequestHandler stays
+  // usable on its own (as it always has been) without every caller learning about
+  // pomodoro; nothing today calls it that way, and this instance is never booted here —
+  // boot-time reconciliation is startServer's job, exactly as it already was.
+  const pomo = pomodoro || createPomodoro({ home });
   // Per-instance, like the SSE hub and for the same reason: two daemons in one process
   // (as the checks spin up) must not redeem each other's handoffs.
   const handoffs = createHandoffStore();
@@ -894,6 +985,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret 
         }
       }
 
+      if (parts[0] === 'api' && parts[1] === 'pomodoro') {
+        return await handlePomodoro(req, res, parts, pomo, home);
+      }
+
       return sendText(res, 404, 'not found');
     } catch (err) {
       // A tagged status means the request was refusable, not that the daemon broke:
@@ -910,10 +1005,33 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret 
 /** Start listening on 127.0.0.1. Resolves once bound, with the actual port (useful
  * for `port: 0` ephemeral binding in checks). */
 export function startServer({ home = boardHome(), port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT, secret } = {}) {
+  // ADR.md entry 8: the daemon owns the pomodoro clock. Created here, once, and
+  // threaded into createRequestHandler below rather than each side minting its own:
+  // this is the ONE instance that owns the live setTimeout for this daemon, and the
+  // pause/resume/reset/settings/ensure routes (src/server.mjs handlePomodoro) need to
+  // re-arm the SAME timer boot() arms, not a second one racing it over the same file.
+  // Boot-time reconciliation only (apply the expiry rule to whatever is on disk, arm
+  // the next real boundary if a timer survives it) -- it never starts a fresh timer on
+  // its own. Closed on 'close' rather than left to its own unref so a deliberate
+  // restart against the same home (as the checks do) never runs two live clocks
+  // against one file at once.
+  //
+  // `onBoundary` fires the native notification (src/notify.mjs, ADR.md entry 9). That
+  // module is async and swallows every failure itself, so a reader's Notification
+  // Center settings can never be a reason this callback misbehaves or the clock
+  // stalls. Dropping this argument is the one edit that would leave the daemon
+  // crossing every boundary in silence with the rest of the suite still green, which
+  // is why test/check-notify.mjs pins it through startServer specifically.
+  const pomodoro = createPomodoro({ home, onBoundary: ({ phase, settings }) => notifyBoundary(phase, settings) });
+
   // `secret` is passed through UNRESOLVED on purpose: defaulting it to readSecret() here
   // would pin the value for the life of the process and undo S4's fix one layer down,
   // where it would be much harder to notice. Absent means "read it per request".
-  const server = http.createServer(createRequestHandler({ home, secret }));
+  const server = http.createServer(createRequestHandler({ home, secret, pomodoro }));
+
+  pomodoro.boot();
+  server.on('close', () => pomodoro.close());
+
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {

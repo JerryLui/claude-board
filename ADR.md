@@ -291,3 +291,52 @@ message that implied otherwise is corrected as part of the same work. Inlining a
 document onto a board stays a bad idea for unrelated reasons (the 320px stage floor, the
 CSP-blocked local mermaid asset), so `/explain` posts a pointer instead; that edit lives in
 `~/.claude/skills/explain/`, outside this repo.
+
+## 8. The daemon owns the pomodoro clock, unlike every other preference — 2026-08-04
+
+**Context:** ADR 1 settled that theme is client-side only, and that precedent has held for every
+setting since: this project has no server-side user state at all, only boards. The pomodoro timer
+(`SPEC_POMODORO.md`) asked the same question and got the opposite answer.
+
+**Decision:** the daemon holds the timer — the current interval's **absolute wall deadline**, the
+long-break cycle counter, and the durations/toggles — persisted under `CLAUDE_BOARD_HOME` beside
+the board store. The browser renders a countdown from that deadline; it never owns one.
+
+**Consequences:** the countdown survives closing every tab, and two open tabs cannot disagree,
+which is the whole point — a pomodoro you lose by closing a tab is not a pomodoro. Storing the
+deadline rather than remaining seconds is what makes a daemon restart transparent, and it is also
+what makes the sleep rule expressible: a deadline already in the past is discarded silently rather
+than fired, so reopening a lid after four hours does not stack up reminders for breaks you took by
+being asleep. The costs are real. The daemon becomes stateful about something that is not a board,
+which every earlier decision avoided; `uninstall.sh` grows a second thing to clean up; and ADR 1's
+principle now needs a stated boundary rather than being read as universal. That boundary is: a
+**theme is a per-reader preference** and belongs to the reader's browser, while a **pomodoro is a
+single fact about the human** and cannot be per-tab without being meaningless.
+Rejected: localStorage, mirroring ADR 1 exactly and costing zero server changes, which loses the
+timer whenever you close the tab and runs two disagreeing countdowns when you open two.
+
+## 9. No menu bar item — the app bundle's signature is load-bearing — 2026-08-04
+
+**Context:** `claude-board` is always on under launchd and already ships a macOS app bundle, so a
+menu bar countdown looks like it should be nearly free — and `SPEC_POMODORO.md` was drafted twice,
+once with it out of scope and once with it in, before the cost was actually priced.
+
+**Decision:** no menu bar item, no `NSStatusItem`, and no AppKit in `bin/launcher.c`. The pomodoro
+surfaces are a native notification at each boundary and a widget on the index page.
+
+**Consequences:** the always-visible glance the menu bar would have given is the thing given up,
+and it is the surface a pomodoro most wants. What buys it back is that `~/Applications/claude-board.app`
+is **ad-hoc signed**, and `install.sh` already refuses to put a `CFBundleVersion` in it for this
+exact reason: changing the bundle's bytes changes its signature and costs the user their TCC
+Documents grant. This repo lives in `~/Documents`, so that grant is not incidental — losing it
+turns every reference into that tree into an EPERM on a board. A menu bar in the existing launcher
+therefore costs a re-approval in System Settings on every install, and it also means flipping
+`LSBackgroundOnly` (which forbids a status item outright) to `LSUIElement`, and growing an
+`NSApplication` run loop inside 150 lines of C whose fork-not-exec structure is the entire
+mechanism by which the TCC grant reaches the daemon at all. A notification posted by `osascript`
+attributes to "Script Editor" in Notification Center rather than to claude-board; that ugliness is
+the accepted price of not touching the bundle.
+Rejected: a second, separate bundle for the menu bar, which leaves `launcher.c` and its signature
+alone but needs its own compile, ad-hoc signature, launchd agent and uninstall path — a lot of new
+installer surface for a countdown. If the menu bar is ever revisited, that is the shape to revisit,
+not AppKit in the launcher.

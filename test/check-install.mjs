@@ -137,6 +137,13 @@ const storeBoardFile = path.join(storeDir, 'boards', 'fake-board.json');
 const storeBoardContent = JSON.stringify({ id: 'fake-board', title: 'a board that must survive uninstall' });
 writeFileSync(storeBoardFile, storeBoardContent);
 
+// The pomodoro document (ADR.md entry 8, ticket 06): the ONE file inside the store
+// uninstall.sh IS meant to remove, by exact name. Pre-populated with real bytes for
+// the same reason storeBoardFile is -- "gone after uninstall" has to be a claim about
+// a real file that really existed, not an absent-either-way accident.
+const pomodoroFile = path.join(storeDir, 'pomodoro.json');
+writeFileSync(pomodoroFile, JSON.stringify({ deadline: 1234567890, cycles: 2, workMinutes: 25 }));
+
 const claudeStub = path.join(binDir, 'claude-stub.mjs');
 const launchctlStub = path.join(binDir, 'launchctl-stub.mjs');
 writeFileSync(claudeStub, STUB_CLAUDE);
@@ -1129,6 +1136,93 @@ async function main() {
     }
   });
 
+  // --- ~/.claude/settings.json is not this repo's file (ticket 06) --------------
+  //
+  // SPEC_POMODORO.md criterion 11 (the half provable without a running Claude Code
+  // session): install.sh reads and writes nothing under ~/.claude/settings.json.
+  // Criterion 12: uninstall.sh leaves the SessionStart hook snippet INSTALL.md
+  // documents for that file untouched -- this repo did not install it, so
+  // uninstall.sh has no more business deleting it than it does a command file it
+  // never shipped (ADR.md entry 5).
+  //
+  // There is no env var seam pointing either script at a fake settings.json, and
+  // there deliberately is not one added here either: a seam whose only purpose is
+  // to let a test redirect a file the scripts never touch would invent exactly the
+  // coupling this criterion forbids. So this proves it two ways instead: a
+  // source-level check that the scripts' own text never references the path except
+  // in a comment or an echoed message (nothing that could open it), and a real run
+  // of both scripts with $HOME itself pointed at a temp directory holding a fake
+  // settings.json, asserting the file survives byte-identical.
+
+  await check('install.sh and uninstall.sh mention settings.json only in a comment or an echo, never in a file operation', async () => {
+    // (Ablation: add `rm -f "$HOME/.claude/settings.json"` or `> "$HOME/.claude/settings.json"`
+    // anywhere in either script and its line fails this -- it is neither a comment
+    // nor an echo statement.)
+    for (const [name, file] of [['install.sh', installScript], ['uninstall.sh', uninstallScript]]) {
+      const lines = readFileSync(file, 'utf8').split('\n');
+      const hits = lines.filter(l => l.includes('settings.json'));
+      assert.ok(hits.length > 0, `${name} should still document why it stays out of settings.json`);
+      for (const line of hits) {
+        const trimmed = line.trim();
+        assert.ok(
+          trimmed.startsWith('#') || trimmed.startsWith('echo'),
+          `${name}: every mention of settings.json must be a comment or an echoed message, found: ${line}`,
+        );
+      }
+    }
+  });
+
+  await check('a SessionStart hook in ~/.claude/settings.json survives install.sh and uninstall.sh byte-identical', async () => {
+    const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-fakehome-'));
+    try {
+      const claudeDir = path.join(fakeHome, '.claude');
+      mkdirSync(claudeDir, { recursive: true });
+      const settingsPath = path.join(claudeDir, 'settings.json');
+      // Shaped like a real settings.json carrying a hook this repo did not add and must
+      // not disturb -- an unrelated command, a matcher, ordinary indentation.
+      const settingsContent = JSON.stringify({
+        hooks: {
+          SessionStart: [
+            { matcher: '', hooks: [{ type: 'command', command: 'some-other-tool --on-session-start' }] },
+          ],
+        },
+      }, null, 2) + '\n';
+      writeFileSync(settingsPath, settingsContent);
+      const before = readFileSync(settingsPath);
+
+      // Every OTHER seam is still redirected into fresh temp paths of its own, same as
+      // every other isolated run in this suite -- only HOME itself is new here, and
+      // only because it is the one thing settings.json's real path is resolved from.
+      const hEnv = {
+        ...env,
+        HOME: fakeHome,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(fakeHome, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(fakeHome, 'Logs'),
+        CLAUDE_BOARD_APP_DIR: path.join(fakeHome, 'Applications'),
+        CLAUDE_BOARD_HOME: path.join(fakeHome, 'Store'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(fakeHome, 'config', 'claude-board', 'secret'),
+        STUB_CLAUDE_LOG: path.join(fakeHome, 'claude-invocations.log'),
+        STUB_CLAUDE_STATE: path.join(fakeHome, 'claude-registrations.json'),
+        STUB_LAUNCHCTL_LOG: path.join(fakeHome, 'launchctl-invocations.log'),
+        STUB_LAUNCHCTL_STATE: path.join(fakeHome, 'launchctl-state.json'),
+      };
+
+      const installRun = spawnSync('bash', [installScript], { env: hEnv, encoding: 'utf8' });
+      assert.equal(installRun.status, 0, `install must succeed\nstdout:\n${installRun.stdout}\nstderr:\n${installRun.stderr}`);
+
+      const uninstallRun = spawnSync('bash', [uninstallScript], { env: hEnv, encoding: 'utf8' });
+      assert.equal(uninstallRun.status, 0, `uninstall must succeed\nstdout:\n${uninstallRun.stdout}\nstderr:\n${uninstallRun.stderr}`);
+
+      const after = readFileSync(settingsPath);
+      // (Ablation: any rewrite of settings.json -- even one that happens to preserve
+      // the hook, e.g. a parse-modify-reformat round trip -- changes these bytes and
+      // fails this. Byte-identical is the point: "the hook survives" is not enough.)
+      assert.ok(before.equals(after), 'the settings.json bytes must be identical after install.sh and uninstall.sh both ran');
+    } finally {
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   // --- uninstall (SPEC_LAUNCH.md criterion 11) ----------------------------------
   //
   // Runs against the SAME workDir/env the two install() runs at the top of this file
@@ -1177,6 +1271,22 @@ async function main() {
     assert.equal(readFileSync(storeBoardFile, 'utf8'), storeBoardContent, 'the store content must be byte-for-byte untouched');
   });
 
+  await check('uninstall removes pomodoro.json by exact name and nothing else in the store (ADR.md entry 8 / ticket 06)', async () => {
+    // The other half of the same brief, pointed the other way: pomodoro.json is
+    // configuration this repo authored, not review history, so it is the ONE file in
+    // the store uninstall.sh is supposed to take back. (Ablation: reverting the step
+    // 2b block in uninstall.sh leaves this file behind and fails the first assertion;
+    // reverting it to `rm -rf "$STORE_DIR"` instead would fail the store-survival
+    // check just above, which is the point of testing both directions.)
+    assert.ok(!existsSync(pomodoroFile), 'pomodoro.json must be gone after uninstall');
+    // And the removal must have been surgical -- the board file one directory over,
+    // asserted again here rather than trusted from the check above, so this check
+    // alone still catches a regression that deletes the whole store to get rid of
+    // pomodoro.json.
+    assert.ok(existsSync(storeBoardFile), 'removing pomodoro.json must not take boards/ with it');
+    assert.equal(readFileSync(storeBoardFile, 'utf8'), storeBoardContent, 'and must not modify what it did not remove');
+  });
+
   await check('uninstall names what it deliberately left behind: the store, the secret and the logs, by path', async () => {
     assert.ok(uninstallResult.stdout.includes(storeDir), 'must name the store path');
     assert.ok(uninstallResult.stdout.includes(secretFile), 'must name the secret path');
@@ -1217,6 +1327,11 @@ async function main() {
   await check('uninstall is safe to run twice', async () => {
     const second = spawnSync('bash', [uninstallScript], { env, encoding: 'utf8' });
     assert.equal(second.status, 0, `a second uninstall must not fail\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    // pomodoro.json is already gone from the run above -- the second run must say so
+    // rather than erroring on a missing file, the same "already absent" idempotency
+    // every other removal in uninstall.sh gets.
+    assert.match(second.stdout, /no pomodoro state at/, 'a second uninstall must report the timer file as already absent, not silently skip it');
+    assert.doesNotMatch(second.stdout, /removed .*pomodoro\.json/, 'and must not claim to have removed it again');
   });
 
   await check('uninstall is safe to run on a machine with nothing installed', async () => {

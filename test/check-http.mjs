@@ -16,6 +16,11 @@ import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { startServer, activeWaitCount } from '../src/server.mjs';
 import { readBoard, searchBoards } from '../src/store.mjs';
+// Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
+// (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
+// through the HTTP routes, never these directly. See the pomodoro checks near the
+// bottom of this file.
+import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src/pomodoro.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
@@ -2787,6 +2792,301 @@ async function main() {
     assert.equal(mode(path.join(home, 'pages')), 0o700);
     assert.equal(mode(path.join(home, 'boards', `${boardId}.json`)), 0o600);
     assert.equal(mode(path.join(home, 'pages', `${boardId}.html`)), 0o600);
+  });
+
+  // --- ticket 03: the pomodoro HTTP surface ---------------------------------------
+  //
+  // GET /api/pomodoro, POST /api/pomodoro/{ensure,pause,resume,reset,settings}. See
+  // src/server.mjs `handlePomodoro`, PROTOCOL.md "HTTP surface", and src/pomodoro.mjs's
+  // pauseTimer/resumeTimer/resetTimer/mergeSettings for the pure logic these routes
+  // wrap. test/check-pomodoro.mjs already covers that pure logic and createPomodoro's
+  // impure methods in isolation; everything below is specifically about the ROUTES —
+  // auth, request/response shape, and persistence across a real daemon restart.
+
+  const POMODORO_WRITE_ACTIONS = ['ensure', 'pause', 'resume', 'reset', 'settings'];
+
+  await check('POMODORO: every route refuses a request carrying no credential at all, with the status the rest of the surface uses', async () => {
+    const getR = await rawRequest(port, 'GET', '/api/pomodoro', `127.0.0.1:${port}`);
+    assert.equal(getR.status, 401, 'GET /api/pomodoro must be gated exactly like every other read');
+
+    for (const action of POMODORO_WRITE_ACTIONS) {
+      const r = await rawRequest(port, 'POST', `/api/pomodoro/${action}`, `127.0.0.1:${port}`);
+      assert.equal(r.status, 401, `POST /api/pomodoro/${action} must refuse a request with no credential`);
+      assert.equal(r.body, '', `POST /api/pomodoro/${action} must send no body on refusal, same as every other write`);
+    }
+  });
+
+  await check('POMODORO: GET returns the whole document plus the server\'s own clock', async () => {
+    const before = Date.now();
+    const doc = await (await fetch(`${base}/api/pomodoro`)).json();
+    const after = Date.now();
+    assert.ok(
+      'settings' in doc && 'cycle' in doc && 'cycleDate' in doc && 'timer' in doc,
+      'the whole document (settings, cycle, cycleDate, timer) must be present',
+    );
+    // `now` lets the page compute a client/server clock offset ONCE rather than trusting
+    // the browser's own Date.now() against a server-minted deadline (see sendPomodoro's
+    // comment in src/server.mjs). Bounded against a before/after window taken around the
+    // call rather than pinned to one instant, since this is a real network round trip.
+    assert.ok(typeof doc.now === 'number' && doc.now >= before && doc.now <= after, `now (${doc.now}) must be the server's own clock, taken at response time (window ${before}-${after})`);
+  });
+
+  await check('POMODORO: the cookie alone can pause, resume, reset and write settings; the secret header alone can do all of those and ensure; the cookie alone cannot ensure', async () => {
+    const cookie = sessionCookieHeader();
+    const cookieHeaders = { origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie };
+
+    const pauseC = await rawRequest(port, 'POST', '/api/pomodoro/pause', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    assert.equal(pauseC.status, 200, 'the cookie alone must be able to pause');
+    const resumeC = await rawRequest(port, 'POST', '/api/pomodoro/resume', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    assert.equal(resumeC.status, 200, 'the cookie alone must be able to resume');
+    const settingsC = await rawRequest(port, 'POST', '/api/pomodoro/settings', `127.0.0.1:${port}`, {
+      headers: { ...cookieHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ workMin: 20 }),
+    });
+    assert.equal(settingsC.status, 200, 'the cookie alone must be able to write settings');
+    const resetC = await rawRequest(port, 'POST', '/api/pomodoro/reset', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    assert.equal(resetC.status, 200, 'the cookie alone must be able to reset');
+
+    // ensure is deliberately NOT in the cookie's list: its one caller (ticket 05's
+    // session-start hook) is a shell script holding the secret, never a browser.
+    // (Ablation: add 'ensure' to POMODORO_COOKIE_ACTIONS in src/server.mjs and this reds.)
+    const ensureC = await rawRequest(port, 'POST', '/api/pomodoro/ensure', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    assert.equal(ensureC.status, 401, 'the cookie must NOT be able to call ensure');
+
+    // The secret does all five, ensure included.
+    for (const action of ['pause', 'resume', 'reset', 'ensure']) {
+      const r = await fetch(`${base}/api/pomodoro/${action}`, { method: 'POST', headers: writeHeaders() });
+      assert.equal(r.status, 200, `the secret header alone must be able to ${action}`);
+    }
+    const settingsS = await fetch(`${base}/api/pomodoro/settings`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ breakMin: 7 }),
+    });
+    assert.equal(settingsS.status, 200, 'the secret header alone must be able to write settings');
+  });
+
+  await check('POMODORO: a bodyless POST /api/pomodoro/ensure with only the secret header succeeds -- the exact shape a session-start hook\'s curl sends', async () => {
+    // No content-type, no body: readJsonBody is never called on the ensure branch of
+    // handlePomodoro (src/server.mjs), which is what lets this succeed instead of the
+    // 415 a real bodyless curl would get from any route that DOES read a JSON body.
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
+    const r = await rawRequest(port, 'POST', '/api/pomodoro/ensure', `127.0.0.1:${port}`, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.equal(r.status, 200, 'ensure must not require a content-type or a body');
+    const body = JSON.parse(r.body);
+    assert.ok(body.timer, 'ensure must have started a timer from the reset, empty state');
+    assert.equal(body.timer.phase, 'work');
+  });
+
+  await check('POMODORO: pause freezes the remaining time across a real wait, and resume continues from where it froze rather than restarting the interval', async () => {
+    // A short work interval (the validator's floor is 1 minute) so a real, meaningful
+    // slice of it can elapse inside a check that still runs in about a second: if resume
+    // wrongly minted a FRESH deadline (`now + workMin*60_000`) instead of continuing from
+    // the frozen remainder, the resulting deadline would land ~700ms later than expected
+    // -- comfortably outside the assertion's tolerance below.
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ workMin: 1 }) });
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(started.timer.phase, 'work');
+
+    await new Promise(resolve => setTimeout(resolve, 700));
+
+    const paused = await (await fetch(`${base}/api/pomodoro/pause`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(paused.timer.paused, true);
+    assert.equal(paused.timer.deadline, undefined, 'a paused timer carries remainingMs, not a deadline');
+    const remainingAtPause = paused.timer.remainingMs;
+    assert.ok(remainingAtPause > 0 && remainingAtPause < 60_000, `remainingMs (${remainingAtPause}) must reflect real elapsed time, not a fresh 60000ms interval`);
+
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Still paused: the remaining time must not have shrunk at all across that wait.
+    const stillPaused = await (await fetch(`${base}/api/pomodoro`)).json();
+    assert.equal(stillPaused.timer.paused, true);
+    assert.equal(stillPaused.timer.remainingMs, remainingAtPause, 'remaining time must not shrink while paused');
+
+    const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(resumed.timer.paused, false);
+    assert.equal(resumed.timer.remainingMs, undefined, 'a running timer carries a deadline, not remainingMs');
+    const expectedDeadline = resumed.now + remainingAtPause;
+    assert.ok(
+      Math.abs(resumed.timer.deadline - expectedDeadline) < 400,
+      `resume must continue from the frozen remainder (expected close to ${expectedDeadline}, got ${resumed.timer.deadline}) -- ` +
+      `(ablation: minting deadline = now + settings.workMin*60_000 on resume instead lands ~700ms later, well outside this tolerance)`,
+    );
+  });
+
+  // Poll GET /api/pomodoro (never reconciled server-side -- see handlePomodoro's own
+  // comment) until `timer.phase` reaches `wantPhase` or `timeoutMs` elapses. Returns the
+  // phase actually observed at the end, so a caller can assert it directly rather than
+  // asserting a boolean and losing what the poll actually saw on a failure.
+  async function pollPomodoroPhase(wantPhase, timeoutMs) {
+    const deadlineAt = Date.now() + timeoutMs;
+    let phase = null;
+    do {
+      const d = await (await fetch(`${base}/api/pomodoro`)).json();
+      phase = d.timer && d.timer.phase;
+      if (phase === wantPhase) return phase;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    } while (Date.now() < deadlineAt);
+    return phase;
+  }
+
+  await check('POMODORO: resume actually RE-ARMS the live timer -- a resumed interval reaches its next boundary on its own, not merely a document that looks correct', async () => {
+    // The state-level check above (pause freezes / resume continues) asserts only on the
+    // PERSISTED document -- deadline, paused, remainingMs. A resume that writes a
+    // perfectly correct-looking deadline but forgets to re-arm the live setTimeout passes
+    // every one of those assertions: the document is right, GET renders a countdown a
+    // page would happily draw ticking toward zero, and nothing ever fires. That gap is
+    // exactly why this check exists: it proves a real setTimeout, not just a value on
+    // disk.
+    //
+    // Seeded directly with a short `remainingMs` -- reaching a near-zero remainder
+    // through a real pause would mean waiting out nearly a full work interval first,
+    // which is what the state-level check above already covers at a duration long enough
+    // to prove the FREEZE half; this check is only about what resume does next.
+    // `notify: false` is load-bearing, not tidiness. This check deliberately drives a REAL
+    // boundary on a real daemon, and startServer wires onBoundary to src/notify.mjs -- so
+    // with the default `notify: true` this would shell out to the actual osascript and pop
+    // an actual banner on the machine running the suite. SPEC_POMODORO.md's Testing section
+    // is explicit: "No notification ever actually fires during the suite." check-http.mjs
+    // stubs no PATH (it has no other reason to), so the toggle is what keeps that true here;
+    // test/check-notify.mjs owns notification coverage and stubs osascript properly.
+    const doc = readPomodoroDoc(home);
+    writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, longEvery: 4, notify: false }, timer: { phase: 'work', paused: true, remainingMs: 150 } }, home);
+
+    const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(resumed.timer.paused, false);
+    assert.ok(resumed.timer.deadline - resumed.now < 1000, `the resumed deadline must be the ~150ms remainder, not a fresh interval (got ${resumed.timer.deadline - resumed.now}ms out)`);
+
+    // (Ablation: delete `arm(next, now);` from createPomodoro's `resume` method in
+    // src/pomodoro.mjs, leaving the `writeDoc` call intact -- every assertion above this
+    // line still passes, and this poll times out with `phase` stuck at 'work'.)
+    const phase = await pollPomodoroPhase('break', 5000);
+    assert.equal(phase, 'break', 'a resumed interval must actually reach its next boundary within a few seconds -- resume must re-arm the live setTimeout, not just persist a correct-looking deadline');
+  });
+
+  await check('POMODORO: ensure actually RE-ARMS the live timer too -- a freshly started interval reaches its boundary on its own', async () => {
+    // Same gap as the resume check above, for ensureTimer's `arm` call instead of
+    // resume's. `workMin` is seeded far below the settings validator's 1-minute floor --
+    // directly on disk, bypassing mergeSettings entirely (that validator is already
+    // covered by its own checks above) -- purely so this interval reaches its boundary in
+    // test time rather than a real 60+ seconds.
+    // `notify: false` for the same reason as the resume check above -- this crosses a real
+    // boundary on a real daemon, and no notification may fire during the suite.
+    const doc = readPomodoroDoc(home);
+    writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, workMin: 150 / 60_000, longEvery: 4, notify: false }, timer: null }, home);
+
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(started.timer.phase, 'work');
+    assert.equal(started.timer.paused, false);
+
+    // (Ablation: delete `arm(next, now);` from createPomodoro's `ensureTimer` method --
+    // the started document above still looks right, and this poll times out.)
+    const phase = await pollPomodoroPhase('break', 5000);
+    assert.equal(phase, 'break', 'a freshly started interval must actually reach its boundary within a few seconds -- ensure must re-arm the live setTimeout, not just persist a correct-looking deadline');
+  });
+
+  await check('POMODORO: reset clears the timer to null and the cycle to 0', async () => {
+    // Seeded directly with a NONZERO cycle -- reaching one through real boundary
+    // crossings would mean waiting out several real work/break intervals, which is
+    // exactly what test/check-pomodoro.mjs already proves at the pure-function level.
+    // This is proving the ROUTE clears a genuinely nonzero value, not that 0 stays 0.
+    const doc = readPomodoroDoc(home);
+    writePomodoroDoc({ ...doc, cycle: 3, timer: { phase: 'work', paused: false, deadline: Date.now() + 5 * 60_000 } }, home);
+
+    const reset = await (await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(reset.timer, null, 'reset must clear the timer');
+    assert.equal(reset.cycle, 0, 'reset must zero the cycle too -- reset ends the loop the cycle was counting');
+
+    const after = await (await fetch(`${base}/api/pomodoro`)).json();
+    assert.equal(after.timer, null);
+    assert.equal(after.cycle, 0);
+  });
+
+  await check('POMODORO: ensure starts a work interval when none exists, and is a no-op against a running, paused, or mid-break timer -- a mid-break ensure leaves the break deadline untouched (criterion 2)', async () => {
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
+
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.ok(started.timer, 'ensure must start a timer where there was none');
+    assert.equal(started.timer.phase, 'work');
+    assert.equal(started.timer.paused, false);
+
+    const runningDeadline = started.timer.deadline;
+    const stillRunning = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(stillRunning.timer.deadline, runningDeadline, 'ensure against a running timer must be a no-op (a second session, a /clear, a resume)');
+
+    await fetch(`${base}/api/pomodoro/pause`, { method: 'POST', headers: writeHeaders() });
+    const pausedBefore = await (await fetch(`${base}/api/pomodoro`)).json();
+    const stillPaused = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(stillPaused.timer.paused, true);
+    assert.equal(stillPaused.timer.remainingMs, pausedBefore.timer.remainingMs, 'ensure against a paused timer must not resume or restart it');
+
+    // Mid-break, seeded directly: a real work interval reaching a break naturally would
+    // take up to workMin minutes. What's being proved is criterion 2's exact wording --
+    // "a session starting mid-break does not cut the break short" -- so the break's own
+    // deadline must survive ensure UNCHANGED, to the millisecond.
+    const seeded = readPomodoroDoc(home);
+    const breakDeadline = Date.now() + 4 * 60_000;
+    writePomodoroDoc({ ...seeded, timer: { phase: 'break', paused: false, deadline: breakDeadline } }, home);
+    const midBreak = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(midBreak.timer.phase, 'break', 'starting mid-break must not switch the phase to work');
+    assert.equal(midBreak.timer.deadline, breakDeadline, 'the break deadline must be untouched, to the millisecond');
+  });
+
+  await check('POMODORO: the settings validator rejects each bad shape with a 400 naming the offending field, and writes nothing', async () => {
+    const before = (await (await fetch(`${base}/api/pomodoro`)).json()).settings;
+
+    const cases = [
+      [{ workMin: 0 }, /workMin/, 'zero is not a valid duration'],
+      [{ workMin: -5 }, /workMin/, 'negative is not a valid duration'],
+      [{ workMin: '25' }, /workMin/, 'a numeric-looking string is still not a number'],
+      [{ breakMin: 1.5 }, /breakMin/, 'a non-integer minute count is rejected'],
+      [{ longBreakMin: 100000 }, /longBreakMin/, 'an absurdly large duration is rejected'],
+      [{ longEvery: 0 }, /longEvery/, 'zero would divide by zero in settleBoundary'],
+      [{ longEvery: -1 }, /longEvery/, 'a negative longEvery is meaningless'],
+      [{ notify: 'yes' }, /notify/, 'a truthy non-boolean is still rejected'],
+      [{ sound: 1 }, /sound/, 'a truthy non-boolean is still rejected'],
+    ];
+    for (const [patch, expectedField, why] of cases) {
+      const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) });
+      assert.equal(r.status, 400, `${why}: ${JSON.stringify(patch)} must be rejected with 400`);
+      const body = await r.json();
+      assert.match(body.error, expectedField, `the 400 must name the offending field for ${JSON.stringify(patch)}`);
+    }
+
+    // A body that is not even an object (a JSON array parses fine but is not the shape
+    // mergeSettings expects) must also be refused rather than read as if its numeric
+    // indices were setting keys.
+    const arrayPatch = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify([1, 2, 3]) });
+    assert.equal(arrayPatch.status, 400, 'a JSON array body must be rejected, not silently treated as an empty patch');
+
+    // Nothing above was ever partially applied.
+    const after = (await (await fetch(`${base}/api/pomodoro`)).json()).settings;
+    assert.deepEqual(after, before, 'every rejected patch above must have left settings byte-for-byte unchanged');
+  });
+
+  await check('POMODORO: settings persist across a daemon restart (criterion 9)', async () => {
+    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, sound: true };
+    const written = await (await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) })).json();
+    assert.equal(written.settings.workMin, 33, 'the write itself must reflect the patch');
+
+    // Close THIS daemon and start a second one against the exact same CLAUDE_BOARD_HOME.
+    // A second startServer() call is what actually re-reads pomodoro.json off disk --
+    // proving persistence against the same in-process daemon would not rule out an
+    // in-memory value nothing ever wrote back (QUIRKS.md "A harness that imports `src/`
+    // serves the code as it was at startup" is the adjacent trap this avoids: a fresh
+    // startServer call, not a fresh import, is what a real restart actually is).
+    await new Promise(resolve => server.close(resolve));
+    ({ server, port } = await startServer({ home, port: 0 }));
+    base = `http://127.0.0.1:${port}`;
+
+    const reread = await (await fetch(`${base}/api/pomodoro`)).json();
+    assert.equal(reread.settings.workMin, 33, 'workMin must survive a daemon restart');
+    assert.equal(reread.settings.breakMin, 6, 'breakMin must survive a daemon restart');
+    assert.equal(reread.settings.longBreakMin, 21, 'longBreakMin must survive a daemon restart');
+    assert.equal(reread.settings.longEvery, 5, 'longEvery must survive a daemon restart');
+    assert.equal(reread.settings.notify, false, 'the notify toggle must survive a daemon restart');
+    assert.equal(reread.settings.sound, true, 'the sound toggle must survive a daemon restart');
   });
 }
 

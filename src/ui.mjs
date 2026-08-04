@@ -3274,10 +3274,14 @@ export const ui = `
   //
   // The tab is opened exactly once, for a thread's first board; every later round
   // arrives over SSE into that same tab, so the page itself has to be what tells
-  // the reviewer something new landed. Three marks, all page-side, none of which
-  // steals focus (the whole reason the tab is not reopened): a pending count in
-  // document.title, a badge drawn onto a data-URI favicon, and -- only when this
-  // document is hidden or unfocused -- a system notification.
+  // the reviewer something new landed. Two marks, both page-side, neither of which
+  // steals focus (the whole reason the tab is not reopened): a countless "you owe
+  // an answer" pip drawn onto a data-URI favicon, and -- only when this document
+  // is hidden or unfocused -- a system notification that does carry the round
+  // number, because Notification Center is not a tab strip glanced at in passing.
+  // The title used to carry a "(n) " prefix too; it doesn't any more -- knowing
+  // you owe an answer is worth a glance, knowing it's three answers wasn't worth
+  // the extra mark, so document.title is just left alone.
   //
   // Every part degrades silently and never blocks: no canvas, no Notification
   // constructor, permission denied or a throw from any of them leaves the round
@@ -3285,21 +3289,22 @@ export const ui = `
   // the first round that would actually notify, never at load. All of it is inert
   // in readonly mode -- there is no SSE connection there to push a round in the
   // first place, and every entry point below returns early on 'readonly' anyway,
-  // so the standalone file:// archive neither draws a badge nor asks for anything.
+  // so the standalone file:// archive neither draws a mark nor asks for anything.
 
   var pendingRounds = 0;
   var baseTitle = document.title;
   var faviconLink = null;
   var baseFavicon = null;
 
-  /** Draw an n-badged favicon as a data URI. Canvas, not a file: PROTOCOL.md's
-   * zero-dependency / single-self-contained-file rule means no new asset can ship
-   * beside the page. Returns null if canvas is unavailable, and the caller just
-   * leaves the favicon alone. Same two colours as the unbadged mark, interpolated
-   * from src/styles.mjs's dark palette so the count and the tile it replaces can't
-   * drift apart (they had: this used to paint a hardcoded blue that was two
-   * palette edits behind --accent). */
-  function drawFavicon(count) {
+  /** Draw the countless pending mark as a data URI: the accent tile with a
+   * smaller ink-coloured pip on top, no digit anywhere. Canvas, not a file:
+   * PROTOCOL.md's zero-dependency / single-self-contained-file rule means no new
+   * asset can ship beside the page. Returns null if canvas is unavailable, and
+   * the caller just leaves the favicon alone. Same two colours as the page's own
+   * unbadged mark, interpolated from src/styles.mjs's dark palette so the pip and
+   * the tile it replaces can't drift apart (they had: this used to paint a
+   * hardcoded blue that was two palette edits behind --accent). */
+  function drawFavicon() {
     try {
       var canvas = document.createElement('canvas');
       canvas.width = 32;
@@ -3311,20 +3316,19 @@ export const ui = `
       ctx.arc(16, 16, 16, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = '${palettes.dark['--accent-ink']}';
-      ctx.font = 'bold 20px -apple-system, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(count > 9 ? '9+' : String(count), 16, 17);
+      ctx.beginPath();
+      ctx.arc(16, 16, 6, 0, Math.PI * 2);
+      ctx.fill();
       return canvas.toDataURL('image/png');
     } catch (e) { return null; }
   }
 
-  /** Badge (count > 0) or unbadge (count === 0) the tab's favicon. Unbadging puts
-   * back the page's own mark (faviconLink, src/styles.mjs) rather than clearing
-   * the href, which would leave the tab blank once every round is answered; the
-   * <link> is still created here if the document somehow carries none, so this
-   * degrades to the old behaviour instead of throwing. */
-  function setFaviconBadge(count) {
+  /** Show (pending truthy) or hide (falsy) the tab's countless favicon mark.
+   * Hiding puts back the page's own mark (faviconLink, src/styles.mjs) rather
+   * than clearing the href, which would leave the tab blank once every round is
+   * answered; the <link> is still created here if the document somehow carries
+   * none, so this degrades to the old behaviour instead of throwing. */
+  function setFaviconBadge(pending) {
     try {
       if (!faviconLink) {
         faviconLink = document.querySelector('link[rel="icon"]');
@@ -3335,18 +3339,14 @@ export const ui = `
         }
         baseFavicon = faviconLink.getAttribute('href');
       }
-      if (!count) {
+      if (!pending) {
         if (baseFavicon) faviconLink.setAttribute('href', baseFavicon);
         else faviconLink.removeAttribute('href');
         return;
       }
-      var href = drawFavicon(count);
+      var href = drawFavicon();
       if (href) faviconLink.setAttribute('href', href);
-    } catch (e) { /* no favicon badge; the title count still marks the tab */ }
-  }
-
-  function setTitleBadge(count) {
-    document.title = count ? '(' + count + ') ' + baseTitle : baseTitle;
+    } catch (e) { /* no favicon mark; the notification still covers a hidden tab */ }
   }
 
   /** A notification INSTEAD of a focus steal, and only when the reviewer isn't
@@ -3388,7 +3388,6 @@ export const ui = `
   function markPendingRound(n) {
     if (readonly) return;
     pendingRounds++;
-    setTitleBadge(pendingRounds);
     setFaviconBadge(pendingRounds);
     notifyRound(n);
   }
@@ -3396,13 +3395,12 @@ export const ui = `
   function clearPendingMark() {
     if (!pendingRounds) return;
     pendingRounds = 0;
-    setTitleBadge(0);
     setFaviconBadge(0);
   }
 
-  // Coming back to the tab is the acknowledgement: the marks clear the moment the
-  // document becomes visible/focused again, so a stale "(3)" never outlives the
-  // rounds it counted.
+  // Coming back to the tab is the acknowledgement: the mark clears the moment the
+  // document becomes visible/focused again, so a stale favicon pip never outlives
+  // the rounds it stood for.
   document.addEventListener('visibilitychange', function () { if (!document.hidden) clearPendingMark(); });
   window.addEventListener('focus', function () { clearPendingMark(); });
 

@@ -31,6 +31,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { ui } from '../src/ui.mjs';
 import { styles, palettes, faviconLink } from '../src/styles.mjs';
 import { indexScript, buildThreadIndex, renderIndexPage, folderName, roundCount } from '../src/indexpage.mjs';
+import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
 import { badgeLabel } from '../src/badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from '../src/lens.mjs';
@@ -5042,48 +5043,74 @@ check('removePendingComment with an id that matches nothing queued is a no-op', 
   assert.deepEqual(emptied, [], 'removing from an already-empty queue is also a no-op, not a throw');
 });
 
-// --- P2 (page side): badge the tab and notify, never steal focus ---------------
+// --- P2 (page side): mark the tab and notify, never steal focus ---------------
 //
-// DESIGN.md Decisions -> "Open once, then badge and notify": "pending count in
-// the title, badge on the favicon, and a macOS notification instead of a focus
-// steal when the tab is open but unfocused". None of the three existed.
+// DESIGN.md Decisions -> "Open once, then badge and notify": a countless mark on
+// the favicon, and a macOS notification instead of a focus steal when the tab is
+// open but unfocused. The title used to carry a "(n) " prefix and the favicon
+// used to carry a digit; both lost their count -- knowing you owe an answer is
+// worth a glance, knowing it's three answers wasn't worth a second mark that
+// could drift out of sync with the round count.
 
-function evalTitleBadge(startingTitle, count) {
-  const body = namedFunctionBody(ui, 'setTitleBadge');
-  assert.ok(body, 'expected setTitleBadge in src/ui.mjs');
-  const doc = { title: startingTitle };
-  new Function('document', 'baseTitle', 'count', `(function setTitleBadge(count) {${body}})(count);`)(doc, startingTitle, count);
-  return doc.title;
-}
-
-check('a pending round puts its count in the document title, and clearing restores the title exactly', () => {
-  assert.equal(evalTitleBadge('Round one', 1), '(1) Round one');
-  assert.equal(evalTitleBadge('Round one', 3), '(3) Round one');
-  assert.equal(evalTitleBadge('Round one', 0), 'Round one', 'clearing must restore the original title, not leave "(0)"');
+check('document.title never takes a pending-count prefix -- setTitleBadge is gone, not just unused', () => {
+  assert.equal(namedFunctionBody(ui, 'setTitleBadge'), null, 'the "(n) " title prefix must be deleted, not left as dead code');
+  assert.ok(!/\(['"]\s*\(['"]\s*\+/.test(ui), 'no "(" + count title-prefix construction may remain anywhere in the client script');
+  // The one legitimate mutation of document.title in the whole page is the
+  // initial baseTitle capture; nothing may reassign it afterwards.
+  assert.ok(!/document\.title\s*=/.test(ui), 'nothing may assign document.title any more -- the tab stops counting');
 });
 
-check('an SSE round push marks the tab: title count, favicon badge and a notification', () => {
+check('an SSE round push marks the tab: favicon mark and a notification, no title write', () => {
   const push = namedFunctionBody(ui, 'applyRoundPush');
   assert.ok(push, 'expected applyRoundPush in src/ui.mjs');
   assert.match(push, /markPendingRound\(/, 'a round push must mark the tab -- the tab is never reopened, so the page has to say so itself');
   const mark = namedFunctionBody(ui, 'markPendingRound');
-  assert.match(mark, /setTitleBadge\(/);
   assert.match(mark, /setFaviconBadge\(/);
   assert.match(mark, /notifyRound\(/);
+  assert.ok(!/setTitleBadge/.test(mark), 'marking a round pending must no longer touch the title');
   assert.match(mark, /if \(readonly\) return;/, 'marking must be inert in readonly mode');
 });
 
-check('the favicon badge is drawn inline as a data URI -- no new asset file, nothing external', () => {
+check('the favicon mark is drawn inline as a data URI, with no digit -- countless, not zero', () => {
   const draw = namedFunctionBody(ui, 'drawFavicon');
   assert.ok(draw, 'expected drawFavicon in src/ui.mjs');
   assert.match(draw, /createElement\('canvas'\)/);
-  assert.match(draw, /toDataURL\(/, 'the badge must be a data URI the page draws, not a fetched or bundled file');
+  assert.match(draw, /toDataURL\(/, 'the mark must be a data URI the page draws, not a fetched or bundled file');
+  assert.ok(!/fillText/.test(draw), 'no digit may be drawn onto the favicon any more -- the mark is countless');
+  assert.ok(!/9\+/.test(draw), 'the old "9+" overflow text must be gone along with every other digit');
   const set = namedFunctionBody(ui, 'setFaviconBadge');
-  assert.match(set, /baseFavicon/, 'clearing the badge must restore the page\'s own mark, not leave the last count on it');
-  assert.match(set, /removeAttribute\('href'\)/, 'and with no mark to restore it must still unbadge rather than keep the count');
+  assert.match(set, /baseFavicon/, 'clearing the mark must restore the page\'s own mark, not leave the badge on it');
+  assert.match(set, /removeAttribute\('href'\)/, 'and with no mark to restore it must still unmark rather than keep the badge');
   // Nothing about this may add an external reference to the emitted page.
   const html = renderBoardPage(createBoard({ title: 'Fav', blocks: [{ kind: 'markdown', text: '# A' }] }));
   assert.ok(!/<link[^>]+href=["']?http/.test(html));
+});
+
+check('a countless mark applies while a round is pending, and the page\'s own mark comes back once nothing is', () => {
+  // setFaviconBadge is exercised directly, the same shape the deleted title-badge
+  // check used: pull the real function body out of the client script (source
+  // text, not a browser) and run it against a stand-in document + canvas.
+  const drawBody = namedFunctionBody(ui, 'drawFavicon');
+  const setBody = namedFunctionBody(ui, 'setFaviconBadge');
+  assert.ok(drawBody && setBody, 'expected drawFavicon and setFaviconBadge in src/ui.mjs');
+  function run(pending) {
+    const link = { rel: 'icon', href: 'data:image/svg+xml,BASE', getAttribute(n) { return this[n]; }, setAttribute(n, v) { this[n] = v; }, removeAttribute(n) { this[n] = undefined; } };
+    const doc = { querySelector: () => link, createElement: () => ({ getContext: () => ({ fillStyle: '', beginPath() {}, arc() {}, fill() {} }), toDataURL: () => 'data:image/png,PIP' }), head: { appendChild() {} } };
+    // ui.mjs's `${palettes.dark[...]}` interpolations already resolved to literal
+    // hex strings when the `ui` template literal itself was evaluated at import
+    // time, so the extracted bodies below reference no free `palettes` variable.
+    const scope = new Function(
+      'document', 'pending',
+      `var faviconLink = null; var baseFavicon = null;
+       function drawFavicon() {${drawBody}}
+       function setFaviconBadge(pending) {${setBody}}
+       setFaviconBadge(pending);
+       return faviconLink.href;`
+    );
+    return scope(doc, pending);
+  }
+  assert.equal(run(1), 'data:image/png,PIP', 'something pending must swap in the drawn mark');
+  assert.equal(run(0), 'data:image/svg+xml,BASE', 'nothing pending must restore the page\'s own unbadged mark, not leave the drawn one or go blank');
 });
 
 check('every page carries the same inline mark, and unbadging has something to restore', () => {
@@ -5133,14 +5160,14 @@ check('the notification fires only when the tab is unfocused, degrades silently,
   assert.match(notify, /window\.focus\(\)/, 'the sole window.focus( call in the file must live inside notifyRound (the click handler built above)');
 });
 
-check('coming back to the tab clears the marks', () => {
+check('coming back to the tab clears the mark', () => {
   const clear = namedFunctionBody(ui, 'clearPendingMark');
   assert.ok(clear, 'expected clearPendingMark in src/ui.mjs');
-  assert.match(clear, /setTitleBadge\(0\)/);
   assert.match(clear, /setFaviconBadge\(0\)/);
-  assert.ok(/visibilitychange/.test(ui), 'the marks must clear when the document becomes visible again');
+  assert.ok(!/setTitleBadge/.test(clear), 'there is nothing left to un-title -- clearing must not reference the deleted title badge');
+  assert.ok(/visibilitychange/.test(ui), 'the mark must clear when the document becomes visible again');
   assert.ok(/addEventListener\('focus'/.test(ui), 'and when the window regains focus');
-  // A landed submit clears them too: nothing is pending once the round went out.
+  // A landed submit clears it too: nothing is pending once the round went out.
   assert.match(namedFunctionBody(ui, 'submitBoard'), /clearPendingMark\(\)/);
 });
 
@@ -5446,7 +5473,7 @@ function stripJsComments(src) {
 }
 
 check('every class the stylesheet rules on is a class something actually emits', () => {
-  const emitters = ['src/render.mjs', 'src/ui.mjs', 'src/indexpage.mjs', 'src/markdown.mjs', 'src/theme.mjs']
+  const emitters = ['src/render.mjs', 'src/ui.mjs', 'src/indexpage.mjs', 'src/markdown.mjs', 'src/theme.mjs', 'src/pomodoro-widget.mjs']
     .map(f => stripJsComments(readFileSync(path.join(repoRoot, f), 'utf8'))).join('\n');
   const ruled = new Set();
   for (const m of styles.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/\.([a-zA-Z][\w-]*)/g)) ruled.add(m[1]);
@@ -5760,7 +5787,15 @@ check('indexScript (the relative-time client script) parses and runs against a m
   const els = [
     { _datetime: '2020-01-01T00:00:00.000Z', textContent: '2020-01-01 00:00:00Z', getAttribute(n) { return n === 'datetime' ? this._datetime : null; } },
   ];
-  const fakeDocument = { querySelectorAll: sel => (sel === '.rel-time' ? els : []) };
+  // querySelector: () => null (ticket 04) -- the pomodoro widget's own
+  // initPomodoroWidget() looks up 'div#pomodoro-widget' first (tag-qualified,
+  // never a bare getElementById -- see "no client script looks an id up bare"
+  // in test/check-archive-ids.mjs) and bails out immediately when it is
+  // absent, which real page markup this minimal stand-in does not model.
+  // Proven separately by the pomodoro-specific checks further down. Without
+  // this stub, indexScript still parses fine but THROWS the moment it runs,
+  // for a reason that has nothing to do with relTime/refresh.
+  const fakeDocument = { querySelectorAll: sel => (sel === '.rel-time' ? els : []), querySelector: () => null };
   let intervalFn = null;
   let intervalMs = null;
   const fakeSetInterval = (fn, ms) => { intervalFn = fn; intervalMs = ms; return 1; };
@@ -5786,7 +5821,7 @@ check('indexScript (the relative-time client script) parses and runs against a m
  * effect of merely evaluating it, before the appended `return` is ever reached.
  * Throws loudly, not silently, if extraction ever breaks. */
 function extractRelTime() {
-  const noopDocument = { querySelectorAll: () => [] };
+  const noopDocument = { querySelectorAll: () => [], querySelector: () => null }; // see the check above: initPomodoroWidget's own bail-out
   const noopSetInterval = () => {};
   const fn = new Function('document', 'setInterval', indexScript + '; return relTime;')(noopDocument, noopSetInterval);
   if (typeof fn !== 'function') throw new Error('indexScript extraction did not yield relTime as a function');
@@ -6180,6 +6215,359 @@ check('nothing in the tree still refers to the deleted board-scoped submit token
     }
   }
 });
+
+// --- the pomodoro widget (ticket 04, SPEC_POMODORO.md) ---------------------------
+// Drives the REAL indexScript against the REAL renderIndexPage() markup, through
+// test/dom-stand-in.mjs -- never a hand-summary of what the widget does
+// (QUIRKS.md: "a mock of someone else's renderer is worth exactly as much as the
+// last time someone checked it against the real thing"). `fetch` is stubbed on
+// globalThis for the duration of each check (same idiom test/check-enter.mjs's
+// withFetchCapture and test/check-comment-mode.mjs already use for `ui`);
+// `setInterval` is still the explicit new Function(...) parameter the indexScript
+// checks above already rely on, which is what lets a check fire a "tick" or a
+// "poll" by hand instead of racing a real 1s/15s timer. This whole section is
+// async (a local `checkAsync`, awaited below) because a pomodoro fetch's own
+// `.then()` chain needs at least one real event-loop turn to settle -- the plain
+// synchronous `check()` above cannot observe that.
+
+let asyncFailures = 0;
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    asyncFailures++;
+    console.error(`FAIL - ${name}`);
+    console.error((err && err.stack) || err);
+  }
+}
+
+/** Stub globalThis.fetch for the duration of `fn(calls)`, recording every call
+ * (url, method, credentials, parsed JSON body) and resolving each with
+ * `handler(call)` as the response's JSON body. Restores the original fetch even
+ * if `fn` throws -- same discipline test/check-archive-ids.mjs's own fetch stubs
+ * already follow. */
+async function withPomodoroFetch(handler, fn) {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = (url, opts) => {
+    const call = {
+      url: String(url),
+      method: (opts && opts.method) || 'GET',
+      credentials: opts && opts.credentials,
+      body: opts && opts.body ? JSON.parse(opts.body) : undefined,
+    };
+    calls.push(call);
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(handler(call)) });
+  };
+  try {
+    await fn(calls);
+  } finally {
+    globalThis.fetch = original;
+  }
+  return calls;
+}
+
+/** Empties the microtask queue (and then some): fetchPomodoro/postPomodoro's own
+ * chain is `fetch(...).then(r => r.json()).then(data => {...})`, and the stub
+ * above adds its own `Promise.resolve()` on top -- several microtask hops.
+ * `setTimeout(resolve, 0)` is scheduled as a macrotask, and Node drains every
+ * pending microtask before running the next macrotask, so one call here is
+ * always enough regardless of exactly how many `.then()` links are chained. */
+function flushPomodoro() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, sound: false };
+
+/** Parse the real renderIndexPage() output and run the real indexScript against
+ * it, capturing every setInterval registration by hand (there are three: refresh's
+ * own 15s poll, tickPomodoro's 1s local repaint, and fetchPomodoro's own poll) so
+ * a check can fire any one of them without a real timer. Must run with
+ * globalThis.fetch already stubbed (initPomodoroWidget's own fetchPomodoro() call
+ * fires synchronously as part of loading). */
+function loadIndexWithPomodoro() {
+  const document = parseHTML(renderIndexPage({ threads: [] }));
+  const intervals = [];
+  const fakeSetInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
+  new Function('document', 'setInterval', indexScript)(document, fakeSetInterval);
+  return { document, intervals };
+}
+
+function pomodoroTickFn(intervals) {
+  const entry = intervals.find(e => e.ms === 1000);
+  assert.ok(entry, 'setup failure: tickPomodoro was never registered via setInterval(tickPomodoro, 1000)');
+  return entry.fn;
+}
+
+check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all six settings fields present', () => {
+  const html = renderIndexPage({ threads: [] });
+  assert.match(html, /<div class="pomodoro-widget" id="pomodoro-widget">/);
+  assert.match(html, /<span class="pomodoro-status" id="pomodoro-status">/);
+  assert.match(html, /<button type="button" class="mode-toggle" id="pomodoro-toggle" hidden>/, 'the toggle must start hidden -- no timer is known until the first fetch resolves');
+  assert.match(html, /<details class="pomodoro-settings" id="pomodoro-settings">/, 'the settings panel must be a <details> -- collapsed by default with no JS required to open it');
+  assert.match(html, /<form class="pomodoro-settings-form" id="pomodoro-settings-form">/);
+  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'sound']) {
+    assert.match(html, new RegExp(`name="${field}"`), `settings form must carry a ${field} field`);
+  }
+  assert.match(html, /id="pomodoro-reset"/);
+  // Beside themeToggle(), not replacing it -- the theme control must still render.
+  // Matched by the real <button ... id="theme-toggle"> tag shape, not a bare
+  // substring search: 'pomodoro-widget'/'theme-toggle' both also appear in this
+  // file's own CSS comments (src/styles.mjs) and in indexScript's querySelector
+  // strings, so a plain indexOf() compares whichever occurrence happens to sort
+  // first among ALL of those, not the two real markup elements this check
+  // actually cares about (caught by running this check before adding this
+  // comment -- the CSS-comment occurrence sorted first and broke the ordering
+  // assertion for a reason that had nothing to do with the real markup).
+  const widgetMatch = html.match(/<div class="pomodoro-widget" id="pomodoro-widget">/);
+  const themeMatch = html.match(/<button type="button" id="theme-toggle"/);
+  assert.ok(widgetMatch && themeMatch, 'setup failure: could not locate both real markup elements');
+  assert.ok(widgetMatch.index < themeMatch.index, 'both controls must render inside the same header, the widget before the theme toggle');
+});
+
+check('pomodoro widget: never a bare "Start" affordance -- starting a pomodoro is a session-start signal owned by another slice', () => {
+  const html = renderIndexPage({ threads: [] });
+  assert.doesNotMatch(html, />\s*Start\s*</i, 'the widget must never offer to start a pomodoro itself');
+});
+
+check('pomodoro widget: reuses formatCountdown verbatim -- indexScript embeds the real function source, not a second mm:ss formatter', () => {
+  assert.ok(indexScript.includes(formatCountdown.toString()), 'indexScript must contain formatCountdown\'s own real source, spliced in via .toString() (src/ui.mjs\'s badgeLabel/computeBoardPatch technique), not a hand-copied restatement of it');
+  // A second, independently written formatter would very likely reach for the
+  // same padStart(2, '0') idiom formatCountdown itself uses -- counting
+  // occurrences catches that shape of regression without demanding indexScript
+  // contain literally nothing else that mentions padStart.
+  const padStartInScript = (indexScript.match(/padStart/g) || []).length;
+  const padStartInFormatCountdown = (formatCountdown.toString().match(/padStart/g) || []).length;
+  assert.equal(padStartInScript, padStartInFormatCountdown, 'indexScript must not contain a second, hand-written mm:ss formatter alongside the embedded formatCountdown');
+});
+
+check('pomodoro widget: polls on the same order of magnitude as refresh\'s own 15s poll, never every second', () => {
+  const m = indexScript.match(/POMODORO_POLL_MS\s*=\s*(\d+)/);
+  assert.ok(m, 'setup failure: POMODORO_POLL_MS not found in indexScript');
+  const ms = Number(m[1]);
+  assert.ok(ms >= 5000 && ms <= 20000, `POMODORO_POLL_MS must be a modest poll interval, not per-second -- got ${ms}ms`);
+});
+
+check('pomodoroRemainingMs: a browser clock skewed by a full minute renders the identical countdown once the daemon-derived offset is applied (criterion 6)', () => {
+  const remainingMs = extractIndexScriptFn('pomodoroRemainingMs');
+  const deadline = 1_000_000_000;
+  const serverNow = deadline - 5 * 60_000; // 5 minutes left, per the daemon's own clock
+  const timer = { phase: 'work', deadline, paused: false };
+
+  // Tab A: a browser clock that happens to agree with the server exactly.
+  const msA = remainingMs(timer, /* offset */ 0, /* browserNow */ serverNow);
+  assert.equal(msA, 5 * 60_000);
+
+  // Tab B: a browser clock running a full minute FAST. The offset (computed at
+  // fetch time as serverNow - browserNow, exactly what fetchPomodoro computes)
+  // absorbs the skew entirely.
+  const skewedBrowserNow = serverNow + 60_000;
+  const offsetB = serverNow - skewedBrowserNow; // -60000
+  const msB = remainingMs(timer, offsetB, skewedBrowserNow);
+  assert.equal(msB, msA, 'two clocks disagreeing by a minute must render the identical remaining time once each has its own daemon-derived offset applied -- this is criterion 6\'s "two open tabs show the same remaining time", reduced to one pure function');
+
+  // Sanity: the skew must actually matter to a NAIVE calculation (deadline -
+  // browserNow, no offset at all), or the assertion above would pass by
+  // accident regardless of whether the offset correction exists at all.
+  const naive = Math.max(0, deadline - skewedBrowserNow);
+  assert.notEqual(naive, msA, 'setup sanity: dropping the offset correction must actually change the answer, or this check proves nothing about criterion 6');
+});
+
+check('pomodoroRemainingMs: a paused timer ignores the clock entirely, returning the frozen remainingMs', () => {
+  const remainingMs = extractIndexScriptFn('pomodoroRemainingMs');
+  const ms = remainingMs({ phase: 'break', paused: true, remainingMs: 42_000 }, /* offset */ 999_999, /* browserNow */ 0);
+  assert.equal(ms, 42_000, 'a paused timer must never consult offset/browserNow -- there is no live deadline left on the wire to subtract anything from');
+});
+
+check('pomodoroRemainingMs: no timer at all is 0, never a thrown error', () => {
+  const remainingMs = extractIndexScriptFn('pomodoroRemainingMs');
+  assert.equal(remainingMs(null, 0, Date.now()), 0);
+});
+
+/** Same `new Function(src + '; return name;')()` extraction technique
+ * extractRelTime already uses on indexScript, generalised to any of its plain
+ * top-level function declarations -- safe here for the same reason: none of
+ * indexScript's pomodoro functions are hidden inside an IIFE. */
+function extractIndexScriptFn(name) {
+  const noopDocument = { querySelectorAll: () => [], querySelector: () => null };
+  const noopSetInterval = () => {};
+  const fn = new Function('document', 'setInterval', `${indexScript}\n; return ${name};`)(noopDocument, noopSetInterval);
+  if (typeof fn !== 'function') throw new Error(`indexScript extraction did not yield ${name} as a function`);
+  return fn;
+}
+
+await checkAsync('pomodoro widget: no timer running renders a calm idle state (the configured work length, no countdown) and hides the toggle', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  let document;
+  await withPomodoroFetch(() => doc, async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  const status = document.querySelector('span#pomodoro-status');
+  const toggle = document.querySelector('button#pomodoro-toggle');
+  assert.ok(status, 'setup failure: no #pomodoro-status rendered');
+  assert.match(status.textContent, /idle/i, 'no timer must read as a calm idle state, not an error (spec: "a real state, not an error")');
+  assert.match(status.textContent, /25/, 'idle state must show the configured work length -- spec: "the durations, or a dash"');
+  assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no timer must never render a countdown');
+  assert.equal(toggle.hidden, true, 'no timer: pause/resume must be hidden entirely, not merely disabled -- offering it implies a timer to act on, and there is no Start control anywhere on this widget (starting a pomodoro is a session-start signal, another slice\'s job)');
+});
+
+await checkAsync('pomodoro widget: a running timer renders "<Phase> mm:ss" from the real formatCountdown and shows a live Pause control', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 1, cycleDate: '2020-01-01', timer: { phase: 'work', deadline: nowMs + 12 * 60_000 + 34_000, paused: false }, now: nowMs };
+  let document;
+  await withPomodoroFetch(() => doc, async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  const status = document.querySelector('span#pomodoro-status');
+  const toggle = document.querySelector('button#pomodoro-toggle');
+  assert.match(status.textContent, /Work/);
+  assert.match(status.textContent, /12:3[0-9]/, `expected roughly 12:34 in ${status.textContent}`);
+  assert.equal(toggle.hidden, false);
+  assert.equal(toggle.textContent, 'Pause');
+});
+
+await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs, shows Resume, and never ticks locally', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 1, cycleDate: '2020-01-01', timer: { phase: 'break', paused: true, remainingMs: 90_000 }, now: nowMs };
+  let document, intervals;
+  await withPomodoroFetch(() => doc, async () => {
+    ({ document, intervals } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  const status = document.querySelector('span#pomodoro-status');
+  const toggle = document.querySelector('button#pomodoro-toggle');
+  assert.match(status.textContent, /Break/);
+  assert.match(status.textContent, /01:30/);
+  assert.match(status.textContent, /paused/i);
+  assert.equal(toggle.textContent, 'Resume');
+
+  // Paused must never tick locally (spec: "the countdown does not tick while
+  // paused"): firing the 1s local-repaint interval by hand must render the
+  // exact same text, since pomodoroRemainingMs ignores offset/browserNow for a
+  // paused timer entirely.
+  const before = status.textContent;
+  pomodoroTickFn(intervals)();
+  assert.equal(status.textContent, before, 'a paused timer must render identical text after a tick -- ticking it would silently un-freeze the countdown');
+});
+
+await checkAsync('pomodoro widget: the local tick never advances the phase on its own -- an expired countdown re-fetches instead of guessing the next phase', async () => {
+  const nowMs = Date.now();
+  // Deliberately already past its own deadline -- if tickPomodoro ever grew its
+  // own boundary-crossing logic (a second, client-side settleBoundary), THIS is
+  // where it would show up: the phase would flip to 'break' locally, with no
+  // fetch involved at all.
+  const stale = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'work', deadline: nowMs - 5000, paused: false }, now: nowMs };
+  let document, intervals, calls;
+  calls = await withPomodoroFetch(() => stale, async (c) => {
+    ({ document, intervals } = loadIndexWithPomodoro());
+    await flushPomodoro();
+    const before = c.length;
+    pomodoroTickFn(intervals)();
+    await flushPomodoro();
+    assert.equal(c.length, before + 1, 'a tick against an already-expired timer must trigger exactly one re-fetch');
+    assert.equal(c[c.length - 1].url, '/api/pomodoro', 'the re-fetch must be a plain GET, never a write that could itself decide the next phase');
+  });
+  // The doc handed back by every fetch in this check is the SAME stale 'work'
+  // document -- proving the phase shown is still whatever the (stubbed) daemon
+  // said, never something tickPomodoro invented on its own.
+  assert.match(document.querySelector('span#pomodoro-status').textContent, /Work/, 'the phase must still be exactly what the daemon last reported, not locally advanced');
+});
+
+await checkAsync('pomodoro widget: clicking the toggle while running posts /api/pomodoro/pause with the session cookie, and applies the response', async () => {
+  const nowMs = Date.now();
+  const running = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: { phase: 'work', deadline: nowMs + 60_000, paused: false }, now: nowMs };
+  const paused = { ...running, timer: { phase: 'work', paused: true, remainingMs: 60_000 } };
+  let document;
+  const calls = await withPomodoroFetch(call => (call.method === 'POST' ? paused : running), async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+    document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+  });
+  const post = calls.find(c => c.method === 'POST');
+  assert.ok(post, 'the click must issue a POST');
+  assert.equal(post.url, '/api/pomodoro/pause');
+  assert.equal(post.credentials, 'same-origin', 'the browser holds only the session cookie, not the secret -- credentials must be sent');
+  assert.equal(document.querySelector('button#pomodoro-toggle').textContent, 'Resume', 'the response must be applied: the control must now read Resume');
+});
+
+await checkAsync('pomodoro widget: clicking the toggle while paused posts /api/pomodoro/resume', async () => {
+  const nowMs = Date.now();
+  const paused = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: { phase: 'break', paused: true, remainingMs: 30_000 }, now: nowMs };
+  const running = { ...paused, timer: { phase: 'break', deadline: nowMs + 30_000, paused: false } };
+  const calls = await withPomodoroFetch(call => (call.method === 'POST' ? running : paused), async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+  });
+  const post = calls.find(c => c.method === 'POST');
+  assert.ok(post);
+  assert.equal(post.url, '/api/pomodoro/resume');
+});
+
+await checkAsync('pomodoro widget: reset needs two clicks -- the first only relabels the SAME control, the second posts /api/pomodoro/reset, and confirm() is never called', async () => {
+  const nowMs = Date.now();
+  const running = { settings: POMODORO_SETTINGS, cycle: 2, cycleDate: '2020-01-01', timer: { phase: 'work', deadline: nowMs + 60_000, paused: false }, now: nowMs };
+  const idle = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: null, now: nowMs };
+  const originalConfirm = globalThis.confirm;
+  globalThis.confirm = () => { throw new Error('must never call confirm() -- a blocking modal is exactly what the two-step button exists to avoid'); };
+  try {
+    await withPomodoroFetch(call => (call.method === 'POST' ? idle : running), async (calls) => {
+      const { document } = loadIndexWithPomodoro();
+      await flushPomodoro();
+      const resetBtn = document.querySelector('button#pomodoro-reset');
+      assert.equal(resetBtn.textContent, 'Reset');
+
+      resetBtn.dispatchEvent(new StandInEvent('click'));
+      await flushPomodoro();
+      assert.equal(resetBtn.textContent, 'Really reset?', 'the first click must only arm the confirm, relabeling the SAME control -- never a second element, never confirm()');
+      assert.equal(calls.filter(c => c.method === 'POST').length, 0, 'the first click must not post anything yet');
+
+      resetBtn.dispatchEvent(new StandInEvent('click'));
+      await flushPomodoro();
+      const posts = calls.filter(c => c.method === 'POST');
+      assert.equal(posts.length, 1, 'the second click must post exactly once');
+      assert.equal(posts[0].url, '/api/pomodoro/reset');
+    });
+  } finally {
+    globalThis.confirm = originalConfirm;
+  }
+});
+
+await checkAsync('pomodoro widget: submitting the settings form posts all six fields to /api/pomodoro/settings, and the response is applied back into the form', async () => {
+  const nowMs = Date.now();
+  const initial = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, sound: true };
+  const saved = { ...initial, settings: savedSettings };
+  let document;
+  const calls = await withPomodoroFetch(call => (call.method === 'POST' ? saved : initial), async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+    const form = document.querySelector('form#pomodoro-settings-form');
+    form.querySelector('input[name="workMin"]').value = '50';
+    form.querySelector('input[name="breakMin"]').value = '10';
+    form.querySelector('input[name="longBreakMin"]').value = '20';
+    form.querySelector('input[name="longEvery"]').value = '3';
+    form.querySelector('input[name="notify"]').checked = false;
+    form.querySelector('input[name="sound"]').checked = true;
+    form.dispatchEvent(new StandInEvent('submit'));
+    await flushPomodoro();
+  });
+  const post = calls.find(c => c.method === 'POST');
+  assert.ok(post, 'submitting must POST');
+  assert.equal(post.url, '/api/pomodoro/settings');
+  assert.deepEqual(post.body, savedSettings, 'all six settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, sound');
+  // Applied back, not merely echoed: re-reading the form after the response
+  // shows the daemon's own saved value, proving the round trip is real.
+  assert.equal(document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value, 50);
+});
+
+if (asyncFailures) failures += asyncFailures;
 
 rmSync(fixturesDir, { recursive: true, force: true });
 

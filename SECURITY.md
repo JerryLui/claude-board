@@ -155,6 +155,16 @@ token scoped to one board, minted for whoever could fetch that board's page; wit
 gated that was strictly weaker than the credential a reader already had to present, so it
 was deleted rather than kept beside it.
 
+The cookie's write authority was widened once, for the pomodoro timer (ticket 03): pause,
+resume, reset and settings now also accept it, which is what lets the index page's pause
+button work from a browser holding only the cookie — under the original rule it could
+render the board but could not press pause. The reasoning is the same one that let submit
+in: the cookie is already worth "may read every board in the store and may answer any open
+round"; pausing an advisory clock that never touches a board, never gates an `ask`, and
+never reaches a tool is strictly less than that, and the same-origin write check still
+stands in front of it. `ensure` (the session-start hook's route) stays secret-only — its
+only caller is a shell script, never a browser, so there is no reach to gain by widening it.
+
 **Guessing a board URL.** Board ids are 16 random bytes. They were 4, which was
 enumerable by any local process in seconds; the audit caught it. This is now defence in
 depth rather than the only thing between a local process and your boards.

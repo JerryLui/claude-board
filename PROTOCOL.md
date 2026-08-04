@@ -51,8 +51,21 @@ src/prose-check.mjs the shared prose-vs-shim checker (SPEC_MIGRATION.md ticket 0
                      or command's own check.mjs — lives outside this repo; see
                      "The prose-vs-shim checker" below and test/check-prose-check.mjs,
                      which proves it against a fixture this repo owns
+src/pomodoro.mjs    the global pomodoro clock: the pure boundary rule (settleBoundary,
+                     startWork, the cycle and its two resets), the document's shape on
+                     disk, and the impure shell the daemon boots. Absolute deadlines, so
+                     a restart is invisible and a deadline slept through expires silently
+src/notify.mjs      one native macOS notification per interval boundary, via osascript.
+                     Message text comes from a closed-set table keyed by phase, so nothing
+                     user-controlled reaches the AppleScript interpreter
+src/pomodoro-widget.mjs
+                     the timer's server-rendered markup for the index page (countdown,
+                     pause/resume, the two-step reset and the settings panel); the client
+                     half of it extends src/indexpage.mjs's script by concatenation
 test/check-pure.mjs test/check-http.mjs test/check-mcp.mjs
-test/check-install.mjs test/check-prose-check.mjs test/run.mjs
+test/check-install.mjs test/check-prose-check.mjs test/check-pomodoro.mjs
+test/check-notify.mjs test/check-pomodoro-page.mjs test/check-install-doc.mjs
+test/run.mjs
 install.sh
 ```
 
@@ -68,7 +81,13 @@ user-facing configuration as well as the seam the checks run against.
 ```
 $CLAUDE_BOARD_HOME/boards/<boardId>.json    the board document, the only mutable truth
 $CLAUDE_BOARD_HOME/pages/<boardId>.html     emitted projection, standalone-openable
+$CLAUDE_BOARD_HOME/pomodoro.json            the pomodoro clock and its settings (ADR entry 8)
 ```
+
+`pomodoro.json` is the one thing here that is not a board, and the one thing `uninstall.sh`
+removes from this directory — by exact name, never a glob. It is configuration this repo
+authored (a deadline, a break length), not review history the user accumulated, which is why
+it goes while `boards/` and `pages/` stay. See `src/pomodoro.mjs` for the document shape.
 
 Daemon listens on `127.0.0.1:7391` (`CLAUDE_BOARD_PORT` overrides, for the checks).
 
@@ -490,6 +509,13 @@ cookie that used to sit beside it — an HMAC of the board id, minted for whoeve
 that board's page — is deleted, because with reads gated it was strictly weaker than the
 credential the reader already had to present.
 
+Widened, ticket 03: it is also accepted on four pomodoro writes — `pause`, `resume`,
+`reset`, `settings` — so the index page's pause button (a browser holding only the cookie)
+can actually press pause. Pausing an advisory clock that never touches a board, never gates
+an `ask`, and never reaches a tool is strictly less than "may read every board and answer
+any open round", so this costs the cookie nothing it did not already carry. `ensure` is
+deliberately excluded: its one caller holds the secret, not the cookie.
+
 ### Authorizing a browser
 
 A credential never appears in a URL a bookmark can capture. Instead:
@@ -543,7 +569,56 @@ GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet
 GET  /api/board/:id/events          SSE: round pushes, state changes
 POST /api/board/:id/submit          { action: 'send'|'discuss', answers, comments }
 GET  /api/search?q=                 archive search
+GET  /api/pomodoro                  the pomodoro document -> { settings, cycle, cycleDate, timer, now }
+POST /api/pomodoro/ensure           ensure a timer exists; no-op if one already does (any phase)
+POST /api/pomodoro/pause            freeze the running interval
+POST /api/pomodoro/resume           continue a paused interval from where it froze
+POST /api/pomodoro/reset            end the loop: timer -> null, cycle -> 0
+POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEvery?, notify?, sound? }
+                                    merged into the stored settings, not replaced
 ```
+
+### The pomodoro clock (ADR.md entry 8)
+
+`GET /api/pomodoro` returns the whole document (`src/pomodoro.mjs` `defaultDoc`) plus
+`now`, the daemon's own `Date.now()` at response time — the page renders a countdown by
+subtracting a deadline from a clock, and the client's clock is not the daemon's, so `now`
+lets it compute `serverNow - Date.now()` once and keep subtracting that offset rather than
+trusting the browser's own clock against a server-minted deadline. Every write route below
+(`ensure`/`pause`/`resume`/`reset`/`settings`) returns the same `{ ...document, now }` shape,
+reflecting the state immediately after that write.
+
+`POST /api/pomodoro/ensure` is *ensure*, never *start*: it begins a fresh work interval only
+when there is no timer at all. A running timer, a paused timer, and a timer mid-break are
+each left untouched — the guarantee ticket 05's session-start hook depends on: a second
+session, a `/clear`, a resume, or a session in another project while a timer runs is a
+no-op, and starting mid-break does not cut the break short. It is deliberately callable with
+**no body at all** — `readJsonBody` is never invoked on this route — so a one-line
+`curl -X POST` from a shell hook works with no `content-type` and nothing to parse.
+
+`POST /api/pomodoro/pause` converts the running interval's absolute `deadline` into a
+`remainingMs` snapshot and sets `paused: true`; `POST /api/pomodoro/resume` reverses that —
+`deadline = now + remainingMs`, `paused: false` — so the interval continues from where it
+froze rather than restarting. Both are no-ops in the states where they make no sense
+(pausing nothing, pausing an already-paused timer, resuming a timer that is not paused).
+`POST /api/pomodoro/reset` clears `timer` to `null` **and** `cycle` to `0` — reset ends the
+loop, so the cycle it was counting goes with it.
+
+`POST /api/pomodoro/settings` merges a partial patch into the stored settings rather than
+replacing them, and validates at this trust boundary: every duration and `longEvery` must be
+a finite integer in a sane range (`longEvery` at least 1 — `settleBoundary` divides by it),
+and `notify`/`sound` must be real booleans. A patch that fails validation is a 400 naming the
+offending field (`{ error }`) and writes nothing, not a silent partial write. Unknown keys in
+the patch are dropped rather than stored or rejected. Changing a duration does **not**
+retarget whatever interval is already running — the new value applies starting at the next
+boundary crossing.
+
+Auth: `GET /api/pomodoro` is gated like every other read (either credential). The four
+browser-facing writes — `pause`, `resume`, `reset`, `settings` — accept the session cookie in
+addition to the secret, which is what lets the index page's pause button work from a browser
+holding only the cookie (see "The browser session cookie" below for the reach this extends).
+`ensure` accepts the secret only: its one caller is the session-start hook, a shell script
+holding the secret, never a browser.
 
 `POST /api/board` body shape (additive — not pinned above): `{ title, blocks, cwd?, thread? }`
 to start a new thread, or `{ boardId, blocks, title? }` to push into a live one. `cwd` is only
@@ -606,13 +681,17 @@ which `body.readonly` hides wholesale — so the standalone `file:` archive offe
 ### Marking an already-open tab
 
 "Open once, then badge and notify" (DESIGN.md) splits across two owners. Page side, on a
-`round` push: a pending count in `document.title`, a badge drawn onto a data-URI favicon (canvas,
-no asset file — the page must stay a single self-contained file), and, only when the document is
-hidden or unfocused, a `Notification`. Unbadged, the tab carries the board mark every page emits
+`round` push: a **countless** mark drawn onto a data-URI favicon (canvas, no asset file — the
+page must stay a single self-contained file), and, only when the document is hidden or
+unfocused, a `Notification`, which does carry the round number. `document.title` is left
+alone — it used to take a `(n) ` prefix and no longer does (see CHANGELOG, "The pending-round
+mark on a tab lost its number, not its mark"): knowing you owe an answer is worth a glance,
+knowing it is three answers was not worth a second mark that could drift out of step with the
+round count. Unmarked, the tab carries the board mark every page emits
 in its `<head>` (`faviconLink`, `src/styles.mjs`): an inline `data:image/svg+xml` link, painted
 from the dark palette's `--accent`/`--accent-ink`, so the same rule holds and the `file:` archive
-shows the mark with the network off. Clearing the badge restores that mark rather than blanking
-the href. Permission is requested lazily on the first round that
+shows the mark with the network off. Clearing the pending mark restores that one rather than
+blanking the href. Permission is requested lazily on the first round that
 would actually notify, and also on a Send click — the one moment the tab is definitely focused,
 so Chrome raises the prompt in the foreground instead of queuing it. A denial is never re-prompted,
 and every part degrades silently: a failure anywhere leaves the round pushed and the page working,
