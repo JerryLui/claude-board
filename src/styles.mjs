@@ -909,6 +909,10 @@ body.comment-mode .blocks { cursor: crosshair; }
    module's own header comment for the split, the same one theme.mjs draws
    between themeToggle() and themeBootScript. */
 .pomodoro-widget { display: flex; align-items: center; gap: var(--space-2); position: relative; }
+/* the tomato stands in for the word "Pomodoro" -- same muted weight the status
+   text beside it carries, so the pair reads as one label, not an icon plus a
+   sentence */
+.pomodoro-icon { color: var(--muted); flex: none; }
 .pomodoro-status { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* The start/pause/resume control: a real switch, knob left for off, knob right

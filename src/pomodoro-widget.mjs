@@ -24,6 +24,13 @@
 // Stroke-based inline glyph, same family as src/theme.mjs's three theme icons
 // and src/render.mjs's COMMENT_ICON/MODE_ICON. No external assets, ever
 // (QUIRKS.md).
+// The widget's name, drawn rather than written: the word "Pomodoro" used to
+// prefix the status text, which cost header width on every reader's screen to
+// repeat something the icon says once. `role="img"` + `<title>` is what keeps
+// the name available to a screen reader now that no visible text carries it --
+// the status span itself only ever says the phase and the clock.
+const TOMATO_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pomodoro"><title>Pomodoro</title><circle cx="12" cy="14.6" r="6.8"/><path d="M12 7.8V4.6"/><path d="M12 7.8 8.2 5.9M12 7.8l3.8-1.9"/></svg>';
+
 const GEAR_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.47V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9.1 19.4a1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 1-1.47V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>';
 
 /** IDs, not classes, are what indexScript's client code looks elements up by
@@ -48,7 +55,8 @@ const GEAR_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" s
  * honest pre-fetch truth: nothing known yet, so off. */
 export function pomodoroWidget() {
   return `<div class="pomodoro-widget" id="pomodoro-widget">
-  <span class="pomodoro-status" id="pomodoro-status">Pomodoro: …</span>
+  ${TOMATO_ICON}
+  <span class="pomodoro-status" id="pomodoro-status">…</span>
   <button type="button" class="pomodoro-switch" id="pomodoro-toggle" role="switch" aria-checked="false" aria-label="Start pomodoro" title="Start pomodoro"><span class="pomodoro-switch-knob" aria-hidden="true"></span></button>
   <details class="pomodoro-settings" id="pomodoro-settings">
     <summary class="pomodoro-settings-summary" role="button" aria-label="Pomodoro settings" title="Pomodoro settings">${GEAR_ICON}</summary>

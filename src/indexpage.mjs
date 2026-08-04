@@ -409,10 +409,10 @@ function renderPomodoro() {
   if (!timer) {
     // No timer running is a real state, not an error: show the configured
     // work length as a calm, honest default, never a countdown.
-    if (statusEl) statusEl.textContent = 'Pomodoro: idle (' + pomodoroDoc.settings.workMin + ' min)';
+    if (statusEl) statusEl.textContent = 'Idle (' + pomodoroDoc.settings.workMin + ' min)';
   } else {
     var ms = pomodoroRemainingMs(timer, pomodoroOffset, Date.now());
-    var text = 'Pomodoro: ' + pomodoroPhaseLabel(timer.phase) + ' ' + formatCountdown(ms);
+    var text = pomodoroPhaseLabel(timer.phase) + ' ' + formatCountdown(ms);
     if (timer.paused) text += ' (paused)';
     if (statusEl) statusEl.textContent = text;
   }
