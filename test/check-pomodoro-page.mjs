@@ -135,15 +135,15 @@ async function main() {
       }
     });
 
-    await check('pomodoro widget: clicking the toggle while running posts through the cookie-authorised route and actually pauses the real document on disk', async () => {
+    await check('pomodoro widget: flipping the switch off while running posts through the cookie-authorised route and actually pauses the real document on disk', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
         const toggle = tab.document.querySelector('button#pomodoro-toggle');
-        assert.equal(toggle.textContent, 'Pause', 'setup failure: expected a running timer');
+        assert.equal(toggle.getAttribute('aria-checked'), 'true', 'setup failure: expected a running timer');
         toggle.dispatchEvent(new StandInEvent('click'));
         await flush();
-        assert.equal(toggle.textContent, 'Resume', 'the response must be applied back into the widget');
+        assert.equal(toggle.getAttribute('aria-checked'), 'false', 'the response must be applied back into the widget');
         const onDisk = readPomodoroDoc(home);
         assert.equal(onDisk.timer.paused, true, 'the click must have actually reached the daemon and paused the real document on disk, not merely repainted the widget');
         assert.equal(typeof onDisk.timer.remainingMs, 'number', 'a paused document must carry a frozen remainingMs (src/pomodoro.mjs pauseTimer)');
@@ -152,18 +152,43 @@ async function main() {
       }
     });
 
-    await check('pomodoro widget: clicking the toggle while paused posts /api/pomodoro/resume and re-arms the daemon\'s own clock', async () => {
+    await check('pomodoro widget: flipping the switch back on while paused posts /api/pomodoro/resume and re-arms the daemon\'s own clock', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
         const toggle = tab.document.querySelector('button#pomodoro-toggle');
-        assert.equal(toggle.textContent, 'Resume', 'setup failure: expected the previous check to have left the timer paused');
+        assert.equal(toggle.getAttribute('aria-checked'), 'false', 'setup failure: expected the previous check to have left the timer paused');
+        assert.equal(toggle.getAttribute('aria-label'), 'Resume pomodoro', 'paused reads off, but its label must say resume, not start');
         toggle.dispatchEvent(new StandInEvent('click'));
         await flush();
-        assert.equal(toggle.textContent, 'Pause');
+        assert.equal(toggle.getAttribute('aria-checked'), 'true');
         const onDisk = readPomodoroDoc(home);
         assert.equal(onDisk.timer.paused, false);
         assert.equal(typeof onDisk.timer.deadline, 'number', 'resuming must mint a fresh absolute deadline (src/pomodoro.mjs resumeTimer)');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    // The end-to-end half of "let me start one by hand": the cookie a browser tab
+    // holds has to be enough to reach /api/pomodoro/ensure over real HTTP, and the
+    // timer it starts has to actually land on disk. test/check-pure.mjs proves the
+    // switch posts the right URL; only this proves the daemon accepts it.
+    await check('pomodoro widget: flipping the switch on while idle starts a real timer on the daemon, authorised by the session cookie alone', async () => {
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: localDateStr(Date.now()) }, home);
+      const tab = loadIndexAgainstDaemon(server.port);
+      try {
+        await flush();
+        const toggle = tab.document.querySelector('button#pomodoro-toggle');
+        assert.equal(toggle.getAttribute('aria-checked'), 'false', 'setup failure: expected an idle daemon');
+        assert.equal(toggle.getAttribute('aria-label'), 'Start pomodoro');
+        toggle.dispatchEvent(new StandInEvent('click'));
+        await flush();
+        assert.equal(toggle.getAttribute('aria-checked'), 'true', 'the started timer must be applied back into the widget');
+        const onDisk = readPomodoroDoc(home);
+        assert.ok(onDisk.timer, 'a real timer must exist on disk -- the click must have reached the daemon, not merely repainted the switch');
+        assert.equal(onDisk.timer.phase, 'work', 'starting by hand starts a WORK interval, exactly as the session-start hook does');
+        assert.equal(onDisk.timer.paused, false);
       } finally {
         tab.restoreFetch();
       }

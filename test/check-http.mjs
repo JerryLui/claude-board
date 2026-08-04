@@ -978,10 +978,22 @@ async function main() {
     const emptyRes = await (await fetch(`${base}/api/search?q=${encodeURIComponent('completely-unrelated-xyz')}`)).json();
     assert.equal(emptyRes.results.filter(r => r.boardId === posted.boardId).length, 0);
 
-    // surfaced in the index UI itself, not just the JSON API
+    // The index UI is a FILTER over the session list, not a second view of the
+    // full-text results above: `GET /` matches on session identity only (title,
+    // project folder, cwd, thread id) and narrows the thread rows in place. The
+    // full-text surface asserted above lives entirely at /api/search.
     const uiHtml = await (await fetch(`${base}/?q=${encodeURIComponent('checkout redesign')}`)).text();
-    assert.ok(uiHtml.includes('Should we ship the checkout redesign?'), 'the index page must render the matching search result inline');
-    assert.ok(uiHtml.includes(`href="/b/${posted.boardId}"`), 'the index search result must link to the board');
+    assert.ok(uiHtml.includes(`data-thread-id="${posted.thread}"`), 'a query matching a session title must leave that session in the filtered list');
+    assert.ok(uiHtml.includes(`href="/b/${posted.boardId}"`), 'the surviving row must still link to the board');
+    assert.ok(!uiHtml.includes('Should we ship the checkout redesign?'), 'the index must NOT render block-level result cards any more -- what was asked inside a session is /api/search\'s answer, not this list\'s');
+
+    // ...and identity-only means identity-only: a phrase that appears only INSIDE
+    // the board (this one is the answer note) is a hit at /api/search and must not
+    // be one here. Ablation: restore the old searchBoards call behind GET / and
+    // this row comes back.
+    const insideHtml = await (await fetch(`${base}/?q=${encodeURIComponent('validated in staging')}`)).text();
+    assert.ok(!insideHtml.includes(`data-thread-id="${posted.thread}"`), 'matching on a board\'s CONTENTS must not filter the session list -- the box names sessions, not what was said in them');
+    assert.ok(insideHtml.includes('No sessions match'), 'a query that matches no session must say so, rather than falling back to the empty-store message');
 
     // ...and the box a REAL browser uses to get here must actually submit. Every
     // assertion above fetches `/?q=` directly, which is not what a user does and does
@@ -1994,16 +2006,17 @@ async function main() {
       const indexRes = await fetch(`${base}/?q=${encodeURIComponent('checkout redesign')}`);
       assert.equal(indexRes.status, 200, 'a corrupt board file must not 500 the index');
       const indexHtml = await indexRes.text();
-      assert.ok(indexHtml.includes('Should we ship the checkout redesign?'), 'every readable board must still be listed and searchable');
+      assert.ok(indexHtml.includes('Checkout redesign'), 'every readable board must still be listed and filterable');
 
       const searchRes = await fetch(`${base}/api/search?q=${encodeURIComponent('checkout redesign')}`);
       assert.equal(searchRes.status, 200, 'a corrupt board file must not 500 archive search');
       assert.ok((await searchRes.json()).results.length > 0);
 
       // L4: the corrupt file is logged once per store walk, so the warning count is a
-      // direct count of how many times `GET /?q=` walked the store. (Ablation: calling
-      // searchBoards(query, home) instead of passing the already-read boards array in
-      // makes this 3 -- two walks for the index request, one for the search request.)
+      // direct count of how many times `GET /?q=` walked the store. Two here: one for
+      // the index request, one for the separate /api/search request. The index's own
+      // count is what matters -- it is 1 whether or not a query is present, since the
+      // filter reads what buildThreadIndex already extracted and never re-walks.
       const indexWarnings = warnings.filter(w => w.includes('b_deadbe11.json'));
       assert.equal(indexWarnings.length, 2, `GET /?q= must walk the store once (plus once for the separate /api/search request), got ${indexWarnings.length} walks`);
     } finally {
@@ -2857,7 +2870,7 @@ async function main() {
     assert.ok(typeof doc.now === 'number' && doc.now >= before && doc.now <= after, `now (${doc.now}) must be the server's own clock, taken at response time (window ${before}-${after})`);
   });
 
-  await check('POMODORO: the cookie alone can pause, resume, reset and write settings; the secret header alone can do all of those and ensure; the cookie alone cannot ensure', async () => {
+  await check('POMODORO: the cookie alone can ensure, pause, resume, reset and write settings, and nothing beyond those five', async () => {
     const cookie = sessionCookieHeader();
     const cookieHeaders = { origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie };
 
@@ -2873,11 +2886,19 @@ async function main() {
     const resetC = await rawRequest(port, 'POST', '/api/pomodoro/reset', `127.0.0.1:${port}`, { headers: cookieHeaders });
     assert.equal(resetC.status, 200, 'the cookie alone must be able to reset');
 
-    // ensure is deliberately NOT in the cookie's list: its one caller (ticket 05's
-    // session-start hook) is a shell script holding the secret, never a browser.
-    // (Ablation: add 'ensure' to POMODORO_COOKIE_ACTIONS in src/server.mjs and this reds.)
+    // ensure IS in the cookie's list, as of the index widget's switch: starting a
+    // pomodoro by hand is a browser doing it, and startWork is a no-op against a timer
+    // that already exists, so the reach it adds is smaller than reset's -- which the
+    // cookie already had. See POMODORO_COOKIE_ACTIONS in src/server.mjs.
     const ensureC = await rawRequest(port, 'POST', '/api/pomodoro/ensure', `127.0.0.1:${port}`, { headers: cookieHeaders });
-    assert.equal(ensureC.status, 401, 'the cookie must NOT be able to call ensure');
+    assert.equal(ensureC.status, 200, 'the cookie alone must be able to start a pomodoro');
+
+    // ...and the list stays CLOSED. A pomodoro write that is not one of the five named
+    // actions must still be refused to a cookie, or POMODORO_COOKIE_ACTIONS has
+    // silently become a `parts[1] === 'pomodoro'` prefix match. (Ablation: swap the Set
+    // membership test for a prefix match and this becomes a 404, not a 401.)
+    const unknownC = await rawRequest(port, 'POST', '/api/pomodoro/skip', `127.0.0.1:${port}`, { headers: cookieHeaders });
+    assert.equal(unknownC.status, 401, 'a pomodoro action outside the named five must stay secret-only, even one that does not exist yet');
 
     // The secret does all five, ensure included.
     for (const action of ['pause', 'resume', 'reset', 'ensure']) {

@@ -234,11 +234,17 @@ function isSameOriginRead(req) {
  * Named and enumerated exactly like `isSubmit` below, on purpose — never a
  * `parts[1] === 'pomodoro'` prefix match, which would silently hand the cookie every
  * pomodoro write this file ever grows, including ones that should stay secret-only.
- * `ensure` is the proof such a route can exist: it is deliberately left OUT of this
- * set, because its one caller (ticket 05's session-start hook) is a shell script
- * holding the secret, never a browser — widening the cookie to cover it would grow
- * what the cookie is worth for no caller that needs the extra reach. */
-const POMODORO_COOKIE_ACTIONS = new Set(['pause', 'resume', 'reset', 'settings']);
+ * `ensure` was originally left OUT of this set, on the reasoning that its one caller
+ * (ticket 05's session-start hook) is a shell script holding the secret and never a
+ * browser. It is in now, because that stopped being true: the index widget's switch
+ * starts a pomodoro by hand, and a browser is exactly what performs it. The reach it
+ * adds is the smallest of the five — `startWork` is a no-op against any timer that
+ * already exists (src/pomodoro.mjs), so the worst a cookie-holder can do with it is
+ * begin an advisory clock that `reset`, already on this list, would have let them end
+ * anyway. It stays a NAMED member of a closed set rather than a
+ * `parts[1] === 'pomodoro'` prefix match, so the next pomodoro write this file grows
+ * is still secret-only until someone deliberately types it here. */
+const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings']);
 
 function isPomodoroCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
@@ -248,13 +254,13 @@ function isPomodoroCookieWrite(parts) {
  * interchangeable:
  *
  *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and it
- *    is what EVERY write except submit and the four pomodoro actions below demands —
+ *    is what EVERY write except submit and the five pomodoro actions below demands —
  *    including `POST /api/board`, the only route that resolves a file, and
  *    `POST /api/handoff`, which mints browser credentials and so must never be
  *    reachable with one.
  *  - the session cookie an authorized browser holds, accepted on submit, and — as of
- *    the pomodoro slice — on `pause`/`resume`/`reset`/`settings` too. The index page's
- *    pause button is a browser holding only the cookie: under the old rule it could
+ *    the pomodoro slice — on `ensure`/`pause`/`resume`/`reset`/`settings` too. The index
+ *    page's switch is a browser holding only the cookie: under the old rule it could
  *    render the board but could not press pause. The justification is the same one that
  *    already let submit in: the cookie is worth "may read every board in the store and
  *    may answer any open round" (src/secret.mjs `sessionToken`'s own comment), and
@@ -1042,16 +1048,16 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 
       if (req.method === 'GET' && url.pathname === '/') {
         const query = url.searchParams.get('q') || '';
-        // One walk of the store, not two: the index and the search both read every
-        // board file, and this daemon is single-threaded — a second full walk blocks
-        // SSE heartbeats and submits behind it for no new information.
-        const boards = listBoards(home);
-        const threads = buildThreadIndex(boards);
-        const results = query.trim() ? searchBoards(query, home, boards) : [];
+        // One walk of the store, and no full-text search behind it: the box on this
+        // page filters the thread list on session identity alone (title, project
+        // folder, cwd, thread id), all of which buildThreadIndex has already
+        // extracted from this same walk. `GET /api/search` is unchanged and remains
+        // the full-text route over board bodies.
+        const threads = buildThreadIndex(listBoards(home));
         // INDEX_CSP, not the board CSP: the search box is a plain GET form back to
         // this same route, and `form-action 'none'` makes the browser refuse to
         // submit it. See render.mjs's comment on INDEX_CSP.
-        return sendHtml(res, 200, renderIndexPage({ threads, query, results }), {
+        return sendHtml(res, 200, renderIndexPage({ threads, query }), {
           'content-security-policy': INDEX_CSP,
         });
       }

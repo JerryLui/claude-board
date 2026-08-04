@@ -917,3 +917,28 @@ The message names the missing message, never the config, so it reads like a synt
 Either pass `-m` (`git tag -m 'why' <name> <commit>`), or — for a throwaway safety ref before
 a history rewrite — use `git branch <name> <commit>` instead, which takes no message and is
 just as easy to delete afterwards.
+
+## `el.hidden = true` does nothing when a class in our own stylesheet sets `display`
+
+The pomodoro Pause/Resume button was `class="mode-toggle" hidden`, and `renderPomodoro` flipped
+`toggleBtn.hidden` to hide it whenever no timer was running. It never hid. `[hidden] { display:
+none }` lives in the **UA stylesheet**, and author styles beat UA styles outright regardless of
+specificity — `.mode-toggle { display: inline-flex; }` (`src/styles.mjs`) wins every time. The
+button rendered as an empty accent-less pill with no label, and clicking it did nothing, because
+the click handler bailed on `!pomodoroDoc.timer`. It looked like a dead control, and it was
+reported as "the toggle isn't working"; nothing in the JS was wrong at all.
+
+The trap is that `hidden` reads like a property with its own force, the way `disabled` has. It
+has none: it is a plain attribute whose entire effect is one low-priority UA rule that any
+author `display` declaration silently overrides. It bites specifically when a component wearing
+a shared chrome class (`.mode-toggle`, `.btn`, anything with `display: flex`/`inline-flex`)
+later grows a "sometimes hidden" state — the class predates the state, so nobody rereads it.
+
+Three ways out, in order of preference here: (1) don't have a hidden state — give the control
+something to do in every state, which is what the switch that replaced this one does; (2) add
+`[hidden] { display: none !important; }` to the stylesheet once, globally; (3) toggle a class
+of your own rather than the attribute. What must NOT be done is trusting a check that asserts
+`el.hidden === true`: the DOM property round-trips perfectly while the element stays on screen,
+so such a check passes against a control the user can plainly see. `test/dom-stand-in.mjs`
+models the property, not the cascade, so it cannot catch this either — the assertion that does
+is on the emitted markup and on the fact that nothing relies on `hidden` at all.

@@ -882,32 +882,84 @@ body.comment-mode .blocks { cursor: crosshair; }
 
 /* thread index (src/indexpage.mjs) — same tokens, its own layout */
 .index-shell { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: var(--space-6) var(--space-5) 96px; }
-.index-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);
+/* align-items: center, not flex-start. The lockup used to be two stacked lines
+   (title over a subtitle) and the actions row a single line, so top-aligning
+   them was the only thing that put the controls level with the TITLE rather
+   than floating in the middle of a taller block. With the subtitle gone both
+   sides are one line each, and flex-start left the controls visibly riding
+   above the title's optical centre. */
+.index-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
   margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--hairline); }
 /* The mark leads the index title rather than taking a control over: this page has
    no back control to absorb it, and it is the one page whose h1 IS the product
-   name, so the two belong in a single lockup. The inner div carries min-width: 0
-   so a long meta line wraps instead of shoving the mark out of the row. */
+   name, so the two belong in a single lockup. */
 .index-head-titles { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .index-head-titles > svg { flex: none; }
-.index-head-titles > div { min-width: 0; }
 /* the gap separates the pomodoro widget from the theme toggle beside it */
 .index-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
-.index-head h1 { font-size: 22px; margin: 0 0 var(--space-1); font-weight: 650; letter-spacing: -0.02em; }
-.index-head .meta { color: var(--muted); font-size: 12.5px; }
+/* 30px, up from 22px: the subtitle it used to sit above is gone, and the title
+   takes that vertical space back rather than leaving the row short. Sized to
+   fill the 36px mark's height without exceeding it, and margin: 0 with a
+   line-height of 1 so the lockup's own centring has nothing to fight. */
+.index-head h1 { font-size: 30px; line-height: 1; margin: 0; font-weight: 650; letter-spacing: -0.02em;
+  min-width: 0; }
 
 /* the pomodoro widget (ticket 04, SPEC_POMODORO.md): src/pomodoro-widget.mjs
    is the markup, src/indexpage.mjs's indexScript is the behaviour -- see that
    module's own header comment for the split, the same one theme.mjs draws
-   between themeToggle() and themeBootScript. Pause/Resume reuses .mode-toggle's
-   own chrome directly (no new class); everything below is new because nothing
-   in this file styled a settings popover or a two-step confirm button before. */
+   between themeToggle() and themeBootScript. */
 .pomodoro-widget { display: flex; align-items: center; gap: var(--space-2); position: relative; }
 .pomodoro-status { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.pomodoro-settings-summary { list-style: none; cursor: pointer; font-size: 11px; color: var(--muted);
-  padding: 4px 8px; border-radius: var(--r-sm); transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
+
+/* The start/pause/resume control: a real switch, knob left for off, knob right
+   for on -- NOT the .mode-toggle pill it used to borrow. Two reasons it could
+   not stay that pill: it carried no state a reader could see except the word on
+   it, and it tried to hide itself with the 'hidden' property against
+   .mode-toggle's own 'display: inline-flex', which is an author rule and so
+   beats the UA sheet's '[hidden] { display: none }' outright -- it never hid,
+   and showed as an empty pill with nothing to act on. This control is never
+   hidden; when idle it starts a pomodoro.
+
+   40x22 is deliberately under the 44px touch minimum, matching every other
+   control in this header (.mode-toggle is ~28px tall): this page is a local
+   desktop dashboard driven by a mouse, and sizing one control for touch while
+   its neighbours stay small would look broken without helping anyone. If the
+   header ever gets a real narrow-viewport treatment, that is where the 44px
+   target belongs, applied to the whole row at once. */
+.pomodoro-switch { display: inline-flex; align-items: center; justify-content: flex-start;
+  width: 40px; height: 22px; flex: none; padding: 2px; box-sizing: border-box;
+  background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+.pomodoro-switch:hover { border-color: var(--hairline-2); }
+.pomodoro-switch-knob { width: 16px; height: 16px; border-radius: 50%; background: var(--muted);
+  /* transform, never 'margin-left'/'left' -- the ui-ux-pro-max animation rules
+     name animating layout properties as the anti-pattern; a transform stays off
+     the layout path entirely. */
+  transform: translateX(0);
+  transition: transform var(--dur) var(--ease), background var(--dur) var(--ease); }
+.pomodoro-switch[aria-checked="true"] { background: var(--accent-soft); border-color: var(--accent); }
+/* 18px = the track's inner width (40 - 2*2 padding - 2*1 border = 34) minus the
+   16px knob. Knob flush left when off, flush right when on. */
+.pomodoro-switch[aria-checked="true"] .pomodoro-switch-knob { background: var(--accent); transform: translateX(18px); }
+@media (prefers-reduced-motion: reduce) {
+  .pomodoro-switch-knob { transition: none; }
+}
+
+/* The settings control is the cogwheel, not the words "Pomodoro settings":
+   the header row is a row of controls, and a text link among them read as
+   prose. Icon-only, so it carries an aria-label and a title (ui-ux-pro-max
+   accessibility priority 1: an icon-only button without a label is the named
+   anti-pattern) -- see src/pomodoro-widget.mjs for both.
+   'display: flex' is what removes the native disclosure triangle in Firefox;
+   'list-style: none' and the ::-webkit-details-marker rule cover the rest. */
+.pomodoro-settings-summary { list-style: none; cursor: pointer; color: var(--muted);
+  display: flex; align-items: center; justify-content: center; width: 26px; height: 26px;
+  border-radius: var(--r-sm); transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .pomodoro-settings-summary::-webkit-details-marker { display: none; }
+.pomodoro-settings-summary::marker { content: ''; }
 .pomodoro-settings-summary:hover { color: var(--ink); background: var(--panel-2); }
+.pomodoro-settings[open] .pomodoro-settings-summary { color: var(--ink); background: var(--panel-2); }
 /* a native <details>/<summary> needs no JS to open or close -- the spec's own
    "lazy correct answer" for a settings panel collapsed by default. Popover
    positioning, not inline: opening it must not shove the countdown/theme
@@ -926,6 +978,12 @@ body.comment-mode .blocks { cursor: crosshair; }
   font-size: 11px; font-weight: 600; border-radius: var(--r-pill); padding: 6px 12px; font: inherit;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .pomodoro-btn:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
+/* Save is the panel's one primary action, so it wears the accent the way
+   .search-btn and .btn-send already do, rather than sitting at the same visual
+   weight as Reset beside it. Same filter: brightness(1.08) hover those two use,
+   so all three primaries behave identically. */
+.pomodoro-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+.pomodoro-btn-primary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
 /* the reset button's armed ("Really reset?") state -- indexScript toggles this
    class alongside the label swap, on the same element the two-step confirm
    already relabels, never a second control. */
@@ -939,14 +997,10 @@ body.comment-mode .blocks { cursor: crosshair; }
   padding: 10px 20px; font: inherit; font-weight: 650; transition: filter var(--dur) var(--ease); }
 .search-btn:hover { filter: brightness(1.08); }
 
-.search-results { margin-bottom: var(--space-6); padding-bottom: var(--space-5); border-bottom: 1px solid var(--hairline); }
-.result-list { display: flex; flex-direction: column; gap: var(--space-3); }
-.result-item { background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-md);
-  padding: var(--space-3) var(--space-4); box-shadow: var(--shadow-1); }
-.result-kind { font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
-.result-text { margin: var(--space-1) 0; color: var(--ink); }
-.result-meta { color: var(--muted); font-size: 12px; }
-.result-meta a { color: var(--accent); }
+/* No '.search-results' / '.result-*' rules any more: the box filters the thread
+   list in place (src/indexpage.mjs filterThreads) instead of rendering a second
+   set of block-level result cards beneath it, so the rows a query produces are
+   .thread-item rows and are already styled below. */
 
 .empty-state { color: var(--muted); font-size: 13px; background: var(--panel); border: 1px dashed var(--hairline);
   border-radius: var(--r-md); padding: var(--space-5); text-align: center; }

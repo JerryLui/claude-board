@@ -29,7 +29,7 @@ src/secret.mjs      the two credentials: the local secret (where it lives, const
                      by the daemon and the shim
 src/handoff.mjs     single-use, seconds-lived browser handoffs, and the recovery command
                      every refusal names
-src/indexpage.mjs   daemon root: thread index and archive search
+src/indexpage.mjs   daemon root: the thread index and its session filter
 src/ui.mjs          client-side script, exported as a string
 src/styles.mjs      page CSS, exported as a string
 src/theme.mjs       client-side theme selection: storage key, THEME_CHANGE_EVENT, the
@@ -59,9 +59,10 @@ src/notify.mjs      one native macOS notification per interval boundary, via osa
                      Message text comes from a closed-set table keyed by phase, so nothing
                      user-controlled reaches the AppleScript interpreter
 src/pomodoro-widget.mjs
-                     the timer's server-rendered markup for the index page (countdown,
-                     pause/resume, the two-step reset and the settings panel); the client
-                     half of it extends src/indexpage.mjs's script by concatenation
+                     the timer's server-rendered markup for the index page (countdown, the
+                     start/pause switch, the two-step reset and the cogwheel settings
+                     panel); the client half extends src/indexpage.mjs's script by
+                     concatenation
 skills/claude-board/SKILL.md
                      the manual for the `ask` tool, and the only prose statement of the
                      protocol a caller reads. install.sh step 6 copies it to
@@ -540,12 +541,17 @@ cookie that used to sit beside it — an HMAC of the board id, minted for whoeve
 that board's page — is deleted, because with reads gated it was strictly weaker than the
 credential the reader already had to present.
 
-Widened, ticket 03: it is also accepted on four pomodoro writes — `pause`, `resume`,
-`reset`, `settings` — so the index page's pause button (a browser holding only the cookie)
-can actually press pause. Pausing an advisory clock that never touches a board, never gates
-an `ask`, and never reaches a tool is strictly less than "may read every board and answer
-any open round", so this costs the cookie nothing it did not already carry. `ensure` is
-deliberately excluded: its one caller holds the secret, not the cookie.
+Widened, ticket 03: it is also accepted on the pomodoro writes — `ensure`, `pause`,
+`resume`, `reset`, `settings` — so the index page's switch (a browser holding only the
+cookie) can actually start, pause and resume the clock. Driving an advisory clock that never
+touches a board, never gates an `ask`, and never reaches a tool is strictly less than "may
+read every board and answer any open round", so this costs the cookie nothing it did not
+already carry. `ensure` was initially excluded, on the reasoning that its only caller was the
+session-start hook; it was added when the index widget grew a manual start, and it is the
+mildest of the five — `startWork` is a no-op against any timer that already exists, so the
+most it can do is begin a clock that `reset` (already on the list) could have ended anyway.
+The list stays a closed, named set: a pomodoro write added later is secret-only until
+someone deliberately names it.
 
 ### Authorizing a browser
 
@@ -589,7 +595,7 @@ looking at a tab. Everything else — `/api/*`, the SSE stream, curl, the shim �
 same page is served whether or not the board exists.
 
 ```
-GET  /                              thread index + archive search
+GET  /?q=                           thread index, filtered to sessions matching q
 GET  /b/:boardId                    the served page
 GET  /api/health                    { ok: true, version }        (open: install.sh polls it)
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
@@ -644,12 +650,12 @@ the patch are dropped rather than stored or rejected. Changing a duration does *
 retarget whatever interval is already running — the new value applies starting at the next
 boundary crossing.
 
-Auth: `GET /api/pomodoro` is gated like every other read (either credential). The four
-browser-facing writes — `pause`, `resume`, `reset`, `settings` — accept the session cookie in
-addition to the secret, which is what lets the index page's pause button work from a browser
+Auth: `GET /api/pomodoro` is gated like every other read (either credential). All five
+writes — `ensure`, `pause`, `resume`, `reset`, `settings` — accept the session cookie in
+addition to the secret, which is what lets the index page's switch work from a browser
 holding only the cookie (see "The browser session cookie" below for the reach this extends).
-`ensure` accepts the secret only: its one caller is the session-start hook, a shell script
-holding the secret, never a browser.
+`ensure` has two callers, not one: ticket 05's session-start hook (holding the secret) and
+the index widget's switch when the reader starts a pomodoro by hand.
 
 `POST /api/board` body shape (additive — not pinned above): `{ title, blocks, cwd?, thread? }`
 to start a new thread, or `{ boardId, blocks, title? }` to push into a live one. `cwd` is only

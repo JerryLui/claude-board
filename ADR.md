@@ -484,3 +484,45 @@ control, and the one page whose `h1` is the product name — the mark leads the 
 at the same `rx 9` (and never `--accent-ink`, which on `--bg` is a pip nobody can see — the state
 this landed in straight out of the merge), and the marks in the board head and the index head are
 the favicon's own rects rather than a second copy of the geometry.
+
+## 13. The index's search box filters sessions; it does not search inside them — 2026-08-04
+
+**Context:** `GET /` used to run the same full-text walk as `GET /api/search` and render
+block-level result cards (a question prompt, an option label, an answer note) in a section
+below the thread list. Two differently-shaped answers to one query sat on the same page: a list
+of sessions, and a list of fragments belonging to sessions. Deciding which one you were looking
+at required reading both.
+
+**Decision:** the box on the index is a filter over the thread list, matching on what
+*identifies* a session — title, project folder, `cwd`, thread id — and nothing inside the
+board. `filterThreads` (`src/indexpage.mjs`) does it from the fields `buildThreadIndex` already
+extracted, so `GET /` no longer reads a board body to serve a query and no longer walks the
+store a second time. `GET /api/search` is untouched and remains the full-text surface.
+
+**Consequences:** you can no longer find a session from the index by something said inside it —
+that answer moved entirely to `/api/search`, which no UI currently calls, so in practice
+full-text is now an API-only capability. The thread id printed on every row stops being purely a
+disambiguator and becomes the thing you type to isolate one of two identically-titled sessions.
+Rules for `.search-results` / `.result-*` and the `resultRow` renderer are deleted rather than
+left dormant, because `test/check-pure.mjs` fails any stylesheet class nothing emits; restoring
+inline results later means writing that renderer again.
+
+## 14. The pomodoro switch may start a timer, so the session cookie may call `ensure` — 2026-08-04
+
+**Context:** `POMODORO_COOKIE_ACTIONS` (`src/server.mjs`) deliberately excluded `ensure`, on the
+reasoning that its only caller was the session-start hook — a shell script holding the secret,
+never a browser — so widening the cookie to reach it would buy nothing. That reasoning expired
+the moment the index widget grew a way to start a pomodoro by hand: the caller is now a browser
+holding only the session cookie.
+
+**Decision:** `ensure` joins the set. The alternative considered and rejected was a
+cookie-reachable alias for it (`/api/pomodoro/start`), which would have been the same reach
+wearing a second route name plus a second code path to keep honest.
+
+**Consequences:** any browser tab holding a session cookie can begin a work interval, which
+means it can also trigger the notification that fires at the boundary. This is the smallest of
+the five actions the cookie now carries: `startWork` is a no-op against any timer that already
+exists, so the worst it does is start a clock that `reset` — already on the list — could have
+ended anyway. The set stays a closed, named list rather than a `parts[1] === 'pomodoro'` prefix
+match, so the next pomodoro write this file grows is still secret-only by default;
+`test/check-http.mjs` asserts both halves, that `ensure` is in and that an unnamed action is out.

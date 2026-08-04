@@ -206,8 +206,9 @@ function threadRow(t) {
   // a title -- and in the title-less case `pathLine` above is also suppressed,
   // leaving nothing else on the row to vary. The thread id is always emitted
   // here for exactly that: a discriminator that survives however the headline
-  // and path happen to collide, matching how the search-results row (below)
-  // already carries it.
+  // and path happen to collide — and, since the search box became a filter over
+  // these rows, the only thing on the row a reader can type to isolate one of
+  // two identically-headlined sessions (filterThreads matches it).
   // A live row opens the board AT the round that still needs an answer, not at
   // round 1: a thread several rounds deep otherwise lands the reviewer on
   // history they already sent and makes them scroll past it to reach the
@@ -231,18 +232,6 @@ function threadRow(t) {
     <span class="${pendingCls}">${t.pending} pending</span>
   </div>
 </a>`;
-}
-
-function resultRow(r) {
-  return `
-<div class="result-item" data-board-id="${escAttr(r.boardId)}" data-kind="${escAttr(r.kind)}">
-  <div class="result-kind">${escHtml(r.kind)}</div>
-  <div class="result-text">${escHtml(r.text)}</div>
-  <div class="result-meta">
-    <a href="/b/${escAttr(r.boardId)}">${escHtml(r.cwd || '(no project directory)')} · ${escHtml(r.thread)}</a>
-    · ${escHtml(formatDate(r.at))}
-  </div>
-</div>`;
 }
 
 /** The index page's only client script: keeps each row's `updated` timestamp
@@ -356,10 +345,14 @@ setInterval(refresh, 15000);
 //    became work -- that is settleBoundary's job (src/pomodoro.mjs), and it
 //    runs on the daemon, never in this script. tickPomodoro below only asks
 //    the daemon what happened, once, when the local countdown reaches zero.
-//  - 'timer: null' (no pomodoro running) is a real, calm state, not an error
-//    and not a reason to offer a Start button here -- starting one is a
-//    session-start signal owned by another slice (criterion 1). This widget
-//    only ever offers Pause/Resume/Reset against a timer that already exists.
+//  - 'timer: null' (no pomodoro running) is a real, calm state, not an error.
+//    The session-start hook (POST /api/pomodoro/ensure) is still the ordinary
+//    way a pomodoro begins; the switch below is a SECOND door onto that same
+//    route, for a reader who wants to start one by hand without waiting for the
+//    next session. One control, three transitions -- idle -> ensure, running ->
+//    pause, paused -> resume -- so it always has something to do and never has
+//    to hide (the old hidden-button shape did not actually hide; see
+//    src/pomodoro-widget.mjs's own comment for why).
 
 var POMODORO_POLL_MS = 15000; // same order of magnitude as refresh's own poll above
 var pomodoroDoc = null; // last-fetched { settings, cycle, cycleDate, timer, now }
@@ -389,6 +382,21 @@ function pomodoroPhaseLabel(phase) {
   return 'Break';
 }
 
+// The switch is ON exactly when a timer is running unpaused. Idle and paused
+// both read as off, and both turn back on -- one 'ensure', the other 'resume'.
+// The label names the ACTION, which is what the control is for; the state is
+// carried by aria-checked and the knob.
+function pomodoroSwitchAction(timer) {
+  if (!timer) return 'ensure';
+  return timer.paused ? 'resume' : 'pause';
+}
+
+function pomodoroSwitchLabel(action) {
+  if (action === 'ensure') return 'Start pomodoro';
+  if (action === 'resume') return 'Resume pomodoro';
+  return 'Pause pomodoro';
+}
+
 // Render only -- never decides anything. No branch here mutates
 // pomodoroDoc.timer or invents a next phase: an expired countdown just prints
 // 00:00 (formatCountdown's own clamp) until the next fetchPomodoro() call
@@ -400,31 +408,44 @@ function renderPomodoro() {
   var timer = pomodoroDoc.timer;
   if (!timer) {
     // No timer running is a real state, not an error: show the configured
-    // work length as a calm, honest default, never a countdown and never a
-    // Start affordance (see this section's header comment).
+    // work length as a calm, honest default, never a countdown.
     if (statusEl) statusEl.textContent = 'Pomodoro: idle (' + pomodoroDoc.settings.workMin + ' min)';
-    if (toggleBtn) toggleBtn.hidden = true;
   } else {
     var ms = pomodoroRemainingMs(timer, pomodoroOffset, Date.now());
     var text = 'Pomodoro: ' + pomodoroPhaseLabel(timer.phase) + ' ' + formatCountdown(ms);
     if (timer.paused) text += ' (paused)';
     if (statusEl) statusEl.textContent = text;
-    if (toggleBtn) {
-      toggleBtn.hidden = false;
-      toggleBtn.textContent = timer.paused ? 'Resume' : 'Pause';
-    }
+  }
+  if (toggleBtn) {
+    var on = !!(timer && !timer.paused);
+    var label = pomodoroSwitchLabel(pomodoroSwitchAction(timer));
+    toggleBtn.setAttribute('aria-checked', on ? 'true' : 'false');
+    toggleBtn.setAttribute('aria-label', label);
+    toggleBtn.setAttribute('title', label);
   }
   pomodoroSyncForm();
 }
 
 // Keeps the (collapsed-by-default) settings panel showing the daemon's actual
 // values, not just whatever was there at page load -- a reader who opens it
-// after another tab changed a duration should see the current numbers. Skips
-// whichever field is currently focused, so a background poll landing mid-edit
-// never yanks the cursor or overwrites an in-progress keystroke.
+// after another tab changed a duration should see the current numbers.
+//
+// Only ever writes while the panel is CLOSED. This is the whole fix for "I type
+// a number, move to the next field, and the first one snaps back": renderPomodoro
+// runs once a SECOND (the local repaint tick), and every one of those runs used
+// to rewrite every field except the one holding focus -- so the value you had
+// just typed and tabbed away from was overwritten within a second, every time,
+// while the daemon still held the old number because nothing had been saved yet.
+// Skipping the focused field alone was never enough: an edit survives leaving
+// the field, and only Save ends it. A closed panel has no edit in progress to
+// destroy, and syncing there is what makes the values fresh at the moment it
+// opens -- at most one poll interval stale -- so no separate open-time sync is
+// needed.
 function pomodoroSyncForm() {
   var form = document.querySelector('form#pomodoro-settings-form');
   if (!form || !pomodoroDoc) return;
+  var panel = document.querySelector('details#pomodoro-settings');
+  if (panel && panel.open) return;
   var s = pomodoroDoc.settings;
   var active = document.activeElement;
   // form.querySelector('input[name="..."]'), never the bare named-form-control
@@ -503,9 +524,13 @@ function tickPomodoro() {
   }
 }
 
+// One switch, three transitions -- see this section's header comment. Before the
+// first fetch resolves there is no doc to decide against, and guessing 'ensure'
+// there could start a pomodoro against a daemon that already has one running,
+// so a click that early does nothing at all.
 function onPomodoroToggleClick() {
-  if (!pomodoroDoc || !pomodoroDoc.timer) return; // no timer: the button is hidden, never reachable
-  postPomodoro(pomodoroDoc.timer.paused ? 'resume' : 'pause');
+  if (!pomodoroDoc) return;
+  postPomodoro(pomodoroSwitchAction(pomodoroDoc.timer));
 }
 
 function pomodoroDisarmReset(btn) {
@@ -536,6 +561,20 @@ function onPomodoroResetClick() {
   postPomodoro('reset');
 }
 
+// Closing the panel is the acknowledgement that the save landed, so it happens
+// in the .then, never optimistically beside the post: mergeSettings
+// (src/pomodoro.mjs) rejects an out-of-range field with a 400, postPomodoro
+// turns that into a rejected promise, and a panel that closed anyway would have
+// swallowed the refusal and left the reader believing a number that was never
+// stored. Closing also re-opens pomodoroSyncForm above, which then writes the
+// daemon's own saved values back over the form.
+function closePomodoroSettings() {
+  var panel = document.querySelector('details#pomodoro-settings');
+  if (panel) panel.open = false;
+  pomodoroDisarmReset(document.querySelector('button#pomodoro-reset'));
+  pomodoroSyncForm();
+}
+
 function onPomodoroSettingsSubmit(ev) {
   ev.preventDefault();
   var form = ev.target;
@@ -546,7 +585,22 @@ function onPomodoroSettingsSubmit(ev) {
     longEvery: parseInt(form.querySelector('input[name="longEvery"]').value, 10),
     notify: !!form.querySelector('input[name="notify"]').checked,
     sound: !!form.querySelector('input[name="sound"]').checked,
-  });
+  }).then(closePomodoroSettings);
+}
+
+// A click anywhere outside the panel closes it -- the ordinary popover gesture,
+// and the only way out other than the summary itself once the panel overlaps the
+// page. Registered on 'document', so it sees the click AFTER it has bubbled all
+// the way up: a click on the summary or inside the form is recognised by
+// closest() finding the panel above it, and is left alone (closing on the
+// summary's own click would fight the native <details> toggle and make the panel
+// impossible to open). Nothing here calls stopPropagation.
+function onDocumentClickClosePomodoroSettings(ev) {
+  var panel = document.querySelector('details#pomodoro-settings');
+  if (!panel || !panel.open) return;
+  var t = ev.target;
+  if (t && t.closest && t.closest('details#pomodoro-settings')) return;
+  closePomodoroSettings();
 }
 
 function initPomodoroWidget() {
@@ -558,6 +612,7 @@ function initPomodoroWidget() {
   if (resetBtn) resetBtn.addEventListener('click', onPomodoroResetClick);
   var form = document.querySelector('form#pomodoro-settings-form');
   if (form) form.addEventListener('submit', onPomodoroSettingsSubmit);
+  document.addEventListener('click', onDocumentClickClosePomodoroSettings);
   fetchPomodoro();
   // Local repaint (no fetch): recomputes the countdown text from the already-
   // cached doc + offset every second, so the widget visibly ticks between
@@ -572,22 +627,45 @@ function initPomodoroWidget() {
 initPomodoroWidget();
 `;
 
-/** Render the complete index page: the thread list (with pending counts, round
- * counts and a visual live/settled distinction) plus, when `query` is non-empty,
- * the archive search results inline — a plain GET-form round trip needing no
- * client JS of its own. The page's one script (`indexScript` above) only ever
- * touches `.rel-time` text content; nothing here depends on it running. */
-export function renderIndexPage({ threads = [], query = '', results = [] } = {}) {
-  const threadsHtml = threads.length
-    ? threads.map(threadRow).join('\n')
-    : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
+/** Filter the thread index down to the sessions a query names. Matches on what
+ * IDENTIFIES a session and nothing else — its title, its project folder, the
+ * full `cwd` behind that folder, and the thread id — never on what was asked or
+ * answered inside it. That is a deliberate narrowing of what this box used to
+ * do (a full-text walk of every board file, rendering block-level result cards
+ * below the list): the unit of an answer here is the session, so the box is a
+ * filter over the list already on screen rather than a second, differently
+ * shaped set of results underneath it. `GET /` no longer reads a single board
+ * body to serve a query — `GET /api/search` is unchanged and is still the
+ * full-text route.
+ *
+ * Case-insensitive substring, not word- or token-matching: the values matched
+ * here are names and paths, where a partial prefix ("clau", "-board") is the
+ * ordinary way anyone types at a filter. Exported for the check. */
+export function filterThreads(threads, query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return threads;
+  return threads.filter(t => [t.title, folderName(t.cwd), t.cwd, t.thread]
+    .some(v => typeof v === 'string' && v.toLowerCase().includes(q)));
+}
 
-  const showResults = query.trim().length > 0;
-  const resultsHtml = !showResults
-    ? ''
-    : results.length
-      ? `<div class="result-list">${results.map(resultRow).join('\n')}</div>`
-      : '<p class="empty-state">No matches.</p>';
+/** Render the complete index page: the thread list (with pending counts, round
+ * counts and a visual live/settled distinction), filtered to `query` when one is
+ * given — a plain GET-form round trip needing no client JS of its own. The
+ * page's one script (`indexScript` above) only ever touches `.rel-time` text
+ * content and the pomodoro widget; nothing here depends on it running. */
+export function renderIndexPage({ threads = [], query = '' } = {}) {
+  const filtering = query.trim().length > 0;
+  const shown = filterThreads(threads, query);
+  // Two different empty states, because they mean two different things: an
+  // empty STORE is "nothing has happened yet, here is what would put something
+  // here", while an empty FILTER is "your query excluded everything, the list
+  // itself is fine". Reporting the first when the second is true would read as
+  // if the sessions had gone missing.
+  const threadsHtml = shown.length
+    ? shown.map(threadRow).join('\n')
+    : filtering
+      ? `<p class="empty-state">No sessions match “${escHtml(query.trim())}”.</p>`
+      : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
 
   return `<!doctype html>
 <html lang="en">
@@ -604,10 +682,7 @@ ${faviconLink}
   <header class="index-head">
     <div class="index-head-titles">
       ${markSvg(36)}
-      <div>
-        <h1>claude-board</h1>
-        <div class="meta">one thread per Claude session</div>
-      </div>
+      <h1>claude-board</h1>
     </div>
     <div class="index-head-actions">
       ${pomodoroWidget()}
@@ -616,10 +691,9 @@ ${faviconLink}
   </header>
 
   <form class="search-form" action="/" method="get">
-    <input class="search-input" type="text" name="q" placeholder="Search archived boards — what was asked, what was answered…" value="${escAttr(query)}">
-    <button class="search-btn" type="submit">Search</button>
+    <input class="search-input" type="text" name="q" placeholder="Filter sessions — by title, project folder or thread id…" value="${escAttr(query)}">
+    <button class="search-btn" type="submit">Filter</button>
   </form>
-  ${showResults ? `<section class="search-results" data-query="${escAttr(query)}">${resultsHtml}</section>` : ''}
 
   <div class="thread-list">
     ${threadsHtml}

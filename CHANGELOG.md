@@ -93,6 +93,32 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ### Changed
 
+- **The pomodoro control is a switch, and it can start a timer.** One control now covers all
+  three transitions — idle turns on and begins a work interval, running turns off and pauses,
+  paused turns back on and resumes — so starting a pomodoro no longer means waiting for the
+  next Claude session to trigger the hook. It replaces the Pause/Resume text button, which
+  had no readable state and tried to disappear itself when idle. `POST /api/pomodoro/ensure`
+  accepts the session cookie for this (ADR.md entry 14); it is the same route the session-start
+  hook already calls, and `startWork` is a no-op against a timer that already exists, so
+  starting one by hand while one runs still changes nothing.
+
+- **The settings panel opens from a cogwheel, and closes when you are done with it.** The
+  "Pomodoro settings" text link became an icon-only control (named for screen readers and on
+  hover). Saving closes the panel; so does clicking anywhere outside it, which also disarms a
+  half-confirmed Reset rather than leaving it armed for the next open. Save is the panel's one
+  primary action and now wears the accent, like every other primary button in the product.
+
+- **The index search box filters sessions instead of searching inside them.** A query narrows
+  the thread list in place, matching a session's title, project folder or thread id; the
+  block-level result cards that used to render beneath the list are gone, along with the
+  full-text walk `GET /` ran to produce them. `GET /api/search` is unchanged and is still the
+  full-text surface. See ADR.md entry 13.
+
+- **The index title fills the header.** The "one thread per Claude session" subtitle is gone and
+  the `h1` grew from 22px to 30px to take the space back. The header row centres its two sides
+  now rather than top-aligning them, which had left the controls riding above the title's
+  optical centre once the second line was no longer there.
+
 - **The mark is an amber slab, and the pending state inverts it.** The tab tile moved from
   `--accent` to `DARK['--warning']` — the one hue the palette holds at nearly the same value
   in either theme, so a single tile now serves both instead of reading as the darkest thing
@@ -122,6 +148,20 @@ this project does not yet follow semantic versioning, because nothing has been r
   exactly as before.
 
 ### Fixed
+
+- **Pomodoro settings no longer snap back while you are filling them in.** Type a duration,
+  move to the next field, and the first one reverted within a second. The widget repaints its
+  countdown every second, and every repaint rewrote every settings field except the one holding
+  focus — from the daemon's values, which still held the old number because nothing had been
+  saved yet. Leaving a field is not abandoning the edit; only Save is. The panel now syncs from
+  the daemon only while it is closed, so an open panel is never written to from underneath, and
+  it still shows current values the moment it opens.
+
+- **The pomodoro pause control worked again, having never actually been hidden.** It set
+  `hidden` to disappear when no timer was running, but `[hidden] { display: none }` is a UA
+  rule and its own class set `display: inline-flex`, which outranks it — so it rendered as an
+  empty pill that did nothing, there being no timer for it to pause. The switch that replaced
+  it is never hidden and never relies on `hidden`. See QUIRKS.md.
 
 - **A CRLF markdown file no longer wedges the daemon.** `.` and `$` do not match `\r`, so
   a line like `- alpha\r` passed the list guard, failed the item pattern, matched no

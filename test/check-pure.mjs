@@ -6386,11 +6386,28 @@ function pomodoroTickFn(intervals) {
   return entry.fn;
 }
 
+/** The widget's own re-fetch poll (POMODORO_POLL_MS), told apart from
+ * `refresh`'s 15s thread-list poll by being the LAST registration at that
+ * interval -- initPomodoroWidget runs after refresh's own setInterval, and both
+ * currently sit at 15000. Fired by hand so a check can land a full re-fetch at a
+ * chosen moment instead of waiting a real 15 seconds. */
+function fetchPomodoroFn(intervals) {
+  const matches = intervals.filter(e => e.ms !== 1000);
+  assert.ok(matches.length, 'setup failure: no pomodoro re-fetch interval was registered');
+  return matches[matches.length - 1].fn;
+}
+
 check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all six settings fields present', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<div class="pomodoro-widget" id="pomodoro-widget">/);
   assert.match(html, /<span class="pomodoro-status" id="pomodoro-status">/);
-  assert.match(html, /<button type="button" class="mode-toggle" id="pomodoro-toggle" hidden>/, 'the toggle must start hidden -- no timer is known until the first fetch resolves');
+  // A switch with a readable state, never the old hidden Pause/Resume pill: it
+  // wore .mode-toggle, whose author-sheet `display: inline-flex` beats the UA
+  // sheet's `[hidden] { display: none }`, so `hidden` never actually hid it.
+  // Asserting the ABSENCE of `hidden` here is what keeps that from coming back.
+  assert.match(html, /<button type="button" class="pomodoro-switch" id="pomodoro-toggle" role="switch" aria-checked="false"/, 'the control must be a role="switch" with a server-rendered off state -- nothing is known until the first fetch resolves');
+  assert.doesNotMatch(html, /id="pomodoro-toggle"[^>]*\shidden/, 'the switch must never rely on the `hidden` attribute/property: .pomodoro-switch sets `display`, and an author display rule outranks the UA stylesheet\'s [hidden] rule');
+  assert.match(html, /id="pomodoro-toggle"[^>]*aria-label="Start pomodoro"/, 'an icon-only control must name the action it performs');
   assert.match(html, /<details class="pomodoro-settings" id="pomodoro-settings">/, 'the settings panel must be a <details> -- collapsed by default with no JS required to open it');
   assert.match(html, /<form class="pomodoro-settings-form" id="pomodoro-settings-form">/);
   for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'sound']) {
@@ -6412,9 +6429,18 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   assert.ok(widgetMatch.index < themeMatch.index, 'both controls must render inside the same header, the widget before the theme toggle');
 });
 
-check('pomodoro widget: never a bare "Start" affordance -- starting a pomodoro is a session-start signal owned by another slice', () => {
+check('pomodoro widget: the settings control is an icon, and the icon carries a name', () => {
   const html = renderIndexPage({ threads: [] });
-  assert.doesNotMatch(html, />\s*Start\s*</i, 'the widget must never offer to start a pomodoro itself');
+  const summary = html.match(/<summary class="pomodoro-settings-summary"[^>]*>([\s\S]*?)<\/summary>/);
+  assert.ok(summary, 'setup failure: no settings <summary> rendered');
+  assert.match(summary[0], /aria-label="Pomodoro settings"/, 'an icon-only control must be named for a screen reader (ui-ux-pro-max accessibility priority 1)');
+  assert.match(summary[0], /title="Pomodoro settings"/, 'and named on hover for everyone else');
+  assert.match(summary[1], /^<svg\b/, 'the summary\'s content must be the cogwheel glyph itself');
+  assert.doesNotMatch(summary[1], /Pomodoro settings/, 'the visible label text must be gone -- the icon replaces it, it does not sit beside it');
+  // Inline SVG, never an emoji or an external asset (QUIRKS.md "No external
+  // assets, ever"; ui-ux-pro-max style rules name emoji-as-icon as the
+  // anti-pattern). Matches how src/theme.mjs draws its own three glyphs.
+  assert.match(summary[1], /stroke="currentColor"/, 'the glyph must be a stroke-based inline SVG in the same family as src/theme.mjs\'s icons');
 });
 
 check('pomodoro widget: reuses formatCountdown verbatim -- indexScript embeds the real function source, not a second mm:ss formatter', () => {
@@ -6483,7 +6509,7 @@ function extractIndexScriptFn(name) {
   return fn;
 }
 
-await checkAsync('pomodoro widget: no timer running renders a calm idle state (the configured work length, no countdown) and hides the toggle', async () => {
+await checkAsync('pomodoro widget: no timer running renders a calm idle state (the configured work length, no countdown) and leaves the switch off but live', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   let document;
@@ -6497,7 +6523,12 @@ await checkAsync('pomodoro widget: no timer running renders a calm idle state (t
   assert.match(status.textContent, /idle/i, 'no timer must read as a calm idle state, not an error (spec: "a real state, not an error")');
   assert.match(status.textContent, /25/, 'idle state must show the configured work length -- spec: "the durations, or a dash"');
   assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no timer must never render a countdown');
-  assert.equal(toggle.hidden, true, 'no timer: pause/resume must be hidden entirely, not merely disabled -- offering it implies a timer to act on, and there is no Start control anywhere on this widget (starting a pomodoro is a session-start signal, another slice\'s job)');
+  assert.equal(toggle.getAttribute('aria-checked'), 'false', 'idle is the switch\'s off state');
+  assert.equal(toggle.getAttribute('aria-label'), 'Start pomodoro', 'idle: the switch\'s job is to START one, and its name has to say so');
+  // The predecessor set `hidden` here and relied on it to disappear -- which it
+  // never did, .mode-toggle's own `display: inline-flex` outranking the UA
+  // sheet's `[hidden]` rule, leaving an empty pill with no timer to act on.
+  assert.notEqual(toggle.hidden, true, 'the switch must stay visible and live when idle -- it is the control that starts a pomodoro, and hiding it is what broke it before');
 });
 
 await checkAsync('pomodoro widget: a running timer renders "<Phase> mm:ss" from the real formatCountdown and shows a live Pause control', async () => {
@@ -6512,8 +6543,8 @@ await checkAsync('pomodoro widget: a running timer renders "<Phase> mm:ss" from 
   const toggle = document.querySelector('button#pomodoro-toggle');
   assert.match(status.textContent, /Work/);
   assert.match(status.textContent, /12:3[0-9]/, `expected roughly 12:34 in ${status.textContent}`);
-  assert.equal(toggle.hidden, false);
-  assert.equal(toggle.textContent, 'Pause');
+  assert.equal(toggle.getAttribute('aria-checked'), 'true', 'a running, unpaused timer is the switch\'s ON state');
+  assert.equal(toggle.getAttribute('aria-label'), 'Pause pomodoro');
 });
 
 await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs, shows Resume, and never ticks locally', async () => {
@@ -6529,7 +6560,8 @@ await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs
   assert.match(status.textContent, /Break/);
   assert.match(status.textContent, /01:30/);
   assert.match(status.textContent, /paused/i);
-  assert.equal(toggle.textContent, 'Resume');
+  assert.equal(toggle.getAttribute('aria-checked'), 'false', 'paused reads as off, the same as idle -- both are turned back on by the same gesture');
+  assert.equal(toggle.getAttribute('aria-label'), 'Resume pomodoro', 'paused and idle share the off POSITION but never the label: one resumes, the other starts');
 
   // Paused must never tick locally (spec: "the countdown does not tick while
   // paused"): firing the 1s local-repaint interval by hand must render the
@@ -6578,7 +6610,41 @@ await checkAsync('pomodoro widget: clicking the toggle while running posts /api/
   assert.ok(post, 'the click must issue a POST');
   assert.equal(post.url, '/api/pomodoro/pause');
   assert.equal(post.credentials, 'same-origin', 'the browser holds only the session cookie, not the secret -- credentials must be sent');
-  assert.equal(document.querySelector('button#pomodoro-toggle').textContent, 'Resume', 'the response must be applied: the control must now read Resume');
+  const after = document.querySelector('button#pomodoro-toggle');
+  assert.equal(after.getAttribute('aria-checked'), 'false', 'the response must be applied: the switch must now read off');
+  assert.equal(after.getAttribute('aria-label'), 'Resume pomodoro');
+});
+
+await checkAsync('pomodoro widget: flipping the switch on while idle posts /api/pomodoro/ensure -- the manual way to start one, without waiting for a session-start hook', async () => {
+  const nowMs = Date.now();
+  const idle = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const started = { ...idle, timer: { phase: 'work', deadline: nowMs + 25 * 60_000, paused: false } };
+  let document;
+  const calls = await withPomodoroFetch(call => (call.method === 'POST' ? started : idle), async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+    document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+  });
+  const post = calls.find(c => c.method === 'POST');
+  assert.ok(post, 'the click must issue a POST -- an idle switch that does nothing is exactly the bug this replaced');
+  assert.equal(post.url, '/api/pomodoro/ensure', 'starting by hand reuses the daemon\'s existing session-start route, never a second start path');
+  assert.equal(post.credentials, 'same-origin', 'the browser holds only the session cookie -- POMODORO_COOKIE_ACTIONS (src/server.mjs) has to include ensure for this to be authorised at all');
+  assert.equal(document.querySelector('button#pomodoro-toggle').getAttribute('aria-checked'), 'true', 'the started timer must be applied back: the switch reads on');
+});
+
+await checkAsync('pomodoro widget: a click landing before the first fetch resolves does nothing at all -- it must never guess ensure against a daemon that may already be running one', async () => {
+  const nowMs = Date.now();
+  const idle = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => idle, async (c) => {
+    const { document } = loadIndexWithPomodoro();
+    // Deliberately NO flushPomodoro() first: the widget has been wired but its
+    // opening fetch has not settled, so pomodoroDoc is still null.
+    document.querySelector('button#pomodoro-toggle').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+    assert.equal(c.filter(x => x.method === 'POST').length, 0, 'nothing may be posted while the widget still has no idea what the daemon holds');
+  });
+  assert.ok(calls.length >= 1, 'setup sanity: the opening GET must still have happened');
 });
 
 await checkAsync('pomodoro widget: clicking the toggle while paused posts /api/pomodoro/resume', async () => {
@@ -6651,6 +6717,98 @@ await checkAsync('pomodoro widget: submitting the settings form posts all six fi
   // Applied back, not merely echoed: re-reading the form after the response
   // shows the daemon's own saved value, proving the round trip is real.
   assert.equal(document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value, 50);
+  // Saving is done, so the panel is done: it closes on the RESPONSE, never
+  // optimistically beside the post (a rejected patch must leave it open).
+  assert.equal(document.querySelector('details#pomodoro-settings').open, false, 'a successful save must close the settings panel');
+});
+
+// The reported bug, reduced to its mechanism: type into one field, move to
+// another, and a repaint tick lands. The old pomodoroSyncForm skipped only the
+// field holding FOCUS, so everything already typed and tabbed away from was
+// overwritten from the daemon's (still unsaved) values within one second.
+await checkAsync('pomodoro widget: a repaint tick while the settings panel is open never overwrites a field the reader has already edited and left', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document, intervals } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = document.querySelector('details#pomodoro-settings');
+    const form = document.querySelector('form#pomodoro-settings-form');
+    const workMin = form.querySelector('input[name="workMin"]');
+    const breakMin = form.querySelector('input[name="breakMin"]');
+
+    panel.open = true;                 // the reader opens the panel
+    workMin.value = '42';              // types a new work length
+    breakMin.focus();                  // and moves on to the next field
+
+    pomodoroTickFn(intervals)();       // one second passes
+    await flushPomodoro();
+    assert.equal(workMin.value, '42', 'the edited value must survive a repaint -- focus moving on is not the reader abandoning the edit, and only Save ends it');
+
+    // A full re-fetch (the 15s poll) must not undo it either: the daemon still
+    // holds the OLD number, since nothing has been saved yet.
+    await fetchPomodoroFn(intervals)();
+    assert.equal(workMin.value, '42', 'a background poll landing mid-edit must not overwrite the panel either');
+  });
+});
+
+await checkAsync('pomodoro widget: the panel resumes syncing the moment it closes, so it never opens on stale values', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: { ...POMODORO_SETTINGS, workMin: 33 }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document, intervals } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = document.querySelector('details#pomodoro-settings');
+    const workMin = document.querySelector('form#pomodoro-settings-form input[name="workMin"]');
+    panel.open = true;
+    workMin.value = '999';             // an edit the reader abandons
+    panel.open = false;                // ...by closing the panel
+    pomodoroTickFn(intervals)();
+    assert.equal(String(workMin.value), '33', 'a closed panel holds no edit worth protecting: it must go back to showing what the daemon actually has');
+  });
+});
+
+await checkAsync('pomodoro widget: a click anywhere outside the settings panel closes it, and a click inside it does not', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = document.querySelector('details#pomodoro-settings');
+    panel.open = true;
+
+    // Inside first: a click on a field the reader is filling in must not close
+    // the panel out from under them.
+    document.querySelector('form#pomodoro-settings-form input[name="workMin"]')
+      .dispatchEvent(new StandInEvent('click'));
+    assert.equal(panel.open, true, 'a click INSIDE the panel must leave it open');
+
+    // Then outside. Dispatched on a real element elsewhere on the page and
+    // allowed to bubble to document, exactly as a browser delivers it.
+    document.querySelector('input.search-input').dispatchEvent(new StandInEvent('click'));
+    assert.equal(panel.open, false, 'a click outside the panel must close it');
+  });
+});
+
+await checkAsync('pomodoro widget: closing the panel by clicking away disarms a half-confirmed Reset rather than leaving it armed for the next open', async () => {
+  const nowMs = Date.now();
+  const running = { settings: POMODORO_SETTINGS, cycle: 1, cycleDate: null, timer: { phase: 'work', deadline: nowMs + 60_000, paused: false }, now: nowMs };
+  await withPomodoroFetch(() => running, async (calls) => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = document.querySelector('details#pomodoro-settings');
+    const resetBtn = document.querySelector('button#pomodoro-reset');
+    panel.open = true;
+    resetBtn.dispatchEvent(new StandInEvent('click'));
+    assert.equal(resetBtn.textContent, 'Really reset?', 'setup failure: the first click must arm it');
+
+    document.querySelector('input.search-input').dispatchEvent(new StandInEvent('click'));
+    assert.equal(resetBtn.textContent, 'Reset', 'clicking away must disarm it -- an armed Reset surviving a close means the NEXT click on it wipes the loop with no confirmation at all');
+
+    panel.open = true;
+    resetBtn.dispatchEvent(new StandInEvent('click'));
+    assert.equal(calls.filter(c => c.method === 'POST').length, 0, 'and that next click must be a fresh first click, posting nothing');
+  });
 });
 
 check('openServed confines a served file to its roots, and refuses everything else alike', () => {

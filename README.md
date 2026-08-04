@@ -117,8 +117,9 @@ two hours) returns an explicit no-response rather than blocking the call forever
 Closing the tab is deliberately *not* a cancel — the board stays live and its URL
 reopens it.
 
-`http://127.0.0.1:7391/` lists every thread with its pending count, and searches
-archived boards: what was asked, what was answered, when.
+`http://127.0.0.1:7391/` lists every thread with its pending count, and filters that list
+to the sessions a query names — by title, project folder or thread id. Searching *inside*
+archived boards (what was asked, what was answered, when) is `GET /api/search?q=`.
 
 ### If a page says "this browser is not authorized"
 
