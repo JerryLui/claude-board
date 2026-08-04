@@ -22,7 +22,7 @@
 // src/server.mjs), so the pin src/ui.mjs draws and the comment list beside it can
 // never disagree about whether an anchor still resolves.
 
-import { styles, palettes } from './styles.mjs';
+import { styles, palettes, faviconLink } from './styles.mjs';
 import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
@@ -1161,6 +1161,7 @@ export function renderBoardPage(board) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
 <title>${escHtml(board.title || 'board')}</title>
+${faviconLink}
 <script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>
@@ -1232,6 +1233,7 @@ export function renderRefusalPage(recoveryCommand) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${escAttr(CSP)}">
 <title>claude-board — this browser is not authorized</title>
+${faviconLink}
 <style>
   /* The board's saved theme is unreachable here -- it lives in localStorage,
      behind the boot script this page deliberately does not carry. The OS

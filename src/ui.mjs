@@ -51,6 +51,7 @@ import {
 import { badgeLabel } from './badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
 import { THEME_CHANGE_EVENT } from './theme.mjs';
+import { palettes } from './styles.mjs';
 
 // Ticket 04 (light theme): mermaid variable -> CSS token, read at call time
 // from the live computed style rather than hardcoded a second time in the
@@ -3289,11 +3290,15 @@ export const ui = `
   var pendingRounds = 0;
   var baseTitle = document.title;
   var faviconLink = null;
+  var baseFavicon = null;
 
   /** Draw an n-badged favicon as a data URI. Canvas, not a file: PROTOCOL.md's
    * zero-dependency / single-self-contained-file rule means no new asset can ship
    * beside the page. Returns null if canvas is unavailable, and the caller just
-   * leaves the favicon alone. */
+   * leaves the favicon alone. Same two colours as the unbadged mark, interpolated
+   * from src/styles.mjs's dark palette so the count and the tile it replaces can't
+   * drift apart (they had: this used to paint a hardcoded blue that was two
+   * palette edits behind --accent). */
   function drawFavicon(count) {
     try {
       var canvas = document.createElement('canvas');
@@ -3301,13 +3306,11 @@ export const ui = `
       canvas.height = 32;
       var ctx = canvas.getContext && canvas.getContext('2d');
       if (!ctx) return null;
-      ctx.fillStyle = '#10141b';
-      ctx.fillRect(0, 0, 32, 32);
-      ctx.fillStyle = '#6ea8fe';
+      ctx.fillStyle = '${palettes.dark['--accent']}';
       ctx.beginPath();
-      ctx.arc(16, 16, 15, 0, Math.PI * 2);
+      ctx.arc(16, 16, 16, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#0b1220';
+      ctx.fillStyle = '${palettes.dark['--accent-ink']}';
       ctx.font = 'bold 20px -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -3316,9 +3319,11 @@ export const ui = `
     } catch (e) { return null; }
   }
 
-  /** Badge (count > 0) or unbadge (count === 0) the tab's favicon. The <link> is
-   * created here rather than emitted by src/render.mjs so the served markup keeps
-   * carrying no external-looking reference at all. */
+  /** Badge (count > 0) or unbadge (count === 0) the tab's favicon. Unbadging puts
+   * back the page's own mark (faviconLink, src/styles.mjs) rather than clearing
+   * the href, which would leave the tab blank once every round is answered; the
+   * <link> is still created here if the document somehow carries none, so this
+   * degrades to the old behaviour instead of throwing. */
   function setFaviconBadge(count) {
     try {
       if (!faviconLink) {
@@ -3328,8 +3333,13 @@ export const ui = `
           faviconLink.setAttribute('rel', 'icon');
           document.head.appendChild(faviconLink);
         }
+        baseFavicon = faviconLink.getAttribute('href');
       }
-      if (!count) { faviconLink.removeAttribute('href'); return; }
+      if (!count) {
+        if (baseFavicon) faviconLink.setAttribute('href', baseFavicon);
+        else faviconLink.removeAttribute('href');
+        return;
+      }
       var href = drawFavicon(count);
       if (href) faviconLink.setAttribute('href', href);
     } catch (e) { /* no favicon badge; the title count still marks the tab */ }

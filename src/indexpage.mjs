@@ -12,7 +12,7 @@
 // of keying by project directory instead.
 
 import path from 'node:path';
-import { styles } from './styles.mjs';
+import { styles, faviconLink } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { questionBlocks } from './board.mjs';
 
@@ -327,6 +327,7 @@ export function renderIndexPage({ threads = [], query = '', results = [] } = {})
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>claude-board</title>
+${faviconLink}
 <script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>

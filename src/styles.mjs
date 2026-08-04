@@ -172,6 +172,30 @@ const LIGHT = {
 // active theme's colors up instead of hand-maintaining a second copy of the palette.
 export const palettes = { dark: DARK, light: LIGHT };
 
+// The tab mark: a board -- two quiet rows and one emphasised row, the open
+// question. Inline as a data URI, never an asset file, for the same reason the
+// badge drawn over it is (PROTOCOL.md "Marking an already-open tab"): the page
+// has to stay a single self-contained file, so the `file:` archive shows the
+// same mark with the network off and the daemon gone.
+//
+// A favicon gets no CSS, so both colours are literals here rather than var()s --
+// read straight off DARK so a palette edit stays a one-block edit. DARK's accent
+// in both themes on purpose: the tile is the accent, and the browser paints it
+// against its own chrome, not against the page. (An icon that followed
+// prefers-color-scheme would vanish into whichever tab strip it matched.)
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">`
+  + `<rect width="32" height="32" rx="8" fill="${DARK['--accent']}"/>`
+  + `<rect x="7" y="8" width="18" height="3.4" rx="1.7" fill="${DARK['--accent-ink']}" opacity=".5"/>`
+  + `<rect x="7" y="14" width="11" height="3.4" rx="1.7" fill="${DARK['--accent-ink']}" opacity=".5"/>`
+  + `<rect x="7" y="20.2" width="18" height="4.4" rx="2.2" fill="${DARK['--accent-ink']}"/>`
+  + `</svg>`;
+
+/** The `<link rel="icon">` every page emits, href inlined. `encodeURIComponent`
+ * rather than a hand-escaped string: `#` in a data URI would otherwise cut the
+ * href off at the first colour. */
+export const faviconLink =
+  `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}">`;
+
 /** Render a palette object as one `selector { ... }` rule's custom-property
  * declarations, plus `color-scheme` so the browser's own chrome (native form
  * controls, the default scrollbar when the webkit one above doesn't apply)

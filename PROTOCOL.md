@@ -592,7 +592,11 @@ which `body.readonly` hides wholesale — so the standalone `file:` archive offe
 "Open once, then badge and notify" (DESIGN.md) splits across two owners. Page side, on a
 `round` push: a pending count in `document.title`, a badge drawn onto a data-URI favicon (canvas,
 no asset file — the page must stay a single self-contained file), and, only when the document is
-hidden or unfocused, a `Notification`. Permission is requested lazily on the first round that
+hidden or unfocused, a `Notification`. Unbadged, the tab carries the board mark every page emits
+in its `<head>` (`faviconLink`, `src/styles.mjs`): an inline `data:image/svg+xml` link, painted
+from the dark palette's `--accent`/`--accent-ink`, so the same rule holds and the `file:` archive
+shows the mark with the network off. Clearing the badge restores that mark rather than blanking
+the href. Permission is requested lazily on the first round that
 would actually notify, and also on a Send click — the one moment the tab is definitely focused,
 so Chrome raises the prompt in the foreground instead of queuing it. A denial is never re-prompted,
 and every part degrades silently: a failure anywhere leaves the round pushed and the page working,

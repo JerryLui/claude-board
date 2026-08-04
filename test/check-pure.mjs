@@ -29,7 +29,7 @@ import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd,
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { ui } from '../src/ui.mjs';
-import { styles, palettes } from '../src/styles.mjs';
+import { styles, palettes, faviconLink } from '../src/styles.mjs';
 import { indexScript, buildThreadIndex, renderIndexPage, folderName, roundCount } from '../src/indexpage.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
 import { badgeLabel } from '../src/badge.mjs';
@@ -4900,10 +4900,28 @@ check('the favicon badge is drawn inline as a data URI -- no new asset file, not
   assert.match(draw, /createElement\('canvas'\)/);
   assert.match(draw, /toDataURL\(/, 'the badge must be a data URI the page draws, not a fetched or bundled file');
   const set = namedFunctionBody(ui, 'setFaviconBadge');
-  assert.match(set, /removeAttribute\('href'\)/, 'clearing the badge must unbadge the favicon, not leave the last count on it');
+  assert.match(set, /baseFavicon/, 'clearing the badge must restore the page\'s own mark, not leave the last count on it');
+  assert.match(set, /removeAttribute\('href'\)/, 'and with no mark to restore it must still unbadge rather than keep the count');
   // Nothing about this may add an external reference to the emitted page.
   const html = renderBoardPage(createBoard({ title: 'Fav', blocks: [{ kind: 'markdown', text: '# A' }] }));
   assert.ok(!/<link[^>]+href=["']?http/.test(html));
+});
+
+check('every page carries the same inline mark, and unbadging has something to restore', () => {
+  // One icon, three pages, no asset file: the board (and so the `file:` archive
+  // written from it), the index, and the refusal page a wrong browser reaches.
+  assert.ok(faviconLink.startsWith('<link rel="icon" href="data:image/svg+xml,'),
+    `the mark must be inline, not a file beside the page: ${faviconLink.slice(0, 60)}`);
+  assert.ok(!faviconLink.includes('#'),
+    'an unescaped # truncates a data URI at the first colour -- the href must be percent-encoded');
+  const svg = decodeURIComponent(faviconLink.slice(faviconLink.indexOf(',') + 1, -2));
+  assert.ok(svg.includes(palettes.dark['--accent']) && svg.includes(palettes.dark['--accent-ink']),
+    'the mark paints the palette, not a hand-copied hex that a palette edit would leave behind');
+
+  const board = renderBoardPage(createBoard({ title: 'Fav', blocks: [{ kind: 'markdown', text: '# A' }] }));
+  assert.ok(board.includes(faviconLink), 'the board page must carry the mark');
+  assert.ok(renderIndexPage({ threads: [] }).includes(faviconLink), 'the index must carry the mark');
+  assert.ok(renderRefusalPage().includes(faviconLink), 'the refusal page must carry the mark');
 });
 
 check('the notification fires only when the tab is unfocused, degrades silently, and never steals focus', () => {

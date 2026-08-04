@@ -5,6 +5,15 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ## [Unreleased]
 
+### Added
+
+- **A tab mark.** The board, the index and the refusal page all emit the same inline
+  `data:image/svg+xml` favicon (a board with two quiet rows and one emphasised row),
+  painted from the dark palette so it never drifts from `--accent`, and inline so the
+  standalone `file:` archive shows it with the network off. Clearing the pending-round
+  badge now restores that mark instead of leaving the tab blank, and the badge itself
+  is drawn in the real accent rather than the two-edits-stale blue it had been using.
+
 ### Fixed
 
 - **A CRLF markdown file no longer wedges the daemon.** `.` and `$` do not match `\r`, so
