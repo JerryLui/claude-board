@@ -177,7 +177,12 @@ function resolveContent(raw, cwd) {
 function byValueText(value, field) {
   const text = typeof value === 'string' ? value : String(value ?? '');
   if (Buffer.byteLength(text, 'utf8') > MAX_REF_BYTES) {
-    throw new Error(`block ${field} is over the ${MAX_REF_BYTES}-byte cap; use a source reference instead`);
+    // Not "use a source reference instead" (SPEC_HTMLREF.md criterion 5): a reference
+    // does not raise this cap for any kind. src/resolve.mjs's resolveRef checks the
+    // whole file's size from fstat BEFORE any slicing, so a reference to content this
+    // size is refused exactly as this by-value payload is -- there is no remedy here,
+    // only a smaller payload.
+    throw new Error(`block ${field} is over the ${MAX_REF_BYTES}-byte cap; a source reference to content this size would be refused the same way`);
   }
   return text;
 }
@@ -243,7 +248,54 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     }
     case 'html': {
       const id = resolveBlockId(raw, 'html', counters, ids, topLevel);
-      return { ...base, id, kind: 'html', html: byValueText(raw.html ?? '', 'html') };
+      // Path-only (SPEC_HTMLREF.md, "Decisions"): the other referenced kinds slice
+      // because text stays text under a knife, but cutting markup at a line or a
+      // section yields unclosed tags and orphaned <style>/<script> -- a broken stage,
+      // not a smaller one. Refused as a block-level error, same shape every other
+      // resolve failure takes (never thrown, block still minted and rendered with the
+      // reason visible), rather than silently ignoring the parameter or slicing markup
+      // that only breaks.
+      if (raw.source && (raw.source.lines || raw.source.section)) {
+        return {
+          ...base,
+          id,
+          kind: 'html',
+          source: raw.source,
+          html: '',
+          // sha of the empty string, not absent: PROTOCOL.md's resolve-failure contract
+          // says a failed block is still minted with its content empty and its sha the
+          // hash of that empty content. This refusal happens before resolveContent runs,
+          // so it has to state the same shape by hand rather than inheriting it.
+          sha: sha256(''),
+          error: 'html source refuses lines/section: slicing markup yields unclosed tags and orphaned styles, not a valid fragment -- reference the whole file',
+        };
+      }
+      if (raw.source) {
+        // Routed through the exact same resolveContent -> resolveRef path every other
+        // referenced kind uses: same confinement, same 512 KiB whole-file cap, same
+        // sha snapshot, same never-throws error shape. `html` (not `text`) is the field
+        // every consumer of an html block already reads (render.mjs's renderHtmlBlock,
+        // src/anchor.mjs's htmlBodyRootFrom) -- renamed here so a referenced file
+        // reaches the stage through the identical field a by-value mock always used.
+        const { text, sha, error } = resolveContent(raw, cwd);
+        return {
+          ...base,
+          id,
+          kind: 'html',
+          source: raw.source,
+          html: text,
+          sha,
+          ...(error ? { error } : {}),
+        };
+      }
+      // `source: null` and a sha even by value, exactly as markdown/mermaid/code do
+      // through resolveContent: PROTOCOL.md's block table states one shape per kind,
+      // not one per way the content arrived, and a consumer that reads `sha` off a
+      // block should not have to know which branch minted it. This branch cannot just
+      // call resolveContent, because that reads `raw.text` and an html block's
+      // by-value field is `raw.html`.
+      const html = byValueText(raw.html ?? '', 'html');
+      return { ...base, id, kind: 'html', source: null, html, sha: sha256(html) };
     }
     case 'compare': {
       const id = resolveBlockId(raw, 'compare', counters, ids, topLevel);

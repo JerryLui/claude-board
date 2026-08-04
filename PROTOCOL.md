@@ -131,14 +131,14 @@ across five branches showed five identical `Round N` headings.
 ### Blocks
 
 Every block has `{ id, round, kind }`. Content blocks additionally carry the resolved
-snapshot — `text` and `sha` — written once at post time and never re-read (see
-"Questions by value, content by reference, snapshotted at post time").
+snapshot — `text` (`html`, for an `html` block) and `sha` — written once at post time and
+never re-read (see "Questions by value, content by reference, snapshotted at post time").
 
 ```js
 { kind: 'markdown', source: Ref|null, text, sha, html, anchors: [Anchor], error? }
 { kind: 'mermaid',  source: Ref|null, text, sha, error? }
 { kind: 'code',     source: Ref,      text, sha, lang, error? }
-{ kind: 'html',     html }                        // by value; hand-mocked stage, no source
+{ kind: 'html',     source: Ref|null, html, sha, error? } // path-only source: `lines`/`section` refused
 { kind: 'compare',  left: { label, block }, right: { label, block } }
 { kind: 'question', prompt, context: [ContentBlock], widget, options: [Option] }
 
@@ -147,6 +147,19 @@ Option = { label, description?, preview? }                  // every widget exce
        | { label, description?, block: ContentBlock|null }  // widget 'choose-between-rendered-variants' only
 widget = 'single' | 'multi' | 'text' | 'rank' | 'choose-between-rendered-variants'
 ```
+
+**`html` may carry a `source` too** (additive 2026-08-04, SPEC_HTMLREF.md; ADR.md entry 7).
+Until now `html` was the one kind with no `source` at all, on the reasoning that a
+hand-mocked stage has no file behind it to point at — that stopped covering the case of an
+agent that renders a real page to disk and wants to put it on a board without re-emitting
+the bytes as generated tokens. It now resolves through the same reader, the same
+confinement, the same 512 KiB cap and the same block-level `error` behaviour as `markdown`,
+`code` and `mermaid` (see "Reference confinement and caps" below). It is the one exception
+to what a `Ref` may carry: `lines` and `section` are refused, with a block-level `error`
+naming markup slicing as the reason — never silently ignored, never a throw. The other
+kinds slice because cutting text at a line boundary still yields text; cutting markup at a
+line boundary yields unclosed tags and orphaned `<style>`, which renders as a broken stage
+and reads like a board bug rather than a documented limit.
 
 A widget outside that list is a **400**, not a silent fallback to `single` (additive, audit
 2026-07-28) — `{ widget: 'freetext' }` rendered a question with no cards and no textarea,
@@ -185,10 +198,10 @@ outside this repo (see "The skills stay personal" in SPEC_MIGRATION.md).
 
 `error` (additive, ticket 03): when a block carries `source` and `src/resolve.mjs`
 fails to resolve it (missing file, out-of-range lines, section not found), the block
-is still minted and kept — `text` comes back `''` and `sha` the hash of the empty
-string — with `error` set to a human-readable reason. The page renders the block
-with that reason visible instead of silently dropping it or aborting the whole post.
-A block with no `source` (by-value `text`) never sets `error`.
+is still minted and kept — `text` (`html`, for an `html` block) comes back `''` and `sha`
+the hash of the empty string — with `error` set to a human-readable reason. The page
+renders the block with that reason visible instead of silently dropping it or aborting the
+whole post. A block with no `source` (by-value content) never sets `error`.
 
 **`cwd` is bound once, per thread** (additive, audit 2026-07-28). `cwd` is the board's own
 project directory, and one of the two places a reference below may resolve — the other
@@ -267,7 +280,10 @@ uses, so the slug the agent is shown for a heading is the slug that resolves.
 
 The same 512 KiB cap applies to by-value `text` and `html`, where it is a **400 on the
 post** rather than a block-level `error`: by-value content came from the caller, so
-there is a caller to tell.
+there is a caller to tell. A `source` ref never raises this cap, for `html` or any other
+kind: `src/resolve.mjs` checks the whole file's size from `fstat` before any of it is
+read, so a 600 KB file behind a reference is refused exactly as a 600 KB file posted by
+value is, just as a block-level `error` rather than a 400.
 
 ### Answers, comments, anchors
 

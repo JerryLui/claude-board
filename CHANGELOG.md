@@ -13,6 +13,16 @@ this project does not yet follow semantic versioning, because nothing has been r
   standalone `file:` archive shows it with the network off. Clearing the pending-round
   badge now restores that mark instead of leaving the tab blank, and the badge itself
   is drawn in the real accent rather than the two-edits-stale blue it had been using.
+- **An `html` block can carry a `source` instead of the markup itself.** `{ kind: 'html',
+  source: { path } }` resolves through the same reader, confinement, 512 KiB cap and sha
+  snapshotting as `markdown`, `code` and `mermaid`, with the same block-level `error` on a
+  failed resolve. `html` was the one kind stuck by value, on the reasoning that a
+  hand-mocked stage has no file to point at — that stopped holding once agents started
+  rendering real pages to disk, where the only way onto a board was re-emitting the whole
+  file as generated tokens (~25-30K of them for one 80 KB document). One exception: `lines`
+  and `section` are refused with a block-level error naming markup slicing as the reason,
+  because cutting markup at a line boundary yields unclosed tags and orphaned `<style>`
+  where cutting text the same way still yields text. See ADR.md entry 7.
 
 ### Fixed
 

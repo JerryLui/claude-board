@@ -995,6 +995,23 @@ export function stageAgentScript() {
  * numbered pins for `dom` anchors, positioned from geometry the stage itself
  * reports (never written to here, since that needs a real, live DOM). */
 function renderHtmlBlock(block, board, commentsByBlock, historical) {
+  // A referenced source can fail to resolve (SPEC_HTMLREF.md criteria 2-4: sliced
+  // with lines/section, over the byte cap, or outside the confinement boundary) --
+  // same block-level-error shape as renderMarkdownBlock/renderCodeBlock/
+  // renderMermaidBlock, stage chrome dropped since there is nothing to stage.
+  if (block.error) {
+    return `
+<section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
+  <div class="block-kicker">HTML stage ${commentButton(block.id, 'block')}</div>
+  ${resolveErrorNote(block)}
+  ${pageDomPinLayer(block.id)}
+  ${commentArea(block.id, commentsByBlock, historical)}
+</section>`;
+  }
+  // A referenced file's resolved text lands in `block.html` exactly where a
+  // hand-mocked stage's by-value text always did (src/board.mjs's normalizeBlock),
+  // so the srcdoc built here is the SAME for both -- nothing downstream of
+  // resolution knows or cares whether the markup came from disk or the wire.
   return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
   <div class="block-kicker">HTML stage ${commentButton(block.id, 'block')} ${stageHint('turn on comment mode to click any element and comment on it')}</div>

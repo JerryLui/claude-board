@@ -164,6 +164,18 @@ escaped in both HTML text and attribute positions. Hand-mocked HTML stages rende
 a sandboxed iframe that the parent never evaluates or trusts, with an isolation check
 asserting the parent ignores hostile messages that carry a correct origin.
 
+**A referenced `html` file runs on the same footing as a hand-mocked one.** `html` is the
+one kind whose `source` names a file rather than only carrying markup by value
+(`SPEC_HTMLREF.md`, `ADR.md` entry 7), resolved through the same reader, confinement and
+cap as every other reference. It renders exactly as a hand-mocked stage does — inside an
+iframe with `sandbox="allow-scripts"` and no `allow-same-origin`, so its browsing context
+is cross-origin from the daemon's own and `contentDocument`/`contentWindow` are
+unreachable from the parent — under the same page CSP (`default-src 'none'`, `script-src
+'unsafe-inline' https://cdn.jsdelivr.net`). This adds no new defence, because none was
+needed: whether the markup was typed by the agent into the request body or read off disk
+by the daemon, it is agent-authored and untrusted either way, and the sandbox and CSP
+above were already built for that, not for a particular way the bytes arrived.
+
 **The agent answering its own question.** The `choose-between-rendered-variants` widget
 puts a rendered block inside each option, and that block may be an HTML stage — an
 iframe running script the *agent* wrote, sitting inside the control the *reviewer* uses
@@ -200,6 +212,12 @@ because it refuses legitimately hard-linked content (content-addressed stores, `
 some backup tools) and there is no test that separates the two cases. Anything that can
 create such a link is running as you, and so is already inside the boundary directly
 above.
+
+The same escape, larger consequence for one kind: for `markdown`, `code` and `mermaid`,
+"quote it" means the hard-linked file's bytes appear as escaped text or a fenced diagram.
+For `html` (`SPEC_HTMLREF.md`, `ADR.md` entry 7), quoting it means its markup is what runs
+inside the sandboxed stage — still opaque-origin, still under the page CSP, so this is not
+a new hole, but it is a bigger one to fall into by the same route.
 
 **A browser extension with host permissions on the profile holding the credential.** It
 can read boards and submit as you. `HttpOnly` stops page script, not extensions.

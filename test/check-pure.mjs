@@ -1777,6 +1777,121 @@ check('a block with a failed resolution renders its error on the page instead of
   assert.ok(markup.includes('Could not resolve'));
 });
 
+// --- SPEC_HTMLREF.md: an html block may carry source: { path }, routed through the -
+// --- same resolveRef every other referenced kind uses, path-only ------------------
+
+check('SPEC_HTMLREF.md criterion 1: an html source ref renders a stage byte-identical to the same content posted by value', () => {
+  const file = path.join(fixturesDir, 'referenced-stage.html');
+  const markup = '<div class="mock"><button>Ship it</button></div>';
+  writeFileSync(file, markup, 'utf8');
+
+  const refBoard = createBoard({
+    title: 'html by reference',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'html', source: { path: 'referenced-stage.html' } }],
+  });
+  const valueBoard = createBoard({
+    title: 'html by value',
+    blocks: [{ kind: 'html', html: markup }],
+  });
+
+  const refBlock = refBoard.blocks[0];
+  assert.equal(refBlock.error, undefined);
+  assert.equal(refBlock.html, markup); // resolved through the same field every other consumer of an html block reads
+  assert.equal(typeof refBlock.sha, 'string');
+  assert.equal(refBlock.sha.length, 64); // snapshotted like every other referenced kind
+
+  const refMarkup = renderBlock(refBlock, refBoard, new Map(), false);
+  const valueMarkup = renderBlock(valueBoard.blocks[0], valueBoard, new Map(), false);
+  // Both boards mint the same first id ('h1') for their one block, so nothing here
+  // depends on stripping ids to compare -- if this is byte-identical, the stage the
+  // reviewer sees from a reference is indistinguishable from a hand-mocked one.
+  assert.equal(refMarkup, valueMarkup);
+  // The literal markup is attribute-escaped inside srcdoc (quotes -> &quot;), so
+  // assert on a quote-free fragment of it that survives escaping unchanged --
+  // proof the resolved file's content actually reached the stage, not just that
+  // the two renders happen to agree.
+  assert.ok(refMarkup.includes('srcdoc='));
+  assert.ok(refMarkup.includes('Ship it'), 'the resolved file content must actually reach the srcdoc');
+
+  // One stored shape per kind, not one per way the content arrived: PROTOCOL.md's
+  // block table states `source` and `sha` unconditionally for html, the same as
+  // markdown/mermaid/code get for free by routing through resolveContent. The
+  // by-value branch mints them by hand, so it is the one that can drift.
+  const valueBlock = valueBoard.blocks[0];
+  assert.equal(valueBlock.source, null);
+  assert.equal(valueBlock.sha, refBlock.sha, 'identical content by either route must snapshot to the identical sha');
+  assert.deepEqual(Object.keys(valueBlock).sort(), Object.keys(refBlock).sort());
+});
+
+check('SPEC_HTMLREF.md criterion 2: lines or section on an html source is refused with a block-level error naming markup slicing, never thrown', () => {
+  const file = path.join(fixturesDir, 'sliceable-stage.html');
+  writeFileSync(file, '<html><body><p>one</p><p>two</p></body></html>', 'utf8');
+
+  const linesBoard = createBoard({
+    title: 'html source, lines refused',
+    cwd: fixturesDir,
+    blocks: [
+      { kind: 'html', source: { path: 'sliceable-stage.html', lines: [1, 1] } },
+      { kind: 'markdown', source: { path: 'no-such-file.md' } },
+    ],
+  });
+  const linesBlock = linesBoard.blocks[0];
+  assert.equal(typeof linesBlock.error, 'string'); // reported on the block, not thrown -- createBoard above did not throw
+  assert.match(linesBlock.error, /slic/i);
+  assert.match(linesBlock.error, /markup/i);
+  assert.equal(linesBlock.html, '');
+  // Same shape every other resolve failure takes (PROTOCOL.md's resolve-failure
+  // contract): content empty, sha the hash of that empty content -- not absent. This
+  // refusal fires before resolveContent runs, so it is the one error path that could
+  // silently drift from the shape the rest of the protocol promises. Asserted against
+  // a sibling block that failed the ordinary way rather than a hardcoded digest, so
+  // the two can never disagree without this failing.
+  const failedSibling = linesBoard.blocks[1];
+  assert.equal(typeof failedSibling.error, 'string');
+  assert.equal(linesBlock.sha, failedSibling.sha);
+
+  const sectionBoard = createBoard({
+    title: 'html source, section refused',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'html', source: { path: 'sliceable-stage.html', section: 'notes' } }],
+  });
+  const sectionBlock = sectionBoard.blocks[0];
+  assert.equal(typeof sectionBlock.error, 'string');
+  assert.match(sectionBlock.error, /slic/i);
+  assert.match(sectionBlock.error, /markup/i);
+
+  // Refused is visible on the page, not silently ignored (the parameter is not
+  // dropped and the whole file is not quietly substituted for the requested slice).
+  const markup = renderedMarkup(renderBoardPage(linesBoard));
+  assert.ok(markup.includes('class="resolve-error"'));
+});
+
+check('SPEC_HTMLREF.md criterion 3: a referenced html file over the 512 KiB cap is refused as a block-level error, and the board still posts with its other blocks intact', () => {
+  const big = path.join(fixturesDir, 'oversize-stage.html');
+  writeFileSync(big, 'x'.repeat(MAX_REF_BYTES + 1), 'utf8');
+  try {
+    const board = createBoard({
+      title: 'html source, over cap',
+      cwd: fixturesDir,
+      blocks: [
+        { kind: 'html', source: { path: 'oversize-stage.html' } },
+        { kind: 'markdown', text: 'still here' },
+      ],
+    });
+    assert.equal(board.blocks.length, 2); // the oversize reference is refused, not dropped
+    const htmlBlock = board.blocks[0];
+    assert.equal(typeof htmlBlock.error, 'string');
+    assert.match(htmlBlock.error, /exceeds the .* cap/);
+    assert.equal(htmlBlock.html, '');
+    const mdBlock = board.blocks[1];
+    assert.equal(mdBlock.error, undefined);
+    assert.equal(mdBlock.text, 'still here'); // the surrounding board is untouched
+  } finally {
+    unlinkSync(big);
+  }
+});
+
 // --- four answer widgets: packet shape, including unanswered, deferred, notes -----
 
 check('all four widgets produce their documented answer shape in the packet, including unanswered, deferred, and notes', () => {
@@ -3139,6 +3254,43 @@ check('allowlist: a path outside BOTH cwd and the allowlist is still refused, wi
   }
 });
 
+check('SPEC_HTMLREF.md criterion 4: a referenced html path outside cwd and every allowlisted root is refused as a block-level error, on the same terms as any other kind\'s ref', () => {
+  const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-html-outside-'));
+  try {
+    const secret = path.join(outside, 'secret.html');
+    writeFileSync(secret, '<script>alert(document.cookie)</script>', 'utf8');
+
+    // Absolute, naming nothing inside a root -- the identical refusal an absolute
+    // code reference to the same path gets, since both route through resolveRef
+    // with no kind-specific carve-out.
+    const htmlBoard = createBoard({
+      title: 'html source, absolute path refused',
+      cwd: fixturesDir,
+      blocks: [{ kind: 'html', source: { path: secret } }],
+    });
+    const codeBoard = createBoard({
+      title: 'code source, absolute path refused (for comparison)',
+      cwd: fixturesDir,
+      blocks: [{ kind: 'code', source: { path: secret } }],
+    });
+    assert.equal(htmlBoard.blocks[0].error, ABSOLUTE_REFUSAL(secret));
+    assert.equal(htmlBoard.blocks[0].error, codeBoard.blocks[0].error, 'html is confined on the same terms as any other kind');
+    assert.equal(htmlBoard.blocks[0].html, '');
+
+    // A relative reference that traverses out of the project.
+    const rel = path.relative(realpathSync(fixturesDir), secret);
+    const relBoard = createBoard({
+      title: 'html source, traversal refused',
+      cwd: fixturesDir,
+      blocks: [{ kind: 'html', source: { path: rel } }],
+    });
+    assert.equal(relBoard.blocks[0].error, OUTSIDE_REFUSAL(rel));
+    assert.ok(!(relBoard.blocks[0].html || '').includes('alert(document.cookie)'));
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 check('allowlist: a symlink out of cwd, and a symlink out of a root, are both refused -- confinement stays on the REALPATH', () => {
   // Ablation: check containment on path.resolve() instead of realpathSync() and
   // either link below reads straight through, since neither link's own spelling
@@ -3733,6 +3885,33 @@ check('N2/cap: a by-value text or html block over the same cap is a loud 400-abl
   const oversize = 'x'.repeat(MAX_REF_BYTES + 1);
   assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'html', html: oversize }] }), /over the .*-byte cap/);
   assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'markdown', text: oversize }] }), /over the .*-byte cap/);
+});
+
+check("SPEC_HTMLREF.md criterion 5: the by-value over-cap message no longer tells the caller a source reference raises the cap, because it does not", () => {
+  // Ablation: revert the message in src/board.mjs's byValueText to "use a source
+  // reference instead" and this fails -- a reference to content this size is refused
+  // by resolveRef's own whole-file fstat check (src/resolve.mjs) before any slicing,
+  // so that phrasing names a remedy that does not work for ANY kind, html included.
+  const oversize = 'x'.repeat(MAX_REF_BYTES + 1);
+  let caught = null;
+  try {
+    createBoard({ title: 't', blocks: [{ kind: 'html', html: oversize }] });
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught, 'an over-cap by-value block must still throw');
+  assert.match(caught.message, /over the .*-byte cap/);
+  assert.ok(!/use a source reference instead/i.test(caught.message), 'must not name a remedy that does not raise the cap');
+  // What the message says instead must actually be true: a reference to a file this
+  // size is refused too, proven end to end rather than merely asserted in prose.
+  const big = path.join(fixturesDir, 'criterion5-oversize.html');
+  writeFileSync(big, oversize, 'utf8');
+  try {
+    const board = createBoard({ title: 't', cwd: fixturesDir, blocks: [{ kind: 'html', source: { path: 'criterion5-oversize.html' } }] });
+    assert.match(board.blocks[0].error, /exceeds the .* cap/);
+  } finally {
+    unlinkSync(big);
+  }
 });
 
 // --- H6: the server's html tree must be the tree the browser built ---------------

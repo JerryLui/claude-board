@@ -259,3 +259,35 @@ element-level-only was rejected for exactly that. Also rejected: removing the bu
 leaving the gesture live, which narrows nothing because comment mode mints anchors on its own;
 and the middle position on `compare` (button gone, side-level clicks kept), rejected as the one
 option inconsistent with every other wrapper.
+
+## 7. An `html` block may name a file, but only a whole one — 2026-08-04
+
+**Context:** `html` was the one content kind with no `source` ref, on the reasoning that a
+hand-mocked stage has no file to point at. That held until agents started producing real
+rendered pages on disk, at which point the only way onto a board was to emit the whole file as
+generated tokens — ~25-30K of them for an 80 KB document, a price an agent silently declined to
+pay on 2026-08-04, posting a stub and misreporting a size limit as the cause. The grill that
+followed disproved its own premise twice: no limit had fired (the file was a tenth of the cap),
+and the fix first proposed would not have closed the problem first named, because `resolveRef`
+checks the whole file's size from `fstat` before slicing, so a reference has never raised the
+cap for any kind.
+
+**Decision:** `html` accepts `source: { path }`, resolved through the same reader, confinement,
+cap and block-level error behaviour as every other kind. Path only — `lines` and `section` are
+refused with an error naming markup slicing as the reason. Rejected: a separate `document`
+kind, which would have kept `html` meaning one thing at the cost of a second kind to render,
+document and anchor; and making the cap slice-aware, which would have closed the original
+(imagined) problem but moves the check that bounds a read before the bytes reach the daemon's
+heap. The security restatement was put to the user and declined as out of interest for a
+local-only tool, so a referenced file executes in the stage on exactly the footing an inline
+mock already did, with `SECURITY.md` recording that rather than defending against it.
+
+**Consequences:** The protocol's "html is the exception that has no source" sentence is now
+false wherever it appears and must be rewritten rather than amended. `html` is the only kind
+whose ref is path-only, which is an exception a reader will trip over and which exists because
+text survives a knife and markup does not. Nothing here helps a file over the cap, in either
+direction — that remains a hard refusal, and the misleading "use a source reference instead"
+message that implied otherwise is corrected as part of the same work. Inlining a full rendered
+document onto a board stays a bad idea for unrelated reasons (the 320px stage floor, the
+CSP-blocked local mermaid asset), so `/explain` posts a pointer instead; that edit lives in
+`~/.claude/skills/explain/`, outside this repo.
