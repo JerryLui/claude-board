@@ -265,6 +265,37 @@ check('criterion 2: the rail moves live over SSE -- the round a push collapses i
 });
 
 // =====================================================================================
+// Rider fix, unrelated to the timer (spec criterion 8): the send bar's
+// post-submit status message ("Sent." / "This round has been sent. Waiting
+// for the next one.") must clear the moment a new round lands, and must never
+// show beside an open round. src/render.mjs already gets the SERVER-rendered
+// half right (span#send-status is only ever seeded with that text when
+// hasOpenRound(board) is false), so this drives the live half: a page loaded
+// with every round already sent (the message present, exactly as a reviewer
+// who reloaded after sending would see it) that then receives a brand-new
+// round over SSE, same payload shape as the SSE-parity check just above.
+// =====================================================================================
+
+check('rider fix: the send bar\'s post-submit status message clears the moment a new round lands, and never sits beside the freshly-opened round', () => {
+  const board = createBoard({ title: 'Round end - status clears on push', blocks: [Q1] });
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  const pageHtml = renderBoardPage(board);
+  const { document, es } = loadBoardWithEventSource(pageHtml);
+  const sendStatus = document.getElementById('send-status');
+  assert.equal(sendStatus.textContent, 'This round has been sent. Waiting for the next one.',
+    'setup failure: with every round sent and none open, the server must render the post-submit status message');
+
+  addRound(board, { blocks: [Q2] });
+  const commentsByBlock = groupCommentsByBlock([]);
+  const payload = { round: 2, mode: 'new-round', blockIds: [], html: renderRoundSection(board, 2, commentsByBlock), board: { ...board, comments: [] } };
+  es.dispatch('round', JSON.stringify(payload));
+
+  assert.equal(sendStatus.textContent, '',
+    'the stale post-submit status must clear the instant a new round lands (src/ui.mjs applyRoundPush) -- it must never sit beside the freshly-opened round');
+  assert.equal(document.getElementById('send-btn').disabled, false, 'setup check: the send bar must also be re-enabled for the new open round');
+});
+
+// =====================================================================================
 // Criterion 6 (rail's half): "... none of this appears in a read-only archive
 // opened from disk." Same rigor as test/check-archive.mjs's own .mode-toggle/
 // .back-to-index checks: the CSS rule's exact wording, plus proof the rail is

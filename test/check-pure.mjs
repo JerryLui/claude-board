@@ -6596,6 +6596,31 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   assert.ok(widgetMatch.index < themeMatch.index, 'both controls must render inside the same header, the widget before the theme toggle');
 });
 
+check('pomodoro widget: Restart/Forward render as one segmented pill between the countdown and the switch -- real buttons, keyboard-reachable, named for a screen reader, always present (spec criterion 7)', () => {
+  const html = renderIndexPage({ threads: [] });
+  assert.match(html, /<span class="pomodoro-ctl-group">/, 'the pair must be one pill, not two independent controls');
+  // Real <button>s, not a div/span wearing a click handler -- that is the whole
+  // of what makes them keyboard-reachable with no extra tabindex plumbing (a
+  // <span onclick> is invisible to Tab).
+  const restartMatch = html.match(/<button type="button" class="pomodoro-ctl" id="pomodoro-restart" aria-label="Restart interval" title="Restart interval">/);
+  const forwardMatch = html.match(/<button type="button" class="pomodoro-ctl" id="pomodoro-forward" aria-label="Forward to next interval" title="Forward to next interval">/);
+  assert.ok(restartMatch, 'Restart must be a real <button>, icon-only, carrying both an aria-label and a matching title');
+  assert.ok(forwardMatch, 'Forward must be a real <button>, icon-only, carrying both an aria-label and a matching title');
+  // Restart left, Forward right, and the whole pill sits between the countdown
+  // and the switch -- ordering, not just presence.
+  const statusMatch = html.match(/<span class="pomodoro-status" id="pomodoro-status">/);
+  const toggleMatch = html.match(/<button type="button" class="pomodoro-switch" id="pomodoro-toggle"/);
+  assert.ok(statusMatch && toggleMatch, 'setup failure: could not locate the countdown or the switch');
+  assert.ok(
+    statusMatch.index < restartMatch.index && restartMatch.index < forwardMatch.index && forwardMatch.index < toggleMatch.index,
+    'expected countdown, then Restart, then Forward, then the switch, in that order'
+  );
+  // Nothing here ever hides the pair -- unlike the switch's aria-checked, there
+  // is no idle-vs-running variant of this markup at all, which is what makes
+  // "always present" true by construction rather than by a runtime check.
+  assert.doesNotMatch(html.slice(restartMatch.index, forwardMatch.index + 200), /\shidden(?:[\s=>]|$)/, 'the controls must never rely on the `hidden` attribute -- always present means always present');
+});
+
 check('pomodoro widget: the three cue rows read Work / Short break / Long break under a hairline and a "Cues" caption, and the duration row beside them is relabeled to match (SPEC_CUES.md placement decision)', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<hr class="pomodoro-settings-divider">/, 'the Cues section needs its own hairline -- no fold, no tab');
@@ -6871,6 +6896,51 @@ await checkAsync('pomodoro widget: clicking the toggle while paused posts /api/p
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post);
   assert.equal(post.url, '/api/pomodoro/resume');
+});
+
+// The Restart/Forward pair (SPEC_POMODORO.md forward/restart slice, criterion
+// 7). Same shape as the toggle checks above: stub the fetch, dispatch a real
+// click, assert on the POST that resulted and that the response landed back
+// in the widget -- never a hand-summary of what onPomodoroForwardClick/
+// onPomodoroRestartClick claim to do.
+await checkAsync('pomodoro widget: clicking Forward posts /api/pomodoro/forward with the session cookie, and the response is applied back into the widget instantly', async () => {
+  const nowMs = Date.now();
+  const running = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'work', deadline: nowMs + 20 * 60_000, paused: false }, now: nowMs };
+  const forwarded = { ...running, cycle: 1, timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false } };
+  let document;
+  const calls = await withPomodoroFetch(call => (call.method === 'POST' ? forwarded : running), async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+    document.querySelector('button#pomodoro-forward').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+  });
+  const post = calls.find(c => c.method === 'POST');
+  assert.ok(post, 'the click must issue a POST');
+  assert.equal(post.url, '/api/pomodoro/forward');
+  assert.equal(post.credentials, 'same-origin', 'the browser holds only the session cookie -- POMODORO_COOKIE_ACTIONS (src/server.mjs) has to include forward for this to be authorised at all');
+  const status = document.querySelector('span#pomodoro-status');
+  assert.match(status.textContent, /Break/, 'the response must be applied back into the widget -- the countdown must move to the phase the daemon actually forwarded to, without waiting for the next poll');
+  assert.match(status.textContent, /0[45]:[0-5][0-9]/, `expected roughly the fresh 5-minute break in ${status.textContent}`);
+});
+
+await checkAsync('pomodoro widget: clicking Restart posts /api/pomodoro/restart with the session cookie, and the response is applied back into the widget instantly', async () => {
+  const nowMs = Date.now();
+  const running = { settings: POMODORO_SETTINGS, cycle: 3, cycleDate: '2020-01-01', timer: { phase: 'work', deadline: nowMs + 30_000, paused: false }, now: nowMs };
+  const restarted = { ...running, timer: { phase: 'work', deadline: nowMs + 25 * 60_000, paused: false } };
+  let document;
+  const calls = await withPomodoroFetch(call => (call.method === 'POST' ? restarted : running), async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+    document.querySelector('button#pomodoro-restart').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+  });
+  const post = calls.find(c => c.method === 'POST');
+  assert.ok(post, 'the click must issue a POST');
+  assert.equal(post.url, '/api/pomodoro/restart');
+  assert.equal(post.credentials, 'same-origin', 'the browser holds only the session cookie -- POMODORO_COOKIE_ACTIONS (src/server.mjs) has to include restart for this to be authorised at all');
+  const status = document.querySelector('span#pomodoro-status');
+  assert.match(status.textContent, /Work/, 'restart keeps the same phase running -- it never advances to the next one');
+  assert.match(status.textContent, /24:5[0-9]|25:00/, `expected the deadline re-minted to a full 25-minute work interval in ${status.textContent}, not the ~30s that was left`);
 });
 
 await checkAsync('pomodoro widget: reset needs two clicks -- the first only relabels the SAME control, the second posts /api/pomodoro/reset, and confirm() is never called', async () => {

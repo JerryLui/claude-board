@@ -4120,6 +4120,11 @@ export const ui = `
     // A round that is not yet sent is a round this page may submit -- this is what
     // brings the send bar back after a previous round was collapsed into history.
     setSendBarEnabled(openRoundNumber() !== null);
+    // Rider fix, unrelated to the timer: submitBoard's "Sent."/"Handed over to
+    // chat." (or the 409 "Already sent." text) belongs to the round that just
+    // went out, not the one that just arrived -- left alone, it would sit next
+    // to the freshly re-enabled send bar until the reviewer submitted again.
+    if (sendStatus && openRoundNumber() !== null) sendStatus.textContent = '';
   }
 
   function applySubmittedPush(data) {

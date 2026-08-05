@@ -45,6 +45,19 @@ const TOMATO_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" h
 
 const GEAR_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.47V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9.1 19.4a1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 1-1.47V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>';
 
+// Restart/forward controls (SPEC_FORWARD.md, round 2's
+// picked visual variant -- /tmp/example-forward-restart.html, the segmented
+// pair). Icon-only, so both buttons carry an aria-label AND a title, same
+// reasoning as the settings cogwheel above: the label names the ACTION a
+// click performs, which is what makes an icon-only control usable
+// (ui-ux-pro-max accessibility priority 1). Glyphs are stroke-based icons
+// picked to read as "restart" and "forward" without a label -- rotate-ccw
+// (restart) and skip-forward, a play triangle plus a bar (forward) -- the
+// same family as TOMATO_ICON/GEAR_ICON above. Neither icon is itself the
+// accessible name; both carry aria-hidden, exactly like GEAR_ICON.
+const RESTART_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+const FORWARD_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 4 15 12 5 20"/><line x1="19" y1="5" x2="19" y2="19"/></svg>';
+
 /** The option list every one of the three cue `<select>`s shares -- built fresh
  * per render (never at module load: cueNames() is call-time-lazy on purpose,
  * see src/cues.mjs's own header comment) but cheap either way, since cueNames()
@@ -76,12 +89,24 @@ function cueOptionsHtml() {
  * `aria-label` (the label names the ACTION a click performs -- Start / Pause /
  * Resume -- which is what makes an icon-only control usable, priority 1 in the
  * ui-ux-pro-max accessibility rules). The server-rendered values below state the
- * honest pre-fetch truth: nothing known yet, so off. */
+ * honest pre-fetch truth: nothing known yet, so off.
+ *
+ * The Restart/Forward pill sits between the status text and the switch (spec
+ * criterion 7, round two's picked variant), two real `<button>`s so both are
+ * keyboard-reachable with no extra tabindex plumbing. Unlike the switch, this
+ * pair never changes shape with the timer's state -- criterion 7 says "always
+ * present", and an idle click is already a server-side no-op
+ * (forwardTimer/restartTimer in src/pomodoro.mjs both return `doc` unchanged
+ * against `!doc.timer`), so there is no idle-disabled state to render either. */
 export function pomodoroWidget() {
   const cueOptions = cueOptionsHtml();
   return `<div class="pomodoro-widget" id="pomodoro-widget">
   ${TOMATO_ICON}
   <span class="pomodoro-status" id="pomodoro-status">…</span>
+  <span class="pomodoro-ctl-group">
+    <button type="button" class="pomodoro-ctl" id="pomodoro-restart" aria-label="Restart interval" title="Restart interval">${RESTART_ICON}</button>
+    <button type="button" class="pomodoro-ctl" id="pomodoro-forward" aria-label="Forward to next interval" title="Forward to next interval">${FORWARD_ICON}</button>
+  </span>
   <button type="button" class="pomodoro-switch" id="pomodoro-toggle" role="switch" aria-checked="false" aria-label="Start pomodoro" title="Start pomodoro"><span class="pomodoro-switch-knob" aria-hidden="true"></span></button>
   <details class="pomodoro-settings" id="pomodoro-settings">
     <summary class="pomodoro-settings-summary" role="button" aria-label="Pomodoro settings" title="Pomodoro settings">${GEAR_ICON}</summary>

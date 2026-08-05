@@ -202,8 +202,9 @@ cleared cookies, a second profile, a different browser — the refusal page name
 that fixes it: `node bin/authorize.mjs` from your clone.
 
 **What the cookie may write.** The secret authorizes every write. The cookie authorizes a
-strictly smaller, closed set: `submit`, and five pomodoro actions — `ensure`, `pause`,
-`resume`, `reset`, `settings` (`POMODORO_COOKIE_ACTIONS`, `src/server.mjs`). That set is a
+strictly smaller, closed set: `submit`, and nine pomodoro actions — `ensure`, `pause`,
+`resume`, `reset`, `settings`, `preview`, `notifyTest`, `forward`, `restart`
+(`POMODORO_COOKIE_ACTIONS`, `src/server.mjs`). That set is a
 named list rather than a `/api/pomodoro/*` prefix match, so a pomodoro route added later is
 secret-only until someone adds it deliberately. The reasoning is that the cookie is already
 worth "may read every board in the store and may answer any open round", and an advisory

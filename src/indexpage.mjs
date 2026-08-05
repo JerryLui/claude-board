@@ -549,6 +549,26 @@ function onPomodoroToggleClick() {
   postPomodoro(pomodoroSwitchAction(pomodoroDoc.timer));
 }
 
+// The Restart/Forward pair (SPEC_FORWARD.md, criterion
+// 7). Always present, so unlike onPomodoroToggleClick above there is no
+// pomodoroDoc-shaped decision to make before posting -- both routes are
+// bodyless no-ops server-side against an idle daemon (src/pomodoro.mjs
+// forwardTimer/restartTimer, both a no-op against '!doc.timer'), so a click
+// before the first fetch resolves or while idle is safe to send exactly like
+// any other click; postPomodoro applies whatever comes back the same way
+// every other pomodoro write here does, which is what makes the countdown
+// move instantly in THIS tab. Every other open tab picks the same change up
+// through the widget's own existing sync -- fetchPomodoro's POMODORO_POLL_MS
+// poll, the one mechanism this file already has for "another tab changed the
+// timer" -- rather than this reaching for a second one.
+function onPomodoroForwardClick() {
+  postPomodoro('forward');
+}
+
+function onPomodoroRestartClick() {
+  postPomodoro('restart');
+}
+
 function pomodoroDisarmReset(btn) {
   pomodoroResetArmed = false;
   if (pomodoroResetTimer) { clearTimeout(pomodoroResetTimer); pomodoroResetTimer = null; }
@@ -700,6 +720,10 @@ function initPomodoroWidget() {
   if (!widget) return;
   var toggleBtn = document.querySelector('button#pomodoro-toggle');
   if (toggleBtn) toggleBtn.addEventListener('click', onPomodoroToggleClick);
+  var restartBtn = document.querySelector('button#pomodoro-restart');
+  if (restartBtn) restartBtn.addEventListener('click', onPomodoroRestartClick);
+  var forwardBtn = document.querySelector('button#pomodoro-forward');
+  if (forwardBtn) forwardBtn.addEventListener('click', onPomodoroForwardClick);
   var resetBtn = document.querySelector('button#pomodoro-reset');
   if (resetBtn) resetBtn.addEventListener('click', onPomodoroResetClick);
   var form = document.querySelector('form#pomodoro-settings-form');

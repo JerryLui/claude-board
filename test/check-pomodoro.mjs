@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +18,8 @@ import {
   normalizeCycle,
   startWork,
   settleBoundary,
+  forwardTimer,
+  restartTimer,
   normalizeDoc,
   readDoc,
   writeDoc,
@@ -24,6 +27,7 @@ import {
 } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
 import { NO_CUE } from '../src/cues.mjs';
+import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -257,6 +261,113 @@ async function main() {
     // deadline math runs.
     assert.ok(EXPIRY_GRACE_MS >= 1_000, 'too small: event-loop slack alone would expire healthy timers');
     assert.ok(EXPIRY_GRACE_MS <= 60_000, 'too large: real sleep would be miscounted as on-time');
+  });
+
+  // -------------------------------------------------------------------------------
+  // forwardTimer -- ADR.md entry 24: forward is the boundary made early. It reuses
+  // settleBoundary's own advance rule at click time rather than a second bookkeeping
+  // path, so these checks pin the SAME cycle bookkeeping settleBoundary's own loop
+  // check above pins, just triggered by a click instead of a real deadline.
+  // -------------------------------------------------------------------------------
+
+  await check('forwardTimer: idle is a no-op, by reference -- nothing thrown, nothing invented (criterion 4)', () => {
+    const doc = defaultDoc();
+    assert.equal(forwardTimer(doc, Date.now()), doc);
+  });
+
+  await check('forwardTimer: a running work interval ends immediately and begins its break', () => {
+    const now = Date.now();
+    const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
+    const next = forwardTimer(doc, now);
+    assert.equal(next.timer.phase, 'break');
+    assert.equal(next.timer.paused, false, 'the next phase starts running');
+    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
+  });
+
+  await check('forwardTimer: forwarding a PAUSED timer advances, and the next phase starts running (criterion 3)', () => {
+    const now = Date.now();
+    // The real shape pauseTimer leaves behind: no deadline, remainingMs instead.
+    const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
+    const next = forwardTimer(doc, now);
+    assert.equal(next.timer.phase, 'break');
+    assert.equal(next.timer.paused, false);
+    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
+    assert.equal('remainingMs' in next.timer, false);
+  });
+
+  await check('forwardTimer: long-break cadence intact across a full loop -- forwarded work still earns its break, forwarded break still increments the cycle, forwarded long break resets it (criterion 1)', () => {
+    const t0 = new Date(2026, 7, 4, 9, 0, 0).getTime();
+    let doc = { ...defaultDoc(), cycleDate: localDateStr(t0), timer: { phase: 'work', deadline: t0 + 999_000, paused: false } };
+    let now = t0;
+
+    // (expected next phase, expected cycle AFTER the click) -- same shape and same
+    // steps as settleBoundary's own full-loop check above, driven by forwardTimer
+    // clicks (arbitrarily far from each interval's real deadline) instead of a real
+    // boundary, which is the whole point: the bookkeeping must not care which one fired.
+    const steps = [
+      ['break', 0],
+      ['work', 1],
+      ['break', 1],
+      ['work', 2],
+      ['break', 2],
+      ['work', 3],
+      ['longBreak', 3], // 4th break is long
+      ['work', 0], // cycle resets after the long break
+    ];
+
+    for (const [expectPhase, expectCycle] of steps) {
+      now += 1_000; // each click lands at a distinct, arbitrary "now" -- never the real deadline
+      const next = forwardTimer(doc, now);
+      assert.equal(next.timer.phase, expectPhase);
+      assert.equal(next.cycle, expectCycle);
+      assert.equal(next.timer.paused, false);
+      doc = next;
+    }
+  });
+
+  // -------------------------------------------------------------------------------
+  // restartTimer -- re-mints the CURRENT interval's deadline to a full phase
+  // duration; phase and cycle are untouched (criterion 5), and it shares forward's
+  // edge rules (criterion 6).
+  // -------------------------------------------------------------------------------
+
+  await check('restartTimer: idle is a no-op, by reference -- nothing thrown, nothing invented', () => {
+    const doc = defaultDoc();
+    assert.equal(restartTimer(doc, Date.now()), doc);
+  });
+
+  await check('restartTimer: re-mints the deadline to a full interval of the CURRENT phase, read from current settings -- phase and cycle untouched', () => {
+    const now = Date.now();
+    const settings = { ...DEFAULT_SETTINGS, workMin: 11, breakMin: 3, longBreakMin: 22 };
+    for (const [phase, key] of [['work', 'workMin'], ['break', 'breakMin'], ['longBreak', 'longBreakMin']]) {
+      const doc = { ...defaultDoc(), settings, cycle: 2, cycleDate: '2026-08-01', timer: { phase, deadline: now - 500_000, paused: false } };
+      const next = restartTimer(doc, now);
+      assert.equal(next.timer.phase, phase, 'phase untouched');
+      assert.equal(next.timer.deadline, now + settings[key] * 60_000, `deadline re-minted to a full ${key}`);
+      assert.equal(next.timer.paused, false);
+      assert.equal(next.cycle, 2, 'cycle untouched');
+      assert.equal(next.cycleDate, '2026-08-01', 'cycleDate untouched');
+    }
+  });
+
+  await check('restartTimer: unpauses -- a paused timer restarts running, with a fresh deadline instead of remainingMs (criterion 6)', () => {
+    const now = Date.now();
+    const doc = { ...defaultDoc(), timer: { phase: 'break', paused: true, remainingMs: 4_000 } };
+    const next = restartTimer(doc, now);
+    assert.equal(next.timer.paused, false);
+    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
+    assert.equal('remainingMs' in next.timer, false);
+  });
+
+  await check('restartTimer: a deadline hours stale is simply re-minted, never treated as expired -- restart bypasses settleBoundary\'s grace rule entirely', () => {
+    const now = Date.now();
+    const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+    const doc = { ...defaultDoc(), cycle: 1, cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now - FOUR_HOURS_MS, paused: false } };
+    const next = restartTimer(doc, now);
+    assert.notEqual(next.timer, null, 'restart never discards the timer the way an expired settleBoundary would');
+    assert.equal(next.timer.phase, 'work');
+    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.workMin * 60_000);
+    assert.equal(next.cycle, 1);
   });
 
   // -------------------------------------------------------------------------------
@@ -529,6 +640,151 @@ async function main() {
     } finally {
       rmSync(expiredHome, { recursive: true, force: true });
     }
+  });
+
+  // -------------------------------------------------------------------------------
+  // POST /api/pomodoro/forward and POST /api/pomodoro/restart -- route-level
+  // coverage against a real in-process daemon on an ephemeral port, proving the
+  // pure rules above actually land on disk through the HTTP surface, that the
+  // session cookie alone (no secret) is enough for both, and that idle really is a
+  // no-op all the way through the route, not just in forwardTimer/restartTimer
+  // isolation. Each check mints its own secret and temp home -- never the real
+  // board home (see QUIRKS.md's writeDoc trap) and never a secret shared across
+  // checks, so nothing here can be confused for another check's daemon.
+  // -------------------------------------------------------------------------------
+
+  async function withPomodoroServer(fn) {
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-route-'));
+    const secret = randomBytes(32).toString('hex');
+    const { server, port } = await startServer({ home: h, port: 0, secret });
+    try {
+      await fn({ home: h, port, secret });
+    } finally {
+      await closeServer(server);
+      rmSync(h, { recursive: true, force: true });
+    }
+  }
+
+  function pomodoroUrl(port, action) {
+    return `http://127.0.0.1:${port}/api/pomodoro/${action}`;
+  }
+
+  await check('POST /api/pomodoro/forward: advances the running timer on disk, same cycle bookkeeping a natural boundary performs', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      const now = Date.now();
+      const running = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
+      writeDoc(running, home);
+
+      const res = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.timer.phase, 'break');
+      assert.equal(body.timer.paused, false);
+
+      const onDisk = readDoc(home);
+      assert.equal(onDisk.timer.phase, 'break', 'the advance really landed on disk, not just in the response');
+      assert.equal(onDisk.timer.deadline, body.timer.deadline);
+    });
+  });
+
+  await check('POST /api/pomodoro/forward: forwarding a PAUSED timer through the route advances it, and the next phase comes back running', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      const now = Date.now();
+      const paused = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
+      writeDoc(paused, home);
+
+      const body = await (await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
+      assert.equal(body.timer.phase, 'break');
+      assert.equal(body.timer.paused, false);
+      assert.equal(readDoc(home).timer.paused, false);
+    });
+  });
+
+  await check('POST /api/pomodoro/forward: idle is a no-op all the way through the route -- 200, nothing thrown, the document on disk is byte-for-byte unchanged (criterion 4)', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      writeDoc(defaultDoc(), home);
+      const pomodoroFile = path.join(home, 'pomodoro.json');
+      const before = readFileSync(pomodoroFile, 'utf8');
+      const mtimeBefore = statSync(pomodoroFile).mtimeMs;
+
+      const res = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.timer, null, 'nothing invented out of idle');
+
+      assert.equal(readFileSync(pomodoroFile, 'utf8'), before, 'the file must not be rewritten at all for an idle forward');
+      assert.equal(statSync(pomodoroFile).mtimeMs, mtimeBefore, 'no write syscall happened, not merely one that produced identical bytes');
+    });
+  });
+
+  await check('POST /api/pomodoro/restart: re-mints the deadline on disk to a full interval of the current phase, from current settings -- phase and cycle untouched', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      const now = Date.now();
+      await fetch(pomodoroUrl(port, 'settings'), {
+        method: 'POST',
+        headers: { [SECRET_HEADER]: secret, 'content-type': 'application/json' },
+        body: JSON.stringify({ breakMin: 9 }),
+      });
+      const settings = readDoc(home).settings;
+      const midBreak = { ...defaultDoc(), settings, cycle: 3, cycleDate: localDateStr(now), timer: { phase: 'break', deadline: now - 1_000, paused: false } };
+      writeDoc(midBreak, home);
+
+      const body = await (await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
+      assert.equal(body.timer.phase, 'break', 'phase untouched');
+      assert.ok(body.timer.deadline > body.now, 'the deadline is back in the future');
+      assert.ok(Math.abs(body.timer.deadline - (body.now + settings.breakMin * 60_000)) < 400, 're-minted to a FULL break, from current settings');
+      assert.equal(body.cycle, 3, 'cycle untouched');
+
+      const onDisk = readDoc(home);
+      assert.equal(onDisk.timer.deadline, body.timer.deadline, 'landed on disk, not just in the response');
+      assert.equal(onDisk.cycle, 3);
+    });
+  });
+
+  await check('POST /api/pomodoro/restart: unpauses -- a paused timer restarts running', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      const paused = { ...defaultDoc(), timer: { phase: 'work', paused: true, remainingMs: 5_000 } };
+      writeDoc(paused, home);
+
+      const body = await (await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
+      assert.equal(body.timer.paused, false);
+      assert.equal(readDoc(home).timer.paused, false);
+    });
+  });
+
+  await check('POST /api/pomodoro/restart: idle is a no-op all the way through the route -- 200, nothing thrown, the document on disk is byte-for-byte unchanged', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      writeDoc(defaultDoc(), home);
+      const pomodoroFile = path.join(home, 'pomodoro.json');
+      const before = readFileSync(pomodoroFile, 'utf8');
+
+      const res = await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.timer, null);
+      assert.equal(readFileSync(pomodoroFile, 'utf8'), before);
+    });
+  });
+
+  await check('POMODORO: the session cookie alone (no secret) can call both forward and restart', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      const now = Date.now();
+      writeDoc({ ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } }, home);
+      const cookieHeaders = { cookie: `${SESSION_COOKIE}=${sessionToken(secret)}` };
+
+      const forwardC = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: cookieHeaders });
+      assert.equal(forwardC.status, 200, 'the cookie alone must be able to forward');
+      assert.equal((await forwardC.json()).timer.phase, 'break');
+
+      const restartC = await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: cookieHeaders });
+      assert.equal(restartC.status, 200, 'the cookie alone must be able to restart');
+
+      // No credential at all is still refused, same as every other pomodoro write.
+      const none = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST' });
+      assert.equal(none.status, 401);
+      const noneRestart = await fetch(pomodoroUrl(port, 'restart'), { method: 'POST' });
+      assert.equal(noneRestart.status, 401);
+    });
   });
 }
 

@@ -1072,6 +1072,27 @@ body.comment-mode .blocks { cursor: crosshair; }
   .pomodoro-switch-knob { transition: none; }
 }
 
+/* Restart/Forward (SPEC_FORWARD.md, criterion 7): one
+   segmented pill between the status text and the switch, round two's picked
+   variant (/tmp/example-forward-restart.html) -- panel background, hairline
+   border, height matched to the 22px switch beside it so the row stays one
+   visual line. overflow: hidden is what lets the two buttons' square corners
+   sit flush against the pill's own rounded ends. */
+.pomodoro-ctl-group { display: inline-flex; align-items: stretch; height: 22px; box-sizing: border-box;
+  background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-pill); overflow: hidden; }
+/* Icon-only, no background/border of its own -- the group above carries both,
+   and a second border here would double the hairline at the pill's own edge.
+   Hover only brightens the icon (background stays the group's own panel-2 --
+   a hover background here would be a no-op on top of it). */
+.pomodoro-ctl { background: none; border: none; display: inline-flex; align-items: center;
+  justify-content: center; width: 24px; color: var(--ink-2);
+  transition: color var(--dur) var(--ease); }
+.pomodoro-ctl:hover { color: var(--ink); }
+/* The hairline divider between the two controls -- an adjacent-sibling border,
+   not a third element, so there is nothing between them a screen reader could
+   stumble on. */
+.pomodoro-ctl + .pomodoro-ctl { border-left: 1px solid var(--hairline); }
+
 /* The settings control is the cogwheel, not the words "Pomodoro settings":
    the header row is a row of controls, and a text link among them read as
    prose. Icon-only, so it carries an aria-label and a title (ui-ux-pro-max

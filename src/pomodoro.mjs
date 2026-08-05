@@ -180,6 +180,59 @@ export function settleBoundary(doc, now) {
   return { doc: nextDoc, boundary: { phase: nextPhase } };
 }
 
+/** Forward (SPEC_FORWARD.md, criteria 1-4; ADR.md entry 24).
+ * No-op — returns `doc` UNCHANGED, by reference — against no timer at all (criterion
+ * 4): idle has no interval to end early, and inventing one here would be `startWork`'s
+ * job, not this one's.
+ *
+ * Otherwise this reuses `settleBoundary` itself rather than re-deriving its cycle
+ * bookkeeping (ADR 24's whole point): it forges a doc whose timer already looks like
+ * it hit its deadline exactly now — `paused: false` (criterion 3: forwarding a paused
+ * timer both advances AND leaves the next phase running, so the paused flag a real
+ * boundary would never see is cleared before settleBoundary ever looks at it) and
+ * `deadline: now` (so `late === 0`, comfortably inside EXPIRY_GRACE_MS — a forward is
+ * never the EXPIRED path; that path is what happens when nobody was there to press
+ * anything). `settleBoundary` then computes the exact same next phase and cycle
+ * arithmetic a natural boundary would have, which is criterion 1 verbatim: a forwarded
+ * work interval still earns its break, a forwarded break still increments the cycle, a
+ * forwarded long break still resets it.
+ *
+ * The `boundary` half of settleBoundary's return is deliberately discarded: that value
+ * is what src/pomodoro.mjs's own reconcile() feeds to `onBoundary` (the notification
+ * seam), and forward's caller (createPomodoro.forward below) never sees it, which is
+ * what makes criterion 2 (no notification, no cue) true by construction rather than by
+ * a caller remembering to suppress it. */
+export function forwardTimer(doc, now) {
+  if (!doc.timer) return doc;
+  const forced = { ...doc, timer: { ...doc.timer, paused: false, deadline: now } };
+  const { doc: next } = settleBoundary(forced, now);
+  return next;
+}
+
+/** Restart (same slice, criteria 5-6). No-op — returns `doc` UNCHANGED, by reference —
+ * against no timer at all, same reasoning as forwardTimer above.
+ *
+ * Otherwise re-mints `deadline` to a FULL interval of whatever phase is already
+ * running, read from `doc.settings` at call time (criterion 5: "the current settings",
+ * not whatever was in effect when the interval first started — the same
+ * read-at-the-boundary rule mergeSettings' own comment already applies to every OTHER
+ * boundary). `phase` and `cycle`/`cycleDate` are carried through untouched, spelled
+ * out rather than left to normalizeCycle: criterion 5 says restart touches neither, and
+ * a midnight rollover crossed by a restart click is still normalizeCycle's job at the
+ * next real boundary, not this one's.
+ *
+ * Builds a fresh `{ phase, deadline, paused: false }` rather than spreading
+ * `doc.timer`, which is what drops a stale `remainingMs` left over from a paused timer
+ * (criterion 6: restart unpauses) instead of leaving it beside a `deadline` a future
+ * reader could mistake for still meaning something — the same shape pauseTimer/
+ * resumeTimer already keep exactly one of `deadline` or `remainingMs` for. */
+export function restartTimer(doc, now) {
+  if (!doc.timer) return doc;
+  const { phase } = doc.timer;
+  const durationMin = phase === 'work' ? doc.settings.workMin : phase === 'longBreak' ? doc.settings.longBreakMin : doc.settings.breakMin;
+  return { ...doc, timer: { phase, deadline: now + durationMin * 60_000, paused: false } };
+}
+
 /** Pause (spec criterion 8). No-op — returns `doc` UNCHANGED, by reference, so callers
  * can skip a needless write — against no timer at all and against a timer that is
  * already paused; pressing pause twice, or pausing a board with nothing running, must
@@ -511,6 +564,35 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     resume(now = Date.now()) {
       const doc = readDoc(home);
       const next = resumeTimer(doc, now);
+      if (next !== doc) {
+        writeDoc(next, home);
+        arm(next, now);
+      }
+      return next;
+    },
+    /** Forward (src/server.mjs POST /api/pomodoro/forward). Wraps the pure
+     * forwardTimer: read, apply, and — only when something actually changed — persist
+     * and re-arm. Re-arming matters exactly the way it does after resume: forwardTimer
+     * mints a brand-new absolute deadline for the next phase, and only a live
+     * setTimeout counting down to THAT deadline turns it into a real boundary later.
+     * Deliberately does not pass an `onBoundary` callback anywhere in this path (ADR.md
+     * entry 24) — `arm` only ever schedules the NEXT natural boundary's setTimeout, it
+     * never itself fires notification code, so nothing here can. */
+    forward(now = Date.now()) {
+      const doc = readDoc(home);
+      const next = forwardTimer(doc, now);
+      if (next !== doc) {
+        writeDoc(next, home);
+        arm(next, now);
+      }
+      return next;
+    },
+    /** Restart (src/server.mjs POST /api/pomodoro/restart). Same wrapper shape as
+     * forward above — read, apply the pure restartTimer, and only persist/re-arm on an
+     * actual change (idle stays a no-op, criterion 6). */
+    restart(now = Date.now()) {
+      const doc = readDoc(home);
+      const next = restartTimer(doc, now);
       if (next !== doc) {
         writeDoc(next, home);
         arm(next, now);

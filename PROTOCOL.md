@@ -551,19 +551,23 @@ that board's page — is deleted, because with reads gated it was strictly weake
 credential the reader already had to present.
 
 Widened, ticket 03: it is also accepted on the pomodoro writes — `ensure`, `pause`,
-`resume`, `reset`, `settings`, `preview` — so the index page's switch and its settings
-popover (a browser holding only the cookie) can actually start, pause and resume the clock,
-and audition a cue. Driving an advisory clock that never touches a board, never gates an
-`ask`, and never reaches a tool is strictly less than "may read every board and answer any
-open round", so this costs the cookie nothing it did not already carry. `ensure` was
-initially excluded, on the reasoning that its only caller was the session-start hook; it was
-added when the index widget grew a manual start, and it is one of the mildest of the six —
-`startWork` is a no-op against any timer that already exists, so the most it can do is begin
-a clock that `reset` (already on the list) could have ended anyway. `preview` joined for the
-same reason and is milder still: it reads and writes nothing, so the most a cookie holder
-gains from it is spawning `afplay` against one of the sounds `src/cues.mjs` admits. The list
-stays a closed, named set: a pomodoro write added later is secret-only until someone
-deliberately names it.
+`resume`, `reset`, `settings`, `preview`, `notifyTest`, `forward`, `restart` — so the index
+page's switch and its settings popover (a browser holding only the cookie) can actually
+start, pause and resume the clock, and audition a cue. Driving an advisory clock that never
+touches a board, never gates an `ask`, and never reaches a tool is strictly less than "may
+read every board and answer any open round", so this costs the cookie nothing it did not
+already carry. `ensure` was initially excluded, on the reasoning that its only caller was the
+session-start hook; it was added when the index widget grew a manual start, and it is one of
+the mildest of the nine — `startWork` is a no-op against any timer that already exists, so
+the most it can do is begin a clock that `reset` (already on the list) could have ended
+anyway. `preview` joined for the same reason and is milder still: it reads and writes
+nothing, so the most a cookie holder gains from it is spawning `afplay` against one of the
+sounds `src/cues.mjs` admits. `forward` and `restart` (ADR.md entry 24) joined on the same
+footing as `reset`: neither reaches further than `reset` already does (ending an interval
+early vs. outright, re-minting a deadline `settings` can already redirect), and both are
+silent by construction, so neither adds "can make the machine make a sound" to what a cookie
+holder already gains from this set. The list stays a closed, named set: a pomodoro write
+added later is secret-only until someone deliberately names it.
 
 ### Authorizing a browser
 
@@ -623,6 +627,12 @@ POST /api/pomodoro/ensure           ensure a timer exists; no-op if one already 
 POST /api/pomodoro/pause            freeze the running interval
 POST /api/pomodoro/resume           continue a paused interval from where it froze
 POST /api/pomodoro/reset            end the loop: timer -> null, cycle -> 0
+POST /api/pomodoro/forward          end the current interval now and begin the next phase,
+                                    with the exact bookkeeping a natural boundary performs;
+                                    no-op while idle; fires no notification and no cue
+POST /api/pomodoro/restart          re-mint the current interval's deadline to a full phase
+                                    duration (current settings); phase/cycle untouched;
+                                    no-op while idle; fires no notification and no cue
 POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEvery?, notify?,
                                     cueWork?, cueBreak?, cueLongBreak? }
                                     merged into the stored settings, not replaced
@@ -639,7 +649,8 @@ POST /api/pomodoro/notifyTest       no body -> { ok: true }; raises one test ban
 subtracting a deadline from a clock, and the client's clock is not the daemon's, so `now`
 lets it compute `serverNow - Date.now()` once and keep subtracting that offset rather than
 trusting the browser's own clock against a server-minted deadline. Every write route below
-(`ensure`/`pause`/`resume`/`reset`/`settings`) returns the same `{ ...document, now }` shape,
+(`ensure`/`pause`/`resume`/`reset`/`settings`/`forward`/`restart`) returns the same
+`{ ...document, now }` shape,
 reflecting the state immediately after that write.
 
 `POST /api/pomodoro/ensure` is *ensure*, never *start*: it begins a fresh work interval only
@@ -657,6 +668,19 @@ froze rather than restarting. Both are no-ops in the states where they make no s
 (pausing nothing, pausing an already-paused timer, resuming a timer that is not paused).
 `POST /api/pomodoro/reset` clears `timer` to `null` **and** `cycle` to `0` — reset ends the
 loop, so the cycle it was counting goes with it.
+
+`POST /api/pomodoro/forward` (ADR.md entry 24) ends the running interval immediately by
+applying `settleBoundary`'s own advance rule at click time rather than a second bookkeeping
+path beside it: a forwarded work interval still earns its break (long-break cadence intact),
+a forwarded break still increments `cycle`, a forwarded long break still resets it. Forwarding
+a paused timer both advances AND leaves the next phase running — the paused flag is cleared
+before the advance, not after. It fires no notification and no cue, ever, and is a no-op
+(nothing thrown, nothing written) while idle.
+
+`POST /api/pomodoro/restart` re-mints the current interval's `deadline` to a full duration of
+whatever phase is already running, read from the current settings; `phase` and `cycle` are
+untouched. It shares forward's edge rules verbatim: silent, unpauses a paused timer into a
+running one, and is a no-op while idle.
 
 `POST /api/pomodoro/settings` merges a partial patch into the stored settings rather than
 replacing them, and validates at this trust boundary: every duration and `longEvery` must be

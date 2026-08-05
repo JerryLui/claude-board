@@ -260,8 +260,18 @@ function isSameOriginRead(req) {
  * one caller is the same popover, ticking Notify (src/indexpage.mjs), and it reads and
  * writes nothing either. What a cookie holder gains is one banner reading "Notifications
  * are working". That text is a literal out of src/notify.mjs's closed table, never
- * anything the request supplies, and there is no body to supply it with. */
-const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview', 'notifyTest']);
+ * anything the request supplies, and there is no body to supply it with.
+ *
+ * `forward` and `restart` join on the same footing as `reset`: a browser holding the
+ * cookie is exactly what clicks either control (ADR.md entry 24), and neither reaches
+ * further than `reset` already does — `forward` ends the running interval early (reset
+ * already lets a cookie holder end it outright) and `restart` re-mints the current
+ * interval's deadline (settings, already on this list, already lets the same caller
+ * change what every FUTURE deadline computes from). Both are silent by construction
+ * (src/pomodoro.mjs's forwardTimer/restartTimer never surface a `boundary` their
+ * caller could feed a notification), so neither adds "can make the machine make a
+ * sound" to what a cookie holder already gains from this set. */
+const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview', 'notifyTest', 'forward', 'restart']);
 
 function isPomodoroCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
@@ -992,6 +1002,11 @@ async function handlePomodoro(req, res, parts, pomo, home) {
     if (action === 'pause') return sendPomodoro(res, pomo.pause());
     if (action === 'resume') return sendPomodoro(res, pomo.resume());
     if (action === 'reset') return sendPomodoro(res, pomo.reset());
+    // Bodyless like ensure/pause/resume/reset above -- neither control's caller (the
+    // pomodoro widget's own two buttons) has anything to say beyond "now", and
+    // src/pomodoro.mjs's forwardTimer/restartTimer take only `(doc, now)`.
+    if (action === 'forward') return sendPomodoro(res, pomo.forward());
+    if (action === 'restart') return sendPomodoro(res, pomo.restart());
     if (action === 'settings') {
       let body;
       try {
