@@ -21,8 +21,10 @@ Every rule in this system reads a `var(--*)` token — the repo enforces it in C
 Follow the same discipline: **no raw colors, radii, spacing, or durations.**
 
 **Surfaces** (climb toward the viewer): `--bg` `--bg-tint` `--panel` `--panel-2`
-`--panel-3`. Plus `--history-bg` (collapsed past rounds), `--stage-bg` (always white,
-for embedded HTML), `--bg-fade-0` / `--bg-fade-80` (gradient masks).
+`--panel-3`. Plus `--history-bg` (collapsed past rounds), `--stage-bg` (the embedded
+HTML stage's artboard: a neutral, per-palette surface — a mock owns its own
+background, and this is only what shows through one that paints none),
+`--bg-fade-0` / `--bg-fade-80` (gradient masks).
 
 **Ink**: `--ink` (primary) `--ink-2` (secondary) `--muted` (tertiary) `--code-ink`.
 

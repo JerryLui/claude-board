@@ -40,7 +40,19 @@ const DARK = {
   '--panel-3': '#1e2839',
   '--scrollbar-hover': '#2c3852',
   '--history-bg': 'rgba(19, 26, 39, 0.55)',
-  '--stage-bg': '#fff',
+  // The html stage's artboard ('.html-stage', '.stage-lens-frame'). Neutral and
+  // per-palette, and not a page surface: a mock owns its own background, so this
+  // is only ever what shows through one that paints none. Two constraints decide
+  // the value and they pull opposite ways:
+  //   - a srcdoc that paints no background sets no color either, so its text is
+  //     the UA's black. The artboard has to stay light enough to read that
+  //     (12.28:1 here) -- which is why the DARK palette's artboard is not dark.
+  //   - the stage's hover outline (STAGE_ACCENT_HEX, src/render.mjs) is ONE
+  //     literal for both palettes and has to clear 3:1 on each: 3.89:1 here.
+  // Dimmed well below LIGHT's #e6e8ee, and a plain grey beside this palette's
+  // blue-tinted surfaces (9.55:1 against --panel-2), so it reads as an inert
+  // artboard rather than as a slab of content.
+  '--stage-bg': '#c3c6cd',
 
   // bg at partial alpha, for the two gradient masks that fade content into --bg.
   // Plain CSS can't derive these from var(--bg) portably (no color-mix() here --
@@ -106,7 +118,11 @@ const LIGHT = {
   '--panel-3': '#e2e6f0',
   '--scrollbar-hover': '#c9d0e2',
   '--history-bg': 'rgba(255, 255, 255, 0.55)',
-  '--stage-bg': '#fff',
+  // the artboard, one step BELOW --panel-2 (1.14:1) rather than at/near white,
+  // so a mock that paints nothing reads as a recessed stage and not as another
+  // card. Black srcdoc text 17.14:1, stage hover outline 5.43:1 -- DARK's own
+  // --stage-bg comment has the full account of both bars.
+  '--stage-bg': '#e6e8ee',
 
   // must track --bg exactly (same rgb triple) or the two fade masks show a seam
   '--bg-fade-0': 'rgba(238, 241, 247, 0)',
@@ -845,7 +861,8 @@ body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { out
    value of a CSS token per mermaid variable through MERMAID_TOKEN_MAP (QUIRKS.md
    "Two stylesheets, one palette", which records the same correction; only the
    html stage's own injected stylesheet still carries a literal hex, and it is
-   deliberately theme-independent). The lens clones an already-rendered SVG, so it
+   one value for two stage surfaces because it clears 3:1 on both, not because
+   the stage is one colour). The lens clones an already-rendered SVG, so it
    inherits whatever the ACTIVE palette produced and adds no colour of its own --
    but that also means a clone taken before a theme switch is stale, which is what
    src/ui.mjs's lensRetheme exists to fix (criterion 15). */

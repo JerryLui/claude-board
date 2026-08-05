@@ -818,20 +818,25 @@ function renderCodeBlock(block, board, commentsByBlock, historical) {
  *
  * Pinned to --accent's LIGHT value, which is not a typo and not the palette
  * this file's document belongs to. The stage renders on `--stage-bg`, and
- * that token is '#fff' in BOTH palettes (src/styles.mjs) -- an agent-authored
- * mock assumes a white canvas, so the stage deliberately does not follow the
- * page. That makes this outline theme-INDEPENDENT: there is no light variant
- * to add, only a right and a wrong colour for white. The dark accent is the
- * wrong one. src/styles.mjs's own LIGHT palette comment already records why
- * ("#7c9cff on white is ~2.3:1"), which is the reason --accent moves to the
- * mid-blues under light; the stage was left holding the value that comment
- * rejects, on the one surface that is always white, so the outline sat at
- * 2.61:1 -- under the 3:1 WCAG minimum for non-text UI, on the ONLY
- * per-element targeting feedback the stage gives. The light accent is 6.65:1
- * against the same white. test/check-pure.mjs asserts the premise (both
- * palettes' --stage-bg identical), the requirement (contrast >= 3:1 against
- * it) and the drift guard (equality with --accent's light value), so a
- * palette change that breaks any of the three fails there rather than here. */
+ * that token is now TWO values (src/styles.mjs): a neutral artboard per
+ * palette, '#c3c6cd' dark and '#e6e8ee' light, since a mock owns its own
+ * background and this surface is only what shows through one that paints
+ * none. So the old justification for one literal ("the stage is white in both
+ * palettes, so this outline is theme-independent") is gone -- what replaces it
+ * is arithmetic, not a premise: both artboards are light neutrals (they have
+ * to be, a srcdoc that paints no background renders the UA's BLACK text on
+ * them), and one mid-blue clears the 3:1 WCAG floor for non-text UI on both.
+ * The light accent measures 3.89:1 on the dark palette's artboard and 5.43:1
+ * on the light one; the DARK accent measures 1.52:1 and 2.13:1, i.e. the same
+ * colour that used to sit at 2.61:1 on white is still the wrong one, and now
+ * fails on both surfaces rather than on one. Two hexes plumbed through the
+ * parent's 'mode' postMessage would also work and is what criterion 7 leaves
+ * open; one literal that clears the bar on both is less machinery, and the
+ * surfaces were chosen far enough apart in luminance to leave it room.
+ * test/check-pure.mjs asserts the premise (the two --stage-bg values differ,
+ * per palette), the requirement (contrast >= 3:1 against EACH of them) and the
+ * drift guard (equality with --accent's light value) separately, so a palette
+ * change that breaks any one of the three fails on the one it broke. */
 export const STAGE_ACCENT_HEX = '#3251c9';
 
 export function stageAgentScript() {
@@ -873,8 +878,9 @@ export function stageAgentScript() {
   // not reach in here (isolation is the point), so this injected stylesheet
   // is a literal hex (STAGE_ACCENT_HEX's own comment, above, explains why a
   // custom property would defeat that isolation rather than merely being
-  // redundant with it, and why it tracks --accent's LIGHT value: the stage is
-  // white in both palettes, so this outline is theme-independent). Injected
+  // redundant with it, and why it tracks --accent's LIGHT value: the stage's
+  // artboard is a light neutral in BOTH palettes -- two different ones -- and
+  // this one hex clears 3:1 on each). Injected
   // LAZILY (only once comment mode has
   // genuinely turned on at least once) rather than unconditionally at script
   // start -- a read-only archive never sends 'mode' with commentMode true at
@@ -890,7 +896,7 @@ export function stageAgentScript() {
       // ordinary hover one. The hover rule's colour is STAGE_ACCENT_HEX, kept in
       // step with src/styles.mjs by hand (QUIRKS.md "Two stylesheets, one
       // palette") because this stylesheet cannot reach the page's tokens -- one
-      // value for both palettes, since the stage is white in both; the
+      // value for both palettes, since it clears 3:1 on either artboard; the
       // SENT_CLASS rule needs no colour of its own, only a cursor, so it adds
       // nothing new to keep in step. No outline at all (not even 'none' -- there
       // is simply no rule adding one), so an already-sent element reads as inert

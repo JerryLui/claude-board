@@ -256,24 +256,54 @@ into it. Its hover-highlight rule is built with a hardcoded hex, updated by hand
 when `--accent` / the surface tokens change in `src/styles.mjs`.
 
 **That hex tracks `--accent`'s LIGHT value, not dark, and the reason generalises.**
-The stage renders on `--stage-bg`, which is `#fff` in *both* palettes — an
-agent-authored mock assumes a white canvas, so the stage deliberately does not
-follow the page. The outline is therefore theme-*independent*: there is no light
-variant to add, only a right and a wrong colour for white. It was pinned to the
-dark accent for as long as the stage existed, which put it at 2.61:1 on white,
-under the 3:1 WCAG floor for non-text UI — on the only per-element targeting
-feedback the stage gives. `src/styles.mjs`'s own LIGHT palette comment had
-already rejected that exact colour on white ("#7c9cff on white is ~2.3:1") when
-it moved `--accent` to the mid-blues; nothing connected the two, because the
-stage's own comment described the requirement as "stay in step with `--accent`"
-without saying *which* palette or *why*. `test/check-pure.mjs` now asserts the
-premise (both palettes' `--stage-bg` identical), the requirement (contrast >= 3:1
-against it) and the drift guard (equality with the light accent) separately, so a
-palette change that breaks any one of them fails on the one it broke.
+It was pinned to the dark accent for as long as the stage existed, which put it at
+2.61:1 on the surface it renders on, under the 3:1 WCAG floor for non-text UI — on
+the only per-element targeting feedback the stage gives. `src/styles.mjs`'s own
+LIGHT palette comment had already rejected that exact colour on white ("#7c9cff on
+white is ~2.3:1") when it moved `--accent` to the mid-blues; nothing connected the
+two, because the stage's own comment described the requirement as "stay in step
+with `--accent`" without saying *which* palette or *why*.
 
-The lesson worth carrying: on a surface that does not follow the theme, "matches
-the token" is not the requirement — "has contrast on the surface it actually
-renders on" is, and only one of those two is worth writing a check for.
+**The premise underneath that fix is overturned (2026-08-05), and the fix survives
+it.** This entry used to say `--stage-bg` was `#fff` in *both* palettes — an
+agent-authored mock assumes a white canvas, so the stage deliberately does not
+follow the page — and concluded the outline was theme-*independent*: no light
+variant to add, only a right and a wrong colour for white. The stage surface is
+now a neutral artboard **per palette** (`#c3c6cd` dark, `#e6e8ee` light), and a
+mock owns its own colour: one that paints a background gets exactly what it
+painted, and the artboard is only ever what shows through one that paints none.
+A mock that follows the board's own theme (what `/example` authors) is unaffected
+— it paints its own background, which is the same thing.
+
+Two things decide those two values, and the second is the trap:
+
+- A srcdoc that paints no background sets no `color` either, so it renders the
+  UA's **black** text. Both artboards therefore have to stay light neutrals —
+  "dark surface for the dark palette" would make exactly the mock this surface
+  exists for unreadable. Dark's is dimmed to 9.55:1 against `--panel-2` so it
+  reads as an inert artboard rather than as a slab of content; light's sits one
+  step below `--panel-2` (1.14:1) so it reads as recessed rather than as a card.
+- The outline is still ONE literal, but "one literal" is no longer free the way
+  "the surface is white in both" made it. It is now a claim about arithmetic:
+  the light accent measures 3.89:1 on the dark artboard and 5.43:1 on the light
+  one. The surfaces were chosen far enough apart in luminance to leave it that
+  room. The alternative — a per-palette hex delivered over the parent's `mode`
+  postMessage, next to `commentMode`/`sentRefs` — is available and is more
+  machinery; take it only if a future palette closes the gap. (Note it would
+  also need re-sending on a *theme* toggle, which `mode` is not sent on today.)
+
+`test/check-pure.mjs` asserts the premise (the two `--stage-bg` values differ),
+the requirement (contrast >= 3:1 against **each** surface, plus black text >= 4.5:1
+on each — a near-black surface would pass the outline bar at ~3.16:1 while hiding
+the mock entirely) and the drift guard (equality with the light accent)
+separately, so a palette change that breaks any one of them fails on the one it
+broke.
+
+The lesson worth carrying, unchanged in kind by the premise flipping: on a surface
+the theme does not reach, "matches the token" is not the requirement — "has
+contrast on the surface it actually renders on" is — and when that surface stops
+being one colour, the check that encodes the requirement has to run once per
+surface rather than being widened to whichever one is convenient.
 
 **The 401 refusal page used to be filed under this entry, and should never have
 been.** `renderRefusalPage` is self-contained by design — no stylesheet link, no

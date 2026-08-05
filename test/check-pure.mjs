@@ -6227,15 +6227,26 @@ check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and t
   //
   // Three assertions rather than one, because "stays in step with --accent"
   // was the wrong requirement and stated it in a way that read as correct:
-  // it tracked the DARK value, on a surface that is white in BOTH palettes,
+  // it tracked the DARK value, on a surface that was white in BOTH palettes,
   // leaving the outline at 2.61:1 -- under the 3:1 WCAG floor for non-text
   // UI, on the stage's only per-element targeting feedback. src/styles.mjs's
   // LIGHT palette comment had already rejected that exact colour on white
   // ("#7c9cff on white is ~2.3:1"); nothing connected the two. So the premise
-  // and the requirement are now asserted directly, and the palette pin is
-  // kept only as a drift guard on top of them.
-  assert.equal(palettes.dark['--stage-bg'], palettes.light['--stage-bg'],
-    `the stage's premise is gone: --stage-bg now differs between palettes (dark ${palettes.dark['--stage-bg']}, light ${palettes.light['--stage-bg']}), so the stage is no longer theme-independent and STAGE_ACCENT_HEX (src/render.mjs) can no longer be one value for both -- it needs a light/dark story, which the sandboxed stage stylesheet has no way to express (QUIRKS.md "Two stylesheets, one palette")`);
+  // and the requirement are asserted directly, and the palette pin is kept
+  // only as a drift guard on top of them.
+  //
+  // The PREMISE is the half that changed (2026-08-05). It used to be "both
+  // palettes' --stage-bg are identical, so the stage is theme-independent and
+  // one literal is trivially right". The stage surface is now a neutral
+  // artboard per palette and a mock owns its own background, so the premise
+  // this pins is the opposite one -- the two surfaces DIFFER -- and the
+  // requirement below has to hold against each of them separately rather than
+  // against the single colour there used to be. Note what that costs the
+  // decoy-resistance of the trio: "one literal" is no longer free, it is a
+  // claim about arithmetic, which is exactly what the requirement assertion
+  // now checks twice.
+  assert.notEqual(palettes.dark['--stage-bg'], palettes.light['--stage-bg'],
+    `--stage-bg is the same colour in both palettes (${palettes.dark['--stage-bg']}), which is the premise this stage's design overturned: the stage surface is a neutral artboard that differs per palette, and a mock that wants a particular canvas paints it itself (src/styles.mjs's two --stage-bg comments). One surface for both themes means either the dark board carries a slab of the light board's chrome or the reverse`);
 
   // WCAG 2.1 relative luminance, the same formula src/styles.mjs's palette
   // comments quote their ratios from.
@@ -6248,13 +6259,35 @@ check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and t
     const [x, y] = [luminance(a), luminance(b)];
     return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
   };
-  const stageBg = palettes.light['--stage-bg'] === '#fff' ? '#ffffff' : palettes.light['--stage-bg'];
-  const ratio = contrast(STAGE_ACCENT_HEX, stageBg);
-  assert.ok(ratio >= 3,
-    `the stage hover outline (STAGE_ACCENT_HEX, src/render.mjs) is ${ratio.toFixed(2)}:1 against the stage's background ${stageBg} -- under the 3:1 WCAG minimum for non-text UI. This outline is the ONLY per-element targeting feedback the stage gives, so a reviewer who cannot see it can be led to anchor a comment to an element they never saw highlighted (the same failure the '--accent: transparent' hijack caused, reached by a palette choice instead)`);
+  // '#fff' and '#ffffff' are the same colour and only one of them parses here.
+  const expand = (hex) => (/^#[0-9a-fA-F]{3}$/.test(hex) ? '#' + hex.slice(1).replace(/./g, (c) => c + c) : hex);
+
+  // The requirement, once per surface: the outline is one literal and it has
+  // to clear the bar on BOTH artboards, not on whichever one happens to be
+  // under a reviewer's theme. (Per-palette hexes would satisfy criterion 7
+  // too -- delivered over the parent's 'mode' postMessage -- and this loop is
+  // the assertion that would then run twice with two hexes instead of one.)
+  for (const [themeName, palette] of Object.entries(palettes)) {
+    const stageBg = expand(palette['--stage-bg']);
+    assert.ok(/^#[0-9a-fA-F]{6}$/.test(stageBg),
+      `setup failure: the ${themeName} palette's --stage-bg (${palette['--stage-bg']}) is not a hex this check can measure -- if the stage surface becomes an rgba() or a gradient, this contrast assertion has to learn to composite it, not be dropped`);
+    // Criterion 6's legibility half, and it is not implied by the outline bar
+    // below: a near-black surface would leave the mid-blue outline at ~3.16:1
+    // (passing) while rendering a mock that paints no background invisible.
+    // Such a mock sets no color either, so its text is the UA's black -- which
+    // is the whole reason both artboards are light neutrals rather than one
+    // light and one dark.
+    const inkRatio = contrast('#000000', stageBg);
+    assert.ok(inkRatio >= 4.5,
+      `the ${themeName} palette's stage surface ${stageBg} leaves the UA's default BLACK text at ${inkRatio.toFixed(2)}:1 -- under the 4.5:1 body-text bar. A mock that paints no background of its own also sets no color, so that is exactly what it renders in; the stage surface has to stay light enough to read it in BOTH palettes (src/styles.mjs's --stage-bg comments)`);
+
+    const ratio = contrast(STAGE_ACCENT_HEX, stageBg);
+    assert.ok(ratio >= 3,
+      `the stage hover outline (STAGE_ACCENT_HEX, src/render.mjs) is ${ratio.toFixed(2)}:1 against the ${themeName} palette's stage surface ${stageBg} -- under the 3:1 WCAG minimum for non-text UI. This outline is the ONLY per-element targeting feedback the stage gives, so a reviewer who cannot see it can be led to anchor a comment to an element they never saw highlighted (the same failure the '--accent: transparent' hijack caused, reached by a palette choice instead). One literal serves both palettes only for as long as it clears 3:1 on both: either move the surfaces further apart in luminance, or give the stage a per-palette hex over the parent's 'mode' message`);
+  }
 
   assert.equal(STAGE_ACCENT_HEX, palettes.light['--accent'],
-    `the stage's hand-maintained literal (STAGE_ACCENT_HEX, src/render.mjs) no longer matches --accent's LIGHT value (${palettes.light['--accent']}) -- light, not dark, because the stage renders on white in both palettes, so the light accent is the one chosen to have contrast there (src/styles.mjs's LIGHT palette comment). QUIRKS.md "Two stylesheets, one palette" requires updating it by hand when that token changes`);
+    `the stage's hand-maintained literal (STAGE_ACCENT_HEX, src/render.mjs) no longer matches --accent's LIGHT value (${palettes.light['--accent']}) -- light, not dark, because both stage artboards are LIGHT neutrals (a srcdoc that paints no background renders the UA's black text, so neither can be dark), and the light accent is the one tuned for contrast on a light surface (src/styles.mjs's LIGHT palette comment). QUIRKS.md "Two stylesheets, one palette" requires updating it by hand when that token changes`);
 });
 
 // --- the handoff, and the credential it hands out ---------------------------------
