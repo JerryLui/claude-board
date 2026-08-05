@@ -404,6 +404,10 @@ body.readonly button#theme-toggle { display: inline-flex; }
   color: var(--warning-ink); font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }
 body.readonly .readonly-banner { display: block; }
 body.readonly .send-bar { display: none; }
+/* SPEC_ROUNDEND criterion 6: none of this spec's new chrome belongs in a frozen
+   archive -- the send bar it would dock is already gone on the line above, and
+   the rail loses its reason to exist alongside it (nothing left to arrive at). */
+body.readonly .round-end { display: none; }
 body.readonly input, body.readonly textarea, body.readonly button.card-choice { pointer-events: none; opacity: 0.7; }
 
 .blocks { display: flex; flex-direction: column; gap: var(--space-6); }
@@ -428,6 +432,17 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .round-history .block { background: var(--history-bg); box-shadow: none; }
 .round-history .md-content, .round-history .question-prompt { opacity: 0.86; }
 .round + .round { padding-top: var(--space-5); }
+/* SPEC_ROUNDEND criterion 1: the round's own bottom -- a divider with a tag
+   naming the round and its question count, so reaching it is a visible event
+   rather than the absence of one (the round's top already has .round-label;
+   this is the twin at the other end). Open rounds only -- see
+   renderRoundSection's own comment. */
+.round-end { display: flex; align-items: center; gap: var(--space-2); padding: 4px 0 var(--space-2); }
+.round-end .line { flex: 1; height: 1px; background: var(--hairline-2); }
+.round-end .tag {
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 3px var(--space-3);
+}
 
 .block {
   position: relative;
@@ -478,6 +493,13 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 
 .question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
 .question-block:not(:has(.question-context)) { grid-template-columns: minmax(0, 1fr); }
+/* the send guard's ring around the first outstanding question once a click on
+   Send has armed instead of submitted (SPEC_ROUNDEND criterion 4) -- toggled
+   client-side by src/ui.mjs's armSendGuard/disarmSend, never present in
+   server-rendered markup. Overrides .block's own border/box-shadow (this
+   section carries that class too); every other question keeps .block's
+   plain hairline. */
+.question-block.flagged { border-color: var(--warning-border-strong); box-shadow: 0 0 0 3px var(--warning-soft); }
 .question-main { min-width: 0; }
 .question-context { min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-md); padding: var(--space-3) var(--space-4); }
@@ -865,11 +887,23 @@ body.comment-mode .blocks { cursor: crosshair; }
   background: linear-gradient(to top, var(--bg) 55%, var(--bg-fade-80) 85%, var(--bg-fade-0));
   backdrop-filter: blur(10px);
   display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); }
+/* SPEC_ROUNDEND criterion 2: the scrim's whole job is telling the reviewer content
+   still runs on underneath the bar -- at the round's own end (.round-end on screen,
+   src/ui.mjs's setupSendBarDock) that stops being true, so the scrim goes with it and
+   the bar docks flush instead, a plain opaque panel with a top hairline. */
+.send-bar.docked { background: var(--bg); backdrop-filter: none; border-top: 1px solid var(--hairline-2); }
 .btn-send { background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; border-radius: var(--r-md);
   padding: 11px 24px; font: inherit; font-size: 13.5px; font-weight: 650; box-shadow: var(--shadow-2);
   transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease); }
 .btn-send:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-send:active:not(:disabled) { transform: translateY(1px); }
+/* the send guard's armed state (SPEC_ROUNDEND criteria 4-5): Send wears this
+   only while armSendGuard has it armed because questions are still
+   outstanding -- never for the plain Cmd+Enter arm at the end of a fully
+   traversed round, which keeps the ordinary accent color and its own label
+   (test/check-enter.mjs criterion 3 pins that one unchanged). */
+.btn-send.warn { background: var(--warning-soft); color: var(--warning-ink); border-color: var(--warning-border-strong); box-shadow: none; }
+.btn-send.warn:hover:not(:disabled) { filter: none; }
 /* the second way out (DESIGN.md "Two ways out, plus a wall clock"): returns the
    call now with whatever is filled in. Secondary weight -- Send stays the primary
    action -- but it sits in the same bar, so body.readonly hides both together. */

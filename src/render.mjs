@@ -1127,10 +1127,27 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   const title = (round && round.title) || '';
   const base = title ? `Round ${roundN} · ${title}` : `Round ${roundN}`;
   const label = historical ? `${base} · sent` : base;
+  // SPEC_ROUNDEND criterion 1: an open round has a top (.round-label above) but used
+  // to render nothing at all after its last block, so running out of scroll and
+  // reaching the actual end read identically. This closes it with a rail naming the
+  // round and its question count -- a sent round already gets its own "· sent" label
+  // and history-rail treatment (below), so the end rail is for the open round only;
+  // src/ui.mjs's markRoundHistory strips it back out the moment a round goes to
+  // history live, so the two never disagree about which rounds carry one (QUIRKS.md
+  // "the stylesheet and the markup are checked against each other" -- same discipline
+  // applied to server markup vs. its live-transition twin). Question count is a plain
+  // top-level count, matching what the send bar's own arming logic (src/ui.mjs) walks
+  // -- a block nested in a question's context or a compare side is not one the
+  // reviewer answers, so it isn't one of "how many questions it held" either.
+  const questionCount = blocksForRound.filter(b => b.kind === 'question').length;
+  const endTag = `end of round ${roundN} · ${questionCount} question${questionCount === 1 ? '' : 's'}`;
+  const endRail = historical ? '' : `
+  <div class="round-end"><span class="line"></span><span class="tag">${escHtml(endTag)}</span><span class="line"></span></div>`;
   return `
 <section class="round ${historical ? 'round-history' : 'round-open'}" data-round="${roundN}" data-round-status="${historical ? 'sent' : 'open'}">
   <div class="round-label">${escHtml(label)}</div>
   ${blocksHtml}
+  ${endRail}
 </section>`;
 }
 

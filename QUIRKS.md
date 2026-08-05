@@ -1131,3 +1131,19 @@ for system or iTunes tones` and `-toneWithIdentifierIsValid: Returning NO`; no
 So a typo'd or removed sound name degrades to a silent notification and logs one error line
 nobody is watching — which is why the name offered to a reader has to come from reading
 `/System/Library/Sounds` rather than from a list typed out by hand.
+
+## A backtick in a comment inside `src/ui.mjs` or `src/styles.mjs` ends the whole file
+
+Both files export their entire payload as one template literal (`export const ui = \`...\`;`,
+`export const styles = \`...\`;`) so render.mjs can inline it verbatim. A markdown-style
+code span in a comment written *inside* that literal is not a comment delimiter to the
+parser — it is a real backtick, so it closes the template literal early and reopens a new
+one at the next backtick, leaving whatever sat between them (e.g. a bare word like
+`deferred`) as invalid top-level JS. The break surfaces nowhere near the actual typo: `npm
+run check` fails a pile of unrelated checks with `SyntaxError: Unexpected identifier` at
+whatever module happened to import the broken file first, not at the file with the typo.
+Quote identifiers with plain single quotes in comments inside these two literals instead
+(the existing convention throughout both files, e.g. src/ui.mjs's own "'## Send btn' is
+exactly as mintable as '## Board data'"). Backticks are fine everywhere *outside* the
+literal (the file-header comments above `export const ui = ` / `export const styles = `)
+and inside real `${...}` interpolations.

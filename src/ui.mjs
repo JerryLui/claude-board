@@ -2797,6 +2797,7 @@ export const ui = `
   var sendBtn = document.querySelector('button#send-btn');
   var discussBtn = document.querySelector('button#discuss-btn');
   var sendStatus = document.querySelector('span#send-status');
+  var sendBar = document.querySelector('div.send-bar');
 
   /** Collect the open round's answers exactly as they stand right now. Shared
    * verbatim by both actions -- Discuss reads the identical surface Send does, so
@@ -2816,6 +2817,22 @@ export const ui = `
       });
     });
     return answers;
+  }
+
+  /** The open round's question-blocks that still carry no status, in round
+   * order -- criterion 3's own completeness rule (a 'deferred' question is
+   * complete; only 'unanswered' is outstanding), read straight off
+   * collectAnswers rather than re-derived, so the send guard below can never
+   * disagree with what a submit itself would post. Empty once every question
+   * has been answered or deferred. */
+  function outstandingBlocks() {
+    var blocks = qsa('.round-open .question-block');
+    var answers = collectAnswers();
+    var outstanding = [];
+    answers.forEach(function (a, i) {
+      if (a.status === 'unanswered') outstanding.push(blocks[i]);
+    });
+    return outstanding;
   }
 
   /** The round this page can still submit: the latest round that is not yet sent.
@@ -2864,6 +2881,7 @@ export const ui = `
   var ROUND_BAND_PX = 96;
   var badgeCurrentRound = (board.rounds && board.rounds[0]) ? board.rounds[0].n : 1;
   var roundObserver = null;
+  var sendBarDockObserver = null;
 
   function renderBadge() {
     var el = document.querySelector('button#round-badge');
@@ -2996,7 +3014,44 @@ export const ui = `
     qsa('.round').forEach(function (section) { roundObserver.observe(section); });
   }
 
+  /** SPEC_ROUNDEND criterion 2: the send bar drops its blur scrim and docks flush
+   * the instant the round's own end (.round-end -- at most one on the page, see
+   * renderRoundSection's own comment) scrolls into view, and floats over content
+   * the rest of the time. An IntersectionObserver on the rail itself, same
+   * discipline as setupRoundObserver just above and for the same reason (no
+   * scroll handler) -- default root/rootMargin/threshold are exactly what "on
+   * screen" means here, unlike the round badge's line, which has to dodge the
+   * sticky header and therefore cannot use the plain viewport.
+   *
+   * Guarded twice, belt and suspenders (QUIRKS.md "Readonly is locked twice"):
+   * '.send-bar' is already 'display: none' under body.readonly (criterion 6),
+   * but bailing here too means an archive never even constructs the observer.
+   * Also guarded on IntersectionObserver existing at all -- test/dom-stand-in.mjs
+   * has none (QUIRKS.md "The stand-in has no layout"), and a browser too old to
+   * have it should still show a working, permanently-floating send bar rather
+   * than throw.
+   *
+   * Re-run wherever setupRoundObserver already is: the set of '.round-end'
+   * elements on the page changes exactly when the set of '.round' sections
+   * does -- a round arriving over SSE adds one, a round collapsing into history
+   * (markRoundHistory) removes one. No '.round-end' at all (every round sent,
+   * nothing left to reach) leaves the bar in its ordinary floating state. */
+  function setupSendBarDock() {
+    if (readonly) return;
+    if (!sendBar) return;
+    if (typeof IntersectionObserver !== 'function') return;
+    if (sendBarDockObserver) sendBarDockObserver.disconnect();
+    var rail = document.querySelector('.round-end');
+    if (!rail) { sendBar.classList.remove('docked'); return; }
+    sendBarDockObserver = new IntersectionObserver(function (entries) {
+      var entry = entries[0];
+      sendBar.classList.toggle('docked', !!entry && entry.isIntersecting);
+    });
+    sendBarDockObserver.observe(rail);
+  }
+
   setupRoundObserver();
+  setupSendBarDock();
   window.addEventListener('resize', function () { setupRoundObserver(); });
 
   /** Scroll to the round that still needs an answer. Inert exactly when that is
@@ -3152,6 +3207,28 @@ export const ui = `
   if (sendBtn) {
     sendBtn.addEventListener('click', function () {
       if (readonly) return;
+      // Already armed (by this click path or by Cmd+Enter -- one shared
+      // sendArmed flag, see "Cmd+Enter board traversal" below): this press IS
+      // the confirmation, identically to a second chord. Submit unconditionally,
+      // with no re-check of what is still outstanding -- an armed button always
+      // means "send what's here now", the same contract the keyboard path
+      // already has (criterion 5).
+      if (sendArmed) {
+        disarmSend();
+        requestNotifyPermissionFromSend();
+        submitBoard('send');
+        return;
+      }
+      // Criterion 3 and 4: a 'deferred' question is complete, only an
+      // 'unanswered' one is outstanding -- and an outstanding question arms
+      // the button instead of sending. Reuses collectAnswers's own rule via
+      // outstandingBlocks, so this can never drift from what submitBoard is
+      // about to post.
+      var outstanding = outstandingBlocks();
+      if (outstanding.length) {
+        armSendGuard(outstanding);
+        return;
+      }
       requestNotifyPermissionFromSend();
       submitBoard('send');
     });
@@ -3163,7 +3240,7 @@ export const ui = `
     });
   }
 
-  // --- Cmd+Enter board traversal ---------------------------------------------
+  // --- Cmd+Enter board traversal, and the Send guard --------------------------
   //
   // A single document-level keydown listener is the whole keyboard path through
   // a board -- there was none before this. Plain Enter is deliberately left
@@ -3184,9 +3261,21 @@ export const ui = `
   // Advance always targets the NEXT question's note field, never "the next
   // unanswered one" -- a key that jumps a different distance depending on
   // invisible state is worse than a predictable one.
+  //
+  // sendArmed is shared with the plain mouse click on Send (see the sendBtn
+  // listener above, which calls armSendGuard/disarmSend below) -- one flag,
+  // not two independently tracked "armed" states, so Escape disarms whichever
+  // way the button got armed and a press from either input is what a second
+  // press from EITHER input expects: submit. The two arm flavors stay visually
+  // distinct because they mean different things -- armSend (keyboard, reaching
+  // the end of a traversal) is "you're done, confirm"; armSendGuard (a click
+  // with questions still outstanding, SPEC_ROUNDEND criteria 3-5) is "this
+  // round isn't finished, are you sure" -- but both set the identical sendArmed
+  // flag and both are undone by the identical disarmSend.
 
   var sendArmed = false;
   var sendOriginalLabel = sendBtn ? sendBtn.textContent : '';
+  var flaggedBlock = null; // the outstanding question-block armSendGuard rang, if any
 
   function armSend() {
     if (!sendBtn) return;
@@ -3195,10 +3284,38 @@ export const ui = `
     sendArmed = true;
   }
 
+  /** The click guard's own arm: scrolls to and rings the first outstanding
+   * question (outstanding[0], already in round order -- see
+   * outstandingBlocks) and relabels Send with the count and its warning
+   * treatment, correctly singular at exactly one. Never called with an empty
+   * outstanding array -- the sendBtn click listener only reaches here when
+   * there is something to flag. */
+  function armSendGuard(outstanding) {
+    if (!sendBtn) return;
+    flaggedBlock = outstanding[0];
+    flaggedBlock.classList.add('flagged');
+    if (flaggedBlock.scrollIntoView) flaggedBlock.scrollIntoView({ block: 'center' });
+    sendBtn.classList.add('warn');
+    var n = outstanding.length;
+    sendBtn.textContent = n + (n === 1 ? ' question unanswered' : ' questions unanswered') + ' — send anyway?';
+    sendBtn.focus();
+    if (sendStatus) sendStatus.textContent = 'jumped to the first unanswered';
+    sendArmed = true;
+  }
+
   function disarmSend() {
     if (!sendBtn) return;
     sendBtn.textContent = sendOriginalLabel;
     sendArmed = false;
+    if (flaggedBlock) {
+      // Only the guard flavor touches the warning class, the ring, and
+      // send-status -- armSend (plain keyboard arm) never sets any of these,
+      // so a Cmd+Enter arm/disarm leaves send-status exactly as it found it.
+      sendBtn.classList.remove('warn');
+      flaggedBlock.classList.remove('flagged');
+      flaggedBlock = null;
+      if (sendStatus) sendStatus.textContent = '';
+    }
   }
 
   /** Focus a question block's note field and bring it on screen -- the same
@@ -3434,6 +3551,26 @@ export const ui = `
     section.setAttribute('data-round-status', 'sent');
     var label = section.querySelector('.round-label');
     if (label && label.textContent.indexOf('sent') === -1) label.textContent = label.textContent + ' · sent';
+    // SPEC_ROUNDEND criterion 1/6: renderRoundSection only ever emits .round-end
+    // for an open round -- a round arriving pre-rendered as historical (a fresh
+    // load, or a server-rendered replacement over SSE) never carries one in the
+    // first place. This is the one path where a round goes historical WITHOUT a
+    // fresh render (an SSE 'round' push's roundsNowSent, or applySubmittedPush's
+    // own no-html fallback): the rail this same section rendered while it was
+    // still open has to come back out here too, or the live transition leaves a
+    // "5 questions" marker sitting inside a round nothing can act on any more --
+    // server markup and this live transition would disagree about which rounds
+    // ever carry one (QUIRKS.md "the stylesheet and the markup are checked
+    // against each other" -- the same discipline, applied here by hand instead
+    // of by a check). The caller (applyRoundPush/applySubmittedPush) re-runs
+    // setupSendBarDock right after, so a dock observer never ends up watching a
+    // node this just removed.
+    // .replaceWith() with no arguments is a real, spec-accurate way to remove a
+    // node (ChildNode.replaceWith("") -- an empty replacement set means "just
+    // take it out"), already implemented by test/dom-stand-in.mjs's Element for
+    // the mermaid-fallback path -- no new stand-in surface needed for this.
+    var rail = section.querySelector('.round-end');
+    if (rail) rail.replaceWith();
     // The diagram's expand control is exempt, exactly as it is in the readonly
     // pass at the top of this file, and for the same reason (DESIGN.md polish
     // ticket 05: "the lens is view-only under body.readonly ... pan and zoom
@@ -3576,6 +3713,12 @@ export const ui = `
     setupRoundObserver();
 
     patch.roundsNowSent.forEach(markRoundHistory);
+    // Re-observe AFTER markRoundHistory: a round this push just collapsed into
+    // history had its .round-end stripped above, and the round this push just
+    // inserted (if any) carries its own, server-rendered -- setupSendBarDock has
+    // to look at the document as it stands now, not as it stood before either
+    // change landed.
+    setupSendBarDock();
 
     // Criterion 8: a round arriving over SSE used to leave the badge reading
     // whatever the page happened to render at load, stale until reload -- the
@@ -3637,6 +3780,12 @@ export const ui = `
     // the local 'replacement', for the same reason applyRoundPush does: only the
     // document knows what actually landed.
     setupRoundObserver();
+    // Same reasoning as applyRoundPush's own call: the just-submitted round's
+    // .round-end is gone (its replacement markup is historical, never carries
+    // one -- and the markRoundHistory fallback branch above strips it too), so
+    // the dock observer has to re-read the document rather than keep watching a
+    // node that may no longer be attached.
+    setupSendBarDock();
     // U3: same fix as applyRoundPush above -- wireRoot(replacement) ran against
     // a detached node, so any page-scoped pin it drew is positioned wrong now
     // that the section is actually attached. Recompute once, here, after attach.

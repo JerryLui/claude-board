@@ -1627,3 +1627,52 @@ export class StandInLocalStorage {
   removeItem(key) { this.map.delete(key); }
   get size() { return this.map.size; }
 }
+
+// --- IntersectionObserver stand-in (SPEC_ROUNDEND criterion 2) ------------------
+//
+// QUIRKS.md "The stand-in has no layout" already explains why this file never had
+// one: nothing here lays anything out, so there is no real geometry for a real
+// IntersectionObserver to intersect against, and the round badge's own
+// setupRoundObserver (src/ui.mjs) has run under no check at all for exactly that
+// reason -- it guards on `typeof IntersectionObserver !== 'function'` and returns,
+// which the stand-in's total absence of the constructor was always enough to
+// exercise.
+//
+// setupSendBarDock (src/ui.mjs, SPEC_ROUNDEND criterion 2) is the first thing in
+// this codebase that needs to DRIVE an IntersectionObserver's callback in both
+// directions, not just prove the missing-constructor guard is safe: "rail on
+// screen -> docked" and "rail off screen -> floating" are both real, checkable
+// behaviour, and neither is provable by asserting a listener got registered. Real
+// geometry (rects, ratios, rootBounds) is still out of reach here for the same
+// reason it always has been -- this fakes the ONE fact src/ui.mjs's callback ever
+// reads off an entry (`isIntersecting`) and gives a check a way to fire it
+// directly, standing in for "the rail's box crossed the viewport's edge" the way
+// StandInEventSource's `dispatch` stands in for a real server push, never a
+// simulation of scrolling, rootMargin or threshold math the stand-in has no way
+// to get right.
+export class StandInIntersectionObserver {
+  constructor(callback) {
+    this.callback = callback;
+    this.targets = [];
+  }
+  observe(target) {
+    if (this.targets.indexOf(target) === -1) this.targets.push(target);
+  }
+  unobserve(target) {
+    const idx = this.targets.indexOf(target);
+    if (idx !== -1) this.targets.splice(idx, 1);
+  }
+  disconnect() { this.targets = []; }
+  /** Test hook, not a real IntersectionObserver capability: fire this observer's
+   * own callback as though `target` just crossed into (`isIntersecting: true`) or
+   * out of (`false`) view. `target` is asserted to be one this observer is
+   * actually watching, the same discipline StandInEventSource's own dispatch
+   * doc comment describes -- driving a callback for an element nobody `observe()`d
+   * would prove the check's own wiring, not src/ui.mjs's. */
+  _setIntersecting(target, isIntersecting) {
+    if (this.targets.indexOf(target) === -1) {
+      throw new Error('StandInIntersectionObserver._setIntersecting: target is not observed by this observer');
+    }
+    this.callback([{ target, isIntersecting }], this);
+  }
+}

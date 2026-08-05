@@ -305,6 +305,14 @@ check('comment mode off: typing into a text-answer widget still records the text
   assert.ok(textarea, 'setup failure: no text-answer textarea rendered for the text-widget question');
   textarea.value = 'this is the reviewer\'s free-text answer';
   textarea.dispatchEvent(new StandInEvent('input'));
+  // The shared fixture's OTHER question (choiceBlock) also needs an answer here:
+  // SPEC_ROUNDEND's send guard (test/check-send-guard.mjs owns its own contract)
+  // arms Send instead of submitting while any question is outstanding, and this
+  // check's own subject is whether typed text reaches the submit body, not the
+  // guard -- so the round is filled out completely, exactly the state a plain
+  // click on Send is still expected to submit immediately.
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
 
   // Answers are read generically off the widget at Send time (src/ui.mjs
   // collectAnswers/currentAnswer), so proving the typed text actually reaches
@@ -333,6 +341,13 @@ check('comment mode off: pressing Send posts the currently-filled-in answers to 
   const document = loadBoard();
   const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
   yes.dispatchEvent(new StandInEvent('click'));
+  // The shared fixture's OTHER question (textBlock) also needs an answer: see
+  // the identical note on the check just above -- the send guard arms on an
+  // outstanding question rather than submitting, so the round is filled out
+  // completely here too, leaving this check's own subject (does a plain click
+  // still submit immediately once the round is complete) untouched.
+  document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]').value = 'a filled-in free-text answer';
+  document.querySelector('textarea[data-answer-for="' + textBlock.id + '"]').dispatchEvent(new StandInEvent('input'));
 
   const originalFetch = globalThis.fetch;
   let captured = null;
