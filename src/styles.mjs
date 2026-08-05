@@ -552,6 +552,15 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    keyboard-focus ring for free, the same way it does for every other
    focusable element here. */
 .options-variants { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-3); }
+/* SPEC_STAGES.md criterion 1: an 'html'-kind option (src/render.mjs's
+   renderVariantOption stamps this modifier only on that kind -- see its own
+   comment) spans every auto-fit column .options-variants currently has,
+   whatever that count is at the page's current width, which is what makes
+   this "one per row at full width" rather than a hardcoded column count.
+   Every other option kind is untouched: no modifier class, so
+   .options-variants' plain grid keeps deciding their layout exactly as it
+   did before this criterion existed. */
+.variant-card--stage { grid-column: 1 / -1; }
 .variant-card { display: block; cursor: pointer; background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-md); padding: var(--space-3) var(--space-4);
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease); }
@@ -589,6 +598,39 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    DELIBERATELY") for the two paths this closes and why guarding a message
    instead of deleting the channel would not have been enough. */
 .choice-variant .html-stage { pointer-events: none; }
+/* SPEC_STAGES.md criteria 10/11, a SEPARATE rule from the one immediately
+   above rather than folded into it -- that one is a trust boundary
+   (director review, see its own comment) and stays exactly as written, on
+   its own line, byte for byte. '.html-stage''s own floor (min-height: 320px,
+   resize: vertical, further down this file) is for a STANDALONE stage only
+   (criterion 13, a different chunk's territory); a variant option's stage
+   overrides all three: 'min-height: 0' lifts the floor, 'resize: none' drops
+   a drag handle 'pointer-events: none' already made ungrabbable here, and
+   'overflow: hidden' is criterion 11's clip -- deliberately with no added
+   "there is more below" marker, the same fault this whole feature exists to
+   fix, one level down; the expand control another chunk is landing is the
+   way to the rest.
+   'height: 320px' is NOT an arbitrary starting number -- it is the exact
+   value of the floor this whole rule replaces. Measured in real Chrome
+   (src/render.mjs's stageAgentScript, "WHEN this runs" comment above
+   reportHeight): a stage's first accurate report is deferred (two nested
+   requestAnimationFrame calls, waiting for this document's own first layout
+   pass), and either that or ResizeObserver's own first delivery can in
+   principle be late or, on a sufficiently old or unusual browser, never
+   arrive at all. A lower placeholder here (200px shipped in an earlier cut
+   of this rule, before that measurement) would leave a variant option's
+   stage WORSE than the fixed floor it was meant to improve on for as long as
+   -- or, in the never-arrives case, for as often as -- that gap lasts. 320px
+   makes "no report yet" cost nothing next to today's behaviour; a real
+   report still grows or shrinks the box exactly as criteria 10/11 want the
+   moment it lands. 'max-height' is a CSS backstop for the same cap
+   handleStageHeight enforces in JS (STAGE_HEIGHT_CAP, src/ui.mjs) --
+   hand-kept at the same value, the way QUIRKS.md's "Two stylesheets, one
+   palette" already documents for this file's stage-side hex, since neither
+   file can read a value out of the other; the clamp that actually matters
+   against a hostile report is the one in JS, which runs before a value ever
+   reaches this box's inline style. */
+.choice-variant .html-stage { min-height: 0; height: 320px; max-height: 600px; resize: none; overflow: hidden; }
 
 /* free text: a comfortable writing surface, not a cramped input */
 .answer-textarea { width: 100%; min-height: 220px; resize: vertical; background: var(--panel-2);
@@ -764,16 +806,17 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .anchor-pin.pin-pending { background: var(--panel); color: var(--accent);
   border: 1px dashed var(--accent); line-height: 18px; }
 
-/* Both stage kinds are clickable at element level, and both read as pictures until
-   something says so. The kicker carries the note; a mermaid node highlights under the
-   cursor (the html stage's equivalent is injected into the iframe's own document by
-   src/ui.mjs, since this stylesheet deliberately does not reach inside it). Neither
-   applies in a standalone file: archive, where nothing is clickable. Ticket 05: one
-   gesture, toggle-gated everywhere -- a diagram node is no longer a standing
-   exception either, so both rules below also require body.comment-mode, the same
-   class setCommentMode (src/ui.mjs) toggles for every other anchor-target rule. */
-.stage-hint { font-size: 10.5px; letter-spacing: 0.04em; text-transform: none; color: var(--muted); font-style: italic; }
-body.readonly .stage-hint { display: none; }
+/* Both stage kinds are clickable at element level, and both read as pictures with no
+   built-in cue of their own -- the comment-mode toggle is the one thing on the page
+   that says so now (ADR.md 21 deleted the kicker's own per-stage hint: repeated once
+   per variant option, in the place vertical space is scarcest, saying what the toggle
+   was already visible chrome to say). A mermaid node highlights under the cursor (the
+   html stage's equivalent is injected into the iframe's own document by src/ui.mjs,
+   since this stylesheet deliberately does not reach inside it). Neither applies in a
+   standalone file: archive, where nothing is clickable. Ticket 05: one gesture,
+   toggle-gated everywhere -- a diagram node is no longer a standing exception either,
+   so both rules below also require body.comment-mode, the same class setCommentMode
+   (src/ui.mjs) toggles for every other anchor-target rule. */
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g')} { cursor: pointer; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
 /* polish ticket 02 (DESIGN.md) criterion 12: a node that already carries a SENT
@@ -846,6 +889,51 @@ ${mermaidNodeRule('body.comment-mode:not(.readonly) .lens-canvas svg g', ':hover
    exactly the same reason and by exactly the same mechanism as it is inline */
 body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent { cursor: not-allowed; }
 body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outline: none; }
+
+/* --- the html-stage lens (SPEC_STAGES criteria 3, 4 and 12) --------------------
+   The second lens src/ui.mjs builds, wearing the first one's chrome ('.lens-bar',
+   '.lens-title', '.lens-btn' above are shared verbatim) and none of its view
+   maths: what it frames is a live iframe, which scrolls and lays itself out on
+   its own, not a cloned SVG on a pannable canvas. Hence no cursor: grab, no
+   touch-action and no user-select here -- every one of those would fight the
+   mock's own pointer input, which is the whole of criterion 4.
+
+   Three things this layout is load-bearing for, none of them decoration:
+   - 'min-height: 0' on the body. A flex child's default min-height is auto, i.e.
+     'never smaller than my content' -- and an iframe's content is a whole
+     document, so without this the body grows past the dialog and the frame
+     scrolls the PAGE instead of scrolling itself.
+   - the body's padding is the lens's clickable surround. src/ui.mjs closes on a
+     click landing on the dialog or on this element (criterion 12's backdrop
+     half); a dialog that filled the viewport edge to edge with the frame would
+     leave nothing outside the stage to aim at.
+   - the frame is sized in CSS, not by the stage. An iframe's intrinsic size is
+     300x150 regardless of what it holds, so 'a mock with its own scrollable
+     content can be scrolled here' needs a real box given from this side. */
+.stage-lens { width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh;
+  margin: 0; padding: 0; border: none; background: var(--bg); color: var(--ink); overflow: hidden; }
+.stage-lens[open] { display: flex; flex-direction: column; }
+.stage-lens::backdrop { background: var(--bg); }
+.stage-lens-body { flex: 1; min-height: 0; padding: var(--space-4); background: var(--bg); }
+.stage-lens-frame { display: block; width: 100%; height: 100%; border: 1px solid var(--hairline);
+  border-radius: var(--r-md); background: var(--stage-bg); }
+/* SPEC_STAGES criterion 7: the pick control's slot, between the title (which
+   carries 'margin-right: auto') and close. Note what is NOT in the two rules
+   above, and is load-bearing for this one: neither the body nor the frame is
+   positioned or given a z-index, so the framed stage stays in normal flow BELOW
+   this bar and a mock has no way to paint over the one control that records an
+   answer. The stage is a cross-origin iframe -- it renders only inside its own
+   box -- so "outside the frame" is a structural guarantee here rather than a
+   stacking-order race. */
+.lens-actions { display: inline-flex; align-items: center; gap: var(--space-2); }
+/* the one control in either lens that RECORDS something, so it does not wear the
+   same quiet chrome as 'close' beside it: accent-filled, the same visual weight
+   .btn-primary gives Send. Disabled when the pick would be refused anyway (a
+   historical round, comment mode -- src/ui.mjs's stageLensPick), which has to
+   look unavailable rather than merely unresponsive. */
+.lens-pick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.lens-pick:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
+.lens-pick:disabled { background: var(--panel-2); border-color: var(--hairline); color: var(--muted); cursor: not-allowed; }
 
 /* the generic comment-mode hover outline (DESIGN.md anchoring criterion 2: "before
    committing the reviewer can see exactly which element will be anchored"). Set

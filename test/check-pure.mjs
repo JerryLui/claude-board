@@ -2293,16 +2293,17 @@ check('html and mermaid blocks each render a stage-wrap + pin-layer, the anchor 
   assert.ok(markup.includes('class="stage-wrap"'));
 });
 
-// --- the element-level gesture has to be discoverable -------------------------
+// --- the element-level gesture's discoverability lives in the toggle alone ----
 //
-// Found in the manual pass, 2026-07-29: the wiring below was correct and unusable.
-// A mermaid diagram and an iframe'd mock both read as pictures, nothing in either
-// said an individual element could take a comment, and the reviewer's first move was
-// the kicker's block-level button — which is exactly the outcome criterion 10 was
-// written against ("the agent receives 'the Send button in the after stage' rather
-// than 'the small card'"). Two affordances, one per stage kind, plus the note.
+// Found in the manual pass, 2026-07-29: the wiring was correct and unusable, so a
+// permanent hint line was added to each stage's kicker. ADR.md 21 deleted it again:
+// a four-option `choose-between-rendered-variants` question repeated that line once
+// per option, in the place vertical space is scarcest, saying what the comment-mode
+// toggle was already made visible chrome to say (criterion 10's discoverability
+// requirement, and criterion 2 of SPEC_STAGES.md). Nothing replaces it -- the toggle
+// carries discoverability alone now, on both stage kinds and in both page states.
 
-check('both stage kinds tell the reviewer their elements are clickable, and a read-only archive does not', () => {
+check('neither stage kind renders a hint in its kicker, and the stylesheet defines no .stage-hint rule at all', () => {
   const board = createBoard({
     title: 'Stage affordances',
     blocks: [
@@ -2313,21 +2314,15 @@ check('both stage kinds tell the reviewer their elements are clickable, and a re
   const page = renderBoardPage(board);
   const markup = renderedMarkup(page);
 
-  const hints = [...markup.matchAll(/<span class="stage-hint">([^<]*)<\/span>/g)].map(m => m[1]);
-  assert.equal(hints.length, 2, `expected one hint per stage kind, got: ${JSON.stringify(hints)}`);
-  assert.ok(hints.some(h => /click any element/i.test(h)), 'the html stage must say its elements are clickable');
-  assert.ok(hints.some(h => /turn on comment mode to click a node/i.test(h)), 'the mermaid stage must say comment mode has to be on before its nodes are clickable');
-
-  // Each hint sits in its own block's kicker, not both in one.
+  // Each kicker carries no hint -- inverted from "the kicker carries the hint".
   const htmlKicker = /<div class="block-kicker">HTML stage.*?<\/div>/s.exec(markup);
   const mermaidKicker = /<div class="block-kicker">Mermaid.*?<\/div>/s.exec(markup);
-  assert.ok(htmlKicker && htmlKicker[0].includes('stage-hint'), 'the html-stage kicker carries the hint');
-  assert.ok(mermaidKicker && mermaidKicker[0].includes('stage-hint'), 'the mermaid kicker carries the hint');
+  assert.ok(htmlKicker && !htmlKicker[0].includes('stage-hint'), 'the html-stage kicker must carry no hint');
+  assert.ok(mermaidKicker && !mermaidKicker[0].includes('stage-hint'), 'the mermaid kicker must carry no hint');
 
-  // Nothing is clickable in a standalone file: archive, so the invitation is hidden
-  // there rather than lying. (styles, not markup: the page is byte-identical either
-  // way — ticket 05's standalone guarantee.)
-  assert.match(page, /body\.readonly \.stage-hint \{[^}]*display: none/, 'a read-only archive must hide the hint');
+  // Not merely hidden in a read-only archive any more -- the rule itself is gone,
+  // so there is nothing left for `body.readonly` to override.
+  assert.ok(!page.includes('.stage-hint'), 'the stylesheet must define no .stage-hint rule at all');
 });
 
 check('a mermaid node highlights under the cursor, and an html stage gets the same affordance injected into its own document', () => {
@@ -4224,6 +4219,144 @@ check('choose-between-rendered-variants: renders each option\'s nested block thr
   // Never a <button> wrapping the card's content -- that is exactly what an
   // iframe cannot legally nest inside.
   assert.ok(!/<button[^>]*class="variant-card/.test(markup));
+});
+
+check('choose-between-rendered-variants (SPEC_STAGES.md criterion 1): an html-kind option carries the full-width modifier class, a non-html option does not (ablation: delete the stageModifier line in renderVariantOption and the first assertion fails)', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which mockup?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'Card A', block: { kind: 'html', html: '<p>mock</p>' } },
+        { label: 'Card B', block: { kind: 'markdown', text: 'copy' } },
+      ],
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const cardA = /<div class="variant-card[^"]*"[^>]*data-choice="Card A">/.exec(markup);
+  const cardB = /<div class="variant-card[^"]*"[^>]*data-choice="Card B">/.exec(markup);
+  assert.ok(cardA, 'setup failure: no card found for the html option');
+  assert.ok(cardB, 'setup failure: no card found for the markdown option');
+  assert.ok(cardA[0].includes('variant-card--stage'), 'an html-kind option\'s card must carry the full-width modifier class');
+  assert.ok(!cardB[0].includes('variant-card--stage'), 'a markdown-kind option\'s card must NOT carry it -- it keeps the existing grid');
+
+  // grid-column: 1 / -1 is what turns the modifier into "one per row at full
+  // width" regardless of how many auto-fit columns .options-variants
+  // currently has -- see src/styles.mjs's own comment on .variant-card--stage.
+  assert.match(styles, /\.variant-card--stage\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/,
+    'src/styles.mjs must span an html-kind option across every grid column, not size it like the other columns');
+});
+
+check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11, fallback): a variant option\'s stage starts no shorter than the 320px floor it replaces -- criterion 10 must not cost a mock height while its report is still in flight or never arrives (ablation: this fails if the starting height in src/styles.mjs\'s .choice-variant .html-stage rule is ever dropped below 320px)', () => {
+  // Real Chrome measurement (see this feature's own entry in QUIRKS.md and
+  // src/render.mjs's "WHEN this runs" comment): a stage's first accurate
+  // report is necessarily deferred past this document's own first layout
+  // pass, which can in principle be late, or -- on a browser old enough to
+  // lack requestAnimationFrame, or a mock whose script throws before it ever
+  // reports -- never arrive at all. An earlier cut of this rule shipped a
+  // 200px starting height, which is 120px SHORTER than the fixed floor this
+  // whole feature exists to improve on: worse than before, for as long (or,
+  // in the never-arrives case, as often) as that gap lasts. This asserts the
+  // rule's own text rather than anything the stand-in could compute (it has
+  // no layout at all, QUIRKS.md), the same shape test/check-pure.mjs already
+  // uses for other rules asserted by their exact wording.
+  assert.match(styles, /\.choice-variant \.html-stage \{ min-height: 0; height: 320px; max-height: 600px; resize: none; overflow: hidden; \}/,
+    'a variant option\'s stage must start at least as tall as the 320px floor it replaces, not the old 200px placeholder');
+});
+
+/** Stub the ONE entry point a real browser actually uses for a stage's first
+ * height report -- requestAnimationFrame, called twice in a row
+ * (stageAgentScript's reportHeightAfterLayout) -- rather than driving the
+ * plain, synchronous reportHeight() a fabricated scrollHeight could satisfy
+ * on its own regardless of whether the deferral is even still there. That
+ * synchronous call is exactly the path measured to be always-zero in a real
+ * browser (src/render.mjs's "WHEN this runs" comment on reportHeight, and
+ * QUIRKS.md's own entry on the measurement): a check that drove it directly
+ * would keep passing even if reportHeightAfterLayout's own rAF chain were
+ * deleted outright and something called reportHeight() straight from script
+ * scope again -- precisely the failure this repo's mermaid-id trap
+ * (QUIRKS.md) warns about, a check that agrees with a wrong assumption about
+ * timing rather than exercising the real one.
+ *
+ * This stub CAPTURES callbacks instead of invoking them, so the deferral
+ * itself is provable: `drain()` runs whatever is currently queued, and since
+ * invoking one callback can queue ANOTHER (stageAgentScript's rAF nested
+ * inside its own rAF callback), it loops until the queue is empty rather than
+ * draining one fixed snapshot -- one `drain()` call is enough however deep
+ * the real chain nests. test/dom-stand-in.mjs has no event loop of its own to
+ * schedule a real deferred callback on, and no notion of "layout has
+ * happened" to defer UNTIL (QUIRKS.md "The stand-in has no layout"), so this
+ * proves the WIRING (a report is not applied until AFTER an explicit,
+ * separate drain step, and the chain that eventually applies it is
+ * requestAnimationFrame, twice, reaching reportHeight) rather than anything
+ * about real frame timing -- the same ceiling already noted for
+ * ResizeObserver. Restores the original binding (usually `undefined`, since
+ * Node has no requestAnimationFrame) even if `fn` throws, same idiom
+ * test/check-enter.mjs's `withFetchCapture` already uses. */
+function withCapturedRAF(fn) {
+  const original = globalThis.requestAnimationFrame;
+  const queue = [];
+  globalThis.requestAnimationFrame = (cb) => { queue.push(cb); };
+  const drain = () => { while (queue.length) queue.shift()(); };
+  try {
+    fn(drain);
+  } finally {
+    globalThis.requestAnimationFrame = original;
+  }
+}
+
+check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11): a variant option\'s stage grows to the height it reports, clamped at the cap -- never past it, and never before its own rendering opportunity (ablation 1: change handleStageHeight\'s Math.min(data.height, STAGE_HEIGHT_CAP) to just data.height and the "taller than the cap" assertion fails; ablation 2: change reportHeightAfterLayout\'s body back to a bare reportHeight() call and the "not yet applied" assertion fails)', () => {
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [
+        // dom-stand-in.mjs models scrollHeight as exactly one fact: whatever a
+        // fixture declares via data-standin-scroll-height, once the node is
+        // connected (QUIRKS.md "The stand-in has no layout"). An explicit
+        // top-level <body> in a mock's own html is honoured as given by
+        // parseHTML, so the declared attribute lands on the same node
+        // stageAgentScript's reportHeight() reads (document.body.scrollHeight).
+        { label: 'Short', block: { kind: 'html', html: '<body data-standin-scroll-height="180"><p>short mock</p></body>' } },
+        { label: 'Tall', block: { kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' } },
+      ],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const frames = document.querySelectorAll('.html-stage');
+  assert.equal(frames.length, 2, 'setup failure: expected two rendered stages');
+
+  withCapturedRAF((drain) => {
+    frames.forEach(f => f.loadSrcdoc());
+    // The measured-in-real-Chrome property itself: nothing is applied yet,
+    // because nothing has told this document its rendering opportunity has
+    // happened. This is the assertion that fails against the ORIGINAL bug
+    // (a synchronous reportHeight() call, which always reads 0 pre-layout in
+    // a real browser but would read the fixture's declared value HERE,
+    // immediately, since the stand-in's declared scrollHeight has no notion
+    // of "before" or "after" layout at all).
+    assert.ok(!frames[0].style.height, 'a height report must not be applied before this document\'s own rendering opportunity');
+    assert.ok(!frames[1].style.height, 'a height report must not be applied before this document\'s own rendering opportunity');
+    drain(); // a real browser: waits for the actual rendering opportunity, then runs the queued (nested) rAF callbacks
+  });
+
+  assert.equal(frames[0].style.height, '180px',
+    'criterion 10: a mock shorter than the cap must grow to the height it actually reports, not sit at a fixed floor');
+  assert.equal(frames[1].style.height, '600px',
+    'criterion 11: a mock taller than the cap must be clipped there, not at its full reported height (4000px)');
+});
+
+check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11, scope): a STANDALONE html stage\'s reported height is never applied -- criterion 13\'s own floor/resize stays untouched, this feature is variant-option-only (ablation: delete handleStageHeight\'s frame.closest(\'.choice-variant\') gate and this fails, because the report would then apply everywhere)', () => {
+  const board = createBoard({
+    title: 'standalone',
+    blocks: [{ kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' }],
+  });
+  const document = loadVariantBoard(board);
+  const frame = document.querySelector('.html-stage');
+  withCapturedRAF((drain) => { frame.loadSrcdoc(); drain(); });
+  assert.ok(!frame.style.height, 'a standalone stage sends the same \'height\' message every html stage does (stageAgentScript cannot tell which kind of card it is in) -- the parent must decline to apply it outside a .choice-variant card');
 });
 
 check('choose-between-rendered-variants: an html option\'s iframe is rendered pointer-events: none -- a real click can never reach it, only the card around it can ever record a pick', () => {

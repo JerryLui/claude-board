@@ -90,15 +90,6 @@ function safeJson(value) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
-/** The one-line "you can click this" note on a stage. Both stage kinds anchor a
- * comment to an individual element (DESIGN.md board criterion 10), and neither
- * announced it: a mermaid diagram and an iframe'd mock both read as pictures, so
- * the gesture was there and undiscovered. Hidden in a standalone `file:` archive,
- * where nothing is clickable — `body.readonly` in src/styles.mjs. */
-function stageHint(text) {
-  return `<span class="stage-hint">${escHtml(text)}</span>`;
-}
-
 /** The comment glyph, as inline SVG rather than an emoji: an emoji renders at the
  * mercy of the platform's font (colour, weight and baseline all differ across
  * macOS/Windows/Linux, and it ignores `currentColor`, so it stayed loud while the
@@ -141,9 +132,18 @@ function commentModeToggle() {
  *
  * src/ui.mjs's `wireDiagramExpand` removes it again if mermaid never produced an
  * SVG (CDN unreachable, invalid chart): a control that opens an empty lens is
- * worse than no control. */
-function expandButton(blockId) {
-  return `<button type="button" class="expand-btn" data-expand-for="${escAttr(blockId)}" aria-label="Open this diagram in the lens">${EXPAND_ICON}expand</button>`;
+ * worse than no control.
+ *
+ * SPEC_STAGES criterion 3 puts the same control on every `html` stage, and both
+ * reasons above carry over unchanged — a stage in a standalone archive still
+ * opens in the lens, so the button has to be in the archive's own bytes and has
+ * to survive the readonly pass. `what` names the thing being opened in the
+ * accessible name and is this file's own word, never board content; the two
+ * kinds share one class, since the class is what src/ui.mjs's readonly carve-out
+ * and the stylesheet both key on, and one control that behaves the same way in
+ * two kickers should not be two. */
+function expandButton(blockId, what) {
+  return `<button type="button" class="expand-btn" data-expand-for="${escAttr(blockId)}" aria-label="Open this ${what || 'diagram'} in the lens">${EXPAND_ICON}expand</button>`;
 }
 
 function commentButton(blockId, kind, ref, label, inline) {
@@ -397,12 +397,24 @@ function renderRankWidget(block, answer, historical) {
  * option's block is exactly as commentable AT BLOCK LEVEL as a compare side's
  * block already is (src/board.mjs's findBlock/questionBlocks walk
  * `options[].block` the same way they walk `left`/`right`), rather than this
- * one widget inventing a suppressed, comment-free rendering path of its own. */
+ * one widget inventing a suppressed, comment-free rendering path of its own.
+ *
+ * SPEC_STAGES.md criterion 1: an `html`-kind option carries the modifier class
+ * `variant-card--stage` (src/styles.mjs: `grid-column: 1 / -1`), which is what
+ * takes it out of `.options-variants`' three-column grid and onto its own full-
+ * width row -- three columns leaves an `html` mock's own text unreadably small,
+ * which is the whole problem this widget existed to fix and previously didn't.
+ * Every other block kind (markdown/code/mermaid/compare) keeps the plain grid
+ * untouched, on the same reasoning `renderHtmlBlock`'s own header comment gives
+ * for why only `html` needed the sandboxed-iframe treatment in the first place:
+ * they render inline, at whatever width the grid already gives them, with no
+ * unreadable-at-a-third-width problem to solve. */
 function renderVariantOption(opt, isSelected, board, commentsByBlock, historical, questionId) {
   const body = opt.block
     ? renderBlock(opt.block, board, commentsByBlock, historical)
     : '<p class="unsupported-widget">no content</p>';
-  return `<div class="variant-card choice-variant${isSelected ? ' selected' : ''}" role="button" tabindex="${historical ? '-1' : '0'}"${historical ? ' aria-disabled="true"' : ''} data-question-id="${escAttr(questionId)}" data-choice="${escAttr(opt.label)}">
+  const stageModifier = opt.block && opt.block.kind === 'html' ? ' variant-card--stage' : '';
+  return `<div class="variant-card choice-variant${stageModifier}${isSelected ? ' selected' : ''}" role="button" tabindex="${historical ? '-1' : '0'}"${historical ? ' aria-disabled="true"' : ''} data-question-id="${escAttr(questionId)}" data-choice="${escAttr(opt.label)}">
     <div class="variant-label">
       <span class="opt-label">${escHtml(opt.label)}</span>
       ${opt.description ? `<span class="opt-desc">${escHtml(opt.description)}</span>` : ''}
@@ -509,7 +521,7 @@ function renderMermaidBlock(block, board, commentsByBlock, historical) {
   </div>`;
   return `
 <section class="block mermaid-block" data-block-id="${escAttr(block.id)}" data-block-kind="mermaid">
-  <div class="block-kicker">Mermaid ${commentButton(block.id, 'block')} ${block.error ? '' : expandButton(block.id)} ${stageHint('turn on comment mode to click a node and comment on it')}</div>
+  <div class="block-kicker">Mermaid ${commentButton(block.id, 'block')} ${block.error ? '' : expandButton(block.id)}</div>
   ${body}
   ${pageDomPinLayer(block.id)}
   ${commentArea(block.id, commentsByBlock, historical)}
@@ -943,6 +955,64 @@ export function stageAgentScript() {
     return resolveSteps(document.body, steps);
   }
 
+  // SPEC_STAGES.md criteria 10/11: this document is the only thing that can
+  // ever know its own rendered height -- the parent cannot reach
+  // 'contentDocument' at all (see this file's own "ORIGIN VALIDATION" design
+  // comment, above stageAgentScript, for why the frame is opaque by design),
+  // so the stage measures and reports over this same channel, the same shape
+  // as 'hover'/'positions' already use, rather than the parent ever trying to
+  // reach in for it. Every html stage sends this, standalone or nested inside
+  // a '.choice-variant' card -- renderHtmlBlock/stageAgentScript are the same
+  // function either way, and this script has no way to know which kind of
+  // card it ended up in -- so src/ui.mjs is the one that decides whether a
+  // report is acted on. 'document.body.scrollHeight', not
+  // 'document.documentElement''s: a mock supplied by value (renderHtmlBlock)
+  // is exactly the fragment that lands in this document's '<body>', same as
+  // every 'dom' ref this script already mints is rooted at 'document.body',
+  // not the synthetic '<html>' wrapper around it.
+  //
+  // WHEN this runs matters as much as WHAT it reads, and got it wrong on the
+  // first cut: calling this synchronously (here, at script scope) measures
+  // BEFORE this document has ever been through a layout pass. Measured
+  // directly in real Chrome (a throwaway probe frame outside this repo,
+  // QUIRKS.md's "Preview harness"): inside a sandboxed srcdoc frame with no
+  // allow-same-origin, 'document.body.scrollHeight' reads 0 not only
+  // synchronously but at 'DOMContentLoaded', at 'load', and even a
+  // zero-delay 'setTimeout' -- there is no external subresource for 'load' to
+  // wait for, so it fires before this frame ever gets a rendering
+  // opportunity. See reportHeightAfterLayout, below, for where the real first
+  // call comes from; this function itself stays the plain, unconditional
+  // measure-and-post -- ResizeObserver (below) also calls it directly, once a
+  // real layout pass has actually happened.
+  function reportHeight() {
+    post({ type: 'height', height: document.body ? document.body.scrollHeight : 0 });
+  }
+
+  // requestAnimationFrame's callback runs as part of the SAME per-frame
+  // "update the rendering" step that performs style/layout for this document
+  // -- nested twice is the standard idiom for "wait until layout has
+  // genuinely settled": a single rAF can still land on the frame that
+  // establishes this document's first rendering opportunity, before that
+  // opportunity's own layout has run, so by the time the SECOND callback
+  // fires, at least one full rendering update is guaranteed complete. This is
+  // the fix for the timing measured above -- 'load' doesn't tell you layout
+  // happened, rAF does. Guarded exactly like ResizeObserver below (absent
+  // from the DOM stand-in, QUIRKS.md "The stand-in has no layout"), and
+  // requested unconditionally at script start regardless of this document's
+  // current visibility: a real browser does not drop an outstanding
+  // requestAnimationFrame request while its page is hidden, only slows its
+  // cadence, so a stage opened into a background tab (a link opened while
+  // reading something else, say) still gets a correct report the moment it
+  // is actually looked at, with no separate visibilitychange plumbing
+  // needed. Until either this or ResizeObserver's own first delivery lands,
+  // src/styles.mjs's own starting height for a variant option's stage is the
+  // fallback -- see that rule's own comment for why it is pinned at the same
+  // 320px the fixed floor this feature replaces used, not lower.
+  function reportHeightAfterLayout() {
+    if (typeof requestAnimationFrame !== 'function') return;
+    requestAnimationFrame(function () { requestAnimationFrame(reportHeight); });
+  }
+
   window.addEventListener('message', function (ev) {
     // See this file's design comment above ("ORIGIN VALIDATION") for why
     // identity, not an origin string, is the correct and sufficient check on
@@ -984,6 +1054,21 @@ export function stageAgentScript() {
     }
   });
 
+  reportHeightAfterLayout();
+  // Keeps the report tracking a mock whose content changes size AFTER first
+  // paint (an image loading in, a toggle revealing more copy) -- guarded
+  // exactly the way src/ui.mjs's setupRoundObserver guards
+  // 'IntersectionObserver' (QUIRKS.md "The stand-in has no layout"): this
+  // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
+  // neither the first, layout-deferred report nor a later resize-driven one
+  // is directly exerciseable there -- see QUIRKS.md's new entry on this
+  // feature's own measurement for what that leaves untestable, and
+  // test/check-pure.mjs's stubbed requestAnimationFrame for how far the
+  // stand-in check goes anyway (the real entry point, not a fabricated
+  // scrollHeight fed straight into reportHeight).
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(reportHeight).observe(document.body);
+  }
   post({ type: 'ready' });
 })();</script>`;
 }
@@ -1020,7 +1105,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical) {
   // resolution knows or cares whether the markup came from disk or the wire.
   return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  <div class="block-kicker">HTML stage ${commentButton(block.id, 'block')} ${stageHint('turn on comment mode to click any element and comment on it')}</div>
+  <div class="block-kicker">HTML stage ${commentButton(block.id, 'block')} ${expandButton(block.id, 'stage')}</div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(block.html + stageAgentScript())}"></iframe>
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>

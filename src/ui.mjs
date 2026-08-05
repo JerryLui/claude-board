@@ -811,12 +811,24 @@ export const ui = `
   // The parent's half of the design in src/render.mjs's 'stageAgentScript'
   // comment. Three responsibilities: find which live '.html-stage' frame a
   // message actually came from (never trust an id the message itself claims),
-  // validate its shape before touching any field, and act on exactly the four
+  // validate its shape before touching any field, and act on exactly the five
   // message types the stage ever sends.
 
   var STAGE_CB = 'cb-stage';
   var nextLocateId = 1;
   var pendingLocates = {}; // requestId -> { layer: pin-layer element, comments: [...] }
+  // SPEC_STAGES.md criterion 11: the clip point for a variant option's stage
+  // (handleStageHeight, below) -- tuned once against a real mock, per the
+  // spec's own "around 600px" call. Hand-kept in step with src/styles.mjs's
+  // '.choice-variant .html-stage' 'max-height', the same "two independent
+  // places, kept in sync by convention" shape QUIRKS.md's "Two stylesheets,
+  // one palette" already documents for this file's stage-side hex and
+  // 'cursor' rule -- neither file can read a value out of the other (this one
+  // is a client script in a template literal; the CSS is a second, separate
+  // one). The CSS max-height is a backstop only: THIS clamp is the one that
+  // actually stops a hostile report, since it runs before the value ever
+  // touches the frame's inline style at all.
+  var STAGE_HEIGHT_CAP = 600;
 
   /** Post one message to 'frame''s stage agent. Wrapped in try/catch: a frame
    * mid-teardown (an amend that replaced this block) can leave 'contentWindow'
@@ -969,6 +981,35 @@ export const ui = `
     openCommentForm(blockId, 'dom', anchor.ref, hint, '');
   }
 
+  /** SPEC_STAGES.md criteria 10/11: 'frame''s stage reporting its own content
+   * height, so a variant option's card can grow to fit it instead of sitting
+   * at '.html-stage''s fixed 320px floor -- the parent cannot measure this
+   * itself (src/render.mjs's design comment on why 'contentDocument' is
+   * unreachable), so the stage measures and reports, the same shape as
+   * 'hover'/'positions'. Height is STAGE-AUTHORED input like every other field
+   * on this channel (QUIRKS.md "A stage-posted message is agent-authored
+   * input"): shape-checked ('Number.isFinite', positive -- a non-finite,
+   * negative or zero report is dropped outright, same as every other
+   * malformed field on this channel) and clamped to STAGE_HEIGHT_CAP before
+   * it ever touches 'frame.style.height', so no report can grow a card
+   * without limit, push page chrome off screen, or claim more than its own
+   * box. 'frame' is already the DOM-walk-identified frame
+   * ('findStageFrame(ev.source)' in the listener below), never an id the
+   * message claims for itself.
+   *
+   * Applied only when 'frame' sits inside a '.choice-variant' card. Every
+   * html stage sends this message, standalone or not (stageAgentScript has no
+   * way to know which kind of card it ended up in -- see its own comment),
+   * but a standalone stage keeps its existing floor/resize behaviour
+   * untouched (spec criterion 13 -- a different chunk's territory); the
+   * gate here, not a change to what the stage sends, is what keeps the two
+   * apart. */
+  function handleStageHeight(data, frame) {
+    if (!Number.isFinite(data.height) || data.height <= 0) return;
+    if (!frame.closest('.choice-variant')) return;
+    frame.style.height = Math.min(data.height, STAGE_HEIGHT_CAP) + 'px';
+  }
+
   function handleStagePositions(data) {
     var pending = pendingLocates[data.requestId];
     if (!pending) return; // unknown/stale request id -- never trusted blindly
@@ -1023,6 +1064,7 @@ export const ui = `
       if (data.text != null && typeof data.text !== 'string') return;
       return;
     }
+    if (data.type === 'height') { handleStageHeight(data, frame); return; }
   });
 
   // mermaid: wired from renderMermaidBlocks below once mermaid has either rendered
@@ -1715,6 +1757,328 @@ export const ui = `
     });
   }
 
+  // --- the html-stage lens (SPEC_STAGES criteria 3, 4 and 12) --------------------
+  //
+  // Criterion 3: "every html stage carries an expand control that opens the stage
+  // in the lens". Criterion 4: "inside the lens the stage receives real pointer
+  // input: a mock with its own scrollable content can be scrolled there".
+  //
+  // It BORROWS THE DIAGRAM LENS'S CHROME, NOT ITS VIEW MATHS (the spec's Out of
+  // Scope says so in as many words): same full-viewport <dialog>, same '.lens-bar'
+  // / '.lens-title' / '.lens-btn' vocabulary, built once and reused. But its
+  // contents are a LIVE BROWSING CONTEXT, not a cloned SVG on a pannable canvas --
+  // an iframe scrolls, zooms and lays itself out on its own, so lensZoomAt/
+  // lensFit/lensOneToOne and the whole clone-and-transform path above have nothing
+  // to do here. A second <dialog> rather than a mode flag on the first one: they
+  // share no state, only styling, and folding two unrelated stages into one
+  // element is how the diagram lens's pan/zoom listeners would end up firing over
+  // an iframe.
+  //
+  // THE FRAME IS A SECOND MOUNT OF THE SAME SRCDOC, AND DELIBERATELY NOT A
+  // '.html-stage'. This is the one decision here worth arguing rather than
+  // reading off the code:
+  //
+  //   - The parent identifies a stage message's sender by walking
+  //     qsa('.html-stage', document) and comparing event.source to each frame's
+  //     contentWindow (findStageFrame, above). That walk carries an ASSUMPTION,
+  //     not just a lookup: every mounted '.html-stage' is exactly one block's
+  //     inline stage, so the frame it finds names the block ('.html-block'
+  //     ancestor), the pin layer to draw into and the sentRefs to send. A second
+  //     frame wearing that class for the same block makes that claim false --
+  //     'ready' would re-run handleStageReady for a block whose inline stage is
+  //     already wired, and the two frames' 'positions' replies would race for one
+  //     pin layer (the layer keeps only the latest requestId, so whichever answers
+  //     second wins and the other's pins vanish).
+  //   - So the lens frame carries '.stage-lens-frame' and never '.html-stage'.
+  //     findStageFrame returns null for it, and its messages are dropped at the
+  //     identity check, before any shape validation -- the same treatment any
+  //     other window on the page gets. That is a strictly SMALLER surface than the
+  //     inline stage has, not a new one, which is the direction to fail in for a
+  //     frame whose whole content is agent-authored.
+  //   - What it costs: the lens copy is not commentable at element level (no
+  //     'ready' means no 'mode', so its own agent never turns its hover/click
+  //     gesture on). The inline stage still is, unchanged -- and for a variant
+  //     option the spec had already given that up to the inertness rule ("Out of
+  //     Scope: restoring element-level comment anchoring inside a variant
+  //     option's stage").
+  //
+  // A COPY, NOT THE INLINE FRAME MOVED IN (which is what lensAdopt does for the
+  // block's comment form, and would have been the obvious symmetry). Re-parenting
+  // an <iframe> destroys and recreates its browsing context -- the srcdoc document
+  // reloads, so "move it in, move it back" is two reloads of the mock rather than
+  // none -- and while it sat in the dialog it would be outside its own
+  // '.html-block', so findStageFrame would match it and the closest('.html-block')
+  // lookup right after would return null: every message from the block's own
+  // stage silently dropped for as long as the lens was open. A fresh mount leaves
+  // the inline stage untouched, which is most of criterion 13.
+  //
+  // POINTER-EVENTS, i.e. why criterion 4 costs nothing at the trust boundary.
+  // '.choice-variant .html-stage { pointer-events: none; }' (src/styles.mjs) is a
+  // security rule, not a style choice (criterion 9, and the spec's Decisions pin
+  // it verbatim). Nothing here relaxes it: the lens frame is neither inside a
+  // '.choice-variant' card nor a '.html-stage', so the rule simply does not
+  // address it, and the frame is live because a plain iframe in a plain dialog is
+  // live. "The lens is where a stage becomes live" (ADR 22) is implemented by
+  // mounting a second copy somewhere the rule was never about, never by weakening
+  // the rule.
+  //
+  // THE SANDBOX IS COPIED, NEVER RE-SPELLED. The attribute is read off the inline
+  // frame and set on the copy before anything else and before it is attached, so
+  // the two frames are sandboxed identically by construction and there is no
+  // moment in which agent script could run under a weaker one. A lens frame that
+  // gained 'allow-same-origin' would re-open the 2026-07-29 audit's S1 chain
+  // wholesale (test/check-stage-isolation.mjs's header), so a frame with no
+  // sandbox attribute at all is refused outright rather than mounted: fail closed,
+  // because the failure this guards is total.
+  //
+  // THE PICK CONTROL (criteria 6, 7 and 8) lives in the bar, in the '.lens-actions'
+  // slot between the title and close. See stageLensPick below for the whole of why
+  // that address is the security property and not a layout preference.
+  var stageLens = null;
+
+  function buildStageLens() {
+    if (stageLens) return stageLens;
+    var dlg = document.createElement('dialog');
+    dlg.className = 'stage-lens';
+    dlg.setAttribute('aria-label', 'Stage lens');
+
+    var bar = document.createElement('div');
+    bar.className = 'lens-bar';
+    var title = document.createElement('span');
+    title.className = 'lens-title';
+    title.textContent = 'Stage lens';
+    // The pick control's slot, filled per open (stageLensPick) rather than
+    // built once: which control belongs here is a fact about the stage being
+    // opened, not about the lens, and criterion 6's "a lens opened from a
+    // standalone stage carries no such control" is exactly the case where it
+    // has to be empty. Emptied on teardown too, so a stale control can never
+    // outlive the option it named.
+    var actions = document.createElement('span');
+    actions.className = 'lens-actions';
+    bar.appendChild(title);
+    bar.appendChild(actions);
+    bar.appendChild(lensButton('close', 'close'));
+
+    var body = document.createElement('div');
+    body.className = 'stage-lens-body';
+
+    dlg.appendChild(bar);
+    dlg.appendChild(body);
+    document.body.appendChild(dlg);
+
+    stageLens = { dlg: dlg, bar: bar, actions: actions, body: body, frame: null,
+      blockId: null, section: null, card: null, opener: null, open: false };
+    wireStageLensChrome();
+    return stageLens;
+  }
+
+  /** Mount 'section''s stage in the lens. 'opener' is the control that asked for
+   * it, kept so criterion 12 can hand focus back to it -- passed in rather than
+   * read off document.activeElement, since whether a click focuses a button at
+   * all is browser-dependent (Safari does not) and the answer must not be. */
+  function stageLensOpen(section, blockId, opener) {
+    var inline = section.querySelector('iframe.html-stage');
+    if (!inline || !inline.getAttribute) return;
+    var srcdoc = inline.getAttribute('srcdoc');
+    var sandbox = inline.getAttribute('sandbox');
+    // Fail closed on both: with no srcdoc there is nothing to show, and with no
+    // sandbox attribute the copy would be a same-origin frame running
+    // agent-authored script -- see this section's design comment.
+    if (srcdoc == null || !sandbox) return;
+    var l = buildStageLens();
+    if (l.open) return; // already open: refuse rather than re-enter (lensOpen's own reasoning)
+    var frame = document.createElement('iframe');
+    frame.className = 'stage-lens-frame';
+    // Named for a screen reader the same way the inline stage is named by its
+    // block kicker; an unlabelled frame is announced as "frame" and nothing else.
+    frame.setAttribute('title', 'Expanded stage');
+    frame.setAttribute('sandbox', sandbox);
+    frame.setAttribute('srcdoc', srcdoc);
+    l.body.innerHTML = '';
+    l.body.appendChild(frame);
+    l.frame = frame;
+    l.blockId = blockId;
+    l.section = section;
+    l.opener = opener || null;
+    l.open = true;
+    stageLensPick(section);
+    if (l.dlg.showModal) l.dlg.showModal();
+    else l.dlg.setAttribute('open', ''); // no <dialog> support (this repo's DOM stand-in)
+  }
+
+  /** Criteria 6, 7 and 8: the control that picks the option this lens was opened
+   * from. Built per open and dropped on teardown -- never once, at build time --
+   * because WHICH option it names is a fact about this open, and criterion 6's
+   * "a lens opened from a standalone stage carries no such control" is the case
+   * where the answer is "none at all".
+   *
+   * WHY THE BAR IS THE SECURITY PROPERTY, not a layout preference (criterion 7,
+   * and the terms ADR 22 was accepted on). The control is an ordinary <button> in
+   * the PARENT document, a flex sibling of the '.stage-lens-body' that holds the
+   * frame -- never inside the frame, never overlapping it. Four attacks and what
+   * actually stops each, all four mechanisms structural rather than guarded:
+   *
+   *   - PRESSING IT. A click inside a cross-origin frame is delivered in that
+   *     frame's own document and does not cross the boundary; the stage's script
+   *     can dispatch all the clicks it likes on its own elements and none of them
+   *     is this button. There is no synthesized-click path either, because:
+   *   - REACHING IT THROUGH THE DOM. 'sandbox="allow-scripts"' with no
+   *     'allow-same-origin' gives the frame an opaque origin, so
+   *     'window.parent.document' is unreachable from inside it -- the property
+   *     test/check-stage-isolation.mjs exists to pin (2026-07-29 audit, S1).
+   *   - FORGING A MESSAGE. There is no message type on the stage channel that
+   *     records a pick (stageAgentScript's "NO 'select' MESSAGE, DELIBERATELY"),
+   *     and this lens's frame is not even in the '.html-stage' walk the listener
+   *     identifies senders with, so nothing it posts is dispatched at all.
+   *   - COVERING IT. A frame paints only inside its own box, and nothing in the
+   *     lens's own CSS takes the body or the frame out of flow (no position,
+   *     no z-index -- src/styles.mjs), so the stage has no way to draw over the
+   *     bar.
+   *
+   * What remains, and is accepted rather than solved (ADR 22's Consequences): a
+   * mock can draw CONVINCING FAKE CHROME inside its own box. Pressing that does
+   * nothing -- which is the point -- but nothing here can stop it being drawn.
+   * The real control's fixed home in the bar, above and outside the frame, is the
+   * whole of the mitigation.
+   *
+   * The label is agent-authored board content and lands via 'textContent': no
+   * parse, so no markup in a label can ever become an element in this document.
+   *
+   * THREE STATES WHERE A PICK IS REFUSED, and what this control does in each --
+   * every one of them is 'selectVariant''s own guard, mirrored into the chrome so
+   * the control never reads as live while being inert:
+   *   - readonly (a standalone file: archive): no control at all. There is no
+   *     answer to record in an archive -- the send bar is gone and every input is
+   *     hard-disabled -- and the diagram lens already sets this precedent by
+   *     hosting no comment form there. The archive's stage lens is a viewer.
+   *   - a historical round ('aria-disabled' on the card): rendered, disabled. The
+   *     card behaves the same way -- visible, still showing which option won,
+   *     refusing to change it -- and a control that is present-but-unavailable
+   *     says that, where an absent one would read as a missing feature.
+   *   - comment mode on: rendered, disabled, for the same reason the card itself
+   *     stands down in comment mode (every widget handler does). Decided once, at
+   *     open: a modal dialog makes the rest of the page inert, so the toggle
+   *     cannot be reached while the lens is up and the state cannot change under
+   *     it. */
+  function stageLensPick(section) {
+    var l = stageLens;
+    l.actions.innerHTML = '';
+    l.card = null;
+    var card = section.closest ? section.closest('.choice-variant') : null;
+    if (!card || readonly) return;
+    l.card = card;
+    var pick = document.createElement('button');
+    pick.type = 'button';
+    // '.lens-btn' for the bar's own chrome, '.lens-pick' as the accent that
+    // makes the one control that RECORDS something look unlike the one that
+    // merely closes (src/styles.mjs).
+    pick.className = 'lens-btn lens-pick';
+    pick.textContent = 'Pick ' + (card.getAttribute('data-choice') || 'this option');
+    if (commentMode || card.getAttribute('aria-disabled') === 'true') pick.disabled = true;
+    pick.addEventListener('click', function () {
+      // The stand-in does not model a browser refusing to fire a click on a
+      // disabled button (test/check-archive.mjs's own note on that), and this
+      // handler must not be the one place that difference matters -- so the
+      // disabled state is re-read here rather than trusted to the platform.
+      if (pick.disabled) return;
+      // Criterion 8, "in one act": record through the ONE path that records
+      // every other pick, then close. selectVariant re-applies all three guards
+      // above on its own -- this control is a caller, never an authority -- so
+      // a pick that it refuses records nothing and simply closes the lens.
+      if (l.card) selectVariant(l.card);
+      stageLensClose();
+    });
+    l.actions.appendChild(pick);
+  }
+
+  /** Undo everything stageLensOpen did, and hand focus back to the control that
+   * opened it (criterion 12). Idempotent for exactly the reason lensTeardown is:
+   * it is reached from this page's own Esc/backdrop handling AND from the
+   * dialog's native 'close' event, which lands on a later task. Dropping the
+   * frame is what ends the copy's browsing context -- the mock's script, timers
+   * and all -- so a closed lens is not a hidden one still running. */
+  function stageLensTeardown() {
+    if (!stageLens || !stageLens.open) return;
+    stageLens.open = false;
+    stageLens.dlg.removeAttribute('open');
+    stageLens.body.innerHTML = '';
+    // The pick control named ONE option, and its listener holds that card. The
+    // next open clears this slot again before filling it (stageLensPick), so
+    // criterion 6 does not rest on this line alone -- what it adds is that a
+    // CLOSED lens holds neither a control nor a reference to a card an SSE
+    // re-render may already have replaced.
+    stageLens.actions.innerHTML = '';
+    stageLens.card = null;
+    stageLens.frame = null;
+    stageLens.blockId = null;
+    stageLens.section = null;
+    var opener = stageLens.opener;
+    stageLens.opener = null;
+    if (opener && opener.focus) opener.focus();
+  }
+
+  function stageLensClose() {
+    if (!stageLens || !stageLens.open) return;
+    // close() first, teardown second -- removing the 'open' attribute by hand
+    // hides a modal dialog without taking it out of the top layer, leaving the
+    // page inert behind an invisible sheet (lensClose's own comment).
+    if (stageLens.dlg.close) stageLens.dlg.close();
+    stageLensTeardown();
+  }
+
+  function wireStageLensChrome() {
+    var l = stageLens;
+    l.dlg.addEventListener('close', function () { stageLensTeardown(); });
+    qsa('.lens-btn', l.bar).forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (b.getAttribute('data-lens') === 'close') stageLensClose();
+      });
+    });
+    // Criterion 12, Esc. A real browser closes a modal <dialog> on Esc by itself
+    // and tells us afterwards through 'close' -- but only when the key event
+    // lands in THIS document, and this lens is the one page surface that can hold
+    // focus inside a cross-origin frame, where the parent sees no key event at
+    // all. Handling it here as well is therefore not belt-and-braces, and it is
+    // also the only version of this that any check without a browser can drive
+    // (the DOM stand-in has no dialog semantics whatsoever). Registered on
+    // 'document' rather than on the dialog so a press with focus anywhere in the
+    // parent document counts; harmless when the lens is shut, since every path
+    // out of here is guarded on 'open'.
+    document.addEventListener('keydown', function (ev) {
+      if (!stageLens || !stageLens.open) return;
+      if (ev.key !== 'Escape' && ev.key !== 'Esc') return;
+      stageLensClose();
+    });
+    // Criterion 12, backdrop. Two targets, because "the backdrop" is two
+    // different elements depending on how the dialog ends up sized: the dialog
+    // itself is what a real browser reports for a click on the ::backdrop area,
+    // and the padded surround around the frame is what a reviewer actually aims
+    // at while the dialog fills the viewport. Anything else -- the bar, its
+    // controls, the frame -- keeps its own meaning, and a click INSIDE the stage
+    // never reaches this document at all (it belongs to the frame's own).
+    l.dlg.addEventListener('click', function (ev) {
+      if (!stageLens.open) return;
+      if (ev.target !== l.dlg && ev.target !== l.body) return;
+      stageLensClose();
+    });
+  }
+
+  /** Criterion 3, binding half: the control itself is server-rendered
+   * (src/render.mjs's expandButton) so a standalone file: archive carries it in
+   * its own bytes, and src/ui.mjs's readonly pass skips it by class -- both
+   * reasons hold for a stage exactly as they do for a diagram. Guarded against a
+   * second binding the same way wireDiagramExpand is: wireRoot re-runs on every
+   * SSE push, over roots that may already have been wired. */
+  function wireStageExpand(section) {
+    var btn = section.querySelector('.expand-btn');
+    if (!btn || btn.__cbExpandWired) return;
+    btn.__cbExpandWired = true;
+    btn.addEventListener('click', function (ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      stageLensOpen(section, section.getAttribute('data-block-id'), btn);
+    });
+  }
+
   /** Re-render (and reposition) every pin layer under 'root' from the current
    * commentsWithPending(). Repositioning ONLY -- it must never re-run the
    * click-listener wiring (that stays one-time per stage document, since the
@@ -2079,6 +2443,40 @@ export const ui = `
     openCommentForm(blockId, 'dom', anchor.ref, buildHint(root, el), '', findPendingCommentForAnchor(pendingComments, blockId, anchor));
   });
 
+  /** Select 'card''s option, deselecting every sibling under the same question.
+   * 'aria-disabled' is this div's equivalent of a real <button>'s 'disabled'
+   * attribute (src/render.mjs sets it once the block's round is historical) --
+   * there is no native disabled state for a plain div to enforce on its own,
+   * so every entry point checks for it here rather than relying on the
+   * browser to refuse the click/keydown the way it would for an actual
+   * disabled button.
+   *
+   * Declared HERE, at the client script's outer scope, rather than beside the
+   * '.choice-variant' wiring loop inside wireRoot where it reads like it
+   * belongs -- SPEC_STAGES criterion 8's lens pick control is a second caller,
+   * and it is built from stageLensOpen, which wireRoot's locals are invisible
+   * from. QUIRKS.md ("A function declared inside wireRoot is invisible from a
+   * page-scoped listener, and the failure is silent") records the last time
+   * this exact helper was on the wrong side of that line: the call threw a
+   * ReferenceError that unwound into a postMessage try/catch several frames
+   * away and vanished, with the plain-click path still working perfectly. Its
+   * closing line -- "the next feature that shares a helper between wireRoot
+   * and a page-scoped listener will [demonstrate it]" -- is this feature.
+   *
+   * There is still exactly ONE path that records a variant pick. The lens's
+   * control calls this function; it does not maintain a second notion of what
+   * is selected, and every guard above applies to it identically. */
+  function selectVariant(card) {
+    if (readonly || commentMode || card.getAttribute('aria-disabled') === 'true') return;
+    var qid = card.getAttribute('data-question-id');
+    var choice = card.getAttribute('data-choice');
+    selections[qid] = choice;
+    touched[qid] = true;
+    qsa('.choice-variant[data-question-id="' + qid + '"]').forEach(function (c) {
+      c.classList.toggle('selected', c === card);
+    });
+  }
+
   // --- wiring, factored so it can run once at hydrate (root = document) and again
   // on just a freshly-inserted subtree after an SSE push (see applyRoundPush below)
   // -- an already-wired, already-filled-in element is never touched twice. ---------
@@ -2145,24 +2543,6 @@ export const ui = `
   // a '.choice-variant' card (src/styles.mjs), so a real click over the mock
   // can never reach the iframe at all -- it lands on THIS card, in the parent
   // document, exactly like a click on the option's label already does.
-
-  /** Select 'card''s option, deselecting every sibling under the same question.
-   * 'aria-disabled' is this div's equivalent of a real <button>'s 'disabled'
-   * attribute (src/render.mjs sets it once the block's round is historical) --
-   * there is no native disabled state for a plain div to enforce on its own,
-   * so every entry point checks for it here rather than relying on the
-   * browser to refuse the click/keydown the way it would for an actual
-   * disabled button. */
-  function selectVariant(card) {
-    if (readonly || commentMode || card.getAttribute('aria-disabled') === 'true') return;
-    var qid = card.getAttribute('data-question-id');
-    var choice = card.getAttribute('data-choice');
-    selections[qid] = choice;
-    touched[qid] = true;
-    qsa('.choice-variant[data-question-id="' + qid + '"]').forEach(function (c) {
-      c.classList.toggle('selected', c === card);
-    });
-  }
 
   qsa('.choice-variant', root).forEach(function (card) {
     var qid = card.getAttribute('data-question-id');
@@ -2410,6 +2790,12 @@ export const ui = `
   // no anchoring-specific step here at all; wireMermaidBlock below still does,
   // since a mermaid diagram renders into THIS document and has no navigation
   // event of its own to announce readiness with.
+
+  // Criterion 3 (SPEC_STAGES): bind the expand control on every html stage under
+  // this root. Unlike the anchoring wiring above there IS something to do here --
+  // the control lives in the block's kicker, in THIS document, so it needs no
+  // message from the stage to become bindable.
+  qsa('.html-block', root).forEach(function (section) { wireStageExpand(section); });
 
   // Page-scoped dom pins (ticket 03): same-document content needs no 'load' event
   // to wait on, so this runs synchronously, right here, for whatever root wireRoot

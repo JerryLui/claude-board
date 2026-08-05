@@ -36,7 +36,8 @@ import assert from 'node:assert/strict';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, CSP } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { styles } from '../src/styles.mjs';
+import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -497,6 +498,65 @@ check('criterion 2: a stage cannot pick its own option -- a "select"-shaped mess
     'a stage must never be able to select its own option -- the agent would be handing itself the answer to its own question');
 });
 
+check('SPEC_STAGES.md criteria 10/11: a forged "height" message from a live, correctly-addressed stage is clamped at the cap, never applied as reported, and a malformed one is silently ignored', () => {
+  const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
+  const document = loadBoard(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  // The real stageAgentScript already reports once here, over the real
+  // channel -- this mock declares no data-standin-scroll-height, so the
+  // stand-in reports its (undeclared) scrollHeight as 0 and the parent's own
+  // shape check (data.height <= 0) drops it, leaving frame.style.height unset.
+  // That is the baseline every assertion below moves from.
+  frame.loadSrcdoc();
+  assert.ok(!frame.style.height, 'setup failure: the real, unrelated initial report should not have set a height');
+
+  function forgeHeight(fields) {
+    document.defaultView.dispatchEvent({
+      type: 'message',
+      data: { cb: 'cb-stage', type: 'height', ...fields },
+      origin: 'null',
+      source: frame.contentWindow,
+    });
+  }
+
+  // A hostile, oversized report -- exactly what the stage's own script could
+  // post directly (this file's header comment: 'cb: cb-stage' is a fixed,
+  // public string, and origin/identity both pass BY CONSTRUCTION for a
+  // message a stage forges about itself). Unclamped, a single option's card
+  // could grow without limit and push every other option -- and the board's
+  // own chrome -- off screen. Ablation: change handleStageHeight's
+  // 'Math.min(data.height, STAGE_HEIGHT_CAP)' to just 'data.height' and this
+  // fails.
+  forgeHeight({ height: 999999 });
+  assert.equal(frame.style.height, '600px', 'a hostile oversized height report must be clamped at the cap, never applied as reported');
+
+  // Every shape a hostile or malformed report could take -- none may move the
+  // frame off the clamped baseline the line above just set. Same discipline
+  // as this file's own 'hostilePayloads' table further up. Ablation: loosen
+  // handleStageHeight's guard from '!Number.isFinite(data.height) ||
+  // data.height <= 0' to just '!data.height' and the zero/NaN/Infinity cases
+  // below still pass, but weakening it further (e.g. dropping the sign check
+  // entirely) makes the negative case fail.
+  const hostile = [
+    { height: -600 },       // negative
+    { height: 0 },          // zero -- rejected, not "shrink to nothing"
+    { height: Infinity },   // not finite
+    { height: NaN },        // not finite
+    { height: '600' },      // string, even one that would coerce usefully
+    {},                     // no height field at all
+  ];
+  for (const fields of hostile) {
+    forgeHeight(fields);
+    assert.equal(frame.style.height, '600px', `a malformed height report must be ignored, not applied: ${JSON.stringify(fields)}`);
+  }
+
+  // Sanity: a genuine, well-formed report still applies right after a batch
+  // of hostile ones was correctly ignored -- the validation is a filter, not
+  // a latch that got stuck rejecting everything once it saw something hostile.
+  forgeHeight({ height: 210 });
+  assert.equal(frame.style.height, '210px', 'a genuine height report must still apply after a batch of hostile ones was ignored');
+});
+
 // Merge guard, not a criterion: `main` grew a document-level Cmd+Enter board
 // traversal (test/check-enter.mjs) after this branch forked, and this widget's
 // cards are the only new element on the branch with their own Enter handler.
@@ -577,6 +637,325 @@ check('criterion 2: the existing element-level comment-anchor gesture into an ht
   const form = document.getElementById('comment-form-' + blockId);
   assert.equal(form.classList.contains('open'), true, 'the pre-existing comment-anchor gesture must still work unchanged');
   assert.equal(card.classList.contains('selected'), false, 'and must never also pick the option');
+});
+
+// =================================================================================
+// 5. The lens mounts a SECOND copy of a stage (SPEC_STAGES criteria 3 and 4), and
+//    everything above has to hold for that copy too.
+//
+//    The lens exists because a variant option's stage is inert in its card by
+//    design and a reviewer still has to be able to use the mock. It gets that by
+//    mounting the same srcdoc a second time inside a <dialog>, where no
+//    'pointer-events: none' rule reaches it -- so this section asks the two
+//    questions that mount raises: is the copy sandboxed exactly like the original
+//    (a lens frame that gained 'allow-same-origin' would re-open S1 wholesale, at
+//    the click of a control that is on EVERY stage), and does the copy have any
+//    reach into the parent that the original does not.
+//
+//    The behavioural checks in test/check-stage-lens.mjs cover the rest of the
+//    lens; these are the adversarial ones.
+// =================================================================================
+
+/** Render a one-stage board, run the client script, and open the lens on it. */
+function openLensOn(mockHtml) {
+  const board = createBoard({ title: 'isolation: the stage lens', blocks: [{ kind: 'html', html: mockHtml }] });
+  const document = loadBoard(renderBoardPage(board));
+  const inline = document.querySelector('.html-stage');
+  document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
+  return { board, blockId: board.blocks[0].id, document, inline, lens: document.querySelector('.stage-lens-frame') };
+}
+
+check('S1: the lens frame is sandboxed identically to the inline stage -- same attribute, and still no allow-same-origin', () => {
+  const { inline, lens } = openLensOn('<div class="mock"><button>Send</button></div>');
+  assert.ok(lens, 'setup failure: the expand control did not mount a lens frame');
+  const sandbox = lens.getAttribute('sandbox');
+  assert.equal(sandbox, inline.getAttribute('sandbox'),
+    'the lens frame\'s sandbox must be byte-identical to the inline stage\'s -- it is copied off that frame, never re-spelled');
+  assert.ok(!String(sandbox).includes('allow-same-origin'),
+    `the lens frame must never carry allow-same-origin, got ${JSON.stringify(sandbox)}`);
+  assert.ok(String(sandbox).includes('allow-scripts'),
+    'and must still run script, or the mock in the lens is a picture rather than a stage');
+});
+
+check('S1: with no sandbox attribute to copy, the lens refuses to open at all rather than mounting an unsandboxed copy', () => {
+  // Fail closed. The attribute is copied off a live element, so this asks what
+  // happens if that element ever stops carrying one -- a future edit to
+  // renderHtmlBlock, or anything in the document that strips it. Mounting
+  // agent-authored srcdoc with no sandbox at all is same-origin script execution
+  // in the daemon's own origin, i.e. S1 with the fix removed; opening nothing is
+  // a visibly broken control, which is the direction to fail in.
+  const board = createBoard({
+    title: 'isolation: the lens fails closed',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+  });
+  const document = loadBoard(renderBoardPage(board));
+  document.querySelector('.html-stage').removeAttribute('sandbox');
+  document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.querySelectorAll('.stage-lens').length, 0,
+    'the lens must not even be built when there is no sandbox attribute to copy onto its frame');
+});
+
+check('S1: a forged message from the LENS frame is inert -- the copy is not one of the page\'s wired stages, and never becomes one', () => {
+  // The identity check src/ui.mjs performs is "is event.source the contentWindow
+  // of a currently-mounted .html-stage" (findStageFrame). The lens frame is
+  // deliberately not one: it carries .stage-lens-frame and nothing else, so it is
+  // outside that walk by construction rather than by a guard someone has to
+  // remember. This forges the exact message a stage's own script can always send
+  // (cb: 'cb-stage' is a fixed public string -- QUIRKS.md "A stage-posted message
+  // is agent-authored input"), from a REAL, live, correctly-addressed lens frame.
+  const { document, blockId, inline, lens } = openLensOn('<div class="mock"><button>Send</button></div>');
+  enableCommentMode(document);
+  inline.loadSrcdoc();
+  lens.loadSrcdoc();
+  const form = document.getElementById('comment-form-' + blockId);
+  const payload = { cb: 'cb-stage', type: 'click', ref: '1.1', tag: 'BUTTON', text: 'Send' };
+
+  // Asserted separately from the message below, and measured rather than
+  // assumed: giving the lens frame the '.html-stage' class as well leaves the
+  // message assertion GREEN, because the listener's next step (closest
+  // '.html-block', which a frame inside the dialog does not have) drops it too.
+  // Two guards that stop the same demo -- QUIRKS.md's own warning -- so the one
+  // this check is named for gets its own assertion rather than riding on the
+  // other's coattails.
+  assert.equal(document.querySelectorAll('.html-stage').length, 1,
+    'the lens frame must not join qsa(\'.html-stage\') -- that walk\'s whole premise is that each frame it finds is one block\'s inline stage');
+
+  document.defaultView.dispatchEvent({ type: 'message', data: payload, origin: 'null', source: lens.contentWindow });
+  assert.equal(form.classList.contains('open'), false,
+    'a message from the lens frame must be dropped at the identity check, even with the opaque origin and a well-formed payload');
+
+  // The same payload from the INLINE stage does open the form -- so the check
+  // above proves the SENDER was rejected, not that the message was malformed.
+  document.defaultView.dispatchEvent({ type: 'message', data: payload, origin: 'null', source: inline.contentWindow });
+  assert.equal(form.classList.contains('open'), true,
+    'setup failure: the same payload from the block\'s own stage must still be accepted');
+});
+
+check('S1: a real click inside the lens frame\'s own document is inert too -- the copy is never told comment mode is on, so its agent has no gesture to report', () => {
+  const { document, blockId, inline, lens } = openLensOn('<div class="mock"><button>Send</button></div>');
+  enableCommentMode(document);
+  inline.loadSrcdoc();
+  lens.loadSrcdoc();
+  const form = document.getElementById('comment-form-' + blockId);
+
+  // The lens frame's agent announced 'ready' when its script ran; the parent
+  // dropped it (not a .html-stage), so no 'mode' message ever came back and the
+  // agent's own `if (!commentMode) return` gate keeps it silent. Two independent
+  // reasons the same click is inert, which is the point: the mount is a viewer.
+  lens.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  assert.equal(form.classList.contains('open'), false, 'a click inside the lens copy must not mint an anchor');
+
+  // ... while the same click in the inline stage still does.
+  inline.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  assert.equal(form.classList.contains('open'), true, 'setup failure: the inline stage\'s own gesture must be unaffected');
+});
+
+// =================================================================================
+// 5b. The lens's PICK CONTROL (SPEC_STAGES criteria 5, 6 and 7).
+//
+//     ADR.md 22: the recommendation was a view-only lens and the decision went the
+//     other way, so this is the one place in the product where a control that
+//     records an answer shares a screen with agent-authored content that is, in
+//     the lens, live and scriptable. Criteria 7 and 8 are the terms that overrule
+//     was accepted on, and criterion 7 is the adversarial one -- so these checks
+//     are attacks, not descriptions, and each names the MECHANISM that defeats it
+//     rather than asserting the outcome and stopping there.
+//
+//     The stage's own reach is unchanged by any of this: it is still inert inside
+//     its card (criterion 9, above), still has no message that records a pick, and
+//     in the lens it gains pointer input over its OWN document and nothing else.
+// =================================================================================
+
+/** A variants board with two html options and a standalone stage below them, run
+ * through the real client script. One document, so "a variant lens has a pick
+ * control, a standalone lens has none" can be asked of the SAME reused dialog --
+ * which is also what pins the teardown that empties it. */
+function pickBoard(mocks = ['<div class="mock"><button>A</button></div>', '<div class="mock"><button>B</button></div>'], labels = ['Card A', 'Card B']) {
+  const board = createBoard({
+    title: 'isolation: the lens pick control',
+    blocks: [
+      {
+        kind: 'question', prompt: 'Which mockup?', widget: 'choose-between-rendered-variants',
+        options: mocks.map((html, i) => ({ label: labels[i], block: { kind: 'html', html } })),
+      },
+      { kind: 'html', html: '<div class="mock"><p>standalone</p></div>' },
+    ],
+  });
+  return board;
+}
+
+function expandOn(section) {
+  const btn = section.querySelector('.expand-btn');
+  assert.ok(btn, 'setup failure: no expand control on that stage');
+  btn.dispatchEvent(new StandInEvent('click'));
+  return btn;
+}
+
+function lensPick(document) { return document.querySelector('.stage-lens .lens-pick'); }
+
+check('criterion 5: activating the expand control on a variant option opens the lens and does not select that option', () => {
+  // INHERITED, not newly built: the card's own click handler already stands
+  // down for a click landing on any nested <button> ("a click landing on
+  // interactive chrome nested inside this option's OWN rendered block keeps its
+  // own meaning", src/ui.mjs), and the expand control is a <button>. It still
+  // needs its own check, because nothing else in the suite would notice if that
+  // exclusion list lost 'button' -- the comment button beside it would silently
+  // start recording picks too. Ablation: drop 'button, ' from that closest(...)
+  // list and this fails.
+  const board = pickBoard();
+  const document = loadBoard(renderBoardPage(board));
+  const cards = document.querySelectorAll('.choice-variant');
+  expandOn(cards[0]);
+
+  assert.equal(document.querySelector('.stage-lens').hasAttribute('open'), true, 'setup failure: the expand control did not open the lens');
+  assert.equal(cards[0].classList.contains('selected'), false,
+    'opening a variant option in the lens must not pick it -- looking at a mock full size is not choosing it');
+  assert.equal(cards[1].classList.contains('selected'), false, 'and must not pick any other option either');
+});
+
+check('criterion 6: a lens opened from a variant option carries a pick control naming that option; one opened from a standalone stage carries none', () => {
+  const board = pickBoard();
+  const standaloneId = board.blocks[1].id;
+  const document = loadBoard(renderBoardPage(board));
+  const cards = document.querySelectorAll('.choice-variant');
+
+  expandOn(cards[1]);
+  const pick = lensPick(document);
+  assert.ok(pick, 'a lens opened from a variant option must carry a pick control');
+  assert.match(pick.textContent, /Card B/, `the control must name the option it will pick, got ${JSON.stringify(pick.textContent)}`);
+  assert.ok(!pick.textContent.includes('Card A'), 'and must not name any other option');
+  assert.equal(pick.disabled, false, 'and must be live on a current round outside comment mode');
+
+  // Same dialog, reused: the standalone open must not inherit the control the
+  // variant open left behind. This is the case a lens built once and filled per
+  // open gets wrong if teardown forgets to empty the slot.
+  document.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
+  const standalone = document.querySelector(`.html-block[data-block-id="${standaloneId}"]`);
+  assert.ok(standalone, 'setup failure: no standalone html block rendered');
+  expandOn(standalone);
+  assert.equal(document.querySelector('.stage-lens').hasAttribute('open'), true, 'setup failure: the standalone lens did not open');
+  assert.equal(lensPick(document), null,
+    'a lens opened from a standalone stage must carry no pick control -- there is no option to pick');
+});
+
+check('criterion 7: the pick control is page chrome in the PARENT document, outside the framed stage, and the stage has no way to cover it', () => {
+  const board = pickBoard();
+  const document = loadBoard(renderBoardPage(board));
+  expandOn(document.querySelectorAll('.choice-variant')[0]);
+  const pick = lensPick(document);
+  const frame = document.querySelector('.stage-lens-frame');
+  const body = document.querySelector('.stage-lens-body');
+
+  // Placement, structurally: in the bar, and NOT inside the element that holds
+  // the frame. A control rendered inside the frame would be inside a document
+  // the agent wrote; one inside the body could be overlapped by a taller stage.
+  assert.ok(pick.closest('.lens-bar'), 'the pick control must live in the lens bar');
+  assert.equal(pick.closest('.stage-lens-body'), null, 'never inside the element that frames the stage');
+  assert.equal(pick.closest('.stage-lens-frame'), null, 'and never inside the frame itself');
+  assert.equal(frame.closest('.lens-bar'), null, 'and the frame must not be inside the bar either');
+  assert.notEqual(document.querySelector('.stage-lens .lens-bar'), null, 'setup failure: no bar');
+
+  // Occlusion, against the REAL stylesheet (test/dom-stand-in.mjs's cascade
+  // resolver): the only way flow content could end up drawn over the bar is by
+  // leaving normal flow. Neither the body nor the frame is positioned or given
+  // a stacking context, and the stage -- a cross-origin iframe -- paints only
+  // inside its own box, so "outside the frame" is structural rather than a
+  // z-order that could be lost. Ablation: give .stage-lens-frame
+  // 'position: absolute' and this fails.
+  for (const [name, el] of [['.stage-lens-body', body], ['.stage-lens-frame', frame]]) {
+    assert.equal(resolveComputedProperty(styles, el, true, 'position'), '',
+      `${name} must stay in normal flow -- positioning it is how the stage would get a chance to cover the pick control`);
+    assert.equal(resolveComputedProperty(styles, el, true, 'z-index'), '',
+      `${name} must not open a stacking context of its own`);
+  }
+});
+
+check('criterion 7: an option label is agent-authored content and reaches the control as TEXT -- markup in a label can never become an element in this document', () => {
+  // Board content is arbitrary agent-supplied text (src/markdown.mjs's
+  // threat-model comment). The control sets it via textContent, so nothing is
+  // parsed; this is the same property escHtml gives the card's own label, by a
+  // different mechanism, and it needs its own check because this one is built at
+  // runtime rather than rendered server-side.
+  const label = '<img src=x onerror="window.__pwned = true"></button><b>Card A</b>';
+  const board = pickBoard(['<div class="mock"><button>A</button></div>'], [label]);
+  const document = loadBoard(renderBoardPage(board));
+  expandOn(document.querySelector('.choice-variant'));
+  const pick = lensPick(document);
+
+  assert.ok(pick.textContent.includes(label), 'the label must reach the control verbatim, as its text');
+  assert.deepEqual(pick.childNodes.filter(n => n.nodeType === 1), [],
+    'and must produce no elements at all inside the control -- a parsed label is a script injection');
+  assert.equal(globalThis.__pwned, undefined, 'nothing in a label may ever execute');
+});
+
+check('criterion 7 (adversarial): a hostile mock in the lens cannot reach, press or forge its way to the pick control -- only draw a fake one inside its own box', () => {
+  // Every attempt a mock can actually make, made for real from inside the lens
+  // frame's live document, with what stops each named on the assertion.
+  const hostile = '<div class="mock"><button id="fake">Pick Card A</button></div><script>'
+    + 'window.__report = { sawParentDocument: false, clickedRealPick: false, reachedTop: false };'
+    + 'try { if (typeof window.parent.document !== "undefined") window.__report.sawParentDocument = true; } catch (e) {}'
+    + 'try { window.parent.document.querySelector(".lens-pick").click(); window.__report.clickedRealPick = true; } catch (e) {}'
+    + 'try { if (window.top && window.top.document) window.__report.reachedTop = true; } catch (e) {}'
+    // The two message shapes a pick could plausibly travel on. Both are forged
+    // from a real, live frame with the opaque origin the parent requires -- the
+    // only thing that stops them is that no such handler exists at all.
+    + 'try { window.parent.postMessage({ cb: "cb-stage", type: "pick", choice: "Card A" }, "*"); } catch (e) {}'
+    + 'try { window.parent.postMessage({ cb: "cb-stage", type: "select", choice: "Card A" }, "*"); } catch (e) {}'
+    + '</script>';
+  const board = pickBoard([hostile, '<div class="mock"><button>B</button></div>']);
+  const document = loadBoard(renderBoardPage(board));
+  const cards = document.querySelectorAll('.choice-variant');
+  expandOn(cards[0]);
+  const frame = document.querySelector('.stage-lens-frame');
+  frame.loadSrcdoc(); // runs the hostile script inside the lens copy, for real
+
+  const report = frame.contentWindow.__report;
+  assert.ok(report, 'setup failure: the hostile script never ran -- fix the fixture, not the claim');
+  assert.equal(report.sawParentDocument, false,
+    'sandbox="allow-scripts" with no allow-same-origin gives the frame an opaque origin: window.parent.document is unreachable, so the control cannot be found');
+  assert.equal(report.clickedRealPick, false, 'and therefore cannot be clicked through the DOM either');
+  assert.equal(report.reachedTop, false, 'nor reached around through window.top');
+  assert.equal(cards[0].classList.contains('selected'), false,
+    'and neither forged message records a pick: there is no message type on this channel that selects an option');
+
+  // Its own live pointer input, which in the lens it genuinely has (criterion 4)
+  // -- on its own fake chrome, which is all a click inside a frame can ever
+  // reach. This is ADR 22's accepted residual risk: the fake button can be
+  // DRAWN, and pressing it does nothing.
+  frame.contentDocument.getElementById('fake').dispatchEvent(new StandInEvent('click'));
+  assert.equal(cards[0].classList.contains('selected'), false,
+    'a click on the mock\'s own fake chrome must record nothing -- a click inside a frame is delivered in that frame\'s document and does not cross the boundary');
+  assert.equal(cards[1].classList.contains('selected'), false, 'and must not pick any other option either');
+
+  // The real control is still exactly where it was, and still works -- the
+  // attacks are refused, not answered by disabling the feature.
+  const pick = lensPick(document);
+  assert.ok(pick, 'the real control must still be there after all of that');
+  pick.dispatchEvent(new StandInEvent('click'));
+  assert.equal(cards[0].classList.contains('selected'), true, 'and a real press on it must still record the pick');
+});
+
+check('criterion 7 (adversarial): a forged pick-shaped message from the INLINE stage records nothing either -- the channel has no handler for one, wherever it comes from', () => {
+  // The lens copy is not in the '.html-stage' walk at all (section 5 above), so
+  // the harder version of this attack is the message coming from the frame the
+  // parent DOES recognise: correct opaque origin, correct live source, a block
+  // this page really rendered.
+  const board = pickBoard();
+  const document = loadBoard(renderBoardPage(board));
+  const cards = document.querySelectorAll('.choice-variant');
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+
+  for (const data of [
+    { cb: 'cb-stage', type: 'pick', choice: 'Card A' },
+    { cb: 'cb-stage', type: 'select', choice: 'Card A' },
+    { cb: 'cb-stage', type: 'pick', card: 0 },
+    { cb: 'cb-stage', type: 'click', ref: '1.1', pick: true },
+  ]) {
+    document.defaultView.dispatchEvent({ type: 'message', data, origin: 'null', source: frame.contentWindow });
+    assert.equal(cards[0].classList.contains('selected'), false,
+      `no message a stage can send may ever record a pick: ${JSON.stringify(data)}`);
+  }
 });
 
 if (failures) {

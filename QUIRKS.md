@@ -12,9 +12,11 @@ test failure, not dead code. Attribute selectors (`[data-status="answered"]`) ar
 not scanned, which is the escape hatch when a state has no class.
 
 Several rules are asserted by their exact text, not their effect —
-`.readonly-banner { display: none;`, `body.readonly .send-bar { display: none; }`
-and `body.readonly .stage-hint { … display: none`. Keep each of those on one line
-and keep the wording; reformatting them breaks the checks.
+`.readonly-banner { display: none;` and `body.readonly .send-bar { display: none; }`.
+Keep each of those on one line and keep the wording; reformatting them breaks the
+checks. (`.stage-hint` used to be a third example here — ADR.md 21 deleted the rule
+outright, so the check on it inverted to an absence check instead: see "no kicker
+carries a hint" in `test/check-pure.mjs`.)
 
 Asserting a rule by its text is itself a trap, and the mermaid rules are why: they
 used to be asserted as the literal string `g[id^="flowchart-"]`, which matched the
@@ -1147,3 +1149,75 @@ Quote identifiers with plain single quotes in comments inside these two literals
 exactly as mintable as '## Board data'"). Backticks are fine everywhere *outside* the
 literal (the file-header comments above `export const ui = ` / `export const styles = `)
 and inside real `${...}` interpolations.
+## `cloneNode` in the stand-in never hands back an `IframeElement`
+
+`test/dom-stand-in.mjs`'s `Element.cloneNode` builds `new Element(this.tag)` — attributes and
+children are copied faithfully, the CLASS is not. So a clone of an `<iframe>` is a plain
+`Element`: no `contentDocument`, no `contentWindow`, no `loadSrcdoc()`, and therefore nothing
+a check can run the stage-side agent script inside or forge a message from.
+`document.createElement('iframe')` does give you a real `IframeElement`
+(`StandInDocument.createElement` special-cases the tag), so page code that mints a frame at
+runtime should build it with `createElement` plus explicit `setAttribute` rather than
+`cloneNode(false)` of an existing one. Not a correctness difference in a browser — both
+produce the same element — but it decides whether the result is testable here at all: the
+html-stage lens (`src/ui.mjs`'s `stageLensOpen`) mounts its copy that way, which is what lets
+`test/check-stage-isolation.mjs` prove a forged message *from the lens frame* is inert, with a
+real `contentWindow` to forge from. Same family as this file's other stand-in entries: the
+model is narrower than the DOM in one specific place, and the narrow spot decides how a check
+can be written, not merely whether it passes.
+
+## A sandboxed `srcdoc` frame's own script runs before its first layout — `load` does not help
+
+SPEC_STAGES.md criterion 10 (a variant option's stage self-reports its content height, since
+the parent cannot reach `contentDocument` at all to measure it) shipped a first cut that called
+`document.body.scrollHeight` synchronously, at the bottom of `stageAgentScript`'s own IIFE, and
+passed the whole check suite green. Dead on arrival in real Chrome: every stage sat at the CSS
+placeholder height, because the value it reported was always `0`.
+
+Measured directly (a throwaway probe frame outside this repo, same shape as this file's
+"Preview harness" entry — `sandbox="allow-scripts"`, no `allow-same-origin`, real tall content):
+`document.body.scrollHeight`, read from **inside** that frame's own script, is `0` not only at
+that synchronous point but at `DOMContentLoaded`, at `load`, and even inside a zero-delay
+`setTimeout`. `load` firing early is the sharpest part of this: there is no external
+subresource for a `srcdoc` document with no images/fetches to wait for, so `load` can — and
+measurably does — fire before this frame has ever been given a rendering opportunity at all.
+Reading the identical property from **outside** the frame (an `allow-same-origin` variant, for
+diagnosis only, `contentDocument.body.scrollHeight` polled from the parent ~300ms after
+creation) read correctly, so the content genuinely does lay out — the defect is entirely about
+*when* the frame's own script can first observe that. The fix (`reportHeightAfterLayout`,
+`src/render.mjs`) waits for two nested `requestAnimationFrame` calls — the standard "wait for
+layout to have genuinely settled" idiom — before the first report, since an rAF callback runs
+as part of the same per-frame "update the rendering" step that performs layout, unlike `load`.
+
+**The DOM stand-in cannot see any of this, in either direction.** `test/dom-stand-in.mjs`
+defines neither `requestAnimationFrame` nor `ResizeObserver` at all (same ceiling as this file's
+"The stand-in has no layout" entry) — a check driving the synchronous `reportHeight()` directly
+with a fixture-declared `data-standin-scroll-height` stayed green whether or not the deferral
+existed, because the stand-in's declared box has no notion of "before" or "after" layout to get
+wrong. The check that actually pins the fix stubs `requestAnimationFrame` itself
+(`withCapturedRAF`, `test/check-pure.mjs`) to CAPTURE callbacks instead of running them, asserts
+the report is *not yet applied* immediately after `loadSrcdoc()`, then drains the captured queue
+and asserts it *is* applied afterward — proving the deferral exists structurally (the real
+report only reaches the parent through that captured entry point, not any earlier one), not
+that a real browser's timing is what the fix assumes. Confirming the actual browser timing —
+that two rAFs is enough, that it isn't so late a reviewer notices a flash of the fallback height
+— has to be driven in real Chrome, the same way this file's `setPointerCapture` and
+`IntersectionObserver` entries already require for their own claims.
+
+**A second measurement, from the same session, worth carrying separately:** attempting to
+reproduce this in an automation-driven tab found `document.visibilityState` stuck at `'hidden'`
+throughout (`document.hasFocus()` could be forced to `true` with a synthetic click; visibility
+could not), and in that state neither a bare `requestAnimationFrame` nor a `ResizeObserver`
+callback fired at all — not merely late — even 4 real seconds after an explicit forced resize of
+the observed element, the same trigger that reliably produces a delivery in an ordinary
+foreground tab. This matches Chrome's documented background-tab rendering throttling, not a
+defect in the fix: a board opened into a background tab (a link opened while reading something
+else) will not get an accurate stage height until the reviewer actually looks at the tab, and
+`src/styles.mjs`'s `.choice-variant .html-stage` starting height (320px — deliberately equal to,
+not less than, the fixed floor this feature replaces, see that rule's own comment) is what a
+reviewer sees for however long that takes, rather than the plain-worse-than-before 200px an
+earlier cut of this same rule shipped before this whole measurement happened. Driving a real
+visibility transition to confirm the report *does* eventually land is out of reach of the
+automation used here (there is no supported way to force a controlled tab's own
+`visibilityState` from page script), so that half rests on Chrome's documented behaviour rather
+than a direct measurement — flagged as such rather than asserted as verified.
