@@ -369,26 +369,26 @@ async function spawnSourceEditDaemon() {
   }
 }
 
-/** The EnvironmentVariables dict out of a plist this suite just generated. */
-function plistEnvOf(plistPath) {
-  const r = spawnSync('plutil', ['-convert', 'json', '-o', '-', plistPath], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr);
-  return JSON.parse(r.stdout).EnvironmentVariables;
-}
-
-/** Spawn a real `bin/daemon.mjs` whose environment is the plist's own
- * EnvironmentVariables dict and nothing else from this process -- which is the shape
- * launchd hands a job, since a launchd job inherits nothing from the shell that installed
- * it. Only three things are added on top, and each for a reason that is not about the
- * value under test: PATH (launchd supplies one), the store/secret testing seams (so this
- * never touches the real ~/Library/Application Support or the real secret), and a free
- * port (the plist's port belongs to this suite's health stub, which is already bound).
- * The old CLAUDE_BOARD_RELOAD_ON_CHANGE is dropped from the inherited env for tidiness
- * only: nothing honours it any more.
+/** Spawn a real `bin/daemon.mjs` with whatever extra environment the caller passes
+ * (typically CLAUDE_BOARD_REF_ROOTS/SERVE_ROOTS) and nothing else from this process.
+ * Used to prove that src/resolve.mjs actually enforces a given roots value against a
+ * real running daemon and a real HTTP request -- independent of HOW that value reaches
+ * the daemon at runtime. On the degraded (no-launcher) path that delivery mechanism is
+ * still the plist directly; with a launcher bundle in use it is bin/launcher.c's
+ * compiled-in OVERRIDE_ENV instead (install.sh no longer writes these into the plist at
+ * all -- see "the plist stops carrying what the launcher now bakes"), and THAT half of
+ * the chain -- the launcher actually delivering the right value and nothing else -- is
+ * proven separately, in full isolation, by test/check-launcher-env.mjs.
+ *
+ * Only three things are added on top of the caller's env, and each for a reason that is
+ * not about the value under test: PATH (launchd/the launcher supplies one), the
+ * store/secret testing seams (so this never touches the real ~/Library/Application
+ * Support or the real secret), and a free port (the plist's port belongs to this suite's
+ * health stub, which is already bound).
  *
  * Resolves once /api/health answers, with the secret the caller needs to speak to it. */
-async function spawnDaemonWithPlistEnv(plistPath) {
-  const dWork = mkdtempSync(path.join(tmpdir(), 'claude-board-plistenv-'));
+async function spawnDaemonWithEnv(extraEnv) {
+  const dWork = mkdtempSync(path.join(tmpdir(), 'claude-board-envcheck-'));
   let child;
   try {
     const home = path.join(dWork, 'home');
@@ -399,13 +399,12 @@ async function spawnDaemonWithPlistEnv(plistPath) {
     const port = await freePort();
 
     const dEnv = {
-      ...plistEnvOf(plistPath),
+      ...extraEnv,
       PATH: process.env.PATH,
       CLAUDE_BOARD_HOME: home,
       CLAUDE_BOARD_SECRET_FILE: dSecretFile,
       CLAUDE_BOARD_PORT: String(port),
     };
-    delete dEnv.CLAUDE_BOARD_RELOAD_ON_CHANGE;
 
     child = spawn(process.execPath, [path.join(repoRoot, 'bin', 'daemon.mjs')], {
       env: dEnv, stdio: ['ignore', 'pipe', 'pipe'],
@@ -414,7 +413,7 @@ async function spawnDaemonWithPlistEnv(plistPath) {
     child.stderr.on('data', c => { err += c.toString(); });
 
     if (!await waitForHealthy(port, 8000)) {
-      throw new Error(`plist-env daemon never answered /api/health\nstderr:\n${err}`);
+      throw new Error(`env-check daemon never answered /api/health\nstderr:\n${err}`);
     }
     return {
       port,
@@ -566,6 +565,50 @@ async function main() {
     assert.doesNotMatch(ran.stderr || '', /cannot exec/, `the launcher must be able to exec its compiled-in node:\n${ran.stderr}`);
   });
 
+  await check('the bundle carries a byte-identical copy of bin/daemon.mjs and src/, staged before signing', async () => {
+    // The payload half of the hole this task closes: bin/daemon.mjs and everything under
+    // src/ used to live only in the clone, outside the signature and outside the rebuild
+    // stamp. install.sh now copies both into Contents/Resources before codesign runs
+    // (see install.sh step 1b), so this asserts the copy is complete and exact against
+    // THIS repo's own real files -- runInstall() above ran install.sh with REPO_DIR set
+    // to this actual clone, not a throwaway one.
+    const appPath = path.join(appDir, 'claude-board.app');
+    const resourcesBin = path.join(appPath, 'Contents', 'Resources', 'bin', 'daemon.mjs');
+    const resourcesSrc = path.join(appPath, 'Contents', 'Resources', 'src');
+    assert.ok(
+      readFileSync(resourcesBin).equals(readFileSync(path.join(repoRoot, 'bin', 'daemon.mjs'))),
+      'the bundled bin/daemon.mjs must be byte-identical to the clone\'s',
+    );
+
+    function listFiles(dir) {
+      let out = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) out = out.concat(listFiles(full));
+        else out.push(full);
+      }
+      return out;
+    }
+    const realSrcDir = path.join(repoRoot, 'src');
+    const realSrcFiles = listFiles(realSrcDir).map(f => path.relative(realSrcDir, f)).sort();
+    const bundledSrcFiles = listFiles(resourcesSrc).map(f => path.relative(resourcesSrc, f)).sort();
+    assert.deepEqual(bundledSrcFiles, realSrcFiles, 'the bundle must carry exactly the same set of files under src/ as the clone -- not a subset, not extras');
+    for (const rel of realSrcFiles) {
+      assert.ok(
+        readFileSync(path.join(resourcesSrc, rel)).equals(readFileSync(path.join(realSrcDir, rel))),
+        `src/${rel} must be byte-identical inside the bundle`,
+      );
+    }
+
+    // Not staged, deliberately: bin/mcp.mjs and bin/authorize.mjs are the shim,
+    // registered with Claude Code (or invoked by a user) at THIS clone's own absolute
+    // path and never run through the launcher, so a copy inside the bundle would be dead
+    // weight nothing points at; bin/launcher.c is a build input, never executed as itself.
+    for (const notStaged of ['mcp.mjs', 'authorize.mjs', 'launcher.c']) {
+      assert.ok(!existsSync(path.join(appPath, 'Contents', 'Resources', 'bin', notStaged)), `bin/${notStaged} must not be staged into the bundle`);
+    }
+  });
+
   await check('a reinstall leaves an unchanged launcher bundle byte-identical (a rebuild would reset its TCC grant)', async () => {
     // The whole point of the stamp in install.sh step 1b. macOS pins a Files-and-Folders
     // grant to the code signature, so rebuilding the bundle on a run that changed
@@ -576,10 +619,19 @@ async function main() {
     // digest below changes between the two runs this suite already made.)
     const exec = path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
     const before = readFileSync(exec);
+    // The payload's own mtime, not just its content: "already current" must not even
+    // RE-COPY bin/daemon.mjs and src/ into an unchanged bundle -- a copy that happened to
+    // reproduce the same bytes would still be indistinguishable from a rebuild by content
+    // alone, but not by mtime. (Ablation: run stage_daemon_payload unconditionally,
+    // outside the already-current branch, and this mtime moves even though the bytes
+    // read back identical.)
+    const payloadFile = path.join(appDir, 'claude-board.app', 'Contents', 'Resources', 'bin', 'daemon.mjs');
+    const payloadMtimeBefore = statSync(payloadFile).mtimeMs;
     const r = spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('rebuild-noop') }, encoding: 'utf8' });
     assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
     assert.deepEqual(readFileSync(exec), before, 'a no-op reinstall must not rewrite the launcher');
     assert.match(r.stdout, /already current/, 'and it must say so, rather than rebuilding silently');
+    assert.equal(statSync(payloadFile).mtimeMs, payloadMtimeBefore, 'a no-op reinstall must not even re-copy the payload into an unchanged bundle');
   });
 
   await check('a launcher built from different inputs IS rebuilt', async () => {
@@ -596,6 +648,139 @@ async function main() {
     assert.notDeepEqual(readFileSync(exec), before, 'a launcher whose baked-in node path changed must be rebuilt');
     // Put the bundle back the way the rest of the suite expects to find it.
     spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('rebuild-restore') }, encoding: 'utf8' });
+  });
+
+  // --- a rogue launcher_paths.h next to bin/launcher.c must not reach the build --------
+  //
+  // bin/launcher.c pulls in its generated header with a QUOTED #include, and a quoted
+  // include searches the including file's own directory before any -I/-iquote path.
+  // Compiling bin/launcher.c in place, straight out of the clone, would mean that search
+  // starts in bin/ -- so a launcher_paths.h planted there (an attacker's, or a leftover
+  // from an older install.sh that used to generate the header in place) shadows the real
+  // one this script writes into its build directory, and the shadow's paths are what get
+  // compiled into a bundle macOS then trusts with the Documents grant. The fix in
+  // install.sh step 1b is structural: the source is copied into the same staging
+  // directory as the real header and compiled from there with -iquote (no -I back into
+  // the clone), so the quoted include's own-directory search lands on the real header no
+  // matter what sits beside bin/launcher.c.
+  await check('a rogue header placed next to the launcher source cannot influence the built binary', async () => {
+    // A full, throwaway clone under workDir -- not this repo's own bin/, which must stay
+    // clean -- holding just what install.sh needs to find (bin/daemon.mjs, bin/mcp.mjs,
+    // bin/launcher.c) plus install.sh itself.
+    const rogueDir = path.join(workDir, 'clone-with-rogue-header');
+    try {
+      mkdirSync(path.join(rogueDir, 'bin'), { recursive: true });
+      writeFileSync(path.join(rogueDir, 'bin', 'daemon.mjs'), '// stub, never executed by install.sh itself\n');
+      writeFileSync(path.join(rogueDir, 'bin', 'mcp.mjs'), '// stub\n');
+      // install.sh now requires src/ to exist and stages it into the bundle -- a stub is
+      // enough, since this clone's daemon is never actually run.
+      mkdirSync(path.join(rogueDir, 'src'), { recursive: true });
+      writeFileSync(path.join(rogueDir, 'src', 'stub.mjs'), '// stub\n');
+      writeFileSync(path.join(rogueDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
+      writeFileSync(path.join(rogueDir, 'install.sh'), readFileSync(installScript, 'utf8'));
+
+      const rogueNodePath = '/tmp/rogue-node-must-never-be-baked-in';
+      const rogueDaemonPath = '/tmp/rogue-daemon-must-never-be-baked-in';
+      writeFileSync(path.join(rogueDir, 'bin', 'launcher_paths.h'), [
+        '/* planted next to bin/launcher.c -- must have zero effect on the build */',
+        `#define CLAUDE_BOARD_NODE "${rogueNodePath}"`,
+        `#define CLAUDE_BOARD_DAEMON "${rogueDaemonPath}"`,
+        '',
+      ].join('\n'));
+
+      const rogueAgents = path.join(workDir, 'LaunchAgents-rogue');
+      const rogueAppDir = path.join(workDir, 'Applications-rogue');
+      const rogueStubs = quietStubs('rogue-header');
+      const r = spawnSync('bash', [path.join(rogueDir, 'install.sh')], {
+        env: {
+          ...env,
+          CLAUDE_BOARD_LAUNCH_AGENTS_DIR: rogueAgents,
+          CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-rogue'),
+          CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-rogue', 'claude-board', 'secret'),
+          CLAUDE_BOARD_APP_DIR: rogueAppDir,
+          ...rogueStubs,
+        },
+        encoding: 'utf8',
+      });
+      assert.equal(r.status, 0, `install must still succeed with a rogue header present:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+      assert.match(r.stdout, /warning:.*launcher_paths\.h/, 'install.sh must name the leftover header and say it is being ignored');
+      assert.doesNotMatch(r.stdout, /error/i, 'the warning must be non-fatal');
+
+      const builtExec = path.join(rogueAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+      assert.ok(existsSync(builtExec), 'the launcher must still build');
+      const built = readFileSync(builtExec);
+
+      // The real paths: the BUNDLED copy of this throwaway clone's bin/daemon.mjs (not
+      // the clone's own path -- CLAUDE_BOARD_DAEMON now names the copy staged into
+      // Contents/Resources), and whichever node interpreter install.sh actually resolved
+      // for it (read back from the quiet stub's own MCP registration, which records
+      // exactly what install.sh chose).
+      const realDaemonPath = path.join(rogueAppDir, 'claude-board.app', 'Contents', 'Resources', 'bin', 'daemon.mjs');
+      const rogueState = JSON.parse(readFileSync(rogueStubs.STUB_CLAUDE_STATE, 'utf8'));
+      const realNodePath = rogueState['claude-board'].command[0];
+      assert.ok(path.isAbsolute(realNodePath));
+
+      assert.ok(built.includes(Buffer.from(`${realDaemonPath}\0`, 'utf8')), 'the built binary must carry the real, compiled-in daemon path');
+      assert.ok(built.includes(Buffer.from(`${realNodePath}\0`, 'utf8')), 'the built binary must carry the real, compiled-in node path');
+      assert.ok(!built.includes(Buffer.from(rogueDaemonPath, 'utf8')), 'the rogue daemon path must not appear anywhere in the built binary');
+      assert.ok(!built.includes(Buffer.from(rogueNodePath, 'utf8')), 'the rogue node path must not appear anywhere in the built binary');
+      // And the payload itself actually landed, byte-identical -- the rogue header must
+      // have zero effect on this half of the build either.
+      assert.equal(
+        readFileSync(path.join(rogueAppDir, 'claude-board.app', 'Contents', 'Resources', 'src', 'stub.mjs'), 'utf8'),
+        '// stub\n',
+      );
+    } finally {
+      rmSync(rogueDir, { recursive: true, force: true });
+    }
+  });
+
+  // --- the stamp must cover the produced binary, not just its inputs -------------------
+
+  await check('re-running the installer after the bundle\'s executable has been altered rebuilds it instead of reporting it as already current', async () => {
+    // Isolated from every other run in this suite: its own LaunchAgents, Applications,
+    // secret and logs, so the assertions below are about this one bundle's lifecycle
+    // and nothing shared with the rest of main().
+    const tAgents = path.join(workDir, 'LaunchAgents-tamper');
+    const tAppDir = path.join(workDir, 'Applications-tamper');
+    const tEnv = {
+      ...env,
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: tAgents,
+      CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-tamper'),
+      CLAUDE_BOARD_APP_DIR: tAppDir,
+      CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-tamper', 'claude-board', 'secret'),
+    };
+    const exec = path.join(tAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+
+    // 1. a fresh install builds the bundle.
+    const first = spawnSync('bash', [installScript], { env: { ...tEnv, ...quietStubs('tamper-1') }, encoding: 'utf8' });
+    assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+    assert.match(first.stdout, /built and signed/, 'the first run must build the bundle');
+    assert.ok(existsSync(exec), 'the executable must exist after the first run');
+
+    // 2. an untouched reinstall is the no-re-prompt guarantee the whole task exists to
+    // protect: "already current", and nothing rewritten.
+    const untouched = readFileSync(exec);
+    const second = spawnSync('bash', [installScript], { env: { ...tEnv, ...quietStubs('tamper-2') }, encoding: 'utf8' });
+    assert.equal(second.status, 0, `stdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    assert.match(second.stdout, /already current/, 'an untouched reinstall must report the bundle as already current');
+    assert.doesNotMatch(second.stdout, /built and signed/, 'and must not rebuild');
+    assert.deepEqual(readFileSync(exec), untouched, 'an untouched reinstall must not rewrite the executable');
+
+    // 3. the executable is altered directly -- none of install.sh's own INPUTS changed,
+    // only the bytes it produced last time -- and the next run must rebuild rather than
+    // trust a stamp that no longer describes what is actually on disk.
+    const tampered = Buffer.concat([untouched, Buffer.from([0])]);
+    writeFileSync(exec, tampered);
+    const third = spawnSync('bash', [installScript], { env: { ...tEnv, ...quietStubs('tamper-3') }, encoding: 'utf8' });
+    assert.equal(third.status, 0, `stdout:\n${third.stdout}\nstderr:\n${third.stderr}`);
+    assert.match(third.stdout, /built and signed/, 'an altered executable must be rebuilt');
+    assert.doesNotMatch(third.stdout, /already current/, 'and must not be reported as already current');
+    // The rebuild is deterministic (same inputs as run 1), so the fixed point to check
+    // against is the tampered bytes, not the pre-tamper original -- a rebuild that
+    // reproduces the original exactly is exactly what "rebuilt" should mean here.
+    assert.notDeepEqual(readFileSync(exec), tampered, 'the rebuilt executable must differ from the tampered one');
+    assert.deepEqual(readFileSync(exec), untouched, 'and, since nothing else changed, must reproduce the original bytes exactly');
   });
 
   await check('install still succeeds without a compiler, degrading loudly instead of failing', async () => {
@@ -623,9 +808,22 @@ async function main() {
     const fallback = spawnSync('plutil', ['-convert', 'json', '-o', '-',
       path.join(workDir, 'LaunchAgents-nocc', 'claude-board.plist')], { encoding: 'utf8' });
     assert.equal(fallback.status, 0, fallback.stderr);
-    const args = JSON.parse(fallback.stdout).ProgramArguments;
+    const fallbackPlist = JSON.parse(fallback.stdout);
+    const args = fallbackPlist.ProgramArguments;
     assert.equal(args.length, 2, 'the fallback plist runs node with the daemon script');
     assert.equal(args[1], path.join(repoRoot, 'bin', 'daemon.mjs'));
+
+    // With no launcher to bake CLAUDE_BOARD_REF_ROOTS/SERVE_ROOTS/HOME into, node reads
+    // its environment from the plist directly -- so on THIS path, unlike the launcher
+    // path asserted elsewhere in this suite, the dict must still carry them exactly as
+    // it always did. Losing them here would mean a degraded install silently serves
+    // nothing and references nothing, with no allowlist reaching the daemon at all.
+    assert.equal(
+      fallbackPlist.EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS,
+      DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2))).join(':'),
+      'the degraded plist must carry the reference roots itself -- there is no launcher to bake them into',
+    );
+    assert.ok('CLAUDE_BOARD_SERVE_ROOTS' in fallbackPlist.EnvironmentVariables, 'and the serve roots too');
   });
 
   await check('RunAtLoad and KeepAlive are set', async () => {
@@ -702,40 +900,51 @@ async function main() {
     assert.equal(plist.EnvironmentVariables.CLAUDE_BOARD_PORT, String(healthPort));
   });
 
-  await check('the generated plist carries CLAUDE_BOARD_REF_ROOTS, defaulting to the three DEFAULT_REF_ROOTS', async () => {
-    // The reference allowlist (ADR.md entry 3) is the one knob that moves a security
-    // boundary, and a launchd job inherits nothing from the shell that ran install.sh:
-    // a root that does not reach the daemon through EnvironmentVariables does not
-    // exist as far as the daemon is concerned, and the session still gets the refusal
-    // box the ticket was filed to remove. The runs above set nothing, so this is the
-    // resolved default.
-    //
-    // It is also the ONLY place that default exists (audit S3, 2026-07-31):
-    // src/resolve.mjs reads an absent variable as an empty allowlist, precisely so a
-    // default living in code cannot widen the boundary on machines whose plist predates
-    // it -- the daemon restarts itself on any src/ change, so such a default would go
-    // live on a routine `git pull` with nothing printed and nobody asked. Which makes
-    // this assertion the one that keeps the shipped default from being nothing at all,
-    // and it is written against DEFAULT_REF_ROOTS rather than a second copy of the list,
-    // so the two cannot drift apart silently.
-    //
-    // Three directories, not ~/.claude entire (audit S1): that tree also holds
-    // .credentials.json, settings.json, shell snapshots and every project transcript.
-    assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
-    assert.deepEqual([...DEFAULT_REF_ROOTS], ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents']);
-    assert.equal(
-      plist.EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS,
-      DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2))).join(':'),
-    );
+  await check('when a launcher bundle is in use, the plist carries no roots or store at all -- the launcher bakes them in instead', async () => {
+    // The reference allowlist (ADR.md entry 3) and the serve allowlist are the two
+    // knobs that move a security boundary, and CLAUDE_BOARD_HOME decides where the
+    // store lives. All three used to be written into the plist's EnvironmentVariables
+    // dict because a launchd job inherits nothing from the shell that ran install.sh --
+    // but with a launcher bundle in use, bin/launcher.c's OVERRIDE_ENV builds the
+    // child's environment itself and ignores whatever the plist says for these three
+    // (see launcher_paths.h and "the plist stops carrying what the launcher now bakes"
+    // in install.sh's step 2). Leaving the keys in the plist anyway would be a lie about
+    // what is actually in force, given anyone who can write that world-readable,
+    // user-writable file could otherwise believe rewriting it moves the boundary when it
+    // no longer does -- so install.sh omits them entirely once USE_LAUNCHER is 1, which
+    // is this suite's ordinary path (see "the launcher bundle is built, signed..." above).
+    assert.ok(plist.EnvironmentVariables, 'the plist must still carry an EnvironmentVariables dict');
+    assert.ok(!('CLAUDE_BOARD_REF_ROOTS' in plist.EnvironmentVariables), 'the launcher carries the reference roots now, not the plist');
+    assert.ok(!('CLAUDE_BOARD_SERVE_ROOTS' in plist.EnvironmentVariables), 'the launcher carries the serve roots now, not the plist');
+    assert.ok(!('CLAUDE_BOARD_HOME' in plist.EnvironmentVariables), 'the launcher carries the store now, not the plist');
 
-    // ...and an explicit value is carried verbatim, colon-separated list and all.
+    // What replaces "read it out of the plist": the resolved default is compiled into
+    // the launcher as a literal C string (bin/launcher.c's CLAUDE_BOARD_REF_ROOTS_VALUE,
+    // via launcher_paths.h) -- proven by reading the executable's own bytes, the same
+    // way the CLAUDE_BOARD_NODE override check further below proves its baked-in path.
+    // It is also the ONLY place that default exists (audit S3, 2026-07-31):
+    // src/resolve.mjs reads an absent variable as an empty allowlist, and it is written
+    // against DEFAULT_REF_ROOTS rather than a second copy of the list, so the two cannot
+    // drift apart silently. Three directories, not ~/.claude entire (audit S1): that
+    // tree also holds .credentials.json, settings.json, shell snapshots and every
+    // project transcript.
+    const launcherExec = path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+    const bakedIn = value => readFileSync(launcherExec).includes(Buffer.from(`${value}\0`, 'utf8'));
+    assert.deepEqual([...DEFAULT_REF_ROOTS], ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents']);
+    const defaultRefRoots = DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2))).join(':');
+    assert.ok(bakedIn(defaultRefRoots), 'the resolved default reference roots must be compiled into the launcher');
+
+    // ...and an explicit value is baked in too, colon-separated list and all -- in place
+    // of a plist entry, which must still be absent.
     const agents = path.join(workDir, 'LaunchAgents-refroots');
+    const refAppDir = path.join(workDir, 'Applications-refroots');
     const chosen = `${path.join(workDir, 'roots-a')}:${path.join(workDir, 'roots-b')}`;
     const r = spawnSync('bash', [installScript], {
       env: {
         ...env,
         CLAUDE_BOARD_REF_ROOTS: chosen,
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+        CLAUDE_BOARD_APP_DIR: refAppDir,
         CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-refroots'),
         CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-refroots', 'claude-board', 'secret'),
         STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-refroots.log'),
@@ -748,38 +957,104 @@ async function main() {
     assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
     const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(agents, 'claude-board.plist')], { encoding: 'utf8' });
     assert.equal(asJson.status, 0, asJson.stderr);
-    assert.equal(JSON.parse(asJson.stdout).EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS, chosen);
+    assert.ok(!('CLAUDE_BOARD_REF_ROOTS' in JSON.parse(asJson.stdout).EnvironmentVariables), 'an explicit value must not land in the plist either');
+    const chosenLauncherExec = path.join(refAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+    assert.ok(readFileSync(chosenLauncherExec).includes(Buffer.from(`${chosen}\0`, 'utf8')), 'the chosen roots must be compiled into the launcher instead');
   });
 
-  await check('an upgrade carries the installed plist\'s reference roots forward instead of silently re-widening them', async () => {
+  await check('a plist from before the record file existed is read once, as a migration, and then persisted', async () => {
+    // Today's carry-forward mechanism (see the checks below) reads a record file next
+    // to the secret rather than the plist, because the plist stops carrying these values
+    // once a launcher bundle is in use. That would silently reset anyone who customised
+    // CLAUDE_BOARD_REF_ROOTS before this change and has no record file yet -- so
+    // install.sh still reads a pre-existing plist as a ONE-TIME migration, then writes
+    // what it found into the record file so this branch never has to fire again.
+    const agents = path.join(workDir, 'LaunchAgents-migrate');
+    const migrateAppDir = path.join(workDir, 'Applications-migrate');
+    const migrateSecretDir = path.join(workDir, 'config-migrate', 'claude-board');
+    const migrateSecretFile = path.join(migrateSecretDir, 'secret');
+    mkdirSync(agents, { recursive: true });
+    mkdirSync(migrateSecretDir, { recursive: true });
+    // A secret already on disk, so this run looks like the upgrade it is meant to
+    // simulate rather than a fresh install, and a hand-written plist carrying a
+    // customised CLAUDE_BOARD_REF_ROOTS in exactly the shape install.sh itself used to
+    // write one -- with no ref_roots record file sitting beside the secret yet.
+    writeFileSync(migrateSecretFile, 'c'.repeat(64), { mode: 0o600 });
+    const preExisting = path.join(workDir, 'migrate-roots');
+    writeFileSync(path.join(agents, 'claude-board.plist'), [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+      '<plist version="1.0">',
+      '<dict>',
+      '\t<key>Label</key><string>claude-board</string>',
+      '\t<key>EnvironmentVariables</key>',
+      '\t<dict>',
+      '\t\t<key>CLAUDE_BOARD_PORT</key><string>7391</string>',
+      `\t\t<key>CLAUDE_BOARD_REF_ROOTS</key><string>${preExisting}</string>`,
+      '\t</dict>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n'));
+
+    const r = spawnSync('bash', [installScript], {
+      env: {
+        ...env,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+        CLAUDE_BOARD_APP_DIR: migrateAppDir,
+        CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-migrate'),
+        CLAUDE_BOARD_SECRET_FILE: migrateSecretFile,
+        STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-migrate.log'),
+        STUB_CLAUDE_STATE: path.join(workDir, 'claude-registrations-migrate.json'),
+        STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-migrate.log'),
+        STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-migrate.json'),
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(r.stdout, /carried forward from .*\(migrated/, 'the migration must be announced, not silent');
+    assert.equal(readFileSync(path.join(migrateSecretDir, 'ref_roots'), 'utf8'), preExisting, 'the pre-existing plist value must be persisted into the new record file');
+    const launcherBytes = readFileSync(path.join(migrateAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
+    assert.ok(launcherBytes.includes(Buffer.from(`${preExisting}\0`, 'utf8')), 'and actually baked into the launcher, not just recorded');
+  });
+
+  await check('an upgrade carries the recorded reference roots forward instead of silently re-widening them', async () => {
     // SECURITY.md tells the operator to narrow this boundary with
-    // `CLAUDE_BOARD_REF_ROOTS= ./install.sh`. install.sh rewrites the plist
+    // `CLAUDE_BOARD_REF_ROOTS= ./install.sh`. install.sh used to rewrite the plist
     // unconditionally and never read the old one back, so the ordinary upgrade -- `git
     // pull && ./install.sh` from a clean shell, the variable long since out of the
     // environment -- restored the default and rebooted the job with it, with nothing on
-    // screen saying so (audit NEW-2, 2026-07-31). Ablation: go back to
-    // `REF_ROOTS="${CLAUDE_BOARD_REF_ROOTS-$DEFAULT_REF_ROOTS}"` and step 2 comes back
-    // holding the default.
+    // screen saying so (audit NEW-2, 2026-07-31). The carry-forward mechanism has since
+    // moved from the plist to a record file beside the secret (the plist no longer
+    // carries this value at all once a launcher bundle is in use), but the guarantee
+    // under test is the same one: an upgrade must not silently re-widen a narrowing.
+    // Ablation: go back to `REF_ROOTS="${CLAUDE_BOARD_REF_ROOTS-$DEFAULT_REF_ROOTS}"`
+    // and step 2 comes back holding the default.
     const agents = path.join(workDir, 'LaunchAgents-upgrade');
+    const upgradeAppDir = path.join(workDir, 'Applications-upgrade');
+    const upgradeSecretDir = path.join(workDir, 'config-upgrade', 'claude-board');
     const upgradeEnv = {
       ...env,
       CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+      CLAUDE_BOARD_APP_DIR: upgradeAppDir,
       CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-upgrade'),
-      CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-upgrade', 'claude-board', 'secret'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(upgradeSecretDir, 'secret'),
       STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-upgrade.log'),
       STUB_CLAUDE_STATE: path.join(workDir, 'claude-registrations-upgrade.json'),
       STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-upgrade.log'),
       STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-upgrade.json'),
     };
-    const plistPath = path.join(agents, 'claude-board.plist');
-    const rootsNow = () => plistEnvOf(plistPath).CLAUDE_BOARD_REF_ROOTS;
+    const recordFile = path.join(upgradeSecretDir, 'ref_roots');
+    const rootsNow = () => readFileSync(recordFile, 'utf8');
+    const launcherExec = path.join(upgradeAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+    const bakedIn = value => readFileSync(launcherExec).includes(Buffer.from(`${value}\0`, 'utf8'));
 
     // 1. the operator narrows, explicitly, exactly as SECURITY.md says to.
     const narrowed = spawnSync('bash', [installScript], {
       env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: '' }, encoding: 'utf8',
     });
     assert.equal(narrowed.status, 0, `stdout:\n${narrowed.stdout}\nstderr:\n${narrowed.stderr}`);
-    assert.equal(rootsNow(), '', 'an explicitly empty value must install as empty');
+    assert.equal(rootsNow(), '', 'an explicitly empty value must be recorded as empty');
 
     // 2. ...and an upgrade from a clean shell leaves that decision standing.
     const upgraded = spawnSync('bash', [installScript], { env: upgradeEnv, encoding: 'utf8' });
@@ -787,13 +1062,15 @@ async function main() {
     assert.equal(rootsNow(), '', 'an upgrade must not restore the default over an explicit narrowing');
 
     // 3. ...while an explicit value still wins over the carried-forward one, or the
-    //    knob would be a one-way door.
+    //    knob would be a one-way door -- and it must actually reach the rebuilt
+    //    launcher, not just a record file nothing then reads.
     const widened = path.join(workDir, 'roots-upgrade');
     const rewidened = spawnSync('bash', [installScript], {
       env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: widened }, encoding: 'utf8',
     });
     assert.equal(rewidened.status, 0, `stdout:\n${rewidened.stdout}\nstderr:\n${rewidened.stderr}`);
     assert.equal(rootsNow(), widened);
+    assert.ok(bakedIn(widened), 'the re-widened roots must be compiled into the launcher');
 
     // 4. ...and whichever of the three happened, the resolved value is on screen. The
     //    boundary moving is exactly the thing that must never be silent.
@@ -801,18 +1078,30 @@ async function main() {
       assert.match(r.stdout, /reference roots:/, 'the install summary must name the resolved roots');
     }
     assert.match(upgraded.stdout, /carried forward from/, 'and say where the value came from');
+
+    // 5. ...and the plist itself never carries this value at all, on any of the three
+    //    runs above, now that a launcher bundle is in use.
+    const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(agents, 'claude-board.plist')], { encoding: 'utf8' });
+    assert.equal(asJson.status, 0, asJson.stderr);
+    assert.ok(!('CLAUDE_BOARD_REF_ROOTS' in JSON.parse(asJson.stdout).EnvironmentVariables));
   });
 
-  await check('the plist\'s CLAUDE_BOARD_REF_ROOTS confines a RUNNING daemon, not just the plist file', async () => {
-    // The check above this one asserts the plist CONTAINS a key, which is structurally
-    // the same shape as the WatchPaths assertion QUIRKS.md records as "a green check
-    // sitting on top of a dead mechanism" -- true, and about nothing. So this one takes
-    // the EnvironmentVariables dict install.sh just wrote, hands it to a real
-    // bin/daemon.mjs the way launchd hands a job its dict (nothing else inherited), and
-    // asks that daemon to resolve two references over its own gated HTTP route: one
-    // inside the configured root and one outside every root. What is NOT covered is
-    // launchctl's own delivery of the dict, because launchctl is stubbed in this suite
-    // and must be -- everything between install.sh and the daemon's boundary is.
+  await check('the roots install.sh resolves and records confine a RUNNING daemon, not just its own printout', async () => {
+    // The check above this one asserts the plist does NOT contain the key any more,
+    // and the migration check proves the record file gets the right bytes -- both are
+    // structurally the same shape as the WatchPaths assertion QUIRKS.md records as "a
+    // green check sitting on top of a dead mechanism" if nothing then reads that record
+    // file back and enforces it. So this one runs install.sh for real, reads back
+    // exactly what it persisted into the record file (the plist no longer carries this
+    // value at all -- see above), and hands THAT to a real bin/daemon.mjs, asking it to
+    // resolve two references over its own gated HTTP route: one inside the configured
+    // root and one outside every root.
+    //
+    // What this does NOT cover: bin/launcher.c actually delivering that same value at
+    // runtime while filtering everything else out of a poisoned parent environment --
+    // that half of the chain is proven separately, in full isolation, by
+    // test/check-launcher-env.mjs, which compiles the real launcher against a stub
+    // daemon rather than running the production one against a live port.
     const rootDir = path.join(workDir, 'live-root');
     const outsideDir = path.join(workDir, 'live-outside');
     const projectDir = path.join(workDir, 'live-project');
@@ -823,13 +1112,14 @@ async function main() {
     writeFileSync(forbidden, 'CONTENT-OUTSIDE-EVERY-ROOT\n', 'utf8');
 
     const agents = path.join(workDir, 'LaunchAgents-live');
+    const liveSecretDir = path.join(workDir, 'config-live', 'claude-board');
     const r = spawnSync('bash', [installScript], {
       env: {
         ...env,
         CLAUDE_BOARD_REF_ROOTS: rootDir,
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
         CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-live'),
-        CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-live', 'claude-board', 'secret'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(liveSecretDir, 'secret'),
         STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-live.log'),
         STUB_CLAUDE_STATE: path.join(workDir, 'claude-registrations-live.json'),
         STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-live.log'),
@@ -839,13 +1129,20 @@ async function main() {
     });
     assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
 
-    const daemon = await spawnDaemonWithPlistEnv(path.join(agents, 'claude-board.plist'));
+    const recordedRoots = readFileSync(path.join(liveSecretDir, 'ref_roots'), 'utf8');
+    assert.equal(recordedRoots, rootDir, 'install.sh must persist exactly the roots it resolved');
+
+    const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(agents, 'claude-board.plist')], { encoding: 'utf8' });
+    assert.equal(asJson.status, 0, asJson.stderr);
+    assert.ok(!('CLAUDE_BOARD_REF_ROOTS' in JSON.parse(asJson.stdout).EnvironmentVariables), 'the plist itself must not carry this value');
+
+    const daemon = await spawnDaemonWithEnv({ CLAUDE_BOARD_REF_ROOTS: recordedRoots });
     try {
       const posted = await fetch(`http://127.0.0.1:${daemon.port}/api/board`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-claude-board-secret': daemon.secret },
         body: JSON.stringify({
-          title: 'plist env round trip',
+          title: 'recorded roots round trip',
           cwd: projectDir,
           blocks: [
             { kind: 'markdown', source: { path: allowed } },
@@ -864,7 +1161,7 @@ async function main() {
       const html = await page.text();
       assert.ok(
         html.includes('CONTENT-INSIDE-THE-CONFIGURED-ROOT'),
-        'the root named in the plist must be an allowlisted root in the running daemon',
+        'the root install.sh resolved and recorded must be an allowlisted root in the running daemon',
       );
       assert.ok(
         !html.includes('CONTENT-OUTSIDE-EVERY-ROOT'),
@@ -1097,6 +1394,10 @@ async function main() {
     mkdirSync(path.join(oddDir, 'bin'), { recursive: true });
     writeFileSync(path.join(oddDir, 'bin', 'daemon.mjs'), '// stub\n');
     writeFileSync(path.join(oddDir, 'bin', 'mcp.mjs'), '// stub\n');
+    // install.sh now requires src/ to exist (it is staged into the bundle) -- a stub is
+    // enough, since nothing here actually runs this clone's daemon.
+    mkdirSync(path.join(oddDir, 'src'), { recursive: true });
+    writeFileSync(path.join(oddDir, 'src', 'stub.mjs'), '// stub\n');
     // The real launcher source: this clone's path is the one with `&` and `<>` in it, so
     // it is also the case that proves c_escape holds up where xml_escape does -- the
     // same bytes have to survive into a C string literal and compile.
@@ -1135,11 +1436,26 @@ async function main() {
     // binary's bytes. This is c_escape's assertion, and the ablation is the same shape:
     // splice the path into launcher_paths.h unescaped and a clone under a path with a
     // quote or backslash in it produces a header that will not compile.
-    assert.ok(existsSync(path.join(workDir, 'Applications-odd', 'claude-board.app')),
+    const oddAppPath = path.join(workDir, 'Applications-odd', 'claude-board.app');
+    assert.ok(existsSync(oddAppPath),
       `the launcher must build from a path with XML metacharacters in it:\n${r.stdout}`);
-    const oddLauncher = readFileSync(path.join(workDir, 'Applications-odd', 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
-    assert.ok(oddLauncher.includes(Buffer.from(`${path.join(oddDir, 'bin', 'daemon.mjs')}\0`, 'utf8')),
-      'the odd clone path must reach the launcher intact');
+    const oddLauncher = readFileSync(path.join(oddAppPath, 'Contents', 'MacOS', 'claude-board'));
+    // CLAUDE_BOARD_DAEMON is the path INSIDE the bundle now (the odd clone's own
+    // bin/daemon.mjs is staged there, never executed from the clone directly), so that is
+    // where the odd bytes have to reach unmangled.
+    assert.ok(oddLauncher.includes(Buffer.from(`${path.join(oddAppPath, 'Contents', 'Resources', 'bin', 'daemon.mjs')}\0`, 'utf8')),
+      'the bundled daemon path must reach the launcher intact');
+    // CLAUDE_BOARD_REPO_ROOT carries the odd CLONE path itself (see src/handoff.mjs
+    // repoRoot()), so this is the other half of the same c_escape claim: the clone path,
+    // odd bytes and all, still has to survive into the compiled binary.
+    assert.ok(oddLauncher.includes(Buffer.from(`${oddDir}\0`, 'utf8')),
+      'the odd clone path must reach the launcher intact via CLAUDE_BOARD_REPO_ROOT');
+    // And the payload itself: the odd clone's own stub source, copied byte-identical.
+    assert.equal(
+      readFileSync(path.join(oddAppPath, 'Contents', 'Resources', 'src', 'stub.mjs'), 'utf8'),
+      '// stub\n',
+      'the payload must be staged into the bundle even from an odd clone path',
+    );
   });
 
   await check('install fails loudly rather than exiting 0 when the generated plist does not lint', async () => {

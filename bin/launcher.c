@@ -32,19 +32,118 @@
  * say any process running as you, including one TCC has refused — run its own code under
  * an identity the user has approved for their Documents folder. Retargeting this one
  * takes a recompile and a resign.
+ *
+ * The same reasoning extends past argv to the environment, and for the identical reason:
+ * the plist is world-readable and user-writable, and its `EnvironmentVariables` dict used
+ * to be inherited by the child wholesale. `NODE_OPTIONS` in that dict is arbitrary code
+ * that runs the instant node starts — anyone who can write the plist could run anything
+ * they want under this bundle's TCC-granted identity, no recompile required. So this
+ * launcher builds the child's environment itself rather than passing its own through:
+ * HOME, PATH and the three CLAUDE_BOARD_* variables that decide what the daemon may read,
+ * serve and write are compiled in exactly like CLAUDE_BOARD_NODE and CLAUDE_BOARD_DAEMON
+ * above, and never taken from whatever launchd happened to hand this process. A fourth,
+ * CLAUDE_BOARD_REPO_ROOT, is compiled in for a different reason: CLAUDE_BOARD_DAEMON now
+ * points inside this bundle (install.sh stages a copy of bin/daemon.mjs and src/ into
+ * Contents/Resources ahead of signing), so import.meta.url can no longer tell the daemon
+ * where the actual clone is — and it needs to know, because src/handoff.mjs's
+ * recoveryCommand() names bin/authorize.mjs by absolute path, and that file is
+ * deliberately NOT staged into the bundle (it runs from the clone, registered with Claude
+ * Code by path, never through this launcher). It decides no boundary the grant reaches;
+ * it is baked in anyway, for the same reason CLAUDE_BOARD_NODE is — an argv- or
+ * env-supplied path here would let anything that can rewrite the plist choose what
+ * recovery command a locked-out reviewer is told to run. A short allowlist of timing/port
+ * knobs — none of which can widen what the grant reaches — is still let through from the
+ * parent, by exact name. Everything else, `NODE_OPTIONS` and `CLAUDE_BOARD_SECRET_FILE`
+ * included, is simply never copied into the child's environment: not filtered out of it,
+ * just never put there. See OVERRIDE_ENV and PASSTHROUGH_NAMES below, and
+ * launcher_paths.h for where the compiled-in values come from.
  */
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 /* Generated into the build directory by install.sh: CLAUDE_BOARD_NODE and
- * CLAUDE_BOARD_DAEMON, each a C string literal holding an absolute path. A header rather
- * than -D so the paths survive the trip through the shell without a second layer of
- * quoting to get wrong. */
+ * CLAUDE_BOARD_DAEMON (an absolute path each — CLAUDE_BOARD_DAEMON is the path INSIDE
+ * the bundle once a launcher is in use, not the clone's), plus six more used below to
+ * build the child's environment — CLAUDE_BOARD_HOME_DIR, CLAUDE_BOARD_PATH,
+ * CLAUDE_BOARD_STORE_DIR, CLAUDE_BOARD_REF_ROOTS_VALUE, CLAUDE_BOARD_SERVE_ROOTS_VALUE
+ * and CLAUDE_BOARD_REPO_ROOT_VALUE. All eight are C string literals. A header rather than
+ * -D so the paths survive the trip through the shell without a second layer of quoting to
+ * get wrong. */
 #include "launcher_paths.h"
+
+/* --- The child's environment, built once here rather than inherited -------------
+ *
+ * Two categories. The compiled-in overrides are string-literal concatenations, so there
+ * is no runtime cost and no allocation for this half at all — the preprocessor pastes
+ * `"NAME="` onto the header's value at compile time, the same way CLAUDE_BOARD_NODE and
+ * CLAUDE_BOARD_DAEMON above are already C string literals rather than something built at
+ * runtime. Changing any of these six costs a rebuild (and, since that changes the
+ * bundle's bytes, a re-sign and a fresh TCC prompt) rather than a plist edit — which is
+ * the point for five of them: they decide what the daemon may read, serve and write, so
+ * retargeting them should cost as much as retargeting CLAUDE_BOARD_NODE does.
+ * CLAUDE_BOARD_REPO_ROOT is the odd one out — it decides no boundary at all, only what
+ * path a locked-out reviewer is told to run — but it is baked in on the same footing
+ * anyway: an env- or plist-supplied value here would be exactly the kind of thing this
+ * file exists to stop a rewritable plist from choosing. */
+static const char *const OVERRIDE_ENV[] = {
+  "HOME=" CLAUDE_BOARD_HOME_DIR,
+  "PATH=" CLAUDE_BOARD_PATH,
+  "CLAUDE_BOARD_HOME=" CLAUDE_BOARD_STORE_DIR,
+  "CLAUDE_BOARD_REF_ROOTS=" CLAUDE_BOARD_REF_ROOTS_VALUE,
+  "CLAUDE_BOARD_SERVE_ROOTS=" CLAUDE_BOARD_SERVE_ROOTS_VALUE,
+  "CLAUDE_BOARD_REPO_ROOT=" CLAUDE_BOARD_REPO_ROOT_VALUE,
+};
+/* An enum, not a `static const int` like FORWARDED_N above: this one sizes the envp
+ * array below, and a `const int` is not a compile-time constant to a strict C compiler
+ * even when its initializer plainly is — which turns that array into a variable-length
+ * array (a silently-accepted GNU extension on this platform, but still a warning worth
+ * not having). An enum constant is. */
+enum { OVERRIDE_ENV_N = (int)(sizeof(OVERRIDE_ENV) / sizeof(OVERRIDE_ENV[0])) };
+
+/* The passthrough allowlist: copied from the parent's environment only if present, and
+ * only under this exact name — no prefix match, no wildcard. Every name here is a
+ * timing or port knob; none of them can change what directory gets read, served or
+ * written, which is what makes it safe to leave these operator-tunable from the plist
+ * without a rebuild. Anything not named here — NODE_OPTIONS chief among them, since it
+ * is arbitrary code that runs the instant node starts, and CLAUDE_BOARD_SECRET_FILE,
+ * since HOME is baked above precisely so the daemon's default secret path is the only
+ * one it can reach — is simply absent from the child's environment: not stripped out of
+ * it, just never copied in. */
+static const char *const PASSTHROUGH_NAMES[] = {
+  "CLAUDE_BOARD_PORT",
+  "CLAUDE_BOARD_SHUTDOWN_MS",
+  "CLAUDE_BOARD_SSE_HEARTBEAT_MS",
+  "CLAUDE_BOARD_TIMEOUT_MS",
+  "CLAUDE_BOARD_HANDOFF_TTL_MS",
+  "TMPDIR",
+};
+enum { PASSTHROUGH_N = (int)(sizeof(PASSTHROUGH_NAMES) / sizeof(PASSTHROUGH_NAMES[0])) };
+
+/* Builds one "NAME=value" entry for a passthrough variable actually present in this
+ * process's own environment. Three-way return rather than a bare pointer, because
+ * "the operator never set this knob" (the common case for most of these) and "malloc
+ * failed" both look like NULL otherwise, and only one of those is safe to treat as
+ * "just leave it out": an allocation failure here means this process cannot say for
+ * certain what it is about to hand a TCC-granted child, which is not a state to exec
+ * out of quietly.
+ *   returns  1  — present, *out is a malloc'd "NAME=value" the caller must keep past exec
+ *            0  — absent from the environment, *out untouched
+ *           -1  — present but malloc failed, *out untouched */
+static int build_passthrough_entry(const char *name, char **out) {
+  const char *value = getenv(name);
+  if (value == NULL) return 0;
+  size_t len = strlen(name) + 1 /* '=' */ + strlen(value) + 1 /* NUL */;
+  char *entry = malloc(len);
+  if (entry == NULL) return -1;
+  snprintf(entry, len, "%s=%s", name, value);
+  *out = entry;
+  return 1;
+}
 
 /* The signals launchd uses to stop a job, plus the two a terminal would send if someone
  * runs this by hand while debugging. SIGKILL is deliberately absent: it cannot be caught,
@@ -94,6 +193,33 @@ int main(void) {
     return 1;
   }
 
+  /* Built before fork(), not after: these entries do not depend on which process reads
+   * them (the environment is the same in parent and child at this point, since fork()
+   * has not happened yet), and failing loudly here — before there is a child to leave
+   * half-supervised — is the simpler failure mode. The array lives in main()'s own stack
+   * frame, which fork() duplicates whole, so the child's copy is still valid when it
+   * execve()s below; nothing here needs to survive past that call, so nothing needs
+   * freeing. Sized for the worst case (every passthrough name present) plus one for the
+   * NULL terminator execve requires. */
+  char *envp[OVERRIDE_ENV_N + PASSTHROUGH_N + 1];
+  int envc = 0;
+  for (int i = 0; i < OVERRIDE_ENV_N; i++) {
+    envp[envc++] = (char *)OVERRIDE_ENV[i];
+  }
+  for (int i = 0; i < PASSTHROUGH_N; i++) {
+    char *entry = NULL;
+    int rc = build_passthrough_entry(PASSTHROUGH_NAMES[i], &entry);
+    if (rc < 0) {
+      fprintf(stderr, "claude-board: cannot build environment for %s: out of memory\n",
+              PASSTHROUGH_NAMES[i]);
+      return 1;
+    }
+    if (rc > 0) {
+      envp[envc++] = entry;
+    }
+  }
+  envp[envc] = NULL;
+
   pid_t pid = fork();
   if (pid < 0) {
     fprintf(stderr, "claude-board: fork failed: %s\n", strerror(errno));
@@ -115,7 +241,10 @@ int main(void) {
     (void)sigprocmask(SIG_SETMASK, &previous, NULL);
 
     char *const argv[] = { (char *)CLAUDE_BOARD_NODE, (char *)CLAUDE_BOARD_DAEMON, NULL };
-    execv(CLAUDE_BOARD_NODE, argv);
+    /* execve, not execv: node inherits exactly the envp built above — the compiled-in
+     * overrides and whatever passthrough knobs the parent set — and nothing else this
+     * process itself was handed. */
+    execve(CLAUDE_BOARD_NODE, argv, envp);
     /* Only reachable if the exec failed — a node that was uninstalled or moved since
      * install.sh baked its path in. 127 is the shell's convention for "command not
      * found", and it goes to the daemon's own error log, which is where install.sh

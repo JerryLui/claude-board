@@ -5,8 +5,82 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ## [Unreleased]
 
+### Security
+
+- **The launcher no longer hands node the plist's environment unfiltered.** The
+  `EnvironmentVariables` dict in `~/Library/LaunchAgents/claude-board.plist` is
+  world-readable and user-writable, and a `NODE_OPTIONS=--require ...` key in it used to
+  run chosen code inside the TCC-granted process with the bundle's signature untouched —
+  no recompile, no re-sign, nothing to distinguish it from a knob an operator meant to
+  tune. `bin/launcher.c` now builds the child's environment itself before `exec`ing node
+  (`execve`, not `execv`): `HOME`, `PATH` (fixed to `/usr/bin:/bin:/usr/sbin:/sbin`, since
+  the daemon shells out to `osascript` and `open` and an inherited `PATH` would be a
+  code-execution path of its own), `CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS` and
+  `CLAUDE_BOARD_SERVE_ROOTS` — the five variables that decide what the daemon may read,
+  serve and write — are compiled in at install time, the same way `CLAUDE_BOARD_NODE` and
+  `CLAUDE_BOARD_DAEMON` already were. Retargeting any of them now costs a rebuild, which
+  costs a re-sign, which costs the user's TCC grant and a fresh prompt — a deliberate
+  trade, made explicit rather than left as an accident of how the launcher happened to be
+  written. A short allowlist of timing and port knobs (`CLAUDE_BOARD_PORT`,
+  `CLAUDE_BOARD_SHUTDOWN_MS`, `CLAUDE_BOARD_SSE_HEARTBEAT_MS`, `CLAUDE_BOARD_TIMEOUT_MS`,
+  `CLAUDE_BOARD_HANDOFF_TTL_MS`, `TMPDIR`) still passes through by exact name, on the
+  theory that none of them can change what directory the grant reaches. Everything else —
+  `NODE_OPTIONS` chief among them, plus `CLAUDE_BOARD_SECRET_FILE`, which is deliberately
+  on neither list, since a baked `HOME` already makes the daemon's own default secret path
+  the only one it can reach — is simply never placed in the child's environment at all:
+  not filtered out of something inherited, never put there in the first place. See
+  SECURITY.md, "Fixed 2026-08-04: the environment used to be a third route, and the widest
+  one", and `test/check-launcher-env.mjs`, which compiles the real launcher against a stub
+  daemon and a poisoned parent environment — including a working `NODE_OPTIONS` marker —
+  to prove the injected code never runs, not just that the string disappears.
+- **`install.sh` stops writing the roots and the store into the plist once a launcher
+  bundle is in use.** `CLAUDE_BOARD_REF_ROOTS`, `CLAUDE_BOARD_SERVE_ROOTS` and
+  `CLAUDE_BOARD_HOME` used to be written into `EnvironmentVariables` unconditionally,
+  which was already misleading the moment the fix above landed: the launcher ignores the
+  plist for these regardless of what it says, so leaving them in was a lie about what is
+  actually in force. They are omitted entirely now, present only on the degraded
+  (no-launcher) path, where node reads its environment straight from the plist because
+  there is nowhere else for it to come from. A previously-customised
+  `CLAUDE_BOARD_REF_ROOTS` / `CLAUDE_BOARD_SERVE_ROOTS` is carried forward across a
+  reinstall from a small record file next to the secret now, rather than read back out of
+  the plist — the exact mechanism that used to let a written `NODE_OPTIONS` propagate
+  silently across every future reinstall, and the one that stops working the moment the
+  plist stops carrying the value at all. A pre-existing plist is still read once, as a
+  migration, so an operator's earlier narrowing is not silently reset back to the default
+  by the upgrade that fixed this.
+- **The daemon's own code is now inside the signed bundle, not just the launcher that
+  forks it.** `bin/daemon.mjs` and everything under `src/` used to live only in the
+  clone — outside the ad-hoc signature and outside the rebuild stamp — so anything that
+  could write the clone owned the TCC grant with no recompile and no re-sign.
+  `install.sh` now stages a copy of both into `claude-board.app/Contents/Resources`
+  before the existing `codesign` call, preserving `bin/`'s and `src/`'s relative layout
+  so `bin/daemon.mjs`'s own `../src/server.mjs` import resolves unchanged. The rebuild
+  stamp's input field folds in a deterministic digest of that payload — every file's own
+  sha256 paired with its relative path, sorted before hashing, so it depends on content
+  alone, never on mtime or directory-walk order — so an untouched reinstall still
+  rebuilds nothing (the guarantee this whole change had to protect: a gratuitous rebuild
+  costs the user their TCC grant), while editing `bin/daemon.mjs` or anything under
+  `src/` in the clone now forces the next install to rebuild, where it silently would not
+  have before. `bin/mcp.mjs` and `bin/authorize.mjs` are deliberately not staged — they
+  are the shim, registered with Claude Code (or run by hand) at the clone's own absolute
+  path, never through the launcher. One thing had to move to make this safe:
+  `src/handoff.mjs`'s `recoveryCommand()` used to derive the clone's location from its
+  own file location, which would have resolved inside the bundle and named a
+  `bin/authorize.mjs` that does not exist there; a sixth compiled-in value,
+  `CLAUDE_BOARD_REPO_ROOT`, now carries the real clone path instead, on the same footing
+  as `CLAUDE_BOARD_NODE`. See SECURITY.md "Fixed 2026-08-04: the daemon's own code is now
+  inside the signed bundle", ADR.md entry 15, and `test/check-install-payload.mjs`, which
+  drives an edited throwaway clone's ALREADY-BUILT launcher to prove the old code is what
+  answers before a reinstall and the new code after one.
+
 ### Added
 
+- **The daemon prints the environment it actually received, names only.**
+  `claude-board env: NAME,NAME,...` — sorted, names only, never values — is the first
+  line `bin/daemon.mjs` logs, landing in `~/Library/Logs/claude-board/daemon.out.log`
+  (not a private log, hence names only). It is the seam that makes the launcher's new
+  environment allowlist (see Security, above) checkable by reading a log line rather than
+  by trusting the C source or booting under real launchd.
 - **A pomodoro timer, owned by the daemon.** A Claude Code session starting begins a work
   interval; from there it is a self-sustaining loop — work rolls into break, break rolls
   into work — until you pause or reset it, and every fourth break is a long one. Each
@@ -98,7 +172,7 @@ this project does not yet follow semantic versioning, because nothing has been r
   paused turns back on and resumes — so starting a pomodoro no longer means waiting for the
   next Claude session to trigger the hook. It replaces the Pause/Resume text button, which
   had no readable state and tried to disappear itself when idle. `POST /api/pomodoro/ensure`
-  accepts the session cookie for this (ADR.md entry 14); it is the same route the session-start
+  accepts the session cookie for this (ADR.md entry 17); it is the same route the session-start
   hook already calls, and `startWork` is a no-op against a timer that already exists, so
   starting one by hand while one runs still changes nothing.
 
@@ -112,7 +186,7 @@ this project does not yet follow semantic versioning, because nothing has been r
   the thread list in place, matching a session's title, project folder or thread id; the
   block-level result cards that used to render beneath the list are gone, along with the
   full-text walk `GET /` ran to produce them. `GET /api/search` is unchanged and is still the
-  full-text surface. See ADR.md entry 13.
+  full-text surface. See ADR.md entry 16.
 
 - **The index title fills the header.** The "one thread per Claude session" subtitle is gone and
   the `h1` grew from 22px to 30px to take the space back. The header row centres its two sides
@@ -257,6 +331,37 @@ this project does not yet follow semantic versioning, because nothing has been r
   forever. The default is narrowed to three roots, `~/.claude/skills`,
   `~/.claude/commands` and `~/.claude/agents`; `CLAUDE_BOARD_REF_ROOTS=~/.claude` still
   opts back into the whole tree for anyone who wants it. See ADR.md entry 3.
+- **A rogue `launcher_paths.h` next to `bin/launcher.c` can no longer reach the build.**
+  `bin/launcher.c` pulls in its generated header with a *quoted* `#include`, and a quoted
+  include searches the including file's own directory before any `-I`/`-iquote` path —
+  so compiling the source in place, straight out of the clone, let a header dropped into
+  `bin/` shadow the real one `install.sh` generates and get compiled and ad-hoc signed,
+  unnoticed, into a bundle macOS then trusts with the Documents grant. Deleting the shadow
+  afterwards left the clone byte-identical to upstream either way. `install.sh` now copies
+  `bin/launcher.c` into the same `mktemp -d` directory it already generates the header
+  into, and compiles that copy with `-iquote` in place of `-I`: no include path reaches
+  back into the clone, so the shadow has no route into the build regardless of whether
+  anyone notices it — a structural fix rather than a check that could rot. A leftover
+  `bin/launcher_paths.h` still found in the clone (plausible: an older `install.sh`
+  generated it in place) earns one non-fatal warning naming the file, not a failed
+  install. See ADR.md entry 14.
+- **The rebuild stamp now covers the installed executable's own bytes, not just its
+  inputs.** `~/.config/claude-board/launcher.stamp` hashed the launcher source, the
+  generated header, the generated `Info.plist` and the bundle identifier — everything
+  that *decides* the bundle's bytes — but nothing about what actually landed at
+  `~/Applications/claude-board.app/Contents/MacOS/claude-board`. A direct edit of that
+  installed executable bypassed every one of those inputs and left the "already current"
+  check none the wiser. The stamp file now carries a second field, the sha256 of the
+  executable as installed (hashed after the atomic `mv`), and a reinstall is "already
+  current" only when that hash still matches too, on top of the existing input-stamp,
+  executable-exists and `codesign --verify` conditions. A stamp file from before this
+  change has only the first field; the missing second never matches a real digest, so
+  the very next install rebuilds once — and writes a fresh two-field stamp — rather than
+  crashing on it. Tested empirically against the exact `codesign --verify` invocation
+  `install.sh` already runs: ad-hoc signing already refuses a bundle whose main
+  executable has been altered by even one flipped byte, so the new hash is redundant
+  with that check today — cheap belt-and-braces, not the only thing standing between a
+  tampered binary and a false "already current". See ADR.md entry 14.
 
 ### Removed
 

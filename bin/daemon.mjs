@@ -25,6 +25,16 @@ import { startServer, DEFAULT_PORT } from '../src/server.mjs';
 const SHUTDOWN_GRACE_MS = Number(process.env.CLAUDE_BOARD_SHUTDOWN_MS) || 2_000;
 const WANTED_PORT = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT;
 
+// The seam that makes bin/launcher.c's environment allowlist checkable without booting
+// under real launchd: every variable actually present in this process's own
+// environment, sorted, NAMES ONLY -- never values, since this goes to
+// ~/Library/Logs/claude-board/daemon.out.log under a real install, which is not a
+// private log. One line, printed unconditionally (not behind a debug flag) so a check
+// -- or a person diagnosing "why can't the board read that file" -- can compare it
+// against the launcher's compiled-in overrides and passthrough allowlist and see
+// exactly what got through, rather than what was merely supposed to.
+console.log(`claude-board env: ${Object.keys(process.env).sort().join(',')}`);
+
 let started;
 try {
   started = await startServer({});

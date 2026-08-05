@@ -73,8 +73,23 @@ export const DEFAULT_PORT = 7391;
 
 /** The repository this daemon is running from. `install.sh` points launchd at a clone
  * wherever the user put it, so this is the only way to name the recovery command with a
- * path that actually exists on the reader's machine. */
+ * path that actually exists on the reader's machine.
+ *
+ * `CLAUDE_BOARD_REPO_ROOT` wins when it is set. It has to: `install.sh` now stages a copy
+ * of `bin/daemon.mjs` and this whole `src/` directory into
+ * `claude-board.app/Contents/Resources` and points the launcher at THAT copy (see
+ * `bin/launcher.c`'s `CLAUDE_BOARD_DAEMON`, baked from the installed path, and its
+ * `OVERRIDE_ENV`), so `import.meta.url` below would resolve to a directory inside the
+ * bundle once a launcher is in use — and `bin/authorize.mjs`, which `recoveryCommand`
+ * below names, is deliberately NOT copied there (it is the shim, run from the clone and
+ * registered with Claude Code by absolute path). Naming it from inside the bundle would
+ * print a command that does not exist. `CLAUDE_BOARD_REPO_ROOT` is the actual clone path
+ * in that case, compiled into the launcher for the identical reason `CLAUDE_BOARD_NODE`
+ * is. The plain computation below is what a daemon running directly out of a clone still
+ * uses — the degraded (no-launcher) path, and anything importing this module out of a
+ * clone directly (a check, a throwaway script). */
 export function repoRoot() {
+  if (process.env.CLAUDE_BOARD_REPO_ROOT) return process.env.CLAUDE_BOARD_REPO_ROOT;
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 }
 

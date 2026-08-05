@@ -68,25 +68,178 @@ one TCC has refused — could spend that grant on its own code. Retargeting the 
 **argv** takes a recompile and a re-sign.
 
 **Known limits of that, stated plainly rather than implied away.** Compiling in the argv
-does not make the grant unspendable by a process running as you, and three routes are
-open today:
+was never a claim that a rewritable plist was the only thing standing between a local
+process and the grant — three more routes were open on top of it: the environment the
+daemon ran in was inherited from the plist unfiltered, the code the bundle actually ran
+lived outside the signature in the clone, and the build itself could be poisoned by a
+file dropped next to the source. All three are closed now (below, in order). What is
+left is narrower, and worth stating precisely rather than declaring the boundary solved:
 
-- The launcher `execv`s, so node inherits launchd's **environment** unfiltered, and the
-  plist is mode 644. A `NODE_OPTIONS=--require ...` key in the existing
-  `EnvironmentVariables` dict runs chosen code inside the granted process with the bundle
-  and its signature untouched. `CLAUDE_BOARD_SECRET_FILE` and `CLAUDE_BOARD_REF_ROOTS` are
-  reachable the same way, and the latter is carried forward across future reinstalls.
-- The code the bundle runs — `bin/daemon.mjs` and everything under `src/` — lives in the
-  clone, is not inside the signed bundle, and is not covered by the rebuild stamp. Anything
-  that can write the clone owns the grant, without recompiling anything.
-- `bin/launcher.c` includes its generated header with a quoted `#include` and is compiled
-  in place, so a `bin/launcher_paths.h` dropped into the clone shadows the real one and
-  `install.sh` will compile, sign and install it for you.
+- **A rebuild costs the grant, on purpose.** Every value that decides what the daemon may
+  read, serve or write — the six compiled-in overrides below, plus the payload now staged
+  into `Resources/` — is an input to the bundle's own bytes. Changing any of them changes
+  the cdhash, and macOS re-prompts for Documents access on the very next launch. That is
+  the design working as intended — the alternative is a boundary a rewritable plist could
+  move without a rebuild — but a user meets it as friction rather than a warning:
+  retargeting `CLAUDE_BOARD_REF_ROOTS`, or editing `bin/daemon.mjs` or anything under
+  `src/`, costs a fresh TCC prompt, not just a fresh binary.
+- **Whoever can write the clone still owns the *next* install, not the running daemon.**
+  `install.sh` builds the launcher and its payload alike from the clone, so a poisoned
+  clone followed by a reinstall still lands inside the signature. What changed is that it
+  can no longer do so silently: the poisoned bundle carries a different cdhash than the
+  one already granted, so the reinstall re-prompts for Documents access, and an attacker
+  who can write the clone but cannot click through that prompt gets nothing. That is a
+  materially weaker attack than the one it replaced — before, an edit to the clone took
+  effect on the very next request, no prompt, no signal at all — but it is not "closed":
+  treat the clone directory and the LaunchAgents plist as inside the trust boundary.
+- **`DYLD_INSERT_LIBRARIES` on the launcher's own load is untouched by any of this.** The
+  `execve`-built environment below governs what the launcher hands *node*; it has no say
+  over what launchd's plist hands the *launcher* itself, one hop earlier, because dyld
+  reads its own family of variables while loading the launcher's image, before a line of
+  `main()` runs (QUIRKS.md, "`DYLD_INSERT_LIBRARIES` (and friends) act on the process
+  being loaded, not on what that process execs"). Closing this needs hardened-runtime
+  signing (`codesign --options runtime`) — worth adding for this specific gap, but it is
+  not the fix for either point above, and it carries its own entitlement and TCC
+  consequences that are out of scope for this pass.
 
-This narrows the blast radius; it does not make the grant free. A board can still render
-any file inside the board's project directory or the reference allowlist, and the
-launcher holds whatever folder access you gave it while it is running. Treat the clone
-directory and the LaunchAgents plist as inside the trust boundary.
+A board can still render any file inside the board's project directory or the reference
+allowlist, and the launcher holds whatever folder access you gave it while it is running
+— none of the above changes that.
+
+**Fixed 2026-08-04: the environment used to be a third route, and the widest one.** The
+launcher used to `execv`, so node inherited launchd's environment unfiltered, and the
+plist is mode 644 and user-writable — a `NODE_OPTIONS=--require ...` key in the existing
+`EnvironmentVariables` dict ran chosen code inside the granted process with the bundle
+and its signature entirely untouched, no recompile required at all.
+`CLAUDE_BOARD_SECRET_FILE` and `CLAUDE_BOARD_REF_ROOTS` were reachable the identical way,
+and the latter used to be carried forward across every future reinstall by reading it
+back out of the plist.
+
+The launcher now `execve`s with an environment it constructs itself rather than passing
+its own through (`bin/launcher.c`, `OVERRIDE_ENV` / `PASSTHROUGH_NAMES`). `HOME`, `PATH`,
+`CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS` and `CLAUDE_BOARD_SERVE_ROOTS` — the five
+variables that decide what the daemon may read, serve and write — are compiled in
+exactly like `CLAUDE_BOARD_NODE` and `CLAUDE_BOARD_DAEMON` already were, at the identical
+cost: retargeting any of them takes a recompile and a re-sign, which is the same
+deliberate trade this whole section is about. `PATH` is baked to the fixed
+`/usr/bin:/bin:/usr/sbin:/sbin`, since the daemon shells out to `osascript` and `open`
+and an inherited `PATH` would be a code-execution path of its own. Only a short
+allowlist of timing and port knobs — `CLAUDE_BOARD_PORT`, `CLAUDE_BOARD_SHUTDOWN_MS`,
+`CLAUDE_BOARD_SSE_HEARTBEAT_MS`, `CLAUDE_BOARD_TIMEOUT_MS`, `CLAUDE_BOARD_HANDOFF_TTL_MS`,
+`TMPDIR` — is still read from the plist, on the theory that none of them can change what
+directory the grant reaches. Everything else, `NODE_OPTIONS` and
+`CLAUDE_BOARD_SECRET_FILE` included, is simply absent from the child's process: not
+stripped out of an inherited environment, never placed there at all. `HOME` being baked
+is what makes `CLAUDE_BOARD_SECRET_FILE` safe to drop rather than allowlist — with it
+fixed, the daemon's own default secret path, `~/.config/claude-board/secret`, is the
+only one the process can reach.
+
+One consequence for the plist's own contents: `CLAUDE_BOARD_REF_ROOTS`,
+`CLAUDE_BOARD_SERVE_ROOTS` and `CLAUDE_BOARD_HOME` are no longer written into it at all
+once a launcher bundle is in use. Leaving them there would have been a lie about what is
+actually in force, since the launcher ignores the plist for these regardless of what it
+says. They remain in the plist, unconditionally, on the degraded (no-launcher) path,
+where node reads its environment straight from launchd because there is nowhere else for
+it to come from. A second consequence: carrying a previously-customised
+`CLAUDE_BOARD_REF_ROOTS` / `CLAUDE_BOARD_SERVE_ROOTS` forward across a reinstall used to
+mean reading the plist back — the exact mechanism that let a written `NODE_OPTIONS`
+propagate silently forever, and the thing that stops working the moment the plist stops
+carrying the value at all. It now lives in a small record file in the same 0700
+directory as the secret, with a one-time read of a pre-existing plist as a migration
+fallback so an upgrade does not silently reset a customised value to the default.
+
+Covered end to end by `test/check-launcher-env.mjs` — a real compiled launcher, a
+poisoned parent environment including a `NODE_OPTIONS` marker that proves the injected
+code never ran (not just that the string went missing), and an assertion that the
+child's environment is exactly the allowlisted set, nothing more — and by
+`test/check-install.mjs`, which proves install.sh resolves and bakes the right values
+and that the plist itself carries none of them once a launcher bundle is in use.
+
+**Fixed 2026-08-04: the build itself could no longer be poisoned by a file left in the
+clone.** `bin/launcher.c` used to compile straight out of the clone, with the compiler's
+`-I` pointed at `launcher_paths.h`, the header `install.sh` generates fresh on every run.
+The source's own `#include "launcher_paths.h"` is a *quoted* include, and a quoted
+include searches the including file's own directory before any `-I` path is consulted —
+so a `bin/launcher_paths.h` dropped into `bin/`, next to the real source, shadowed the
+generated header and got compiled, ad-hoc signed and installed into a bundle macOS then
+trusts with the Documents grant, with nothing on screen saying so. Deleting the shadow
+afterward left the clone byte-identical to upstream, so neither the attack nor an
+innocent leftover from an older `install.sh` (one that used to generate the header in
+place) showed up in `git status` either way.
+
+`install.sh` now stages `bin/launcher.c` into the same throwaway `mktemp -d` directory it
+already generates `launcher_paths.h` and the staged `Info.plist` into, and compiles that
+copy with `-iquote "$LAUNCHER_BUILD_DIR"` in place of `-I`. With the source and its real
+header staged together and no include path reaching back into the clone, a quoted
+include's own-directory search lands on the real header no matter what sits beside
+`bin/launcher.c` in the clone — the fix is structural, not a check that can rot, so a
+rogue header is powerless whether or not anyone notices it. `install.sh` still prints one
+non-fatal warning naming the file if `bin/launcher_paths.h` exists in the clone:
+refusing outright would turn a stale, innocent leftover into a failed install, and
+silence would leave a genuinely planted one un-named.
+
+The rebuild stamp also gained a second field here: the sha256 of the *installed*
+executable, computed after the atomic `mv`, so a hand-edit of the bytes actually on disk
+— bypassing every input the stamp otherwise covers — no longer leaves "already current"
+none the wiser. Belt-and-braces rather than the only thing standing between a tampered
+binary and a false "already current": ad-hoc signing already covers the main executable
+with page hashes, and `codesign --verify` (already required for "already current")
+already refuses a bundle whose executable was altered by even one flipped byte. This
+stops being redundant with that check the day a `codesign --verify` bypass or a
+signature-format quirk on some future macOS makes it less than airtight.
+
+Covered by `test/check-install.mjs`: a rogue header planted next to `bin/launcher.c` in a
+throwaway clone builds a bundle carrying the real, compiled-in paths and none of the
+rogue ones, with a non-fatal warning on stdout; and a three-run sequence (build, untouched
+reinstall reports "already current" and rewrites nothing, then the installed executable
+is altered directly and the next run rebuilds, reproducing the original bytes exactly)
+proves the stamp's new field does its job in both directions. (`ADR.md` entry 14.)
+
+**Fixed 2026-08-04: the daemon's own code is now inside the signed bundle.** The "Known
+limits of that" section above named the remaining hole plainly: `bin/daemon.mjs`
+and everything under `src/` lived only in the clone, outside the ad-hoc signature and
+outside the rebuild stamp, so anything that could write the clone owned the TCC grant with
+no recompile and no re-sign required. `install.sh` now copies both into
+`claude-board.app/Contents/Resources` — preserving `bin/`'s and `src/`'s relative layout,
+so `bin/daemon.mjs`'s own `../src/server.mjs` import resolves unchanged — before the
+`codesign` call that step 1b already ran, so the signature (and `codesign --verify`,
+already part of the "already current" test) cover the payload exactly as they cover the
+launcher binary. A source copy rather than one bundled file: no bundler to add to a
+zero-dependency repo, stack traces stay honest, and the tamper-obviousness a bundled
+file's own hash would buy is already there via the signature. `bin/mcp.mjs` and
+`bin/authorize.mjs` are deliberately NOT copied — they are the shim, registered with
+Claude Code (or invoked by a person) at the clone's own absolute path, never through the
+launcher or the TCC-granted identity, so a copy inside the bundle would be dead weight
+nothing points at; `bin/launcher.c` is a build input, never executed as itself.
+
+The stamp's input field (`~/.config/claude-board/launcher.stamp`) now folds in a
+deterministic digest of that payload — every file's own sha256, paired with its relative
+path and sorted before hashing, so the result depends only on content, never on mtime or
+the order a directory read happens to return files in. Two things follow, and the first is
+the one this whole task exists to protect: a reinstall that changed nothing rebuilds
+nothing, byte-identical executable and untouched `Resources/`, so an already-granted user
+is never re-prompted by a routine `git pull && ./install.sh`. The second: editing
+`bin/daemon.mjs` or anything under `src/` in the clone now DOES force the next install to
+rebuild, where it silently would not have before — the clone is a build input from here
+on, and a `git pull` alone changes nothing about what is running until `install.sh` runs
+again (see QUIRKS.md "A bare `kickstart` no longer picks up a source edit"). One
+consequence worth naming precisely: `src/handoff.mjs`'s `recoveryCommand()` used to derive
+the clone's location from its own `import.meta.url`, which would have resolved to a
+directory inside the bundle once the daemon ran from there — and named
+`bin/authorize.mjs` at a path that does not exist, since that file is not staged.
+`CLAUDE_BOARD_REPO_ROOT`, compiled into the launcher on the same footing as
+`CLAUDE_BOARD_NODE` (`bin/launcher.c`'s `OVERRIDE_ENV`), carries the real clone path
+instead; it decides no boundary the grant reaches, and is baked in anyway rather than read
+from the plist for the same reason the other five are.
+
+Covered by `test/check-install-payload.mjs`: a throwaway clone builds a bundle carrying a
+byte-identical copy of its own `bin/daemon.mjs` and `src/`; editing the clone's
+`src/server.mjs` and running the ALREADY-BUILT launcher proves the old code is still what
+answers; the same edit forces the next install to rebuild, and the rebuilt launcher then
+serves the new code; an unauthenticated request to the running bundled daemon gets a
+refusal page naming the clone's `bin/authorize.mjs`, never a bundle path; and the stamp's
+payload digest is proven deterministic against directory-walk order and mtime directly,
+not only inferred from two installs producing the same bytes.
 
 **Where a reference can reach.** A board renders file content by reference, and a
 reference resolves in exactly two places: inside the board's own project directory, or

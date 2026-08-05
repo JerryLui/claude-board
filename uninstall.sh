@@ -189,6 +189,17 @@ echo "left in place on purpose:"
 echo "  store (your review history):  $STORE_DIR"
 echo "  local secret:                 $SECRET_FILE"
 echo "  logs:                         $LOG_DIR"
+# The three carry-forward records, kept for the same reason the secret is: they are your
+# configuration, not the bundle's. install.sh writes them so a reinstall keeps the roots
+# and store you chose, now that the launcher bakes those in and the plist no longer
+# carries them to be read back. The launcher stamp above IS removed, because it describes
+# a bundle that no longer exists; these describe choices that outlive it. Named
+# individually rather than as "$SECRET_DIR/*" so nobody hand-deletes the secret with them.
+for record in "$SECRET_DIR/ref_roots" "$SECRET_DIR/serve_roots" "$SECRET_DIR/board_home"; do
+  if [ -f "$record" ]; then
+    echo "  install-time choice:          $record"
+  fi
+done
 echo "Remove them yourself if you want them gone."
 echo
 # Not in the list above, because it is not a path and not something to delete — but a

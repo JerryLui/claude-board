@@ -48,10 +48,17 @@ bash install.sh
 ```
 
 One idempotent command, and one click. It generates a local secret, builds the launcher
-bundle, installs a launchd job running the daemon from this clone, waits for the daemon
-to actually answer before claiming success, and registers the MCP server with Claude Code
-at user scope. Running it again changes nothing that already matches: the secret is never
-rotated and the launcher is not rebuilt unless something it is built from changed.
+bundle — copying the daemon's own code into it so the code that runs is covered by the
+same signature as the launcher that forks it — installs a launchd job running that
+bundle, waits for the daemon to actually answer before claiming success, and registers
+the MCP server with Claude Code at user scope. Running it again changes nothing that
+already matches: the secret is never rotated and the launcher is not rebuilt unless
+something it is built from changed.
+
+**The clone is a build input now, not something the daemon reads live.** A `git pull`
+alone changes nothing about what is running; re-run `bash install.sh` to take it. See
+"Development" below for what that means day to day if you are working on this repo
+rather than just running it.
 
 This installs the service and its credential — nothing that calls them. `claude-board`
 ships the daemon, the shim and the protocol; it ships no commands or skills (see
@@ -203,21 +210,27 @@ Every check is also runnable alone, and each runs under a deadline in its own pr
 group, so a check that hangs fails by name instead of stalling the run.
 
 One gotcha worth knowing before you debug anything: **nothing picks up your changes on
-its own.** The installed daemon runs this clone's `bin/daemon.mjs` straight from disk,
-but it loads that code once, at start. Editing a file changes nothing until the daemon
-is restarted, and the way to restart it is to re-run `./install.sh` (or kickstart it,
-below). This is deliberate. The daemon used to watch its own `src/` and `bin/` and exit
-on any write there, letting `KeepAlive` bring the new code up — which meant a save
-during a review dropped every open event stream and every held-open wait, an atomic-save
-temp file counted as a change, and a half-written edit could take the daemon down for
-real and leave launchd throttling a crash loop. A plist-level `WatchPaths` was never an
-option either: it only ever *starts* a job that isn't running, and `KeepAlive` guarantees
-this one always already is, so the two fight instead of composing (see
-[QUIRKS.md](QUIRKS.md)).
+its own, and a plain restart is not enough either.** The installed daemon runs a COPY of
+`bin/daemon.mjs` and `src/` staged inside the launcher bundle at install time (see "Install"
+above and ADR.md entry 15), not this clone's files directly, and it loads that code once,
+at start. Editing a file changes nothing until you re-run `./install.sh` — which notices
+the edited code and rebuilds the bundle around it — and, unlike before that copy existed,
+**a bare `launchctl kickstart` is not enough on its own**: it restarts the same
+already-built binary forking the same already-staged copy, so the daemon visibly bounces
+(same log lines, same "listening on 127.0.0.1:7391") while still running your old code.
+See [QUIRKS.md](QUIRKS.md) "A bare `kickstart` no longer picks up a source edit" if that
+catches you mid-debug. This is deliberate, same as the restart behaviour itself: the
+daemon used to watch its own `src/` and `bin/` and exit on any write there, letting
+`KeepAlive` bring the new code up — which meant a save during a review dropped every open
+event stream and every held-open wait, an atomic-save temp file counted as a change, and a
+half-written edit could take the daemon down for real and leave launchd throttling a crash
+loop. A plist-level `WatchPaths` was never an option either: it only ever *starts* a job
+that isn't running, and `KeepAlive` guarantees this one always already is, so the two fight
+instead of composing (see [QUIRKS.md](QUIRKS.md)).
 
-To take a code change, or to revive an unresponsive daemon, restart the job yourself
-(`./install.sh` does this too, and is what you want after changing anything the plist or
-the launcher bundle is built from):
+To take a code change, run `./install.sh` again. To just revive an unresponsive daemon on
+the code it already has — no code change involved — a plain kickstart is still what you
+want:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/claude-board

@@ -772,6 +772,34 @@ an `ask` call that posts nothing. There is no clue in either that the problem is
 LaunchAgent, so treat "Failed to fetch" from a board as "check the daemon is running"
 before anything else.
 
+## A bare `kickstart` no longer picks up a source edit — only `./install.sh` does
+
+Before 2026-08-04, `bin/daemon.mjs` ran straight out of the clone, so a plain
+`launchctl kickstart -k gui/$(id -u)/claude-board` — no reinstall, no rebuild — was
+enough to pick up an edit: kickstart just restarts the same `node` process pointed at
+the same clone path, and node re-reads the file from disk on every start. That stopped
+being true the moment `install.sh` started staging a COPY of `bin/daemon.mjs` and all of
+`src/` into `claude-board.app/Contents/Resources` and pointing the launcher at the copy
+(see SECURITY.md "Fixed 2026-08-04: the daemon's own code is now inside the signed
+bundle" and ADR.md entry 15). A kickstart now restarts the same already-built binary,
+which forks the same already-staged copy — an edit to the clone underneath it changes
+nothing until `./install.sh` runs again, notices the payload digest moved, rebuilds and
+re-signs the bundle, and only THEN does a fresh copy land in Resources.
+
+The trap: this is easy to miss because the daemon still visibly restarts on a kickstart —
+same pid churn, same log lines, same "daemon listening on 127.0.0.1:7391" — so nothing
+about the symptom says "you are looking at old code." The tell is comparing behaviour
+against the file you just edited, not against whether the process bounced. If you are
+iterating on `src/` or `bin/daemon.mjs`, the loop is `./install.sh`, every time — not
+`launchctl kickstart`, which is now only good for reviving a daemon that crashed or
+hung on the code it already has. (The degraded, no-launcher path is the one exception:
+there, `bin/daemon.mjs` still runs straight out of the clone, exactly as before, and a
+kickstart alone is enough — see `install.sh` step 1b.)
+
+`test/check-install-payload.mjs` pins the fixed behaviour directly: it edits a
+throwaway clone's `src/server.mjs`, runs the ALREADY-BUILT launcher and asserts the old
+code is what answers, then reinstalls and asserts the edit only takes effect after that.
+
 ## Reload-on-change fired on editor temp files, not just source edits (removed)
 
 Historical, and part of why the mechanism is gone (entry above). Under
@@ -917,6 +945,49 @@ The message names the missing message, never the config, so it reads like a synt
 Either pass `-m` (`git tag -m 'why' <name> <commit>`), or — for a throwaway safety ref before
 a history rewrite — use `git branch <name> <commit>` instead, which takes no message and is
 just as easy to delete afterwards.
+
+## Sizing a C array from `sizeof(arr)/sizeof(arr[0])` held in `static const int` is a VLA
+
+`bin/launcher.c` builds the child's `envp` from two tables, and the natural way to size it is
+`char *envp[OVERRIDE_ENV_N + PASSTHROUGH_N + 1]` where `OVERRIDE_ENV_N` is
+`(int)(sizeof(OVERRIDE_ENV) / sizeof(OVERRIDE_ENV[0]))`. If that division lives in a
+`static const int` (the same pattern the file already used for `FORWARDED_N`, which is fine
+there because `FORWARDED_N` is only ever a loop bound), clang accepts it but warns:
+`variable length array folded to constant array as an extension [-Wgnu-folding-constant]`. A
+`const int` is not a compile-time constant expression to a strict C compiler even when its
+initializer plainly is one, so using it to size an array makes that array a VLA — silently
+accepted here as a GNU/Clang extension, but a warning `install.sh`'s `-Wall` build would then
+carry forever. Fix: an `enum { OVERRIDE_ENV_N = (int)(sizeof(...)/sizeof(...[0])) };` instead —
+an enum constant IS a real compile-time constant, same value, zero warning. Only matters when
+the count is used to size something; a plain loop bound (`for (int i = 0; i < FORWARDED_N; i++)`)
+never triggers this and does not need the enum treatment.
+
+## `DYLD_INSERT_LIBRARIES` (and friends) act on the process being loaded, not on what that process execs
+
+Testing that `bin/launcher.c`'s new execve-built environment drops `DYLD_INSERT_LIBRARIES`
+before handing it to node, the obvious move is to spawn the compiled launcher with
+`DYLD_INSERT_LIBRARIES=/tmp/does-not-exist.dylib` in its OWN environment and check the string
+never reaches the child. That crashes the launcher itself instead, before a single line of its
+`main()` runs:
+
+    dyld[...]: terminating because inserted dylib '/tmp/does-not-exist.dylib' could not be
+    loaded: tried: ... (no such file) ...
+
+`DYLD_*` variables are read by `dyld` while loading whatever process they are set on — here,
+the launcher binary the test harness spawns — not by that process's own code, and not only by
+whatever it later `exec`s. There is no C code in `launcher.c` that runs before dyld has already
+either honoured or refused the variable against the launcher's own image. This is also, in the
+real deployment, a gap this fix does not close: if an attacker's plist set
+`DYLD_INSERT_LIBRARIES` on the launcher itself (`ProgramArguments` names the launcher, and
+launchd would apply `EnvironmentVariables` to the process it execs, which is the launcher, not
+node), dyld would act on it before `main()` ever got a chance to build the filtered `envp` this
+fix is about — closing that would mean hardened-runtime signing the bundle, a signing change
+out of scope here and with its own TCC/entitlement consequences. The fix in this repo is scoped
+to what the launcher hands node, not to what launchd (or anything else) hands the launcher.
+For the test: point `DYLD_INSERT_LIBRARIES` at a dylib that actually exists and is harmless to
+load (e.g. `/usr/lib/libgmalloc.dylib` — present on every macOS install, loads without
+incident) so dyld succeeds and the test is about `launcher.c`'s filtering, not about dyld's
+own refusal of a bad path.
 
 ## `el.hidden = true` does nothing when a class in our own stylesheet sets `display`
 

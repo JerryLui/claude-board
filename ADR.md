@@ -470,6 +470,70 @@ one-block edit. What must not be undone is the explicit `DARK` naming — light'
 `#805300`, a brown tuned for contrast against text, and a well-meaning switch to the active
 theme's token would turn the tile to mud on exactly half the machines.
 
+## 13. The environment the daemon runs in is baked into the launcher, not read from the plist — 2026-08-04
+
+**Context:** Entry 9 already treats the launcher bundle's signature as load-bearing and refuses
+to touch it for a menu bar; this entry is the same trade applied to what the bundle actually
+hands node. `~/Library/LaunchAgents/claude-board.plist` is mode 644 and user-writable — SECURITY.md
+already named this before it was fixed — and until now `bin/launcher.c` `execv`'d, so node
+inherited launchd's whole environment. A `NODE_OPTIONS=--require /some/script.js` key in the
+plist's `EnvironmentVariables` dict ran arbitrary code inside the TCC-granted process with the
+bundle's own signature untouched: no recompile, no re-sign, nothing to distinguish it from a
+knob an operator meant to tune. `CLAUDE_BOARD_SECRET_FILE` and `CLAUDE_BOARD_REF_ROOTS` were
+reachable the identical way, and `CLAUDE_BOARD_REF_ROOTS` was carried forward across every future
+reinstall by reading the plist back — the same mechanism, pointed the other way, that would have
+propagated an injected `NODE_OPTIONS` forever once it landed once.
+
+**Decision:** `bin/launcher.c` now `execve`s with an environment it constructs itself, in two
+tiers. `HOME`, `PATH`, `CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS` and
+`CLAUDE_BOARD_SERVE_ROOTS` — the five variables that decide what the daemon may read, serve and
+write — are compiled in via `launcher_paths.h`, generated fresh by `install.sh` on every run,
+exactly like `CLAUDE_BOARD_NODE` and `CLAUDE_BOARD_DAEMON` already were. `PATH` is fixed to
+`/usr/bin:/bin:/usr/sbin:/sbin` rather than resolved from anywhere, since the daemon shells out
+to `osascript` and `open` and an inherited `PATH` is itself a code-execution surface. A short
+allowlist — `CLAUDE_BOARD_PORT`, `CLAUDE_BOARD_SHUTDOWN_MS`, `CLAUDE_BOARD_SSE_HEARTBEAT_MS`,
+`CLAUDE_BOARD_TIMEOUT_MS`, `CLAUDE_BOARD_HANDOFF_TTL_MS`, `TMPDIR` — still passes through from
+whatever the plist says, by exact name, no prefix match. The dividing line is not "security
+knob vs. convenience knob", it is narrower and mechanical: does this variable change what
+directory the grant can reach. None of the six can; all five compiled-in ones can. Everything
+else — `NODE_OPTIONS` above all, and `CLAUDE_BOARD_SECRET_FILE`, deliberately on neither list
+since a baked `HOME` already makes `~/.config/claude-board/secret` the only secret path the
+process can reach — is simply absent from the child's environment: not stripped out of
+something inherited, never placed there in the first place.
+
+The corollary for `install.sh`: once a launcher bundle is in use, `CLAUDE_BOARD_REF_ROOTS`,
+`CLAUDE_BOARD_SERVE_ROOTS` and `CLAUDE_BOARD_HOME` are no longer written into the plist at all.
+Writing them and having the launcher ignore them would be worse than omitting them — a plist
+that names a root the running daemon does not actually honour is a false statement about the
+boundary, readable by exactly the process this fix is defending against. Carrying a customised
+value forward across a reinstall therefore moves too: rather than reading it back out of the
+plist (dead now that the plist does not carry it, and previously the exact channel that would
+have made an injected `NODE_OPTIONS` durable across every future `git pull && ./install.sh`),
+`install.sh` records the effective roots in the 0700 directory that already holds the secret and
+the launcher's rebuild stamp, and reads them back from there. A plist written before this change
+is still read once, as a migration, so an operator who narrowed `CLAUDE_BOARD_REF_ROOTS` before
+today does not have that choice silently reset to the default by the same upgrade that closes
+the hole.
+
+**Consequences:** Retargeting any of the five baked variables now costs exactly what
+retargeting `CLAUDE_BOARD_NODE` already cost — a rebuild, a re-sign, and the user's TCC grant
+reset to be re-approved — which is a real, felt cost for an operator who wants to point
+`CLAUDE_BOARD_REF_ROOTS` somewhere new, not a free `./install.sh` env var away any more the way
+it read before this entry. That is accepted rather than worked around, because the alternative
+is the hole this entry closes: anything that can widen a security boundary without a rebuild is
+also reachable by anything that can write the plist, which is any process running as you,
+including one TCC has already refused. The six passthrough names are the pressure valve —
+timing and ports stay a plist edit away — and the list is meant to stay short: a future request
+to add a seventh name should be read as a request to widen what the plist can move, not merely
+to make an operator's life more convenient, and answered by the same test this entry's fix
+applies — does it change what directory the grant reaches.
+
+Rejected: keeping the roots in the plist and merely dropping `NODE_OPTIONS` and the other
+obviously-dangerous names from a blocklist. A blocklist has to anticipate every future dangerous
+variable; an allowlist only has to name the ones that are known to be safe, and everything
+un-named — including whatever the next Node release invents — is refused by construction rather
+than by having been thought of in time.
+
 Two smaller consequences fell out. The tile now needs `roundRect` rather than `arc` (Safari
 16.4+, Chrome 99+ — fine for a macOS-only tool, and where it is missing `drawFavicon`'s existing
 `try/catch` returns null and the tab keeps its unbadged mark, which is the correct degradation).
@@ -485,7 +549,170 @@ at the same `rx 9` (and never `--accent-ink`, which on `--bg` is a pip nobody ca
 this landed in straight out of the merge), and the marks in the board head and the index head are
 the favicon's own rects rather than a second copy of the geometry.
 
-## 13. The index's search box filters sessions; it does not search inside them — 2026-08-04
+## 14. The launcher is compiled from a staged copy, and the rebuild stamp covers the produced binary — 2026-08-04
+
+**Context:** `bin/launcher.c` was compiled in place, straight out of the clone, with
+`-I "$LAUNCHER_BUILD_DIR"` pointing the compiler at the header `install.sh` generates. The
+source's own `#include "launcher_paths.h"` is a *quoted* include, and a quoted include searches
+the including file's own directory before any `-I`/`-iquote` path — so a `launcher_paths.h`
+dropped into `bin/`, next to the source, shadowed the real generated header and got compiled and
+ad-hoc signed straight into a bundle macOS then trusts with the Documents grant (entry 9), with
+nothing on screen saying so. Deleting the shadow afterwards leaves the clone byte-identical to
+upstream, so the attack (or an innocent leftover — an older `install.sh` generated the header in
+place) is invisible in `git status` either way.
+
+Separately, and independently, the rebuild stamp at `~/.config/claude-board/launcher.stamp`
+hashed every input that decides the bundle's bytes — the source, the generated header, the
+generated `Info.plist`, the bundle identifier — and nothing about what actually landed at
+`~/Applications/claude-board.app/Contents/MacOS/claude-board`. A hand-edit of the installed
+executable, bypassing every one of those inputs, left the "already current" check none the wiser.
+
+**Decision:** Two changes, one per gap, both confined to `install.sh`'s own staging and stamping —
+neither touches `bin/launcher.c`'s content, the header's `#define`s, or the plist's
+`EnvironmentVariables`, which stay another chunk's to own.
+
+First, `install.sh` copies `bin/launcher.c` into the same `mktemp -d` directory it already
+generates `launcher_paths.h` and the staged `Info.plist` into, and compiles that copy with
+`-iquote "$LAUNCHER_BUILD_DIR"` in place of `-I`. With the source and its header both staged
+together and no include path reaching the clone, a quoted include's own-directory search lands on
+the real header no matter what sits beside `bin/launcher.c` — the fix is structural, not a check
+that can rot, so a rogue header is powerless whether or not anyone notices it. On top of that,
+`install.sh` still prints a single non-fatal warning naming the file if `bin/launcher_paths.h`
+exists in the clone: refusing outright would turn a stale, innocent leftover into a failed
+install, but silence would leave a genuinely planted one un-named.
+
+Second, the stamp file gains a second field: the sha256 of the installed executable, computed
+*after* the atomic `mv` — i.e., of the bytes at `$APP_EXEC`, not the staged copy. "Already
+current" now requires that hash to match what is currently on disk, on top of the existing input
+stamp, the executable-exists check, and `codesign --verify`. A stamp file written before this
+change has only the first field; the missing second field can never equal a real digest, so that
+case rebuilds once — earning a fresh, two-field stamp — rather than crashing on a short read.
+
+**Consequences:** For the same inputs, nothing changes: a routine `git pull && ./install.sh`
+still reports "already current" and the TCC grant survives, which is the whole point entry 9
+exists to protect, and is worth restating because a stamp that is too eager to rebuild is exactly
+as bad here as one that is not eager enough. The stamp file's format changes shape (two
+newline-separated fields, not one bare hash); nothing outside `install.sh` reads its contents —
+`uninstall.sh` only ever deletes it by path — so nothing else needed to change to match.
+
+Tested empirically against the exact `codesign --verify "$APP_PATH"` invocation `install.sh`
+already runs: ad-hoc code signing on macOS covers the main executable with page hashes in the
+`CodeDirectory`, and `--verify` already refuses a bundle whose executable has been altered by even
+one flipped byte, appended or interior. The executable hash added here is therefore redundant
+with that check today — belt-and-braces, not the only thing standing between a tampered binary
+and a false "already current" — but it is a few lines and one more `sha256_file` call, and it
+stops being redundant the day a `codesign --verify` bypass or a signature-format quirk on some
+future macOS makes the existing check less than airtight. Keeping both is cheaper than trusting
+that day never comes.
+
+**Status: accepted.** Covered by `test/check-install.mjs`: a rogue header planted next to
+`bin/launcher.c` in a throwaway clone builds a bundle carrying the real, compiled-in paths and
+none of the rogue ones, with a non-fatal warning on stdout; and a three-run sequence (build,
+untouched reinstall reports "already current" and rewrites nothing, then the installed executable
+is altered directly and the next run rebuilds — reproducing the original bytes exactly, since
+nothing else changed) proves the stamp's new field does its job in both directions.
+
+## 15. The daemon's own code is staged into the signed bundle, not left running from the clone — 2026-08-04
+
+**Context:** Entries 13 and 14 made the launcher's environment and the launcher binary itself
+trustworthy — compiled-in overrides, a stamp covering the produced executable — but both left
+one thing untouched, and SECURITY.md said so plainly under "Known limits of that": `bin/daemon.mjs`
+and everything under `src/` lived only in the clone. `ProgramArguments` named
+`claude-board.app/Contents/MacOS/claude-board`, and that binary forked `node` against
+`CLAUDE_BOARD_DAEMON`, a path compiled in by entry 13 — but a compiled-in path is only as
+trustworthy as what sits at the far end of it, and what sat there was a plain file in a plain
+git clone, writable by anything running as the user, unsigned, unstamped. The bundle's whole
+premise — that holding the grant and being able to spend it are different things — held for the
+launcher and fell apart one hop later: recompiling nothing, re-signing nothing, an edit to
+`src/store.mjs` or `src/resolve.mjs` took effect on the very next request, under the identity the
+user had granted Documents access to.
+
+**Decision:** `install.sh`'s launcher-bundle step (already staging `bin/launcher.c`,
+`launcher_paths.h` and `Info.plist` into a build directory ahead of `codesign`, per entry 14)
+now stages the daemon's own payload there too: `bin/daemon.mjs` and the whole of `src/`, copied
+into `$STAGED_APP/Contents/Resources` with their relative layout preserved, so
+`bin/daemon.mjs`'s existing `import { startServer } from '../src/server.mjs'` resolves exactly
+as it always did. The copy happens before the `codesign --force --sign -` call entry 9 already
+runs, so the ad-hoc signature — and `codesign --verify`, already part of the "already current"
+test — cover the payload on the identical footing as the launcher binary itself. A source copy,
+not a bundled single file: this repo has no bundler and entry 5 already rejected inventing
+machinery a zero-dependency tool does not need, a stack trace out of a copied `src/server.mjs`
+still names the real file and line, and the tamper-obviousness a bundled file's own hash would
+buy is already sitting there in the signature. `bin/mcp.mjs` and `bin/authorize.mjs` are
+deliberately excluded: they are the shim, registered with Claude Code (`mcp.mjs`) or invoked
+directly by a person (`authorize.mjs`) at the clone's own absolute path, never through the
+launcher or under the TCC-granted identity — a copy inside the bundle would be a second file
+nothing ever points at. `bin/launcher.c` is excluded for the same reason entry 14 already
+established: it is a build input, never a thing executed as itself.
+
+`CLAUDE_BOARD_DAEMON` (entry 13's compiled-in path) now names the INSTALLED bundle location —
+`$APP_PATH/Contents/Resources/bin/daemon.mjs` — rather than the clone's, on the degraded
+(no-launcher) path only continuing to name `$REPO_DIR/bin/daemon.mjs` directly, exactly as
+before this entry: that path has no bundle to stage anything into, and stays the unsigned,
+ungranted path it always was.
+
+The rebuild stamp (entry 14's two-field file) gains a payload digest, folded into the existing
+first field alongside the source, header, Info.plist and bundle-id hashes it already covered.
+`payload_digest()` walks `bin/daemon.mjs` and every file under `src/`, hashes each individually,
+and combines those hashes — paired with each file's own relative path — into one digest over a
+SORTED file list: deterministic by construction, so two clean checkouts of identical content
+produce the same digest regardless of mtime or the order a directory read happens to return
+files in. This is the sharpest constraint the whole entry sits under — TCC pins a Documents
+grant to the bundle's code signature, so a gratuitous rebuild on a run that changed nothing
+would silently walk that grant back and lock the user out until they re-approve it, on every
+routine `git pull && ./install.sh`, which is most installs. Folding a non-deterministic digest
+into the stamp would have manufactured exactly that failure on a schedule no operator could
+predict or reproduce.
+
+One thing had to move for this to be safe rather than merely signed: `src/handoff.mjs`'s
+`recoveryCommand()`, which names `bin/authorize.mjs` on the "not authorized" refusal page,
+used to compute the clone's location from its own `import.meta.url` — correct when
+`bin/daemon.mjs` ran straight out of the clone, wrong the instant it started running from a
+copy inside the bundle, since it would have resolved to a directory inside
+`Contents/Resources` and printed a command pointing at a file that is not there (`authorize.mjs`
+is deliberately not staged, per the exclusion above). A sixth compiled-in override,
+`CLAUDE_BOARD_REPO_ROOT` (`bin/launcher.c`'s `OVERRIDE_ENV`, `launcher_paths.h`'s
+`CLAUDE_BOARD_REPO_ROOT_VALUE`), carries the real clone path instead, read by `repoRoot()`
+in preference to the `import.meta.url` computation whenever it is set. It decides no
+boundary the grant reaches — it is not a security override the way the other five are — but it
+is baked in on the identical footing anyway: an env- or plist-supplied value here would be
+exactly the kind of thing entry 13 exists to stop a rewritable plist from choosing, applied to
+what a locked-out reviewer is told to run rather than to what the daemon may read.
+
+**Consequences:** The clone is now unambiguously a build input rather than a live execution
+path. A `git pull` with no `./install.sh` afterward changes nothing about what is running —
+true in spirit since entry 13 stopped the daemon watching `src/` for changes, but now true in a
+stronger sense: before this entry, a bare `launchctl kickstart` (no rebuild at all) was enough
+to pick up an edited `bin/daemon.mjs`, because node re-read the clone's own file on every start.
+After it, kickstart restarts the same already-built binary forking the same already-staged
+copy, and only `./install.sh` — noticing the payload digest moved — rebuilds, re-signs and
+lands a fresh copy (QUIRKS.md "A bare `kickstart` no longer picks up a source edit"). README.md
+and INSTALL.md say this plainly where an operator meets it, not just here.
+
+Rejected: leaving the payload out of the signature and relying on the stamp alone to force a
+rebuild on any edit. A stamp with no matching signature coverage would still let anything
+that can write BOTH the clone AND the stamp file — the same "any process running as you"
+threat model this whole area already accepts as out of scope one layer up — edit the payload
+and hand-edit the stamp to match, walking straight past the "already current" check with a
+tampered bundle nothing would ever rebuild. Covering the payload with the signature closes that:
+`codesign --verify`, already required for "already current," would refuse a bundle whose
+`Resources/` no longer matches what it was signed over, the same way it already refuses a
+tampered executable (entry 14).
+
+**Status: accepted.** Covered by `test/check-install.mjs` (the payload lands byte-identical
+inside this repo's own real bundle build, the rogue-header and XML-metacharacter throwaway
+clones both now carry a `src/` stub and assert the BUNDLED daemon path is what gets compiled
+in, and a no-op reinstall leaves the payload's own mtime untouched, not just its bytes) and by
+the new `test/check-install-payload.mjs`, which builds a throwaway clone, edits its
+`src/server.mjs`, runs the ALREADY-BUILT launcher and proves the old code is what answers,
+reinstalls and proves that edit forces a rebuild, runs the REBUILT launcher and proves the new
+code is what answers, drives an unauthenticated request against the running bundled daemon and
+proves the refusal page names the clone's `bin/authorize.mjs` rather than a path inside the
+bundle, and proves `payload_digest` itself is insensitive to mtime and directory-walk order
+directly, against two hand-built trees, rather than only inferring it from two installs
+happening to agree.
+
+## 16. The index's search box filters sessions; it does not search inside them — 2026-08-04
 
 **Context:** `GET /` used to run the same full-text walk as `GET /api/search` and render
 block-level result cards (a question prompt, an option label, an answer note) in a section
@@ -507,7 +734,7 @@ Rules for `.search-results` / `.result-*` and the `resultRow` renderer are delet
 left dormant, because `test/check-pure.mjs` fails any stylesheet class nothing emits; restoring
 inline results later means writing that renderer again.
 
-## 14. The pomodoro switch may start a timer, so the session cookie may call `ensure` — 2026-08-04
+## 17. The pomodoro switch may start a timer, so the session cookie may call `ensure` — 2026-08-04
 
 **Context:** `POMODORO_COOKIE_ACTIONS` (`src/server.mjs`) deliberately excluded `ensure`, on the
 reasoning that its only caller was the session-start hook — a shell script holding the secret,
