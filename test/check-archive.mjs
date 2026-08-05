@@ -52,7 +52,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createBoard, applySubmit } from '../src/board.mjs';
-import { renderBoardPage } from '../src/render.mjs';
+import { renderBoardPage, STAGE_MARGIN_RESET } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles, palettes } from '../src/styles.mjs';
 import { themeBootScript } from '../src/theme.mjs';
@@ -576,7 +576,7 @@ check('archive: hovering ordinary content adds no highlight class -- the afforda
   } finally { restore(); }
 });
 
-check('archive: hovering inside the isolated html-stage document adds no outline, and no hover stylesheet is even injected into it (QUIRKS.md "two stylesheets, one palette")', () => {
+check('archive: hovering inside the isolated html-stage document adds no outline, and no HOVER stylesheet is ever injected into it (QUIRKS.md "two stylesheets, one palette") -- the always-present gutter-fix reset is the one exception, and it is unconditional by design', () => {
   const { document, restore } = loadArchive();
   try {
     const frame = document.querySelectorAll('.html-stage')[1]; // standalone stage
@@ -590,7 +590,21 @@ check('archive: hovering inside the isolated html-stage document adds no outline
     // this ordering structurally) -- checked here behaviourally, against the
     // iframe's own live document, which the board page's stylesheet deliberately
     // never reaches (QUIRKS.md).
-    assert.equal((stageDoc.head ? stageDoc.head.children.length : 0), 0, 'no stylesheet should be injected into the stage document in readonly');
+    //
+    // Exactly ONE style element is expected now, not zero: STAGE_MARGIN_RESET
+    // (the html-stage gutter fix) is server-rendered into every srcdoc
+    // unconditionally, readonly or not -- an archived board's hand-authored
+    // mocks need to render edge to edge exactly as much as a live one's do, so
+    // this one is never gated on comment mode the way the hover stylesheet is.
+    // The property this check actually exists to pin is narrower: the HOVER
+    // stylesheet specifically (the one carrying the outline/cursor rules,
+    // identified by HOVER_CLASS's own name) is never among them.
+    const headStyles = stageDoc.head ? stageDoc.head.children.filter(el => el.tagName === 'STYLE') : [];
+    assert.equal(headStyles.length, 1, 'the stage document must carry exactly the one always-present reset style, and no other');
+    assert.equal(headStyles[0].textContent, STAGE_MARGIN_RESET.replace(/^<style>|<\/style>$/g, ''),
+      'the one style present must be byte-identical to the exported STAGE_MARGIN_RESET, not a hand-copied guess at it');
+    assert.ok(!headStyles.some(el => el.textContent.indexOf('cb-anchor-hover') !== -1),
+      'no stylesheet carrying the hover rule (HOVER_CLASS) may ever be injected into a read-only archive\'s stage');
 
     button.dispatchEvent(new StandInEvent('mouseover'));
     assert.equal(button.classList.contains('cb-anchor-hover'), false, 'hovering inside an archived html stage must not outline the element');

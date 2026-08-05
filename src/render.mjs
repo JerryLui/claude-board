@@ -1079,6 +1079,13 @@ export function stageAgentScript() {
 })();</script>`;
 }
 
+/** Prepended to every html-stage `srcdoc` (renderHtmlBlock, below) to kill the
+ * UA default `body { margin: 8px }` gutter -- see that function's own comment
+ * for why this is a bare leading `<style>` and not an explicit document
+ * wrapper. Exported (same reasoning as STAGE_ACCENT_HEX above) so a check can
+ * assert against this exact string rather than a hand-copied guess at it. */
+export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>';
+
 /** A raw HTML stage, for hand-mocked UI previews with no source file — the one
  * context kind passed by value (see PROTOCOL.md Blocks). Rendered inside a
  * sandboxed iframe so the mock's own markup/CSS/script never leaks into or
@@ -1109,11 +1116,42 @@ function renderHtmlBlock(block, board, commentsByBlock, historical) {
   // hand-mocked stage's by-value text always did (src/board.mjs's normalizeBlock),
   // so the srcdoc built here is the SAME for both -- nothing downstream of
   // resolution knows or cares whether the markup came from disk or the wire.
+  //
+  // STAGE_MARGIN_RESET (below) exists for exactly one reason: a bare fragment
+  // `srcdoc` (no <html>/<head>/<body> of its own) still gets the UA default
+  // `body { margin: 8px }`, which showed the frame's own background
+  // (`--stage-bg`, `.html-stage` in src/styles.mjs) through an 8px gutter on
+  // every side of every hand-authored mock. Its only job is the margin/padding
+  // reset -- no color anywhere in it, so html/body stay transparent and the
+  // parent-controlled `--stage-bg` still shows through wherever the mock
+  // itself paints nothing.
+  //
+  // Deliberately a LEADING <style> tag, not an explicit <html><head>...</head>
+  // <body>...</body></html> wrapper: a real browser only hoists a leading run
+  // of head-only elements (HEAD_ONLY_TAGS -- style/script/meta/link/title/base)
+  // out of `document.body` when the srcdoc is parsed as the bare fragment it
+  // actually is (see src/anchor.mjs's own HEAD_ONLY_TAGS comment and the C2 fix
+  // ticket 08 shipped for it). An explicit `<body>` opened before block.html's
+  // own leading `<style>` (the ordinary case for a mock that styles itself --
+  // see this function's own header comment) stops that hoist dead: once body
+  // is genuinely, explicitly open, the HTML parsing algorithm inserts a
+  // subsequent style/script tag as an ordinary CHILD of body instead of
+  // reopening head for it, which shifts every `dom`-anchor ref index by one
+  // and breaks exactly the mocks ticket 08 exists to support (confirmed
+  // against test/check-click.mjs's own C2 check, which fails hard on an
+  // explicit-body wrapper here). A leading `<style>` has no such cost: it is
+  // itself just the first element of that same leading head-only run, so it
+  // hoists out of body right alongside a mock's own leading `<style>` (if any),
+  // in encounter order, and a <style> element's rules apply wherever it ends
+  // up in the tree regardless. block.html + stageAgentScript() still land in
+  // exactly the same relative order as before, immediately after the reset --
+  // this only prepends, it never moves the script.
+  const srcdocContent = STAGE_MARGIN_RESET + block.html + stageAgentScript();
   return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
   <div class="block-kicker">HTML stage ${commentButton(block.id, 'block')} ${expandButton(block.id, 'stage')}</div>
   <div class="stage-wrap">
-    <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(block.html + stageAgentScript())}"></iframe>
+    <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(srcdocContent)}"></iframe>
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
   </div>
   ${commentArea(block.id, commentsByBlock, historical)}

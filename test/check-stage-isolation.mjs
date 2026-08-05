@@ -34,7 +34,7 @@
 
 import assert from 'node:assert/strict';
 import { createBoard, applySubmit } from '../src/board.mjs';
-import { renderBoardPage, CSP } from '../src/render.mjs';
+import { renderBoardPage, CSP, STAGE_MARGIN_RESET } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
 import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
@@ -956,6 +956,131 @@ check('criterion 7 (adversarial): a forged pick-shaped message from the INLINE s
     assert.equal(cards[0].classList.contains('selected'), false,
       `no message a stage can send may ever record a pick: ${JSON.stringify(data)}`);
   }
+});
+
+// =================================================================================
+// 6. The html-stage gutter (SPEC_EDGES criteria 4/5, "kill the html-stage
+//    gutter"): a bare-fragment `srcdoc` gets the UA default `body { margin:
+//    8px }`, which shows `.html-stage`'s own painted background through an
+//    8px gutter on every side. renderHtmlBlock (src/render.mjs) fixes this by
+//    prepending STAGE_MARGIN_RESET -- a plain `<style>` reset, deliberately
+//    NOT an explicit <html><head>...</head><body>...</body></html> wrapper --
+//    ahead of block.html and stageAgentScript(). Checked here on the rendered
+//    document string, no browser needed (this file's own remit): the srcdoc
+//    text itself, never a layout measurement the stand-in cannot make.
+// =================================================================================
+
+check('criterion 4: every html-stage srcdoc opens with the exact margin/padding reset renderHtmlBlock exports as STAGE_MARGIN_RESET, immediately before the mock\'s own markup', () => {
+  const board = createBoard({
+    title: 'gutter: reset is present and leads',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+  });
+  const document = loadBoard(renderBoardPage(board));
+  const srcdoc = document.querySelector('.html-stage').getAttribute('srcdoc');
+  assert.ok(srcdoc, 'setup failure: no srcdoc on the rendered .html-stage frame');
+  assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0,
+    'the srcdoc must open with the exact exported STAGE_MARGIN_RESET string, not a hand-copied re-spelling of it');
+  assert.equal(srcdoc.indexOf(board.blocks[0].html), STAGE_MARGIN_RESET.length,
+    'the mock\'s own markup must immediately follow the reset, with nothing else between them');
+
+  // Ablation record (run by hand, reverted immediately after -- restore via a
+  // second edit, never `git checkout` on uncommitted work, per this repo's own
+  // QUIRKS.md): deleting the `STAGE_MARGIN_RESET +` prefix in renderHtmlBlock's
+  // `srcdocContent` assignment makes this check fail immediately, on the first
+  // assertion above -- that assignment is the one place this string is ever
+  // added, so there is no other path that could still satisfy it.
+});
+
+check('criterion 4: the reset carries no color of any kind -- html/body must stay transparent, so a mock that paints no background of its own lands on the parent-controlled --stage-bg, not on a color this file introduced', () => {
+  assert.doesNotMatch(STAGE_MARGIN_RESET, /background|color|#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(/,
+    `STAGE_MARGIN_RESET must be a pure margin/padding reset, no paint of any kind: ${JSON.stringify(STAGE_MARGIN_RESET)}`);
+  assert.match(STAGE_MARGIN_RESET, /margin\s*:\s*0/, 'the reset must actually zero the margin -- that is its whole job');
+});
+
+check('criterion 4: the reset is itself a leading head-only element, so it hoists out of document.body exactly like a mock\'s own leading <style> already does (ticket 08\'s C2 fix) -- body\'s children, and therefore every dom-anchor ref index, are unaffected by its presence', () => {
+  // The regression this check exists to catch: an earlier version of this fix
+  // wrapped the srcdoc in an explicit <html><head>...</head><body>...</body>
+  // </html> document instead of a bare leading <style>. Once <body> is
+  // genuinely, explicitly open, the HTML parsing algorithm inserts a
+  // SUBSEQUENT style/script tag as an ordinary child of body rather than
+  // reopening head for it -- so a mock with its own leading <style> (the
+  // ordinary case ticket 08 exists to support -- see this file's C2-flavoured
+  // checks below) got body.children shifted by one, and every dom-anchor ref
+  // minted against it went off-by-one. Caught by test/check-click.mjs's own C2
+  // check the first time this was tried; this is the same property, pinned
+  // here on the stage-isolation side too.
+  const board = createBoard({
+    title: 'gutter: reset does not disturb the C2 hoist',
+    blocks: [{ kind: 'html', html: '<style>.mock{font:14px system-ui}</style><div class="mock"><button>Send</button></div>' }],
+  });
+  const document = loadBoard(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+
+  // Both the reset AND the mock's own leading <style> must have been hoisted
+  // out of body -- so body has exactly two children: the mock's own div
+  // (still FIRST, unaffected by either style tag), then the trailing injected
+  // stage-agent <script>. Three or more would mean a style tag stayed in body.
+  assert.equal(frame.contentDocument.body.children.length, 2,
+    'both the reset and the mock\'s own leading <style> must hoist out of body, leaving only the mock\'s div and the trailing agent script');
+  assert.equal(frame.contentDocument.body.children[0].tagName, 'DIV', 'the mock\'s own top-level element must still be body\'s first child');
+  assert.equal(frame.contentDocument.body.children[1].tagName, 'SCRIPT', 'the injected stage agent must still be body\'s last child');
+
+  // And the two hoisted <style> elements landed in head, in encounter order --
+  // the reset first (it is prepended ahead of block.html), the mock's own
+  // second.
+  const headStyles = frame.contentDocument.head.children.filter(el => el.tagName === 'STYLE');
+  assert.equal(headStyles.length, 2, 'both leading <style> tags must have hoisted into head');
+  assert.match(headStyles[0].textContent, /margin\s*:\s*0/, 'the reset must be the FIRST hoisted style');
+  assert.match(headStyles[1].textContent, /\.mock/, 'the mock\'s own style must be the second, still present and unaltered');
+});
+
+check('criterion 5: an html-kind variant option\'s clipped stage carries the same reset, ahead of that option\'s own mock -- the fix is not special-cased to a standalone stage', () => {
+  const board = createBoard({
+    title: 'gutter: variant option stage',
+    blocks: [{
+      kind: 'question', prompt: 'Which mockup?', widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'html', html: '<div class="mock">A</div>' } },
+        { label: 'B', block: { kind: 'html', html: '<div class="mock">B</div>' } },
+      ],
+    }],
+  });
+  const document = loadBoard(renderBoardPage(board));
+  const frames = document.querySelectorAll('.html-stage');
+  assert.equal(frames.length, 2, 'setup failure: expected one stage per option');
+  for (const frame of frames) {
+    const srcdoc = frame.getAttribute('srcdoc');
+    assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0, 'every variant option\'s stage must open with the same reset as a standalone stage');
+  }
+});
+
+check('criterion 5: a compare side\'s html stage carries the same reset -- renderCompareSide/renderBlock share renderHtmlBlock, not a second srcdoc builder', () => {
+  const board = createBoard({
+    title: 'gutter: compare side stage',
+    blocks: [{
+      kind: 'compare',
+      left: { label: 'Old', block: { kind: 'markdown', markdown: 'old copy' } },
+      right: { label: 'New', block: { kind: 'html', html: '<div class="mock">new</div>' } },
+    }],
+  });
+  const document = loadBoard(renderBoardPage(board));
+  const frame = document.querySelector('.compare-side .html-stage');
+  assert.ok(frame, 'setup failure: no html-stage rendered on the compare side');
+  const srcdoc = frame.getAttribute('srcdoc');
+  assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0, 'the compare side\'s stage must open with the same reset as a standalone stage');
+});
+
+check('criterion 5: the stage lens opens on the exact same srcdoc, reset included -- it is a copy of the live attribute, never a second render', () => {
+  const board = createBoard({ title: 'gutter: the lens', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
+  const document = loadBoard(renderBoardPage(board));
+  const inline = document.querySelector('.html-stage');
+  document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
+  const lens = document.querySelector('.stage-lens-frame');
+  assert.ok(lens, 'setup failure: the expand control did not mount a lens frame');
+  assert.equal(lens.getAttribute('srcdoc'), inline.getAttribute('srcdoc'),
+    'the lens frame\'s srcdoc must be byte-identical to the inline stage\'s -- including the reset, since it is copied off that frame rather than rebuilt');
+  assert.equal(lens.getAttribute('srcdoc').indexOf(STAGE_MARGIN_RESET), 0, 'and must therefore also open with the reset');
 });
 
 if (failures) {
