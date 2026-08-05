@@ -3290,11 +3290,14 @@ export const ui = `
    * intersection. The fallback for the case the band CANNOT answer (finding
    * NEW-1): the band is a fixed strip at [h, h + ROUND_BAND_PX] from the
    * viewport top, but the page cannot scroll past its own end, and there is
-   * ~222px of slack below the last round (the .blocks gap, the send bar, and
-   * .board-shell's 128px bottom padding). So the LAST round has to be taller
-   * than roughly 'innerHeight - 222 - (h + ROUND_BAND_PX)' -- about 414px at an
-   * 813px viewport, ~700px on a large display -- before it can ever reach the
-   * band at all. Measured in Chrome: a 169px round 2 tops out at y=406 at
+   * slack below the last round (the .blocks gap and the send bar -- measured
+   * as ~222px at the time of this finding, when .board-shell also carried a
+   * 128px bottom padding since removed for the flush-bottom fix; the slack is
+   * smaller now, which only shrinks the edge case this clamp exists for, it
+   * does not remove the need for it). So the LAST round has to be taller
+   * than roughly 'innerHeight - slack - (h + ROUND_BAND_PX)' -- about 414px at
+   * an 813px viewport under the old, larger slack, less now -- before it can
+   * ever reach the band at all. Measured in Chrome: a 169px round 2 tops out at y=406 at
    * maximum scroll, never intersects, and the badge sits on 'round 1 of 2' with
    * the reviewer bottomed out on round 2. That short trailing round is normally
    * the freshly-pushed OPEN one, i.e. exactly the round the badge exists to name
@@ -3333,10 +3336,10 @@ export const ui = `
    * last round can always reach it, which is finding NEW-1.
    *
    * The defect: the band was a fixed strip at [h, h + 96] and the page cannot
-   * scroll past its own end. Below the last round sits ~222px of slack (the
-   * .blocks gap, the send bar, and .board-shell's 128px bottom padding), so a
-   * trailing round has to be roughly 'innerHeight - 222 - (h + 96)' tall --
-   * about 414px at an 813px viewport, ~700px on a large display -- before it can
+   * scroll past its own end. Below the last round sits slack (the .blocks gap
+   * and the send bar; .board-shell no longer adds a bottom padding term to it,
+   * since the flush-bottom fix), so a trailing round has to be roughly
+   * 'innerHeight - slack - (h + 96)' tall -- before it can
    * EVER enter that strip. A shorter one never does, and that is normally the
    * freshly-pushed OPEN round, i.e. exactly the round the badge exists to name.
    * Measured in Chrome at innerHeight 913, h 81: a 432px round 2 bottoms out

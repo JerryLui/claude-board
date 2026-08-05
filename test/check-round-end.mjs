@@ -32,7 +32,7 @@ import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { parseHTML, StandInIntersectionObserver, StandInEventSource } from './dom-stand-in.mjs';
+import { parseHTML, StandInIntersectionObserver, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -330,6 +330,59 @@ check('criterion 6 (docking half): the docking observer never runs in a read-onl
   const rail = document.querySelector('.round-end');
   assert.equal(observerWatching(observers, rail), null, 'setupSendBarDock must bail out under readonly -- no observer should ever be attached to the rail in an archive');
   assert.equal(observers.length, 1, 'only the round badge\'s own observer should exist under readonly -- setupSendBarDock must return before constructing one at all');
+});
+
+// =====================================================================================
+// "The page ends where the last control is" (spec chunk, 2026-08-05). Root cause:
+// .board-shell used to carry a 128px bottom padding, so at full scroll the sticky
+// .send-bar (the shell's own last child) rested 128px above the document's actual
+// bottom edge -- a band of bare background below the one control that should have
+// been flush with the page's own end. Under body.readonly the send bar is
+// display:none (asserted above) and the same padding left the identical band below
+// the last block instead. Fix: src/styles.mjs's .board-shell rule, see its own
+// comment. These checks use resolveComputedProperty (test/dom-stand-in.mjs), the
+// same real-cascade resolver test/check-stage-lens.mjs and
+// test/check-stage-isolation.mjs already use for a property the stand-in's own
+// getComputedStyle stub does not cover, rather than a hand-rolled regex against the
+// rule's spelling (QUIRKS.md's own warning about that shape).
+// =====================================================================================
+
+check('criterion 1/8: .board-shell carries no bottom padding -- reverting to a trailing px value (e.g. the old 128px) must fail this check', () => {
+  const board = createBoard({ title: 'Flush bottom - open round', blocks: [Q1, Q2] });
+  const html = renderBoardPage(board);
+  const document = loadBoard(html);
+  const shell = document.querySelector('.board-shell');
+  assert.ok(shell, 'setup failure: no .board-shell rendered');
+  const padding = resolveComputedProperty(styles, shell, true, 'padding');
+  assert.equal(padding, '0 var(--space-5)',
+    'expected .board-shell\'s padding to carry no bottom value -- a trailing px reopens the band below the send bar (or, in readonly, below the last block)');
+});
+
+check('criterion 1: .send-bar is .board-shell\'s own last element child -- nothing rendered after it that would sit in the flush-bottom padding\'s place', () => {
+  const board = createBoard({ title: 'Flush bottom - last child', blocks: [Q1] });
+  const html = renderBoardPage(board);
+  const document = loadBoard(html);
+  const shell = document.querySelector('.board-shell');
+  const children = shell.children;
+  const last = children[children.length - 1];
+  assert.ok(last && last.classList.contains('send-bar'),
+    '.send-bar must be .board-shell\'s last element child for a zero bottom padding to actually land the bar\'s own lower edge on the document\'s lower edge');
+});
+
+check('criterion 3: a read-only file:// archive (send bar hidden) shares the same zero-bottom-padding .board-shell rule -- no separate readonly override reintroduces the band below the last block', () => {
+  const board = createBoard({ title: 'Flush bottom - archive', blocks: [Q1] });
+  const html = renderBoardPage(board);
+  const dir = mkdtempSync(path.join(tmpdir(), 'claude-board-flush-bottom-archive-'));
+  const file = path.join(dir, 'board.html');
+  writeFileSync(file, html, 'utf8');
+  const fileBytes = readFileSync(file, 'utf8');
+  const document = loadBoard(fileBytes, 'file:');
+  assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
+  const shell = document.querySelector('.board-shell');
+  assert.ok(shell, 'setup failure: no .board-shell in the archive\'s DOM');
+  const padding = resolveComputedProperty(styles, shell, true, 'padding');
+  assert.equal(padding, '0 var(--space-5)',
+    'the archive shares .board-shell\'s rule with the live page -- readonly must never carry its own bottom-padding override');
 });
 
 if (failures) {

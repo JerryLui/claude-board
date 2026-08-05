@@ -331,7 +331,17 @@ svg { flex: none; }
   * { transition: none !important; animation: none !important; }
 }
 
-.board-shell { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 0 var(--space-5) 128px; }
+/* No trailing bottom padding: the send bar (.send-bar, sticky and in-flow, near
+   the bottom of this file) is the shell's own last child, so its bottom edge
+   IS the document's bottom edge -- a reviewer scrolled to the end sees the bar's
+   lower edge flush with the page's, not a band of bare background sized for
+   nothing. Under body.readonly the bar is display:none and the last block
+   itself becomes the shell's last child, so the same zero padding lands it
+   flush too -- one rule answers both endings, live and archived, because
+   neither ever had a reason to reserve space below whatever happens to be
+   there last. Pinned by test/check-round-end.mjs's flush-bottom check, which
+   fails if this padding grows a bottom value again. */
+.board-shell { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 0 var(--space-5); }
 
 /* the board's identity stays on screen: a long board scrolls for a while, and
    "which board am I in, how many rounds deep" is the first thing you lose */
