@@ -7,9 +7,12 @@
 // (markup) and `themeBootScript` (behaviour). Ticket 04 (SPEC_POMODORO.md).
 //
 // The three cue pickers (SPEC_CUES.md) follow the same split: the OPTION LIST
-// is static per machine (whatever src/cues.mjs's cueNames() reads off this
-// machine's /System/Library/Sounds, memoised there), so it belongs here,
-// server-rendered once per request -- but the SELECTED value is daemon state,
+// is machine state, not daemon state (whatever src/cues.mjs's cueNames() reads
+// off this machine's sound directories), so it belongs here, server-rendered
+// per request -- a reader who drops an .aiff into ~/Library/Sounds gets it in
+// the list on the next page load, since ADR.md entry 23 made that the way to
+// add a cue and cueNames() caches only briefly for it. The SELECTED value is
+// daemon state,
 // so it is never set in this markup at all, exactly like every other settings
 // field below. indexpage.mjs's pomodoroSyncForm fills it in on first fetch.
 //

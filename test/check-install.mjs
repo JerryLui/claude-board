@@ -930,12 +930,17 @@ async function main() {
     // It is also the ONLY place that default exists (audit S3, 2026-07-31):
     // src/resolve.mjs reads an absent variable as an empty allowlist, and it is written
     // against DEFAULT_REF_ROOTS rather than a second copy of the list, so the two cannot
-    // drift apart silently. Three directories, not ~/.claude entire (audit S1): that
-    // tree also holds .credentials.json, settings.json, shell snapshots and every
-    // project transcript.
+    // drift apart silently. Three directories under ~/.claude, not that tree entire
+    // (audit S1): it also holds .credentials.json, settings.json, shell snapshots and
+    // every project transcript. The fourth is the render directory (2026-08-05), the
+    // same one DEFAULT_SERVE_ROOTS names -- referencing and serving stay separate
+    // grants, this adds the directory to the narrower one only.
     const launcherExec = path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
     const bakedIn = value => readFileSync(launcherExec).includes(Buffer.from(`${value}\0`, 'utf8'));
-    assert.deepEqual([...DEFAULT_REF_ROOTS], ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents']);
+    assert.deepEqual(
+      [...DEFAULT_REF_ROOTS],
+      ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents', '~/Documents/renders'],
+    );
     const defaultRefRoots = DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2))).join(':');
     assert.ok(bakedIn(defaultRefRoots), 'the resolved default reference roots must be compiled into the launcher');
 

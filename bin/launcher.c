@@ -214,6 +214,14 @@ static const struct { const char *phase; const char *message; } MESSAGES[] = {
   { "work",      "Work interval started" },
   { "break",     "Break started" },
   { "longBreak", "Long break started" },
+  /* Not a phase the clock settles on: "test" is what src/notify.mjs's notifyTest sends
+   * when the reader ticks Notify, so the question "did that do anything?" is answered by
+   * a banner instead of by waiting out an interval. A row in this table, not a special
+   * case in main() below, because that is what keeps the property above true of it too.
+   * Note for an install that predates it: the daemon selects a row it can no longer find
+   * and shows nothing, which is the same failure mode as any unrecognised phase --
+   * re-run install.sh to recompile this binary. */
+  { "test",      "Notifications are working" },
 };
 enum { MESSAGES_N = (int)(sizeof(MESSAGES) / sizeof(MESSAGES[0])) };
 

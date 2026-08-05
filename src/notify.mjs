@@ -40,6 +40,13 @@ const MESSAGES = {
   work: 'Work interval started',
   break: 'Break started',
   longBreak: 'Long break started',
+  // Not a phase the clock can ever settle on: `test` is what `notifyTest` below fires
+  // when the reader ticks Notify, so that "did that do anything?" is answered by a
+  // banner rather than by waiting out an interval. It lives in this table with the
+  // real phases because that is what the table IS -- the closed set of sentences this
+  // file can put on screen -- and adding a row is the sanctioned way to extend it. The
+  // rule the header states still holds: no entry, no notification, and never a template.
+  test: 'Notifications are working',
 };
 
 // Phase -> the settings key holding THAT phase's cue (src/pomodoro.mjs's cueWork/
@@ -128,10 +135,29 @@ function appleScriptQuote(s) {
  * see the file header for why. */
 export function notifyBoundary(phase, settings) {
   if (!settings || settings.notify === false) return;
+  fire(phase, cueFor(phase, settings));
+}
+
+/** Fire the one notification whose whole job is to prove notifications arrive, for the
+ * reader who has just ticked Notify (src/indexpage.mjs). Deliberately NOT gated on
+ * `settings.notify` the way `notifyBoundary` is: the tick that asks for this has not
+ * been saved yet, and a test that stays silent until after a Save answers the question
+ * backwards. Silent, too -- no cue argument -- because auditioning a SOUND already has
+ * its own control beside this one (the cue pickers, `playPreview` in src/server.mjs),
+ * and a test banner that also plays something makes it ambiguous which of the two just
+ * worked. Never throws and never awaits the subprocess, exactly like its sibling. */
+export function notifyTest() {
+  fire('test', NO_CUE);
+}
+
+/** The spawn both entry points share: the bundle's own executable when this file is
+ * running from inside one, `osascript` otherwise (see the file header for why that
+ * fallback is load-bearing rather than a nicety). Split out of `notifyBoundary` when
+ * `notifyTest` arrived, so the two can never drift into two different ideas of which
+ * binary to use or how to quote what it says. */
+function fire(phase, cue) {
   const message = MESSAGES[phase];
   if (!message) return; // unrecognised phase: no notification, see MESSAGES above.
-
-  const cue = cueFor(phase, settings);
 
   if (APP_EXEC) {
     // `phase` itself crosses here, where every other path in this file passes only

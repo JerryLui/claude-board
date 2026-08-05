@@ -154,9 +154,16 @@ what a directory name containing `:` degenerates into — grants nothing at all 
 granting some neighbouring directory nobody named.
 
 **What the default allowlist is, and how it gets there.** `~/.claude/skills`,
-`~/.claude/commands` and `~/.claude/agents` — three directories, not the whole of
-`~/.claude`, which also holds `.credentials.json`, `settings.json`, shell snapshots and
-every project's transcripts. An *absent* `CLAUDE_BOARD_REF_ROOTS` means an empty
+`~/.claude/commands`, `~/.claude/agents` and `~/Documents/renders`. Under `~/.claude`
+that is three directories, not the whole of it, which also holds `.credentials.json`,
+`settings.json`, shell snapshots and every project's transcripts. The fourth is the
+render directory the render skills already write into, so a page an agent just rendered
+can be posted by reference rather than pasted in by value; it is the same directory
+`CLAUDE_BOARD_SERVE_ROOTS` defaults to, and the two remain separate grants on separate
+variables. Every default root is a directory only this user writes to: a world-writable
+one (`/tmp`) is deliberately not a default, since a default reaches every install on the
+next upgrade and a reference root is read on an agent's say-so. Name it yourself if you
+want it. An *absent* `CLAUDE_BOARD_REF_ROOTS` means an empty
 allowlist, the project directory alone. The default lives in `install.sh` rather than in
 the daemon's code, so the boundary only ever widens during an install that prints the
 roots it resolved, and a value you narrowed once is carried forward rather than reset by

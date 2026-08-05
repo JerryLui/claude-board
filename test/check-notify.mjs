@@ -14,10 +14,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { notifyBoundary } from '../src/notify.mjs';
+import { notifyBoundary, notifyTest } from '../src/notify.mjs';
 import { startServer } from '../src/server.mjs';
 import { writeDoc, localDateStr, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
+import { readSecret, SECRET_HEADER } from '../src/secret.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -136,6 +137,35 @@ async function main() {
       await new Promise(r => setTimeout(r, 200));
       assert.deepEqual(readLines(log), [], 'osascript must never be invoked when notify is false, cue included');
     });
+  });
+
+  await check('notifyTest fires one silent banner, whatever the saved notify setting says', async () => {
+    const log = freshLog();
+    await withStubOnPath(log, {}, async () => {
+      notifyTest();
+      const lines = await waitForLines(log, 1);
+      assert.equal(lines.length, 1, 'exactly one osascript invocation');
+      const [flag, script] = lines[0];
+      assert.equal(flag, '-e');
+      assert.match(script, /display notification/);
+      assert.match(script, /Notifications are working/, 'the test banner says what it is');
+      // Silent on purpose: auditioning a SOUND is the cue pickers' job, and a test
+      // banner that also plays something makes it ambiguous which one just worked.
+      assert.doesNotMatch(script, /sound name/, 'the test banner crosses no sound argument');
+    });
+  });
+
+  await check('notifyTest takes no settings at all -- the tick that asks for it has not been saved yet', async () => {
+    // Structural, not stateful: the reader has only just ticked the box, so the stored
+    // document still says notifications are off. `notifyTest` fires anyway, and the way
+    // it guarantees that is by taking no settings argument and reading no document --
+    // asserted on the function itself rather than by writing a doc to disk, which is
+    // both a weaker claim (it would pass on a version that read the doc and happened to
+    // find notify: true) and a check with a side effect on the reader's real state.
+    assert.equal(notifyTest.length, 0, 'notifyTest must take no arguments');
+    const src = readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8');
+    const body = src.slice(src.indexOf('export function notifyTest'), src.indexOf('function fire('));
+    assert.doesNotMatch(body, /settings|readDoc/, 'notifyTest must not consult the saved settings');
   });
 
   await check('criterion 3: each phase crosses ITS OWN cue by name, and three different phases play three different sounds', async () => {
@@ -276,6 +306,39 @@ async function main() {
     rmSync(home, { recursive: true, force: true });
   });
 
+  await check('the real daemon path: POST /api/pomodoro/notifyTest fires the test banner, with notifications saved OFF', async () => {
+    // The route the Notify tick calls (src/indexpage.mjs). It lives here rather than in
+    // test/check-http.mjs for the reason that file states about itself: it stubs no PATH,
+    // so the only thing keeping it silent is `notify: false` in the seeded document --
+    // and this route deliberately ignores that value, which is the whole point of it.
+    // Seeded off below for exactly that reason: a green result proves the test banner is
+    // not gated on the setting the reader has ticked but not yet saved.
+    const log = freshLog();
+    const home = mkdtempSync(path.join(tmpdir(), 'claude-board-notifytest-e2e-'));
+    writeDoc({ settings: { ...DEFAULT_SETTINGS, notify: false }, cycle: 0, cycleDate: null, timer: null }, home);
+
+    await withStubOnPath(log, {}, async () => {
+      const { server } = await startServer({ home, port: 0 });
+      try {
+        const { port } = server.address();
+        const r = await fetch(`http://127.0.0.1:${port}/api/pomodoro/notifyTest`, {
+          method: 'POST',
+          headers: { [SECRET_HEADER]: readSecret() },
+        });
+        assert.equal(r.status, 200);
+        assert.deepEqual(await r.json(), { ok: true });
+        const lines = await waitForLines(log, 1, 5000);
+        assert.equal(lines.length, 1, 'exactly one osascript invocation reached through the route');
+        const [, script] = lines[0];
+        assert.match(script, /Notifications are working/);
+        assert.doesNotMatch(script, /sound name/, 'the test banner stays silent through the route too');
+      } finally {
+        await new Promise(resolve => server.close(resolve));
+      }
+    });
+    rmSync(home, { recursive: true, force: true });
+  });
+
   // The bundled path (ADR.md entry 19). Every check above exercises the osascript
   // fallback, because this suite imports src/notify.mjs from the clone and the clone is
   // not a bundle -- which is exactly the degraded install's situation, and is why the
@@ -369,7 +432,15 @@ process.exit(0);
     // know is a boundary that silently notifies nothing on the bundled install.
     const c = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
     const table = c.slice(c.indexOf('MESSAGES[] = {'), c.indexOf('enum { MESSAGES_N'));
-    for (const phase of ['work', 'break', 'longBreak']) {
+    // Read the phases out of src/notify.mjs rather than listing them here. A hardcoded
+    // list is exactly how this check goes quietly stale: it passed for the three phases
+    // it named while a fourth ('test', 2026-08-05) could have been added on one side
+    // only, which is the drift this exists to catch.
+    const js = readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8');
+    const jsTable = js.slice(js.indexOf('const MESSAGES = {'), js.indexOf('const CUE_KEYS'));
+    const phases = [...jsTable.matchAll(/^\s{2}(\w+):\s*'/gm)].map(m => m[1]);
+    assert.ok(phases.length >= 4, `expected to parse src/notify.mjs's MESSAGES keys, got ${JSON.stringify(phases)}`);
+    for (const phase of phases) {
       assert.match(table, new RegExp(`"${phase}"`), `bin/launcher.c must know the '${phase}' phase`);
     }
   });

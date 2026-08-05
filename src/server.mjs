@@ -56,7 +56,7 @@ import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveCom
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
-import { notifyBoundary } from './notify.mjs';
+import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
 import { openServed, resolveRefRoots } from './resolve.mjs';
 
@@ -254,8 +254,14 @@ function isSameOriginRead(req) {
  * NOTHING (not pomodoro.json, not settings.notify), so a cookie holder gains at most
  * "spawn `afplay` against one of the 14 files src/cues.mjs's closed set admits" — less
  * reach than `settings`, already on this list, which lets the same caller rewrite every
- * duration and toggle in the document. */
-const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview']);
+ * duration and toggle in the document.
+ *
+ * `notifyTest` joins on the same footing as `preview`, and is the visual half of it: its
+ * one caller is the same popover, ticking Notify (src/indexpage.mjs), and it reads and
+ * writes nothing either. What a cookie holder gains is one banner reading "Notifications
+ * are working". That text is a literal out of src/notify.mjs's closed table, never
+ * anything the request supplies, and there is no body to supply it with. */
+const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview', 'notifyTest']);
 
 function isPomodoroCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
@@ -1023,6 +1029,17 @@ async function handlePomodoro(req, res, parts, pomo, home) {
         return sendJson(res, 400, { error: 'cue must be one of the sounds macOS ships, or "None"' });
       }
       playPreview(body.cue);
+      return sendJson(res, 200, { ok: true });
+    }
+    // The banner half of `preview` above: what the Notify tick sends, so that turning
+    // notifications on is confirmed by one arriving rather than by waiting out an
+    // interval. No body is read at all -- there is nothing for the caller to say, since
+    // the sentence is a literal out of src/notify.mjs's closed MESSAGES table -- and
+    // like `preview` it never touches pomodoro.json or settings.notify: the tick that
+    // triggers it has not been saved yet, and a test gated on the saved value would
+    // answer the question backwards.
+    if (action === 'notifyTest') {
+      notifyTest();
       return sendJson(res, 200, { ok: true });
     }
   }

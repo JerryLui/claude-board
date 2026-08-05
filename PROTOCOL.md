@@ -295,8 +295,10 @@ rest of the disk.
 
 The reference roots are `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths). They
 exist so a session can render the skill, command or agent file it is discussing rather
-than a refusal box, and the default `install.sh` writes into the launchd plist is exactly
-those three directories: `~/.claude/skills`, `~/.claude/commands`, `~/.claude/agents`. An
+than a refusal box, and so a page it has just rendered to disk can be referenced rather
+than inlined. The default `install.sh` writes into the launchd plist is exactly four
+directories: `~/.claude/skills`, `~/.claude/commands`, `~/.claude/agents` and
+`~/Documents/renders`. An
 *absent* variable means no allowlist at all — the `cwd`-only boundary — deliberately, so
 that a default living in code cannot widen the boundary on a machine that never
 reinstalled; an explicitly empty value means the same thing. Each root is validated
@@ -626,6 +628,8 @@ POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEv
                                     merged into the stored settings, not replaced
 POST /api/pomodoro/preview          { cue } -> { ok: true }; plays a cue immediately, reads
                                     and writes nothing
+POST /api/pomodoro/notifyTest       no body -> { ok: true }; raises one test banner
+                                    immediately, reads and writes nothing
 ```
 
 ### The pomodoro clock (ADR.md entry 8)
@@ -676,11 +680,16 @@ through Notification Center, so auditioning a cue never raises a banner, and a n
 selected cue kills whatever preview is still playing first, so a fast run of picker changes
 never overlaps into a chorus.
 
-Auth: `GET /api/pomodoro` is gated like every other read (either credential). All six
-writes — `ensure`, `pause`, `resume`, `reset`, `settings`, `preview` — accept the session
-cookie in addition to the secret, which is what lets the index page's switch and its settings
-popover work from a browser holding only the cookie (see "The browser session cookie" below
-for the reach this extends). `preview` is cookie-reachable for the same reason `ensure` is:
+Auth: `GET /api/pomodoro` is gated like every other read (either credential). All seven
+writes (`ensure`, `pause`, `resume`, `reset`, `settings`, `preview`, `notifyTest`) accept
+the session cookie in addition to the secret, which is what lets the index page's switch and
+its settings popover work from a browser holding only the cookie (see "The browser session
+cookie" below for the reach this extends). `notifyTest` is the settings popover's other
+audition, and sits on the same footing as `preview`: its one caller is the Notify checkbox in
+that popover, it reads and writes nothing, and what it grants is one banner whose sentence is
+a literal out of `src/notify.mjs`'s closed table, with no request body to supply one. It
+ignores the stored `notify` setting on purpose, since the tick that triggers it has not been
+saved yet. `preview` is cookie-reachable for the same reason `ensure` is:
 its one caller is the settings popover's picker, a browser holding only the cookie, and what
 it grants that caller is advisory — at most spawning `afplay` against one of the sounds
 `src/cues.mjs`'s closed set admits, less reach than `settings`, already on this list, which

@@ -26,7 +26,7 @@ import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mk
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { boardHome } from './store.mjs';
-import { isCue, pickCue, NO_CUE, SOUNDS_DIR } from './cues.mjs';
+import { isCue, pickCue, NO_CUE, SOUNDS_DIRS } from './cues.mjs';
 
 // ---------------------------------------------------------------------------------
 // Settings, defaults, and the document shape (a contract other tickets build against
@@ -37,9 +37,12 @@ import { isCue, pickCue, NO_CUE, SOUNDS_DIR } from './cues.mjs';
 // being spelled as literals, so a machine missing one of these three preferred sounds
 // degrades to `None` for that phase instead of shipping a default the validator would
 // refuse on the very next save (see pickCue's own comment). That is a computed lookup
-// (cueNames() reads /System/Library/Sounds once and memoises), so this object is built
-// once at module load and frozen, same as before -- not a literal, but still computed
-// exactly once, never re-derived per read.
+// (cueNames() reads src/cues.mjs's SOUNDS_DIRS and caches briefly), so this object is
+// built once at module load and frozen, same as before -- not a literal, but still
+// computed exactly once, never re-derived per read. The freeze is what makes these three
+// defaults immune to cueNames() re-reading later: a sound a reader deletes after startup
+// leaves the default naming it, which mergeSettings below then refuses on the next save,
+// the same way it refuses any other name that is no longer a cue.
 export const DEFAULT_SETTINGS = Object.freeze({
   workMin: 25,
   breakMin: 5,
@@ -304,7 +307,11 @@ export function mergeSettings(doc, patch) {
   for (const key of CUE_KEYS) {
     if (!(key in patch)) continue;
     if (!isCue(patch[key])) {
-      throw new Error(`settings.${key} must be the name of a sound in ${SOUNDS_DIR} or "${NO_CUE}"`);
+      // Names the directories rather than listing the valid names: the list is up to 14
+      // long and the reader's real question on a rejected save is where to put a sound.
+      throw new Error(
+        `settings.${key} must be "${NO_CUE}" or the name of a sound in ${SOUNDS_DIRS.join(' / ')}`
+      );
     }
     settings[key] = patch[key];
   }

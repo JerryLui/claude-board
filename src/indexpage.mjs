@@ -653,6 +653,33 @@ function onPomodoroCueChange(ev) {
   pomodoroPreviewTimers[name] = timer;
 }
 
+// Ticking Notify fires one test banner immediately, before Save -- the same
+// "audition it now" idea as the cue pickers above, for the half of the setting
+// that is seen rather than heard. Without it, the only way to learn whether
+// notifications actually arrive on this machine is to enable them and then wait
+// out an entire interval, and if the answer is no (Notification Center refusing
+// claude-board, the bundle never granted permission) nothing ever says so.
+//
+// On the way ON only. Unticking is not a thing to confirm, and firing there
+// would be actively wrong: a banner saying notifications work, arriving because
+// the reader just turned them off.
+//
+// Fire and forget for exactly the reasons onPomodoroCueChange states -- no
+// .then(), a swallowing .catch(), no read of the body, and postPomodoro
+// deliberately not reused, because this is not a write: the tick is not saved
+// until Save, and the route it hits never touches pomodoro.json either. No
+// debounce, unlike the pickers: a checkbox has one value per click, so there is
+// no held-key run of intermediate values to collapse.
+function onPomodoroNotifyChange(ev) {
+  var el = ev.target;
+  if (!el || el.getAttribute('name') !== 'notify') return;
+  if (!el.checked) return;
+  fetch('/api/pomodoro/notifyTest', {
+    method: 'POST',
+    credentials: 'same-origin',
+  }).catch(function () { /* fire-and-forget: see this function's own comment */ });
+}
+
 // A click anywhere outside the panel closes it -- the ordinary popover gesture,
 // and the only way out other than the summary itself once the panel overlaps the
 // page. Registered on 'document', so it sees the click AFTER it has bubbled all
@@ -681,6 +708,10 @@ function initPomodoroWidget() {
   // cue pickers are the only <select> elements this form ever has, so
   // onPomodoroCueChange's own tagName check is all the scoping this needs.
   if (form) form.addEventListener('change', onPomodoroCueChange);
+  // A second delegated 'change' on the same form, not a branch inside the one
+  // above: each handler scopes itself to its own control (SELECT there, the
+  // notify checkbox here) and they share nothing but the event.
+  if (form) form.addEventListener('change', onPomodoroNotifyChange);
   document.addEventListener('click', onDocumentClickClosePomodoroSettings);
   fetchPomodoro();
   // Local repaint (no fetch): recomputes the countdown text from the already-

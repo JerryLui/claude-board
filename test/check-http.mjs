@@ -3417,6 +3417,16 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
     assert.equal(r.status, 401, 'a preview request holding no credential must be refused, exactly like every other pomodoro write');
   });
 
+  await check('NOTIFY TEST: POST /api/pomodoro/notifyTest refuses a request with no credential at all', async () => {
+    // Only the refusal is checked here, deliberately. The 200 path raises a real banner
+    // -- notifyTest ignores settings.notify by design, so this file's usual `notify:
+    // false` guard cannot keep it silent, and this file stubs no PATH. That half lives
+    // in test/check-notify.mjs, which stubs osascript properly. A 401 is decided before
+    // the handler runs, so nothing fires from here.
+    const r = await rawRequest(port, 'POST', '/api/pomodoro/notifyTest', `127.0.0.1:${port}`, {});
+    assert.equal(r.status, 401, 'an uncredentialled request must never be able to raise a banner on the reader\'s machine');
+  });
+
   await check('PREVIEW: a rapid second preview kills the first rather than overlapping into a chorus (criterion 7)', async () => {
     const log = freshPreviewLog();
     // A generous duration -- long enough that if the kill below silently stopped

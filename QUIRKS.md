@@ -1119,6 +1119,20 @@ held a file with the requested name and lost anyway, and the logged size (475278
 having to listen. `~/Library/Sounds` was checked separately and *is* searched — a file dropped
 there resolved by name and logged its own path.
 
+**On a name collision `/System/Library/Sounds` wins, which is the reverse of the documented
+Library search order.** Apple's search path puts `~/Library` ahead of `/System/Library`, so a
+user copy would be expected to shadow a stock sound. Measured with the same decoy trick, it does
+not: `Basso.aiff` staged as `~/Library/Sounds/Glass.aiff` (221376 bytes) against the stock
+`Glass.aiff` (475278), `sound name "Glass"`, and `sss` logged `audio data size 475278, audio
+file path /System/Library/Sounds/Glass.aiff`. The stock sound played. So a reader-supplied
+sound is reachable only under a name no stock sound already uses — a file named after one of
+the 14 is silently unreachable, not an override. `src/cues.mjs` orders `SOUNDS_DIRS`
+accordingly, so its preview resolves to the same file the notification does.
+
+The measurement needs `/usr/bin/log` spelled in full if `rtk` is wired in as a Bash hook: a bare
+`log show` is rewritten to `rtk log` and dies with `too many arguments`, which reads exactly like
+an empty result rather than a command that never ran.
+
 **The extension is optional and is not part of the name.** `Glass` and `Glass.aiff` both play
 `/System/Library/Sounds/Glass.aiff`; `unc:sound` logs the argument verbatim (`{ nam: Glass }`)
 and then logs `Glass.aiff` one line later, so macOS appends the suffix itself. Either spelling
@@ -1221,3 +1235,24 @@ visibility transition to confirm the report *does* eventually land is out of rea
 automation used here (there is no supported way to force a controlled tab's own
 `visibilityState` from page script), so that half rests on Chrome's documented behaviour rather
 than a direct measurement — flagged as such rather than asserted as verified.
+
+## `writeDoc` defaults to the REAL board home, so a check that calls it without one clobbers the reader's pomodoro state
+
+`writeDoc(doc, home = boardHome())` (`src/pomodoro.mjs`). The second parameter is where the
+whole safety of that function lives in a test: every check in `test/check-notify.mjs` that
+uses it passes a `mkdtempSync` directory, and one that forgets writes straight into
+`~/Library/Application Support/claude-board/pomodoro.json`, i.e. the reader's own settings and
+whatever timer they had running.
+
+It fails silently in both directions, which is what makes it worth an entry. Pass the wrong
+SHAPE too (a bare settings object instead of `{ settings, cycle, cycleDate, timer }`, an easy
+slip since `DEFAULT_SETTINGS` is exported right beside `writeDoc`) and nothing throws: the
+file is written, `readDoc` cannot find a `settings` key in it, its `catch`/normalise path
+hands back `defaultDoc()`, and the daemon carries on looking healthy while every setting the
+reader had chosen is gone. The check that did it still passed, because what it was asserting
+never depended on the write.
+
+Two habits, either of which is enough: give every `writeDoc` in a check an explicit temp
+`home`, and assert against `readDoc(home)` rather than trusting the write. If a check does not
+need daemon state at all, prefer asserting the property structurally: `notifyTest.length === 0`
+says "reads no settings" more directly than seeding a document to prove it ignores one.

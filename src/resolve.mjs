@@ -77,17 +77,30 @@ export const MAX_REF_BYTES = 512 * 1024;
  * Exported so `test/check-install.mjs` can pin the installer's default against the one
  * place this project states it, rather than against a second copy of the same list.
  *
- * Three directories, not the whole of `~/.claude` (audit S1, 2026-07-31). The case
- * ADR.md entry 3 argues for is "render the skill, command or agent file this session is
- * discussing", and that is exactly these three; `~/.claude` as a whole also holds
- * `settings.json`, `.credentials.json`, shell snapshots, project transcripts and every
- * plugin's private state, none of which any board has a reason to quote. Anyone who
- * wants the whole tree can still say so: `CLAUDE_BOARD_REF_ROOTS=~/.claude` does
- * precisely what it says. */
+ * Three of the four are under `~/.claude`, and it is those three rather than the whole
+ * of it (audit S1, 2026-07-31). The case ADR.md entry 3 argues for is "render the skill,
+ * command or agent file this session is discussing", and that is exactly these three;
+ * `~/.claude` as a whole also holds `settings.json`, `.credentials.json`, shell
+ * snapshots, project transcripts and every plugin's private state, none of which any
+ * board has a reason to quote. Anyone who wants the whole tree can still say so:
+ * `CLAUDE_BOARD_REF_ROOTS=~/.claude` does precisely what it says.
+ *
+ * The fourth is the render directory, added 2026-08-05, and it is the same directory
+ * `DEFAULT_SERVE_ROOTS` already names: the one the render skills write into. Without it
+ * an agent that has just rendered a stage has no place to reference it FROM, so it
+ * inlines the bytes into the post instead: measured at ~7KB per variant option against
+ * one line for a ref, for a byte-identical board. Note what this does NOT do: referencing
+ * and serving stay separate grants on separate variables (see `openServed`), and this
+ * only adds the directory to the narrower of the two. A world-writable shared directory
+ * (`/tmp` was the proposal this replaced) was rejected for a default: every install would
+ * inherit it on the next `git pull`, and a reference root is a place the daemon reads on
+ * an agent's say-so, so it should be one only this user can write to. Anyone who wants
+ * `/tmp` anyway can name it: `CLAUDE_BOARD_REF_ROOTS=...:/tmp`. */
 export const DEFAULT_REF_ROOTS = Object.freeze([
   '~/.claude/skills',
   '~/.claude/commands',
   '~/.claude/agents',
+  '~/Documents/renders',
 ]);
 
 /** macOS `O_NOFOLLOW_ANY` (`<sys/fcntl.h>`, macOS 11+): refuse the open outright if ANY

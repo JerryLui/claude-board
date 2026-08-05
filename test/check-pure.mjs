@@ -3382,11 +3382,28 @@ check('S1/S3: an absent CLAUDE_BOARD_REF_ROOTS grants nothing, and the default i
   // command or agent file it is discussing" is these three directories. ~/.claude as a
   // whole is also .credentials.json, settings.json, shell snapshots, every project's
   // transcripts and every plugin's private state.
-  assert.deepEqual([...DEFAULT_REF_ROOTS], ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents']);
+  //
+  // The fourth entry is the render directory (2026-08-05), so a stage an agent just
+  // rendered can be posted by reference instead of inlined by value. It is pinned here
+  // for a second reason beyond drift: it must stay a directory only this user writes to.
+  // A world-writable shared root (/tmp) was the rejected alternative -- a default ships
+  // to every install on the next pull, and a reference root is read on an agent's say-so.
+  assert.deepEqual(
+    [...DEFAULT_REF_ROOTS],
+    ['~/.claude/skills', '~/.claude/commands', '~/.claude/agents', '~/Documents/renders'],
+  );
+  assert.ok(
+    !DEFAULT_REF_ROOTS.some(r => r === '/tmp' || r.startsWith('/tmp/') || r === '/var/tmp'),
+    'a world-writable directory must never be a DEFAULT reference root; name it explicitly if you want it',
+  );
   assert.ok(Object.isFrozen(DEFAULT_REF_ROOTS), 'a shared allowlist default must not be mutable by a caller');
 
   // ...and the narrowing has teeth, asserted against a stand-in tree so it does not
   // turn into a statement about what this machine happens to have under ~/.claude.
+  // Every default root is stood in for by its basename under one parent, which is what
+  // makes the last two assertions about the BOUNDARY rather than about any one root's
+  // real location -- allowlisting the leaves must not allowlist the directory holding
+  // them, whichever leaves those are.
   const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-fakehome-'));
   try {
     const dotClaude = path.join(realpathSync(fakeHome), '.claude');
@@ -3397,12 +3414,12 @@ check('S1/S3: an absent CLAUDE_BOARD_REF_ROOTS grants nothing, and the default i
     writeFileSync(credentials, '{"token":"exfiltrated"}', 'utf8');
 
     const roots = resolveRefRoots(DEFAULT_REF_ROOTS.map(r => path.join(dotClaude, path.basename(r))).join(':'));
-    assert.equal(roots.length, 3, 'all three default roots must survive validation');
+    assert.equal(roots.length, DEFAULT_REF_ROOTS.length, 'every default root must survive validation');
     assert.equal(resolvePath({ path: skill }, null, roots).path, skill, 'a skill file still resolves');
     assert.equal(
       resolveRef({ path: credentials }, { cwd: null, roots }).text,
       undefined,
-      'the parent of the three roots is not itself a root',
+      'the parent of the default roots is not itself a root',
     );
     // ...and it would have, under the old default: allowlist ~/.claude itself and the
     // same reference reads straight through.
@@ -6967,6 +6984,37 @@ await checkAsync('pomodoro widget: changing a cue picker posts a preview immedia
   assert.equal(previews[0].credentials, 'same-origin', 'same credentials shape as every other pomodoro write in this file');
   assert.deepEqual(previews[0].body, { cue: CUE_C });
   assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'a preview must never be a write -- criterion 8');
+});
+
+await checkAsync('pomodoro widget: ticking Notify fires one test banner immediately, and is not a write', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    document.querySelector('details#pomodoro-settings').open = true;
+    const notify = document.querySelector('form#pomodoro-settings-form input[name="notify"]');
+    notify.checked = true;
+    notify.dispatchEvent(new StandInEvent('change'));
+  });
+  const tests = calls.filter(c => c.url === '/api/pomodoro/notifyTest');
+  assert.equal(tests.length, 1, 'exactly one test-notification request');
+  assert.equal(tests[0].method, 'POST');
+  assert.equal(tests[0].credentials, 'same-origin', 'same credentials shape as every other pomodoro request in this file');
+  assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'ticking Notify must not save anything -- Save is still the write');
+});
+
+await checkAsync('pomodoro widget: unticking Notify fires nothing -- a banner saying notifications work, because they were just turned off, is the wrong answer', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const notify = document.querySelector('form#pomodoro-settings-form input[name="notify"]');
+    notify.checked = false;
+    notify.dispatchEvent(new StandInEvent('change'));
+  });
+  assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/notifyTest'), []);
 });
 
 await checkAsync('pomodoro widget: selecting None previews it like any other value -- no special-cased silence on the client, the server owns "plays nothing"', async () => {

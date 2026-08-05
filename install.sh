@@ -160,12 +160,16 @@ BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
 # project directory (ADR.md entry 3, src/resolve.mjs): colon-separated absolute paths,
 # so a session can render the skill, command or agent file it is discussing.
 #
-# The default is three directories, NOT ~/.claude as a whole (audit S1, 2026-07-31):
-# the rest of that tree is settings.json, .credentials.json, shell snapshots and every
-# project's transcripts, none of which a board has a reason to quote.
+# Under ~/.claude the default is three directories, NOT the whole tree (audit S1,
+# 2026-07-31): the rest of it is settings.json, .credentials.json, shell snapshots and
+# every project's transcripts, none of which a board has a reason to quote.
 # `CLAUDE_BOARD_REF_ROOTS=$HOME/.claude ./install.sh` still installs the whole tree for
-# anyone who wants it. Keep these three in step with DEFAULT_REF_ROOTS in
-# src/resolve.mjs; test/check-install.mjs asserts they match.
+# anyone who wants it. The fourth entry is the render directory (2026-08-05), the same
+# one DEFAULT_SERVE_ROOTS names below: an agent that just rendered a stage needs a place
+# to reference it FROM, or it inlines the bytes into the post instead. Referencing and
+# serving remain separate grants on separate variables -- this adds the directory to the
+# narrower one only. Keep all four in step with DEFAULT_REF_ROOTS in src/resolve.mjs;
+# test/check-install.mjs asserts they match.
 #
 # This is also the ONLY place the default exists (audit S3): src/resolve.mjs reads an
 # absent CLAUDE_BOARD_REF_ROOTS as an EMPTY allowlist, so that a default living in code
@@ -188,7 +192,7 @@ BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
 # otherwise. That is the safe direction of the two — an upgrade may not widen what an
 # operator narrowed, and it may not narrow what they widened either, because both are
 # their call and not this script's.
-DEFAULT_REF_ROOTS="$HOME/.claude/skills:$HOME/.claude/commands:$HOME/.claude/agents"
+DEFAULT_REF_ROOTS="$HOME/.claude/skills:$HOME/.claude/commands:$HOME/.claude/agents:$HOME/Documents/renders"
 if [ -n "${CLAUDE_BOARD_REF_ROOTS+set}" ]; then
   REF_ROOTS="$CLAUDE_BOARD_REF_ROOTS"
   REF_ROOTS_FROM="CLAUDE_BOARD_REF_ROOTS"
