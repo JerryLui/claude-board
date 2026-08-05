@@ -767,7 +767,7 @@ match, so the next pomodoro write this file grows is still secret-only by defaul
 
 ## 18. The boundary cue is played, not attached to the notification — 2026-08-05
 
-**Status:** accepted
+**Status:** superseded by 20
 
 **Context:** a per-phase sound — one for work, one for the short break, one for the long break —
 cannot be expressed as a property of the notification, because the daemon has two notification
@@ -857,3 +857,58 @@ existing bundle, which is not merely worse but impossible — macOS grants the b
 identity to its `CFBundleExecutable` and refuses every other binary in `Contents/MacOS` with
 "Notifications are not allowed for this application" (measured; QUIRKS.md). That is the constraint
 that decided this entry's shape.
+
+## 20. The system sounds are staged into the bundle, so macOS owns the cue — 2026-08-05
+
+**Status:** accepted. Supersedes 18.
+
+**Context:** entry 18 decided the per-phase cue would be played by the daemon itself, because
+`UNNotificationSound soundNamed:` resolves a name against the app bundle's Resources and
+`Library/Sounds` — never against `/System/Library/Sounds`, which is where the 14 sounds a reader
+would want actually live. (`/System/Library/Sounds` *is* reachable from AppleScript's `sound
+name`, which is why the degraded clone install could always name a sound and the bundled install
+could not. The old `NSUserNotification` API read it too; the modern one does not.) Playing the
+file directly sidesteps that, and it is what entry 18 chose.
+
+Grilling the setting surfaced what that costs, and the cost was refused: a cue the daemon plays
+is not a notification, so macOS cannot see it. Turning claude-board's notification sound off in
+System Settings, turning its notifications off entirely, or switching on a Focus each silence the
+banner and leave the cue ringing. The reader's only mute becomes a switch in this app's own
+popover, which is the opposite of "filter it where every other app is filtered".
+
+Entry 18 also mispriced the alternative. Entry 9's objection to changing the bundle is that new
+bytes change its ad-hoc signature and walk back the reader's TCC Documents grant — but entry 15
+folds a digest of every file under `src/` into the rebuild stamp, so any release that touches
+`src/` already rebuilds and re-signs, and already walks that grant back. A release adding a
+pomodoro setting touches `src/` by definition. The marginal cost of adding sound files to that
+same install is therefore zero re-approvals, not one.
+
+**Decision:** `install.sh` copies `/System/Library/Sounds/*.aiff` into
+`$STAGED_APP/Contents/Resources`, at the point it already stages `bin/daemon.mjs` and `src/` and
+ahead of the `codesign` call, and the rebuild stamp's payload digest widens to cover them. The
+cue is once again the notification's own sound, named per phase — `UNNotificationSound
+soundNamed:` on the bundled path, AppleScript's `sound name` on the clone path, the same 14 names
+either way. Nothing audio enters the repo; the files are copied from the OS at install time, on
+the machine that already has them.
+
+**Consequences:** every macOS control over notifications now reaches the cue, which is the whole
+point — a Focus silences it, the per-app sound toggle silences it, and the reader tunes this
+where they tune everything else. Three distinct cues survive on both installs. The bundle grows
+by roughly 4.7 MB, `install.sh` grows a copy step, and a reader on a Mac whose
+`/System/Library/Sounds` is non-standard gets whatever is actually there rather than a fixed
+list, so the enumeration and the staging must read the same directory or the picker will offer
+names the bundle cannot resolve. The picker's preview is the one thing that does not go through
+Notification Center: auditioning a sound must not raise a banner, so the preview plays the file
+directly and is deliberately outside macOS's filtering.
+
+Rejected: symlinking the 14 sounds into `~/Library/Sounds`, the other directory `soundNamed:`
+searches. It needs no bundle change and no megabytes, but `~/Library/Sounds` is a shared
+namespace — those entries appear in every other app's sound picker and in Sound settings — so it
+makes this app's install visible in a place that is not this app's, and `uninstall.sh` grows a
+cleanup step that has to distinguish its own symlinks from a reader's own files.
+
+**Open before implementation:** that `soundNamed:` genuinely refuses `/System/Library/Sounds` is
+taken from Apple's documented search path, not measured on this machine. It is the fact this
+entry rests on. Measure it first: if a bare name already resolves against the system directory,
+the staging step and these 4.7 MB are unnecessary and the decision collapses back to "name the
+sound, change nothing else".
