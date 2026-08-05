@@ -348,16 +348,27 @@ function twoOptionBoard() {
   });
 }
 
-/** Press Send with a stubbed `fetch` and hand back the posted body. */
+/** Press Send with a stubbed `fetch` and hand back the posted body.
+ *
+ * Presses twice when the first press only armed the button: the round-end send
+ * guard (DESIGN.md round-end criteria 4-5) arms instead of submitting while any
+ * question still carries no status, and the forced-press check below needs its
+ * round to stay deliberately incomplete -- that a forced press records nothing
+ * IS its subject, so answering the round to get past the guard would delete the
+ * thing it measures. The second press is the guard's own "send anyway", which is
+ * how a reviewer submits a partial round too. A press that neither submits nor
+ * arms is still a setup failure. */
 function sendAndCapture(document) {
   const originalFetch = globalThis.fetch;
+  const sendBtn = document.getElementById('send-btn');
   let captured = null;
   globalThis.fetch = (url, opts) => {
     captured = { url, body: JSON.parse(opts.body) };
     return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
   };
   try {
-    document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+    sendBtn.dispatchEvent(new StandInEvent('click'));
+    if (!captured) sendBtn.dispatchEvent(new StandInEvent('click'));
   } finally {
     globalThis.fetch = originalFetch;
   }

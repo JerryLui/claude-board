@@ -404,7 +404,7 @@ body.readonly button#theme-toggle { display: inline-flex; }
   color: var(--warning-ink); font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }
 body.readonly .readonly-banner { display: block; }
 body.readonly .send-bar { display: none; }
-/* SPEC_ROUNDEND criterion 6: none of this spec's new chrome belongs in a frozen
+/* DESIGN.md round-end criterion 6: none of this work's new chrome belongs in a frozen
    archive -- the send bar it would dock is already gone on the line above, and
    the rail loses its reason to exist alongside it (nothing left to arrive at). */
 body.readonly .round-end { display: none; }
@@ -432,7 +432,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .round-history .block { background: var(--history-bg); box-shadow: none; }
 .round-history .md-content, .round-history .question-prompt { opacity: 0.86; }
 .round + .round { padding-top: var(--space-5); }
-/* SPEC_ROUNDEND criterion 1: the round's own bottom -- a divider with a tag
+/* DESIGN.md round-end criterion 1: the round's own bottom -- a divider with a tag
    naming the round and its question count, so reaching it is a visible event
    rather than the absence of one (the round's top already has .round-label;
    this is the twin at the other end). Open rounds only -- see
@@ -494,7 +494,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
 .question-block:not(:has(.question-context)) { grid-template-columns: minmax(0, 1fr); }
 /* the send guard's ring around the first outstanding question once a click on
-   Send has armed instead of submitted (SPEC_ROUNDEND criterion 4) -- toggled
+   Send has armed instead of submitted (DESIGN.md round-end criterion 4) -- toggled
    client-side by src/ui.mjs's armSendGuard/disarmSend, never present in
    server-rendered markup. Overrides .block's own border/box-shadow (this
    section carries that class too); every other question keeps .block's
@@ -975,7 +975,7 @@ body.comment-mode .blocks { cursor: crosshair; }
   background: linear-gradient(to top, var(--bg) 55%, var(--bg-fade-80) 85%, var(--bg-fade-0));
   backdrop-filter: blur(10px);
   display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); }
-/* SPEC_ROUNDEND criterion 2: the scrim's whole job is telling the reviewer content
+/* DESIGN.md round-end criterion 2: the scrim's whole job is telling the reviewer content
    still runs on underneath the bar -- at the round's own end (.round-end on screen,
    src/ui.mjs's setupSendBarDock) that stops being true, so the scrim goes with it and
    the bar docks flush instead, a plain opaque panel with a top hairline. */
@@ -985,7 +985,7 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease); }
 .btn-send:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-send:active:not(:disabled) { transform: translateY(1px); }
-/* the send guard's armed state (SPEC_ROUNDEND criteria 4-5): Send wears this
+/* the send guard's armed state (DESIGN.md round-end criteria 4-5): Send wears this
    only while armSendGuard has it armed because questions are still
    outstanding -- never for the plain Cmd+Enter arm at the end of a fully
    traversed round, which keeps the ordinary accent color and its own label

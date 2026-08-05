@@ -1,5 +1,5 @@
 // Acceptance checks for the send guard (src/ui.mjs, search "the Send guard"):
-// an incomplete round arms Send instead of sending it (SPEC_ROUNDEND criteria
+// an incomplete round arms Send instead of sending it (DESIGN.md round-end criteria
 // 3, 4, 5, and this chunk's own half of 6). Same harness idiom as
 // test/check-enter.mjs, which this file sits beside and pattern-matches --
 // drives the REAL src/ui.mjs client script, in the real DOM stand-in, through

@@ -1212,7 +1212,7 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   const title = (round && round.title) || '';
   const base = title ? `Round ${roundN} · ${title}` : `Round ${roundN}`;
   const label = historical ? `${base} · sent` : base;
-  // SPEC_ROUNDEND criterion 1: an open round has a top (.round-label above) but used
+  // DESIGN.md round-end criterion 1: an open round has a top (.round-label above) but used
   // to render nothing at all after its last block, so running out of scroll and
   // reaching the actual end read identically. This closes it with a rail naming the
   // round and its question count -- a sent round already gets its own "· sent" label

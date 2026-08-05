@@ -1628,7 +1628,7 @@ export class StandInLocalStorage {
   get size() { return this.map.size; }
 }
 
-// --- IntersectionObserver stand-in (SPEC_ROUNDEND criterion 2) ------------------
+// --- IntersectionObserver stand-in (DESIGN.md round-end criterion 2) ------------------
 //
 // QUIRKS.md "The stand-in has no layout" already explains why this file never had
 // one: nothing here lays anything out, so there is no real geometry for a real
@@ -1638,7 +1638,7 @@ export class StandInLocalStorage {
 // which the stand-in's total absence of the constructor was always enough to
 // exercise.
 //
-// setupSendBarDock (src/ui.mjs, SPEC_ROUNDEND criterion 2) is the first thing in
+// setupSendBarDock (src/ui.mjs, DESIGN.md round-end criterion 2) is the first thing in
 // this codebase that needs to DRIVE an IntersectionObserver's callback in both
 // directions, not just prove the missing-constructor guard is safe: "rail on
 // screen -> docked" and "rail off screen -> floating" are both real, checkable

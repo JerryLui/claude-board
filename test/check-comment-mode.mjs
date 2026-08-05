@@ -306,7 +306,7 @@ check('comment mode off: typing into a text-answer widget still records the text
   textarea.value = 'this is the reviewer\'s free-text answer';
   textarea.dispatchEvent(new StandInEvent('input'));
   // The shared fixture's OTHER question (choiceBlock) also needs an answer here:
-  // SPEC_ROUNDEND's send guard (test/check-send-guard.mjs owns its own contract)
+  // the round-end send guard (DESIGN.md) (test/check-send-guard.mjs owns its own contract)
   // arms Send instead of submitting while any question is outstanding, and this
   // check's own subject is whether typed text reaches the submit body, not the
   // guard -- so the round is filled out completely, exactly the state a plain

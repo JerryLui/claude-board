@@ -1,5 +1,5 @@
-// SPEC_ROUNDEND criteria 1, 2, and the rail's half of 6 ("the end of a round" --
-// see that spec's Problem section: a round has a top but no bottom, and the send
+// DESIGN.md round-end criteria 1, 2, and the rail's half of 6 ("the end of a round" --
+// see that section's own preamble: a round has a top but no bottom, and the send
 // bar's scrim floats over content identically whether the round is three
 // questions from over or none). Same rung as test/check-enter.mjs, which owns
 // criteria 3-5 and the arming half of 6 -- this file never touches the Send

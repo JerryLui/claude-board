@@ -3400,7 +3400,7 @@ export const ui = `
     qsa('.round').forEach(function (section) { roundObserver.observe(section); });
   }
 
-  /** SPEC_ROUNDEND criterion 2: the send bar drops its blur scrim and docks flush
+  /** DESIGN.md round-end criterion 2: the send bar drops its blur scrim and docks flush
    * the instant the round's own end (.round-end -- at most one on the page, see
    * renderRoundSection's own comment) scrolls into view, and floats over content
    * the rest of the time. An IntersectionObserver on the rail itself, same
@@ -3655,7 +3655,7 @@ export const ui = `
   // press from EITHER input expects: submit. The two arm flavors stay visually
   // distinct because they mean different things -- armSend (keyboard, reaching
   // the end of a traversal) is "you're done, confirm"; armSendGuard (a click
-  // with questions still outstanding, SPEC_ROUNDEND criteria 3-5) is "this
+  // with questions still outstanding, DESIGN.md round-end criteria 3-5) is "this
   // round isn't finished, are you sure" -- but both set the identical sendArmed
   // flag and both are undone by the identical disarmSend.
 
@@ -3937,7 +3937,7 @@ export const ui = `
     section.setAttribute('data-round-status', 'sent');
     var label = section.querySelector('.round-label');
     if (label && label.textContent.indexOf('sent') === -1) label.textContent = label.textContent + ' · sent';
-    // SPEC_ROUNDEND criterion 1/6: renderRoundSection only ever emits .round-end
+    // DESIGN.md round-end criterion 1/6: renderRoundSection only ever emits .round-end
     // for an open round -- a round arriving pre-rendered as historical (a fresh
     // load, or a server-rendered replacement over SSE) never carries one in the
     // first place. This is the one path where a round goes historical WITHOUT a
