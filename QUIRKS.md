@@ -1056,3 +1056,78 @@ Debugging this at all needs `getNotificationSettingsWithCompletionHandler:`, sin
 `requestAuthorization` reports "denied by the user long ago" and "you are not a registered
 app" with the same string. A throwaway bundle carrying the same `CFBundleIdentifier` as the
 one under test reads the real status without disturbing it.
+
+## `soundNamed:` searches `/System/Library/Sounds` and does NOT search the app bundle — the documented search path is backwards
+
+Apple documents `[UNNotificationSound soundNamed:]` as resolving a bare name against the
+posting app's own `Contents/Resources` and against `Library/Sounds`, and explicitly not
+against `/System/Library/Sounds`. On macOS 26.5 it is the other way round, in both halves:
+a bare name resolves against `/System/Library/Sounds`, and a file that exists *only* in the
+posting bundle's `Contents/Resources` does not resolve at all. Copying the system sounds into
+a bundle to make them nameable is therefore not merely unnecessary, it does not work.
+
+The trap has teeth because the documented behaviour is the conservative-sounding one, so a
+design that assumes it looks safe and costs megabytes for nothing. ADR.md entry 20 was written
+on that assumption and this measurement is what it was waiting on.
+
+**How it was measured.** A throwaway ad-hoc-signed bundle (`CBSoundProbe.app`, its own
+`CFBundleIdentifier`, `LSBackgroundOnly`, one ObjC binary that is the bundle's own
+`CFBundleExecutable` — the entry two above says why it has to be) posting one notification per
+run with `content.sound = [UNNotificationSound soundNamed:argv[1]]`.
+
+Two things about the rig, both of which cost a run to find. The probe cannot live in `/tmp`:
+LaunchServices registers a bundle there — `lsregister -f` succeeds and `lsregister -dump`
+shows the record — but never binds it, and `usernoted` then fails the client with
+`Failed to find or validate client of identifier ...`, surfacing to the caller as the same
+`Notifications are not allowed for this application` string as the two traps above. Moving the
+identical bundle to `~/Applications` fixed it. And `NotificationCenter` rate-limits sounds
+(`Can't play sound, played a sound 0.17s ago`), so variants posted back to back silence each
+other; leave a few seconds between them.
+
+**The observable, no ears required.** `systemsoundserverd` logs the absolute path of the file
+it is handed, and the byte count, so the log says which file played and not merely that one
+did:
+
+```sh
+log stream --level debug --style compact \
+  --predicate 'process == "usernoted" OR process == "NotificationCenter" OR eventMessage CONTAINS[c] "aiff"'
+```
+
+```
+NotificationCenter [com.apple.unc:sound] Playing notification sound { nam: Glass } for com.example.cbsoundprobe
+NotificationCenter [com.apple.unc:sound] Playing sound Glass.aiff for 3B8423D3
+systemsoundserverd [com.apple.coreaudio:sss] SSServerImp.cpp:1510 clientPID 873(NotificationCent), ssid 4104,
+  audio data size 475278, audio file path /System/Library/Sounds/Glass.aiff
+```
+
+**What each variant did**, on macOS 26.5 (25F84), sounds unmuted, no Focus:
+
+| `soundNamed:` argument | `Contents/Resources` | played |
+| --- | --- | --- |
+| `Glass.aiff` | empty | `/System/Library/Sounds/Glass.aiff` |
+| `Glass` | empty | `/System/Library/Sounds/Glass.aiff` |
+| `Glass.aiff` | **`Basso.aiff` copied in as `Glass.aiff`** | `/System/Library/Sounds/Glass.aiff` |
+| `Glass` | same decoy staged | `/System/Library/Sounds/Glass.aiff` |
+| `OnlyInBundle.aiff` | that file, and only there | **nothing** |
+| `NoSuchSoundAtAll.aiff` | empty | **nothing** |
+
+The decoy row is the one that makes this a measurement rather than an inference: the bundle
+held a file with the requested name and lost anyway, and the logged size (475278 bytes, exactly
+`/System/Library/Sounds/Glass.aiff`; the decoy is 221376) says which file won without anyone
+having to listen. `~/Library/Sounds` was checked separately and *is* searched — a file dropped
+there resolved by name and logged its own path.
+
+**The extension is optional and is not part of the name.** `Glass` and `Glass.aiff` both play
+`/System/Library/Sounds/Glass.aiff`; `unc:sound` logs the argument verbatim (`{ nam: Glass }`)
+and then logs `Glass.aiff` one line later, so macOS appends the suffix itself. Either spelling
+is safe, which also means a picker that stores names with the extension and one that stores
+them without are equally correct — pick one and be consistent, because nothing downstream will
+complain about the other.
+
+**An unresolvable name is silence, not the default sound.** Resolution goes through
+ToneLibrary, which answers with `Tone with identifier '<name>' is neither in of the collections
+for system or iTunes tones` and `-toneWithIdentifierIsValid: Returning NO`; no
+`systemsoundserverd` call follows. The banner still appears, correctly, with no sound at all.
+So a typo'd or removed sound name degrades to a silent notification and logs one error line
+nobody is watching — which is why the name offered to a reader has to come from reading
+`/System/Library/Sounds` rather than from a list typed out by hand.

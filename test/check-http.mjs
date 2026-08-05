@@ -21,6 +21,7 @@ import { readBoard, searchBoards } from '../src/store.mjs';
 // through the HTTP routes, never these directly. See the pomodoro checks near the
 // bottom of this file.
 import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src/pomodoro.mjs';
+import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
@@ -3092,7 +3093,11 @@ async function main() {
       [{ longEvery: 0 }, /longEvery/, 'zero would divide by zero in settleBoundary'],
       [{ longEvery: -1 }, /longEvery/, 'a negative longEvery is meaningless'],
       [{ notify: 'yes' }, /notify/, 'a truthy non-boolean is still rejected'],
-      [{ sound: 1 }, /sound/, 'a truthy non-boolean is still rejected'],
+      [{ cueWork: 'Sosumi ' }, /cueWork/, 'a name outside the closed set (trailing space) is rejected'],
+      [{ cueBreak: 'NotASound' }, /cueBreak/, 'a name macOS does not ship is rejected'],
+      [{ cueLongBreak: 1 }, /cueLongBreak/, 'a non-string cue value is rejected'],
+      [{ cueWork: '' }, /cueWork/, 'the empty string is not "None" and is rejected'],
+      [{ cueBreak: null }, /cueBreak/, 'null is not a valid cue value'],
     ];
     for (const [patch, expectedField, why] of cases) {
       const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) });
@@ -3112,8 +3117,35 @@ async function main() {
     assert.deepEqual(after, before, 'every rejected patch above must have left settings byte-for-byte unchanged');
   });
 
+  await check('POMODORO: each cue picker accepts every sound the picker may offer, plus None, and nothing outside that set (criterion 2)', async () => {
+    for (const key of ['cueWork', 'cueBreak', 'cueLongBreak']) {
+      for (const name of cueNames()) {
+        const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ [key]: name }) });
+        assert.equal(r.status, 200, `${key}: ${JSON.stringify(name)} is in the closed set and must be accepted`);
+        const body = await r.json();
+        assert.equal(body.settings[key], name);
+      }
+    }
+  });
+
+  await check('POMODORO: sound is retired -- a patch carrying it is silently dropped, not rejected, and stores nothing', async () => {
+    // "sound leaves TOGGLE_KEYS": an unknown key is dropped, same as any other key
+    // this module has never heard of -- it must NOT come back as a 400 (that would be
+    // treating a key it used to recognise differently from one it never did), and it
+    // must not resurrect a `sound` field in the stored document either.
+    const before = (await (await fetch(`${base}/api/pomodoro`)).json()).settings;
+    const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ sound: true }) });
+    assert.equal(r.status, 200, 'a patch containing only a retired key must not be rejected');
+    const body = await r.json();
+    assert.equal('sound' in body.settings, false, 'the stored document must never regain a sound key');
+    assert.deepEqual(body.settings, before, 'a sound-only patch must change nothing at all');
+  });
+
   await check('POMODORO: settings persist across a daemon restart (criterion 9)', async () => {
-    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, sound: true };
+    const sounds = cueNames().filter(n => n !== NO_CUE);
+    assert.ok(sounds.length >= 2, 'this machine must ship at least two real sounds for this check to mean anything');
+    const [soundA, soundB] = sounds;
+    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, cueWork: soundA, cueBreak: soundB, cueLongBreak: NO_CUE };
     const written = await (await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) })).json();
     assert.equal(written.settings.workMin, 33, 'the write itself must reflect the patch');
 
@@ -3133,7 +3165,10 @@ async function main() {
     assert.equal(reread.settings.longBreakMin, 21, 'longBreakMin must survive a daemon restart');
     assert.equal(reread.settings.longEvery, 5, 'longEvery must survive a daemon restart');
     assert.equal(reread.settings.notify, false, 'the notify toggle must survive a daemon restart');
-    assert.equal(reread.settings.sound, true, 'the sound toggle must survive a daemon restart');
+    assert.equal(reread.settings.cueWork, soundA, 'cueWork must survive a daemon restart');
+    assert.equal(reread.settings.cueBreak, soundB, 'cueBreak must survive a daemon restart');
+    assert.equal(reread.settings.cueLongBreak, NO_CUE, 'cueLongBreak must survive a daemon restart');
+    assert.equal('sound' in reread.settings, false, 'the retired sound key must never reappear');
   });
 
   await check('GET /file serves a whole document as-is, only from a configured root', () => {
@@ -3192,6 +3227,241 @@ async function main() {
       }
     })();
   });
+
+  // ===================================================================================
+  // SPEC_CUES.md: POST /api/pomodoro/preview -- the picker's "audition a sound before
+  // saving" route (ADR.md entry 20, criterion 7). New section, appended at the very end
+  // of the check sequence on purpose: the settings checks elsewhere in this file are
+  // owned by a different slice of this work and are not touched here.
+  //
+  // Criterion 11 ("no check in it ever makes an audible sound") applies here exactly as
+  // it does in test/check-notify.mjs: `afplay` is stubbed first on PATH, the exact
+  // pattern that file already uses for `osascript`, so src/server.mjs's
+  // `execFile('afplay', [filePath], ...)` resolves to the stub and nothing here ever
+  // reaches the real player.
+  // ===================================================================================
+
+  // Two real names off THIS machine's /System/Library/Sounds (src/cues.mjs's own
+  // "enumerated rather than hardcoded" rule, same reasoning test/check-notify.mjs
+  // applies) -- two, not one, because the chorus check below needs to tell "the first
+  // preview" and "the second preview" apart by which file each one named.
+  const PREVIEW_CUES = cueNames().filter(n => n !== NO_CUE);
+  assert.ok(PREVIEW_CUES.length >= 2, 'this machine needs at least 2 real sounds in /System/Library/Sounds for the preview checks');
+  const [PREVIEW_CUE_A, PREVIEW_CUE_B] = PREVIEW_CUES;
+
+  const STUB_AFPLAY = `#!/usr/bin/env node
+import fs from 'node:fs';
+const log = process.env.STUB_AFPLAY_LOG;
+fs.appendFileSync(log, 'start:' + JSON.stringify(process.argv.slice(2)) + '\\n');
+process.on('SIGTERM', () => {
+  fs.appendFileSync(log, 'term:' + JSON.stringify(process.argv.slice(2)) + '\\n');
+  process.exit(0);
+});
+setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || '0'));
+`;
+
+  const previewStubDir = mkdtempSync(path.join(tmpdir(), 'claude-board-preview-stub-'));
+  // { mode: 0o755 } at creation -- no separate chmod call needed, same effect.
+  writeFileSync(path.join(previewStubDir, 'afplay'), STUB_AFPLAY, { mode: 0o755 });
+
+  let previewLogCounter = 0;
+  function freshPreviewLog() {
+    previewLogCounter++;
+    return path.join(previewStubDir, `afplay-invocations-${previewLogCounter}.log`);
+  }
+  function readPreviewLines(logPath) {
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+  }
+  async function waitForPreviewLines(logPath, count, timeoutMs = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (readPreviewLines(logPath).length >= count) return readPreviewLines(logPath);
+      await new Promise(r => setTimeout(r, 20));
+    }
+    return readPreviewLines(logPath);
+  }
+  /** PATH-stub the same way test/check-notify.mjs's withStubOnPath does, restoring
+   * whatever was there before (including "was absent") afterwards. */
+  async function withAfplayStub(logPath, durationMs, fn) {
+    const savedPath = process.env.PATH;
+    const savedLog = process.env.STUB_AFPLAY_LOG;
+    const savedDuration = process.env.STUB_AFPLAY_DURATION_MS;
+    process.env.PATH = `${previewStubDir}:${process.env.PATH}`;
+    process.env.STUB_AFPLAY_LOG = logPath;
+    process.env.STUB_AFPLAY_DURATION_MS = String(durationMs);
+    try {
+      await fn();
+    } finally {
+      process.env.PATH = savedPath;
+      if (savedLog === undefined) delete process.env.STUB_AFPLAY_LOG; else process.env.STUB_AFPLAY_LOG = savedLog;
+      if (savedDuration === undefined) delete process.env.STUB_AFPLAY_DURATION_MS; else process.env.STUB_AFPLAY_DURATION_MS = savedDuration;
+    }
+  }
+
+  await check('PREVIEW: a valid cue answers 200 {ok:true} and plays that cue\'s file directly, bypassing Notification Center entirely', async () => {
+    const log = freshPreviewLog();
+    await withAfplayStub(log, 200, async () => {
+      const r = await fetch(`${base}/api/pomodoro/preview`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ cue: PREVIEW_CUE_A }),
+      });
+      assert.equal(r.status, 200);
+      assert.deepEqual(await r.json(), { ok: true });
+      const lines = await waitForPreviewLines(log, 1);
+      assert.equal(lines.length, 1, 'exactly one afplay invocation');
+      const [argv] = JSON.parse(lines[0].slice('start:'.length));
+      assert.equal(argv, `/System/Library/Sounds/${PREVIEW_CUE_A}.aiff`, 'the file played must be the named cue\'s own file');
+    });
+  });
+
+  await check('PREVIEW: cue "None" answers 200 {ok:true} and plays nothing (criterion 7: selecting None plays nothing)', async () => {
+    const log = freshPreviewLog();
+    await withAfplayStub(log, 200, async () => {
+      const r = await fetch(`${base}/api/pomodoro/preview`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ cue: NO_CUE }),
+      });
+      assert.equal(r.status, 200);
+      assert.deepEqual(await r.json(), { ok: true });
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.deepEqual(readPreviewLines(log), [], 'afplay must never be invoked for None');
+    });
+  });
+
+  await check('PREVIEW: a value isCue() refuses is a 400 naming the "cue" field, matching the shape a bad duration is refused in', async () => {
+    const log = freshPreviewLog();
+    await withAfplayStub(log, 200, async () => {
+      const cases = [
+        [{ cue: 'definitely not a real sound' }, 'a name off the closed set'],
+        [{ cue: 'none' }, 'wrong case is not the same string as None'],
+        [{}, 'cue missing entirely'],
+        [{ cue: 123 }, 'a non-string cue'],
+        [{ cue: null }, 'a null cue'],
+      ];
+      for (const [body, why] of cases) {
+        const r = await fetch(`${base}/api/pomodoro/preview`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(body) });
+        assert.equal(r.status, 400, `${why}: ${JSON.stringify(body)} must be rejected with 400`);
+        const j = await r.json();
+        assert.match(j.error, /cue/, `the 400 must name the "cue" field for ${JSON.stringify(body)}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.deepEqual(readPreviewLines(log), [], 'no rejected body may ever reach afplay');
+    });
+  });
+
+  await check('PREVIEW: reads and writes nothing -- pomodoro.json is byte-for-byte unchanged across a preview', async () => {
+    const before = readPomodoroDoc(home);
+    const log = freshPreviewLog();
+    await withAfplayStub(log, 200, async () => {
+      const r = await fetch(`${base}/api/pomodoro/preview`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ cue: PREVIEW_CUE_B }),
+      });
+      assert.equal(r.status, 200);
+      await waitForPreviewLines(log, 1);
+    });
+    const after = readPomodoroDoc(home);
+    assert.deepEqual(after, before, 'a preview must never touch pomodoro.json -- it is an audition, not a setting');
+  });
+
+  await check('PREVIEW: plays even with settings.notify off -- the notify toggle gates the boundary cue, never the picker\'s own audition (criterion 7)', async () => {
+    const doc = readPomodoroDoc(home);
+    writePomodoroDoc({ ...doc, settings: { ...doc.settings, notify: false } }, home);
+    const log = freshPreviewLog();
+    try {
+      await withAfplayStub(log, 200, async () => {
+        const r = await fetch(`${base}/api/pomodoro/preview`, {
+          method: 'POST',
+          headers: writeHeaders(),
+          body: JSON.stringify({ cue: PREVIEW_CUE_A }),
+        });
+        assert.equal(r.status, 200, 'notify: false must not refuse a preview');
+        const lines = await waitForPreviewLines(log, 1);
+        assert.equal(lines.length, 1, 'notify: false must not silence a preview -- only the boundary cue is gated by it');
+      });
+    } finally {
+      // Restore, so a later check in this file that reads settings.notify is not left
+      // looking at a value THIS check changed.
+      writePomodoroDoc({ ...readPomodoroDoc(home), settings: { ...readPomodoroDoc(home).settings, notify: doc.settings.notify } }, home);
+    }
+  });
+
+  await check('PREVIEW: the cookie alone may preview, joining POMODORO_COOKIE_ACTIONS (src/server.mjs)', async () => {
+    const cookie = sessionCookieHeader();
+    const cookieHeaders = {
+      origin: `http://127.0.0.1:${port}`,
+      'sec-fetch-site': 'same-origin',
+      cookie,
+      'content-type': 'application/json',
+    };
+    const log = freshPreviewLog();
+    await withAfplayStub(log, 200, async () => {
+      const r = await rawRequest(port, 'POST', '/api/pomodoro/preview', `127.0.0.1:${port}`, {
+        headers: cookieHeaders,
+        body: JSON.stringify({ cue: PREVIEW_CUE_A }),
+      });
+      assert.equal(r.status, 200, 'the cookie alone must be able to preview a cue');
+      await waitForPreviewLines(log, 1);
+    });
+  });
+
+  await check('PREVIEW: POST /api/pomodoro/preview refuses a request with no credential at all', async () => {
+    const r = await rawRequest(port, 'POST', '/api/pomodoro/preview', `127.0.0.1:${port}`, {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cue: PREVIEW_CUE_A }),
+    });
+    assert.equal(r.status, 401, 'a preview request holding no credential must be refused, exactly like every other pomodoro write');
+  });
+
+  await check('PREVIEW: a rapid second preview kills the first rather than overlapping into a chorus (criterion 7)', async () => {
+    const log = freshPreviewLog();
+    // A generous duration -- long enough that if the kill below silently stopped
+    // happening, the first stub would still be alive (and this check would catch it via
+    // the missing 'term:' line) rather than coincidentally having already exited on its
+    // own and passing for the wrong reason.
+    await withAfplayStub(log, 1500, async () => {
+      const first = await fetch(`${base}/api/pomodoro/preview`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ cue: PREVIEW_CUE_A }),
+      });
+      assert.equal(first.status, 200);
+      await waitForPreviewLines(log, 1); // the first stub is confirmed running before the second fires
+
+      const second = await fetch(`${base}/api/pomodoro/preview`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ cue: PREVIEW_CUE_B }),
+      });
+      assert.equal(second.status, 200);
+
+      const lines = await waitForPreviewLines(log, 3, 3000); // start:A, term:A, start:B
+      assert.ok(lines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_A)),
+        `the FIRST preview (${PREVIEW_CUE_A}) must have been killed once the second one started -- got: ${JSON.stringify(lines)}`);
+      assert.ok(lines.some(l => l.startsWith('start:') && l.includes(PREVIEW_CUE_B)),
+        `the SECOND preview (${PREVIEW_CUE_B}) must have started -- got: ${JSON.stringify(lines)}`);
+      assert.ok(!lines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_B)),
+        'the second preview must still be the one considered "in flight" -- nothing has killed IT yet');
+
+      // Cleanup: kill the still-running second stub too, via the same mechanism (any
+      // preview call kills whatever is playing first) rather than leaving a 1.5s stub
+      // process outliving this check and delaying the suite's own exit.
+      const cleanup = await fetch(`${base}/api/pomodoro/preview`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ cue: NO_CUE }),
+      });
+      assert.equal(cleanup.status, 200);
+      const finalLines = await waitForPreviewLines(log, 4, 2000); // + term:B
+      assert.ok(finalLines.some(l => l.startsWith('term:') && l.includes(PREVIEW_CUE_B)), 'cleanup must have killed the second stub in turn');
+    });
+  });
+
+  rmSync(previewStubDir, { recursive: true, force: true });
 }
 
 main()

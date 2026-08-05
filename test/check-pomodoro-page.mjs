@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
 import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, defaultDoc, localDateStr } from '../src/pomodoro.mjs';
+import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
@@ -194,21 +195,43 @@ async function main() {
       }
     });
 
-    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all six fields', async () => {
+    // Nine fields now, not six: the `sound` checkbox retired into three independent
+    // per-phase cue pickers (SPEC_CUES.md criterion 1, ADR.md entry 20). Three
+    // DIFFERENT names are chosen deliberately rather than three copies of one -- "each
+    // remembers its own choice independently of the other two" is the criterion, and a
+    // check that set all three alike would pass just as happily against a bug that
+    // collapsed them into a single stored value. The names come off cueNames() rather
+    // than being hardcoded, for the same reason src/pomodoro-widget.mjs builds its
+    // options from it: this suite must not assert a 14-name list that is a property of
+    // the machine it runs on.
+    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all nine fields, the three cues independently', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
+        // Skip NO_CUE at index 0 -- three real, distinct sounds is the stronger
+        // arrangement, and `None` gets its own coverage in check-http/check-notify.
+        const names = cueNames().filter(n => n !== NO_CUE);
+        assert.ok(names.length >= 3, 'this machine must ship at least three system sounds for this check to mean anything');
+        const [cueWork, cueBreak, cueLongBreak] = names;
         const form = tab.document.querySelector('form#pomodoro-settings-form');
         form.querySelector('input[name="workMin"]').value = '42';
         form.querySelector('input[name="breakMin"]').value = '7';
         form.querySelector('input[name="longBreakMin"]').value = '18';
         form.querySelector('input[name="longEvery"]').value = '5';
         form.querySelector('input[name="notify"]').checked = false;
-        form.querySelector('input[name="sound"]').checked = true;
+        form.querySelector('select[name="cueWork"]').value = cueWork;
+        form.querySelector('select[name="cueBreak"]').value = cueBreak;
+        form.querySelector('select[name="cueLongBreak"]').value = cueLongBreak;
         form.dispatchEvent(new StandInEvent('submit'));
         await flush();
         const onDisk = readPomodoroDoc(home);
-        assert.deepEqual(onDisk.settings, { workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, sound: true }, 'all six fields must actually persist on disk, exactly as entered');
+        assert.deepEqual(onDisk.settings, { workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, cueWork, cueBreak, cueLongBreak }, 'all nine fields must actually persist on disk, exactly as entered');
+        // Restated as its own assertion rather than left implicit in the deepEqual
+        // above: the deepEqual would still pass if the three cues happened to be equal
+        // AND the arrangement above had picked three equal names, so this pins the
+        // property the criterion is actually about.
+        assert.equal(new Set([onDisk.settings.cueWork, onDisk.settings.cueBreak, onDisk.settings.cueLongBreak]).size, 3, 'the three cues must land as three distinct stored values, not collapse into one');
+        assert.ok(!('sound' in onDisk.settings), 'the retired sound key must not come back from a round trip through the real form');
       } finally {
         tab.restoreFetch();
       }

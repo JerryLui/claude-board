@@ -26,19 +26,31 @@ import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mk
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { boardHome } from './store.mjs';
+import { isCue, pickCue, NO_CUE, SOUNDS_DIR } from './cues.mjs';
 
 // ---------------------------------------------------------------------------------
 // Settings, defaults, and the document shape (a contract other tickets build against
 // — see SPEC_POMODORO.md; do not change field names without checking who reads them).
 // ---------------------------------------------------------------------------------
 
+// The three per-phase cue defaults go through pickCue (src/cues.mjs) rather than
+// being spelled as literals, so a machine missing one of these three preferred sounds
+// degrades to `None` for that phase instead of shipping a default the validator would
+// refuse on the very next save (see pickCue's own comment). That is a computed lookup
+// (cueNames() reads /System/Library/Sounds once and memoises), so this object is built
+// once at module load and frozen, same as before -- not a literal, but still computed
+// exactly once, never re-derived per read.
 export const DEFAULT_SETTINGS = Object.freeze({
   workMin: 25,
   breakMin: 5,
   longBreakMin: 15,
   longEvery: 4,
   notify: true,
-  sound: false,
+  // Three DIFFERENT cues (spec criterion 9) -- one per phase, so the reader tells
+  // work/short-break/long-break apart by ear without looking at the screen.
+  cueWork: pickCue('Hero'),
+  cueBreak: pickCue('Purr'),
+  cueLongBreak: pickCue('Submarine'),
 });
 
 /** How late a deadline is allowed to run before the interval counts as EXPIRED rather
@@ -217,7 +229,12 @@ export function resetTimer(doc, _now) {
 // ---------------------------------------------------------------------------------
 
 const DURATION_KEYS = ['workMin', 'breakMin', 'longBreakMin'];
-const TOGGLE_KEYS = ['notify', 'sound'];
+const TOGGLE_KEYS = ['notify'];
+// The three per-phase cue settings (SPEC_CUES.md criterion 1) -- validated against
+// src/cues.mjs's isCue, the one place the closed set of legal values (the 14 sounds
+// macOS ships, plus `None`) is enumerated. Not re-enumerated here on purpose (this
+// file's own comment above already says do not re-derive that set anywhere else).
+const CUE_KEYS = ['cueWork', 'cueBreak', 'cueLongBreak'];
 
 /** A day. Generous on purpose — this is not a defense against a bad PLAN (nobody is
  * stopped from setting a silly-but-harmless 3-hour break), only against a value that
@@ -284,6 +301,13 @@ export function mergeSettings(doc, patch) {
     if (typeof patch[key] !== 'boolean') throw new Error(`settings.${key} must be a boolean`);
     settings[key] = patch[key];
   }
+  for (const key of CUE_KEYS) {
+    if (!(key in patch)) continue;
+    if (!isCue(patch[key])) {
+      throw new Error(`settings.${key} must be the name of a sound in ${SOUNDS_DIR} or "${NO_CUE}"`);
+    }
+    settings[key] = patch[key];
+  }
   return { ...doc, settings };
 }
 
@@ -325,11 +349,38 @@ function atomicWrite(targetPath, contents) {
 
 /** Coerce whatever JSON.parse handed back into the documented shape, defensively —
  * not full schema validation, just enough that a document written by an older or
- * newer version of this module (a missing `sound` key, say) fills in from
+ * newer version of this module (a missing `cueWork` key, say) fills in from
  * DEFAULT_SETTINGS instead of the reader silently losing a field everywhere it's
- * used. */
-function normalizeDoc(parsed) {
-  const settings = { ...DEFAULT_SETTINGS, ...(parsed && typeof parsed.settings === 'object' && parsed.settings ? parsed.settings : {}) };
+ * used. Runs on every read (readDoc below), which is what makes migration below
+ * complete: there is no separate one-shot migration pass, only "the next write
+ * carries the normalized shape back to disk".
+ *
+ * Migration (SPEC_CUES.md criterion 9): the retired `sound` boolean, if present,
+ * becomes a THIRD layer of defaults — `Glass` on all three cues for `sound: true`,
+ * `None` for `sound: false` — spread in UNDER whatever the document already states
+ * explicitly for `cueWork`/`cueBreak`/`cueLongBreak`, exactly the way DEFAULT_SETTINGS
+ * itself is already a layer under the parsed settings a few lines below. That is a
+ * deliberate choice, not the only reading of criterion 9: a document could instead
+ * carry both a `sound` key and already-present cue keys if an already-migrated
+ * document (one that had already gone through this function once, been written back
+ * without `sound`, and then had its cues hand-picked) had `sound` re-added by a hand
+ * edit — the sound-derived values only fill in cues the document doesn't already
+ * state, rather than clobbering a reader's actual per-phase choice with a stale
+ * boolean's guess. Either way `sound` itself never survives into the returned
+ * settings — "no document is left holding a sound key that still does something" is
+ * true even in the branch where it does nothing at all. */
+export function normalizeDoc(parsed) {
+  const parsedSettings = parsed && typeof parsed.settings === 'object' && parsed.settings ? parsed.settings : {};
+  const { sound, ...rest } = parsedSettings;
+  // pickCue('Glass'), not the bare literal criterion 9 words it as: on a machine whose
+  // /System/Library/Sounds has no Glass.aiff, a migration writing the literal would put a
+  // value in the document that mergeSettings then REFUSES, so the reader's next save of
+  // any unrelated field 400s on a cue they never chose. pickCue degrades that one case to
+  // `None` and leaves criterion 9 satisfied verbatim everywhere Glass actually exists,
+  // which is every stock machine.
+  const migrated = sound ? pickCue('Glass') : NO_CUE;
+  const soundMigration = 'sound' in parsedSettings ? { cueWork: migrated, cueBreak: migrated, cueLongBreak: migrated } : {};
+  const settings = { ...DEFAULT_SETTINGS, ...soundMigration, ...rest };
   const cycle = Number.isInteger(parsed && parsed.cycle) ? parsed.cycle : 0;
   const cycleDate = typeof (parsed && parsed.cycleDate) === 'string' ? parsed.cycleDate : null;
   const timer = parsed && typeof parsed.timer === 'object' ? parsed.timer : null;

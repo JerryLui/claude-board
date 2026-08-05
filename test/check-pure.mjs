@@ -32,6 +32,7 @@ import { ui } from '../src/ui.mjs';
 import { styles, palettes, faviconLink } from '../src/styles.mjs';
 import { indexScript, buildThreadIndex, renderIndexPage, folderName, roundCount } from '../src/indexpage.mjs';
 import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
+import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
 import { badgeLabel } from '../src/badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from '../src/lens.mjs';
@@ -6364,7 +6365,20 @@ function flushPomodoro() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, sound: false };
+// Fixture cue values, read from cueNames() itself rather than hardcoded --
+// mirrors src/cues.mjs's own "enumerated, never a second guess at the
+// directory" discipline, so these checks stay correct on whatever machine
+// actually runs them instead of assuming a specific 14 (SPEC_CUES.md: "a
+// picker offering a name the bundle cannot resolve is a silent boundary").
+// Three distinct names are what let a check prove the three pickers actually
+// remember their own choice independently (criterion 1) rather than three
+// fields that happen to agree by accident.
+const ALL_CUES = cueNames();
+const CUE_A = ALL_CUES[1] || NO_CUE;
+const CUE_B = ALL_CUES[2] || NO_CUE;
+const CUE_C = ALL_CUES[3] || NO_CUE;
+
+const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, cueWork: CUE_A, cueBreak: CUE_B, cueLongBreak: NO_CUE };
 
 /** Parse the real renderIndexPage() output and run the real indexScript against
  * it, capturing every setInterval registration by hand (there are three: refresh's
@@ -6397,7 +6411,7 @@ function fetchPomodoroFn(intervals) {
   return matches[matches.length - 1].fn;
 }
 
-check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all six settings fields present', () => {
+check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all eight settings fields present', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<div class="pomodoro-widget" id="pomodoro-widget">/);
   assert.match(html, /<span class="pomodoro-status" id="pomodoro-status">/);
@@ -6410,9 +6424,12 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   assert.match(html, /id="pomodoro-toggle"[^>]*aria-label="Start pomodoro"/, 'an icon-only control must name the action it performs');
   assert.match(html, /<details class="pomodoro-settings" id="pomodoro-settings">/, 'the settings panel must be a <details> -- collapsed by default with no JS required to open it');
   assert.match(html, /<form class="pomodoro-settings-form" id="pomodoro-settings-form">/);
-  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'sound']) {
+  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'cueWork', 'cueBreak', 'cueLongBreak']) {
     assert.match(html, new RegExp(`name="${field}"`), `settings form must carry a ${field} field`);
   }
+  // The retired boolean (SPEC_CUES.md: "not kept as a master mute") must be
+  // gone entirely -- markup, not just unused.
+  assert.doesNotMatch(html, /name="sound"/, 'the sound checkbox must be retired -- the three cue pickers replace it');
   assert.match(html, /id="pomodoro-reset"/);
   // Beside themeToggle(), not replacing it -- the theme control must still render.
   // Matched by the real <button ... id="theme-toggle"> tag shape, not a bare
@@ -6427,6 +6444,50 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   const themeMatch = html.match(/<button type="button" id="theme-toggle"/);
   assert.ok(widgetMatch && themeMatch, 'setup failure: could not locate both real markup elements');
   assert.ok(widgetMatch.index < themeMatch.index, 'both controls must render inside the same header, the widget before the theme toggle');
+});
+
+check('pomodoro widget: the three cue rows read Work / Short break / Long break under a hairline and a "Cues" caption, and the duration row beside them is relabeled to match (SPEC_CUES.md placement decision)', () => {
+  const html = renderIndexPage({ threads: [] });
+  assert.match(html, /<hr class="pomodoro-settings-divider">/, 'the Cues section needs its own hairline -- no fold, no tab');
+  assert.match(html, /<div class="pomodoro-settings-caption">Cues<\/div>/);
+  // `<select name="x"` with no closing `>`, so an attribute added to the tag later
+  // (aria-label, say) does not fail an assertion about the row's LABEL, which is the
+  // only thing this check is about. The pinned part is the visible wording the spec
+  // chose -- Work / Short break / Long break -- and that it wraps the right field.
+  assert.match(html, /<label class="pomodoro-field">Work<select name="cueWork"[ >]/);
+  assert.match(html, /<label class="pomodoro-field">Short break<select name="cueBreak"[ >]/);
+  assert.match(html, /<label class="pomodoro-field">Long break<select name="cueLongBreak"[ >]/);
+  // Every cue picker carries a group-qualified accessible name. The "Cues" caption
+  // above is a plain div: browse mode reads it, tabbing does not, and tabbing is how
+  // this panel is used -- so without these the three combo boxes announce as bare
+  // "Work" / "Short break" / "Long break" straight after the identically-worded
+  // duration rows. Each label must still CONTAIN the visible text, or a voice-control
+  // user saying "click Work" stops matching (WCAG 2.5.3).
+  for (const [field, visible] of [['cueWork', 'Work'], ['cueBreak', 'Short break'], ['cueLongBreak', 'Long break']]) {
+    const m = html.match(new RegExp(`<select name="${field}"[^>]*aria-label="([^"]*)"`));
+    assert.ok(m, `${field} must carry an aria-label -- the Cues caption is not announced while tabbing`);
+    assert.ok(m[1].includes(visible), `${field}'s accessible name ("${m[1]}") must contain its visible label ("${visible}")`);
+    assert.notEqual(m[1], visible, `${field}'s accessible name must say more than the visible label, or it is indistinguishable from the duration row of the same name`);
+  }
+  // The duration row keeps its own wording, relabeled from "Break (min)" to
+  // "Short break (min)" so it matches the cue row beside it.
+  assert.match(html, /<label class="pomodoro-field">Short break \(min\)<input type="number" name="breakMin"/);
+  assert.doesNotMatch(html, /<label class="pomodoro-field">Break \(min\)</, 'the old, unqualified "Break (min)" label must be gone');
+});
+
+check('pomodoro widget: each cue picker offers exactly cueNames() -- None plus the sounds this machine actually has -- and nothing else (criterion 2)', () => {
+  const html = renderIndexPage({ threads: [] });
+  const names = cueNames();
+  for (const field of ['cueWork', 'cueBreak', 'cueLongBreak']) {
+    const m = html.match(new RegExp(`<select name="${field}"[^>]*>([\\s\\S]*?)</select>`));
+    assert.ok(m, `setup failure: no <select name="${field}"> found`);
+    const values = [...m[1].matchAll(/<option value="([^"]*)">/g)].map(x => x[1]);
+    // Compared against the REAL cueNames() output, not a hand-typed list of
+    // 14 -- src/cues.mjs's own header comment is exactly why: a hardcoded
+    // list here would be right about a stock machine and silently wrong
+    // about one whose /System/Library/Sounds has been pruned or added to.
+    assert.deepEqual(values, names, `${field}'s options must be exactly cueNames(), in the same order`);
+  }
 });
 
 check('pomodoro widget: the settings control is an icon, and the icon carries a name', () => {
@@ -6691,10 +6752,13 @@ await checkAsync('pomodoro widget: reset needs two clicks -- the first only rela
   }
 });
 
-await checkAsync('pomodoro widget: submitting the settings form posts all six fields to /api/pomodoro/settings, and the response is applied back into the form', async () => {
+await checkAsync('pomodoro widget: submitting the settings form posts all eight fields to /api/pomodoro/settings, and the response is applied back into the form', async () => {
   const nowMs = Date.now();
   const initial = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
-  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, sound: true };
+  // Rotated relative to POMODORO_SETTINGS (CUE_A/CUE_B/None), not just three
+  // arbitrary new names -- proves each of the three fields round-trips its
+  // OWN new value rather than the write path silently mixing them up.
+  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, cueWork: CUE_B, cueBreak: NO_CUE, cueLongBreak: CUE_C };
   const saved = { ...initial, settings: savedSettings };
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? saved : initial), async () => {
@@ -6706,20 +6770,146 @@ await checkAsync('pomodoro widget: submitting the settings form posts all six fi
     form.querySelector('input[name="longBreakMin"]').value = '20';
     form.querySelector('input[name="longEvery"]').value = '3';
     form.querySelector('input[name="notify"]').checked = false;
-    form.querySelector('input[name="sound"]').checked = true;
+    form.querySelector('select[name="cueWork"]').value = CUE_B;
+    form.querySelector('select[name="cueBreak"]').value = NO_CUE;
+    form.querySelector('select[name="cueLongBreak"]').value = CUE_C;
     form.dispatchEvent(new StandInEvent('submit'));
     await flushPomodoro();
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'submitting must POST');
   assert.equal(post.url, '/api/pomodoro/settings');
-  assert.deepEqual(post.body, savedSettings, 'all six settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, sound');
+  assert.deepEqual(post.body, savedSettings, 'all eight settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, cueWork, cueBreak, cueLongBreak');
   // Applied back, not merely echoed: re-reading the form after the response
-  // shows the daemon's own saved value, proving the round trip is real.
+  // shows the daemon's own saved value, proving the round trip is real -- for
+  // both a duration field and one cue field (criterion 1: each picker is its
+  // own value, independent of the other two).
   assert.equal(document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value, 50);
+  assert.equal(document.querySelector('form#pomodoro-settings-form select[name="cueWork"]').value, CUE_B);
   // Saving is done, so the panel is done: it closes on the RESPONSE, never
   // optimistically beside the post (a rejected patch must leave it open).
   assert.equal(document.querySelector('details#pomodoro-settings').open, false, 'a successful save must close the settings panel');
+});
+
+await checkAsync('pomodoro widget: the three cue pickers sync independently from the daemon\'s settings on the first fetch, one value per phase (criterion 1)', async () => {
+  assert.notEqual(CUE_A, CUE_B, 'setup failure: this machine needs at least two distinct sounds under /System/Library/Sounds for this fixture to mean anything');
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const form = document.querySelector('form#pomodoro-settings-form');
+    assert.equal(form.querySelector('select[name="cueWork"]').value, CUE_A);
+    assert.equal(form.querySelector('select[name="cueBreak"]').value, CUE_B);
+    assert.equal(form.querySelector('select[name="cueLongBreak"]').value, NO_CUE);
+  });
+});
+
+// Criterion 7's own client-side half: a change has to reach a real network
+// call, and criterion 11 forbids any check here from letting a REAL request
+// out. withPomodoroFetch keeps globalThis.fetch stubbed for the whole
+// withPomodoroFetch(...) call, so the wait below (comfortably longer than
+// indexpage.mjs's own debounce) is what lets the debounced call actually
+// fire while it is still safely captured by the stub -- letting it fire
+// AFTER fetch is restored would send a real request out from this test.
+function waitOutPreviewDebounce() {
+  return new Promise(resolve => setTimeout(resolve, 250));
+}
+
+await checkAsync('pomodoro widget: changing a cue picker posts a preview immediately, before Save, and never writes the stored settings (criteria 7 and 8)', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    document.querySelector('details#pomodoro-settings').open = true;
+    const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
+    cueWork.value = CUE_C;
+    cueWork.dispatchEvent(new StandInEvent('change'));
+    await waitOutPreviewDebounce();
+  });
+  const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
+  assert.equal(previews.length, 1, 'exactly one preview request, once the debounce settles');
+  assert.equal(previews[0].method, 'POST');
+  assert.equal(previews[0].credentials, 'same-origin', 'same credentials shape as every other pomodoro write in this file');
+  assert.deepEqual(previews[0].body, { cue: CUE_C });
+  assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'a preview must never be a write -- criterion 8');
+});
+
+await checkAsync('pomodoro widget: selecting None previews it like any other value -- no special-cased silence on the client, the server owns "plays nothing"', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const cueBreak = document.querySelector('form#pomodoro-settings-form select[name="cueBreak"]');
+    cueBreak.value = NO_CUE;
+    cueBreak.dispatchEvent(new StandInEvent('change'));
+    await waitOutPreviewDebounce();
+  });
+  const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
+  assert.equal(previews.length, 1);
+  assert.deepEqual(previews[0].body, { cue: NO_CUE });
+});
+
+await checkAsync('pomodoro widget: a rapid run of changes on the same picker (a held arrow key) collapses to one preview of the value it lands on, never a chorus (criterion 7)', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
+    // Simulates a held arrow key: several 'change' events land back to back,
+    // well inside the debounce window -- exactly the shape a real key-repeat
+    // produces (see onPomodoroCueChange's own comment, src/indexpage.mjs).
+    for (const value of [CUE_A, CUE_B, NO_CUE, CUE_C]) {
+      cueWork.value = value;
+      cueWork.dispatchEvent(new StandInEvent('change'));
+    }
+    await waitOutPreviewDebounce();
+  });
+  const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
+  assert.equal(previews.length, 1, 'four rapid changes on one picker must collapse into exactly one preview request, never one per change');
+  assert.deepEqual(previews[0].body, { cue: CUE_C }, 'the one preview that does fire must carry the value the picker actually landed on, not an earlier one it passed through');
+});
+
+await checkAsync('pomodoro widget: changing TWO different pickers in quick succession still previews both -- the debounce is per field, not one shared gate', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const form = document.querySelector('form#pomodoro-settings-form');
+    const cueWork = form.querySelector('select[name="cueWork"]');
+    const cueBreak = form.querySelector('select[name="cueBreak"]');
+    cueWork.value = CUE_C;
+    cueWork.dispatchEvent(new StandInEvent('change'));
+    cueBreak.value = NO_CUE;
+    cueBreak.dispatchEvent(new StandInEvent('change'));
+    await waitOutPreviewDebounce();
+  });
+  const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
+  assert.equal(previews.length, 2, 'two different pickers changed close together must each still preview -- a shared debounce would drop the first');
+  assert.deepEqual(previews.map(p => p.body), [{ cue: CUE_C }, { cue: NO_CUE }]);
+});
+
+await checkAsync('pomodoro widget: closing the panel without saving reverts a previewed cue back to the stored value -- a preview is not a write (criterion 8)', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document, intervals } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = document.querySelector('details#pomodoro-settings');
+    const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
+    assert.equal(cueWork.value, CUE_A, 'setup failure: expected the daemon\'s stored value synced in first');
+    panel.open = true;
+    cueWork.value = CUE_C;                 // the reader previews a different sound
+    cueWork.dispatchEvent(new StandInEvent('change'));
+    panel.open = false;                    // ...then closes without Save
+    pomodoroTickFn(intervals)();           // the repaint tick is what actually re-syncs (pomodoroSyncForm's own guard)
+    assert.equal(cueWork.value, CUE_A, 'closing without saving must revert the picker to the daemon\'s actual stored cue, exactly like every other abandoned edit');
+    await waitOutPreviewDebounce();        // let the still-pending preview fire against the stub, not the real fetch
+  });
 });
 
 // The reported bug, reduced to its mechanism: type into one field, move to

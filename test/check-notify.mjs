@@ -17,8 +17,19 @@ import { fileURLToPath } from 'node:url';
 import { notifyBoundary } from '../src/notify.mjs';
 import { startServer } from '../src/server.mjs';
 import { writeDoc, localDateStr, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
+import { cueNames, NO_CUE } from '../src/cues.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Real names off THIS machine's /System/Library/Sounds (src/cues.mjs's own
+// "enumerated rather than hardcoded" rule, extended to the checks: a fixed
+// ['Glass', 'Sosumi', ...] list would be right about a stock Mac and wrong about a
+// reader's pruned one). Three distinct real cues are what "three phases set to three
+// different sounds produce three different sounds" (criterion 3) needs to tell apart;
+// NO_CUE ('None') is imported separately since it is never one of these.
+const REAL_CUES = cueNames().filter(n => n !== NO_CUE);
+assert.ok(REAL_CUES.length >= 3, 'this machine needs at least 3 real sounds in /System/Library/Sounds for this check to tell three phases apart');
+const [CUE_WORK, CUE_BREAK, CUE_LONG_BREAK] = REAL_CUES;
 
 let failures = 0;
 async function check(name, fn) {
@@ -105,7 +116,7 @@ async function main() {
   await check('a boundary fires exactly one osascript invocation naming the phase that just began', async () => {
     const log = freshLog();
     await withStubOnPath(log, {}, async () => {
-      notifyBoundary('work', { notify: true, sound: false });
+      notifyBoundary('work', { notify: true, cueWork: NO_CUE, cueBreak: NO_CUE, cueLongBreak: NO_CUE });
       const lines = await waitForLines(log, 1);
       assert.equal(lines.length, 1, 'exactly one osascript invocation');
       const [flag, script] = lines[0];
@@ -115,41 +126,76 @@ async function main() {
     });
   });
 
-  await check('notify: false fires nothing at all', async () => {
+  await check('notify: false fires nothing at all (criterion 6: notify is a master switch over the cue too)', async () => {
     const log = freshLog();
     await withStubOnPath(log, {}, async () => {
-      notifyBoundary('work', { notify: false, sound: true });
+      notifyBoundary('work', { notify: false, cueWork: CUE_WORK });
       // No promise to await (notifyBoundary returns synchronously before ever touching
       // the subprocess on this path) -- a short settle is still worth it in case a
       // regression made this path async too.
       await new Promise(r => setTimeout(r, 200));
-      assert.deepEqual(readLines(log), [], 'osascript must never be invoked when notify is false');
+      assert.deepEqual(readLines(log), [], 'osascript must never be invoked when notify is false, cue included');
     });
   });
 
-  await check('sound: true puts a sound name clause in the script, sound: false does not', async () => {
+  await check('criterion 3: each phase crosses ITS OWN cue by name, and three different phases play three different sounds', async () => {
     const log = freshLog();
     await withStubOnPath(log, {}, async () => {
-      notifyBoundary('break', { notify: true, sound: true });
-      notifyBoundary('longBreak', { notify: true, sound: false });
-      const lines = await waitForLines(log, 2);
-      assert.equal(lines.length, 2);
-      // Two independent subprocesses -- do not assume which finishes writing first.
-      // 'Break started' (capital B) names the break phase; 'Long break started'
-      // (lowercase b) is the only script that also contains 'Long'.
-      const soundOnScript = lines.map(l => l[1]).find(s => /Break started/.test(s) && !/Long/.test(s));
-      const soundOffScript = lines.map(l => l[1]).find(s => /Long break started/.test(s));
-      assert.ok(soundOnScript, 'expected a script for the break phase');
-      assert.ok(soundOffScript, 'expected a script for the longBreak phase');
-      assert.match(soundOnScript, /sound name/, 'sound: true must include a sound name clause');
-      assert.doesNotMatch(soundOffScript, /sound name/, 'sound: false must not include a sound name clause');
+      const settings = { notify: true, cueWork: CUE_WORK, cueBreak: CUE_BREAK, cueLongBreak: CUE_LONG_BREAK };
+      notifyBoundary('work', settings);
+      notifyBoundary('break', settings);
+      notifyBoundary('longBreak', settings);
+      const lines = await waitForLines(log, 3);
+      assert.equal(lines.length, 3);
+      // Three independent subprocesses -- do not assume which finishes writing first.
+      // 'Work interval started' names work; 'Break started' (capital B, no 'Long') names
+      // break; 'Long break started' names longBreak.
+      const scripts = lines.map(l => l[1]);
+      const workScript = scripts.find(s => /Work interval started/.test(s));
+      const breakScript = scripts.find(s => /Break started/.test(s) && !/Long/.test(s));
+      const longBreakScript = scripts.find(s => /Long break started/.test(s));
+      assert.ok(workScript, 'expected a script for the work phase');
+      assert.ok(breakScript, 'expected a script for the break phase');
+      assert.ok(longBreakScript, 'expected a script for the longBreak phase');
+      assert.match(workScript, new RegExp(`sound name "${CUE_WORK}"`), 'work must cross cueWork, not another phase\'s cue');
+      assert.match(breakScript, new RegExp(`sound name "${CUE_BREAK}"`), 'break must cross cueBreak, not another phase\'s cue');
+      assert.match(longBreakScript, new RegExp(`sound name "${CUE_LONG_BREAK}"`), 'longBreak must cross cueLongBreak, not another phase\'s cue');
+      // The whole point of a per-phase cue (ADR.md entry 20's problem statement): the
+      // three clauses must actually differ, not just be present.
+      const names = [CUE_WORK, CUE_BREAK, CUE_LONG_BREAK];
+      assert.equal(new Set(names).size, 3, 'the three picked cues must be distinct, or this check proves nothing');
+    });
+  });
+
+  await check('criterion 3: a phase set to None crosses no sound argument at all', async () => {
+    const log = freshLog();
+    await withStubOnPath(log, {}, async () => {
+      notifyBoundary('break', { notify: true, cueWork: CUE_WORK, cueBreak: NO_CUE, cueLongBreak: CUE_LONG_BREAK });
+      const lines = await waitForLines(log, 1);
+      assert.equal(lines.length, 1);
+      const [, script] = lines[0];
+      assert.match(script, /Break started/);
+      assert.doesNotMatch(script, /sound name/, 'cueBreak: None must not add a sound name clause');
+    });
+  });
+
+  await check('a cue value the closed set does not recognise crosses nothing, same as None', async () => {
+    const log = freshLog();
+    await withStubOnPath(log, {}, async () => {
+      // Not a validity check on the HTTP boundary (src/pomodoro.mjs owns that) -- this is
+      // notifyBoundary's OWN defensive posture as a pure function of whatever settings
+      // handed it, exactly as an unrecognised phase already gets no MESSAGES entry.
+      notifyBoundary('work', { notify: true, cueWork: 'definitely; not a real sound' });
+      const lines = await waitForLines(log, 1);
+      assert.equal(lines.length, 1);
+      assert.doesNotMatch(lines[0][1], /sound name/, 'a value isCue() refuses must never reach the script string');
     });
   });
 
   await check('an unknown phase fires nothing (the closed-set guard)', async () => {
     const log = freshLog();
     await withStubOnPath(log, {}, async () => {
-      notifyBoundary('lunch', { notify: true, sound: true });
+      notifyBoundary('lunch', { notify: true, cueWork: CUE_WORK });
       await new Promise(r => setTimeout(r, 200));
       assert.deepEqual(readLines(log), [], 'an unrecognised phase must never reach osascript');
     });
@@ -162,7 +208,7 @@ async function main() {
     process.on('uncaughtException', onUncaught);
     try {
       await withStubOnPath(log, { STUB_OSASCRIPT_EXIT: '1' }, async () => {
-        assert.doesNotThrow(() => notifyBoundary('work', { notify: true, sound: false }));
+        assert.doesNotThrow(() => notifyBoundary('work', { notify: true, cueWork: CUE_WORK }));
         await waitForLines(log, 1); // let the async failure actually happen before asserting on it
         await new Promise(r => setTimeout(r, 100));
       });
@@ -178,7 +224,7 @@ async function main() {
     process.on('uncaughtException', onUncaught);
     try {
       await withStubEnv({ PATH: emptyBinDir }, async () => {
-        assert.doesNotThrow(() => notifyBoundary('work', { notify: true, sound: false }));
+        assert.doesNotThrow(() => notifyBoundary('work', { notify: true, cueWork: CUE_WORK }));
         await new Promise(r => setTimeout(r, 300)); // give the ENOENT time to surface async
       });
     } finally {
@@ -202,7 +248,7 @@ async function main() {
     // startServer's own pomodoro.boot() call, short enough that waitForLines's 5s
     // budget below has no reason to be patient about it.
     writeDoc({
-      settings: { ...DEFAULT_SETTINGS, notify: true, sound: false },
+      settings: { ...DEFAULT_SETTINGS, notify: true, cueWork: CUE_WORK, cueBreak: CUE_BREAK, cueLongBreak: CUE_LONG_BREAK },
       cycle: 0,
       cycleDate: localDateStr(now),
       timer: { phase: 'work', deadline: now + 150, paused: false },
@@ -222,6 +268,7 @@ async function main() {
         // work -> break with the default settings (longEvery: 4, cycle starts at 0), so
         // the boundary reports the phase that just began: 'break'.
         assert.match(script, /break/i, 'the message must name the phase that just began (work -> break)');
+        assert.match(script, new RegExp(`sound name "${CUE_BREAK}"`), 'the cue that crosses through the real daemon path must be the BREAK phase\'s own cue, not cueWork');
       } finally {
         await new Promise(resolve => server.close(resolve));
       }
@@ -255,30 +302,63 @@ process.exit(0);
     chmodSync(exec, 0o755);
     const modPath = path.join(appDir, 'Contents', 'Resources', 'src', 'notify.mjs');
     writeFileSync(modPath, readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8'));
+    // notify.mjs's own `import { isCue, NO_CUE } from './cues.mjs'` resolves relative to
+    // ITS location once copied, so the copy needs cues.mjs sitting beside it too, or the
+    // dynamic import below throws ERR_MODULE_NOT_FOUND before this check ever runs.
+    writeFileSync(
+      path.join(appDir, 'Contents', 'Resources', 'src', 'cues.mjs'),
+      readFileSync(path.join(repoRoot, 'src', 'cues.mjs'), 'utf8'),
+    );
     return { exec, mod: await import(`file://${modPath}`) };
   }
 
-  await check('inside a bundle, a boundary spawns the bundle executable and never osascript', async () => {
+  await check('inside a bundle, a boundary with no cue spawns the bundle executable with just the phase, and never osascript', async () => {
     const log = freshLog();
     const launcherLog = path.join(workDir, 'launcher-invocations-1.log');
     const { mod } = await importFromFakeBundle('claude-board');
     await withStubOnPath(log, { STUB_LAUNCHER_LOG: launcherLog }, async () => {
-      mod.notifyBoundary('work', { notify: true, sound: false });
+      mod.notifyBoundary('work', { notify: true, cueWork: NO_CUE });
       const lines = await waitForLines(launcherLog, 1);
       assert.deepEqual(lines[0], ['--notify', 'work'],
-        'the phase is passed as an argument, and no --sound without the setting');
+        'the phase is passed as an argument, and no third argument when the cue is None');
       assert.deepEqual(readLines(log), [],
         'osascript must not be invoked at all when the bundle executable is present');
     });
   });
 
-  await check('inside a bundle, sound: true adds --sound', async () => {
+  await check('inside a bundle, the phase\'s cue crosses as a third argv argument, criterion 4 (same sound on each install)', async () => {
     const launcherLog = path.join(workDir, 'launcher-invocations-2.log');
     const { mod } = await importFromFakeBundle('claude-board-2');
     await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
-      mod.notifyBoundary('longBreak', { notify: true, sound: true });
+      mod.notifyBoundary('longBreak', { notify: true, cueLongBreak: CUE_LONG_BREAK });
       const lines = await waitForLines(launcherLog, 1);
-      assert.deepEqual(lines[0], ['--notify', 'longBreak', '--sound']);
+      assert.deepEqual(lines[0], ['--notify', 'longBreak', CUE_LONG_BREAK],
+        'the bundled path crosses the SAME bare cue name the osascript path\'s sound name clause carries');
+    });
+  });
+
+  await check('inside a bundle, each phase crosses its OWN cue -- not another phase\'s', async () => {
+    const launcherLog = path.join(workDir, 'launcher-invocations-3.log');
+    const { mod } = await importFromFakeBundle('claude-board-3');
+    const settings = { notify: true, cueWork: CUE_WORK, cueBreak: CUE_BREAK, cueLongBreak: CUE_LONG_BREAK };
+    await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
+      mod.notifyBoundary('work', settings);
+      mod.notifyBoundary('break', settings);
+      mod.notifyBoundary('longBreak', settings);
+      const lines = await waitForLines(launcherLog, 3);
+      assert.deepEqual(lines.find(l => l[1] === 'work'), ['--notify', 'work', CUE_WORK]);
+      assert.deepEqual(lines.find(l => l[1] === 'break'), ['--notify', 'break', CUE_BREAK]);
+      assert.deepEqual(lines.find(l => l[1] === 'longBreak'), ['--notify', 'longBreak', CUE_LONG_BREAK]);
+    });
+  });
+
+  await check('inside a bundle, a cue value the closed set does not recognise crosses no third argument', async () => {
+    const launcherLog = path.join(workDir, 'launcher-invocations-4.log');
+    const { mod } = await importFromFakeBundle('claude-board-4');
+    await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
+      mod.notifyBoundary('work', { notify: true, cueWork: 'not a real sound at all' });
+      const lines = await waitForLines(launcherLog, 1);
+      assert.deepEqual(lines[0], ['--notify', 'work']);
     });
   });
 
@@ -294,7 +374,7 @@ process.exit(0);
     }
   });
 
-  await check('criterion 14: no audio file is tracked anywhere in the repo', async () => {
+  await check('criterion 10: no audio file is tracked anywhere in the repo', async () => {
     const r = spawnSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     const audioExt = /\.(aiff|wav|mp3|m4a|caf|aac|ogg)$/i;

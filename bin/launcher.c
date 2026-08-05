@@ -58,17 +58,25 @@
  * just never put there. See OVERRIDE_ENV and PASSTHROUGH_NAMES below, and
  * launcher_paths.h for where the compiled-in values come from.
  *
- * One thing this binary does besides supervise node: `claude-board --notify <phase>`
- * posts the pomodoro boundary notification and exits, without forking anything. That
- * mode exists here, in the file whose whole subject is not spending the grant, because a
- * notification's name, icon and System Settings row come from the bundle of the process
- * that posts it and from nothing else — and macOS refuses to let any executable other
- * than the bundle's own CFBundleExecutable claim that identity, so a helper binary beside
- * this one could not do it (bin/notify.m's header, and QUIRKS.md, record the
- * measurement). The daemon spawns this mode; launchd never does. What argv is allowed to
- * choose in it is one index into MESSAGES below, never a string that reaches the screen —
- * see NOTIFY_FLAG.
+ * One thing this binary does besides supervise node: `claude-board --notify <phase>
+ * [cue]` posts the pomodoro boundary notification and exits, without forking anything.
+ * That mode exists here, in the file whose whole subject is not spending the grant,
+ * because a notification's name, icon and System Settings row come from the bundle of
+ * the process that posts it and from nothing else — and macOS refuses to let any
+ * executable other than the bundle's own CFBundleExecutable claim that identity, so a
+ * helper binary beside this one could not do it (bin/notify.m's header, and QUIRKS.md,
+ * record the measurement). The daemon spawns this mode; launchd never does. What argv
+ * chooses for the phase is one index into MESSAGES below, never a string that reaches
+ * the screen — see NOTIFY_FLAG. The optional third argument names the cue (ADR.md entry
+ * 20, CONTEXT.md "Cue") — see is_safe_cue_name below for why that one is a character
+ * filter rather than a second closed table: the cue vocabulary is whatever
+ * /System/Library/Sounds holds on THIS machine, read live by src/cues.mjs (there is no
+ * install-time snapshot of it -- QUIRKS.md "soundNamed: searches /System/Library/Sounds
+ * and does NOT search the app bundle" is why a staged copy was dropped), which this
+ * binary has no compiled-in list of, so "closed set" here means "argv cannot be anything
+ * but a bare sound name" rather than "argv must be one of N literal strings".
  */
+#include <ctype.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -161,14 +169,38 @@ static int build_passthrough_entry(const char *name, char **out) {
  * Implemented in bin/notify.m, compiled into this same binary (see this file's header
  * for why it cannot be a separate executable). Declared here rather than in a header:
  * there is exactly one caller and exactly one definition, both compiled together by the
- * one `cc` invocation in install.sh, and two scalar arguments are few enough to check by
- * eye against the definition. `body == NULL` requests authorization and posts nothing.
- * Returns 0 on success. */
-extern int cb_notify(const char *body, int with_sound);
+ * one `cc` invocation in install.sh, and two arguments are few enough to check by eye
+ * against the definition. `body == NULL` requests authorization and posts nothing.
+ * `cue_name == NULL` posts with no sound, exactly as a phase set to `None` in
+ * src/cues.mjs intends. Returns 0 on success. */
+extern int cb_notify(const char *body, const char *cue_name);
 
 static const char *const NOTIFY_FLAG = "--notify";
 static const char *const NOTIFY_AUTHORIZE_FLAG = "--notify-authorize";
-static const char *const NOTIFY_SOUND_FLAG = "--sound";
+
+/* The cue-name argument's own filter, standing in for a closed table the way MESSAGES
+ * stands in for the phase argument below. It cannot be a literal enumeration: the cue
+ * vocabulary is whatever THIS machine's /System/Library/Sounds holds, read live by
+ * src/cues.mjs, and this binary carries no copy of that listing. What it carries instead
+ * is the same character-level rule src/cues.mjs's own SAFE_NAME applies before a name is
+ * trusted anywhere: one leading alphanumeric, then any run of alphanumerics, spaces,
+ * underscores and hyphens, nothing else -- exactly the shape of the 14 stock names macOS
+ * ships. An argv byte outside that shape (quotes, slashes, control characters, anything
+ * a rewritten plist could try) never reaches cb_notify or UNNotificationSound
+ * soundNamed: at all; it is treated the same as no cue being named. Length-bounded too,
+ * so this never hands Foundation an unbounded argv string -- 64 comfortably covers every
+ * name macOS ships today. */
+#define MAX_CUE_NAME_LEN 64
+static int is_safe_cue_name(const char *s) {
+  size_t len = strlen(s);
+  if (len == 0 || len >= MAX_CUE_NAME_LEN) return 0;
+  if (!isalnum((unsigned char)s[0])) return 0;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (!(isalnum(c) || c == ' ' || c == '_' || c == '-')) return 0;
+  }
+  return 1;
+}
 
 /* The phases this binary will display something for, paired with the exact sentence it
  * displays. A closed table, matching src/notify.mjs's MESSAGES on the other side of the
@@ -213,16 +245,19 @@ int main(int argc, char **argv) {
    * through to supervising node, exactly as an argv-less invocation always has, because
    * launchd's invocation is the one that must never depend on getting argv right. */
   if (argc >= 2 && strcmp(argv[1], NOTIFY_AUTHORIZE_FLAG) == 0) {
-    return cb_notify(NULL, 0);
+    return cb_notify(NULL, NULL);
   }
   if (argc >= 3 && strcmp(argv[1], NOTIFY_FLAG) == 0) {
-    /* Two arguments' worth of argv, both closed sets: argv[2] selects a row of MESSAGES
-     * (and selects nothing at all if it matches no row), argv[3] is the literal
-     * --sound or is absent. */
-    int with_sound = (argc >= 4 && strcmp(argv[3], NOTIFY_SOUND_FLAG) == 0);
+    /* Two arguments' worth of argv, both filtered before either reaches cb_notify:
+     * argv[2] selects a row of MESSAGES (and selects nothing at all if it matches no
+     * row); argv[3], if present, is a cue name that must pass is_safe_cue_name or it is
+     * treated as absent -- src/notify.mjs never sends one that would fail this (cueFor
+     * there already collapsed anything isCue() refuses to "no cue"), so this is a second
+     * line of defense against a hand-invoked launcher, not the primary one. */
+    const char *cue_name = (argc >= 4 && is_safe_cue_name(argv[3])) ? argv[3] : NULL;
     for (int i = 0; i < MESSAGES_N; i++) {
       if (strcmp(argv[2], MESSAGES[i].phase) == 0) {
-        return cb_notify(MESSAGES[i].message, with_sound);
+        return cb_notify(MESSAGES[i].message, cue_name);
       }
     }
     fprintf(stderr, "claude-board: unrecognised notify phase\n");

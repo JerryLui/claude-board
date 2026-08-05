@@ -977,6 +977,19 @@ body.comment-mode .blocks { cursor: crosshair; }
 .pomodoro-field-check { justify-content: flex-start; }
 .pomodoro-field input[type="number"] { width: 60px; background: var(--panel-2); border: 1px solid var(--hairline);
   color: var(--ink); border-radius: var(--r-sm); padding: 4px 6px; font: inherit; }
+/* The three cue pickers (SPEC_CUES.md) -- same field row, a <select> instead
+   of a number input. Wider than the duration inputs above: a cue's value
+   ("Submarine", "None") needs more than 60px, and unlike a duration there is
+   no natural max-width to hold it to, so this caps rather than fixes it. */
+.pomodoro-field select { max-width: 120px; background: var(--panel-2); border: 1px solid var(--hairline);
+  color: var(--ink); border-radius: var(--r-sm); padding: 4px 6px; font: inherit; }
+/* The Cues section's own hairline + caption -- no fold, no tab, everything the
+   panel can do is visible the moment it opens (the spec's own placement
+   decision). Caption styled like .note-field label's own small-caps treatment,
+   not a second, competing type scale. */
+.pomodoro-settings-divider { border: none; border-top: 1px solid var(--hairline); margin: 2px 0; }
+.pomodoro-settings-caption { font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted); }
 .pomodoro-settings-actions { display: flex; gap: var(--space-2); margin-top: var(--space-1); }
 .pomodoro-btn { background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink-2);
   font-size: 11px; font-weight: 600; border-radius: var(--r-pill); padding: 6px 12px; font: inherit;

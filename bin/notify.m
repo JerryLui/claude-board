@@ -31,9 +31,9 @@
 #import <UserNotifications/UserNotifications.h>
 
 /* Matched by hand against the extern declaration in bin/launcher.c -- the only caller,
- * compiled into the same binary. Two scalar arguments, deliberately: a signature this
- * small is one a reader can check against the other file at a glance, which is what
- * stands in for the header this pair is too small to deserve. */
+ * compiled into the same binary. Two arguments, deliberately: a signature this small is
+ * one a reader can check against the other file at a glance, which is what stands in
+ * for the header this pair is too small to deserve. */
 
 /* The title is a literal here rather than an argument for the same reason bin/launcher.c
  * keeps the message bodies in a closed table: this binary holds a TCC grant to the
@@ -46,11 +46,25 @@ static NSString *const kTitle = @"Pomodoro";
  * notifications" prompt lands while the reader is still looking at their terminal rather
  * than at the first boundary of a work interval hours later.
  *
+ * `cue_name` is NULL for "cross this boundary silently" (a phase set to `None`, or an
+ * argv that failed bin/launcher.c's is_safe_cue_name filter) and otherwise a bare name
+ * out of /System/Library/Sounds, e.g. "Glass" -- passed to soundNamed: with NO extension
+ * appended. QUIRKS.md ("soundNamed: searches /System/Library/Sounds and does NOT search
+ * the app bundle") measured this: Apple's documented search path (bundle Resources, then
+ * ~/Library/Sounds, never the system directory) is backwards on this machine in both
+ * halves -- a bare name resolves straight against /System/Library/Sounds, a file staged
+ * into this bundle's own Resources under the same name is never even looked at, and the
+ * extension is optional (macOS appends it itself; the two spellings resolve to the same
+ * file). There is therefore no install-time staging step for sound files -- ADR.md entry
+ * 20's staging plan did not survive that measurement -- and nothing here should start to
+ * assume one. An unresolvable name here is silence, not a fallback to the default sound
+ * (also measured); this function does not branch on that either way.
+ *
  * Returns 0 if the notification was handed to Notification Center (or, in the
  * authorize-only case, if permission was granted), 1 otherwise. The caller treats a
  * failure as a failure to notify and nothing more: a reader's notification settings must
  * never be a way to take the pomodoro clock, or the daemon, down. */
-int cb_notify(const char *body, int with_sound) {
+int cb_notify(const char *body, const char *cue_name) {
   @autoreleasepool {
     UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
     /* Written and read only on this thread and on the completion handlers' queue, and
@@ -81,11 +95,16 @@ int cb_notify(const char *body, int with_sound) {
       UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
       content.title = kTitle;
       content.body = [NSString stringWithUTF8String:body];
-      /* defaultSound, not the "Glass" the osascript path named: UNNotificationSound
-       * resolves a name against the app bundle's own Resources, and criterion 14 of
-       * SPEC_POMODORO.md ("no audio file added to the repo") is why there is nothing
-       * there to resolve. The reader asked for a sound, not for that sound. */
-      if (with_sound) content.sound = [UNNotificationSound defaultSound];
+      /* soundNamed:, not defaultSound: a bare name resolves straight against
+       * /System/Library/Sounds (QUIRKS.md, measured -- see cb_notify's own comment
+       * above), the same directory the osascript path's `sound name` clause resolves
+       * against (src/notify.mjs) -- "the same sound on each" install, with no bundle
+       * staging step for either path to depend on. No sound property at all when
+       * cue_name is NULL: that is what makes a phase set to `None` cross silently, with
+       * no separate branch for it to fall out of sync with. */
+      if (cue_name != NULL) {
+        content.sound = [UNNotificationSound soundNamed:[NSString stringWithUTF8String:cue_name]];
+      }
 
       /* trigger:nil means deliver now. The identifier is fresh per post rather than
        * constant, because a repeated identifier REPLACES the notification already in

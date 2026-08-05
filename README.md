@@ -104,6 +104,17 @@ Settings → Notifications → claude-board**. There is no API for this — it i
 setting only you can change, and it is the reason the notification has to come from a
 bundle of ours at all.
 
+The notification also carries a **cue**: one of the sounds macOS already ships, chosen per
+phase — work, short break, long break — in the pomodoro settings popover. Three different
+cues mean a boundary tells you which phase just began without your having to look at the
+screen; any phase can be set to **None** if you'd rather have the banner alone. Picking a
+cue plays it there and then, so you choose by ear rather than by guessing what "Sosumi" is.
+
+Because the cue rides on the notification rather than being played beside it, turning
+claude-board's sound off in **System Settings → Notifications → claude-board**, or switching
+on a Focus, silences the cue exactly the way it silences every other app's — there is no
+second set of switches here.
+
 Verify:
 
 ```sh

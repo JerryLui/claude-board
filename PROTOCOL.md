@@ -51,13 +51,20 @@ src/prose-check.mjs the shared prose-vs-shim checker (SPEC_MIGRATION.md ticket 0
                      still import it; see "The prose-vs-shim checker" below and
                      test/check-prose-check.mjs, which proves it against a fixture this
                      repo owns
+src/cues.mjs        the cue vocabulary (CONTEXT.md "Cue", ADR.md entry 20): the closed set
+                     of legal cue values, enumerated live from /System/Library/Sounds plus
+                     "None", read once and shared by the settings validator, the per-phase
+                     defaults, and the preview player
 src/pomodoro.mjs    the global pomodoro clock: the pure boundary rule (settleBoundary,
                      startWork, the cycle and its two resets), the document's shape on
                      disk, and the impure shell the daemon boots. Absolute deadlines, so
                      a restart is invisible and a deadline slept through expires silently
-src/notify.mjs      one native macOS notification per interval boundary, via osascript.
-                     Message text comes from a closed-set table keyed by phase, so nothing
-                     user-controlled reaches the AppleScript interpreter
+src/notify.mjs      one native macOS notification per interval boundary, carrying that
+                     phase's cue (src/cues.mjs): the bundle's own executable in --notify
+                     mode when running from inside claude-board.app (bin/launcher.c,
+                     bin/notify.m, ADR.md entry 19), osascript only on the no-launcher
+                     clone install. Message text and the cue both come from closed-set
+                     lookups, so nothing user-controlled reaches the AppleScript interpreter
 src/pomodoro-widget.mjs
                      the timer's server-rendered markup for the index page (countdown, the
                      start/pause switch, the two-step reset and the cogwheel settings
@@ -542,16 +549,19 @@ that board's page — is deleted, because with reads gated it was strictly weake
 credential the reader already had to present.
 
 Widened, ticket 03: it is also accepted on the pomodoro writes — `ensure`, `pause`,
-`resume`, `reset`, `settings` — so the index page's switch (a browser holding only the
-cookie) can actually start, pause and resume the clock. Driving an advisory clock that never
-touches a board, never gates an `ask`, and never reaches a tool is strictly less than "may
-read every board and answer any open round", so this costs the cookie nothing it did not
-already carry. `ensure` was initially excluded, on the reasoning that its only caller was the
-session-start hook; it was added when the index widget grew a manual start, and it is the
-mildest of the five — `startWork` is a no-op against any timer that already exists, so the
-most it can do is begin a clock that `reset` (already on the list) could have ended anyway.
-The list stays a closed, named set: a pomodoro write added later is secret-only until
-someone deliberately names it.
+`resume`, `reset`, `settings`, `preview` — so the index page's switch and its settings
+popover (a browser holding only the cookie) can actually start, pause and resume the clock,
+and audition a cue. Driving an advisory clock that never touches a board, never gates an
+`ask`, and never reaches a tool is strictly less than "may read every board and answer any
+open round", so this costs the cookie nothing it did not already carry. `ensure` was
+initially excluded, on the reasoning that its only caller was the session-start hook; it was
+added when the index widget grew a manual start, and it is one of the mildest of the six —
+`startWork` is a no-op against any timer that already exists, so the most it can do is begin
+a clock that `reset` (already on the list) could have ended anyway. `preview` joined for the
+same reason and is milder still: it reads and writes nothing, so the most a cookie holder
+gains from it is spawning `afplay` against one of the sounds `src/cues.mjs` admits. The list
+stays a closed, named set: a pomodoro write added later is secret-only until someone
+deliberately names it.
 
 ### Authorizing a browser
 
@@ -611,8 +621,11 @@ POST /api/pomodoro/ensure           ensure a timer exists; no-op if one already 
 POST /api/pomodoro/pause            freeze the running interval
 POST /api/pomodoro/resume           continue a paused interval from where it froze
 POST /api/pomodoro/reset            end the loop: timer -> null, cycle -> 0
-POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEvery?, notify?, sound? }
+POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEvery?, notify?,
+                                    cueWork?, cueBreak?, cueLongBreak? }
                                     merged into the stored settings, not replaced
+POST /api/pomodoro/preview          { cue } -> { ok: true }; plays a cue immediately, reads
+                                    and writes nothing
 ```
 
 ### The pomodoro clock (ADR.md entry 8)
@@ -644,18 +657,36 @@ loop, so the cycle it was counting goes with it.
 `POST /api/pomodoro/settings` merges a partial patch into the stored settings rather than
 replacing them, and validates at this trust boundary: every duration and `longEvery` must be
 a finite integer in a sane range (`longEvery` at least 1 — `settleBoundary` divides by it),
-and `notify`/`sound` must be real booleans. A patch that fails validation is a 400 naming the
-offending field (`{ error }`) and writes nothing, not a silent partial write. Unknown keys in
-the patch are dropped rather than stored or rejected. Changing a duration does **not**
-retarget whatever interval is already running — the new value applies starting at the next
-boundary crossing.
+`notify` must be a real boolean, and each of `cueWork`/`cueBreak`/`cueLongBreak` must be the
+name of a sound in `/System/Library/Sounds` or the string `"None"` — the closed set
+`src/cues.mjs` reads live off that directory (ADR.md entry 20), not a fixed list. A patch
+that fails validation is a 400 naming the offending field (`{ error }`) and writes nothing,
+not a silent partial write. Unknown keys in the patch are dropped rather than stored or
+rejected. Changing a duration does **not** retarget whatever interval is already running —
+the new value applies starting at the next boundary crossing.
 
-Auth: `GET /api/pomodoro` is gated like every other read (either credential). All five
-writes — `ensure`, `pause`, `resume`, `reset`, `settings` — accept the session cookie in
-addition to the secret, which is what lets the index page's switch work from a browser
-holding only the cookie (see "The browser session cookie" below for the reach this extends).
-`ensure` has two callers, not one: ticket 05's session-start hook (holding the secret) and
-the index widget's switch when the reader starts a pomodoro by hand.
+`POST /api/pomodoro/preview` auditions a cue: `{ cue }`, where `cue` must satisfy the same
+`isCue` check `settings` validates `cueWork`/`cueBreak`/`cueLongBreak` against, with `"None"`
+a legal choice that previews as silence rather than a 400 — a reader has to be able to
+audition "nothing" too. It reads and writes nothing (not `pomodoro.json`, not
+`settings.notify`), on purpose: this is an audition, not a setting, so it plays even while
+the notify toggle is off, and it never returns the document shape — `{ ok: true }`, not
+`{ ...document, now }`. It plays the sound file directly with `afplay` rather than posting it
+through Notification Center, so auditioning a cue never raises a banner, and a newly
+selected cue kills whatever preview is still playing first, so a fast run of picker changes
+never overlaps into a chorus.
+
+Auth: `GET /api/pomodoro` is gated like every other read (either credential). All six
+writes — `ensure`, `pause`, `resume`, `reset`, `settings`, `preview` — accept the session
+cookie in addition to the secret, which is what lets the index page's switch and its settings
+popover work from a browser holding only the cookie (see "The browser session cookie" below
+for the reach this extends). `preview` is cookie-reachable for the same reason `ensure` is:
+its one caller is the settings popover's picker, a browser holding only the cookie, and what
+it grants that caller is advisory — at most spawning `afplay` against one of the sounds
+`src/cues.mjs`'s closed set admits, less reach than `settings`, already on this list, which
+lets the same caller rewrite every duration and toggle in the document. `ensure` has two
+callers, not one: ticket 05's session-start hook (holding the secret) and the index widget's
+switch when the reader starts a pomodoro by hand.
 
 `POST /api/board` body shape (additive — not pinned above): `{ title, blocks, cwd?, thread? }`
 to start a new thread, or `{ boardId, blocks, title? }` to push into a live one. `cwd` is only

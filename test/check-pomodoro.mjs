@@ -17,11 +17,13 @@ import {
   normalizeCycle,
   startWork,
   settleBoundary,
+  normalizeDoc,
   readDoc,
   writeDoc,
   createPomodoro,
 } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
+import { NO_CUE } from '../src/cues.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -284,6 +286,79 @@ async function main() {
     const now = Date.now();
     const doc = { ...defaultDoc(), timer: { phase: 'break', deadline: now + 120_000, paused: false } };
     assert.equal(startWork(doc, now), doc);
+  });
+
+  // -------------------------------------------------------------------------------
+  // DEFAULT_SETTINGS / normalizeDoc -- the three per-phase cue defaults and the
+  // `sound` migration (SPEC_CUES.md criterion 9). Driven directly through
+  // normalizeDoc: it's a pure function of whatever JSON.parse would have handed
+  // back, so none of this needs a real file or a temp dir.
+  // -------------------------------------------------------------------------------
+
+  await check('DEFAULT_SETTINGS: no sound key, and three DIFFERENT per-phase cues', () => {
+    assert.equal('sound' in DEFAULT_SETTINGS, false);
+    const { cueWork, cueBreak, cueLongBreak } = DEFAULT_SETTINGS;
+    for (const v of [cueWork, cueBreak, cueLongBreak]) assert.equal(typeof v, 'string');
+    // Criterion 9: "starts with three different cues" -- a picker offering the same
+    // sound under three different labels would satisfy every other assertion here
+    // and still fail the actual point of the feature (telling phases apart by ear).
+    assert.notEqual(cueWork, cueBreak);
+    assert.notEqual(cueBreak, cueLongBreak);
+    assert.notEqual(cueWork, cueLongBreak);
+  });
+
+  await check('normalizeDoc: no settings at all (fresh machine) gets the three distinct cue defaults, no sound key', () => {
+    const settings = normalizeDoc(null).settings;
+    assert.deepEqual(settings, DEFAULT_SETTINGS);
+    assert.equal('sound' in settings, false);
+  });
+
+  await check('normalizeDoc: settings present but sound absent entirely also takes the fresh-machine defaults', () => {
+    // Distinct from "sound: false" below -- an absent key is not a falsy value, and
+    // the two must not collapse into the same behaviour (ablation: `'sound' in
+    // parsedSettings` swapped for `parsedSettings.sound` would fail to distinguish
+    // "never had a sound key" from "sound: false", and this is the check that would
+    // catch it -- undefined cueWork/cueBreak/cueLongBreak here would silently equal
+    // the "None on all three" migration's own output for two of the three keys by
+    // coincidence, so the DIFFERENT defaults below are what actually proves it).
+    const settings = normalizeDoc({ settings: { workMin: 40 } }).settings;
+    assert.equal('sound' in settings, false);
+    assert.equal(settings.cueWork, DEFAULT_SETTINGS.cueWork);
+    assert.equal(settings.cueBreak, DEFAULT_SETTINGS.cueBreak);
+    assert.equal(settings.cueLongBreak, DEFAULT_SETTINGS.cueLongBreak);
+    assert.equal(settings.workMin, 40, 'sanity: an unrelated field survives normalization untouched');
+  });
+
+  await check('normalizeDoc: sound: true migrates to Glass on all three phases, and sound does not survive', () => {
+    const settings = normalizeDoc({ settings: { sound: true } }).settings;
+    assert.equal(settings.cueWork, 'Glass');
+    assert.equal(settings.cueBreak, 'Glass');
+    assert.equal(settings.cueLongBreak, 'Glass');
+    assert.equal('sound' in settings, false, 'no document is left holding a sound key that still does something');
+  });
+
+  await check('normalizeDoc: sound: false migrates to None on all three phases, and sound does not survive', () => {
+    const settings = normalizeDoc({ settings: { sound: false } }).settings;
+    assert.equal(settings.cueWork, NO_CUE);
+    assert.equal(settings.cueBreak, NO_CUE);
+    assert.equal(settings.cueLongBreak, NO_CUE);
+    assert.equal('sound' in settings, false);
+  });
+
+  await check('normalizeDoc: an already-migrated document with a hand-edited sound key back doesn\'t clobber cues it already states', () => {
+    // A document that already carries its own cueWork (chosen by hand after an
+    // earlier migration already ran) and THEN, by some later hand edit, has `sound`
+    // reintroduced beside it. Deliberate choice: the sound-derived value only fills
+    // in whatever the document does not already state, the same "explicit beats
+    // default" precedence DEFAULT_SETTINGS itself already gets below the parsed
+    // settings -- a resurrected `sound: true` must not silently overwrite a cue the
+    // reader actually picked. cueBreak/cueLongBreak were never stated, so THOSE still
+    // take the sound migration's word for it.
+    const settings = normalizeDoc({ settings: { sound: true, cueWork: 'Blow' } }).settings;
+    assert.equal(settings.cueWork, 'Blow', 'an explicitly-present cue survives a resurrected sound key untouched');
+    assert.equal(settings.cueBreak, 'Glass');
+    assert.equal(settings.cueLongBreak, 'Glass');
+    assert.equal('sound' in settings, false);
   });
 
   // -------------------------------------------------------------------------------

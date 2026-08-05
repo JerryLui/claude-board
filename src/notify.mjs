@@ -25,6 +25,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isCue, NO_CUE } from './cues.mjs';
 
 // A closed-set lookup, not a template. `phase` reaches here as settleBoundary's own
 // `boundary.phase` (src/pomodoro.mjs), typed 'work' | 'break' | 'longBreak' -- but that
@@ -40,6 +41,33 @@ const MESSAGES = {
   break: 'Break started',
   longBreak: 'Long break started',
 };
+
+// Phase -> the settings key holding THAT phase's cue (src/pomodoro.mjs's cueWork/
+// cueBreak/cueLongBreak, one row per phase in the settings popover -- CONTEXT.md
+// "Cue", ADR.md entry 20). A closed table beside MESSAGES above, for the identical
+// reason: `phase` selects which settings field to read, it is never interpolated
+// into one.
+const CUE_KEYS = {
+  work: 'cueWork',
+  break: 'cueBreak',
+  longBreak: 'cueLongBreak',
+};
+
+// Unlike `phase` and the two tables above, a cue name is CALLER-SUPPLIED: it started
+// life as a JSON value on disk (settings.cueWork et al.), not as a literal this file
+// wrote. `isCue` (src/cues.mjs) is what keeps the same "closed set, not free text"
+// property true one layer further out -- it is a set built once from
+// /System/Library/Sounds and filtered through a conservative name pattern, closed by
+// construction the same way MESSAGES is closed by hand. A settings value that is not
+// in that set -- absent, `None`, or garbage from a hand-edited pomodoro.json --
+// resolves to NO_CUE here, which both call sites below already treat as "cross
+// nothing": there is no separate silence branch to forget, exactly as cuePath's own
+// comment in cues.mjs describes for the file-path case.
+function cueFor(phase, settings) {
+  const key = CUE_KEYS[phase];
+  const value = key && settings[key];
+  return isCue(value) ? value : NO_CUE;
+}
 
 // The bundle's own executable, or null when this file is not running from inside a
 // bundle. Derived from import.meta.url and from nothing else -- never from an environment
@@ -68,10 +96,6 @@ const APP_EXEC = (() => {
 })();
 
 const TITLE = 'Pomodoro';
-// A name out of /System/Library/Sounds, not a file this repo ships -- criterion 14 ("no
-// audio file added to the repo") holds by construction, because this string is the only
-// sound-related thing notifyBoundary ever sends anywhere.
-const SOUND_NAME = 'Glass';
 
 // Logged once per process, not once per failure: a reader who has Notification Center
 // blocked, or who is on a machine with no osascript at all, would otherwise get one
@@ -107,6 +131,8 @@ export function notifyBoundary(phase, settings) {
   const message = MESSAGES[phase];
   if (!message) return; // unrecognised phase: no notification, see MESSAGES above.
 
+  const cue = cueFor(phase, settings);
+
   if (APP_EXEC) {
     // `phase` itself crosses here, where every other path in this file passes only
     // literals -- and it is safe for the same reason it is safe on the other side: the
@@ -115,19 +141,29 @@ export function notifyBoundary(phase, settings) {
     // nothing. It has also already been checked against this file's own MESSAGES two
     // lines above, so a phase that got here is one both tables know. No shell is
     // involved either way: execFile, not exec.
+    //
+    // The cue name is a THIRD argument, appended only when it is not NO_CUE -- absent
+    // entirely rather than an empty string or a "None" token, so bin/launcher.c's own
+    // argv parsing (argc >= 4) is what decides whether a cue was named at all, with no
+    // sentinel value for it to mistake for a real sound. cueFor above has already
+    // reduced whatever settings held to either a name isCue() accepts or NO_CUE, so
+    // what crosses here is never free text -- see cueFor's own comment.
     const args = ['--notify', phase];
-    if (settings.sound === true) args.push('--sound');
+    if (cue !== NO_CUE) args.push(cue);
     execFile(APP_EXEC, args, warnOnFailure);
     return;
   }
 
   let script = `display notification ${appleScriptQuote(message)} with title ${appleScriptQuote(TITLE)}`;
-  // settings.sound === true is the only thing that adds the clause. DEFAULT_SETTINGS
-  // (src/pomodoro.mjs) ships sound: false, so anything else -- false, or absent from an
-  // older document normalizeDoc hasn't back-filled -- must stay silent: erring toward
-  // noise the reader never asked for is the wrong direction for a default to fail in.
-  if (settings.sound === true) {
-    script += ` sound name ${appleScriptQuote(SOUND_NAME)}`;
+  // Only a resolved cue (cueFor already collapsed "not a cue" and NO_CUE to the same
+  // NO_CUE) adds the clause -- crossing into a phase set to None must stay silent, and
+  // so must a phase whose settings key is missing or holds something isCue() refuses.
+  // appleScriptQuote is belt-and-suspenders here exactly as it already is for MESSAGES/
+  // TITLE above: isCue() is the actual boundary (src/cues.mjs's SAFE_NAME pattern is
+  // what makes the closed set closed), so nothing reaches this string that was not
+  // already a name macOS ships.
+  if (cue !== NO_CUE) {
+    script += ` sound name ${appleScriptQuote(cue)}`;
   }
 
   execFile('osascript', ['-e', script], warnOnFailure);

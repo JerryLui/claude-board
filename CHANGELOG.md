@@ -110,9 +110,11 @@ this project does not yet follow semantic versioning, because nothing has been r
   into work — until you pause or reset it, and every fourth break is a long one. Each
   boundary fires a native macOS notification, so it reaches you with no browser tab open
   and no browser running (posted by the app bundle itself — see the entry above, which
-  supersedes the `osascript` route this shipped with); sound, off by default, rides the
-  same call rather than an audio file this repo would have to ship. The index page carries the countdown, pause/resume and a
-  settings panel for the three durations, the long-break interval and the two toggles.
+  supersedes the `osascript` route this shipped with); sound, off by default, rode the
+  same call as one generic tone (retired below into three per-phase cues, chosen rather
+  than merely toggled). The index page carries the countdown, pause/resume and a settings
+  panel for the three durations, the long-break interval, and — see below — a cue per
+  phase in place of the old sound toggle.
 
   The daemon holds the clock rather than the browser — a deliberate departure from ADR 1's
   client-side-only precedent, on the grounds that a theme is a per-reader preference while
@@ -244,6 +246,47 @@ this project does not yet follow semantic versioning, because nothing has been r
   middle of, and a same-tab navigation discarded unsubmitted answers and half-typed comments
   with no warning and no way back to the draft. Neutralised URLs still collapse to `href="#"`
   exactly as before.
+
+- **The pomodoro's `sound` toggle is three per-phase cues now.** `cueWork`, `cueBreak` and
+  `cueLongBreak` each hold a bare name out of `/System/Library/Sounds`, or `"None"`, so
+  crossing into a work interval, a short break and a long break can each sound different —
+  the reader picks by ear, in the settings popover, rather than reading a boolean that only
+  ever meant "on". A fresh install (no `pomodoro.json` at all) starts with three different
+  cues out of the box, one per phase, each falling back to `None` on a machine missing the
+  preferred sound. Picking a cue plays it immediately, over a new `POST
+  /api/pomodoro/preview` route that reads and writes nothing (not `pomodoro.json`, not
+  `settings.notify`) and plays the file directly with `afplay` rather than through
+  Notification Center, so auditioning a cue never raises a banner; a fast run of picker
+  changes kills whatever preview is still playing before starting the next, never layering
+  into a chorus. `sound` itself is retired and migrates on the next read of an existing
+  `pomodoro.json`: `sound: true` becomes `Glass` on all three cues, `sound: false` becomes
+  `None` on all three, and no document is left holding a `sound` key that still does
+  anything.
+
+  Outside the preview, the cue rides the boundary notification's own sound rather than
+  being played beside it — the reason being that every control macOS already gives you over
+  claude-board's notifications (the per-app sound toggle, turning notifications off, a
+  Focus) then silences the cue too, with no second mute switch to find in this app's own
+  settings.
+
+  That shape survived a real reversal, worth recording because it changes what the feature
+  cost. The plan going in (`ADR.md` entry 20, superseding entry 18) was to stage the 14
+  files at `/System/Library/Sounds` into the app bundle's own `Contents/Resources` at
+  install time — about 4.7 MB and a new install step, on the strength of Apple's documented
+  claim that `UNNotificationSound soundNamed:` resolves a bare name against a bundle's own
+  Resources and `Library/Sounds`, and explicitly not against the system directory. The spec
+  required measuring that claim before writing the staging step, and the measurement
+  ([QUIRKS.md](QUIRKS.md), "`soundNamed:` searches `/System/Library/Sounds` and does NOT
+  search the app bundle") found it backwards in both halves: a bare name already resolves
+  against `/System/Library/Sounds` with nothing staged at all, and a file planted in the
+  bundle under the exact requested name still loses to the system copy — the decisive run
+  logged `systemsoundserverd` reading 475278 bytes from `/System/Library/Sounds/Glass.aiff`
+  even with a 221376-byte decoy filed under that same name sitting in the bundle. The
+  staging step would not have worked, so the feature that shipped instead costs nothing
+  beyond it: no install step, no bytes added to the bundle, no re-sign, no TCC
+  re-approval, no change to `install.sh` at all. `src/cues.mjs` reads
+  `/System/Library/Sounds` live rather than shipping a fixed list of 14, so the picker
+  offers whatever sounds are actually on the machine.
 
 ### Fixed
 

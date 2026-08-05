@@ -360,6 +360,11 @@ var pomodoroOffset = 0; // serverNow - Date.now(), recomputed on every successfu
 var pomodoroZeroFetched = false; // debounces the zero-crossing re-fetch below
 var pomodoroResetArmed = false;
 var pomodoroResetTimer = null;
+// One pending debounce timer per cue field name (SPEC_CUES.md criterion 7) --
+// see onPomodoroCueChange's own comment for why a per-field map, not one
+// shared timer.
+var pomodoroPreviewTimers = {};
+var POMODORO_PREVIEW_DEBOUNCE_MS = 150;
 
 // Pure: given a timer snapshot from the daemon, the clock offset computed at
 // the last successful fetch, and the browser's current clock, returns the
@@ -457,13 +462,24 @@ function pomodoroSyncForm() {
   var longBreakMin = form.querySelector('input[name="longBreakMin"]');
   var longEvery = form.querySelector('input[name="longEvery"]');
   var notify = form.querySelector('input[name="notify"]');
-  var sound = form.querySelector('input[name="sound"]');
+  // The three cue pickers (SPEC_CUES.md), synced the same way and on the same
+  // condition as every field above -- each is its own <select>, so this is
+  // what makes "reverting a change without saving leaves the stored cue
+  // untouched" (criterion 8) true: a preview (onPomodoroCueChange below) only
+  // ever posts to /api/pomodoro/preview, never writes pomodoroDoc.settings, so
+  // the next sync (panel closed, same as any other abandoned edit) overwrites
+  // whatever the picker was showing with the daemon's actual stored value.
+  var cueWork = form.querySelector('select[name="cueWork"]');
+  var cueBreak = form.querySelector('select[name="cueBreak"]');
+  var cueLongBreak = form.querySelector('select[name="cueLongBreak"]');
   if (workMin && active !== workMin) workMin.value = s.workMin;
   if (breakMin && active !== breakMin) breakMin.value = s.breakMin;
   if (longBreakMin && active !== longBreakMin) longBreakMin.value = s.longBreakMin;
   if (longEvery && active !== longEvery) longEvery.value = s.longEvery;
   if (notify && active !== notify) notify.checked = !!s.notify;
-  if (sound && active !== sound) sound.checked = !!s.sound;
+  if (cueWork && active !== cueWork) cueWork.value = s.cueWork;
+  if (cueBreak && active !== cueBreak) cueBreak.value = s.cueBreak;
+  if (cueLongBreak && active !== cueLongBreak) cueLongBreak.value = s.cueLongBreak;
 }
 
 // fetch/credentials: 'same-origin', matching src/ui.mjs's own submitBoard --
@@ -584,8 +600,57 @@ function onPomodoroSettingsSubmit(ev) {
     longBreakMin: parseInt(form.querySelector('input[name="longBreakMin"]').value, 10),
     longEvery: parseInt(form.querySelector('input[name="longEvery"]').value, 10),
     notify: !!form.querySelector('input[name="notify"]').checked,
-    sound: !!form.querySelector('input[name="sound"]').checked,
+    cueWork: form.querySelector('select[name="cueWork"]').value,
+    cueBreak: form.querySelector('select[name="cueBreak"]').value,
+    cueLongBreak: form.querySelector('select[name="cueLongBreak"]').value,
   }).then(closePomodoroSettings);
+}
+
+// Criterion 7: picking a cue plays it immediately, before Save, even with the
+// notify toggle off -- POST /api/pomodoro/preview (src/server.mjs, another
+// owner's route) is what actually plays the file; this only asks for it. Fire
+// and forget on purpose: a failed preview (offline tab, daemon mid-restart)
+// must never surface an error to the reader or disturb the form -- no
+// .then(), a swallowing .catch(), and no read of the response body, which is
+// why postPomodoro (used by every other write here) is not reused -- that
+// helper applies the response back into pomodoroDoc and rejects on a non-ok
+// status, both wrong for something that is not a write at all (criterion 8:
+// a preview must never touch pomodoroDoc.settings).
+//
+// Debounced per FIELD NAME, not by one shared timer across all three pickers:
+// a held arrow key on ONE <select> can fire 'change' once per option it scans
+// past, and previewing every one of those would be exactly the "chorus"
+// criterion 7 forbids -- so each new change on the same field cancels that
+// field's own still-pending preview and restarts the wait, and only the value
+// the reader actually lands on ever plays. A shared timer would additionally
+// let a change on one picker cancel a still-pending preview on a DIFFERENT
+// one, which is not the same bug this exists to fix and would drop a
+// legitimate, independent preview on the floor. unref'd (matching
+// pomodoroResetTimer above) so a pending preview is never the reason an
+// in-process check's node process fails to exit on its own.
+function onPomodoroCueChange(ev) {
+  var el = ev.target;
+  if (!el || el.tagName !== 'SELECT') return;
+  // getAttribute('name'), not the bare '.name' property a real browser also
+  // reflects: test/dom-stand-in.mjs models only the attribute (its Element
+  // has no 'name' IDL reflection, unlike 'id' and 'disabled' -- see that
+  // file's own comment on which properties genuinely need reflecting), and
+  // this file already reads every other form field the same explicit way
+  // (form.querySelector('input[name="..."]'), never form.workMin).
+  var name = el.getAttribute('name');
+  var value = el.value;
+  if (pomodoroPreviewTimers[name]) clearTimeout(pomodoroPreviewTimers[name]);
+  var timer = setTimeout(function () {
+    delete pomodoroPreviewTimers[name];
+    fetch('/api/pomodoro/preview', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cue: value }),
+    }).catch(function () { /* fire-and-forget: see this function's own comment */ });
+  }, POMODORO_PREVIEW_DEBOUNCE_MS);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+  pomodoroPreviewTimers[name] = timer;
 }
 
 // A click anywhere outside the panel closes it -- the ordinary popover gesture,
@@ -612,6 +677,10 @@ function initPomodoroWidget() {
   if (resetBtn) resetBtn.addEventListener('click', onPomodoroResetClick);
   var form = document.querySelector('form#pomodoro-settings-form');
   if (form) form.addEventListener('submit', onPomodoroSettingsSubmit);
+  // Delegated on the form rather than one listener per <select>: the three
+  // cue pickers are the only <select> elements this form ever has, so
+  // onPomodoroCueChange's own tagName check is all the scoping this needs.
+  if (form) form.addEventListener('change', onPomodoroCueChange);
   document.addEventListener('click', onDocumentClickClosePomodoroSettings);
   fetchPomodoro();
   // Local repaint (no fetch): recomputes the countdown text from the already-

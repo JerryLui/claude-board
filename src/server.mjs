@@ -48,6 +48,7 @@ import http from 'node:http';
 import { createReadStream, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
 import { readBoard, writeBoard, writePage, boardHome, listBoards, searchBoards } from './store.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
@@ -56,6 +57,7 @@ import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock,
 import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary } from './notify.mjs';
+import { isCue, cuePath } from './cues.mjs';
 import { openServed, resolveRefRoots } from './resolve.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
@@ -243,8 +245,17 @@ function isSameOriginRead(req) {
  * begin an advisory clock that `reset`, already on this list, would have let them end
  * anyway. It stays a NAMED member of a closed set rather than a
  * `parts[1] === 'pomodoro'` prefix match, so the next pomodoro write this file grows
- * is still secret-only until someone deliberately types it here. */
-const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings']);
+ * is still secret-only until someone deliberately types it here.
+ *
+ * `preview` joins for the same reason `ensure` did: its one caller is the settings
+ * popover's picker (ADR.md entry 20, criterion 7 — a picker must audition a cue the
+ * instant the reader selects it, before anything is saved, which only a browser holding
+ * the cookie can reach), and it is advisory in the same sense — it reads and writes
+ * NOTHING (not pomodoro.json, not settings.notify), so a cookie holder gains at most
+ * "spawn `afplay` against one of the 14 files src/cues.mjs's closed set admits" — less
+ * reach than `settings`, already on this list, which lets the same caller rewrite every
+ * duration and toggle in the document. */
+const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview']);
 
 function isPomodoroCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
@@ -898,6 +909,46 @@ function handleEvents(req, res, id, home, sse) {
   res.on('error', cleanup);
 }
 
+// The one in-flight preview child, module scope rather than per-request: there is one
+// daemon and one reader, and criterion 7 ("a rapid series of changes never overlaps
+// into a chorus") means the SECOND picker change must kill the FIRST preview, which is
+// only possible if both requests can see the same handle. No per-session or per-socket
+// keying -- a preview belongs to the one settings popover open at a time, the same way
+// the pomodoro clock itself is one global timer and not one per request (ADR.md entry 8).
+let previewChild = null;
+
+/** Play one cue file directly with `afplay`, outside Notification Center entirely — the
+ * one path ADR.md entry 20 calls out as deliberately unfiltered, because auditioning a
+ * cue from a picker must not raise a banner. Kills whatever is still playing FIRST,
+ * so a rapid series of picker changes each cut the previous one off rather than layering
+ * into a chorus (criterion 7) -- the kill happens even when `cue` turns out to be `None`
+ * or invalid, so selecting None while something is still playing silences it too.
+ *
+ * Async only and every failure swallowed, never thrown -- the same discipline
+ * src/notify.mjs's own header lays out, and for the identical reason: a reader's PATH,
+ * a missing afplay, or a already-exited child must never be a way to fail the HTTP
+ * response this rides in on or to take anything else down. */
+function playPreview(cue) {
+  if (previewChild) {
+    try { previewChild.kill(); } catch { /* already exited: nothing to kill */ }
+    previewChild = null;
+  }
+  const filePath = cuePath(cue); // null for NO_CUE and for anything isCue() refuses
+  if (!filePath) return;
+  try {
+    const child = execFile('afplay', [filePath], () => {
+      // Only clear the slot if it is still THIS child -- a later preview may already
+      // have replaced it (killed it, even), and that call's own callback is what owns
+      // clearing the slot for what it started.
+      if (previewChild === child) previewChild = null;
+    });
+    previewChild = child;
+  } catch {
+    // afplay missing from PATH, or some other spawn-time failure: never audible,
+    // never thrown. See this function's own header.
+  }
+}
+
 /** `{ ...doc, now: Date.now() }` for every pomodoro response, write or read alike. The
  * page renders a countdown by subtracting a deadline from a clock, and the client's
  * clock is not the daemon's (a laptop's wall clock can be minutes off, and even a
@@ -950,6 +1001,29 @@ async function handlePomodoro(req, res, parts, pomo, home) {
         // `pomo.settings` persists anything before every field in the patch validates.
         return sendJson(res, 400, { error: String(err.message || err) });
       }
+    }
+    // `{ cue: "<name>" }` -- what a picker sends the instant the reader selects it
+    // (ADR.md entry 20, criterion 7). Deliberately NOT routed through `pomo`: this is
+    // an audition, not a setting, so it never reads or writes pomodoro.json and never
+    // looks at settings.notify -- the notify toggle silences the boundary cue, not the
+    // picker's own preview (criterion 7's "even while the notify toggle is off").
+    if (action === 'preview') {
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+      }
+      // isCue (src/cues.mjs) is the whole validator, same closed set the settings route
+      // holds cueWork/cueBreak/cueLongBreak to -- and it accepts NO_CUE ('None') as
+      // valid, which previews as silence (playPreview's own cuePath(cue) === null
+      // branch) rather than a 400: choosing None is a choice the reader must be able to
+      // audition too.
+      if (!isCue(body && body.cue)) {
+        return sendJson(res, 400, { error: 'cue must be one of the sounds macOS ships, or "None"' });
+      }
+      playPreview(body.cue);
+      return sendJson(res, 200, { ok: true });
     }
   }
   return sendText(res, 404, 'not found');
