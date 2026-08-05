@@ -75,6 +75,30 @@ this project does not yet follow semantic versioning, because nothing has been r
 
 ### Added
 
+- **The pomodoro notification comes from claude-board now, with claude-board's icon, and
+  it can be made to stay on screen.** It used to be posted by `osascript`, which meant
+  macOS attributed it to Script Editor: Script Editor's name on the banner, Script Editor's
+  icon, and — the part that actually cost something — Script Editor as the only row in
+  System Settings > Notifications you could switch from Banners to Alerts, which is the
+  setting that decides whether a boundary vanishes after five seconds or waits until you
+  dismiss it. All three come from the bundle of whichever process posts, and nothing can
+  override them, so the fix was to post from `claude-board.app` itself: `bin/notify.m` (a
+  `UNUserNotificationCenter` post) compiles into the launcher binary, `bin/launcher.c`
+  gains a `--notify <phase>` mode, and `src/notify.mjs` spawns that mode when it can see it
+  is running from inside the bundle. The bundle also gets an icon for the first time —
+  `bin/claude-board.icns`, the amber board mark `src/styles.mjs` already draws as the
+  favicon — which is what shows on the notification.
+
+  Two one-time steps come with it, both of which the installer now walks you through: macOS
+  asks once whether claude-board may notify you (`install.sh` triggers that prompt at the
+  end of an install you are watching, rather than letting it appear hours later at a
+  boundary), and making boundaries persist is still a manual toggle, because Banners versus
+  Alerts is a per-app setting with no API — System Settings > Notifications > claude-board
+  > Alerts. The `osascript` path stays exactly as it was for the no-launcher install, which
+  has no bundle to post from. ADR entry 19, which amends entry 9: that entry accepted the
+  Script Editor attribution as the price of never touching the launcher's signature, and
+  entry 15 had already made that price unpayable by folding the daemon's own code into the
+  same signature.
 - **The daemon prints the environment it actually received, names only.**
   `claude-board env: NAME,NAME,...` — sorted, names only, never values — is the first
   line `bin/daemon.mjs` logs, landing in `~/Library/Logs/claude-board/daemon.out.log`
@@ -84,10 +108,10 @@ this project does not yet follow semantic versioning, because nothing has been r
 - **A pomodoro timer, owned by the daemon.** A Claude Code session starting begins a work
   interval; from there it is a self-sustaining loop — work rolls into break, break rolls
   into work — until you pause or reset it, and every fourth break is a long one. Each
-  boundary fires a native macOS notification through `osascript`, so it reaches you with
-  no browser tab open, no browser running and no permission prompt; sound, off by default,
-  rides the same call as a `/System/Library/Sounds` name rather than an audio file this
-  repo would have to ship. The index page carries the countdown, pause/resume and a
+  boundary fires a native macOS notification, so it reaches you with no browser tab open
+  and no browser running (posted by the app bundle itself — see the entry above, which
+  supersedes the `osascript` route this shipped with); sound, off by default, rides the
+  same call rather than an audio file this repo would have to ship. The index page carries the countdown, pause/resume and a
   settings panel for the three durations, the long-break interval and the two toggles.
 
   The daemon holds the clock rather than the browser — a deliberate departure from ADR 1's

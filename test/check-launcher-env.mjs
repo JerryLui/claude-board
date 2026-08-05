@@ -49,6 +49,11 @@ function freePort() {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const launcherSrc = path.join(repoRoot, 'bin', 'launcher.c');
+// The other half of the same binary (ADR.md entry 19): launcher.c calls cb_notify, so a
+// build of launcher.c alone does not link. Compiled here for the same reason install.sh
+// compiles it -- separately, because -fobjc-arc is an Objective-C flag and clang says so
+// when it is handed a .c file alongside.
+const notifySrc = path.join(repoRoot, 'bin', 'notify.m');
 const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
 
 if (spawnSync(ccCmd, ['--version']).error) {
@@ -129,7 +134,12 @@ writeFileSync(headerPath, [
 ].join('\n'));
 
 const launcherExec = path.join(workDir, 'launcher');
-const build = spawnSync(ccCmd, ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc], { encoding: 'utf8' });
+const notifyObj = path.join(workDir, 'notify.o');
+const notifyBuild = spawnSync(ccCmd,
+  ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', notifyObj, notifySrc], { encoding: 'utf8' });
+const build = notifyBuild.status !== 0 ? notifyBuild : spawnSync(ccCmd,
+  ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj,
+   '-framework', 'Foundation', '-framework', 'UserNotifications'], { encoding: 'utf8' });
 
 async function main() {
   await check('the launcher compiles clean against the generated header (no warnings, same flags install.sh uses plus -Wextra)', async () => {

@@ -1013,3 +1013,46 @@ of your own rather than the attribute. What must NOT be done is trusting a check
 so such a check passes against a control the user can plainly see. `test/dom-stand-in.mjs`
 models the property, not the cascade, so it cannot catch this either — the assertion that does
 is on the emitted markup and on the fact that nothing relies on `hidden` at all.
+
+## A bundle's notification identity belongs to `CFBundleExecutable`, and to nothing else in it
+
+`UNUserNotificationCenter` will not post from a binary that is not the bundle's own
+`CFBundleExecutable` — not even one sitting inside `Contents/MacOS` of the same correctly
+signed, correctly registered bundle. It fails at `requestAuthorizationWithOptions:` with
+`Notifications are not allowed for this application`, no prompt, no row in System Settings,
+nothing to indicate the problem is *which* binary rather than the bundle.
+
+Measured on macOS 26.5 (ad-hoc signed bundle in `~/Applications`): the same compiled binary
+posts fine as `Contents/MacOS/<CFBundleExecutable>` and is refused as
+`Contents/MacOS/helper`, with only the filename changed between the two runs.
+
+This is why the pomodoro notification is a `--notify` mode of `bin/launcher.c` rather than a
+notifier binary next to it (ADR.md entry 19), and why "just add a small helper to the bundle"
+is not available as a shape for anything else that needs to post. A second *bundle* works —
+it has its own `CFBundleExecutable` — at the cost of a second everything else.
+
+## A freshly installed app bundle cannot post a notification until LaunchServices knows about it
+
+A bundle can be at `~/Applications/foo.app`, correctly signed, runnable, with a valid
+`CFBundleIdentifier`, and still be refused with `Notifications are not allowed for this
+application` — the identical error to the `CFBundleExecutable` trap above, from a completely
+different cause. LaunchServices has not registered it yet. Its own scan of `~/Applications`
+gets there eventually; "eventually" is not a thing the first pomodoro boundary after an
+install can wait for.
+
+```sh
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Applications/claude-board.app
+```
+
+`install.sh` runs exactly that, guarded by `[ -x ]` because the path is private, before it
+asks for authorization. **Order matters:** register first, then request. A request that
+reaches a not-yet-registered bundle does not queue, retry or prompt later — and on the
+install where this was found, it left the bundle recorded as *denied*
+(`authorizationStatus == 1`), which no amount of re-running fixes, because macOS prompts once
+per bundle identifier and then answers from its own record. The only way out is
+System Settings > Notifications > claude-board.
+
+Debugging this at all needs `getNotificationSettingsWithCompletionHandler:`, since
+`requestAuthorization` reports "denied by the user long ago" and "you are not a registered
+app" with the same string. A throwaway bundle carrying the same `CFBundleIdentifier` as the
+one under test reads the real status without disturbing it.

@@ -347,6 +347,17 @@ alone but needs its own compile, ad-hoc signature, launchd agent and uninstall p
 installer surface for a countdown. If the menu bar is ever revisited, that is the shape to revisit,
 not AppKit in the launcher.
 
+**Amended by entry 19, 2026-08-05.** The menu bar decision stands. The sentence about the
+notification does not: "a notification posted by `osascript` attributes to Script Editor; that
+ugliness is the accepted price of not touching the bundle" was priced against a launcher whose
+bytes only moved when `launcher.c` did. Entry 15 has since folded `bin/daemon.mjs` and all of
+`src/` into the same signature, so **every** install that lands a code change already rebuilds,
+re-signs and costs the reader that TCC prompt. "Not touching the bundle" stopped being a thing an
+install could buy, and with it the reason to accept Script Editor's icon on the reader's screen.
+Entry 19 posts the notification from this bundle instead. Note what did NOT change: this entry's
+underlying rule, that a *gratuitous* rebuild — a run that changed nothing — must never happen, is
+exactly as load-bearing as it was, and is what `install.sh`'s rebuild stamp still enforces.
+
 ## 10. The daemon serves a rendered file, it does not render one — 2026-08-04
 
 **Context:** Entry 7 left `/explain` posting a pointer: an absolute path as plain text. A path
@@ -753,3 +764,96 @@ exists, so the worst it does is start a clock that `reset` — already on the li
 ended anyway. The set stays a closed, named list rather than a `parts[1] === 'pomodoro'` prefix
 match, so the next pomodoro write this file grows is still secret-only by default;
 `test/check-http.mjs` asserts both halves, that `ensure` is in and that an unnamed action is out.
+
+## 18. The boundary cue is played, not attached to the notification — 2026-08-05
+
+**Status:** accepted
+
+**Context:** a per-phase sound — one for work, one for the short break, one for the long break —
+cannot be expressed as a property of the notification, because the daemon has two notification
+paths and only one of them can name a sound. The bundled install posts through
+`UNUserNotificationCenter`, whose `soundNamed:` resolves against the app bundle's own Resources;
+nothing audio is in there, and entry 9 already priced why putting something there is expensive
+(new bytes in the bundle change its ad-hoc signature and cost the reader their TCC Documents
+grant, in a repo that lives in `~/Documents`). The clone install's `osascript` fallback *can*
+name any of the 14 files in `/System/Library/Sounds`. Attaching the cue to the notification
+therefore makes the setting work on the degraded install and silently collapse to one generic
+sound on the normal one — a preference that visibly does nothing.
+
+**Decision:** the cue is a separate thing the daemon plays itself, `afplay
+/System/Library/Sounds/<Name>.aiff`, and the notification is always posted silent on both paths.
+`with_sound` and the `--sound` flag lose their only caller.
+
+**Consequences:** one code path, so the three cues are genuinely three sounds on every install,
+and the choice is a name out of a directory listing rather than a capability of whichever
+notifier is present. The price is that macOS no longer owns the cue: a Focus that silences
+banners does not silence this, the cue does not appear as claude-board's notification sound in
+System Settings, and the reader's only mute is setting the phase to `None` in the widget. That
+is the accepted trade — a pomodoro cue that a Focus swallows is a cue that fails exactly when
+the reader is concentrating. It also turns "does turning notifications off silence the cue too"
+from a fact of the mechanism into a decision somebody has to make. Rejected alongside the bundle-Resources route: a
+symlink farm in `~/Library/Sounds` to make `soundNamed:` resolve, which is undocumented
+behaviour on macOS and would have to be created and cleaned up by the installer.
+
+**Amended by entry 19, 2026-08-05 — and not yet implemented.** Nothing in the repo plays an
+`afplay` cue today; this entry is a decision waiting for the per-phase sound setting it was
+written for, and the pomodoro's setting is still the boolean `sound` it always was. What entry 19
+changed underneath it: the `UNUserNotificationCenter` path this entry describes as hypothetical
+now exists (`bin/notify.m`), and `with_sound` / `--sound` are real and do have a caller —
+`src/notify.mjs` passes `--sound` when `settings.sound` is true, and the notification carries
+`UNNotificationSound.defaultSound`. That does not contradict the decision above, because the
+collapse this entry objects to is specific to *per-phase named* sounds: one generic tone standing
+in for three distinct cues is a preference that visibly does nothing, whereas one generic tone
+standing in for a boolean "make a sound" is the preference working. When the per-phase cue lands,
+the decision holds and `with_sound` loses its caller exactly as written here.
+
+## 19. The pomodoro notification is posted by the bundle, not by osascript — 2026-08-05
+
+**Status:** accepted
+
+**Context:** three things about a macOS notification — the name on it, the icon on it, and which
+row of System Settings > Notifications governs it — all come from the bundle of the process that
+posts it, and nothing can override them: there is no API for the icon, and Banner-versus-Alert
+(the difference between a notification that vanishes in five seconds and one that stays until
+dismissed) is a per-app setting only the reader can change, in System Settings, for whichever app
+posted. The daemon is `node`, which has no bundle, so it shelled out to `osascript` — and got
+Script Editor's name, Script Editor's icon, and a row labelled "Script Editor" as the only place
+to make a pomodoro boundary persist. Entry 9 accepted that as the price of not touching the
+launcher bundle's signature. Entry 15 then folded the daemon's own code into that signature, at
+which point every code-carrying install already rebuilt, re-signed and re-prompted, and the price
+entry 9 was paying for had stopped existing.
+
+**Decision:** `claude-board.app` posts its own notifications. `bin/notify.m` (a
+`UNUserNotificationCenter` post) is compiled into the launcher binary, `bin/launcher.c` gains a
+`--notify <phase>` mode that runs it and forks nothing, `src/notify.mjs` spawns that mode when it
+can see it is running from inside the bundle, and `bin/claude-board.icns` — the board mark from
+`src/styles.mjs`, the same one the favicon draws — becomes the bundle's icon and therefore the
+notification's. `osascript` stays as the fallback for the no-launcher install, which has no bundle
+to post from.
+
+**Consequences:** the notification says claude-board, carries the board's amber mark, and has its
+own row in System Settings where the reader can set Alerts and have boundaries stay on screen —
+which is what makes the pomodoro visible to someone who is not looking at the board. Three things
+this costs, all of them accepted:
+
+- **A launcher that links two frameworks and reads argv.** Both are confined to a mode launchd
+  never invokes: `main()` matches `--notify` before it installs a signal handler, and the
+  supervising path still takes every path it uses from compiled-in constants. What argv chooses in
+  that mode is one index into a closed table of three sentences, never a string that reaches the
+  screen — the same posture as everything else in that file.
+- **One more permission prompt.** `install.sh` asks at the end of an install the reader is
+  watching, rather than leaving it to appear hours later at a boundary with no context. A reader
+  who says no gets no notifications and a working daemon; the fix is a toggle in System Settings,
+  which the installer prints.
+- **A registration step.** A newly installed bundle is refused notification rights outright until
+  LaunchServices knows about it, so `install.sh` calls `lsregister -f` before it asks
+  (QUIRKS.md). It is a private path, so the call is guarded rather than depended on.
+
+Rejected: a second app bundle whose only job is notifications — the shape entry 9 named as the way
+to revisit this. It leaves `launcher.c` untouched but buys a second compile, a second ad-hoc
+signature, a second uninstall path and a second row in System Settings, and the entry-9 reason for
+wanting `launcher.c` untouched had already lapsed. Also rejected: a helper executable inside the
+existing bundle, which is not merely worse but impossible — macOS grants the bundle's notification
+identity to its `CFBundleExecutable` and refuses every other binary in `Contents/MacOS` with
+"Notifications are not allowed for this application" (measured; QUIRKS.md). That is the constraint
+that decided this entry's shape.

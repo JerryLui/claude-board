@@ -90,6 +90,20 @@ the installer builds a bundle instead of asking you to hand `node` itself the ke
 your Documents folder, which is the same permission with a vastly wider blast radius.
 See [SECURITY.md](SECURITY.md#defended).
 
+### The second click: allowing notifications
+
+The same bundle posts the pomodoro's boundary notifications, which is what puts
+claude-board's own name and mark on them instead of Script Editor's. macOS asks about that
+separately, once, and the installer triggers the prompt at the end of an install rather
+than letting it turn up hours later at the end of a work interval. Saying no costs you the
+notifications and nothing else.
+
+By default a boundary is a **banner**: it appears for a few seconds and goes away, whether
+or not you were looking. To make it wait for you instead, set it to **Alerts** in **System
+Settings → Notifications → claude-board**. There is no API for this — it is a per-app
+setting only you can change, and it is the reason the notification has to come from a
+bundle of ours at all.
+
 Verify:
 
 ```sh

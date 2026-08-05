@@ -134,6 +134,18 @@ PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
 OUT_LOG="$LOG_DIR/daemon.out.log"
 ERR_LOG="$LOG_DIR/daemon.err.log"
 LAUNCHER_SRC="$REPO_DIR/bin/launcher.c"
+# Compiled into the same binary as launcher.c, because macOS gives a notification the
+# identity of the bundle's CFBundleExecutable and refuses it to anything else in the
+# bundle (bin/notify.m's header). ADR.md entry 19.
+LAUNCHER_NOTIFY_SRC="$REPO_DIR/bin/notify.m"
+# The bundle's icon, and therefore the icon on every pomodoro notification. Generated from
+# the board mark in src/styles.mjs, which is the same mark the favicon draws, by:
+#   rsvg-convert -w N -h N mark.svg -o icon_NxN.png   (N = 16,32,64,128,256,512,1024)
+#   iconutil -c icns -o bin/claude-board.icns claude-board.iconset
+# Checked in rather than generated here: rsvg-convert is a homebrew package, and an
+# install must not need one. Treated as optional below for the same reason a missing C
+# compiler is — an unbrandable bundle is worth more than no bundle.
+LAUNCHER_ICON_SRC="$REPO_DIR/bin/${LABEL}.icns"
 APP_PATH="$APP_DIR/${LABEL}.app"
 APP_EXEC="$APP_PATH/Contents/MacOS/${LABEL}"
 # Where the daemon's own code lands inside the bundle (step 1b below stages bin/daemon.mjs
@@ -564,8 +576,14 @@ STAGED_INFO="$STAGED_APP/Contents/Info.plist"
 STAGED_HEADER="$LAUNCHER_BUILD_DIR/launcher_paths.h"
 # The compiled copy of bin/launcher.c, staged beside STAGED_HEADER for the reason above.
 STAGED_LAUNCHER_SRC="$LAUNCHER_BUILD_DIR/launcher.c"
+# bin/notify.m gets the same treatment for consistency rather than necessity: it includes
+# nothing of ours, so there is no header for anything beside it in the clone to shadow.
+# Compiling both halves of the binary out of the same staging directory is one fewer rule
+# to remember than compiling one there and one from the clone.
+STAGED_NOTIFY_SRC="$LAUNCHER_BUILD_DIR/notify.m"
 mkdir -p "$STAGED_APP/Contents/MacOS"
 cp "$LAUNCHER_SRC" "$STAGED_LAUNCHER_SRC"
+cp "$LAUNCHER_NOTIFY_SRC" "$STAGED_NOTIFY_SRC"
 
 # The one filename byte c_escape cannot handle. Absurd in practice, a broken build if it
 # ever happens, and cheaper to refuse by name than to debug from a compiler error.
@@ -608,17 +626,32 @@ else
 #define CLAUDE_BOARD_REPO_ROOT_VALUE "$(c_escape "$REPO_DIR")"
 HEADER
 
+  # CFBundleIconFile only when there is an icon to name, because naming one that is not in
+  # Contents/Resources is worse than naming none: the bundle then has a broken icon
+  # reference rather than the system default. The key is spliced in ahead of the first
+  # key below (trailing newline inside the variable, no blank line when empty) so that the
+  # plist stays byte-identical to the pre-icon one on an install that has no icns —
+  # a plist whose bytes moved is a rebuild, and a rebuild is the user's Documents grant.
+  ICON_PLIST_ENTRY=""
+  if [ -f "$LAUNCHER_ICON_SRC" ]; then
+    ICON_PLIST_ENTRY="	<key>CFBundleIconFile</key>
+	<string>$(xml_escape "$LABEL")</string>
+"
+  fi
+
   # LSBackgroundOnly, because this is a daemon: without it the launcher takes a Dock
-  # icon and a menu bar at login. No CFBundleVersion tied to package.json's version
-  # either — a version bump would change these bytes, change the signature, and cost the
-  # user their Documents grant for nothing. The bundle's version is the bundle's, and it
-  # only moves when the bundle actually does.
+  # icon and a menu bar at login. It does NOT stop the bundle posting notifications, and
+  # does not stop macOS showing the one-time "claude-board would like to send you
+  # notifications" prompt — measured, not assumed (QUIRKS.md). No CFBundleVersion tied to
+  # package.json's version either — a version bump would change these bytes, change the
+  # signature, and cost the user their Documents grant for nothing. The bundle's version
+  # is the bundle's, and it only moves when the bundle actually does.
   cat > "$STAGED_INFO" <<INFO
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIdentifier</key>
+${ICON_PLIST_ENTRY}	<key>CFBundleIdentifier</key>
 	<string>$(xml_escape "$BUNDLE_ID")</string>
 	<key>CFBundleName</key>
 	<string>$(xml_escape "$LABEL")</string>
@@ -650,7 +683,15 @@ INFO
   # makes an edit to bin/daemon.mjs or anything under src/ in the clone force a rebuild:
   # without it, the payload copied into Contents/Resources a few lines below could go
   # stale forever, since nothing else in this stamp depends on its content.
-  LAUNCHER_STAMP="$(sha256_string "$(sha256_file "$LAUNCHER_SRC")|$(sha256_file "$STAGED_HEADER")|$(sha256_file "$STAGED_INFO")|$BUNDLE_ID|$PAYLOAD_DIGEST")"
+  # The icon is a bundle input like any other, so it is in the stamp like any other: a
+  # redrawn icns with everything else unchanged has to force a rebuild, or the bundle
+  # keeps the old art forever. "none" rather than a digest when there is no icns, so that
+  # adding one later moves the stamp too.
+  LAUNCHER_ICON_DIGEST="none"
+  if [ -f "$LAUNCHER_ICON_SRC" ]; then
+    LAUNCHER_ICON_DIGEST="$(sha256_file "$LAUNCHER_ICON_SRC")"
+  fi
+  LAUNCHER_STAMP="$(sha256_string "$(sha256_file "$LAUNCHER_SRC")|$(sha256_file "$LAUNCHER_NOTIFY_SRC")|$LAUNCHER_ICON_DIGEST|$(sha256_file "$STAGED_HEADER")|$(sha256_file "$STAGED_INFO")|$BUNDLE_ID|$PAYLOAD_DIGEST")"
 
   # The stamp file has two lines: the input stamp above, and the sha256 of the
   # executable as it was actually installed (recorded below, after the atomic `mv`).
@@ -688,8 +729,18 @@ INFO
   # is the copy staged next to the real header (see STAGED_LAUNCHER_SRC above), and no
   # include path reaches back into the clone, so a launcher_paths.h planted beside
   # bin/launcher.c has no route into this build.
-  elif ! "$CC_CMD" -O2 -Wall -o "$STAGED_APP/Contents/MacOS/$LABEL" \
-         -iquote "$LAUNCHER_BUILD_DIR" "$STAGED_LAUNCHER_SRC" 2>&1; then
+  # Two compiler invocations rather than one, because the two halves are different
+  # languages: -fobjc-arc is meaningless for C and passing it alongside a .c file makes
+  # clang say so. notify.m compiles to an object first, then launcher.c compiles and links
+  # against it with the two frameworks UNUserNotificationCenter needs. Both halves land in
+  # one binary on purpose — see bin/notify.m's header for why a second executable in the
+  # bundle cannot post a notification.
+  elif ! {
+    "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/notify.o" "$STAGED_NOTIFY_SRC" 2>&1 \
+      && "$CC_CMD" -O2 -Wall -o "$STAGED_APP/Contents/MacOS/$LABEL" \
+           -iquote "$LAUNCHER_BUILD_DIR" "$STAGED_LAUNCHER_SRC" "$LAUNCHER_BUILD_DIR/notify.o" \
+           -framework Foundation -framework UserNotifications 2>&1
+  }; then
     launcher_degraded "the launcher failed to compile (output above)"
   # The daemon's own payload, staged into Contents/Resources BEFORE signing so the
   # ad-hoc signature (and codesign --verify, part of the "already current" test above)
@@ -699,10 +750,15 @@ INFO
   # directory-exists-or-not behaviour, which differs depending on whether Resources/src
   # already exists (it never does here, since $STAGED_APP is fresh out of mktemp, but the
   # explicit form is correct either way and does not depend on that being true forever).
+  # The icon rides along in the same step and under the same signature: it is what every
+  # pomodoro notification shows, and CFBundleIconFile above names it. Copied only if it
+  # exists, matching the plist key above — a clone with no icns builds an unbranded bundle
+  # rather than no bundle.
   elif ! {
     mkdir -p "$STAGED_APP/Contents/Resources/bin" "$STAGED_APP/Contents/Resources/src" \
       && cp "$REPO_DIR/bin/daemon.mjs" "$STAGED_APP/Contents/Resources/bin/daemon.mjs" \
-      && cp -R "$REPO_DIR/src/." "$STAGED_APP/Contents/Resources/src/"
+      && cp -R "$REPO_DIR/src/." "$STAGED_APP/Contents/Resources/src/" \
+      && { [ ! -f "$LAUNCHER_ICON_SRC" ] || cp "$LAUNCHER_ICON_SRC" "$STAGED_APP/Contents/Resources/${LABEL}.icns"; }
   }; then
     launcher_degraded "could not stage bin/daemon.mjs and src/ into the bundle before signing"
   # --force so a re-sign replaces rather than refuses; --identifier explicitly rather
@@ -987,6 +1043,40 @@ echo "authorize a browser:  $NODE_BIN $REPO_DIR/bin/authorize.mjs"
 echo 'revive:  launchctl kickstart -k gui/$(id -u)/claude-board'
 echo "logs:    $OUT_LOG"
 echo "         $ERR_LOG"
+# LaunchServices has to know about the bundle before macOS will let it post a
+# notification at all -- a bundle that is merely present at $APP_PATH, correctly signed
+# and perfectly runnable, is refused with "Notifications are not allowed for this
+# application" until it is registered. LaunchServices does pick up ~/Applications on its
+# own eventually, but "eventually" is not something the first pomodoro boundary after an
+# install can wait for. Measured, and recorded in QUIRKS.md.
+#
+# lsregister lives at a private path, which is why this is a guarded call and not a
+# dependency: if Apple moves it, the bundle is registered a little later by the scanner
+# instead of immediately by this line, and nothing else about the install changes.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ "$USE_LAUNCHER" -eq 1 ] && [ -x "$LSREGISTER" ]; then
+  "$LSREGISTER" -f "$APP_PATH" >/dev/null 2>&1 || true
+fi
+
+# Ask for notification permission here, at the end of an install the reader is watching,
+# rather than leaving the prompt to surface hours later at the first pomodoro boundary --
+# by which time the dialog has no context and the interval it belonged to is already
+# running. `|| true` because this script runs under `set -e` and a reader who says No (or
+# who has said No before) has answered the question, not broken the install: notifications
+# are one feature of the board and the daemon above is already up and serving without
+# them. Idempotent on every later run — macOS prompts once per bundle and answers from its
+# own record after that, so this is a no-op round trip on an install that changed nothing.
+if [ "$USE_LAUNCHER" -eq 1 ] && [ -x "$APP_EXEC" ]; then
+  # Said before the call, not after: the first install puts a dialog on screen and this
+  # line blocks until it is answered, and an unexplained pause with a dialog behind the
+  # terminal window is the shape of a hung installer. Every later run prints this and
+  # returns instantly, which is the price of not having to know in advance which run is
+  # the first one.
+  echo "==> if macOS asks whether \"$LABEL\" may send notifications, say Allow"
+  echo "    (pomodoro boundaries; nothing else on the board notifies)"
+  "$APP_EXEC" --notify-authorize >/dev/null 2>&1 || true
+fi
+
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   echo "launcher: $APP_PATH ($BUNDLE_ID)"
   # Named on every successful run, not just the run that built it: this is the answer to
@@ -995,4 +1085,12 @@ if [ "$USE_LAUNCHER" -eq 1 ]; then
   echo "          macOS attributes the daemon's file reads to this bundle. A reference into"
   echo "          ~/Documents, ~/Desktop or ~/Downloads needs it ticked in System Settings ->"
   echo "          Privacy & Security -> Files and Folders."
+  # The one thing about the pomodoro notification this script cannot do for the reader.
+  # Banner (auto-dismissing after a few seconds) versus Alert (stays until dismissed) is a
+  # per-app setting macOS exposes only in System Settings — there is no API for it, which
+  # is why this is a printed instruction rather than a line of code. It is worth printing
+  # at all because the setting is the whole reason the notification comes from this bundle
+  # rather than from osascript: before, the row to change said "Script Editor".
+  echo "          Pomodoro notifications come from it too. To make them stay on screen until"
+  echo "          dismissed: System Settings -> Notifications -> $LABEL -> Alerts."
 fi

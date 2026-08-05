@@ -57,6 +57,17 @@
  * included, is simply never copied into the child's environment: not filtered out of it,
  * just never put there. See OVERRIDE_ENV and PASSTHROUGH_NAMES below, and
  * launcher_paths.h for where the compiled-in values come from.
+ *
+ * One thing this binary does besides supervise node: `claude-board --notify <phase>`
+ * posts the pomodoro boundary notification and exits, without forking anything. That
+ * mode exists here, in the file whose whole subject is not spending the grant, because a
+ * notification's name, icon and System Settings row come from the bundle of the process
+ * that posts it and from nothing else — and macOS refuses to let any executable other
+ * than the bundle's own CFBundleExecutable claim that identity, so a helper binary beside
+ * this one could not do it (bin/notify.m's header, and QUIRKS.md, record the
+ * measurement). The daemon spawns this mode; launchd never does. What argv is allowed to
+ * choose in it is one index into MESSAGES below, never a string that reaches the screen —
+ * see NOTIFY_FLAG.
  */
 #include <errno.h>
 #include <signal.h>
@@ -145,6 +156,35 @@ static int build_passthrough_entry(const char *name, char **out) {
   return 1;
 }
 
+/* --- The --notify mode ----------------------------------------------------------
+ *
+ * Implemented in bin/notify.m, compiled into this same binary (see this file's header
+ * for why it cannot be a separate executable). Declared here rather than in a header:
+ * there is exactly one caller and exactly one definition, both compiled together by the
+ * one `cc` invocation in install.sh, and two scalar arguments are few enough to check by
+ * eye against the definition. `body == NULL` requests authorization and posts nothing.
+ * Returns 0 on success. */
+extern int cb_notify(const char *body, int with_sound);
+
+static const char *const NOTIFY_FLAG = "--notify";
+static const char *const NOTIFY_AUTHORIZE_FLAG = "--notify-authorize";
+static const char *const NOTIFY_SOUND_FLAG = "--sound";
+
+/* The phases this binary will display something for, paired with the exact sentence it
+ * displays. A closed table, matching src/notify.mjs's MESSAGES on the other side of the
+ * spawn, and for the identical reason stated there: the string that reaches the screen is
+ * a literal out of this array, never a byte of argv. argv chooses WHICH entry, and an
+ * unrecognised phase chooses none — it is not a format string, a fallback, or a default.
+ * This binary holds the reader's Documents grant, and the plist that spawns it is
+ * user-writable; "the notification body is free text from the command line" is exactly
+ * the kind of thing that should stay impossible here. */
+static const struct { const char *phase; const char *message; } MESSAGES[] = {
+  { "work",      "Work interval started" },
+  { "break",     "Break started" },
+  { "longBreak", "Long break started" },
+};
+enum { MESSAGES_N = (int)(sizeof(MESSAGES) / sizeof(MESSAGES[0])) };
+
 /* The signals launchd uses to stop a job, plus the two a terminal would send if someone
  * runs this by hand while debugging. SIGKILL is deliberately absent: it cannot be caught,
  * and launchd sending it means the graceful window has already closed. */
@@ -165,7 +205,30 @@ static void forward(int sig) {
   }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  /* Before anything else, and before a single line of the supervising path below runs:
+   * the notify modes fork nothing, exec nothing, and install no handlers. They are also
+   * the only reason this binary reads argv at all — everything the supervising path uses
+   * is compiled in, which is the point of the whole file. An unrecognised argument falls
+   * through to supervising node, exactly as an argv-less invocation always has, because
+   * launchd's invocation is the one that must never depend on getting argv right. */
+  if (argc >= 2 && strcmp(argv[1], NOTIFY_AUTHORIZE_FLAG) == 0) {
+    return cb_notify(NULL, 0);
+  }
+  if (argc >= 3 && strcmp(argv[1], NOTIFY_FLAG) == 0) {
+    /* Two arguments' worth of argv, both closed sets: argv[2] selects a row of MESSAGES
+     * (and selects nothing at all if it matches no row), argv[3] is the literal
+     * --sound or is absent. */
+    int with_sound = (argc >= 4 && strcmp(argv[3], NOTIFY_SOUND_FLAG) == 0);
+    for (int i = 0; i < MESSAGES_N; i++) {
+      if (strcmp(argv[2], MESSAGES[i].phase) == 0) {
+        return cb_notify(MESSAGES[i].message, with_sound);
+      }
+    }
+    fprintf(stderr, "claude-board: unrecognised notify phase\n");
+    return 1;
+  }
+
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
   sa.sa_handler = forward;
@@ -240,11 +303,14 @@ int main(void) {
     }
     (void)sigprocmask(SIG_SETMASK, &previous, NULL);
 
-    char *const argv[] = { (char *)CLAUDE_BOARD_NODE, (char *)CLAUDE_BOARD_DAEMON, NULL };
+    /* child_argv, not argv: main() now takes an argv of its own (the notify modes at the
+     * top read it), and what the child execs must stay compiled-in — this array shadowing
+     * that parameter would put the two one rename apart. */
+    char *const child_argv[] = { (char *)CLAUDE_BOARD_NODE, (char *)CLAUDE_BOARD_DAEMON, NULL };
     /* execve, not execv: node inherits exactly the envp built above — the compiled-in
      * overrides and whatever passthrough knobs the parent set — and nothing else this
      * process itself was handed. */
-    execve(CLAUDE_BOARD_NODE, argv, envp);
+    execve(CLAUDE_BOARD_NODE, child_argv, envp);
     /* Only reachable if the exec failed — a node that was uninstalled or moved since
      * install.sh baked its path in. 127 is the shell's convention for "command not
      * found", and it goes to the daemon's own error log, which is where install.sh

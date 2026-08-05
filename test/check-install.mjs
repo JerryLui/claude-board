@@ -677,6 +677,11 @@ async function main() {
       mkdirSync(path.join(rogueDir, 'src'), { recursive: true });
       writeFileSync(path.join(rogueDir, 'src', 'stub.mjs'), '// stub\n');
       writeFileSync(path.join(rogueDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
+      // The launcher's other half (ADR.md entry 19), a build input on the same footing as
+      // launcher.c: install.sh copies both into its staging directory unconditionally, and
+      // launcher.c does not link without it. The icns is deliberately NOT copied here --
+      // it is the optional input, and a clone without one must still build a bundle.
+      writeFileSync(path.join(rogueDir, 'bin', 'notify.m'), readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8'));
       writeFileSync(path.join(rogueDir, 'install.sh'), readFileSync(installScript, 'utf8'));
 
       const rogueNodePath = '/tmp/rogue-node-must-never-be-baked-in';
@@ -1402,6 +1407,9 @@ async function main() {
     // it is also the case that proves c_escape holds up where xml_escape does -- the
     // same bytes have to survive into a C string literal and compile.
     writeFileSync(path.join(oddDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
+    // Both halves of the binary, since launcher.c calls into this one (ADR.md entry 19).
+    // The icns is left out on purpose here too: this clone builds a bundle without one.
+    writeFileSync(path.join(oddDir, 'bin', 'notify.m'), readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8'));
     writeFileSync(path.join(oddDir, 'install.sh'), readFileSync(installScript, 'utf8'));
 
     const oddAgents = path.join(workDir, 'LaunchAgents-odd');

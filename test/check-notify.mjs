@@ -229,6 +229,71 @@ async function main() {
     rmSync(home, { recursive: true, force: true });
   });
 
+  // The bundled path (ADR.md entry 19). Every check above exercises the osascript
+  // fallback, because this suite imports src/notify.mjs from the clone and the clone is
+  // not a bundle -- which is exactly the degraded install's situation, and is why the
+  // fallback still has to work. The two checks below cover the other branch by building
+  // the layout install.sh stages (Contents/Resources/src/notify.mjs beside
+  // Contents/MacOS/<name>) around a COPY of the real file, so what is under test is the
+  // shipped derivation rather than a restatement of it. The stub executable stands in for
+  // the launcher's --notify mode; no real notification can fire from here either.
+  const STUB_LAUNCHER = `#!/usr/bin/env node
+import fs from 'node:fs';
+fs.appendFileSync(process.env.STUB_LAUNCHER_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
+process.exit(0);
+`;
+
+  /** Stage a fake claude-board.app around a copy of src/notify.mjs and import it. Fresh
+   * bundle name per call so two checks can never share a module instance -- APP_EXEC is
+   * computed once at import, and node caches modules by URL. */
+  async function importFromFakeBundle(name) {
+    const appDir = path.join(workDir, `${name}.app`);
+    mkdirSync(path.join(appDir, 'Contents', 'MacOS'), { recursive: true });
+    mkdirSync(path.join(appDir, 'Contents', 'Resources', 'src'), { recursive: true });
+    const exec = path.join(appDir, 'Contents', 'MacOS', name);
+    writeFileSync(exec, STUB_LAUNCHER);
+    chmodSync(exec, 0o755);
+    const modPath = path.join(appDir, 'Contents', 'Resources', 'src', 'notify.mjs');
+    writeFileSync(modPath, readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8'));
+    return { exec, mod: await import(`file://${modPath}`) };
+  }
+
+  await check('inside a bundle, a boundary spawns the bundle executable and never osascript', async () => {
+    const log = freshLog();
+    const launcherLog = path.join(workDir, 'launcher-invocations-1.log');
+    const { mod } = await importFromFakeBundle('claude-board');
+    await withStubOnPath(log, { STUB_LAUNCHER_LOG: launcherLog }, async () => {
+      mod.notifyBoundary('work', { notify: true, sound: false });
+      const lines = await waitForLines(launcherLog, 1);
+      assert.deepEqual(lines[0], ['--notify', 'work'],
+        'the phase is passed as an argument, and no --sound without the setting');
+      assert.deepEqual(readLines(log), [],
+        'osascript must not be invoked at all when the bundle executable is present');
+    });
+  });
+
+  await check('inside a bundle, sound: true adds --sound', async () => {
+    const launcherLog = path.join(workDir, 'launcher-invocations-2.log');
+    const { mod } = await importFromFakeBundle('claude-board-2');
+    await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
+      mod.notifyBoundary('longBreak', { notify: true, sound: true });
+      const lines = await waitForLines(launcherLog, 1);
+      assert.deepEqual(lines[0], ['--notify', 'longBreak', '--sound']);
+    });
+  });
+
+  await check('the launcher knows every phase src/notify.mjs will send it', async () => {
+    // The two closed tables (MESSAGES in src/notify.mjs, MESSAGES in bin/launcher.c) are
+    // the mechanism by which argv selects a sentence instead of supplying one, and they
+    // are only that if they agree: a phase this file will send but the launcher does not
+    // know is a boundary that silently notifies nothing on the bundled install.
+    const c = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
+    const table = c.slice(c.indexOf('MESSAGES[] = {'), c.indexOf('enum { MESSAGES_N'));
+    for (const phase of ['work', 'break', 'longBreak']) {
+      assert.match(table, new RegExp(`"${phase}"`), `bin/launcher.c must know the '${phase}' phase`);
+    }
+  });
+
   await check('criterion 14: no audio file is tracked anywhere in the repo', async () => {
     const r = spawnSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
