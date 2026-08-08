@@ -446,6 +446,35 @@ Related: in headless Chrome a `fetch` from a tab that is not the focused one can
 pending indefinitely. A driver that opens and closes several tabs should run any
 fetch-dependent assertion first, or give it its own browser.
 
+### Growing the viewport after load mis-positions anchor pins
+
+`examples/screenshot.mjs` needs a viewport tall enough that no `html`/`mermaid` stage
+is off-screen (`captureBeyondViewport` never paints one — see "Real mermaid node ids
+are prefixed" and this file's own comments for the general shape). The obvious move is
+`Emulation.setDeviceMetricsOverride` to grow the viewport to `document.documentElement.
+scrollHeight` AFTER `Page.navigate` and the page has already wired itself up. That
+silently mis-places every already-rendered anchor pin: growing the viewport changes
+`window.innerHeight` (and, if a scrollbar disappears, the layout width by a few px too),
+which fires a real `resize` DOM event, and `src/ui.mjs`'s `window.addEventListener
+('resize', ...)` handler calls `refreshPins`, which recomputes every pin's position —
+apparently before the resized layout has actually settled, since the result is not a
+slightly-off position but a hardcoded `(10, 10)` fallback corner of the pin-layer for
+every pin on the page. Measured directly: a mermaid pin anchored to the third node of a
+four-node flowchart (`ref: 'Ready'`) reported `left: 433px; top: 32.75px` — dead center
+of that exact node — before any resize, and `left: 10px; top: 10px` — the top-left
+corner of the *first* node — after one. Visually this reads as "the pin is on the wrong
+box," not as an error, so nothing about the symptom points at the resize.
+
+The fix is to never call `setDeviceMetricsOverride` after the page has loaded at all:
+set the final width/height/deviceScaleFactor once, BEFORE `Page.navigate`, so the page's
+own initial layout and pin-wiring run once, correctly, with no resize event in the
+picture. A generous fixed height costs nothing — captured clip regions are cheap
+regardless of how tall the viewport nominally is — so `examples/screenshot.mjs`
+gives the gallery round 20000, well past what that round needs, and the artifact
+page its own 1000, the height a reviewer actually sees a full-frame page at.
+Two heights means two full navigations, not one navigation plus a metrics change
+partway through; the script reloads for the second shot for exactly that reason.
+
 ### Preview harness
 
 There is no dev server for the rendered page. To eyeball UI changes, write a
@@ -626,6 +655,32 @@ forever once minted. If a fixture needs that shape anyway (e.g. testing a
 resolver's own defensive guard against it), splice a properly-normalised block
 from a throwaway `createBoard` directly into `board.blocks[i]`, id overwritten by
 hand — don't fight `amendRound` for it, it will always throw.
+
+### A machine-identity sweep cannot be `includes(os.hostname())`
+
+The obvious way to check a committed artifact for leaked machine identity is
+`committedText.includes(os.hostname())`. It fails in both directions at once, and
+`test/check-sample-board.mjs` was written that way first before both showed up.
+
+False positives: a short hostname is an ordinary word. On a machine whose hostname
+is the macOS default (three characters, vendor-shaped), an html-stage mock's CSS
+font stack — `-apple-system, BlinkMacSystemFont, ...` — trips the sweep for
+reasons unconnected to machine identity.
+
+False negatives, the worse half: the check only ever runs where the identity it
+looks for is the identity present. On CI the account is `runner` and the hostname
+is the runner's, so an artifact carrying the author's name sails past — and
+`os.hostname()` returns the fully-qualified `.local` form, which does not match
+the bare ComputerName that a leak would actually carry.
+
+So the sweep matches *shapes* instead (`test/check-sample-board.mjs`,
+`IDENTITY_PATTERNS`): home-directory paths, `$HOME`, `/var/folders`, email
+addresses, `.local` hostnames. Those are machine-independent, so the check means
+the same thing on every machine, and the `.local` pattern catches any host's
+hostname rather than only the one it is running on. The residual gap is a
+hand-typed literal name in a fixture, and the byte-identity check next to it is
+the real backstop for anything machine-derived: content that varies by machine
+cannot survive a regeneration comparison anywhere but the machine that made it.
 
 ---
 

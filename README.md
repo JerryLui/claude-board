@@ -14,6 +14,25 @@ tab. There is no Linux or Windows path and none is planned.
 > Boards carry excerpts of whatever source files you asked the agent to render, so read
 > [SECURITY.md](SECURITY.md) before installing.
 
+## What it looks like
+
+[`examples/sample-board.json`](examples/sample-board.json) is a fictional, finished
+review — every block kind and answer widget, comments pinned to a diagram node, to an
+element inside a rendered mock, and to a whole block — rendered to
+[`examples/sample-board.html`](examples/sample-board.html), the same format a real
+review is archived in. GitHub serves that file as plain text rather than a page, so
+treat the link as something to download and open locally (double-click it, or
+`open examples/sample-board.html`) — it renders read-only, no daemon required.
+
+The board has two rounds, one pager flip apart, and opens on the newer one: the block
+gallery below. The other round is a different shape entirely — a full-viewport artifact
+with no card around it — reachable from the page by the pill at the bottom (or the edge
+chevrons); its own screenshot is the second image below.
+
+![Round 2 of the sample board, the block gallery it opens on: a markdown block with a comparison table, a mermaid flowchart carrying two comments, one on the whole block and one pinned to a node, a code block, a before/after compare of two rendered mocks, and an answered single-choice question with its own context panel.](examples/sample-board.png)
+
+![Round 1 of the same board, one pager flip back: a full-viewport kitchen-display mock with no card or column around it, a numbered pin on its "Confirm" button, the comment it anchors floating over the artifact, and the round pager at the bottom naming both rounds.](examples/sample-board-comments.png)
+
 ## Why
 
 `AskUserQuestion` gives you at most four questions per call, in a terminal, with a
