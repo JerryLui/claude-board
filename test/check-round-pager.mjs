@@ -821,7 +821,11 @@ check('AC 7 (SPEC_AWAITED.md ticket 02): the page board\'s comment panel clears 
   assert.match(ui, /function setupPagerDockHeightTracking\s*\(\s*\)\s*\{[\s\S]*?\}/,
     'the tracking function must be defined in the real client script');
   const fnBody = ui.match(/function setupPagerDockHeightTracking\s*\(\s*\)\s*\{([\s\S]*?)\n  \}/)[1];
-  assert.match(fnBody, /querySelector\(['"]\.round-pager-dock['"]\)/, 'it must measure the real dock element');
+  // Tag qualifier optional, and preferred: board content mints its own ids and
+  // classes (src/markdown.mjs's slugify), so this file's own convention is
+  // 'div.round-pager-dock' over a bare class. What this asserts is that the
+  // measurement reads the REAL dock, whichever way the selector spells it.
+  assert.match(fnBody, /querySelector\(['"](?:div)?\.round-pager-dock['"]\)/, 'it must measure the real dock element');
   assert.match(fnBody, /new ResizeObserver\(/, 'it must be a live observer, not a one-shot read at load');
   assert.match(fnBody, /setProperty\(['"]--round-pager-dock-h['"]/, 'and it must write the exact property .page-comments reads');
   assert.match(ui, /setupPagerDockHeightTracking\(\);/, 'the function must actually be CALLED on the page, not merely defined and left unused');

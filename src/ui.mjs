@@ -3839,13 +3839,28 @@ export const ui = `
     if (sendBarDockObserver) sendBarDockObserver.disconnect();
     var rail = document.querySelector('.round-end');
     if (!rail) { sendBar.classList.remove('docked'); railIntersecting = false; updateQuestionsLeftPill(); return; }
+    // The viewport's bottom strip is not free space: '.send-bar' is sticky at
+    // 'bottom: 0' and drawn over it, so a default-margin observer flips
+    // 'docked' the instant the rail's first pixel enters the viewport -- while
+    // that pixel is still BEHIND the bar. That window (the bar's own height,
+    // measured in Chrome at ~77px) used to be covered by the docked bar's top
+    // hairline; ADR.md entry 51 removed it on the grounds that the rail is
+    // already a line two rows above, which is only true once the rail has
+    // cleared the bar. Shrinking the observer's root by the bar's height is
+    // what makes the entry's premise true: 'docked' now means "the rail is on
+    // screen AND above the bar", and until then the bar keeps its gradient
+    // scrim, which is the treatment for content still running on underneath.
+    // Measured at observe time rather than hardcoded, for the same reason
+    // '--round-pager-dock-h' is measured: the bar grows a row on narrow
+    // windows (the 560px breakpoint near the end of src/styles.mjs).
+    var barHeight = Math.round(sendBar.getBoundingClientRect().height);
     sendBarDockObserver = new IntersectionObserver(function (entries) {
       var entry = entries[0];
       var intersecting = !!entry && entry.isIntersecting;
       sendBar.classList.toggle('docked', intersecting);
       railIntersecting = intersecting;
       updateQuestionsLeftPill();
-    });
+    }, { rootMargin: '0px 0px -' + barHeight + 'px 0px' });
     sendBarDockObserver.observe(rail);
   }
 
@@ -3876,13 +3891,43 @@ export const ui = `
    * row count updates this with it, with nothing to remember to keep in
    * step. */
   function setupPagerDockHeightTracking() {
-    var dock = document.querySelector('.round-pager-dock');
+    // Tag-qualified, the same convention every other chrome lookup in this file
+    // follows: board content mints its own ids and classes (src/markdown.mjs's
+    // slugify), and a querySelector that names only the class can be answered
+    // by an element the agent wrote.
+    var dock = document.querySelector('div.round-pager-dock');
     if (!dock) return;
-    if (typeof ResizeObserver !== 'function') return;
-    var ro = new ResizeObserver(function (entries) {
-      var entry = entries[0];
-      var h = entry && entry.contentRect ? entry.contentRect.height : dock.getBoundingClientRect().height;
+    // Both writers report the same box. 'contentRect' is the CONTENT box and
+    // this measurement is the BORDER box; they agree only while the dock has no
+    // padding or border, which is exactly the assumption the comment below
+    // refuses to make about its own future ("a future change to the dock's own
+    // font size, padding or row count"). A zero is never written: a dock that
+    // measures 0 at hydrate (display:none on a board that has not painted it
+    // yet) would otherwise replace the stylesheet's 84px fallback with nothing,
+    // and on the no-ResizeObserver path nothing would ever correct it.
+    function write(h) {
+      if (!(h > 0)) return;
       document.documentElement.style.setProperty('--round-pager-dock-h', h + 'px');
+    }
+    // Measured once here, and only THEN observed -- the same correction
+    // measurePillHalf's own wiring carries, for the identical reason: measured
+    // in Chrome, a ResizeObserver on an element that is already laid out and
+    // never resized again delivers nothing at all. Every board that loads with
+    // its dock at its final size (which is most of them: the dock only changes
+    // when a round arrives and relabels it) therefore left this property unset
+    // for the whole session, and every rule that reads it -- '.page-comments''s
+    // clearance and the sent round's own bottom reservation, both in
+    // src/styles.mjs -- silently ran on its 84px fallback instead of the real
+    // 63.4px. Not a crash, which is why it survived: a too-large fallback
+    // over-reserves rather than overlapping, so the failure looks like slightly
+    // loose spacing.
+    write(dock.getBoundingClientRect().height);
+    if (typeof ResizeObserver !== 'function') return;
+    // The entry is deliberately unread: its 'contentRect' is the content box,
+    // and write() wants the border box on both paths (see its comment). The
+    // observer here is a trigger, not a source of the measurement.
+    var ro = new ResizeObserver(function () {
+      write(dock.getBoundingClientRect().height);
     });
     ro.observe(dock);
   }

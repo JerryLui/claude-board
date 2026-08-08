@@ -511,6 +511,14 @@ export const DEFAULT_AWAIT_TIMEOUT_MS = 2_400_000;
  * `wait: true` or not, because CONTEXT.md's Awaited entry names only these two
  * routes in and this ticket does not invent a third.
  *
+ * `wait: true` on a round that already asks something is IGNORED, not refused --
+ * the `||` below is what implements that, and it is a decision, not a fallout.
+ * Such a round is already awaited by construction, so the flag asks for the
+ * state it is already in: there is nothing to refuse and nothing to add, and a
+ * refusal would fail a call whose only sin is saying out loud what the round
+ * already does. Pinned by test/check-page-board.mjs, on both call sites below,
+ * deadline included.
+ *
  * `blocks` here is THIS round's own normalized blocks only (never the whole
  * board's), which is what both callers below already have in hand and what makes
  * `isPageRound` and `questionBlocks({ blocks })` correct without a `round` filter. */

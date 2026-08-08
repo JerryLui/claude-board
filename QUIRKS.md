@@ -443,6 +443,21 @@ you are writing to see what the page does today still belongs in `/tmp`.
 
 Things that cost time:
 
+- **Driving the page board's condense from a driver needs a real wheel event over the
+  stage.** The progress comes from the *artifact's* own scroll, reported out of the
+  stage iframe — `window.scrollTo` on the parent moves nothing and `--stage-p` stays
+  `0`, which reads exactly like a broken condense. Reaching in is not the way out
+  either: the stage is sandboxed to an opaque origin, so `frame.contentWindow`
+  throws `SecurityError: Blocked a frame with origin "null"`. A run of
+  `Input.dispatchMouseEvent { type: 'mouseWheel' }` at the frame's centre is what
+  scrolls it, same as a reviewer's wheel.
+- **Scroll-to-bottom measurements land mid-animation.** `<html>` carries
+  `scroll-behavior: smooth`, so a `scrollTo(0, scrollHeight)` followed by a settle
+  delay measures a box still in flight — the reservation this session added read as a
+  105px *overlap* that way, and as the 12px of clearance it actually is once the
+  driver set `documentElement.style.scrollBehavior = 'auto'` first. Assert you are
+  actually at the bottom (`scrollHeight - scrollY - innerHeight < 2`) before believing
+  any number measured there.
 - Measure element coordinates in a *separate* eval from the `scrollIntoView` that
   precedes it, with a settle delay between. Measuring across a scroll gives stale
   coordinates and clicks land somewhere unrelated.

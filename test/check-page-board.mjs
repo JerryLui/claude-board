@@ -260,6 +260,71 @@ check('criterion 16: the condense is a ramp with no threshold -- the pill forms 
   assert.equal(progress(document), '1.000', 'a long artifact cannot push the progress past 1');
 });
 
+// What no stand-in can measure is a box, so this asserts the two shapes the
+// geometry depends on rather than the pixels they produce. Measured in Chrome
+// against this same render, the pill stops having one height at all and takes
+// the one its controls ask for: 64.4px before, and after, 39.8px on an awaited
+// page (the comment-mode chip is the tallest thing in it) or 34.4px on one
+// that is not awaited (no chip, so the badge's own label sets it). 12px of air
+// on both sides of the contents in either case.
+//
+// The identity block is the one that bit: collapsed to 'max-width: 0' at
+// 'opacity: 0' it still contributed all 52.4px of its height, so the pill was
+// sized by text nobody can see rather than by the controls it exists to carry.
+// The mark is the other half -- a width that eased with the ramp would leave
+// src/ui.mjs's measurePillHalf (which reads '.back-to-index'.offsetWidth, and
+// re-measures only when '.board-head-actions' resizes) holding a figure for a
+// mark size the header has already left.
+check('criterion 16: the condensed pill is sized by the controls it carries -- the collapsed identity block gives up its height as well as its width, and the mark never eases', () => {
+  const { document, frame } = openPageBoard();
+  const ident = document.querySelector('.board-head-ident');
+  const title = document.querySelector('.board-head-title');
+  const brand = document.querySelector('.back-to-index');
+
+  reportScroll(frame, 800);
+  assert.equal(progress(document), '1.000', 'setup: fully condensed');
+
+  assert.match(computed(ident, 'max-height'), /--stage-p/,
+    'an invisible identity block that keeps its height sets the pill\'s height, which is what made the chrome read as rounder than its own contents');
+  assert.match(computed(ident, 'max-width'), /--stage-p/, 'and it still collapses horizontally as before');
+  assert.match(computed(title, 'gap'), /--stage-p/,
+    'the gap that held the identity block off the mark goes with it, or the pill\'s contents sit left of their own band -- and measurePillHalf, which sums brand + the header\'s gap + actions, silently stops being the whole content width');
+  assert.doesNotMatch(computed(brand, 'width'), /--stage-p/,
+    'the mark is one constant width on a page board: an eased width is measured once and then wrong for every other progress on the ramp');
+});
+
+// The chrome the reviewer actually picked, as declared properties -- the one
+// layer of this a stand-in can hold. What it cannot see is the box those
+// properties produce; that stays a real-browser fact, measured and recorded in
+// src/styles.mjs's own comments.
+check('criterion 16: the pill wears a corner rather than a capsule, and holds one line of chrome rather than a chip beside a label', () => {
+  const { document, frame } = openPageBoard();
+  const badge = document.querySelector('button#round-badge');
+  const meta = document.querySelector('span#round-meta');
+  const head = document.querySelector('.board-head');
+  reportScroll(frame, 800);
+
+  // 'none', not '': the page board's own header rule states it outright (the
+  // wash and the pill chrome are separate layers there, so the header's own box
+  // must declare it away). On an ordinary board the declaration is simply gone,
+  // which the resolver reports as '' -- both spellings of ADR.md entry 52.
+  assert.equal(computed(head, 'border-bottom'), 'none',
+    'a header that fades draws no hairline under the fade (ADR.md entry 52) -- the gradient is the edge');
+  assert.equal(computed(badge, 'background'), 'none', 'the badge is a label on a page board, not a chip: its own fill was the second round shape arguing with the pill\'s');
+  assert.equal(computed(badge, 'border'), 'none',
+    'and its border goes with the fill -- as border:none rather than a transparent colour, so .board-head .round-badge:hover (which outranks this rule) can still lift the colour without drawing the frame back');
+  assert.match(computed(meta, 'border-left'), /var\(--hairline\)/,
+    'a hairline is what separates the label from the read-only note once neither wears chrome');
+  // Asserted against the stylesheet text, not through the resolver: ':empty' is
+  // a state the stand-in does not evaluate (QUIRKS.md, "the stand-in has no
+  // layout" -- it has no live matching either). The fact being pinned is that
+  // the rule exists at all, because an awaited page first paints with no
+  // countdown in this slot (src/render.mjs leaves the wall-clock figure to
+  // hydrate) and a divider with nothing after it is what the reviewer would see.
+  assert.match(styles, /body\.page-board \.round-meta:empty \{ display: none; \}/,
+    'the divider must not be drawn while the slot is still empty');
+});
+
 check('criterion 16: the frame is untouched across a whole condense/expand cycle -- it floats OVER the frame, which stays a constant 100vh', () => {
   const { document, frame } = openPageBoard();
   const head = document.querySelector('.board-head');
@@ -273,6 +338,8 @@ check('criterion 16: the frame is untouched across a whole condense/expand cycle
   assert.equal(frame.getAttribute('style'), null,
     'condensing must never write to the frame -- a frame that resized as the header did would reflow a long artifact under the reader mid-read, which is exactly what ADR.md entry 40 chose an overlay to prevent');
   assert.equal(computed(frame, 'height'), '100vh', 'and the stylesheet still gives it a constant viewport height');
+  assert.doesNotMatch(computed(frame, 'height'), /--stage-p/,
+    'a frame whose height read the condense progress would resize under the reader on every scroll -- the exact reflow ADR.md entry 40 chose an overlay to prevent');
   // The frame is structurally exempt from the one thing that CAN set an inline
   // height: handleStageHeight is gated on '.choice-variant', and a page board's
   // stage is not one. Proven directly by this file's own criterion-2 check
@@ -1116,6 +1183,36 @@ check('AC 8: a page board nobody is waiting on offers no comment control at all,
   assert.equal(toggle.classList.contains('active'), true, 'setup: comment mode is on');
   frame.contentDocument.getElementById('theme').dispatchEvent(new StandInEvent('click'));
   assert.equal(document.querySelectorAll('.comment-form.open').length, 0, 'no form may open anywhere -- there is no comment control to open one');
+});
+
+// =================================================================================
+// `wait` on a round that already asks something. Left undecided when this ticket
+// landed, decided now: IGNORED, not refused. Such a round is already awaited by
+// construction, so `wait: true` asks for the state it is already in -- there is
+// nothing to refuse and nothing to add, and a refusal would fail a call whose
+// only sin is saying out loud what the round already does. The two routes into
+// `awaited` stay the two in CONTEXT.md's glossary; this check exists so a later
+// change cannot quietly make `wait` a third one, in either direction.
+// =================================================================================
+
+check('`wait: true` on a round that already asks something is ignored, not refused -- the round is awaited by its question either way, and the deadline is the same either way', () => {
+  const blocks = [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }];
+  const withWait = createBoard({ title: 'wait on a question round', blocks, wait: true, awaitTimeoutMs: 38 * 60_000 });
+  const without = createBoard({ title: 'wait on a question round', blocks, awaitTimeoutMs: 38 * 60_000 });
+  assert.equal(withWait.rounds[0].awaited, true, 'a question round is awaited whether or not the caller said wait');
+  assert.equal(without.rounds[0].awaited, true, 'setup: and awaited without it too -- that is the point');
+  // The deadline is minted from the round's own postedAt, so two boards created
+  // a tick apart differ in the instant but must not differ in the OFFSET.
+  const offset = b => Date.parse(b.rounds[0].awaitDeadline) - Date.parse(b.rounds[0].postedAt);
+  assert.equal(offset(withWait), offset(without),
+    '`wait` must not lengthen, shorten or otherwise touch a question round\'s deadline');
+
+  // Same answer on a later round, which mints through addRound rather than
+  // createBoard -- the two call sites of mintAwait, both pinned.
+  const board = createBoard({ title: 'wait on a later question round', blocks: [{ kind: 'html', html: ARTIFACT }] });
+  addRound(board, { blocks, wait: true });
+  assert.equal(board.rounds[1].awaited, true, 'a later question round is awaited by its question, wait or no wait');
+  assert.equal(board.rounds[0].awaited, false, 'and the page round it followed is untouched -- wait was never passed to it');
 });
 
 // =================================================================================

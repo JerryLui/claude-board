@@ -1942,6 +1942,8 @@ check('criterion 1: a page board renders the stage edge to edge -- no card, no k
 check('criterion 2: the page board stage is a constant 100vh that scrolls internally, and the page itself does not scroll', () => {
   const { body, frame } = renderedPage(pageBoard());
   assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '100vh', 'the frame is a constant viewport height (ADR.md entry 34), not a box grown to content');
+  assert.doesNotMatch(resolveComputedProperty(styles, frame, true, 'height'), /--stage-p/,
+    'and constant means constant through the condense ramp too -- a frame sized on the progress reflows the artifact under the reader');
   assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '0', 'the 320px floor is lifted, so the frame is exactly 100vh and nothing else');
   assert.equal(resolveComputedProperty(styles, frame, true, 'resize'), 'none', 'a frame the reviewer can drag taller is a frame whose height changes while it is read');
   assert.equal(resolveComputedProperty(styles, body, true, 'overflow'), 'hidden', 'the board page itself never scrolls -- the artifact scrolls inside its own frame');

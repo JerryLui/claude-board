@@ -1442,18 +1442,32 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
   const historical = sent;
   const count = (commentsByBlock.get(blockId) || []).length;
   const label = count === 0 ? 'Nothing to add' : `Send ${count} comment${count === 1 ? '' : 's'}`;
-  const hint = (open && count === 0)
-    ? `<p class="page-comment-hint" id="page-comment-hint-${escAttr(blockId)}">Click anywhere on the page to leave a comment.</p>`
+  // Rendered INSIDE the send bar, at its left end (src/styles.mjs): the hint is
+  // one short line and the bar's own row had room for it, so a row of its own
+  // was a row of panel height spent on nothing. src/ui.mjs finds it through the
+  // panel rather than through a parent, so its home here is a layout fact only.
+  //
+  // Moving it there did cost one thing, and `aria-describedby` below is what
+  // buys it back: the hint used to be the panel's FIRST child, so a screen
+  // reader met "click anywhere on the page to leave a comment" before the
+  // compose input. It is now the last row, announced after the input it
+  // explains and between Discuss and Send. Pointing the input at it restores
+  // the pairing without moving the box back: the instruction is read as the
+  // field's own description, wherever it sits on screen.
+  const hintId = `page-comment-hint-${escAttr(blockId)}`;
+  const showHint = open && count === 0;
+  const hint = showHint
+    ? `<p class="page-comment-hint" id="${hintId}">Click anywhere on the page to leave a comment.</p>`
     : '';
   return `
-    ${hint}
     <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
-      <input type="text" placeholder="Add a comment"${historical ? ' disabled' : ''}>
+      <input type="text" placeholder="Add a comment"${showHint ? ` aria-describedby="${hintId}"` : ''}${historical ? ' disabled' : ''}>
       <button type="submit"${historical ? ' disabled' : ''}>Add</button>
     </form>
     <div class="comment-list-wrap"><div class="comment-list" id="comment-list-${escAttr(blockId)}">${commentItemsHtml(blockId, commentsByBlock)}</div></div>
     <div class="page-send-bar" data-round="${round.n}">
+      ${hint}
       <button type="button" class="btn-discuss page-discuss-btn" data-round="${round.n}"${historical ? ' disabled' : ''}>Discuss in chat</button>
       <button type="button" class="btn-send page-send-btn" data-round="${round.n}"${historical ? ' disabled' : ''}>${escHtml(label)}</button>
     </div>`;

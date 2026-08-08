@@ -127,6 +127,10 @@ arrival notification. `awaitDeadline` is `null` when `awaited` is `false`, other
 8601 instant `postedAt` plus the wait timeout in effect when the round was minted (default
 40 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
 below) — stamped at mint time and never recomputed by an amend of the same round.
+`wait: true` on a round that already carries a question is **ignored, not refused**: the
+round is awaited by its question either way and the deadline is identical either way, so
+the flag asks for the state the round is already in. It stays the two routes above; `wait`
+never becomes a third.
 
 **`awaited` comes back off when the deadline passes** (ADR 50). `closeLapsedAwaitedRounds`
 (`src/badge.mjs`) is the only writer that clears it, and `readBoard` (`src/store.mjs`) — the

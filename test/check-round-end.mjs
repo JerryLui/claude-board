@@ -202,9 +202,14 @@ check('the .round-end rail\'s CSS uses real design tokens (spacing/hairline), no
 // of the round is on screen, and floating over content when it is not."
 // =====================================================================================
 
-check('the .send-bar.docked rule drops both the gradient scrim AND the blur, and adds a top hairline', () => {
-  assert.match(styles, /\.send-bar\.docked \{ background: var\(--bg\); backdrop-filter: none; border-top: 1px solid var\(--hairline-2\); \}/,
+check('the .send-bar.docked rule drops the gradient scrim AND the blur, and draws no rule of its own', () => {
+  assert.match(styles, /\.send-bar\.docked \{ background: var\(--bg\); backdrop-filter: none; \}/,
     'expected the docked rule to replace the scrim with a flat background and no blur');
+  // '.docked' means the closing rail is on screen, and the rail is already a
+  // full-width line two rows up: a border here drew a second horizontal rule
+  // under the first, at the one moment the first is guaranteed to be visible.
+  assert.doesNotMatch(styles, /\.send-bar\.docked \{[^}]*border[^}]*\}/,
+    'the docked bar must not add a hairline -- .round-end\'s own rule is the line at the foot of a fully scrolled round');
 });
 
 check('the send bar starts floating (no .docked class) on an ordinary hydrate, before any intersection has been reported', () => {
@@ -394,7 +399,16 @@ check('.send-bar is .board-shell\'s own last element child -- nothing rendered a
     '.send-bar must be .board-shell\'s last element child for a zero bottom padding to actually land the bar\'s own lower edge on the document\'s lower edge');
 });
 
-check('a read-only file:// archive (send bar hidden) shares the same zero-bottom-padding .board-shell rule -- no separate readonly override reintroduces the band below the last block', () => {
+// This check used to forbid an archive ANY bottom padding ("one rule answers
+// both endings, live and archived"). That promise predated the round pager's
+// floating dock, and outlived its own truth: body.readonly hides the send bar
+// on every archive, and renderRoundSection prints the dock on every board --
+// including a one-round one -- so what "flush" bought an archive was its last
+// block underneath a fixed box, not a clean bottom edge. The invariant is
+// rewritten rather than dropped: an archive reserves, and reserves BY THE SAME
+// EXPRESSION the comment panel clears the dock with, so the two can never
+// drift apart into a gap or an overlap.
+check('a read-only file:// archive (send bar hidden, dock still on screen) reserves the dock\'s own measured height -- by the same expression .page-comments clears it with, not a number of its own', () => {
   const board = createBoard({ title: 'Flush bottom - archive', blocks: [Q1] });
   const html = renderBoardPage(board);
   const dir = mkdtempSync(path.join(tmpdir(), 'claude-board-flush-bottom-archive-'));
@@ -405,9 +419,42 @@ check('a read-only file:// archive (send bar hidden) shares the same zero-bottom
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
   const shell = document.querySelector('.board-shell');
   assert.ok(shell, 'setup failure: no .board-shell in the archive\'s DOM');
-  const padding = resolveComputedProperty(styles, shell, true, 'padding');
-  assert.equal(padding, '0 var(--space-5)',
-    'the archive shares .board-shell\'s rule with the live page -- readonly must never carry its own bottom-padding override');
+  // Setup, and the reason this reservation is unconditional: one round, no
+  // round ever sent, and the dock is on the page regardless.
+  assert.ok(document.querySelector('.round-pager-dock'),
+    'setup failure: the dock must render on a one-round archive too -- if it stopped, this reservation is dead weight and should go with it');
+
+  // The longhand, directly. The shorthand cannot see this rule: it arrives from
+  // a different selector and the resolver does not fold longhands into the
+  // shorthand -- which is exactly how the band this check once forbade got back
+  // on screen with the old assertion still green.
+  const reserved = resolveComputedProperty(styles, shell, true, 'padding-bottom');
+  assert.ok(reserved.includes('var(--round-pager-dock-h'),
+    'the archive must clear the dock by its MEASURED height, not a pixel literal sized for today\'s dock');
+
+  // The anti-drift assertion, and the point of the whole check: token for token
+  // the same expression as the panel's, read off the page board's own rendered
+  // panel rather than copied into this file as a string.
+  const pageBoard = parseHTML(renderBoardPage(createBoard({ title: 'Rendered artifact', blocks: [{ kind: 'html', html: '<p>hello</p>' }] })));
+  const panel = pageBoard.querySelector('.page-comments');
+  assert.ok(panel, 'setup failure: expected a page board to render .page-comments');
+  assert.equal(reserved, resolveComputedProperty(styles, panel, true, 'bottom'),
+    'the shell\'s reservation and the panel\'s clearance must stay the same expression -- if one grows a term the other does not, an archive gets a gap or an overlap');
+
+  document.body.classList.add('sent-page');
+  assert.equal(resolveComputedProperty(styles, shell, true, 'padding-bottom'), reserved,
+    'an archived board whose round in view is sent carries both classes, and both selectors must land the same value -- not one stacked on the other');
+});
+
+check('a live board with its round still open keeps the flush bottom -- the send bar is the floor there, so reserving on top of it would band the page', () => {
+  const board = createBoard({ title: 'Flush bottom - open round', blocks: [Q1] });
+  const document = loadBoard(renderBoardPage(board));
+  const shell = document.querySelector('.board-shell');
+  // Empty, not '0': the resolver reports what a rule DECLARES and does not fold
+  // the shorthand into longhands, so "no rule sets padding-bottom here" reads
+  // as ''. A reservation leaking onto the open round would resolve to its calc().
+  assert.equal(resolveComputedProperty(styles, shell, true, 'padding-bottom'), '',
+    'nothing may reserve below an open round: .send-bar is in flow as the shell\'s last child and its own edge is the document\'s');
 });
 
 // =====================================================================================
