@@ -1,9 +1,9 @@
-// End-to-end click check (ticket 01, DESIGN.md): drives the REAL src/ui.mjs
+// End-to-end click check: drives the REAL src/ui.mjs
 // client script, in a minimal in-repo DOM stand-in (test/dom-stand-in.mjs), through
 // the actual gesture a reviewer performs -- click an element inside a hand-mocked
 // html stage -- and asserts a comment form opens with the anchor filled in.
 //
-// This is criterion 8's check: "a check fails if the click path breaks end to end,
+// This check exists because "a check fails if the click path breaks end to end,
 // exercising the real gesture rather than the pieces underneath it." Every check in
 // test/check-pure.mjs and test/check-http.mjs passed while this gesture was dead --
 // they exercise src/anchor.mjs's pure resolution logic and the rendered markup, but
@@ -14,10 +14,10 @@
 // (see the second check below) -- its own credibility is established first by the
 // check above it, which pins the exact browser behaviour the defect turns on (an
 // iframe's about:blank placeholder document, not the real srcdoc content, being what
-// is live the moment the page's own script runs). Ticket 01's log records the
-// ablation that proves this check goes green once the gesture is fixed (temporarily
+// is live the moment the page's own script runs). An ablation log records the
+// proof that this check goes green once the gesture is fixed (temporarily
 // dropping the synchronous `readyState === 'complete'` wiring call in src/ui.mjs and
-// re-running this file) -- fixing it for real is ticket 02's job, not this file's.
+// re-running this file) -- fixing it for real is a separate job, not this file's.
 
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
@@ -63,15 +63,15 @@ function loadBoard() {
 
 // --- credibility: pin the one browser behaviour this check exists to reproduce --
 //
-// DESIGN.md Decisions -> "Criterion 8 runs in a DOM stand-in": the leading
+// The leading
 // hypothesis for the defect is an iframe's initial (about:blank) document being what
 // gets wired up, instead of the real one. Before trusting the click check below,
 // this pins that the stand-in actually reproduces that shape: the iframe's
 // contentDocument is already present, 'complete', and empty the moment the page is
 // parsed -- BEFORE the client script runs and BEFORE the real srcdoc content ever
 // loads. A stand-in that instead handed the real document straight to the client
-// script would make the check below pass for the wrong reason (see DESIGN.md
-// Testing: "a stand-in that models the browser wrongly is exactly how this feature
+// script would make the check below pass for the wrong reason ("a stand-in that
+// models the browser wrongly is exactly how this feature
 // shipped dead twice").
 
 check('a fresh .html-stage iframe starts out wired to an about:blank-shaped placeholder document, not the real srcdoc content -- the exact browser behaviour the defect turns on', () => {
@@ -91,12 +91,12 @@ check('clicking an element inside a hand-mocked html stage opens that block\'s c
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage iframe on the rendered page');
 
-  // Ticket 03 (DESIGN.md): the user's decision, one gesture toggle-gated
+  // One gesture, toggle-gated
   // everywhere, means the stage click no longer fires on its own -- comment mode
   // has to be turned on first, through the actual toggle button, exactly the way
   // a reviewer would. test/check-comment-mode.mjs's own checks cover comment
   // mode OFF leaving this click inert; this file keeps proving what happens once
-  // the click lands, same as before this ticket.
+  // the click lands, same as before.
   const modeToggle = document.getElementById('comment-mode-toggle');
   assert.ok(modeToggle, 'setup failure: no comment-mode toggle rendered on the board page');
   modeToggle.dispatchEvent(new StandInEvent('click'));
@@ -121,7 +121,7 @@ check('clicking an element inside a hand-mocked html stage opens that block\'s c
   assert.ok(form, 'setup failure: the board page has no comment-form for the html block');
   assert.equal(
     form.classList.contains('open'), true,
-    'clicking an element inside the html stage must open that block\'s comment form -- it did not (the "open" class was never added), meaning no click listener ever fired on the REAL stage document; this is criterion 8\'s failure, the click gesture is dead',
+    'clicking an element inside the html stage must open that block\'s comment form -- it did not (the "open" class was never added), meaning no click listener ever fired on the REAL stage document; the click gesture is dead',
   );
   assert.equal(form.getAttribute('data-anchor-kind'), 'dom', `expected the opened form's anchor kind to be "dom", got ${JSON.stringify(form.getAttribute('data-anchor-kind'))}`);
   const ref = form.getAttribute('data-anchor-ref');
@@ -136,10 +136,10 @@ check('clicking an element inside a hand-mocked html stage opens that block\'s c
   assert.equal(target.textContent, 'commenting on: Send', `expected the "commenting on:" label to name what was clicked, got ${JSON.stringify(target.textContent)}`);
 });
 
-// --- audit C2, ticket 08: a mock that inlines its own <style> ------------------
+// --- a mock that inlines its own <style> ------------------
 //
 // A hand-mocked stage carrying its own styling is the ordinary case -- it is
-// what DESIGN.md's own isolation Decision makes an author do, since the
+// what the isolation model makes an author do, since the
 // page's tokens deliberately never reach into the sandboxed srcdoc. A real
 // browser hoists that leading <style> into <head>, so `document.body`'s first
 // child is the mock's own top-level element, not the style tag. This check
@@ -159,14 +159,14 @@ const styledPageHtml = renderBoardPage(styledBoard);
 
 check('C2: clicking an element in a mock whose srcdoc opens with its own <style> mints a ref the server actually resolves, not an off-by-one', () => {
   const document = parseHTML(styledPageHtml);
-  // Ticket 10 (DESIGN.md): a real, working `window` here, not a
+  // A real, working `window` here, not a
   // throwaway `{ addEventListener() {} }` stub -- src/ui.mjs's own
   // `window.addEventListener('message', ...)` (the parent's half of the
   // postMessage protocol the html-stage click now goes over) has to reach a
   // window the stage can actually deliver to, which `document.defaultView`
   // (auto-wired by parseHTML) is and a no-op stub is not. Every other check in
-  // this suite already made this switch; this one is new, from ticket 08's
-  // merge, and needs the same fix.
+  // this suite already made this switch; this one is new, and
+  // needs the same fix.
   const window = document.defaultView;
   const location = { protocol: 'http:' };
   new Function('document', 'window', 'location', ui)(document, window, location);
@@ -175,7 +175,7 @@ check('C2: clicking an element in a mock whose srcdoc opens with its own <style>
   const frame = document.querySelector('.html-stage');
   frame.loadSrcdoc();
 
-  // Ticket 10: every html-stage srcdoc now carries a trailing, injected
+  // Every html-stage srcdoc now carries a trailing, injected
   // `<script>` (the stage-side agent -- src/render.mjs's `stageAgentScript`,
   // appended AFTER the mock's own markup, never before it -- see that
   // function's own comment on why). A real browser hoists only a LEADING run
@@ -204,7 +204,7 @@ check('C2: clicking an element in a mock whose srcdoc opens with its own <style>
   // HEAD_ONLY_TAGS-hoisting implementations (src/anchor.mjs's own, and this
   // file's) actually agree on the ref a real click mints.
   assert.equal(resolveDomAnchor(styledBoard.blocks[0].html, ref, hint), true,
-    'the server must resolve the exact ref/hint a real click mints against a self-styling mock -- reporting it lost here is audit finding C2');
+    'the server must resolve the exact ref/hint a real click mints against a self-styling mock');
 });
 
 if (failures) {

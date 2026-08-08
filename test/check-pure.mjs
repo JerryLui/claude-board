@@ -21,7 +21,7 @@ import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock,
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, openServed, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
-// Both used only by the reference-boundary checks (audit 2026-07-31). The descriptor
+// Both used only by the reference-boundary checks. The descriptor
 // discipline inside resolveRef is asserted by swapping the file out BETWEEN the check
 // and the read, which means patching the fs namespace src/resolve.mjs imports from --
 // node:module's syncBuiltinESMExports is what propagates such a patch into an ESM
@@ -174,7 +174,7 @@ check('duplicate heading text gets a disambiguated slug', () => {
   assert.deepEqual(anchors.map(a => a.ref), ['notes', 'notes-2']);
 });
 
-// --- ticket 10: attribute-value escaping in the markdown renderer (security) ------
+// --- attribute-value escaping in the markdown renderer (security) ------
 //
 // markdown.mjs's `esc` covered only & < > and was never applied to attribute values
 // at all -- `alt`, `src` and `href` were built by raw string concatenation, so
@@ -343,7 +343,7 @@ check('every round stores its own title, and an amend refines it without ever bl
   assert.equal(board.rounds[2].title, 'feat/one');
 });
 
-// --- ticket 04: amending a still-open round, and the additive-push patch --------
+// --- amending a still-open round, and the additive-push patch --------
 
 check('amendRound appends a new block into the still-open round without minting round 2', () => {
   const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '# A' }] });
@@ -473,23 +473,23 @@ check('ui.mjs embeds the literal source of computeBoardPatch, not a hand-copied 
   );
 });
 
-// Ticket 03 / criterion 6: the same computeBoardPatch technique, applied to the
-// hint-composition rule test/check-comment-mode.mjs's criterion-6 checks exercise
+// The same computeBoardPatch technique, applied to the
+// hint-composition rule test/check-comment-mode.mjs's checks exercise
 // end to end. An earlier draft got this specifically wrong: src/anchor.mjs
 // carried a design COMMENT describing the rule but no actual code, so reverting
 // that file changed nothing any check could see -- exactly the "looks right,
-// believed correct, not actually exercised" shape DESIGN.md exists to
+// believed correct, not actually exercised" shape this check exists to
 // repair. This check is what makes that regression loud again if it recurs: a
 // hand-edit of ui.mjs's embedded copy that diverges from src/anchor.mjs's real
 // composeHint fails here even before any behavioural check would notice.
 check('ui.mjs embeds the literal source of composeHint, not a hand-copied reimplementation', () => {
   assert.ok(
     ui.includes(composeHint.toString()),
-    'the client script must contain the exact function source, so criterion 6\'s hint rule and the browser copy can never drift apart',
+    'the client script must contain the exact function source, so the hint rule and the browser copy can never drift apart',
   );
 });
 
-check('composeHint: identity alone outside a compare, matching ticket 02\'s plain html-stage hint unchanged', () => {
+check('composeHint: identity alone outside a compare, matching the plain html-stage hint unchanged', () => {
   assert.equal(composeHint('Send', 'button', false, '', ''), 'Send');
   assert.equal(composeHint('Send', 'button', false, '', 'html'), 'Send', 'blockKind alone (no compare ancestor) must never add context');
   assert.equal(composeHint('Total', 'td', false, '', 'markdown'), 'Total', 'a plain table cell carries no role word and no context');
@@ -510,7 +510,7 @@ check('composeHint: falls back to a role word, then the bare tag name, for an el
   assert.equal(composeHint('', 'div', false, '', ''), 'div', 'a tag with no role word in the table falls back to its own bare name');
 });
 
-// Audit C6: `ROLE_WORD[tag]`/`BLOCK_NOUN[blockKind]` had no `hasOwnProperty`
+// `ROLE_WORD[tag]`/`BLOCK_NOUN[blockKind]` had no `hasOwnProperty`
 // guard, so a tag/blockKind of 'constructor' (or any other Object.prototype
 // member name) walked the prototype chain instead of missing the lookup --
 // returning the `Object` CONSTRUCTOR FUNCTION as the "role word"/"block noun",
@@ -532,7 +532,7 @@ check('composeHint: C6 regression -- a tag or blockKind of "constructor" (or any
   assert.equal(badBlockKind, 'x in A block', 'an unrecognised blockKind (including "constructor") degrades to the same "block" fallback as any other unknown kind');
 });
 
-check('composeHint: every block-kind noun the ticket names, and an unknown kind degrades to "block" rather than throwing', () => {
+check('composeHint: every block-kind noun, and an unknown kind degrades to "block" rather than throwing', () => {
   assert.equal(composeHint('x', 'span', true, 'A', 'html'), 'x in A stage');
   assert.equal(composeHint('x', 'span', true, 'A', 'mermaid'), 'x in A diagram');
   assert.equal(composeHint('x', 'span', true, 'A', 'code'), 'x in A reference');
@@ -542,7 +542,7 @@ check('composeHint: every block-kind noun the ticket names, and an unknown kind 
   assert.equal(composeHint('x', 'span', true, 'A', 'nonsense-kind'), 'x in A block');
 });
 
-// Ticket 04 / criterion 7-8 (DESIGN.md polish): the round badge's label, the same
+// The round badge's label, the same
 // toString()-splicing technique again -- see src/badge.mjs's own file comment for
 // why `round ${rounds.length}` (the old, position-blind label) was a real bug,
 // not a wording nitpick.
@@ -569,7 +569,7 @@ check('badgeLabel: a single-round board reads "round 1 of 1", never just "round 
 });
 
 check('badgeLabel: the post-push shape -- M grows, N (the round still in view) does not', () => {
-  // Criterion 8: a round arriving over SSE grows `total` immediately; the
+  // A round arriving over SSE grows `total` immediately; the
   // reviewer's own read position (`current`) is untouched by that arrival. Two
   // independent numbers, so a one-argument implementation ("round N of N") would
   // pass the 1-of-1 case above and fail here.
@@ -577,7 +577,7 @@ check('badgeLabel: the post-push shape -- M grows, N (the round still in view) d
   assert.equal(badgeLabel(2, 2), 'round 2 of 2');
 });
 
-// Ticket 05 / criterion 10 (DESIGN.md polish): the diagram lens's view math, the
+// The diagram lens's view math, the
 // same toString()-splicing technique a third time -- see src/lens.mjs's own file
 // comment. Each of these is held to an arithmetic invariant rather than to a
 // remembered constant, which is the only way "scroll zooms" can be checked
@@ -650,7 +650,7 @@ check('lensFit puts the whole diagram inside the stage and centres it, and never
   assert.equal(small.y, 350);
 });
 
-check('lensFit clamps into the SAME band lensZoomAt does, so the first wheel-out on a very tall diagram cannot zoom IN (finding D7)', () => {
+check('lensFit clamps into the SAME band lensZoomAt does, so the first wheel-out on a very tall diagram cannot zoom IN', () => {
   // The defect, stated as arithmetic: a 400x24000 flowchart fits an 800x600
   // stage at 0.025, well below lensZoomAt's 0.1 floor. Wheel out from there and
   // `Math.max(min, s * factor)` returns 0.1 -- a LARGER scale than the view
@@ -756,15 +756,15 @@ check('a comment whose block no longer exists reports what it lost, not silently
   assert.equal(findBlock(board, 'd99'), null);
 });
 
-// --- src/anchor.mjs: element-level anchoring, pure (ticket 06) --------------------
+// --- src/anchor.mjs: element-level anchoring, pure --------------------
 //
 // Click gestures themselves need a browser and are explicitly out of scope for the
-// automated checks (DESIGN.md Testing); src/anchor.mjs is the seam that carries
+// automated checks; src/anchor.mjs is the seam that carries
 // every bit of anchoring logic that *isn't* the gesture -- path building, hint
 // extraction, path resolution, mermaid id round-tripping -- so it can be proven
 // here without simulating a DOM. src/ui.mjs's click handlers are a thin duplicate
 // of these same functions (necessarily: the served page has no import graph at
-// runtime, see ticket 05's standalone-archive guarantee), exercised only by hand.
+// runtime, see the standalone-archive guarantee), exercised only by hand.
 
 check('extractHint collapses whitespace and caps length, never inventing a coordinate', () => {
   assert.equal(extractHint('  Send   \n  Message  '), 'Send Message');
@@ -828,8 +828,7 @@ check('resolveSteps reports null the moment a step no longer resolves -- the "th
 // ANYWHERE in the raw html string, never touching `ref` at all. That both
 // false-resolved (a hint matching a class name or tag name) and false-"lost"
 // (nested markup, entities, or extractHint's own truncation ellipsis broke the
-// contiguous-substring match) -- caught by audit, see DESIGN.md's board slice
-// 06 log. These checks pin the fix: ref must actually address an element, and only
+// contiguous-substring match) -- caught as a real bug. These checks pin the fix: ref must actually address an element, and only
 // that element's own text is checked against the hint.
 
 check('parseHtmlTree builds an element tree where .children is element-only (matching real Element.children, not childNodes)', () => {
@@ -886,12 +885,12 @@ check('resolveDomAnchor rejects a hint that only matches an attribute value or t
   assert.equal(resolveDomAnchor(html, '1.1', 'div'), false); // "div" is a tag name, not button's text
 });
 
-// Audit 2026-07-29, finding C1: `domIdentityHintMatches` ended
+// `domIdentityHintMatches` ended
 // `return normalizedHint.startsWith(normalizedIdentity)`, checking the
 // relationship backwards -- a live element whose text is a literal PREFIX of
 // some unrelated stored hint satisfied `startsWith` by coincidence, resolving
 // the comment onto the wrong element rather than reporting it lost. These are
-// the three rows the director measured true (should be false) on HEAD before
+// the three rows that measured true (should be false) on HEAD before
 // the fix; see this check's own name for the row each assertion locks in.
 check('resolveDomAnchor: C1 regression -- a stored hint that merely STARTS WITH the live element\'s text must not resolve (the inverted prefix check\'s false-positive)', () => {
   assert.equal(resolveDomAnchor('<div class="mock"><button>S</button></div>', '1.1', 'Send'), false,
@@ -925,15 +924,15 @@ check('resolveDomAnchor requires a non-empty hint, and degrades to false rather 
   assert.doesNotThrow(() => resolveDomAnchor('<div><unclosed>', '1.1', 'Send'));
 });
 
-// Audit 2026-07-29, finding C2: a browser parses `srcdoc` as a full document
+// A browser parses `srcdoc` as a full document
 // and hoists a leading <style>/<script>/<meta>/<link>/<title>/<base> into
 // <head>, so `document.body`'s first child is the mock's own top-level
 // element, not the style tag -- exactly what src/ui.mjs mints every ref
 // against. `resolveDomAnchor` used to resolve against parseHtmlTree's raw
 // synthetic root instead, which kept the leading <style> as a body sibling and
 // shifted every following index by one: the browser-minted ref reported LOST,
-// and the UNHOISTED ref one index later resolved instead. Both director
-// measurements from the audit, now inverted.
+// and the UNHOISTED ref one index later resolved instead. Both
+// measurements, now inverted.
 check('resolveDomAnchor: C2 regression -- a leading <style> before the mock\'s real content must not shift ref indices', () => {
   const html = '<style>.mock{font:14px system-ui}</style><div class="mock"><button>Send</button></div>';
   assert.equal(resolveDomAnchor(html, '1.1', 'Send'), true,
@@ -992,7 +991,7 @@ check('mermaidRefResolves traces a ref back to the diagram source, and reports f
 
 check('mermaidRefResolves does not false-negative on chained arrows or inline-label edges -- what the old arrow-grammar regex got wrong', () => {
   // A --> B --> C: an earlier regex-based id extractor only ever captured the first
-  // two ids in a chain and lost the tail (audit-caught, see ticket 06's log).
+  // two ids in a chain and lost the tail.
   const chained = 'flowchart LR\n  A --> B --> C';
   assert.ok(mermaidRefResolves(chained, 'A'));
   assert.ok(mermaidRefResolves(chained, 'B'));
@@ -1007,7 +1006,7 @@ check('mermaidRefResolves does not false-negative on chained arrows or inline-la
 
 check('mermaidRefResolves runs in linear time even against a large, adversarial-shaped source -- no catastrophic backtracking', () => {
   // The old arrow-chain regex had measured catastrophic backtracking on input like
-  // this (audit-caught: 10s+ at 160KB). A plain indexOf-based scan must stay fast.
+  // this (10s+ at 160KB). A plain indexOf-based scan must stay fast.
   const adversarial = 'A-'.repeat(50000);
   const start = Date.now();
   const result = mermaidRefResolves(adversarial, 'nonexistent-ref');
@@ -1037,10 +1036,10 @@ check('resolveComment resolves a dom anchor whose ref+hint are still valid toget
 
   const lost = resolveComment(board, board.comments[1]);
   assert.equal(lost.resolved, false);
-  // Ticket 04: a lost `dom` anchor reports the stored HINT ("Launch"), not the
+  // A lost `dom` anchor reports the stored HINT ("Launch"), not the
   // opaque index-chain ref ("9.9") -- the hint is what a human or agent can
   // actually recognise as "what this comment was about" once the element it
-  // named is gone (DESIGN.md ticket 04: "the stored hint is what
+  // named is gone ("the stored hint is what
   // survives when the element does not"). An `md`/`mermaid` anchor's ref is
   // already human-legible (a heading slug, a diagram node id), so those still
   // report their ref -- see the checks below for mermaid and check-http.mjs for
@@ -1070,9 +1069,9 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
   assert.equal(lost.lost, 'Ghost');
 });
 
-// --- ticket 05: resolveMermaidAnchor's precedence -- generic first, node id ---
-// leaned on as a fallback, per DESIGN.md's "Mermaid stops being the
-// template" -- see src/anchor.mjs's "ticket 05 design" comment for the full
+// --- resolveMermaidAnchor's precedence -- generic first, node id ---
+// leaned on as a fallback -- "Mermaid stops being the
+// template" -- see src/anchor.mjs's design comment for the full
 // reasoning. Direct, pure tests over resolveMermaidAnchor itself (not just
 // through resolveComment/board.mjs) so the precedence is checkable and
 // ablatable in one place, plus a resolveComment-level check right after
@@ -1095,7 +1094,7 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
 // test proves the ORDER, not just that the id fallback happens to always win
 // because the generic half can never succeed in this codebase today.
 //
-// `pre.mermaid` itself (audit V3, ticket 08) is excluded from the resolution
+// `pre.mermaid` itself is excluded from the resolution
 // surface -- the same chrome exclusion src/ui.mjs's click listener already
 // applies (ANCHOR_CHROME_SELECTOR lists `pre.mermaid` precisely because a real
 // click there is handled by wireMermaidBlock's own listener, never this
@@ -1143,7 +1142,7 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
     mermaidBoard.comments.push({ n: 1, blockId: mermaidBlock.id, anchor, text: 'stale both ways', createdAt: new Date().toISOString(), round: 1 });
     const resolved = resolveComment(mermaidBoard, mermaidBoard.comments[0]);
     assert.equal(resolved.resolved, false);
-    assert.equal(resolved.lost, 'nowhere in this section', 'a lost mermaid anchor with a hint must report the hint (ticket 04\'s lostLabel rule), not the bare node id');
+    assert.equal(resolved.lost, 'nowhere in this section', 'a lost mermaid anchor with a hint must report the hint (the lostLabel rule), not the bare node id');
   });
 
   check('resolveComment: a mermaid anchor with domRef/hint that resolves generically, but a node id that does not, still resolves through the real server-side call site', () => {
@@ -1163,7 +1162,7 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
   });
 }
 
-// --- audit V3: the block's own chrome must never be inside the resolution surface --
+// --- the block's own chrome must never be inside the resolution surface --
 
 check('resolveDomAnchorInSection: V3 regression -- a ref addressing a markdown block\'s own kicker chrome must not resolve, even with a matching hint', () => {
   const board = createBoard({ title: 'V3', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
@@ -1179,7 +1178,7 @@ check('resolveDomAnchorInSection: V3 regression -- a ref addressing a markdown b
     'a ref into the block-kicker must never resolve, no matter how well the hint matches its text');
 });
 
-check('resolveComment: V3 regression -- a forged dom anchor stored against a block\'s own chrome (the audit\'s own measured shape) reports lost, not resolved', () => {
+check('resolveComment: V3 regression -- a forged dom anchor stored against a block\'s own chrome reports lost, not resolved', () => {
   const board = createBoard({ title: 'V3 end to end', blocks: [{ kind: 'markdown', text: '# Notes\n\nSome text.' }] });
   const blockId = board.blocks[0].id;
   applySubmit(board, {
@@ -1190,7 +1189,7 @@ check('resolveComment: V3 regression -- a forged dom anchor stored against a blo
     'a dom anchor into a markdown block\'s own kicker (its comment-button text) must not resolve');
 });
 
-check('resolveMermaidAnchor: V3 regression -- a forged domRef into the block\'s own chrome (the audit\'s own measured shape: a nonexistent node id, domRef "1") never carries the anchor, only mermaidRefResolves can', () => {
+check('resolveMermaidAnchor: V3 regression -- a forged domRef into the block\'s own chrome (a nonexistent node id, domRef "1") never carries the anchor, only mermaidRefResolves can', () => {
   const board = createBoard({ title: 'V3 mermaid', blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' }] });
   const block = board.blocks[0];
   const sectionHtml = renderBlock(block, board, new Map(), false);
@@ -1244,14 +1243,14 @@ check('applySubmit: a comment naming a blockId that is not a real block on the b
   assert.equal(board.comments[0].text, 'real block');
 });
 
-// --- audit U5: a dom anchor must not survive its block's kind changing under it --
+// --- a dom anchor must not survive its block's kind changing under it --
 
 // NOTE on reachability: `resolveBlockId` (above in this file) already refuses
 // an incoming block whose `kind` doesn't match its `id`'s own kind-letter
 // prefix (`{id:'h1', kind:'markdown', ...}` throws "does not start with the
 // 'h' letter"), on every normalizeBlock path amendRound uses -- so the exact
-// "amendRound swaps a block's kind at the same id" mechanism the audit
-// describes is NOT reachable through the normal write path today; a block's
+// "amendRound swaps a block's kind at the same id" mechanism
+// is NOT reachable through the normal write path today; a block's
 // kind is permanently fixed by its own id once minted. The fixture below
 // constructs the shape by direct mutation instead of through amendRound, to
 // prove resolveComment's OWN guard is correct defense-in-depth regardless --
@@ -1298,7 +1297,7 @@ check('resolveComment: U5 regression -- a dom anchor whose block\'s kind no long
     'a dom anchor minted against the block when it was "html" must not be resolved against its "markdown" replacement, even though "2.1" coincidentally addresses matching text there');
 });
 
-check('resolveComment: a dom anchor with no recorded mintBlockKind (a pre-ticket-08 comment) resolves exactly as before -- the guard is backward compatible', () => {
+check('resolveComment: a dom anchor with no recorded mintBlockKind (a comment predating that field) resolves exactly as before -- the guard is backward compatible', () => {
   const board = createBoard({ title: 'U5 backcompat', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
   const blockId = board.blocks[0].id;
   // Hand-built, bypassing applySubmit, exactly like an older archive's stored
@@ -1307,7 +1306,7 @@ check('resolveComment: a dom anchor with no recorded mintBlockKind (a pre-ticket
   assert.equal(resolveComment(board, board.comments[0]).resolved, true);
 });
 
-// --- audit U4 (routed to ticket 08's resolver-side half by the director) ------
+// --- an 'html' block's two client-side dom roots ------
 //
 // An 'html' block has two client-side roots but resolveComment used to assume
 // only one: `.html-stage` (the iframe) is chrome, reached only through
@@ -1344,10 +1343,9 @@ check('resolveComment: U4 regression -- a dom anchor rooted at an html block\'s 
     'a dom anchor rooted at the html block\'s own section (not the iframe) must still resolve -- the resolver must not assume block.kind === "html" means "always root at the iframe"');
 });
 
-// --- audit U1/U2: anchors into answer-derived content, re-measured with C1 fixed --
+// --- anchors into answer-derived content, re-measured with C1 fixed --
 //
-// Judgement call (ticket 08, see this repo's report for the full reasoning):
-// NOT fixed here, by design. DESIGN.md's Decision "An anchor survives
+// Judgement call: NOT fixed here, by design. The decision "An anchor survives
 // re-render, not editing" scopes the promise to content unchanged since post
 // time. U1's status line and U2's rank order both derive from `board.answers`,
 // which only changes when the reviewer answers/re-ranks and sends -- an edit
@@ -1356,15 +1354,15 @@ check('resolveComment: U4 regression -- a dom anchor rooted at an html block\'s 
 // shifts a rank order or an answer status, so it never loses either pin; only
 // an intervening Send that changes the answer does, and honestly reports what
 // it lost rather than silently vanishing or misattributing -- exactly what
-// criterion 4's second half promises. What DOES matter, and is fixed by C1
+// that decision's second half promises. What DOES matter, and is fixed by C1
 // above: before that fix, a rank re-order could resolve onto the WRONG
 // sibling (a silent misattribution) whenever one option's identity was a
 // prefix of another's; after it, the same re-order always degrades to an
 // honest "lost", never a wrong resolve. This locks in that re-measurement
-// using the audit's own scenario (options "Ship it" / "Ship it later" / "Drop
+// using the same scenario (options "Ship it" / "Ship it later" / "Drop
 // it", where "Ship it" is a literal prefix of "Ship it later").
 
-check('U1, re-verified (director could not reproduce it; confirmed here with the real board.mjs functions): a status-line comment is lost by the very Send that carries it, when that Send also answers the question', () => {
+check('U1, re-verified (previously not reproduced; confirmed here with the real board.mjs functions): a status-line comment is lost by the very Send that carries it, when that Send also answers the question', () => {
   const board = createBoard({
     title: 'U1',
     blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
@@ -1396,7 +1394,7 @@ check('U1, re-verified (director could not reproduce it; confirmed here with the
   // Judgement call (not a bug -- see this block's own header comment): the
   // status text this anchor names genuinely changed as a direct result of the
   // reviewer's own answer, in the same request. Reported lost, honestly, per
-  // criterion 4's second half.
+  // that decision's second half.
   assert.equal(resolved.resolved, false, 'answering the question changes the status line this anchor named -- must report lost, not silently keep resolving against now-false text');
   assert.equal(resolved.lost, 'status: unanswered');
 });
@@ -1468,7 +1466,7 @@ check('findBlock and resolveComment reach an html/mermaid block nested inside a 
 //
 // src/ui.mjs duplicates extractHint, stepsToPath and buildSteps as plain functions
 // inside its template string -- necessarily, since the served page has no import
-// graph at runtime (ticket 05's standalone-archive guarantee) -- rather than
+// graph at runtime (the standalone-archive guarantee) -- rather than
 // importing src/anchor.mjs. Nothing before this point ever checked that the two
 // copies actually agree: src/anchor.mjs's own copies are exercised directly above,
 // and ui.mjs's copy was previously only checked structurally (readonly guards,
@@ -1790,10 +1788,10 @@ check('a block with a failed resolution renders its error on the page instead of
   assert.ok(markup.includes('Could not resolve'));
 });
 
-// --- SPEC_HTMLREF.md: an html block may carry source: { path }, routed through the -
+// --- an html block may carry source: { path }, routed through the -
 // --- same resolveRef every other referenced kind uses, path-only ------------------
 
-check('SPEC_HTMLREF.md criterion 1: an html source ref renders a stage byte-identical to the same content posted by value', () => {
+check('an html source ref renders a stage byte-identical to the same content posted by value', () => {
   const file = path.join(fixturesDir, 'referenced-stage.html');
   const markup = '<div class="mock"><button>Ship it</button></div>';
   writeFileSync(file, markup, 'utf8');
@@ -1837,7 +1835,7 @@ check('SPEC_HTMLREF.md criterion 1: an html source ref renders a stage byte-iden
   assert.deepEqual(Object.keys(valueBlock).sort(), Object.keys(refBlock).sort());
 });
 
-check('SPEC_HTMLREF.md criterion 2: lines or section on an html source is refused with a block-level error naming markup slicing, never thrown', () => {
+check('lines or section on an html source is refused with a block-level error naming markup slicing, never thrown', () => {
   const file = path.join(fixturesDir, 'sliceable-stage.html');
   writeFileSync(file, '<html><body><p>one</p><p>two</p></body></html>', 'utf8');
 
@@ -1880,7 +1878,7 @@ check('SPEC_HTMLREF.md criterion 2: lines or section on an html source is refuse
   assert.ok(markup.includes('class="resolve-error"'));
 });
 
-check('SPEC_HTMLREF.md criterion 3: a referenced html file over the 512 KiB cap is refused as a block-level error, and the board still posts with its other blocks intact', () => {
+check('a referenced html file over the 512 KiB cap is refused as a block-level error, and the board still posts with its other blocks intact', () => {
   const big = path.join(fixturesDir, 'oversize-stage.html');
   writeFileSync(big, 'x'.repeat(MAX_REF_BYTES + 1), 'utf8');
   try {
@@ -2001,9 +1999,9 @@ check('the rank widget renders options in the stored order when there is a prior
   assert.deepEqual(order, ['C', 'A', 'B']);
 });
 
-// --- ticket 04: the history rail ---------------------------------------------------
+// --- the history rail ---------------------------------------------------
 //
-// DESIGN.md Decisions -> "A board is a session-scoped thread with rounds": "the
+// The decision "A board is a session-scoped thread with rounds": "the
 // sent round collapsed into a history rail with its answers still readable."
 
 check('a sent round renders as history with its prompt, choice and note still readable; a still-open round renders live', () => {
@@ -2046,7 +2044,7 @@ check('interactive controls inside a history round are rendered disabled, so a l
 });
 
 check('a history round\'s comment form is disabled too, on every CONTENT block kind -- not just markdown', () => {
-  // Audit finding: commentArea() didn't originally take `historical` at all, so a
+  // commentArea() didn't originally take `historical` at all, so a
   // fresh page load of a board with a sent round left every comment form fully
   // live even though the round's answer controls were correctly disabled --
   // divergent from what the client-side collapse (markRoundHistory) already did.
@@ -2163,9 +2161,9 @@ check('all five context kinds render into the page: markdown, code, mermaid, htm
 // gesture over these two kinds is inert too) no commentArea/pageDomPinLayer
 // either. The four content kinds -- markdown, mermaid, html, code -- are
 // unaffected: same commentButton, same commentArea, same pin-layer as before
-// this ADR entry, on a block that renders nothing at all (criterion 7).
+// this ADR entry, on a block that renders nothing at all.
 
-check('criterion 2: a question block renders no comment button, no comment form, no comment area, and no page-scoped pin-layer', () => {
+check('a question block renders no comment button, no comment form, no comment area, and no page-scoped pin-layer', () => {
   const board = createBoard({
     title: 'No comment chrome on question',
     blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -2187,7 +2185,7 @@ check('criterion 2: a question block renders no comment button, no comment form,
   assert.ok(!section.includes('class="pin-layer"'), 'a question block\'s own section must carry no page-scoped pin-layer');
 });
 
-check('criterion 2: a compare block renders no comment button, no comment form, no comment area, and no page-scoped pin-layer on the wrapper -- only its two nested sides may carry one', () => {
+check('a compare block renders no comment button, no comment form, no comment area, and no page-scoped pin-layer on the wrapper -- only its two nested sides may carry one', () => {
   const board = createBoard({
     title: 'No comment chrome on compare',
     blocks: [{
@@ -2212,7 +2210,7 @@ check('criterion 2: a compare block renders no comment button, no comment form, 
   assert.ok(!markup.slice(wrapperStart, gridStart).includes('class="pin-layer"'), 'no pin-layer between the compare wrapper\'s kicker and its grid');
 });
 
-check('criterion 18 / ADR.md entry 28: mermaid and html keep their comment button, form and pin-layer; markdown and code carry none of it', () => {
+check('ADR.md entry 28: mermaid and html keep their comment button, form and pin-layer; markdown and code carry none of it', () => {
   const board = createBoard({
     title: 'Only the rendered kinds keep their button',
     blocks: [
@@ -2242,7 +2240,7 @@ check('criterion 18 / ADR.md entry 28: mermaid and html keep their comment butto
   }
 });
 
-check('criterion 7: the whole-block comment button still opens the comment form when a content block has nothing to point at -- a failed reference, and an empty stage', () => {
+check('the whole-block comment button still opens the comment form when a content block has nothing to point at -- a failed reference, and an empty stage', () => {
   // A reference that failed to resolve renders a .resolve-error note instead of
   // content, but the button/form survive -- they live in the kicker/commentArea,
   // outside the `block.error` branch. Checked on `mermaid` rather than `code`:
@@ -2267,7 +2265,7 @@ check('criterion 7: the whole-block comment button still opens the comment form 
   assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${htmlId}"`), 'and still render the form that button opens');
 });
 
-check('criterion 17: a rendered kind nested inside a question\'s context or a compare side keeps its own comment button and form -- and a markdown one in the same slot keeps none', () => {
+check('a rendered kind nested inside a question\'s context or a compare side keeps its own comment button and form -- and a markdown one in the same slot keeps none', () => {
   const board = createBoard({
     title: 'Nested blocks are judged on their own kind',
     blocks: [
@@ -2307,7 +2305,7 @@ check('criterion 17: a rendered kind nested inside a question\'s context or a co
   }
 });
 
-// --- ticket 06: numbered pins on the element, in html-stage and mermaid blocks ----
+// --- numbered pins on the element, in html-stage and mermaid blocks ----
 
 check('html and mermaid blocks each render a stage-wrap + pin-layer, the anchor point src/ui.mjs positions numbered pins into', () => {
   const board = createBoard({
@@ -2327,12 +2325,11 @@ check('html and mermaid blocks each render a stage-wrap + pin-layer, the anchor 
 
 // --- the element-level gesture's discoverability lives in the toggle alone ----
 //
-// Found in the manual pass, 2026-07-29: the wiring was correct and unusable, so a
+// The wiring was correct and unusable, so a
 // permanent hint line was added to each stage's kicker. ADR.md 21 deleted it again:
 // a four-option `choose-between-rendered-variants` question repeated that line once
 // per option, in the place vertical space is scarcest, saying what the comment-mode
-// toggle was already made visible chrome to say (criterion 10's discoverability
-// requirement, and criterion 2 of SPEC_STAGES.md). Nothing replaces it -- the toggle
+// toggle was already made visible chrome to say. Nothing replaces it -- the toggle
 // carries discoverability alone now, on both stage kinds and in both page states.
 
 check('neither stage kind renders a hint in its kicker, and the stylesheet defines no .stage-hint rule at all', () => {
@@ -2359,7 +2356,7 @@ check('neither stage kind renders a hint in its kicker, and the stylesheet defin
 
 check('a mermaid node highlights under the cursor, and an html stage gets the same affordance injected into its own document', () => {
   // Mermaid renders into the page's own DOM, so the page stylesheet can reach it.
-  // Ticket 05: gated on body.comment-mode too, same as everything else this
+  // Gated on body.comment-mode too, same as everything else this
   // gesture touches -- a diagram node is no longer a standing exception.
   // Bound to a REAL mermaid 11 node id rather than to the selector's spelling. The
   // rules used to be asserted as literal `g[id^="flowchart-"]` text, which is how a
@@ -2388,7 +2385,7 @@ check('a mermaid node highlights under the cursor, and an html stage gets the sa
   });
   assert.ok(selectsReal, `no alternative in ${MERMAID_NODE_SELECTOR} selects a real mermaid 11 node id (${realNodeId}) — the hover affordance and pointer cursor would be invisible in every browser`);
 
-  // Ticket 10: the html stage is now a genuinely cross-origin iframe (no
+  // The html stage is now a genuinely cross-origin iframe (no
   // `allow-same-origin`), so nothing in src/ui.mjs can reach in to inject a
   // stylesheet or track a hover any more -- that lives entirely inside
   // stageAgentScript (src/render.mjs), the string inlined into every html
@@ -2424,7 +2421,7 @@ check('a mermaid node highlights under the cursor, and an html stage gets the sa
   assert.ok(!afterDecl.includes(`'${decl[1]}'`), 'the class name must not be repeated as a literal');
 });
 
-// --- DESIGN.md polish ticket 02, criterion 12 (html-stage half) -----------------
+// --- the sent-comment visual inertness fix (html-stage half) -----------------
 //
 // An element already carrying a SENT comment must be VISIBLY inert inside the
 // stage too, not just click-inert (src/ui.mjs's handleStageClick already
@@ -2516,7 +2513,7 @@ check('a dom-anchored comment renders its hint and number in the block\'s commen
   }, 1);
   const markup = renderedMarkup(renderBoardPage(board));
   assert.ok(markup.includes('#1 · Send'));
-  // Ticket 04: the lost tag names the stored hint ("Launch"), not the opaque
+  // The lost tag names the stored hint ("Launch"), not the opaque
   // ref ("9.9") -- see the matching resolveComment check above for why.
   assert.ok(markup.includes('#2 · lost: Launch'));
   assert.ok(markup.includes('comment-lost'));
@@ -2573,7 +2570,7 @@ check('a question carrying non-markdown context kinds normalises and renders the
 
 // --- ADR.md entry 26: full width, context as prose ---------------------------
 //
-// See DESIGN.md Decisions -> "The full-width rule keys on the presence of a
+// See the decision "The full-width rule keys on the presence of a
 // rendered stage, not on the widget" and ADR.md entry 26. Two changes, one
 // condition (src/render.mjs's questionCarriesStage): a question whose options
 // or context carry a rendered stage (an 'html' block, whole or nested inside a
@@ -2582,7 +2579,7 @@ check('a question carrying non-markdown context kinds normalises and renders the
 // comment button/form/pin-layer on the context items themselves. A question
 // with no stage anywhere renders exactly as it did before this entry: unchanged.
 
-check('criterion 15: a question whose CONTEXT carries a rendered stage renders full width -- no .question-context card, no second grid column', () => {
+check('a question whose CONTEXT carries a rendered stage renders full width -- no .question-context card, no second grid column', () => {
   const board = createBoard({
     title: 'Stage in context',
     blocks: [{
@@ -2599,7 +2596,7 @@ check('criterion 15: a question whose CONTEXT carries a rendered stage renders f
   assert.ok(markup.includes('class="html-stage"'), 'the stage itself must still render');
 });
 
-check('criterion 15: a question whose OPTIONS carry a rendered stage (choose-between-rendered-variants) ALSO renders full width when it has unrelated context too', () => {
+check('a question whose OPTIONS carry a rendered stage (choose-between-rendered-variants) ALSO renders full width when it has unrelated context too', () => {
   const board = createBoard({
     title: 'Stage in options, plain context',
     blocks: [{
@@ -2618,7 +2615,7 @@ check('criterion 15: a question whose OPTIONS carry a rendered stage (choose-bet
   assert.ok(markup.includes('class="question-context-prose"'));
 });
 
-check('criterion 15 (negative case): a question with NO rendered stage anywhere -- in options or context -- is genuinely unaffected and keeps the .question-context card (ablation: this must fail if questionCarriesStage or the branch reading it is ever deleted in favour of "always full width")', () => {
+check('negative case: a question with NO rendered stage anywhere -- in options or context -- is genuinely unaffected and keeps the .question-context card (ablation: this must fail if questionCarriesStage or the branch reading it is ever deleted in favour of "always full width")', () => {
   const board = createBoard({
     title: 'No stage anywhere',
     blocks: [{
@@ -2637,7 +2634,7 @@ check('criterion 15 (negative case): a question with NO rendered stage anywhere 
   assert.ok(markup.includes('Markdown'), 'the nested block\'s own kicker label must still render, unaffected');
 });
 
-check('criterion 15: a stage nested inside a compare side, inside a question\'s context, also counts as a rendered stage (blockCarriesStage recurses into compare)', () => {
+check('a stage nested inside a compare side, inside a question\'s context, also counts as a rendered stage (blockCarriesStage recurses into compare)', () => {
   const board = createBoard({
     title: 'Stage inside compare inside context',
     blocks: [{
@@ -2659,7 +2656,7 @@ check('criterion 15: a stage nested inside a compare side, inside a question\'s 
   assert.ok(markup.includes('class="html-stage"'));
 });
 
-check('criterion 16: a stage-carrying question\'s context renders no card, no border-carrying wrapper, and no kicker -- only prose, above the options', () => {
+check('a stage-carrying question\'s context renders no card, no border-carrying wrapper, and no kicker -- only prose, above the options', () => {
   const board = createBoard({
     title: 'No card, no kicker',
     blocks: [{
@@ -2699,7 +2696,7 @@ check('criterion 16: a stage-carrying question\'s context renders no card, no bo
   // ADR.md entry 26's "no comment control" read across every kind at once. Entry
   // 28 supersedes that half of 26: the rule is drawn on kind and never on
   // position, so the html item here keeps the affordance it has everywhere else,
-  // and the markdown item beside it keeps none. Criterion 16's own words -- "no
+  // and the markdown item beside it keeps none. The words -- "no
   // card, no border, no kicker" -- are asserted above and are untouched by that:
   // a comment button is none of the three.
   const proseItem = markdownContextId => {
@@ -2721,7 +2718,7 @@ check('criterion 16: a stage-carrying question\'s context renders no card, no bo
   assert.ok(promptIdx < contextIdx && contextIdx < optionsIdx, 'context prose must sit under the prompt and above the options');
 });
 
-check('criteria 16 + 18: a code block in a stage-carrying question\'s context renders as plain prose -- no per-line anchor spans, no comment affordance, and no ReferenceError on the way', () => {
+check('a code block in a stage-carrying question\'s context renders as plain prose -- no per-line anchor spans, no comment affordance, and no ReferenceError on the way', () => {
   // The prose context path is the one place `code` is rendered by something
   // other than renderCodeBlock. When ADR.md entry 28 deleted renderCodeLines it
   // was still being CALLED from there, so this whole branch threw
@@ -2752,9 +2749,9 @@ check('criteria 16 + 18: a code block in a stage-carrying question\'s context re
   assert.ok(!markup.includes(`data-block-id="${codeId}" data-anchor-kind="block"`), 'and no comment button');
 });
 
-// --- ticket 05: snapshot and standalone archive ------------------------------------
+// --- snapshot and standalone archive ------------------------------------
 //
-// See DESIGN.md Decisions -> "JSON is truth, the page is a projection" and
+// See the decisions "JSON is truth, the page is a projection" and
 // "Questions by value, content by reference, snapshotted at post time". The HTTP
 // check (test/check-http.mjs) covers the store-mutation and end-to-end
 // rewrite/delete guarantees; these are the pure-function halves: renderBoardPage
@@ -2823,10 +2820,10 @@ check('a board whose referenced source was rewritten, then deleted, still render
   assert.ok(!markup.includes('COMPLETELY REWRITTEN'));
 });
 
-// --- ticket 05: standalone read-only archive ----------------------------------------
+// --- standalone read-only archive ----------------------------------------
 //
-// Chrome-automated checks of the interactive layer are out of scope (DESIGN.md
-// Testing), so this is a structural check on the shipped mechanism rather than a
+// Chrome-automated checks of the interactive layer are out of scope,
+// so this is a structural check on the shipped mechanism rather than a
 // simulated click: the client script (src/ui.mjs, exported as a plain string) must
 // decide read-only mode synchronously from the page's own protocol, and every
 // listener that would mutate answer/comment state or reach the network must guard
@@ -2909,20 +2906,20 @@ check('every ui.mjs listener that mutates answer/comment state or submits guards
   assert.ok(/^\s*if \(readonly\) return;/.test(submitBody), 'submitBoard must return early in readonly mode');
 });
 
-// --- ticket 06: the click-to-comment gesture must be inert in read-only mode, ---
+// --- the click-to-comment gesture must be inert in read-only mode, ---
 // exactly like every other mutating listener above, and pin rendering (which is
 // what makes an archived board still show its pins) must NOT be gated on it.
 
 check('the html-stage and mermaid element-click listeners guard on readonly too, so click-to-comment is inert in read-only mode', () => {
   const bodies = listenerBodies(ui);
   const anchorClickBodies = bodies.filter(b => /openCommentForm\(/.test(b));
-  // Ticket 03 named 4 listeners that open a comment form: .comment-btn, the
+  // 4 listeners open a comment form: .comment-btn, the
   // html-stage click, the mermaid click, and the generic comment-mode click.
-  // Ticket 10 moved the html-stage one behind a postMessage dispatch --
+  // The html-stage one now sits behind a postMessage dispatch --
   // `openCommentForm(` no longer appears literally inside an
   // `addEventListener` callback for that case, only inside the named
-  // `handleStageClick` helper the single `message` listener calls. Ticket 05 of
-  // The polish batch (DESIGN.md) did the same to the mermaid one, for the same kind of reason:
+  // `handleStageClick` helper the single `message` listener calls. The same was
+  // done to the mermaid one, for the same kind of reason:
   // a diagram node can now be clicked in TWO places (inline, and inside the
   // lens) and both must mint the identical anchor, so both call one named
   // `mintMermaidComment` instead of each opening a form themselves. The literal
@@ -2938,11 +2935,11 @@ check('the html-stage and mermaid element-click listeners guard on readonly too,
   assert.ok(/openCommentForm\(/.test(stageClickBody), 'handleStageClick must open a comment form');
   assert.ok(/\breadonly\b/.test(stageClickBody), 'handleStageClick opens a comment form without checking readonly');
 
-  // DESIGN.md polish ticket 05: the mermaid half. One minting function, and every
+  // The mermaid half. One minting function, and every
   // listener that reaches it carries the same readonly guard the inline mermaid
   // listener used to carry on its own -- including the lens's, which is the
   // whole of "the comment gesture inside it is gated exactly like every other
-  // comment gesture" (the spec's own Decision on the readonly lens).
+  // comment gesture".
   const mintBody = namedFunctionBody(ui, 'mintMermaidComment');
   assert.ok(mintBody, 'mintMermaidComment not found -- both diagram-node click paths mint through it');
   assert.ok(/openCommentForm\(/.test(mintBody), 'mintMermaidComment must open a comment form');
@@ -2967,7 +2964,7 @@ check('pin rendering is never gated by readonly, only the click/hover gesture is
   assert.ok(guardIdxMermaid !== -1, 'wireMermaidBlock must have a readonly early-return gating the click listener');
   assert.ok(pinIdxMermaid < guardIdxMermaid, 'renderMermaidPins must run before the readonly early-return, not after -- otherwise an archived board loses its pins');
 
-  // Ticket 10: the html-stage case no longer has one function with an
+  // The html-stage case no longer has one function with an
   // ordering to pin down -- pin positioning (handleStageReady ->
   // requestStagePositions, fired the moment a stage announces itself
   // 'ready') and the click gesture (handleStageClick) are separate functions
@@ -2986,24 +2983,24 @@ check('pin rendering is never gated by readonly, only the click/hover gesture is
   assert.ok(!/\breadonly\b/.test(requestBody), 'requestStagePositions must never gate on readonly -- an archived stage still needs its pins positioned');
 });
 
-// --- the lens's pointer capture (DESIGN.md polish ticket 05) ---------------------
+// --- the lens's pointer capture ---------------------
 //
 // Asserted structurally, and only because the behaviour is genuinely out of
 // reach here: there is no such thing as pointer capture in this repo's DOM
 // stand-in, so a check that drives the lens there cannot tell the two versions
-// apart. It is not a hypothetical -- it was MEASURED in Chrome during this
-// ticket. Taking the capture on 'pointerdown' makes the browser retarget
+// apart. It is not a hypothetical -- it was MEASURED in Chrome. Taking the
+// capture on 'pointerdown' makes the browser retarget
 // everything after it, the resulting 'click' included, at the capture element,
 // so the lens's click handler saw '.lens-stage' instead of the diagram node the
 // pointer was over and clicking a node in the lens silently did nothing, with
-// every check in test/check-mermaid-anchor.mjs green. Same precedent as ticket
-// 02's stage half (see its log): the shape is pinned here, the behaviour rests
+// every check in test/check-mermaid-anchor.mjs green. Same precedent as
+// before: the shape is pinned here, the behaviour rests
 // on the in-browser drive.
 //
 // The limit of this check, stated rather than left to be discovered a second
 // time: it constrains the ORDER of two lines and nothing else. It passed
 // throughout the period when the threshold those lines sit behind measured the
-// wrong quantity entirely (finding D5 -- `drag.x/y` reassigned every move, so
+// wrong quantity entirely (`drag.x/y` reassigned every move, so
 // the gate asked "did this ONE FRAME move more than 3px" and a slow pan never
 // crossed it, leaving both lines permanently unreached), and it still passes
 // against a pointermove handler whose first statement is `return;`. The
@@ -3045,10 +3042,10 @@ check('renderBoardPage always emits the readonly-banner element in the body mark
   assert.ok(renderedMarkup(renderBoardPage(board)).includes('class="readonly-banner"'));
 });
 
-// --- ticket 04: SSE push is applied additively, never a wholesale re-render -----
+// --- SSE push is applied additively, never a wholesale re-render -----
 //
-// Field preservation on a push is browser-DOM behaviour, which DESIGN.md's
-// Testing section explicitly puts out of automated scope ("checked by opening a
+// Field preservation on a push is browser-DOM behaviour, which is
+// explicitly out of automated scope ("checked by opening a
 // board and using it"). What IS provable here without a browser: the client script
 // never wipes the live board container and only ever inserts/replaces targeted
 // nodes, and it subscribes over SSE only in the same circumstances every other
@@ -3083,7 +3080,7 @@ check('a push seeds newly-appeared block answers through the same computeBoardPa
 });
 
 check('a push wires the freshly-parsed fragment BEFORE inserting it into the live document -- never re-wiring blocks the push did not touch', () => {
-  // Real bug found and fixed during audit: wireRoot(container) / wireRoot(roundSection)
+  // Real bug found and fixed: wireRoot(container) / wireRoot(roundSection)
   // called AFTER moving the new nodes into the live #blocks / round section
   // re-registers every listener on every block ALREADY there too (wireRoot has no
   // idempotence guard -- an already-wired element gets a second listener set).
@@ -3111,10 +3108,10 @@ check('a push wires the freshly-parsed fragment BEFORE inserting it into the liv
   assert.ok(wireIdxB < replaceIdxB, 'wireRoot(frag) must run before the amended blocks replace/join the live round section');
 });
 
-// --- ticket 04 / ticket 06 merge: element-level anchoring must be wired on -----
+// --- element-level anchoring must be wired on -----
 // content that arrives over a push, not just on what was on the page at hydrate.
 //
-// Before this merge, ticket 06's html-stage wiring was a separate, unscoped,
+// Before this merge, the html-stage wiring was a separate, unscoped,
 // run-once-at-load pass (`qsa('.html-stage')`, no root, executed exactly once
 // right after hydrate) -- correct for round 1, but silently inert for any html
 // or mermaid stage that arrives in a round pushed later over SSE, since nothing
@@ -3124,19 +3121,19 @@ check('a push wires the freshly-parsed fragment BEFORE inserting it into the liv
 // proves anchoring wiring genuinely lives inside wireRoot (not bolted on as a
 // second, separate pass); the second proves every DOM-insertion branch that
 // handles a push actually calls wireRoot on the content it just inserted. Neither
-// fact alone is sufficient -- ticket 04's push code could wire a subtree that
+// fact alone is sufficient -- the push code could wire a subtree that
 // never wires anchors, or the anchoring wiring could live somewhere a push never
 // reaches -- so both need to hold, and did not both hold on either side of this
 // merge before it was resolved this way.
 
-check('element-level anchoring on a pushed html stage needs no per-push wiring pass at all -- ticket 10 replaced the root-scoped DOM wiring this check used to require with a page-level, push-agnostic message listener', () => {
-  // Before ticket 10: `wireHtmlStage` reached into `frame.contentDocument`
+check('element-level anchoring on a pushed html stage needs no per-push wiring pass at all -- a page-level, push-agnostic message listener replaced the root-scoped DOM wiring this check used to require', () => {
+  // Previously: `wireHtmlStage` reached into `frame.contentDocument`
   // directly, so a pushed stage had to be found and wired EXPLICITLY, inside
   // wireRoot, scoped to whatever subtree a push actually inserted -- an
   // unscoped, run-once-at-load pass was silently inert for anything pushed
-  // later (see this section's own header comment on the ticket 04/06 merge
-  // this check was originally written to prove). Ticket 10 drops
-  // `allow-same-origin`, so that direct reach is impossible now regardless of
+  // later (see this section's own header comment on the merge
+  // this check was originally written to prove). Dropping
+  // `allow-same-origin` makes that direct reach impossible now regardless of
   // scoping -- and, structurally, unnecessary: a stage's own agent script
   // announces itself 'ready' the moment it runs, wherever/whenever its
   // iframe ends up in the document, and ONE page-level
@@ -3144,14 +3141,14 @@ check('element-level anchoring on a pushed html stage needs no per-push wiring p
   // inside wireRoot, never re-registered per push) reacts to it. So the
   // property this check now proves is the opposite shape of before: there is
   // NO root-scoped html-stage wiring loop left inside wireRoot to find (an
-  // ablation that reintroduced one would be regressing toward the pre-
-  // ticket-10 architecture, not fixing anything), and exactly one page-level
+  // ablation that reintroduced one would be regressing toward the old
+  // architecture, not fixing anything), and exactly one page-level
   // message listener exists, declared outside wireRoot.
   const wireRootBody = namedFunctionBody(ui, 'wireRoot');
   assert.ok(wireRootBody, 'wireRoot not found');
   assert.ok(
     !wireRootBody.includes("qsa('.html-stage'"),
-    'wireRoot must not contain an html-stage-specific wiring loop any more -- ticket 10 replaced it with a page-level message listener; a match here means the old, contentDocument-reaching architecture crept back in',
+    'wireRoot must not contain an html-stage-specific wiring loop any more -- a page-level message listener replaced it; a match here means the old, contentDocument-reaching architecture crept back in',
   );
 
   const messageListenerSites = [...ui.matchAll(/window\.addEventListener\('message', function \(ev\) \{/g)];
@@ -3169,7 +3166,7 @@ check('element-level anchoring on a pushed html stage needs no per-push wiring p
   // anchorable -- comment mode on, click the pushed element, a pin lands --
   // lives in test/check-anchor-push.mjs, driven through the real
   // subscription src/ui.mjs itself opens, exactly the kind of check
-  // DESIGN.md's Testing section asks for over a structural one like
+  // that's asked for over a structural one like
   // this file's own checks.
 });
 
@@ -3194,7 +3191,7 @@ check('a round pushed over SSE has its html/mermaid stages wired for anchoring: 
 });
 
 check('an amend that replaces a block clears the reviewer\'s local field state for that block, rather than leaving a stale, invisible value behind', () => {
-  // Real bug found and fixed during audit: a replace-amend re-renders the block
+  // Real bug found and fixed: a replace-amend re-renders the block
   // fresh from the server (an open round's textarea comes back empty, since
   // board.answers has no entry yet), but the client's own `selections`/`notes`
   // dicts were left untouched -- so a reviewer who had typed something into a
@@ -3224,7 +3221,7 @@ check('the emitted page has no external script or stylesheet reference -- everyt
 });
 
 // =================================================================================
-// Audit regressions (2026-07-28). Each check below fails without its fix; the
+// Regressions. Each check below fails without its fix; the
 // ablation that proves it is named in the check's own comment.
 // =================================================================================
 
@@ -3364,7 +3361,7 @@ check('C2: an ordinary relative reference inside the project still resolves, and
   assert.ok(resolvePath({ path: 'inside.txt' }, fixturesDir).path.endsWith('inside.txt'));
 });
 
-// --- the reference allowlist (ADR.md entry 3, DESIGN.md polish criterion 13) -------
+// --- the reference allowlist (ADR.md entry 3) -------
 //
 // References now resolve inside `cwd` OR inside a configured root (default
 // `~/.claude`), and nowhere else. This is the one security boundary this batch moves,
@@ -3378,7 +3375,7 @@ const OUTSIDE_REFUSAL = p => `refusing reference ${p}: resolves outside the boar
 
 /** Run `fn` with CLAUDE_BOARD_REF_ROOTS set to `spec` (or unset, for `undefined`),
  * restoring whatever this process actually has afterwards. The daemon reads the
- * variable, so the end-to-end half of criterion 13 has to go through it rather than
+ * variable, so the end-to-end half of this rule has to go through it rather than
  * through the `roots` parameter. */
 function withRefRoots(spec, fn) {
   const had = Object.prototype.hasOwnProperty.call(process.env, 'CLAUDE_BOARD_REF_ROOTS');
@@ -3472,7 +3469,7 @@ check('allowlist: a path outside BOTH cwd and the allowlist is still refused, wi
   }
 });
 
-check('SPEC_HTMLREF.md criterion 4: a referenced html path outside cwd and every allowlisted root is refused as a block-level error, on the same terms as any other kind\'s ref', () => {
+check('a referenced html path outside cwd and every allowlisted root is refused as a block-level error, on the same terms as any other kind\'s ref', () => {
   const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-html-outside-'));
   try {
     const secret = path.join(outside, 'secret.html');
@@ -3579,7 +3576,7 @@ check('allowlist: an unusable configured root is dropped, never widened and neve
   }
 });
 
-// --- the 2026-07-31 audit of that boundary (S1-S4, S7-S9) ------------------------
+// --- that boundary, further hardening (S1-S4, S7-S9) ------------------------
 //
 // Everything above asserts the allowlist does what ADR.md entry 3 says. Everything
 // below asserts the things it turned out to ALSO do. Each check names the finding it
@@ -3602,7 +3599,7 @@ check('S1/S3: an absent CLAUDE_BOARD_REF_ROOTS grants nothing, and the default i
   // whole is also .credentials.json, settings.json, shell snapshots, every project's
   // transcripts and every plugin's private state.
   //
-  // The fourth entry is the render directory (2026-08-05), so a stage an agent just
+  // The fourth entry is the render directory, so a stage an agent just
   // rendered can be posted by reference instead of inlined by value. It is pinned here
   // for a second reason beyond drift: it must stay a directory only this user writes to.
   // A world-writable shared root (/tmp) was the rejected alternative -- a default ships
@@ -3795,7 +3792,7 @@ check('S2: a regular file renamed over the path between the open and the read ca
   // do NOT pin it. Both of them swap in a SYMLINK, which O_NOFOLLOW_ANY refuses at
   // openSync before any read is reached -- so they cover the flag and say nothing about
   // where the bytes come from. Reverting `readFileSync(fd)` to `readFileSync(abs)` left
-  // the entire suite green (found by mutation testing, 2026-07-31): the flag was masking
+  // the entire suite green (found by mutation testing): the flag was masking
   // the descriptor.
   //
   // The two defend different attacks. The flag closes the symlink swap. The descriptor
@@ -4122,7 +4119,7 @@ check('N2/cap: a by-value text or html block over the same cap is a loud 400-abl
   assert.throws(() => createBoard({ title: 't', blocks: [{ kind: 'markdown', text: oversize }] }), /over the .*-byte cap/);
 });
 
-check("SPEC_HTMLREF.md criterion 5: the by-value over-cap message no longer tells the caller a source reference raises the cap, because it does not", () => {
+check("the by-value over-cap message no longer tells the caller a source reference raises the cap, because it does not", () => {
   // Ablation: revert the message in src/board.mjs's byValueText to "use a source
   // reference instead" and this fails -- a reference to content this size is refused
   // by resolveRef's own whole-file fstat check (src/resolve.mjs) before any slicing,
@@ -4154,7 +4151,7 @@ check("SPEC_HTMLREF.md criterion 5: the by-value over-cap message no longer tell
 // Every fixture here is a shape where the browser's parser inserts or auto-closes an
 // element. src/ui.mjs mints the index chain against the LIVE dom; src/anchor.mjs
 // resolves it against the snapshot. A one-node disagreement makes a live, on-screen
-// element report LOST (breaking acceptance criterion 10 and this module's own "a
+// element report LOST (breaking this module's own "a
 // live anchor is never misreported lost" invariant), and the pin renders pin-lost.
 //
 // Ablation for all four: revert parseHtmlTree to the tag-omission-free version (no
@@ -4312,7 +4309,7 @@ check('N8: a heading slug can never collide with a list-item id', () => {
   assert.equal(byRef.get('risks-li1'), 'first risk');
 });
 
-// --- P3: criterion 5 holds unconditionally ---------------------------------------
+// --- P3: this rule holds unconditionally ---------------------------------------
 
 check('P3: a headingless markdown source still yields one anchor per top-level list item', () => {
   // Ablation: remove the SYNTHETIC_SECTION assignment and this returns anchors: [],
@@ -4357,7 +4354,7 @@ check('L2: a single/multi/rank/choose-between-rendered-variants question with ze
   assert.equal(ok.blocks[0].widget, 'text');
 });
 
-// --- SPEC_MIGRATION.md criterion 2: choose-between-rendered-variants --------------
+// --- choose-between-rendered-variants --------------
 
 check('choose-between-rendered-variants: each option carries a nested block normalized through the same path as a compare side\'s, minting a real, unique id', () => {
   const board = createBoard({
@@ -4461,7 +4458,7 @@ check('choose-between-rendered-variants: renders each option\'s nested block thr
   assert.ok(!/<button[^>]*class="variant-card/.test(markup));
 });
 
-check('choose-between-rendered-variants (SPEC_STAGES.md criterion 1): an html-kind option carries the full-width modifier class, a non-html option does not (ablation: delete the stageModifier line in renderVariantOption and the first assertion fails)', () => {
+check('choose-between-rendered-variants: an html-kind option carries the full-width modifier class, a non-html option does not (ablation: delete the stageModifier line in renderVariantOption and the first assertion fails)', () => {
   const board = createBoard({
     title: 'variants',
     blocks: [{
@@ -4489,7 +4486,7 @@ check('choose-between-rendered-variants (SPEC_STAGES.md criterion 1): an html-ki
     'src/styles.mjs must span an html-kind option across every grid column, not size it like the other columns');
 });
 
-check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11, fallback): a variant option\'s stage starts no shorter than the 320px floor it replaces -- criterion 10 must not cost a mock height while its report is still in flight or never arrives (ablation: this fails if the starting height in src/styles.mjs\'s .choice-variant .html-stage rule is ever dropped below 320px)', () => {
+check('choose-between-rendered-variants (fallback): a variant option\'s stage starts no shorter than the 320px floor it replaces -- the floor must not cost a mock height while its report is still in flight or never arrives (ablation: this fails if the starting height in src/styles.mjs\'s .choice-variant .html-stage rule is ever dropped below 320px)', () => {
   // Real Chrome measurement (see this feature's own entry in QUIRKS.md and
   // src/render.mjs's "WHEN this runs" comment): a stage's first accurate
   // report is necessarily deferred past this document's own first layout
@@ -4547,7 +4544,7 @@ function withCapturedRAF(fn) {
   }
 }
 
-check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11): a variant option\'s stage grows to the height it reports, clamped at the cap -- never past it, and never before its own rendering opportunity (ablation 1: change handleStageHeight\'s Math.min(data.height, STAGE_HEIGHT_CAP) to just data.height and the "taller than the cap" assertion fails; ablation 2: change reportHeightAfterLayout\'s body back to a bare reportHeight() call and the "not yet applied" assertion fails)', () => {
+check('choose-between-rendered-variants: a variant option\'s stage grows to the height it reports, clamped at the cap -- never past it, and never before its own rendering opportunity (ablation 1: change handleStageHeight\'s Math.min(data.height, STAGE_HEIGHT_CAP) to just data.height and the "taller than the cap" assertion fails; ablation 2: change reportHeightAfterLayout\'s body back to a bare reportHeight() call and the "not yet applied" assertion fails)', () => {
   const board = createBoard({
     title: 'variants',
     blocks: [{
@@ -4583,12 +4580,12 @@ check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11): a varia
   });
 
   assert.equal(frames[0].style.height, '180px',
-    'criterion 10: a mock shorter than the cap must grow to the height it actually reports, not sit at a fixed floor');
+    'a mock shorter than the cap must grow to the height it actually reports, not sit at a fixed floor');
   assert.equal(frames[1].style.height, '600px',
-    'criterion 11: a mock taller than the cap must be clipped there, not at its full reported height (4000px)');
+    'a mock taller than the cap must be clipped there, not at its full reported height (4000px)');
 });
 
-check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11, scope): a STANDALONE html stage\'s reported height is never applied -- criterion 13\'s own floor/resize stays untouched, this feature is variant-option-only (ablation: delete handleStageHeight\'s frame.closest(\'.choice-variant\') gate and this fails, because the report would then apply everywhere)', () => {
+check('choose-between-rendered-variants (scope): a STANDALONE html stage\'s reported height is never applied -- the existing floor/resize stays untouched, this feature is variant-option-only (ablation: delete handleStageHeight\'s frame.closest(\'.choice-variant\') gate and this fails, because the report would then apply everywhere)', () => {
   const board = createBoard({
     title: 'standalone',
     blocks: [{ kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' }],
@@ -4600,7 +4597,7 @@ check('choose-between-rendered-variants (SPEC_STAGES.md criteria 10/11, scope): 
 });
 
 check('choose-between-rendered-variants: an html option\'s iframe is rendered pointer-events: none -- a real click can never reach it, only the card around it can ever record a pick', () => {
-  // SECURITY, not polish (director review): without this, a real, trusted
+  // SECURITY, not polish: without this, a real, trusted
   // click over the visible mock content of an html-kind option would land
   // INSIDE the iframe rather than on the card, and the stage is untrusted,
   // agent-authored content -- see src/render.mjs's "NO 'select' MESSAGE,
@@ -4942,7 +4939,7 @@ check('N3: answers to questions nested in a compare side or a question\'s contex
 check('N11: the STORED json carries an explicit unanswered entry for an untouched question, nested ones included', () => {
   // Ablation: delete the unanswered-synthesis loop in applySubmit. The packet still
   // looks right (buildPacket has its own fallback), which is why the suite stayed
-  // green -- but the archive, which criteria 4 and 14 rest on, can no longer tell
+  // green -- but the archive can no longer tell
   // "the reviewer left this blank" from "this round was never submitted".
   const board = createBoard({
     title: 't',
@@ -5020,7 +5017,7 @@ check('N1: a leading C0 control byte does not smuggle javascript: past the schem
   const clean = mdToHtml('[x](\x01https://example.com/a)');
   assert.ok(clean.includes('href="https://example.com/a"'));
   assert.ok(!clean.includes('\x01'));
-  // ticket 10's original guarantees still hold
+  // the original guarantees still hold
   assert.ok(mdToHtml('[t](javascript:alert(1))').includes('href="#"'));
   assert.ok(mdToHtml('[t](https://x.se)').includes('href="https://x.se"'));
 });
@@ -5100,10 +5097,13 @@ check('C2b: $HOME, a directory above it, a non-directory and a path that does no
   const home = os.homedir();
   assert.throws(() => createBoard({ title: 't', cwd: home, blocks: [] }), /too broad/);
   assert.throws(() => createBoard({ title: 't', cwd: path.dirname(home), blocks: [] }), /too broad/);
+  // A non-directory and a path that does not exist share ONE refusal, deliberately:
+  // distinguishing them made the message an existence-and-type oracle over the whole
+  // disk. Assert both are refused, never that they are told apart.
   const file = path.join(fixturesDir, 'not-a-dir.txt');
   writeFileSync(file, 'x', 'utf8');
-  assert.throws(() => createBoard({ title: 't', cwd: file, blocks: [] }), /not a directory/);
-  assert.throws(() => createBoard({ title: 't', cwd: path.join(fixturesDir, 'nope'), blocks: [] }), /does not exist/);
+  assert.throws(() => createBoard({ title: 't', cwd: file, blocks: [] }), /not a readable directory/);
+  assert.throws(() => createBoard({ title: 't', cwd: path.join(fixturesDir, 'nope'), blocks: [] }), /not a readable directory/);
   assert.throws(() => createBoard({ title: 't', cwd: 'relative/project', blocks: [] }), /must be an absolute path/);
 });
 
@@ -5205,11 +5205,11 @@ check('N10: a line range past the end of a newline-terminated file errors instea
 
 // --- P1: Discuss in chat, the second way out -----------------------------------
 //
-// DESIGN.md Decisions -> "Two ways out, plus a wall clock" / acceptance
-// criterion 7. The whole path behind it (POST /submit {action:'discuss'},
+// The decision "Two ways out, plus a wall clock". The whole path behind it
+// (POST /submit {action:'discuss'},
 // board.state='discuss', the shim's stop-posting branch) shipped and is checked
 // elsewhere; for a long stretch the AFFORDANCE did not exist at all, so half of
-// criterion 7 was dead with every server-side check still green. These assertions
+// that promise was dead with every server-side check still green. These assertions
 // are against the rendered markup with the <style> block, the #board-data payload
 // and the client script stripped (renderedMarkup above) -- the string "discuss"
 // occurs in the inlined JSON's `state` field and in src/ui.mjs's own source, so an
@@ -5233,7 +5233,7 @@ check('the send bar carries Discuss in chat beside Send, in the rendered markup'
 
 check('Discuss posts the same body as Send through one shared submit path, differing only in action', () => {
   // One fetch, one body-building path: a second, hand-copied fetch is how Discuss
-  // would quietly come to collect less than Send does (DESIGN.md: it returns
+  // would quietly come to collect less than Send does (it returns
   // "whatever is filled in" -- partial answers are the point).
   const submitFetches = [...ui.matchAll(/fetch\([^)]*\/submit/g)];
   assert.equal(submitFetches.length, 1, 'both actions must share one submit fetch, not carry two divergent copies');
@@ -5270,8 +5270,8 @@ check('Send also requests notification permission -- the one click guaranteed to
 
 // --- P6: a queued comment gets its pin immediately ------------------------------
 //
-// DESIGN.md calls the batching the win ("queue a dozen comments, send once");
-// criterion 10 says "a numbered pin appears on the element". The queue-side of
+// The batching is the win ("queue a dozen comments, send once");
+// the promise is "a numbered pin appears on the element". The queue-side of
 // that used to push onto pendingComments and never touch a pin layer, so no pin
 // appeared until after Send. commentsWithPending is extracted and evaluated here
 // rather than pattern-matched, so the numbering is actually exercised.
@@ -5341,11 +5341,11 @@ check('a pending pin is visually distinguishable from a sent one, in both the cl
   assert.ok(styles.includes('.anchor-pin.pin-pending'), 'src/styles.mjs must style .pin-pending differently from a sent pin');
 });
 
-// --- DESIGN.md polish ticket 02: the pending-comment queue, pure -----------------
+// --- the pending-comment queue, pure -----------------
 //
-// findPendingCommentForAnchor (criterion 1's "reopen and edit", also reused for
-// criterion 12's "already sent") and removePendingComment (criterion 2's delete
-// control) are the two functions this ticket's own log calls out for
+// findPendingCommentForAnchor ("reopen and edit", also reused for
+// "already sent") and removePendingComment (the delete
+// control) are the two functions called out for
 // extraction, exercised here with no DOM at all -- src/ui.mjs only ever embeds
 // this exact src/anchor.mjs source via .toString(), so what is checked here is
 // what actually runs on the page.
@@ -5364,8 +5364,8 @@ check('findPendingCommentForAnchor finds a queued comment by anchor, across ever
   // The match is on blockId + anchor kind/ref, not hint/domRef/label -- a
   // caller re-deriving the SAME clicked element's anchor a second time is not
   // guaranteed to recompute byte-identical cosmetic fields (composeHint can
-  // legitimately read different live text between two clicks), and criterion
-  // 1 must still recognise it as the same target.
+  // legitimately read different live text between two clicks), and this
+  // must still recognise it as the same target.
   assert.equal(findPendingCommentForAnchor(pending, 'h1', { kind: 'dom', ref: '1.2', hint: 'a different hint now' }).id, 2);
   // A ref/kind/block that was never queued is simply not found.
   assert.equal(findPendingCommentForAnchor(pending, 'h1', { kind: 'dom', ref: '9.9' }), undefined);
@@ -5373,7 +5373,7 @@ check('findPendingCommentForAnchor finds a queued comment by anchor, across ever
   assert.equal(findPendingCommentForAnchor(pending, 'nope', { kind: 'md', ref: 'findings' }), undefined, 'a different blockId must not match');
 });
 
-check('findPendingCommentForAnchor never matches a SENT comment -- criterion 3\'s "no edit path" holds at the function level, not just by caller discipline', () => {
+check('findPendingCommentForAnchor never matches a SENT comment -- the "no edit path" rule holds at the function level, not just by caller discipline', () => {
   // A comment shaped exactly like a sent one (it carries an 'n', the way
   // board.comments entries do) but living in a list that is NOT the page's
   // pendingComments -- the point being that this function has no notion of
@@ -5385,7 +5385,7 @@ check('findPendingCommentForAnchor never matches a SENT comment -- criterion 3\'
   assert.equal(findPendingCommentForAnchor(pendingComments, 'h1', { kind: 'dom', ref: '1.2' }), undefined,
     'a sent comment living outside pendingComments must never be found by this function');
   // And the SAME function, called with board.comments itself (exactly what
-  // src/ui.mjs's isSentAnchor does for criterion 12), DOES find it -- proving
+  // src/ui.mjs's isSentAnchor does), DOES find it -- proving
   // the function is a plain list search, not silently sent-aware.
   assert.equal(findPendingCommentForAnchor(sentComments, 'h1', { kind: 'dom', ref: '1.2' }).text, 'already sent');
 });
@@ -5401,7 +5401,7 @@ check('removePendingComment removes the middle of three, and the remaining two r
   assert.deepEqual(after.map(c => c.id), [10, 12], 'the other two must survive, in their original relative order');
   // Provisional numbers are never stored on an entry -- they are derived from
   // POSITION (nextCommentNumber() + index, src/ui.mjs's commentsWithPending),
-  // so re-deriving them from the shorter array IS the renumbering criterion 2
+  // so re-deriving them from the shorter array IS the renumbering this
   // requires: what were provisional #2 and #3 become #2 and #3 again (of two),
   // contiguous, with no gap where the deleted middle one used to be.
   const base = 1; // as if board.comments is empty, nextCommentNumber() === 1
@@ -5423,7 +5423,7 @@ check('removePendingComment with an id that matches nothing queued is a no-op', 
 
 // --- P2 (page side): mark the tab and notify, never steal focus ---------------
 //
-// DESIGN.md Decisions -> "Open once, then badge and notify": the page's own
+// The decision "Open once, then badge and notify": the page's own
 // amber tile carrying a bold ink numeral on the favicon, and a macOS
 // notification instead of a focus steal when the tab is open but unfocused.
 // The title used to carry a "(n) " prefix; it lost it for good -- a numeral
@@ -5454,7 +5454,7 @@ check('the favicon mark draws the page\'s own amber tile with a bold ink numeral
   assert.ok(draw, 'expected drawFavicon in src/ui.mjs');
   assert.match(draw, /createElement\('canvas'\)/);
   assert.match(draw, /toDataURL\(/, 'the mark must be a data URI the page draws, not a fetched or bundled file');
-  assert.match(draw, /fillText\(/, 'the count is drawn as canvas text, not an SVG data URI -- criterion 3');
+  assert.match(draw, /fillText\(/, 'the count is drawn as canvas text, not an SVG data URI');
   assert.ok(!/<svg/.test(draw), 'the pending mark must never be built as an SVG string -- a missing font there would silently drop the digit');
   // The tile is the SAME amber tile the unmarked tab shows, same fill, same rx 9
   // corner -- no state paints a second tile colour, and the inverted dark ground
@@ -5469,7 +5469,7 @@ check('the favicon mark draws the page\'s own amber tile with a bold ink numeral
   // The numeral is ink on amber -- the same ink MARK_SHAPES' rows already use.
   assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--accent-ink']}'`),
     'the numeral must be --accent-ink, off the palette rather than hand-copied');
-  // Criterion 2: the sizing ladder, optical steps rather than a linear scale --
+  // The sizing ladder, optical steps rather than a linear scale --
   // 22px at one digit, 18px at two, 17px for the 9+ overflow, capped at 99.
   assert.match(draw, /22/, 'expected the one-digit size in the sizing ladder');
   assert.match(draw, /18/, 'expected the two-digit size in the sizing ladder');
@@ -5542,7 +5542,7 @@ check('a numbered mark applies while a round is pending, sized by the digit ladd
 });
 
 check('a canvas or font failure during drawFavicon leaves the tab\'s existing mark alone, never a blank amber tile', () => {
-  // Criterion 3: canvas text can fail (unsupported context, a throwing font
+  // Canvas text can fail (unsupported context, a throwing font
   // path) the way an SVG data URI's font resolution silently degrades -- but
   // unlike the SVG case, a throw here is caught and the caller keeps whatever
   // mark the tab already had, rather than swap in a half-drawn or blank tile.
@@ -5797,8 +5797,8 @@ check('the subscription resyncs on every open, through the same computeBoardPatc
     "'open' fires on the first connect AND every reconnect -- exactly the moments something may have been missed");
   const resyncBody = namedFunctionBody(ui, 'resync');
   assert.match(resyncBody, /fetch\('\/b\/' \+ encodeURIComponent\(boardId\)\)/, 'resync must re-read the current board');
-  // Tag/type-qualified, not a bare getElementById -- audit 2026-07-31,
-  // finding P1: this document is parsed straight from response bytes, so a
+  // Tag/type-qualified, not a bare getElementById -- this document is parsed
+  // straight from response bytes, so a
   // '## Board data' heading could satisfy a bare id lookup here exactly like
   // it could at hydrate time (see the top of `ui` itself, and
   // test/check-archive-ids.mjs, which drives this end to end).
@@ -5858,7 +5858,7 @@ check('the defer button re-applies the live deferred flag on every wire, like ev
 // --- no more mirror drift between the markup and the stylesheet -------------------
 
 /** Strip line and block comments from JS source, respecting
- * string/template-literal and regex-literal boundaries -- audit finding M5:
+ * string/template-literal and regex-literal boundaries --
  * the orphan-class check below used to substring-search the RAW emitter
  * source, comments included, so `.mode-toggle-icon` (named only in a doc
  * comment above `themeToggle()`, src/theme.mjs) satisfied it even after
@@ -5952,11 +5952,11 @@ check('every class the stylesheet rules on is a class something actually emits',
   assert.deepEqual(orphans, [], `src/styles.mjs rules on classes nothing emits: ${orphans.join(', ')}`);
 });
 
-// --- indexpage.mjs: the thread index's own render path (ticket 06) ----------------
+// --- indexpage.mjs: the thread index's own render path ----------------
 // buildThreadIndex, renderIndexPage, folderName, roundCount and threadRow (the last
 // not exported -- exercised only through renderIndexPage's output, same as every
-// other unexported render helper in this file) were imported by no test at all: the
-// audit's T1. `folderName` and `roundCount` gained an `export` here for exactly this
+// other unexported render helper in this file) were imported by no test at all.
+// `folderName` and `roundCount` gained an `export` here for exactly this
 // -- neither needed one to do its job inside indexpage.mjs, only to be reached from
 // outside it.
 
@@ -5977,8 +5977,8 @@ function extractThreadItem(html, boardId) {
  * A "distinct rows" check comparing raw item HTML instead of this is worthless
  * -- href and data-thread-id differ by board id on every row regardless of
  * anything visible, so raw-string comparison passes even when a reviewer would
- * see three identical rows. This is exactly the shape of check an audit finding
- * called out: distinctness has to be asserted on what renders, not on markup a
+ * see three identical rows. This is exactly the shape of check that matters:
+ * distinctness has to be asserted on what renders, not on markup a
  * reviewer never looks at. */
 function visibleText(item) {
   return item.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -6005,7 +6005,7 @@ check('roundCount: a board doc\'s own rounds-array length, zero for a shape that
   assert.equal(roundCount({}), 0, 'must read as zero, not throw, on a board-shaped object with no rounds at all');
 });
 
-check('the rounds-left badge counts open rounds that still ask something, not question blocks -- correctly singular at one, plural at two (AC 1)', () => {
+check('the rounds-left badge counts open rounds that still ask something, not question blocks -- correctly singular at one, plural at two', () => {
   // Two board docs in one thread, the ordinary shape for a session that starts a
   // second board without closing the first. boardA's single open round carries
   // TWO question blocks; boardB's carries one. The count must read 2 -- one round
@@ -6045,7 +6045,7 @@ check('the rounds-left badge counts open rounds that still ask something, not qu
   assert.doesNotMatch(item2, /1 rounds left/, 'never "1 rounds left"');
 });
 
-check('an index row with no open asking round renders no badge element at all -- not a zero-reading one (AC 2)', () => {
+check('an index row with no open asking round renders no badge element at all -- not a zero-reading one', () => {
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'rounds-left-zero');
   mkdirSync(dir, { recursive: true });
   const board = createBoard({ title: 'settled', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
@@ -6060,8 +6060,8 @@ check('an index row with no open asking round renders no badge element at all --
   assert.doesNotMatch(item, /class="thread-status"/, 'no empty status wrapper left in its place');
 });
 
-check('a question left deferred inside an already-SENT round contributes nothing to the count (AC 3)', () => {
-  // A sent round cannot be returned to (SPEC_COUNTS.md Open Questions, ADR.md
+check('a question left deferred inside an already-SENT round contributes nothing to the count', () => {
+  // A sent round cannot be returned to (ADR.md
   // entry 25's own stated cost) -- so once `applySubmit` marks a round `sent`,
   // whatever any of its questions were left as is no longer an open trip back to
   // the board, `deferred` included.
@@ -6075,7 +6075,7 @@ check('a question left deferred inside an already-SENT round contributes nothing
   assert.equal(thread.roundsLeft, 0, 'a deferred question inside a SENT round is not an open round');
 });
 
-check('a round that asks nothing contributes nothing to the count, and the badge and the live dot never disagree (AC 4)', () => {
+check('a round that asks nothing contributes nothing to the count, and the badge and the live dot never disagree', () => {
   // `applySubmit` is the only thing that marks a round `sent`, and a reviewer submits by
   // answering. So a round with no question block had no reachable way out of `open`, and
   // its row pulsed a live dot forever right beside its own honest empty badge.
@@ -6160,7 +6160,7 @@ check('a board with neither a title nor a cwd still produces exactly one headlin
 });
 
 check('three threads sharing one cwd render as three visibly distinct rows, told apart by title', () => {
-  // DESIGN.md's Decisions section calls this out by name: keying by project
+  // Keying by project
   // directory instead of by thread would collapse these into one row.
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'shared');
   mkdirSync(dir, { recursive: true });
@@ -6179,7 +6179,7 @@ check('three threads sharing one cwd render as three visibly distinct rows, told
 
 check('three TITLE-LESS threads sharing one cwd still render as three distinct rows -- title alone cannot tell them apart here', () => {
   // The titled check above is satisfied even if the row's only discriminator
-  // were the title itself. An audit finding was a regression here specifically
+  // were the title itself. There was a regression here specifically
   // for title-less boards, where the headline (folder name) AND the path line
   // (suppressed once the folder IS the headline) collide identically across all
   // three, leaving nothing visible to vary except whatever else the row carries.
@@ -6299,7 +6299,7 @@ check('a live row opens the board AT the round still owed an answer; a settled r
   assert.match(ui, /window\.addEventListener\('load', jumpToOpenRoundAfterPaint\)/, 'the jump must be deferred to the load event, not issued inline while the document is still loading');
 });
 
-// --- the index page's client script (ticket 06) ------------------------------------
+// --- the index page's client script ------------------------------------
 // `node --check` on src/indexpage.mjs only proves the OUTER template literal that
 // wraps `indexScript` is well-formed; it says nothing about whether the CLIENT
 // script embedded inside it parses, exactly the gap QUIRKS.md's backtick entry
@@ -6323,7 +6323,7 @@ check('indexScript (the relative-time client script) parses and runs against a m
   const els = [
     { _datetime: '2020-01-01T00:00:00.000Z', textContent: '2020-01-01 00:00:00Z', getAttribute(n) { return n === 'datetime' ? this._datetime : null; } },
   ];
-  // querySelector: () => null (ticket 04) -- the pomodoro widget's own
+  // querySelector: () => null -- the pomodoro widget's own
   // initPomodoroWidget() looks up 'div#pomodoro-widget' first (tag-qualified,
   // never a bare getElementById -- see "no client script looks an id up bare"
   // in test/check-archive-ids.mjs) and bails out immediately when it is
@@ -6342,7 +6342,7 @@ check('indexScript (the relative-time client script) parses and runs against a m
   assert.notEqual(els[0].textContent, '2020-01-01 00:00:00Z', 'refresh() must actually run once up front and overwrite the placeholder text, not wait for the first interval tick');
   // The narrowest bucket relTime has ("a minute ago", 45s-90s) is 45 seconds
   // wide. A poll slower than that can step clean over the bucket depending on
-  // where a row's load time happens to land within it -- an audit-caught defect
+  // where a row's load time happens to land within it -- a defect
   // (60000 used to be the value here). 20000 is a generous margin under 45000,
   // not a literal restatement of whatever indexScript happens to use today.
   assert.ok(intervalMs > 0 && intervalMs <= 20000, `refresh must poll often enough to never skip the narrowest bucket -- got ${intervalMs}ms`);
@@ -6367,7 +6367,7 @@ function extractRelTime() {
 check('relTime: pinned at the exact boundaries its own if-chain names, with a fixed "now" rather than the wall clock', () => {
   // relTime rounds each unit FIRST and thresholds the ROUNDED value (moment.js's
   // own algorithm) rather than thresholding the raw ms diff and rounding only for
-  // display -- the former shape had a real bug an audit caught: a diff that
+  // display -- the former shape had a real bug: a diff that
   // rounds UP to the next tier's boundary still printed in the tier below it for
   // one more tick (44m59s read "45 minutes ago", 45m00s one second later read
   // "an hour ago"). These boundaries are pinned at the value where each unit
@@ -6417,20 +6417,19 @@ check('relTime: pinned at the exact boundaries its own if-chain names, with a fi
   assert.equal(relTime(null, now), null, 'a null iso must be returned verbatim, not treated as the epoch');
 });
 
-// A palette change has to stay a one-block edit (DESIGN.md acceptance criterion
-// 6). This invariant already rotted once -- the header comment above `styles`
+// A palette change has to stay a one-block edit. This invariant already rotted once -- the header comment above `styles`
 // asserted it while 21 rules quietly reached past the token block for a raw
 // literal -- so it is enforced here instead of merely claimed in prose.
 const RAW_COLOR = /#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{4}\b|#[0-9a-fA-F]{3}\b|\brgba?\([^)]*\)/;
 
 // A "token block" is any rule -- :root, or :root nested inside a @media query
-// (ticket 02's light palette), or any future selector -- whose declarations are
+// (a light-palette variant), or any future selector -- whose declarations are
 // ALL either a custom property (`--name: value;`) or `color-scheme` (the one
 // non-custom-property declaration a palette's :root carries alongside it).
 // Blanking every such leaf rule out (character-for-character, so line numbers
 // still line up) before scanning is what lets this check not know the token
 // block's selector in advance -- it stays correct however many get added, and
-// it does not require special-casing ticket 02's second block by name.
+// it does not require special-casing that second block by name.
 //
 // The regex below matches leaf declaration blocks only (no braces inside the
 // body): run globally left-to-right over CSS that nests a rule inside a
@@ -6478,13 +6477,13 @@ check('no rule outside a token block carries a raw hex or rgba literal', () => {
 });
 
 check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and the exemption is honest', () => {
-  // Spec criterion 6's binding amendment: "The sandboxed stage stylesheet
+  // The binding amendment: "The sandboxed stage stylesheet
   // (stageAgentScript) is exempt and keeps its literal." A prior version of
   // this exemption let `stageAgentScript()`'s injected CSS satisfy the SAME
   // "token block" shape the check above blanks out (a `:root { --accent:
   // <anything> }` rule), which made the check self-certifying: it would have
-  // passed even if the stage's literal were changed to '#ff0000' (2026-07-31
-  // audit, finding H5), because "wrapped in a one-declaration :root block" was
+  // passed even if the stage's literal were changed to '#ff0000', because
+  // "wrapped in a one-declaration :root block" was
   // the only thing it ever checked for.
   //
   // The real reason the stage gets a literal at all (STAGE_ACCENT_HEX's own
@@ -6563,14 +6562,14 @@ check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and t
 
   // The requirement, once per surface: the outline is one literal and it has
   // to clear the bar on BOTH artboards, not on whichever one happens to be
-  // under a reviewer's theme. (Per-palette hexes would satisfy criterion 7
+  // under a reviewer's theme. (Per-palette hexes would satisfy this
   // too -- delivered over the parent's 'mode' postMessage -- and this loop is
   // the assertion that would then run twice with two hexes instead of one.)
   for (const [themeName, palette] of Object.entries(palettes)) {
     const stageBg = expand(palette['--stage-bg']);
     assert.ok(/^#[0-9a-fA-F]{6}$/.test(stageBg),
       `setup failure: the ${themeName} palette's --stage-bg (${palette['--stage-bg']}) is not a hex this check can measure -- if the stage surface becomes an rgba() or a gradient, this contrast assertion has to learn to composite it, not be dropped`);
-    // Criterion 6's legibility half, and it is not implied by the outline bar
+    // The legibility half, and it is not implied by the outline bar
     // below: a near-black surface would leave the mid-blue outline at ~3.16:1
     // (passing) while rendering a mock that paints no background invisible.
     // Such a mock sets no color either, so its text is the UA's black -- which
@@ -6676,19 +6675,24 @@ check('the session cookie matcher accepts only the real cookie, and never throws
   assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${sessionToken(secret)}`, null), false, 'no secret on disk accepts nothing');
 });
 
-check('a duplicate session cookie cannot shadow the real one: the FIRST match wins', () => {
-  // audit 2026-07-31 S5. Cookies ignore ports, so any other server on this host can set
-  // a second cb_session for it. Last-wins meant one such cookie sorting later shadowed
-  // the daemon's own and locked the reviewer out of every board -- permanently, because
-  // bin/authorize.mjs re-mints at the same (host, path) key and leaves the duplicate in
-  // place, so the one command the refusal page names could not clear it.
-  // RFC 6265 section 5.4 sends the most specific match first, which is the host-and-path
-  // cookie this daemon set. Ablation: restore last-wins in parseCookies and this reds.
+check('a duplicate session cookie cannot shadow the real one, at EITHER end of the header', () => {
+  // Cookies ignore ports (RFC 6265 section
+  // 8.5), so any other server on this host can set a second cb_session. Whichever single
+  // end the parse picked, the other end shadowed the real credential and locked the
+  // reviewer out of every board -- permanently, because bin/authorize.mjs re-mints the
+  // Path=/ key and cannot clear a duplicate set at a longer path, so the one command the
+  // refusal page names could not fix it.
+  // The original fix read section 5.4 backwards: it orders LONGER paths FIRST, and this
+  // daemon's cookie is Path=/, the shortest possible, so it sorts LAST. Section 5.4 is
+  // also only a SHOULD whose own note calls servers depending on this order "erroneously"
+  // dependent. So neither end is safe and the parse searches every value.
+  // Ablation: make sessionCookieMatches pick values[0] or values.at(-1) and one of the
+  // three assertions below reds.
   const secret = 'c'.repeat(64);
   const real = sessionToken(secret);
   assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${real}; ${SESSION_COOKIE}=junk`, secret), true, 'a duplicate appended after the real cookie must not shadow it');
   assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=${real}; other=1; ${SESSION_COOKIE}=${'e'.repeat(64)}`, secret), true, 'nor a duplicate that is the right shape but the wrong value');
-  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=junk; ${SESSION_COOKIE}=${real}`, secret), false, 'and a bare-name cookie sorting first is still honoured as first -- the ordering is the browser\'s statement about specificity, not something to search past');
+  assert.equal(sessionCookieMatches(`${SESSION_COOKIE}=junk; ${SESSION_COOKIE}=${real}`, secret), true, 'and a shadowing duplicate sorting FIRST must not lock the reviewer out either -- §5.4 puts longer paths first, and this daemon\'s cookie is Path=/, so it sorts last');
 });
 
 check('the recovery command names a file that exists, absolutely, and survives a path with spaces', () => {
@@ -6722,7 +6726,7 @@ check('the refusal page follows the theme, from the palettes rather than a hand-
   // Two separate failures, one after the other, on the page a reader sees at
   // exactly the moment they hold nothing else. First it shipped dark-only --
   // six hardcoded hex, no light variant, so a light-mode machine got a black
-  // slab where every other route rendered #eef1f7 (2026-07-31 audit, R5).
+  // slab where every other route rendered #eef1f7.
   // Then the light variant was added the same way it was diagnosed: by hand.
   // Which left the DARK half still on its original six literals, none of them
   // a value in either palette, so the page went on mismatching every dark
@@ -6774,7 +6778,7 @@ check('the recovery command is one string, read from one place by everything tha
 });
 
 check('nothing in the tree still refers to the deleted board-scoped submit token', () => {
-  // SPEC_LAUNCH.md: "Submit collapses into the read credential", and the deletion lands
+  // "Submit collapses into the read credential", and the deletion lands
   // in the same slice as the gate. A leftover reference is a leftover code path.
   const files = ['src/secret.mjs', 'src/server.mjs', 'src/handoff.mjs', 'src/ui.mjs', 'bin/mcp.mjs', 'bin/authorize.mjs', 'PROTOCOL.md'];
   for (const f of files) {
@@ -6785,7 +6789,7 @@ check('nothing in the tree still refers to the deleted board-scoped submit token
   }
 });
 
-// --- the pomodoro widget (ticket 04, SPEC_POMODORO.md) ---------------------------
+// --- the pomodoro widget ---------------------------
 // Drives the REAL indexScript against the REAL renderIndexPage() markup, through
 // test/dom-stand-in.mjs -- never a hand-summary of what the widget does
 // (QUIRKS.md: "a mock of someone else's renderer is worth exactly as much as the
@@ -6850,10 +6854,10 @@ function flushPomodoro() {
 // Fixture cue values, read from cueNames() itself rather than hardcoded --
 // mirrors src/cues.mjs's own "enumerated, never a second guess at the
 // directory" discipline, so these checks stay correct on whatever machine
-// actually runs them instead of assuming a specific 14 (SPEC_CUES.md: "a
+// actually runs them instead of assuming a specific 14 ("a
 // picker offering a name the bundle cannot resolve is a silent boundary").
 // Three distinct names are what let a check prove the three pickers actually
-// remember their own choice independently (criterion 1) rather than three
+// remember their own choice independently rather than three
 // fields that happen to agree by accident.
 const ALL_CUES = cueNames();
 const CUE_A = ALL_CUES[1] || NO_CUE;
@@ -6909,7 +6913,7 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'cueWork', 'cueBreak', 'cueLongBreak']) {
     assert.match(html, new RegExp(`name="${field}"`), `settings form must carry a ${field} field`);
   }
-  // The retired boolean (SPEC_CUES.md: "not kept as a master mute") must be
+  // The retired boolean ("not kept as a master mute") must be
   // gone entirely -- markup, not just unused.
   assert.doesNotMatch(html, /name="sound"/, 'the sound checkbox must be retired -- the three cue pickers replace it');
   assert.match(html, /id="pomodoro-reset"/);
@@ -6928,7 +6932,7 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   assert.ok(widgetMatch.index < themeMatch.index, 'both controls must render inside the same header, the widget before the theme toggle');
 });
 
-check('pomodoro widget: Restart/Forward render as one segmented pill between the countdown and the switch -- real buttons, keyboard-reachable, named for a screen reader, always present (spec criterion 7)', () => {
+check('pomodoro widget: Restart/Forward render as one segmented pill between the countdown and the switch -- real buttons, keyboard-reachable, named for a screen reader, always present', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<span class="pomodoro-ctl-group">/, 'the pair must be one pill, not two independent controls');
   // Real <button>s, not a div/span wearing a click handler -- that is the whole
@@ -6953,7 +6957,7 @@ check('pomodoro widget: Restart/Forward render as one segmented pill between the
   assert.doesNotMatch(html.slice(restartMatch.index, forwardMatch.index + 200), /\shidden(?:[\s=>]|$)/, 'the controls must never rely on the `hidden` attribute -- always present means always present');
 });
 
-check('pomodoro widget: the three cue rows read Work / Short break / Long break under a hairline and a "Cues" caption, and the duration row beside them is relabeled to match (SPEC_CUES.md placement decision)', () => {
+check('pomodoro widget: the three cue rows read Work / Short break / Long break under a hairline and a "Cues" caption, and the duration row beside them is relabeled to match', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<hr class="pomodoro-settings-divider">/, 'the Cues section needs its own hairline -- no fold, no tab');
   assert.match(html, /<div class="pomodoro-settings-caption">Cues<\/div>/);
@@ -6982,7 +6986,7 @@ check('pomodoro widget: the three cue rows read Work / Short break / Long break 
   assert.doesNotMatch(html, /<label class="pomodoro-field">Break \(min\)</, 'the old, unqualified "Break (min)" label must be gone');
 });
 
-check('pomodoro widget: each cue picker offers exactly cueNames() -- None plus the sounds this machine actually has -- and nothing else (criterion 2)', () => {
+check('pomodoro widget: each cue picker offers exactly cueNames() -- None plus the sounds this machine actually has -- and nothing else', () => {
   const html = renderIndexPage({ threads: [] });
   const names = cueNames();
   for (const field of ['cueWork', 'cueBreak', 'cueLongBreak']) {
@@ -7011,7 +7015,7 @@ check('pomodoro widget: the settings control is an icon, and the icon carries a 
   assert.match(summary[1], /stroke="currentColor"/, 'the glyph must be a stroke-based inline SVG in the same family as src/theme.mjs\'s icons');
 });
 
-check('pomodoro widget: the status text alone denies selection; the settings panel\'s inputs and labels are untouched (criterion 14)', () => {
+check('pomodoro widget: the status text alone denies selection; the settings panel\'s inputs and labels are untouched', () => {
   const statusRule = styles.match(/\.pomodoro-status\s*\{[^}]*\}/);
   assert.ok(statusRule, 'setup failure: no .pomodoro-status rule found in src/styles.mjs');
   assert.match(statusRule[0], /user-select:\s*none/, '.pomodoro-status must deny selection -- a double-click or a drag across the countdown must select nothing');
@@ -7046,7 +7050,7 @@ check('pomodoro widget: polls on the same order of magnitude as refresh\'s own 1
   assert.ok(ms >= 5000 && ms <= 20000, `POMODORO_POLL_MS must be a modest poll interval, not per-second -- got ${ms}ms`);
 });
 
-check('pomodoroRemainingMs: a browser clock skewed by a full minute renders the identical countdown once the daemon-derived offset is applied (criterion 6)', () => {
+check('pomodoroRemainingMs: a browser clock skewed by a full minute renders the identical countdown once the daemon-derived offset is applied', () => {
   const remainingMs = extractIndexScriptFn('pomodoroRemainingMs');
   const deadline = 1_000_000_000;
   const serverNow = deadline - 5 * 60_000; // 5 minutes left, per the daemon's own clock
@@ -7062,13 +7066,13 @@ check('pomodoroRemainingMs: a browser clock skewed by a full minute renders the 
   const skewedBrowserNow = serverNow + 60_000;
   const offsetB = serverNow - skewedBrowserNow; // -60000
   const msB = remainingMs(timer, offsetB, skewedBrowserNow);
-  assert.equal(msB, msA, 'two clocks disagreeing by a minute must render the identical remaining time once each has its own daemon-derived offset applied -- this is criterion 6\'s "two open tabs show the same remaining time", reduced to one pure function');
+  assert.equal(msB, msA, 'two clocks disagreeing by a minute must render the identical remaining time once each has its own daemon-derived offset applied -- this is the "two open tabs show the same remaining time" property, reduced to one pure function');
 
   // Sanity: the skew must actually matter to a NAIVE calculation (deadline -
   // browserNow, no offset at all), or the assertion above would pass by
   // accident regardless of whether the offset correction exists at all.
   const naive = Math.max(0, deadline - skewedBrowserNow);
-  assert.notEqual(naive, msA, 'setup sanity: dropping the offset correction must actually change the answer, or this check proves nothing about criterion 6');
+  assert.notEqual(naive, msA, 'setup sanity: dropping the offset correction must actually change the answer, or this check proves nothing');
 });
 
 check('pomodoroRemainingMs: a paused timer ignores the clock entirely, returning the frozen remainingMs', () => {
@@ -7108,7 +7112,7 @@ await checkAsync('pomodoro widget: no timer running renders a calm idle state (t
   assert.match(status.textContent, /idle/i, 'no timer must read as a calm idle state, not an error (spec: "a real state, not an error")');
   assert.match(status.textContent, /25/, 'idle state must show the configured work length -- spec: "the durations, or a dash"');
   assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no timer must never render a countdown');
-  assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'no timer must never render a cycle position either (criterion 13)');
+  assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'no timer must never render a cycle position either');
   assert.equal(toggle.getAttribute('aria-checked'), 'false', 'idle is the switch\'s off state');
   assert.equal(toggle.getAttribute('aria-label'), 'Start pomodoro', 'idle: the switch\'s job is to START one, and its name has to say so');
   // The predecessor set `hidden` here and relied on it to disappear -- which it
@@ -7133,7 +7137,7 @@ await checkAsync('pomodoro widget: a running timer renders "<Phase> mm:ss" from 
   assert.equal(toggle.getAttribute('aria-label'), 'Pause pomodoro');
 });
 
-await checkAsync('pomodoro widget: a running work or short-break interval names its position in the cycle as "Work 3/4 · 12:34"; a long break carries no position (criterion 11)', async () => {
+await checkAsync('pomodoro widget: a running work or short-break interval names its position in the cycle as "Work 3/4 · 12:34"; a long break carries no position', async () => {
   const nowMs = Date.now();
   // cycle: 2 means two work intervals already completed this cycle -- the THIRD
   // is the one now running, out of POMODORO_SETTINGS.longEvery (4).
@@ -7168,7 +7172,7 @@ await checkAsync('pomodoro widget: a running work or short-break interval names 
   assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'a long break must never render a cycle position');
 });
 
-await checkAsync('pomodoro widget: lowering longEvery mid-cycle never renders a position past the end of the cycle (criterion 11)', async () => {
+await checkAsync('pomodoro widget: lowering longEvery mid-cycle never renders a position past the end of the cycle', async () => {
   // Reachable by an ordinary act: the reviewer drops "long break every" from 8
   // to 2 while `cycle` is already 5. settleBoundary does not renormalise cycle
   // on a settings write -- it resets only at the next long break -- so the bare
@@ -7218,27 +7222,27 @@ await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs
   assert.equal(status.textContent, before, 'a paused timer must render identical text after a tick -- ticking it would silently un-freeze the countdown');
 });
 
-// SPEC_MARK.md ticket 03: the phase -> mark mapping (favicon + header glyph)
+// The phase -> mark mapping (favicon + header glyph)
 // and the null-phase guard. The pure predicates are extracted and driven
 // directly first (the non-trivial logic the spec names as needing a runnable
 // check), then the same states are driven end to end through the real
 // indexScript + renderIndexPage markup, the same DOM-stand-in shape every
 // other pomodoro widget check above already uses.
 
-check('pomodoroIsResting: only a RUNNING, UNPAUSED break or long break counts as resting -- work, idle, a paused timer in ANY phase (including mid-break), and a phase the daemon has never reported all read false (criteria 7-9, 13)', () => {
+check('pomodoroIsResting: only a RUNNING, UNPAUSED break or long break counts as resting -- work, idle, a paused timer in ANY phase (including mid-break), and a phase the daemon has never reported all read false', () => {
   const isResting = extractIndexScriptFn('pomodoroIsResting');
-  assert.equal(isResting(null), false, 'no timer at all (no poll has returned yet) must never read as resting -- criterion 9\'s anti-flicker guard');
+  assert.equal(isResting(null), false, 'no timer at all (no poll has returned yet) must never read as resting -- the anti-flicker guard');
   assert.equal(isResting(undefined), false);
   assert.equal(isResting({ phase: 'work', paused: false }), false);
   assert.equal(isResting({ phase: 'break', paused: false }), true);
-  assert.equal(isResting({ phase: 'longBreak', paused: false }), true, 'a long break must satisfy the identical rest condition as a short break -- criterion 8');
+  assert.equal(isResting({ phase: 'longBreak', paused: false }), true, 'a long break must satisfy the identical rest condition as a short break');
   assert.equal(isResting({ phase: 'break', paused: true }), false, 'a PAUSED break must keep the ordinary mark -- idle and paused both keep it regardless of which phase they are paused in');
   assert.equal(isResting({ phase: 'longBreak', paused: true }), false);
   assert.equal(isResting({ phase: 'idle', paused: false }), false, 'a phase name the daemon has never actually sent must never be read as resting');
   assert.equal(isResting({ phase: undefined, paused: false }), false);
 });
 
-check('pomodoroIsActiveWork: only a RUNNING, UNPAUSED work interval turns the glyph amber -- idle and paused (any phase) stay muted (criterion 15)', () => {
+check('pomodoroIsActiveWork: only a RUNNING, UNPAUSED work interval turns the glyph amber -- idle and paused (any phase) stay muted', () => {
   const isActiveWork = extractIndexScriptFn('pomodoroIsActiveWork');
   assert.equal(isActiveWork(null), false);
   assert.equal(isActiveWork({ phase: 'work', paused: false }), true);
@@ -7264,7 +7268,7 @@ function pomodoroGlyphPaths(document) {
   return [...slot.querySelectorAll('path')].map(p => p.getAttribute('d'));
 }
 
-await checkAsync('SPEC_MARK.md ticket 03: a running, unpaused break or long break swaps the index tab to the rest mark and the header glyph to the pause glyph, both muted; work alone turns the glyph amber; idle, paused, and a paused break all keep the ordinary mark (criteria 7-9, 13-16)', async () => {
+await checkAsync('a running, unpaused break or long break swaps the index tab to the rest mark and the header glyph to the pause glyph, both muted; work alone turns the glyph amber; idle, paused, and a paused break all keep the ordinary mark', async () => {
   const nowMs = Date.now();
   const cases = [
     { name: 'idle', timer: null, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
@@ -7272,7 +7276,7 @@ await checkAsync('SPEC_MARK.md ticket 03: a running, unpaused break or long brea
     { name: 'paused work', timer: { phase: 'work', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
     { name: 'running short break', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, favicon: 'rest', paths: REST_PATHS, amber: false, restStatus: true },
     { name: 'running long break', timer: { phase: 'longBreak', deadline: nowMs + 15 * 60_000, paused: false }, favicon: 'rest', paths: REST_PATHS, amber: false, restStatus: true },
-    // Criterion 15 ("idle and paused keep the muted tomato") applies even mid-break:
+    // "Idle and paused keep the muted tomato" applies even mid-break:
     // pausing never hands the rest mark to a phase that would otherwise earn it.
     { name: 'paused short break', timer: { phase: 'break', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
     { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
@@ -7290,14 +7294,14 @@ await checkAsync('SPEC_MARK.md ticket 03: a running, unpaused break or long brea
     assert.deepEqual(pomodoroGlyphPaths(document), c.paths, `${c.name}: expected the ${c.paths === REST_PATHS ? 'rest' : 'tomato'} glyph`);
     const icon = document.querySelector('span#pomodoro-icon-slot .pomodoro-icon');
     assert.equal(icon.classList.contains('pomodoro-icon-amber'), c.amber, `${c.name}: amber class mismatch`);
-    // Accessible name never changes (criterion 16), whichever glyph is mounted.
+    // Accessible name never changes, whichever glyph is mounted.
     assert.equal(icon.getAttribute('aria-label'), 'Pomodoro', `${c.name}: the glyph's accessible name must still read "Pomodoro"`);
     const status = document.querySelector('span#pomodoro-status');
     assert.equal(status.classList.contains('pomodoro-status-rest'), c.restStatus, `${c.name}: status-muted class mismatch`);
   }
 });
 
-await checkAsync('SPEC_MARK.md ticket 03: before the first pomodoro fetch resolves, the tab and the header stay exactly as server-rendered -- never flicker through the rest mark even though the (stubbed, not-yet-answered) daemon reports a break the moment it does answer (criterion 9)', async () => {
+await checkAsync('before the first pomodoro fetch resolves, the tab and the header stay exactly as server-rendered -- never flicker through the rest mark even though the (stubbed, not-yet-answered) daemon reports a break the moment it does answer', async () => {
   const nowMs = Date.now();
   const restingDoc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
   await withPomodoroFetch(() => restingDoc, async () => {
@@ -7311,7 +7315,7 @@ await checkAsync('SPEC_MARK.md ticket 03: before the first pomodoro fetch resolv
   });
 });
 
-await checkAsync('SPEC_MARK.md ticket 03: the mark returns to the ordinary tile within one poll interval of a break ending, with no reload (criterion 12)', async () => {
+await checkAsync('the mark returns to the ordinary tile within one poll interval of a break ending, with no reload', async () => {
   const nowMs = Date.now();
   const resting = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
   const backToWork = { ...resting, cycle: 1, timer: { phase: 'work', deadline: nowMs + 25 * 60_000, paused: false } };
@@ -7425,8 +7429,7 @@ await checkAsync('pomodoro widget: clicking the toggle while paused posts /api/p
   assert.equal(post.url, '/api/pomodoro/resume');
 });
 
-// The Restart/Forward pair (SPEC_POMODORO.md forward/restart slice, criterion
-// 7). Same shape as the toggle checks above: stub the fetch, dispatch a real
+// The Restart/Forward pair. Same shape as the toggle checks above: stub the fetch, dispatch a real
 // click, assert on the POST that resulted and that the response landed back
 // in the widget -- never a hand-summary of what onPomodoroForwardClick/
 // onPomodoroRestartClick claim to do.
@@ -7529,7 +7532,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eight 
   assert.deepEqual(post.body, savedSettings, 'all eight settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, cueWork, cueBreak, cueLongBreak');
   // Applied back, not merely echoed: re-reading the form after the response
   // shows the daemon's own saved value, proving the round trip is real -- for
-  // both a duration field and one cue field (criterion 1: each picker is its
+  // both a duration field and one cue field (each picker is its
   // own value, independent of the other two).
   assert.equal(document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value, 50);
   assert.equal(document.querySelector('form#pomodoro-settings-form select[name="cueWork"]').value, CUE_B);
@@ -7538,7 +7541,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eight 
   assert.equal(document.querySelector('details#pomodoro-settings').open, false, 'a successful save must close the settings panel');
 });
 
-await checkAsync('pomodoro widget: the three cue pickers sync independently from the daemon\'s settings on the first fetch, one value per phase (criterion 1)', async () => {
+await checkAsync('pomodoro widget: the three cue pickers sync independently from the daemon\'s settings on the first fetch, one value per phase', async () => {
   assert.notEqual(CUE_A, CUE_B, 'setup failure: this machine needs at least two distinct sounds under /System/Library/Sounds for this fixture to mean anything');
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
@@ -7552,8 +7555,8 @@ await checkAsync('pomodoro widget: the three cue pickers sync independently from
   });
 });
 
-// Criterion 7's own client-side half: a change has to reach a real network
-// call, and criterion 11 forbids any check here from letting a REAL request
+// The client-side half: a change has to reach a real network
+// call, and nothing here may let a REAL request
 // out. withPomodoroFetch keeps globalThis.fetch stubbed for the whole
 // withPomodoroFetch(...) call, so the wait below (comfortably longer than
 // indexpage.mjs's own debounce) is what lets the debounced call actually
@@ -7563,7 +7566,7 @@ function waitOutPreviewDebounce() {
   return new Promise(resolve => setTimeout(resolve, 250));
 }
 
-await checkAsync('pomodoro widget: changing a cue picker posts a preview immediately, before Save, and never writes the stored settings (criteria 7 and 8)', async () => {
+await checkAsync('pomodoro widget: changing a cue picker posts a preview immediately, before Save, and never writes the stored settings', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async () => {
@@ -7580,7 +7583,7 @@ await checkAsync('pomodoro widget: changing a cue picker posts a preview immedia
   assert.equal(previews[0].method, 'POST');
   assert.equal(previews[0].credentials, 'same-origin', 'same credentials shape as every other pomodoro write in this file');
   assert.deepEqual(previews[0].body, { cue: CUE_C });
-  assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'a preview must never be a write -- criterion 8');
+  assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'a preview must never be a write');
 });
 
 await checkAsync('pomodoro widget: ticking Notify fires one test banner immediately, and is not a write', async () => {
@@ -7630,7 +7633,7 @@ await checkAsync('pomodoro widget: selecting None previews it like any other val
   assert.deepEqual(previews[0].body, { cue: NO_CUE });
 });
 
-await checkAsync('pomodoro widget: a rapid run of changes on the same picker (a held arrow key) collapses to one preview of the value it lands on, never a chorus (criterion 7)', async () => {
+await checkAsync('pomodoro widget: a rapid run of changes on the same picker (a held arrow key) collapses to one preview of the value it lands on, never a chorus', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async () => {
@@ -7671,7 +7674,7 @@ await checkAsync('pomodoro widget: changing TWO different pickers in quick succe
   assert.deepEqual(previews.map(p => p.body), [{ cue: CUE_C }, { cue: NO_CUE }]);
 });
 
-await checkAsync('pomodoro widget: closing the panel without saving reverts a previewed cue back to the stored value -- a preview is not a write (criterion 8)', async () => {
+await checkAsync('pomodoro widget: closing the panel without saving reverts a previewed cue back to the stored value -- a preview is not a write', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
@@ -7782,7 +7785,7 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
 check('openServed confines a served file to its roots, and refuses everything else alike', () => {
   // The serve route hands whole documents to a browser at the daemon's own origin, so
   // its boundary gets the same treatment resolvePath's does -- and every refusal has to
-  // be the SAME refusal (audit S7), or the route is an existence oracle for the disk.
+  // be the SAME refusal, or the route is an existence oracle for the disk.
   const root = realpathSync(mkdtempSync(path.join(fixturesDir, 'serve-root-')));
   const outside = realpathSync(mkdtempSync(path.join(fixturesDir, 'serve-outside-')));
   writeFileSync(path.join(root, 'doc.html'), '<h1>ok</h1>');

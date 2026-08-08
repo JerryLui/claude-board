@@ -1,8 +1,7 @@
-// Ticket 07 (DESIGN.md), audit finding C3: "the stand-in shares the
-// server's parser bugs, so criterion 8 cannot see them." Concretely, the audit
-// measured test/dom-stand-in.mjs's OWN parser disagreeing with src/anchor.mjs's
-// parseHtmlTree -- the module every `dom` anchor is actually RESOLVED against,
-// server-side -- on ordinary, not adversarial, markup:
+// The stand-in shares the server's parser bugs, so they go undetected.
+// Concretely, test/dom-stand-in.mjs's OWN parser was measured disagreeing with
+// src/anchor.mjs's parseHtmlTree -- the module every `dom` anchor is actually
+// RESOLVED against, server-side -- on ordinary, not adversarial, markup:
 //
 //   <ul><li>a<li>b</ul>       stand-in: ul > li > li     parseHtmlTree: ul > [li, li]
 //   <p>intro<div>after</div>  stand-in: p > div          parseHtmlTree: p, div siblings
@@ -13,7 +12,7 @@
 // decision functions (autoCloseFor/impliedParentFor) and the entity table
 // directly with src/anchor.mjs's parseHtmlTree, rather than a second, hand-ported
 // copy of the same rules -- see that file's own header comment for why sharing is
-// preferred over porting. This file is the fixture the audit itself asked for:
+// preferred over porting. This file is the fixture that verifies it:
 // feed both parsers the SAME corpus (the exact shapes measured above, plus every
 // other tag-omission rule autoCloseFor/impliedParentFor encodes) and assert they
 // build IDENTICAL trees -- so a future edit to either side's structural handling
@@ -59,7 +58,7 @@ function assertTreesAgree(html) {
     `parser disagreement for ${JSON.stringify(html)}:\n  src/anchor.mjs  : ${JSON.stringify(anchorShape)}\n  dom-stand-in.mjs: ${JSON.stringify(standInShape)}`);
 }
 
-// --- the exact shapes the audit measured disagreeing --------------------------
+// --- the exact shapes measured disagreeing --------------------------
 
 check('optional </li>: <ul><li>a<li>b</ul> -- ul > [li, li], not ul > li > li', () => {
   assertTreesAgree('<ul><li>a<li>b</ul>');
@@ -127,8 +126,8 @@ check('an explicit closing tag closes everything implicitly opened above it: <ul
 // WRONG per HTML5 (a non-void element's trailing `/` is ignored by a real
 // browser; `<div/>after` should nest "after" INSIDE the div) -- src/anchor.mjs's
 // tokenizer gates on the same `selfClosed` flag for every non-void tag, not just
-// void ones, and always did. Not this ticket's job to fix (a product-code
-// correctness question, out of scope here -- see this ticket's report), but
+// void ones, and always did. Not this file's job to fix (a product-code
+// correctness question, out of scope here), but
 // sharing the same tag-omission functions means the stand-in inherits the SAME
 // wrongness rather than a DIFFERENT one, which is what this check locks in: the
 // two sides must keep agreeing, correct or not.
@@ -145,7 +144,7 @@ check('the repo\'s own well-formed html-stage fixture still agrees: <div class="
   assertTreesAgree('<div class="mock"><button>Send</button></div>');
 });
 
-// --- a small, deterministic outerHTML round-trip (ticket 07, audit finding V6) --
+// --- a small, deterministic outerHTML round-trip --
 //
 // firstElementChild/outerHTML used to be entirely absent from the stand-in (not
 // even an empty string -- plain `undefined`), so src/ui.mjs's applyResync built

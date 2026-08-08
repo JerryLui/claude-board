@@ -7,13 +7,9 @@
 // `notifications/progress` throughout so the MCP idle-abort timer never fires.
 //
 // The tab is opened on a one-time handoff, not on the board URL: reads are gated
-// (SPEC_LAUNCH.md) and this process is the only one holding the secret, so it is the
+// and this process is the only one holding the secret, so it is the
 // only one that can hand the browser a credential. See `handoffUrl` below.
-// See PROTOCOL.md "MCP surface" and "Detecting a session with no human in it",
-// and DESIGN.md Decisions -> "The blocking tool call is the wait", "Two ways
-// out, plus a wall clock", "Fail loudly, never degrade silently", "A board is
-// never posted where no human is watching", "One blocking tool, with a known
-// escape route", "Open once, then badge and notify", "Always on under launchd".
+// See PROTOCOL.md "MCP surface" and "Detecting a session with no human in it".
 //
 // Two properties this file has to hold that are easy to lose:
 //   * Every `ask` call is independent. Progress notifications, the wait and the
@@ -115,7 +111,7 @@ function headlessRefusalMessage(reason) {
 }
 
 // ---------------------------------------------------------------------------
-// The third refusal trigger (SPEC_MIGRATION.md criterion 10, the VPS case):
+// The third refusal trigger (the VPS case):
 // CLAUDE_CODE_ENTRYPOINT=cli and a reachable daemon both look fine over SSH, but
 // openBoardTab (below) silently no-ops on non-darwin with no CLAUDE_BOARD_OPEN_CMD
 // configured -- there is simply no mechanism on that machine to put a tab in front
@@ -207,7 +203,7 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
       // Did the request actually go out? A socket that died before the body was flushed
       // wrote nothing; one that died after may have been fully applied by the daemon,
       // which is a difference the caller's error message has to respect rather than
-      // guess at (audit 2026-07-31 D1).
+      // guess at.
       reject(Object.assign(err, { requestSent: req.writableFinished === true }));
     });
     if (data) req.write(data);
@@ -215,8 +211,8 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
   });
 }
 
-/** `sent` distinguishes the two cases that used to share one sentence (audit 2026-07-31
- * D1). A connection that never opened really did write nothing. A connection that died
+/** `sent` distinguishes the two cases that used to share one sentence. A connection
+ * that never opened really did write nothing. A connection that died
  * AFTER the request body went out may have applied the whole round and lost only the
  * response — the daemon's work is synchronous once the body is read — so claiming
  * "nothing was posted or written" there is a false statement that makes the agent retry
@@ -298,8 +294,8 @@ function sleep(ms) {
 
 // ---------------------------------------------------------------------------
 // Opening the tab. macOS `open <url>` on the thread's FIRST board, and on a
-// later round ONLY when nothing is connected to that board any more —
-// DESIGN.md "Open once, then badge and notify": later rounds push over SSE
+// later round ONLY when nothing is connected to that board any more:
+// later rounds push over SSE
 // into the live tab and must not steal focus, but "if no client is connected at
 // all the daemon opens the tab again", otherwise a round pushed into a tab the
 // reviewer closed blocks the call in silence for the full wall clock.
@@ -391,15 +387,15 @@ function openBoardTab(url) {
 
 /** How many clients are connected to `boardId` right now, or null when the daemon
  * does not report it — an older daemon, which reads as "unknown". We do not reopen on a
- * guess, because opening every round is exactly the focus-stealing behaviour DESIGN.md
- * rejects. Unknown is logged to stderr rather than swallowed.
+ * guess, because opening every round is exactly the focus-stealing behaviour rejected
+ * here. Unknown is logged to stderr rather than swallowed.
  *
  * ONE source: the `clients` count on the POST response, which is free and race-free —
  * it is the count at the instant the round landed. There used to be a second, a
  * `GET /api/board/:id/clients` probe, and src/server.mjs has never routed it: it 404ed,
  * so this returned null every time and the reopen below has never once fired in
  * production, while test/check-mcp.mjs kept it green by standing the route up in a
- * proxy (audit 2026-07-31 S3). Deleted rather than implemented on the daemon side too,
+ * proxy. Deleted rather than implemented on the daemon side too,
  * because the POST response already knows and a second source is a second thing to keep
  * true. */
 function connectedClientCount(posted) {
@@ -434,8 +430,7 @@ async function reopenIfNoClient(posted, url) {
 // routine (a crash under KeepAlive, a kickstart from the revive command, an install
 // taking an update) and tears every open connection down; the board is untouched on
 // disk and still open, so the only correct move is to reattach by board id and
-// round — DESIGN.md
-// "Always on under launchd": "the shim reattaches by board id and the page
+// round: "the shim reattaches by board id and the page
 // reconnects over SSE". Reporting "daemon not reachable" there strands whatever the
 // reviewer submits next. Only a daemon refusal (a status code — 404 board gone,
 // most of all) or the wall clock is terminal.
@@ -582,10 +577,10 @@ function formatAnchor(anchor) {
     // rejected by src/board.mjs's sanitizeAnchor before it can reach a packet, and
     // one hand-edited into a board file falls through to the default below.
     case 'dom': return `dom:${anchor.ref}${anchor.hint ? ` ("${anchor.hint}")` : ''}`;
-    // Ticket 05: a diagram node's anchor carries a hint too (composeHint, the same
+    // A diagram node's anchor carries a hint too (composeHint, the same
     // rule as every other element-level anchor) -- prefer it exactly like `dom`
     // above (src/render.mjs's anchorTag does the same), falling back to the bare
-    // node id for a pre-ticket-05 anchor that has none.
+    // node id for an older anchor that has none.
     case 'mermaid': return `mermaid:${anchor.ref}${anchor.hint ? ` ("${anchor.hint}")` : ''}`;
     default: return `${anchor.kind}${anchor.ref ? `:${anchor.ref}` : ''}`;
   }
@@ -641,7 +636,7 @@ function packetResult(text, packet) {
  * `session.boardId == null` is read before an await and written after one: two
  * `ask` calls arriving in the same tick would otherwise both see null, both POST a
  * brand-new board and both open a tab, minting two threads for one shim. That
- * breaks "one thread per MCP shim process" (DESIGN.md "A thread per session").
+ * breaks "one thread per MCP shim process".
  * The promise is cleared in `finally`, so a failed first post leaves the session
  * clean for the next call to retry rather than wedging the thread forever. */
 async function postThisRound(session, title, blocks) {
@@ -680,7 +675,7 @@ async function postThisRound(session, title, blocks) {
   // `requestId` is derived from what this round IS, not randomly: an agent retrying a
   // call whose response was lost re-sends the same blocks, so the same id, and the daemon
   // recognises it as the request it already applied instead of appending a second copy of
-  // every question (audit 2026-07-31 D1). A genuinely new round differs in its blocks and
+  // every question. A genuinely new round differs in its blocks and
   // so gets a different id. Scoped to the board so two boards cannot collide.
   const requestId = createHash('sha256')
     .update(JSON.stringify([session.boardId, title, blocks]))
@@ -701,7 +696,7 @@ async function postThisRound(session, title, blocks) {
  * walk on the normalized board — a block is minted in exactly the shape it arrives, so
  * checking the raw input finds the same set an already-posted board would.
  *
- * This is the entire "does this call have anything to wait for" decision (criterion 1):
+ * This is the entire "does this call have anything to wait for" decision:
  * a round with a question anywhere in it blocks until submit; a round with none returns
  * as soon as the post lands. One call, one shape — no mode flag, no separate
  * "no-questions" guard, just this. */
@@ -752,7 +747,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   if (isFirstBoard) await openAuthorizedTab(posted.boardId, url);
   else await reopenIfNoClient(posted, url);
 
-  // Criterion 1: a round with no question block anywhere in it has nothing a human
+  // A round with no question block anywhere in it has nothing a human
   // needs to submit, so there is nothing left to wait for — return the instant the
   // post lands. Opening the tab above stays best-effort either way: the shim spawns
   // the opener detached and never learns whether a tab actually appeared (see
@@ -816,7 +811,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
 
   // A `timeout` packet is the DAEMON's cap expiring, not the shim's, so `waited.
   // timedOut` above is false and this used to fall through to "Board submitted."
-  // (audit) -- the agent was told the reviewer had answered when the answers were
+  // -- the agent was told the reviewer had answered when the answers were
   // all synthesised `unanswered` and the round is still open, so the reviewer's
   // later Send answers into nothing. Same wording as the shim-side cap, which is
   // the same event seen from the other side.
@@ -849,8 +844,8 @@ function respondError(id, code, message) {
 }
 
 /** The board URL rides along in every progress message, not just the final result:
- * it is the fallback that cannot fail (DESIGN.md "Open once, then badge and
- * notify"), and it has to reach the human *before* they submit, not after. */
+ * it is the fallback that cannot fail, and it has to reach the human *before* they
+ * submit, not after. */
 function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
   write({
     jsonrpc: '2.0',

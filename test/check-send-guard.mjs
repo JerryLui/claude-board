@@ -1,6 +1,5 @@
 // Acceptance checks for the send guard (src/ui.mjs, search "the Send guard"):
-// an incomplete round arms Send instead of sending it (DESIGN.md round-end criteria
-// 3, 4, 5, and this chunk's own half of 6). Same harness idiom as
+// an incomplete round arms Send instead of sending it. Same harness idiom as
 // test/check-enter.mjs, which this file sits beside and pattern-matches --
 // drives the REAL src/ui.mjs client script, in the real DOM stand-in, through
 // the actual click/keydown gestures, and asserts on what a reviewer would
@@ -113,13 +112,12 @@ function withFetchCapture(fn) {
   return calls;
 }
 
-// === criterion 3 ================================================================
 // "A question is complete when it carries any status, answered or deferred
 // alike; only unanswered counts as outstanding." The decision most likely to
 // regress: a deferred question must never be the one Send arms on, and must
 // never count toward the outstanding total.
 
-check('criterion 3: a deferred question does not count as outstanding -- Send arms on the still-unanswered one instead, skipping the deferred one', () => {
+check('a deferred question does not count as outstanding -- Send arms on the still-unanswered one instead, skipping the deferred one', () => {
   const document = loadBoard();
   const blocks = openBlocks(document);
   answerSingle(blocks[0], 'Yes');       // Q1: answered
@@ -136,12 +134,11 @@ check('criterion 3: a deferred question does not count as outstanding -- Send ar
     'exactly one question (the deferred one does not count) must be reported as outstanding');
 });
 
-// === criterion 4 ================================================================
 // "Pressing Send while questions are outstanding arms instead of submitting:
 // it scrolls to the first question with no status, rings it, and relabels
 // the button. It does not submit."
 
-check('criterion 4: a click on Send with outstanding questions posts nothing and arms the button', () => {
+check('a click on Send with outstanding questions posts nothing and arms the button', () => {
   const document = loadBoard();
   const sendBtn = document.getElementById('send-btn');
   assert.equal(sendBtn.textContent, 'Send', 'setup failure: Send must start with its ordinary label');
@@ -152,7 +149,7 @@ check('criterion 4: a click on Send with outstanding questions posts nothing and
   assert.notEqual(sendBtn.textContent, 'Send', 'the first click must visibly relabel Send to show it is armed');
 });
 
-check('criterion 4: the flagged question is the FIRST one with no status, not merely any outstanding one', () => {
+check('the flagged question is the FIRST one with no status, not merely any outstanding one', () => {
   const document = loadBoard();
   const blocks = openBlocks(document);
   answerSingle(blocks[0], 'Yes'); // Q1: answered -- must never be flagged
@@ -170,12 +167,11 @@ check('criterion 4: the flagged question is the FIRST one with no status, not me
     'the send-status slot must say where the reviewer was sent');
 });
 
-// === criterion 5 ================================================================
 // "A second press of the armed button submits the partial round exactly as
 // today, and Escape disarms it, so a reviewer who genuinely wants a partial
 // send never leaves the board."
 
-check('criterion 5: a second click on the armed button submits, posting exactly what the Cmd+Enter arm/send route posts for the same partial state', () => {
+check('a second click on the armed button submits, posting exactly what the Cmd+Enter arm/send route posts for the same partial state', () => {
   // Path A: the click guard. Answer Q1, defer Q2, leave Q3 outstanding,
   // click Send twice -- arm, then confirm.
   const docA = loadBoard();
@@ -214,7 +210,7 @@ check('criterion 5: a second click on the armed button submits, posting exactly 
     'the partial round must go out exactly as filled in -- Q3 still unanswered, not silently completed by sending');
 });
 
-check('criterion 5: Escape disarms the click-armed Send, restoring its label, color, and the ring, without submitting', () => {
+check('Escape disarms the click-armed Send, restoring its label, color, and the ring, without submitting', () => {
   const document = loadBoard();
   const blocks = openBlocks(document);
   const sendBtn = document.getElementById('send-btn');
@@ -274,12 +270,11 @@ check('one shared armed state: arming by Cmd+Enter, then a plain click on Send, 
   assert.equal(calls.length, 1, 'a click on an already Cmd+Enter-armed Send must submit -- the SAME sendArmed flag, not a second arm');
 });
 
-// === the questions-left pill's own criterion 6 (DESIGN.md round-end decisions /
-// ADR.md entry 27 -- NOT the round-end spec's criterion 6 covered just below,
-// which is about a read-only archive) ============================================
+// === the questions-left pill's own round-end agreement rule (ADR.md entry 27 --
+// NOT the read-only-archive case covered just below) ============================================
 // "The count is live... and it reaches zero exactly when the send guard would no
 // longer arm." This file owns the send guard's own outstanding-question rule, so
-// this is where the agreement case belongs (this ticket's own testing note): one
+// this is where the agreement case belongs: one
 // check driving BOTH the pill (src/ui.mjs's questions-left-pill, via
 // outstandingBlocks()) and the guard (a real click on Send) off the identical
 // board state at each step, asserting they agree -- not two independent
@@ -310,8 +305,8 @@ check('the questions-left pill and the send guard read the identical outstanding
   assert.equal(blocks[1].classList.contains('flagged'), true, 'the guard must now flag Q2');
   document.body.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
 
-  // Defer Q2 -- one left (Q3). Criterion 3's "deferred counts as complete" and
-  // the pill's own matching rule (round-end criterion 6 / ADR.md entry 27) must
+  // Defer Q2 -- one left (Q3). The "deferred counts as complete" rule and
+  // the pill's own matching rule (ADR.md entry 27) must
   // agree: neither the guard nor the pill count it.
   deferBlock(blocks[1]);
   assert.equal(pill.textContent, '1 question left', 'a deferred question must not count toward the pill\'s own outstanding total, exactly as it does not for the guard');
@@ -327,13 +322,13 @@ check('the questions-left pill and the send guard read the identical outstanding
   assert.equal(pill.textContent, '0 questions left', 'the pill must reach zero at the exact point nothing remains outstanding');
   assert.equal(pill.classList.contains('visible'), false, 'a count of zero must never be shown');
   calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
-  assert.equal(calls.length, 1, 'the guard must no longer arm once the pill reads zero -- a click now submits on the first press, exactly the moment criterion 6 names');
+  assert.equal(calls.length, 1, 'the guard must no longer arm once the pill reads zero -- a click now submits on the first press, exactly the moment the count reaches zero');
 });
 
-// === criterion 6 (this chunk's half) ============================================
+// === the read-only-archive case (this chunk's half) ============================================
 // "None of this appears in a read-only archive opened from disk."
 
-check('criterion 6: the send guard never engages in a read-only (file://) archive', () => {
+check('the send guard never engages in a read-only (file://) archive', () => {
   const document = loadBoard('file:');
   const blocks = openBlocks(document);
   const sendBtn = document.getElementById('send-btn');

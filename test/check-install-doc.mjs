@@ -1,6 +1,6 @@
 // Binds INSTALL.md's session-start hook prose to the mechanism it describes.
 //
-// SPEC_POMODORO.md's original suggestion was to bind this with src/prose-check.mjs --
+// The original suggestion was to bind this with src/prose-check.mjs --
 // wrong tool: that module binds prose to the MCP shim's live `tools/list` schema
 // (getLiveTools / toolName 'ask' / inputSchema.properties) and has no way to express
 // "this shell command hits this HTTP route". Instead this check extracts the ACTUAL
@@ -18,7 +18,7 @@
 // so this would likely be safe either way; async is what the rest of the suite does
 // and costs nothing here.
 //
-// Criterion 11 (install.sh never reads or writes ~/.claude/settings.json) is already
+// That install.sh never reads or writes ~/.claude/settings.json is already
 // proved twice in test/check-install.mjs ("mention settings.json only in a comment or
 // an echo" and the byte-identical-survival run) -- not duplicated here.
 
@@ -148,7 +148,7 @@ async function main() {
 
   ({ server, port } = await startServer({ home: daemonHome, port: 0 }));
 
-  await check('the extracted hook, run against a live daemon with no timer, starts a work interval (criterion 1)', async () => {
+  await check('the extracted hook, run against a live daemon with no timer, starts a work interval', async () => {
     const before = await pomodoroDoc();
     assert.equal(before.timer, null, 'fixture daemon must start with no timer at all');
 
@@ -166,7 +166,7 @@ async function main() {
     assert.ok(Number.isFinite(doc.timer.deadline) && doc.timer.deadline > Date.now(), 'the deadline must be a real point in the future');
   });
 
-  await check('running the hook again against the running timer leaves its deadline unchanged to the millisecond (criterion 2: a second session, a /clear, a resume)', async () => {
+  await check('running the hook again against the running timer leaves its deadline unchanged to the millisecond (a second session, a /clear, a resume)', async () => {
     const before = await pomodoroDoc();
     assert.ok(before.timer, 'must already be running, from the previous check');
     const deadlineBefore = before.timer.deadline;
@@ -192,7 +192,7 @@ async function main() {
     assert.ok(samples >= 5, 'sanity: the sampling window must actually have sampled more than once');
   });
 
-  await check('running the hook against a mid-break timer leaves the break deadline untouched (criterion 2: does not cut the break short)', async () => {
+  await check('running the hook against a mid-break timer leaves the break deadline untouched (does not cut the break short)', async () => {
     // Seeded directly, the same ARRANGE-only pattern test/check-http.mjs uses for this
     // exact fixture state (a real work interval reaching a break naturally takes up to
     // workMin minutes) -- every ASSERTION below still goes through the HTTP route via
@@ -226,8 +226,8 @@ async function main() {
 
   await check('running the hook with no secret file at all still exits 0 and prints nothing', async () => {
     // A distinct HOME with no ~/.config/claude-board/secret whatsoever -- the "missing
-    // secret file" case named explicitly in the ticket, separate from "wrong secret"
-    // and separate from "nothing listening" above.
+    // secret file" case, separate from "wrong secret" and separate from "nothing
+    // listening" above.
     const noSecretHome = mkdtempSync(path.join(tmpdir(), 'claude-board-installdoc-nosecret-'));
     try {
       const { stdout, stderr } = await execFileP('bash', ['-c', hookEntry.command], {

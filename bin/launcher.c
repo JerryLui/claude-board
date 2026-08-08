@@ -68,7 +68,7 @@
  * record the measurement). The daemon spawns this mode; launchd never does. What argv
  * chooses for the phase is one index into MESSAGES below, never a string that reaches
  * the screen — see NOTIFY_FLAG. The optional third argument names the cue (ADR.md entry
- * 20, CONTEXT.md "Cue") — see is_safe_cue_name below for why that one is a character
+ * 20) — see is_safe_cue_name below for why that one is a character
  * filter rather than a second closed table: the cue vocabulary is whatever
  * /System/Library/Sounds holds on THIS machine, read live by src/cues.mjs (there is no
  * install-time snapshot of it -- QUIRKS.md "soundNamed: searches /System/Library/Sounds

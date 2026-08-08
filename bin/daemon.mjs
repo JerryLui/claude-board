@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// launchd entry point (ticket 08 wires the plist); boots the HTTP server on
+// launchd entry point; boots the HTTP server on
 // 127.0.0.1:7391 (CLAUDE_BOARD_PORT overrides).
 //
 // Shutdown has to be prompt, because it is not rare: KeepAlive restarts the daemon on

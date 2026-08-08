@@ -1,5 +1,5 @@
 // The daemon root: a thread index plus archive search, as a view over the store.
-// See PROTOCOL.md "HTTP surface", DESIGN.md Decisions -> "A thread per session,
+// See PROTOCOL.md "HTTP surface"; "A thread per session,
 // addressable from an index" and "Archived boards are searchable".
 //
 // A thread is `board.thread` (one MCP shim process, one Claude session). In the
@@ -8,7 +8,7 @@
 // `thread` rather than assuming a 1:1 board:thread mapping keeps this correct even
 // in the edge case where a caller reuses a thread id across board docs. Two threads
 // with the same `cwd` are still two separate rows here, each with its own rounds-left
-// count — the exact case DESIGN.md's Decisions section calls out as the failure
+// count — the exact failure
 // of keying by project directory instead.
 
 import path from 'node:path';
@@ -16,7 +16,7 @@ import { styles, faviconLink, restFaviconHref, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { questionBlocks } from './board.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
-// clock are owned by other tickets and stay untouched here (ticket 04 consumes
+// clock are owned by other tickets and stay untouched here (this file consumes
 // the API, it does not extend it). Reused rather than reimplemented in
 // indexScript below, via the same Function.prototype.toString() embedding
 // src/ui.mjs already uses for computeBoardPatch/composeHint/badgeLabel (see
@@ -46,7 +46,7 @@ export function folderName(cwd) {
 const stamp = b => (typeof b?.updatedAt === 'string' ? b.updatedAt : '');
 
 /** A board's rounds that are still open **and still ask something** — a trip back
- * to the board the reviewer genuinely owes (ADR.md entry 25, CONTEXT.md "Rounds
+ * to the board the reviewer genuinely owes (ADR.md entry 25, "Rounds
  * left"). This is the one predicate both the index badge's count and `isLiveBoard`
  * below read, so the two can never disagree: a round carrying no question block
  * has no gesture that could ever clear it (`POST /api/board/:id/submit` is the
@@ -55,7 +55,7 @@ const stamp = b => (typeof b?.updatedAt === 'string' ? b.updatedAt : '');
  * `/visualize`, `/gamify` — asks nothing by design and must count as settled, not
  * as a permanent false alarm.
  *
- * questionBlocks, not a top-level walk of board.blocks (audit, inherited from the
+ * questionBlocks, not a top-level walk of board.blocks (inherited from the
  * predecessor this replaces). Questions nest inside a compare side, another
  * question's `context`, and an option's block; the top-level-only version missed
  * a board whose only question was nested. Every other traversal (findBlock,
@@ -95,7 +95,7 @@ export function buildThreadIndex(boards) {
 
   const threads = [];
   for (const [thread, group] of byThread) {
-    // `stamp` rather than String(...) throughout (audit): a board whose `updatedAt`
+    // `stamp` rather than String(...) throughout: a board whose `updatedAt`
     // is missing stringified to "undefined", which collates ABOVE every ISO date --
     // it sorted first, hijacked `primary`, and seeded the reduce below with a value
     // no real timestamp could ever beat, freezing the whole thread's date. Absent
@@ -155,7 +155,7 @@ function formatDate(iso) {
  * attribute wherever it is the only thing standing in for a name. */
 function threadRow(t) {
   const liveCls = t.live ? ' live' : '';
-  // Absent entirely at zero (AC 2), never a zero-reading badge: `roundsLeft` and
+  // Absent entirely at zero, never a zero-reading badge: `roundsLeft` and
   // `live` are both derived from `openAskingRounds` (src/indexpage.mjs), so this
   // element and the pulsing `.live-dot` above it can never disagree about whether
   // the row owes the reader anything.
@@ -301,7 +301,7 @@ refresh();
 setInterval(refresh, 15000);
 ` + '\n' + formatCountdown.toString() + '\n' + `
 // =================================================================================
-// The pomodoro widget (ticket 04, SPEC_POMODORO.md). Everything below this line
+// The pomodoro widget. Everything below this line
 // is appended by '+' concatenation, never dollar-brace interpolation, exactly like
 // the formatCountdown embedding just above -- this file's own header comment
 // bans a literal backtick or interpolation ANYWHERE inside the indexScript
@@ -313,14 +313,14 @@ setInterval(refresh, 15000);
 // block; see this export's header comment for the fuller version of the same
 // reasoning src/ui.mjs's own dollar-brace fn.toString() embeddings rely on.
 //
-// Design, matching SPEC_POMODORO.md's own decisions:
+// Design:
 //  - The page owns no clock. Every rendered countdown comes from
 //    'pomodoroRemainingMs(timer, offset, Date.now())' below, where 'offset' is
 //    computed ONCE PER FETCH from the DAEMON's own 'now' (never the bare
 //    browser clock) -- see fetchPomodoro's comment. Two tabs polling the same
 //    daemon each compute their own offset from the same server clock, which is
 //    what makes their rendered countdowns agree regardless of either browser's
-//    own clock skew (criterion 6).
+//    own clock skew.
 //  - Nothing here ever decides a work interval became a break or a break
 //    became work -- that is settleBoundary's job (src/pomodoro.mjs), and it
 //    runs on the daemon, never in this script. tickPomodoro below only asks
@@ -333,14 +333,14 @@ setInterval(refresh, 15000);
 //    pause, paused -> resume -- so it always has something to do and never has
 //    to hide (the old hidden-button shape did not actually hide; see
 //    src/pomodoro-widget.mjs's own comment for why).
-//  - The tab favicon and the header glyph (SPEC_MARK.md ticket 03) both read the
+//  - The tab favicon and the header glyph both read the
 //    SAME running-unpaused-break predicate -- pomodoroIsResting below, defined
 //    once and called from both renderPomodoroFavicon and renderPomodoroGlyph --
 //    so the tab and the header can never disagree about which phase counts as
 //    "resting". A null phase (pomodoroDoc still null, before the first fetch
 //    resolves) is not a break: the predicate requires a real timer object, so a
 //    slow first load renders the ordinary mark and glyph, never flickers
-//    through rest (criterion 9).
+//    through rest.
 
 var POMODORO_POLL_MS = 15000; // same order of magnitude as refresh's own poll above
 var pomodoroDoc = null; // last-fetched { settings, cycle, cycleDate, timer, now }
@@ -348,7 +348,7 @@ var pomodoroOffset = 0; // serverNow - Date.now(), recomputed on every successfu
 var pomodoroZeroFetched = false; // debounces the zero-crossing re-fetch below
 var pomodoroResetArmed = false;
 var pomodoroResetTimer = null;
-// One pending debounce timer per cue field name (SPEC_CUES.md criterion 7) --
+// One pending debounce timer per cue field name --
 // see onPomodoroCueChange's own comment for why a per-field map, not one
 // shared timer.
 var pomodoroPreviewTimers = {};
@@ -384,10 +384,10 @@ function pomodoroPhaseLabel(phase) {
 // again there. cycle + 1 is therefore the ordinal of whichever work-or-break
 // interval is currently running, out of settings.longEvery -- and a long break
 // itself is deliberately excluded, since the breakNumber that selected it was
-// already a multiple of longEvery, and CONTEXT.md's Cycle entry never wants a
-// break bucketed against the interval count it resets. No server-side or
+// already a multiple of longEvery, and a break should never be bucketed
+// against the interval count it resets. No server-side or
 // protocol change needed for this: doc.cycle is already in the document the
-// browser polls (SPEC_COUNTS.md Decisions).
+// browser polls.
 //
 // Clamped at longEvery, which only matters when the reviewer LOWERS longEvery
 // mid-cycle: cycle is already past the new divisor, so the bare ordinal reads
@@ -420,20 +420,19 @@ function pomodoroSwitchLabel(action) {
 'var TOMATO_ICON = ' + JSON.stringify(TOMATO_ICON) + ';\n' +
 'var REST_ICON = ' + JSON.stringify(REST_ICON) + ';\n'
 + `
-// SPEC_MARK.md ticket 03: real values spliced in from src/pomodoro-widget.mjs
+// Real values spliced in from src/pomodoro-widget.mjs
 // and src/styles.mjs (JSON.stringify, the same "embed the real source, never a
 // hand copy" discipline formatCountdown.toString() already uses just above) --
 // TOMATO_ICON/REST_ICON/REST_FAVICON_HREF above are literally
 // src/pomodoro-widget.mjs's and src/styles.mjs's own exports, not a second
 // drawing that could drift from either.
 
-// The one predicate both the tab mark and the header glyph read (criteria 7-9,
-// 13, 14): true only for a REAL timer, RUNNING (not paused), on a break or long
+// The one predicate both the tab mark and the header glyph read: true only for a REAL timer, RUNNING (not paused), on a break or long
 // break. Idle, paused -- in ANY phase, including mid-break -- and work all read
 // false, and so does a timer pomodoroDoc has not been fetched yet (timer is
 // null/undefined then, same as genuinely idle): "no poll has returned" and
 // "idle" are indistinguishable on purpose, since a phase this is at most one
-// poll interval stale about is not evidence of a break (spec decision: "a null
+// poll interval stale about is not evidence of a break ("a null
 // phase means no mark change, never on break"). Exported to neither the tab nor
 // the glyph individually -- both call this SAME function, so they cannot render
 // two different opinions about which phase counts as "resting".
@@ -441,18 +440,17 @@ function pomodoroIsResting(timer) {
   return !!timer && !timer.paused && (timer.phase === 'break' || timer.phase === 'longBreak');
 }
 
-// The glyph's amber condition (criterion 15) -- deliberately a SEPARATE
+// The glyph's amber condition -- deliberately a SEPARATE
 // predicate from pomodoroIsResting rather than its negation: idle and paused
 // both fail this AND fail pomodoroIsResting, and still have to render the
-// plain muted tomato, not amber -- "idle has nothing to turn up for" (spec
-// decision) is exactly the asymmetry a bare negation of pomodoroIsResting
+// plain muted tomato, not amber -- "idle has nothing to turn up for"
+// is exactly the asymmetry a bare negation of pomodoroIsResting
 // would erase.
 function pomodoroIsActiveWork(timer) {
   return !!timer && !timer.paused && timer.phase === 'work';
 }
 
-// The index tab's own favicon swap (criterion 7: applying the rest mark built
-// by ticket 02). Same base-href capture/restore SHAPE as src/ui.mjs's
+// The index tab's own favicon swap. Same base-href capture/restore SHAPE as src/ui.mjs's
 // setFaviconBadge -- captured lazily on first call, from whatever the page's
 // own <link rel="icon"> (faviconLink, src/styles.mjs) already carries, and
 // restored exactly rather than hardcoded, so this still does the right thing
@@ -467,9 +465,9 @@ function renderPomodoroFavicon(timer) {
     if (pomodoroFaviconLink) pomodoroBaseFaviconHref = pomodoroFaviconLink.getAttribute('href');
   }
   if (!pomodoroFaviconLink) return; // faviconLink is always server-rendered; nothing to degrade to if it is somehow absent
-  // Criterion 13 (a pending count wins outright): the index page owns no
+  // A pending count wins outright: the index page owns no
   // pending-count favicon state of its own -- that is src/ui.mjs's
-  // setFaviconBadge, reachable only from a BOARD tab (design decision: "the
+  // setFaviconBadge, reachable only from a BOARD tab ("the
   // rest mark is index-only"), so there is nothing on THIS page that could ever
   // need to outrank the rest mark. The precedence still belongs here, not only
   // in this comment: pomodoroIsResting is the ONLY thing that may pick
@@ -478,7 +476,7 @@ function renderPomodoroFavicon(timer) {
   pomodoroFaviconLink.setAttribute('href', pomodoroIsResting(timer) ? REST_FAVICON_HREF : pomodoroBaseFaviconHref);
 }
 
-// The header glyph swap (criteria 14-16). Swaps the glyph's MARKUP, never the
+// The header glyph swap. Swaps the glyph's MARKUP, never the
 // 'hidden' property -- .pomodoro-icon carries an author 'display' rule that
 // the UA stylesheet's '[hidden] { display: none }' can never outrank (this
 // section's own header comment: the exact trap that once left a dead pill
@@ -486,7 +484,7 @@ function renderPomodoroFavicon(timer) {
 // mounted so the 1s local-repaint tick (tickPomodoro, which calls renderPomodoro
 // every second regardless of whether anything changed) does not re-parse the
 // same SVG string every second -- the swap itself is still instant either way
-// (criterion 16: nothing here animates or transitions), this only skips
+// (nothing here animates or transitions), this only skips
 // redundant DOM writes.
 var pomodoroIconKind = null; // 'tomato' | 'rest', null before the first render
 function renderPomodoroGlyph(timer) {
@@ -515,7 +513,7 @@ function renderPomodoroGlyph(timer) {
 function renderPomodoro() {
   var statusEl = document.querySelector('span#pomodoro-status');
   var toggleBtn = document.querySelector('button#pomodoro-toggle');
-  // The null-doc guard (criterion 9): before the first fetch resolves there is
+  // The null-doc guard: before the first fetch resolves there is
   // no timer to read at all, and the server-rendered markup (the plain tomato,
   // the plain mark) is already the correct anti-flicker default -- so this
   // returns before touching the favicon or the glyph, exactly as it already did
@@ -580,10 +578,10 @@ function pomodoroSyncForm() {
   var longBreakMin = form.querySelector('input[name="longBreakMin"]');
   var longEvery = form.querySelector('input[name="longEvery"]');
   var notify = form.querySelector('input[name="notify"]');
-  // The three cue pickers (SPEC_CUES.md), synced the same way and on the same
+  // The three cue pickers, synced the same way and on the same
   // condition as every field above -- each is its own <select>, so this is
   // what makes "reverting a change without saving leaves the stored cue
-  // untouched" (criterion 8) true: a preview (onPomodoroCueChange below) only
+  // untouched" true: a preview (onPomodoroCueChange below) only
   // ever posts to /api/pomodoro/preview, never writes pomodoroDoc.settings, so
   // the next sync (panel closed, same as any other abandoned edit) overwrites
   // whatever the picker was showing with the daemon's actual stored value.
@@ -614,7 +612,7 @@ function fetchPomodoro() {
     // daemon's own 'now' (src/server.mjs sendPomodoro) is what makes this
     // correct regardless of how far the browser's wall clock has drifted --
     // never 'deadline - Date.now()' directly. See this section's header
-    // comment for why that is what makes two tabs agree (criterion 6).
+    // comment for why that is what makes two tabs agree.
     pomodoroOffset = data.now - Date.now();
     pomodoroDoc = data;
     pomodoroZeroFetched = false;
@@ -667,8 +665,7 @@ function onPomodoroToggleClick() {
   postPomodoro(pomodoroSwitchAction(pomodoroDoc.timer));
 }
 
-// The Restart/Forward pair (SPEC_FORWARD.md, criterion
-// 7). Always present, so unlike onPomodoroToggleClick above there is no
+// The Restart/Forward pair. Always present, so unlike onPomodoroToggleClick above there is no
 // pomodoroDoc-shaped decision to make before posting -- both routes are
 // bodyless no-ops server-side against an idle daemon (src/pomodoro.mjs
 // forwardTimer/restartTimer, both a no-op against '!doc.timer'), so a click
@@ -744,7 +741,7 @@ function onPomodoroSettingsSubmit(ev) {
   }).then(closePomodoroSettings);
 }
 
-// Criterion 7: picking a cue plays it immediately, before Save, even with the
+// Picking a cue plays it immediately, before Save, even with the
 // notify toggle off -- POST /api/pomodoro/preview (src/server.mjs, another
 // owner's route) is what actually plays the file; this only asks for it. Fire
 // and forget on purpose: a failed preview (offline tab, daemon mid-restart)
@@ -752,13 +749,13 @@ function onPomodoroSettingsSubmit(ev) {
 // .then(), a swallowing .catch(), and no read of the response body, which is
 // why postPomodoro (used by every other write here) is not reused -- that
 // helper applies the response back into pomodoroDoc and rejects on a non-ok
-// status, both wrong for something that is not a write at all (criterion 8:
-// a preview must never touch pomodoroDoc.settings).
+// status, both wrong for something that is not a write at all (a preview
+// must never touch pomodoroDoc.settings).
 //
 // Debounced per FIELD NAME, not by one shared timer across all three pickers:
 // a held arrow key on ONE <select> can fire 'change' once per option it scans
 // past, and previewing every one of those would be exactly the "chorus"
-// criterion 7 forbids -- so each new change on the same field cancels that
+// this forbids -- so each new change on the same field cancels that
 // field's own still-pending preview and restarts the wait, and only the value
 // the reader actually lands on ever plays. A shared timer would additionally
 // let a change on one picker cancel a still-pending preview on a DIFFERENT

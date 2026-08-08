@@ -1,51 +1,50 @@
-// Ticket 03 (DESIGN.md): comment mode, and one anchoring model over the
-// board's own rendered DOM. Extends the end-to-end DOM stand-in seam ticket 01
-// built and ticket 02 turned green (test/dom-stand-in.mjs, test/check-click.mjs,
+// Comment mode, and one anchoring model over the
+// board's own rendered DOM. Extends the end-to-end DOM stand-in seam already
+// built and turned green (test/dom-stand-in.mjs, test/check-click.mjs,
 // test/check-click-pin.mjs) rather than adding another unit check over the pure
 // module -- the whole point of this repo's testing strategy is that a check over
 // src/anchor.mjs alone cannot see whether a listener is actually attached to a
-// live document (see DESIGN.md Decisions -> "Criterion 8 runs in a DOM
-// stand-in", and its own Testing section).
+// live document.
 //
 // Covers, against the REAL src/ui.mjs client script run in the stand-in:
-//   - criterion 1, as ADR.md entry 28 leaves it: the generic page-scoped gesture
+//   - as ADR.md entry 28 leaves it: the generic page-scoped gesture
 //     over the kinds that are still commentable -- a diagram, and a diagram
 //     inside a compare side -- each clicked in comment mode, each opening its
 //     block's comment form with a `dom` reference and a hint naming it.
 //     Table-driven over the SAME rendered board. This table used to hold one row
 //     per acceptance-criterion example (prose, a list item, a table cell, a line
-//     of a code reference); entry 28 inverts those into the criterion-18 table
+//     of a code reference); entry 28 inverts those into the table
 //     immediately below it, which drives the same gesture and asserts it mints
 //     nothing. ("a question's own widget" was inverted the same way one ADR
 //     earlier, by entry 6.)
-//   - criterion 17: an `html` stage and a `mermaid` diagram are commentable
+//   - an `html` stage and a `mermaid` diagram are commentable
 //     WHEREVER they appear -- including inside a question's `context` and inside
 //     a compare side. Checked by driving the real gesture in each position, not
 //     by reading the kind check.
-//   - criterion 18: a `markdown` block and a `code` block offer no comment
+//   - a `markdown` block and a `code` block offer no comment
 //     control (no button, no form, no list, no pin-layer) and no click-to-anchor
 //     gesture, at the top level or nested inside a wrapper.
-//   - criterion 2: with comment mode on, hovering marks the exact element under
+//   - with comment mode on, hovering marks the exact element under
 //     the cursor and never an ancestor.
-//   - criterion 3: with comment mode OFF (the default -- these checks never touch
+//   - with comment mode OFF (the default -- these checks never touch
 //     the toggle), the ordinary interactions the spec names by name still work:
 //     choosing a single-select option, typing into a text answer, and pressing
 //     Send (a stubbed global `fetch` captures what actually got posted, so this
 //     is a real assertion on the collected answers, not just "it didn't throw").
 //     Drag-to-rank and text-selection are the two interactions this repo's own
-//     testing docs already carve out as not automatable in a headless DOM
-//     (DESIGN.md Testing) -- see this file's own note further down for
+//     testing docs already carve out as not automatable in a headless DOM --
+//     see this file's own note further down for
 //     exactly what is and isn't covered here for that reason.
-//   - criterion 6: the hint for a clicked element names both its own identity and
+//   - the hint for a clicked element names both its own identity and
 //     its containing context -- the concrete "Send button in the after stage"
-//     case from the ticket, via the html-stage's click gesture and a compare
+//     case, via the html-stage's click gesture and a compare
 //     block's two sides.
 //   - one gesture, toggle-gated everywhere: a later product decision (not a
 //     defect -- see this file's own section further down) retired the hand-
 //     mocked stage's original always-on click/hover as a standing exception.
 //     With comment mode off, clicking inside a stage now does nothing and no
-//     hover outline appears; with it on, the stage behaves exactly as ticket 02
-//     left it. test/check-click.mjs and test/check-click-pin.mjs cover "what
+//     hover outline appears; with it on, the stage behaves exactly as it did
+//     before. test/check-click.mjs and test/check-click-pin.mjs cover "what
 //     happens once the click lands" (unchanged); this file covers the toggle
 //     itself gating that gesture.
 
@@ -67,10 +66,10 @@ function check(name, fn) {
   }
 }
 
-// One board fixture covering every content kind criterion 1 asks for, short of
-// the diagram node (ticket 05) and the hand-mocked stage on its own (already
+// One board fixture covering every content kind called for, short of
+// the diagram node and the hand-mocked stage on its own (already
 // covered end to end by test/check-click.mjs / test/check-click-pin.mjs -- this
-// file's own criterion-6 check below still exercises it, inside a compare side).
+// file's own hint check below still exercises it, inside a compare side).
 const BLOCK_SPEC = [
   {
       kind: 'markdown',
@@ -134,7 +133,7 @@ function loadBoard() {
 
 /** Turns comment mode on via the actual toggle button -- never by reaching in and
  * setting a variable, which would prove nothing about the gesture a reviewer
- * actually has (criterion 2: discoverable, visible chrome). */
+ * actually has (discoverable, visible chrome). */
 function enableCommentMode(document) {
   const toggle = document.getElementById('comment-mode-toggle');
   assert.ok(toggle, 'setup failure: no #comment-mode-toggle button rendered on the board page');
@@ -162,7 +161,7 @@ function loadSoloStageBoard() {
   return { document, blockId: soloBlockId };
 }
 
-// --- criterion 1 (partial): one content kind per acceptance-criterion example --
+// --- one content kind per acceptance-criterion example --------------------------
 
 const KIND_CASES = [
   {
@@ -175,7 +174,7 @@ const KIND_CASES = [
     name: 'a diagram on one side of a comparison',
     blockId: compareBlock.left.block.id,
     find: doc => errorNoteFor(doc, compareBlock.left.block.id),
-    // Inside a compare side, the hint also carries context (criterion 6) -- the
+    // Inside a compare side, the hint also carries context -- the
     // note's own text as identity, "Before diagram" as context (this side's own
     // label plus the nested block's kind noun -- see src/anchor.mjs's design
     // comment).
@@ -209,7 +208,7 @@ for (const kindCase of KIND_CASES) {
   });
 }
 
-// --- criterion 18: markdown and code offer neither control nor gesture ---------
+// --- markdown and code offer neither control nor gesture ------------------------
 //
 // The inverse of the table above, driven exactly the same way. Each of these was
 // a POSITIVE row until ADR.md entry 28; keeping them as negatives is what stops
@@ -225,14 +224,14 @@ const NON_ANCHORABLE_KIND_CASES = [
 ];
 
 for (const kindCase of NON_ANCHORABLE_KIND_CASES) {
-  check(`criterion 18: clicking ${kindCase.name} in comment mode mints no comment and shows no hover affordance`, () => {
+  check(`clicking ${kindCase.name} in comment mode mints no comment and shows no hover affordance`, () => {
     const document = loadBoard();
     enableCommentMode(document);
     assertNotAnchorable(document, kindCase.find(document), kindCase.name);
   });
 }
 
-check('criterion 18: a markdown block and a code block render no comment button, no comment form, no comment list, no comment target and no pin-layer', () => {
+check('a markdown block and a code block render no comment button, no comment form, no comment list, no comment target and no pin-layer', () => {
   const document = loadBoard();
   for (const [name, blockId] of [['markdown', mdBlock.id], ['code', codeBlock.id]]) {
     const section = document.querySelector(`[data-block-id="${blockId}"]`);
@@ -273,7 +272,7 @@ check('comment mode: a numbered pin lands on the anchored element once the opene
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'a freshly-queued comment must not render as lost');
 });
 
-// --- criterion 2: hovering marks exactly the hovered element ------------------
+// --- hovering marks exactly the hovered element --------------------------------
 
 // Driven inside a hand-mocked html stage rather than over markdown prose: ADR.md
 // entry 28 left `html` and `mermaid` as the only commentable kinds, and a stage's
@@ -307,10 +306,9 @@ check('comment mode off: hovering marks nothing at all (the affordance itself is
   assert.equal(button.classList.contains('cb-anchor-hover'), false, 'hovering must do nothing while comment mode is off');
 });
 
-// --- criterion 3: comment mode OFF (never touched below) never steals an ------
+// --- comment mode OFF (never touched below) never steals an -------------------
 // ordinary interaction. Driven end to end through the real client script, not
-// argued -- DESIGN.md's own Testing section and this ticket's
-// instructions both call out that an untested claim here is exactly how this
+// argued -- an untested claim here is exactly how this
 // spec's own defect shipped twice.
 //
 // NOT covered here, named rather than silently skipped: text selection, and the
@@ -318,15 +316,15 @@ check('comment mode off: hovering marks nothing at all (the affordance itself is
 // it implements no selection API at all, and 'dragover' (where the actual
 // reordering happens, driven by a live pointer position) is not modelled either --
 // both are pre-existing, documented ceilings of this stand-in, not new gaps this
-// file introduces. DESIGN.md's Testing section already carves the FULL
-// drag-and-drop gesture out as unautomatable without a real browser for that
+// file introduces. The FULL
+// drag-and-drop gesture is already carved out as unautomatable without a real browser for that
 // reason.
 //
-// Ticket 07 follow-up (DESIGN.md, audit finding C5): what IS reachable,
-// and IS covered a few checks below, is the one thing criterion 3 actually turns
+// What IS reachable,
+// and IS covered a few checks below, is the one thing this actually turns
 // on for this widget -- the 'dragstart' handler's own `commentMode ||` guard
 // (src/ui.mjs). This comment used to claim that coverage existed here without any
-// check ever dispatching a 'dragstart'; the audit caught that as the exact
+// check ever dispatching a 'dragstart'; that turned out to be the exact
 // pattern this whole spec exists to eliminate (a criterion standing on an
 // argument, with a comment vouching for a check that was never written), and
 // `node test/run.mjs` stayed fully green with `commentMode ||` deleted from that
@@ -341,8 +339,8 @@ check('comment mode off: choosing a single-select option still selects it (and d
   yes.dispatchEvent(new StandInEvent('click'));
 
   assert.equal(yes.classList.contains('selected'), true, 'clicking an option with comment mode off must still select it');
-  // Ticket 01 (ADR "Commenting is confined to content blocks", sibling ticket,
-  // src/render.mjs): a question block renders no comment-form of its own any
+  // Per ADR "Commenting is confined to content blocks"
+  // (src/render.mjs): a question block renders no comment-form of its own any
   // more at all, so there is no single element left to ask "did THIS one stay
   // closed". Proven instead the same way the wrapper-gating checks further
   // down this file prove it -- driving the real gesture and checking its
@@ -361,7 +359,7 @@ check('comment mode off: typing into a text-answer widget still records the text
   textarea.value = 'this is the reviewer\'s free-text answer';
   textarea.dispatchEvent(new StandInEvent('input'));
   // The shared fixture's OTHER question (choiceBlock) also needs an answer here:
-  // the round-end send guard (DESIGN.md) (test/check-send-guard.mjs owns its own contract)
+  // the round-end send guard (test/check-send-guard.mjs owns its own contract)
   // arms Send instead of submitting while any question is outstanding, and this
   // check's own subject is whether typed text reaches the submit body, not the
   // guard -- so the round is filled out completely, exactly the state a plain
@@ -392,7 +390,7 @@ check('comment mode off: typing into a text-answer widget still records the text
   assert.equal(answer.status, 'answered');
 });
 
-check('comment mode off: pressing Send posts the currently-filled-in answers to the submit route, exactly as before this ticket', () => {
+check('comment mode off: pressing Send posts the currently-filled-in answers to the submit route, exactly as before', () => {
   const document = loadBoard();
   const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
   yes.dispatchEvent(new StandInEvent('click'));
@@ -428,8 +426,8 @@ check('comment mode off: pressing Send posts the currently-filled-in answers to 
   assert.equal(choiceAnswer.choice, 'Yes', 'the option chosen before Send must be what gets posted');
 });
 
-// --- src/ui.mjs's rank-list 'dragstart' guard (ticket 07 follow-up, audit -----
-// finding C5): a standalone board, not the shared fixture above, since these two
+// --- src/ui.mjs's rank-list 'dragstart' guard: a standalone board, not the ----
+// shared fixture above, since these two
 // checks need to inspect the widget both with comment mode on and off, exactly
 // the same reason loadSoloStageBoard is kept separate from `board`.
 
@@ -471,7 +469,7 @@ check('comment mode on: a dragstart on a rank item is stood down by the SAME gua
     'with comment mode on, a dragstart on a rank item must be stood down, exactly like choosing an option or pressing Defer -- a click mid-drag must anchor, not reorder');
 });
 
-// --- criterion 6: the hint carries both identity and containing context -------
+// --- the hint carries both identity and containing context --------------------
 
 check('the hint for a clicked element reads "<identity> in <context>": a "Send" button inside the compare\'s "After" html stage', () => {
   const document = loadBoard();
@@ -501,7 +499,7 @@ check('the hint for a clicked element reads "<identity> in <context>": a "Send" 
   assert.equal(hint, 'Send button in After stage', `expected the exact "identity in context" hint, got ${JSON.stringify(hint)}`);
 });
 
-check('ticket 02\'s plain html-stage hint is unchanged outside a compare (no context to add)', () => {
+check('the plain html-stage hint is unchanged outside a compare (no context to add)', () => {
   const soloBoard = createBoard({
     title: 'Ticket 03 -- plain stage, no compare',
     blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
@@ -521,15 +519,15 @@ check('ticket 02\'s plain html-stage hint is unchanged outside a compare (no con
 
   const form = document.getElementById('comment-form-' + soloBlockId);
   assert.equal(form.getAttribute('data-anchor-label'), 'Send',
-    'outside a compare, the hint must stay exactly the clicked element\'s own text, unchanged from ticket 02');
+    'outside a compare, the hint must stay exactly the clicked element\'s own text, unchanged from before');
 });
 
 // --- one gesture, toggle-gated everywhere: the user's decision on the ---------
 // hand-mocked stage -------------------------------------------------------------
 //
-// A later product decision, not a defect: ticket 03 originally left the stage's
+// A later product decision, not a defect: this originally left the stage's
 // click/hover always-on (the isolated mock has no ordinary interaction of its own
-// to steal, so criterion 3 never required gating it). The user decided that was
+// to steal, so nothing required gating it). The user decided that was
 // still two gestures on one page and asked for exactly one, toggle-gated
 // everywhere -- so the stage now obeys `commentMode` exactly like the generic
 // page listener. test/check-click.mjs and test/check-click-pin.mjs now turn
@@ -550,7 +548,7 @@ check('comment mode off: clicking inside the hand-mocked stage opens no comment 
     'with comment mode off, clicking an element inside the stage must not open a comment form -- the stage is no longer a standing exception');
 });
 
-check('comment mode off: hovering inside the hand-mocked stage adds no outline (an outline that leads nowhere is exactly what criterion 2 rules out)', () => {
+check('comment mode off: hovering inside the hand-mocked stage adds no outline (an outline that leads nowhere is exactly the kind of affordance this rules out)', () => {
   const { document } = loadSoloStageBoard();
   const frame = document.querySelector('.html-stage');
   frame.loadSrcdoc();
@@ -563,7 +561,7 @@ check('comment mode off: hovering inside the hand-mocked stage adds no outline (
     'with comment mode off, hovering an element inside the stage must not mark it as the one that will be anchored');
 });
 
-check('comment mode on: hovering, then clicking, inside the hand-mocked stage still marks and anchors the element, exactly as ticket 02 left it', () => {
+check('comment mode on: hovering, then clicking, inside the hand-mocked stage still marks and anchors the element, exactly as before', () => {
   const { document, blockId } = loadSoloStageBoard();
   enableCommentMode(document);
   const frame = document.querySelector('.html-stage');
@@ -597,10 +595,9 @@ check('comment mode: turning it off mid-hover clears an already-applied stage ho
 });
 
 // =================================================================================
-// Ticket 07 (DESIGN.md): every ablation in the audit's V1 table must fail
-// a NAMED check. Each block below is written against, and verified red against,
-// the specific line(s) the audit names -- see this ticket's own log/report for the
-// ablation output. Grouped here (rather than a new file) because every one of
+// Every ablation that was tried must fail a NAMED check. Each block below is
+// written against, and verified red against, the specific line(s) that ablation
+// touches. Grouped here (rather than a new file) because every one of
 // these reuses loadBoard/enableCommentMode/loadSoloStageBoard, and every one of
 // them is about the SAME thing this whole file is already about: driving the real
 // client script, not the pieces underneath it.
@@ -608,7 +605,7 @@ check('comment mode: turning it off mid-hover clears an already-applied stage ho
 
 // --- src/ui.mjs:627 -- document.body.classList.toggle('comment-mode', ...) ----
 
-check('comment mode: turning it on adds body.comment-mode -- every CSS rule behind criterion 2 (src/styles.mjs) keys off exactly this class, and the only checks that named it before ticket 07 asserted it absent (ablation: deleting the toggle() call)', () => {
+check('comment mode: turning it on adds body.comment-mode -- every CSS rule behind this (src/styles.mjs) keys off exactly this class, and the only checks that named it before asserted it absent (ablation: deleting the toggle() call)', () => {
   const document = loadBoard();
   assert.equal(document.body.classList.contains('comment-mode'), false, 'setup failure: body must not start with comment-mode');
   const toggle = enableCommentMode(document);
@@ -652,7 +649,7 @@ check('comment mode: hovering a second element (with no intervening mouseout) st
   second.dispatchEvent(new StandInEvent('mouseover')); // no mouseout on `first` first
 
   assert.equal(first.classList.contains('cb-anchor-hover'), false,
-    'moving the hover to a second element must clear the first element\'s highlight, even with no intervening mouseout -- criterion 2 names "that element, and not its ancestors", which a highlight trailing behind on the PREVIOUS element also violates');
+    'moving the hover to a second element must clear the first element\'s highlight, even with no intervening mouseout -- "that element, and not its ancestors" is the rule, and a highlight trailing behind on the PREVIOUS element also violates it');
   assert.equal(second.classList.contains('cb-anchor-hover'), true, 'the newly-hovered element must still be marked');
 });
 
@@ -701,14 +698,14 @@ check('comment mode: the toggle\'s aria-pressed attribute and visible label both
 
   toggle.dispatchEvent(new StandInEvent('click'));
   assert.equal(toggle.getAttribute('aria-pressed'), 'true', 'aria-pressed must read "true" once comment mode is actually ON');
-  assert.equal(label.textContent, 'Comment mode: on', 'the visible label must read "on" once comment mode is actually ON -- an inverted label reads "off" while a click anchors, which criterion 2\'s "unambiguous" rules out');
+  assert.equal(label.textContent, 'Comment mode: on', 'the visible label must read "on" once comment mode is actually ON -- an inverted label reads "off" while a click anchors, which an unambiguous label rules out');
 
   toggle.dispatchEvent(new StandInEvent('click'));
   assert.equal(toggle.getAttribute('aria-pressed'), 'false', 'aria-pressed must read "false" once comment mode is actually OFF');
   assert.equal(label.textContent, 'Comment mode: off', 'the visible label must read "off" once comment mode is actually OFF');
 });
 
-// --- ANCHOR_CHROME_SELECTOR: each entry the audit named, dropped individually --
+// --- ANCHOR_CHROME_SELECTOR: each entry, dropped individually -------------------
 
 check('comment mode: clicking a block\'s own "comment" kicker chrome (not the button itself, which self-excludes via the anchorRootFor/el===root guard -- the surrounding .block-kicker div, which carries no data-block-id of its own) opens no comment form at all (ablation: dropping .block-kicker, .comment-btn from ANCHOR_CHROME_SELECTOR mints a dom anchor against it instead)', () => {
   const document = loadBoard();
@@ -725,7 +722,7 @@ check('comment mode: clicking a block\'s own "comment" kicker chrome (not the bu
     'clicking the kicker chrome around the comment button (not the button itself) must not open any comment form -- with the kicker unexcluded, the generic listener mints a dom anchor against it instead, since the kicker itself carries no data-block-id to trip the self-guard the button has');
 });
 
-// Ablation note (ticket 02, ADR "Commenting is confined to content blocks"):
+// Ablation note (per ADR "Commenting is confined to content blocks"):
 // dropping `.compare-label` from ANCHOR_CHROME_SELECTOR used to be the thing
 // that made this check fail -- .compare-label's nearest [data-block-id]
 // ancestor is the compare block's own OUTER section (it sits inside
@@ -735,14 +732,14 @@ check('comment mode: clicking a block\'s own "comment" kicker chrome (not the bu
 // whose resolved root's own data-block-kind is `compare` (or `question`)
 // regardless of ANCHOR_CHROME_SELECTOR, so a click on `.compare-label` still
 // mints nothing even with the selector entry removed -- confirmed by actually
-// running that ablation against this check post-ticket-02: nothing in the
+// running that ablation against this check: nothing in the
 // suite goes red. Reported rather than silently dropped, exactly like the
 // `.round-label` finding a few checks below (which was already dead for an
 // unrelated reason -- anchorRootFor finding no block there at all). What IS
 // checked below is the real, current, correct behaviour, proved the same way
 // the wrapper-gating checks further down this file do: driving the gesture
 // and checking the page as a whole, not a specific block's form (the compare
-// block itself renders no comment-form any more either, sibling ticket 01).
+// block itself renders no comment-form any more either).
 check('comment mode: clicking a compare side\'s own label opens no comment form anywhere on the page and mints no comment', () => {
   const document = loadBoard();
   enableCommentMode(document);
@@ -763,7 +760,7 @@ check('comment mode: clicking a compare side\'s own label opens no comment form 
 });
 
 // NOT independently observable through a click, and reported rather than papered
-// over (this ticket's own hard constraint): `.round-label` sits directly inside
+// over (a hard constraint): `.round-label` sits directly inside
 // the round `<section class="round">`, which itself carries no `data-block-id` --
 // nor does anything between it and `<body>`. `anchorRootFor` (`el.closest('[data-
 // block-id]')`) therefore already returns null for a click anywhere on or inside
@@ -806,13 +803,13 @@ check('comment mode: clicking the html-stage iframe element itself (the outer-do
     'clicking the iframe element itself must not ALSO open a page-scoped dom-anchor form via the generic page-wide listener');
 });
 
-// --- the whole-block comment button (DESIGN.md polish criteria 1 and 12) -------
+// --- the whole-block comment button ---------------------------------------------
 //
 // This section used to be about `.comment-btn[data-anchor-kind="md"]` -- the
 // inline control injectAnchorButtons (src/render.mjs) put after every markdown
 // heading and list item, the ONLY producer of `md` anchors on the page, and the
-// one anchor-minting path that never learned either of ticket 02's two rules
-// (audit findings P1/P2: no findPendingCommentForAnchor lookup, no isSentAnchor
+// one anchor-minting path that never learned either of two rules
+// (no findPendingCommentForAnchor lookup, no isSentAnchor
 // gate, so a second click on a heading queued a second independent comment).
 // ADR.md entry 28 deletes that control and the `md` anchor kind with it, and
 // those two checks go with them -- the editing and sent-gate rules they covered
@@ -842,17 +839,17 @@ check('the whole-block "comment" button stays ADDITIVE -- several separate remar
     'the whole-block gesture must still queue two independent comments');
 });
 
-// --- criterion 2: the delete control, driven rather than asserted into ---------
+// --- the delete control, driven rather than asserted into -----------------------
 //
 // Nothing exercised this gesture end to end: `.comment-delete` could be removed
 // from renderPendingCommentItem entirely and the whole suite stayed green, which
-// is how criterion 2's only affordance came to have no behavioural cover at all.
+// is how this only affordance came to have no behavioural cover at all.
 // Driven here through the real listener, on three queued comments so the
 // renumbering half ("the remaining provisional pins stay contiguous") is
 // observable rather than merely claimed -- deleting the MIDDLE one is the case
 // that distinguishes a real renumber from an append-only list.
 
-check('criterion 2: a queued comment\'s delete control removes it, its pin, and renumbers everything after it', () => {
+check('a queued comment\'s delete control removes it, its pin, and renumbers everything after it', () => {
   const document = loadBoard();
   enableCommentMode(document);
   // Three queued comments: two dom-anchored on the first diagram's neighbouring
@@ -878,7 +875,7 @@ check('criterion 2: a queued comment\'s delete control removes it, its pin, and 
   form.dispatchEvent(new StandInEvent('submit'));
 
   // Sorted, because entries live in their OWN block's list and document order
-  // is therefore block order, not queue order -- what criterion 2 promises is
+  // is therefore block order, not queue order -- what this promises is
   // that the numbers stay a contiguous 1..n run, not where they sit on the page.
   const numbers = () => document.querySelectorAll('.comment-item.comment-pending .comment-anchor')
     .map(el => Number(/#(\d+)/.exec(el.textContent)[1])).sort((a, b) => a - b);
@@ -893,7 +890,7 @@ check('criterion 2: a queued comment\'s delete control removes it, its pin, and 
   // Delete the MIDDLE one (by queue number, not by document position -- entries
   // live in their own block's list), through its own control.
   const del = itemFor('remark-beta').querySelector('.comment-delete');
-  assert.ok(del, 'criterion 2: every queued comment\'s list entry must carry a delete control');
+  assert.ok(del, 'every queued comment\'s list entry must carry a delete control');
   del.dispatchEvent(new StandInEvent('click'));
 
   const remaining = document.querySelectorAll('.comment-item.comment-pending');
@@ -901,14 +898,14 @@ check('criterion 2: a queued comment\'s delete control removes it, its pin, and 
   assert.equal(remaining.map(i => String(i.textContent || '')).join('').includes('remark-beta'), false,
     'the deleted comment\'s text must be gone from the page');
   assert.deepEqual(numbers(), [1, 2],
-    'criterion 2: the remaining provisional numbers must stay contiguous after a deletion, with no gap where #2 was');
+    'the remaining provisional numbers must stay contiguous after a deletion, with no gap where #2 was');
   assert.equal(numberOf('remark-gamma'), 2,
-    'criterion 2: deleting #2 must renumber the comment that was #3 down to #2 -- and it lives on a DIFFERENT block, so the renumber has to be board-wide');
+    'deleting #2 must renumber the comment that was #3 down to #2 -- and it lives on a DIFFERENT block, so the renumber has to be board-wide');
   assert.equal(document.querySelectorAll('.mermaid-block .anchor-pin.pin-pending').length, 1,
     'the deleted comment\'s hollow pin must be gone too, and the surviving one must remain');
 });
 
-check('criterion 12 (page-scoped half): an element carrying a SENT dom comment is not a comment target, and its neighbours still are', () => {
+check('an element carrying a SENT dom comment is not a comment target, and its neighbours still are', () => {
   // The generic comment-mode click listener's own isSentAnchor gate -- deleting
   // it left the whole suite green before this check existed. The ref is minted
   // by a REAL click first (never hardcoded), then sent, then the page reloaded
@@ -939,7 +936,7 @@ check('criterion 12 (page-scoped half): an element carrying a SENT dom comment i
   const liveNote = errorNoteFor(document, liveDiagramId);
   assert.ok(sentNote && liveNote, 'setup failure: both diagram sections must render a .resolve-error note');
 
-  // Hover first: criterion 12 is "visibly not a comment target" as well as inert.
+  // Hover first: the rule is "visibly not a comment target" as well as inert.
   sentNote.dispatchEvent(new StandInEvent('mouseover'));
   assert.equal(sentNote.classList.contains('cb-anchor-sent'), true,
     'the element carrying a sent comment must be de-affordanced on hover, not marked as an ordinary target');
@@ -947,7 +944,7 @@ check('criterion 12 (page-scoped half): an element carrying a SENT dom comment i
 
   sentNote.dispatchEvent(new StandInEvent('click'));
   const form = document.getElementById('comment-form-' + sentDiagramId);
-  assert.equal(form.classList.contains('open'), false, 'criterion 12: clicking it must do nothing');
+  assert.equal(form.classList.contains('open'), false, 'clicking it must do nothing');
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0, 'and queue nothing');
 
   // The negative: the neighbouring block's own note is still an ordinary target,
@@ -969,7 +966,7 @@ check('criterion 12 (page-scoped half): an element carrying a SENT dom comment i
 // keeps its own [data-block-id]/[data-block-kind], so it is judged on its OWN
 // kind, before the wrapper is ever reached.
 //
-// ADR.md entry 28 is what decides that judgement now, and criterion 17 is the
+// ADR.md entry 28 is what decides that judgement now, and this is the
 // claim these nested checks carry: an `html` stage and a `mermaid` diagram are
 // commentable WHEREVER they appear, a question's context and a compare side
 // included, while `markdown` and `code` are inert in exactly those same
@@ -988,9 +985,9 @@ const WRAPPER_BOARD = createBoard({
       prompt: 'Pick a favorite',
       widget: 'single',
       options: [{ label: 'Red' }, { label: 'Blue' }],
-      // Criterion 17: an html stage inside a question's `context`. Its own kind
+      // An html stage inside a question's `context`. Its own kind
       // is what decides, so it is exactly as commentable here as at the top
-      // level. The markdown entry beside it is the contrast (criterion 18):
+      // level. The markdown entry beside it is the contrast:
       // same slot, same wrapper, no affordance.
       context: [
         { kind: 'html', html: '<div class="mock"><button>Ship</button></div>' },
@@ -1011,7 +1008,7 @@ const WRAPPER_BOARD = createBoard({
     },
     {
       kind: 'compare',
-      // Criterion 17's other position: a mermaid diagram in a compare side.
+      // Another position for the same rule: a mermaid diagram in a compare side.
       left: { label: 'Left', block: { kind: 'mermaid', source: { path: 'no-such-diagram-28d.mmd' } } },
       right: { label: 'Right' }, // no `block` -- "a side that carries no content block"
     },
@@ -1041,7 +1038,7 @@ function loadWrapperBoard() {
  * hover, and no comment minted from the click. Checked over the page as a
  * whole (no comment-form anywhere ends up open, no comment gets queued) rather
  * than by looking up a specific block's own comment-form element -- question
- * and compare blocks render none at all any more (sibling ticket 01, ADR
+ * and compare blocks render none at all any more (ADR
  * "Commenting is confined to content blocks"), so a blockId-keyed lookup would
  * find null on exactly the wrapper surfaces this helper exists to check. */
 function assertNotAnchorable(document, el, name) {
@@ -1113,7 +1110,7 @@ for (const c of COMPARE_WRAPPER_CASES) {
 
 // --- nested blocks stay fully live one level in --------------------------------
 
-check("criterion 17: an html stage nested inside a question's context is commentable exactly as it is anywhere else, even though the question's own prompt (a sibling in the same section) is not", () => {
+check("an html stage nested inside a question's context is commentable exactly as it is anywhere else, even though the question's own prompt (a sibling in the same section) is not", () => {
   const document = loadWrapperBoard();
   enableCommentMode(document);
 
@@ -1141,7 +1138,7 @@ check("criterion 17: an html stage nested inside a question's context is comment
   assert.ok(String(nestedForm.getAttribute('data-anchor-label') || '').indexOf('Ship') !== -1,
     'and carry a hint naming what was clicked');
 
-  // Criterion 18, same slot: the markdown entry beside it carries no affordance
+  // Same slot: the markdown entry beside it carries no affordance
   // at all, and the wrapper's own prompt is inert -- in the SAME document, in the
   // same click sequence, so neither result can be "the gesture is dead".
   assert.equal(document.getElementById('comment-form-' + wrapperContextProse.id), null,
@@ -1165,7 +1162,7 @@ check("criterion 17: an html stage nested inside a question's context is comment
     "the only open form afterward must still be the nested stage's own");
 });
 
-check("criterion 17: a mermaid diagram in the SAME prose context keeps its affordance too -- the prose path is a layout, not a second comment rule", () => {
+check("a mermaid diagram in the SAME prose context keeps its affordance too -- the prose path is a layout, not a second comment rule", () => {
   const document = loadWrapperBoard();
   enableCommentMode(document);
 
@@ -1189,7 +1186,7 @@ check("criterion 17: a mermaid diagram in the SAME prose context keeps its affor
   assert.equal(form.getAttribute('data-anchor-kind'), 'dom');
 
   // ...and the pin actually lands, in that item's own layer -- the half a
-  // markup-only check cannot see (audit finding C4: an anchorable surface with no
+  // markup-only check cannot see (an anchorable surface with no
   // layer to draw into resolves to a comment with no pin anywhere on the page).
   const layer = Array.prototype.slice.call(section.children).find(c => c.classList && c.classList.contains('pin-layer'));
   assert.ok(layer, 'a mermaid context item must carry a page-scoped pin-layer of its own');
@@ -1199,7 +1196,7 @@ check("criterion 17: a mermaid diagram in the SAME prose context keeps its affor
   assert.equal(pins.length, 1, `expected exactly one pin in the context diagram's own layer, got ${pins.length}`);
 });
 
-check("criterion 17: a mermaid diagram nested inside a compare side is commentable exactly as it is anywhere else, even though the compare's own kicker/grid (a sibling in the same section) is not", () => {
+check("a mermaid diagram nested inside a compare side is commentable exactly as it is anywhere else, even though the compare's own kicker/grid (a sibling in the same section) is not", () => {
   const document = loadWrapperBoard();
   enableCommentMode(document);
 
@@ -1232,9 +1229,9 @@ check("criterion 17: a mermaid diagram nested inside a compare side is commentab
 
 // --- a round of only question blocks: no anchorable content anywhere, but -----
 // answering and sending it (and toggling comment mode itself) behave exactly as
-// before this ticket -------------------------------------------------------------
+// before -----------------------------------------------------------------------
 
-check('a round with only question blocks: the comment-mode toggle still renders and still toggles, and answering/sending behaves exactly as before this ticket', () => {
+check('a round with only question blocks: the comment-mode toggle still renders and still toggles, and answering/sending behaves exactly as before', () => {
   const onlyQuestionsBoard = createBoard({
     title: 'Ticket 02 -- an all-question round',
     blocks: [
@@ -1256,7 +1253,7 @@ check('a round with only question blocks: the comment-mode toggle still renders 
   assert.equal(toggle.classList.contains('active'), false,
     'the toggle must still turn back off on a board with no anchorable content');
 
-  // Answering and sending proceed exactly as they did before this ticket.
+  // Answering and sending proceed exactly as they did before.
   const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
   yes.dispatchEvent(new StandInEvent('click'));
   assert.equal(yes.classList.contains('selected'), true, 'choosing an option must still work on an all-question board');

@@ -5,8 +5,7 @@
 // pointing at THIS clone, Label exactly "claude-board"), and exactly one
 // MCP registration rather than two. Also runs uninstall.sh once, against
 // the state the two install runs left behind, and asserts it undoes
-// everything install.sh owns while leaving everything it does not
-// (SPEC_LAUNCH.md criteria 9 and 11).
+// everything install.sh owns while leaving everything it does not.
 //
 // Never touches the real ~/Library/LaunchAgents, ~/Library/Logs,
 // ~/Library/Application Support/claude-board, or Claude MCP config, and never calls
@@ -22,8 +21,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync, spawn } from 'node:child_process';
 import http from 'node:http';
 // The installer writes the reference allowlist into the plist, and that value is the
-// only place the shipped default exists (audit S3, 2026-07-31 -- src/resolve.mjs reads
-// an absent variable as an empty allowlist on purpose). Imported rather than copied so
+// only place the shipped default exists -- src/resolve.mjs reads
+// an absent variable as an empty allowlist on purpose. Imported rather than copied so
 // the two cannot drift.
 import { DEFAULT_REF_ROOTS } from '../src/resolve.mjs';
 
@@ -128,7 +127,7 @@ const appDir = path.join(workDir, 'Applications');
 mkdirSync(binDir, { recursive: true });
 
 // The store: install.sh/uninstall.sh never write to it, but uninstall.sh has to
-// REPORT its path, and the whole point of criterion 11 is that uninstall must never
+// REPORT its path, and the whole point is that uninstall must never
 // touch it. Pre-populated with a fake board so "the store survives uninstall" is a
 // claim about real bytes on disk, not just a directory existing.
 const storeDir = path.join(workDir, 'Store');
@@ -137,7 +136,7 @@ const storeBoardFile = path.join(storeDir, 'boards', 'fake-board.json');
 const storeBoardContent = JSON.stringify({ id: 'fake-board', title: 'a board that must survive uninstall' });
 writeFileSync(storeBoardFile, storeBoardContent);
 
-// The pomodoro document (ADR.md entry 8, ticket 06): the ONE file inside the store
+// The pomodoro document (ADR.md entry 8): the ONE file inside the store
 // uninstall.sh IS meant to remove, by exact name. Pre-populated with real bytes for
 // the same reason storeBoardFile is -- "gone after uninstall" has to be a claim about
 // a real file that really existed, not an absent-either-way accident.
@@ -473,7 +472,7 @@ async function main() {
 
   // --- the local secret -------------------------------------------------------
   //
-  // DESIGN.md Decisions -> "A loopback Host check, an origin check, and a local
+  // "A loopback Host check, an origin check, and a local
   // secret". install.sh owns generating it, because it is the one place that runs once
   // per machine and can set the modes before anything is written into the file.
 
@@ -843,7 +842,7 @@ async function main() {
     // further below, which spawns a real daemon over a temp copy and edits it.
     //
     // (Ablation: reintroducing a `WatchPaths` array here beside `KeepAlive: true` is
-    // the dead-mechanism claim SPEC_LAUNCH.md criterion 17 forbids — see QUIRKS.md
+    // a dead-mechanism claim that is forbidden — see QUIRKS.md
     // "WatchPaths does not restart the daemon" — so this fails on purpose if it comes
     // back. So does re-adding CLAUDE_BOARD_RELOAD_ON_CHANGE, which is the live
     // mechanism that WAS shipped and is now deliberately gone.)
@@ -927,11 +926,11 @@ async function main() {
     // the launcher as a literal C string (bin/launcher.c's CLAUDE_BOARD_REF_ROOTS_VALUE,
     // via launcher_paths.h) -- proven by reading the executable's own bytes, the same
     // way the CLAUDE_BOARD_NODE override check further below proves its baked-in path.
-    // It is also the ONLY place that default exists (audit S3, 2026-07-31):
+    // It is also the ONLY place that default exists:
     // src/resolve.mjs reads an absent variable as an empty allowlist, and it is written
     // against DEFAULT_REF_ROOTS rather than a second copy of the list, so the two cannot
-    // drift apart silently. Three directories under ~/.claude, not that tree entire
-    // (audit S1): it also holds .credentials.json, settings.json, shell snapshots and
+    // drift apart silently. Three directories under ~/.claude, not that tree entire:
+    // it also holds .credentials.json, settings.json, shell snapshots and
     // every project transcript. The fourth is the render directory (2026-08-05), the
     // same one DEFAULT_SERVE_ROOTS names -- referencing and serving stay separate
     // grants, this adds the directory to the narrower one only.
@@ -1034,7 +1033,7 @@ async function main() {
     // unconditionally and never read the old one back, so the ordinary upgrade -- `git
     // pull && ./install.sh` from a clean shell, the variable long since out of the
     // environment -- restored the default and rebooted the job with it, with nothing on
-    // screen saying so (audit NEW-2, 2026-07-31). The carry-forward mechanism has since
+    // screen saying so. The carry-forward mechanism has since
     // moved from the plist to a record file beside the secret (the plist no longer
     // carries this value at all once a launcher bundle is in use), but the guarantee
     // under test is the same one: an upgrade must not silently re-widen a narrowing.
@@ -1189,7 +1188,7 @@ async function main() {
     // under `set -euo pipefail` that failing command substitution kills the whole
     // install part-way through, having already written a log directory and possibly
     // an MCP registration. One stray byte in a clone path or a reference root is
-    // enough (audit S9, 2026-07-31).
+    // enough.
     //
     // Node cannot put such a byte into a child's environment (env values are UTF-8
     // strings), so the function is lifted out of install.sh and exercised directly,
@@ -1249,7 +1248,7 @@ async function main() {
     assert.equal(statSync(logDir).mode & 0o777, 0o700);
   });
 
-  // Ticket 04 / ADR.md entry 5: install.sh no longer installs `/grill` or any other
+  // ADR.md entry 5: install.sh no longer installs `/grill` or any other
   // command file -- that whole step, and the hash-comparison guard that decided
   // whether to overwrite a user's edited copy, is gone. What used to be asserted here
   // (a fresh install writes the shipped file, an unmodified copy is updated when the
@@ -1265,7 +1264,7 @@ async function main() {
 
   // --- the interpreter baked into the plist ------------------------------------
   //
-  // Raised by ticket 08 and settled here: `command -v node` on a machine using a
+  // `command -v node` on a machine using a
   // version manager resolves to a versioned directory (~/.nvm/versions/node/vX/bin),
   // and the next upgrade deletes it. launchd then points at a path that no longer
   // exists, which surfaces as "daemon is not reachable" in every session, with
@@ -1393,7 +1392,7 @@ async function main() {
     assert.equal(JSON.parse(readFileSync(registrations, 'utf8'))['claude-board'].command[0], chosen);
   });
 
-  // --- audit fix round: L6, plist XML injection --------------------------------
+  // --- plist XML injection --------------------------------
   //
   // `&`, `<` and `>` are all legal in a macOS path and all significant in XML. A clone
   // in ~/Documents/work & play produced a plist that plutil rejects outright while
@@ -1516,11 +1515,11 @@ async function main() {
     }
   });
 
-  // --- ~/.claude/settings.json is not this repo's file (ticket 06) --------------
+  // --- ~/.claude/settings.json is not this repo's file --------------
   //
-  // SPEC_POMODORO.md criterion 11 (the half provable without a running Claude Code
-  // session): install.sh reads and writes nothing under ~/.claude/settings.json.
-  // Criterion 12: uninstall.sh leaves the SessionStart hook snippet INSTALL.md
+  // The half provable without a running Claude Code
+  // session: install.sh reads and writes nothing under ~/.claude/settings.json.
+  // uninstall.sh leaves the SessionStart hook snippet INSTALL.md
   // documents for that file untouched -- this repo did not install it, so
   // uninstall.sh has no more business deleting it than it does a command file it
   // never shipped (ADR.md entry 5).
@@ -1603,7 +1602,7 @@ async function main() {
     }
   });
 
-  // --- uninstall (SPEC_LAUNCH.md criterion 11) ----------------------------------
+  // --- uninstall ----------------------------------
   //
   // Runs against the SAME workDir/env the two install() runs at the top of this file
   // used, deliberately last: the launchd job, the plist, the MCP registration and the
@@ -1634,7 +1633,7 @@ async function main() {
     // install.sh authored this bundle outright, so unlike the store, the secret and the
     // logs it is uninstall's to take away -- leaving a signed launchd binary in
     // ~/Applications pointing at a daemon that is gone is the kind of leftover
-    // criterion 11 exists to prevent.
+    // uninstall exists to prevent.
     assert.ok(!existsSync(path.join(appDir, 'claude-board.app')), 'the launcher bundle must be gone after uninstall');
     assert.ok(!existsSync(path.join(path.dirname(secretFile), 'launcher.stamp')), 'the stamp recording what it was built from must go with it');
     // The TCC entry it may have left in System Settings cannot be removed by any
@@ -1667,7 +1666,7 @@ async function main() {
     assert.equal(readFileSync(storeBoardFile, 'utf8'), storeBoardContent, 'the store content must be byte-for-byte untouched');
   });
 
-  await check('uninstall removes pomodoro.json by exact name and nothing else in the store (ADR.md entry 8 / ticket 06)', async () => {
+  await check('uninstall removes pomodoro.json by exact name and nothing else in the store (ADR.md entry 8)', async () => {
     // The other half of the same brief, pointed the other way: pomodoro.json is
     // configuration this repo authored, not review history, so it is the ONE file in
     // the store uninstall.sh is supposed to take back. (Ablation: reverting the step
@@ -1689,7 +1688,7 @@ async function main() {
     assert.ok(uninstallResult.stdout.includes(logDir), 'must name the logs path');
   });
 
-  // Ticket 04 / ADR.md entry 5: install.sh no longer installs `/grill` or any other
+  // ADR.md entry 5: install.sh no longer installs `/grill` or any other
   // command file, so uninstall.sh has nothing of its own to take back at
   // ~/.claude/commands -- deleting anything there now would mean destroying a file the
   // user owns, not one this repo put there. The old checks here (an unmodified command

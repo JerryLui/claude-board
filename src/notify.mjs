@@ -1,5 +1,4 @@
-// Native notification at each pomodoro boundary (SPEC_POMODORO.md criterion 5,
-// ticket 02).
+// Native notification at each pomodoro boundary.
 //
 // Two ways out, and which one is used is decided by where THIS FILE is running from, not
 // by configuration. A daemon running out of claude-board.app/Contents/Resources spawns
@@ -50,8 +49,8 @@ const MESSAGES = {
 };
 
 // Phase -> the settings key holding THAT phase's cue (src/pomodoro.mjs's cueWork/
-// cueBreak/cueLongBreak, one row per phase in the settings popover -- CONTEXT.md
-// "Cue", ADR.md entry 20). A closed table beside MESSAGES above, for the identical
+// cueBreak/cueLongBreak, one row per phase in the settings popover -- ADR.md entry 20).
+// A closed table beside MESSAGES above, for the identical
 // reason: `phase` selects which settings field to read, it is never interpolated
 // into one.
 const CUE_KEYS = {

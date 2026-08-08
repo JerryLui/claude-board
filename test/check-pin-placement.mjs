@@ -1,5 +1,4 @@
-// Ticket 09 (DESIGN.md): "every pin lands where it is named" -- criteria 4
-// and 5 re-earned. Fixes audit findings C4 and U6; U3 is covered in
+// "every pin lands where it is named" -- re-earned. Fixes findings C4 and U6; U3 is covered in
 // test/check-anchor-push.mjs (it is specifically about SSE-pushed content).
 //
 // C4: three sections invited the click-to-anchor gesture but had no pin-layer to
@@ -12,8 +11,7 @@
 // nested inside `.stage-wrap`, entirely absent when the block errored). A `dom`
 // anchor rooted at any of these still resolved server-side (resolveDomAnchorInSection
 // walks the whole section), so the comment recorded as `resolved: true` with no
-// pin anywhere on the page -- ticket 09's own framing of the defect. Ticket 07's
-// real layout model (test/dom-stand-in.mjs) is what makes "the pin lands where it
+// pin anywhere on the page. The real layout model (test/dom-stand-in.mjs) is what makes "the pin lands where it
 // is named" independently checkable here, not just "a pin exists somewhere": every
 // check below recomputes the expected position the exact way src/ui.mjs's
 // renderDomPins does (`elBox.left - stageBox.left`, `elBox.top - stageBox.top`)
@@ -102,7 +100,7 @@ function clickAndSubmit(document, el, blockId, text) {
 
 check('C4 (retired by ADR.md entry 6): a compare block renders no page-scoped pin-layer of its own, and clicking a side\'s own chrome mints no comment at all', () => {
   const board = createBoard({
-    title: 'Ticket 09 / ADR entry 6 -- a compare wrapper has no comment affordance of its own',
+    title: 'ADR entry 6 -- a compare wrapper has no comment affordance of its own',
     blocks: [{
       kind: 'compare',
       left: { label: 'Before', block: { kind: 'markdown', text: 'old copy' } },
@@ -133,12 +131,12 @@ check('C4 (retired by ADR.md entry 6): a compare block renders no page-scoped pi
 
 // ADR.md entry 28 draws the comment rule on KIND and never on position, so the
 // nested block this case re-points at is now a rendered one: a `mermaid` diagram
-// inside a compare side is exactly as commentable as one at the top level
-// (criterion 17). Its errored branch is used because that is the one part of a
+// inside a compare side is exactly as commentable as one at the top level.
+// Its errored branch is used because that is the one part of a
 // mermaid section the generic page-scoped gesture can reach -- `pre.mermaid` and
 // `.stage-wrap` are chrome, and a node click is the diagram's own gesture,
 // covered end to end in test/check-mermaid-anchor.mjs.
-check('criterion 17 / C4, re-pointed: a mermaid block NESTED inside a compare side is genuinely anchorable in ITS OWN pin-layer -- the comment rule is drawn on kind, not on where the block sits', () => {
+check('C4, re-pointed: a mermaid block NESTED inside a compare side is genuinely anchorable in ITS OWN pin-layer -- the comment rule is drawn on kind, not on where the block sits', () => {
   const board = createBoard({
     title: 'ADR entry 28 -- a compare side\'s nested diagram stays commentable',
     blocks: [{
@@ -201,7 +199,7 @@ check('criterion 17 / C4, re-pointed: a mermaid block NESTED inside a compare si
 
 check('C4: a mermaid block that failed to resolve is still anchorable -- clicking its .resolve-error note draws a correctly positioned pin, even though the block has no stage-wrap/live-svg at all', () => {
   const board = createBoard({
-    title: 'Ticket 09 -- a broken mermaid reference is still commentable',
+    title: 'a broken mermaid reference is still commentable',
     blocks: [{ kind: 'mermaid', source: { path: 'no-such-diagram-09.mmd' } }],
   });
   const blockId = board.blocks[0].id;
@@ -234,7 +232,7 @@ check('C4: a mermaid block that failed to resolve is still anchorable -- clickin
 
 check('U6: a lost pin\'s fallback stacked position stays put across repeated re-renders of its layer, never walking outward (ablation: dropping resetStackedOffset next to layer.innerHTML = \'\' makes this fail after the second re-render)', () => {
   const board = createBoard({
-    title: 'Ticket 09 -- stacked offset must not drift',
+    title: 'stacked offset must not drift',
     blocks: [{ kind: 'mermaid', text: 'flowchart TD\n  A[Stale] --> B[Gone]' }],
   });
   const staleBlockId = board.blocks[0].id;

@@ -1,17 +1,17 @@
-// Live-daemon checks for the pomodoro widget (ticket 04, SPEC_POMODORO.md). Pure
+// Live-daemon checks for the pomodoro widget. Pure
 // logic and DOM-stand-in-driven checks (markup, clock-offset arithmetic, the
 // no-timer/running/paused renderings, pause/resume/reset button behaviour, the
 // settings round trip, "never advances a phase on its own") live in
-// test/check-pure.mjs, which this ticket owns. This file is for the one thing
+// test/check-pure.mjs. This file is for the one thing
 // those cannot prove: that the widget's own fetch/postPomodoro calls actually
 // authorise and round-trip against a REAL daemon over real HTTP, that a write
 // really lands on disk (not just repaints the widget), and that two
 // independently-loaded "tabs" against the SAME live daemon agree on the
-// remaining time end to end (criterion 6) -- including across a real daemon
+// remaining time end to end -- including across a real daemon
 // restart.
 //
 // Deliberately does NOT touch test/check-http.mjs or test/check-pomodoro.mjs
-// (ticket 03's owner may still be pushing follow-ups to both) or src/pomodoro.mjs
+// (someone may still be pushing follow-ups to both) or src/pomodoro.mjs
 // -- readDoc/writeDoc are imported read-only, the same ARRANGE-only use
 // test/check-http.mjs's own pomodoro checks already make, never the assertion
 // itself. Registered in test/run.mjs's `checks` array.
@@ -108,12 +108,12 @@ async function main() {
     const now = Date.now();
     // cycle: 2 (against the default settings' longEvery of 4) so the position half
     // of the status text is actually exercised end to end, not just the countdown --
-    // criterion 11's "Work 3/4 · 12:34" shape rides on these two checks rather than
-    // earning new ones (SPEC_COUNTS.md's own testing section).
+    // the "Work 3/4 · 12:34" shape rides on these two checks rather than
+    // earning new ones.
     const running = { ...defaultDoc(), cycle: 2, cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false } };
     writePomodoroDoc(running, home);
 
-    await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone (no secret header) -- exactly what a browser tab holds, position and all (criterion 11)', async () => {
+    await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone (no secret header) -- exactly what a browser tab holds, position and all', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
@@ -125,7 +125,7 @@ async function main() {
       }
     });
 
-    await check('pomodoro widget: two independently-loaded "tabs" against the SAME live daemon render the identical remaining time, position included (criterion 12)', async () => {
+    await check('pomodoro widget: two independently-loaded "tabs" against the SAME live daemon render the identical remaining time, position included', async () => {
       const tabA = loadIndexAgainstDaemon(server.port);
       const tabB = loadIndexAgainstDaemon(server.port);
       try {
@@ -202,7 +202,7 @@ async function main() {
     });
 
     // Nine fields now, not six: the `sound` checkbox retired into three independent
-    // per-phase cue pickers (SPEC_CUES.md criterion 1, ADR.md entry 20). Three
+    // per-phase cue pickers (ADR.md entry 20). Three
     // DIFFERENT names are chosen deliberately rather than three copies of one -- "each
     // remembers its own choice independently of the other two" is the criterion, and a
     // check that set all three alike would pass just as happily against a bug that
@@ -244,11 +244,11 @@ async function main() {
     });
 
     // ---------------------------------------------------------------------------
-    // Criterion 6, the daemon-restart half. test/check-pomodoro.mjs (ticket 03)
+    // The daemon-restart half. test/check-pomodoro.mjs
     // already proves the DOCUMENT survives a restart; this proves the PAGE reads
     // it identically across one, through the real widget end to end.
     // ---------------------------------------------------------------------------
-    await check('pomodoro widget: the rendered countdown survives a daemon restart -- same deadline, same offset math, same text (position included) on either side of it (criterion 11)', async () => {
+    await check('pomodoro widget: the rendered countdown survives a daemon restart -- same deadline, same offset math, same text (position included) on either side of it', async () => {
       const now2 = Date.now();
       // cycle: 1 -> position 2/4, so the restart proves the POSITION survives
       // reading `doc.cycle` back off disk, not only the countdown.

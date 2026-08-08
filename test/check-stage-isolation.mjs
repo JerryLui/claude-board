@@ -1,6 +1,6 @@
-// Ticket 10 (DESIGN.md), the 2026-07-29 audit's S1 and S2: this is the
-// check that exists to prove the property the whole ticket is about, the way
-// DESIGN.md's Testing section demands -- against the real gesture, not
+// This is the
+// check that exists to prove the property the whole fix is about, the way
+// disciplined testing demands -- against the real gesture, not
 // the pieces underneath it.
 //
 // S1 (HIGH): `sandbox="allow-same-origin allow-scripts"` on the html-stage
@@ -17,7 +17,7 @@
 // they do:
 //   1. the rendered sandbox attribute never carries `allow-same-origin`;
 //   2. a `<script>` inside a mock, actually EXECUTED (test/dom-stand-in.mjs's
-//      `runInlineScripts`, ticket 10's own extension to that file), cannot
+//      `runInlineScripts`, an extension to that file), cannot
 //      reach the parent document -- neither by mutating it directly nor by
 //      reading anything off `window.parent` beyond `postMessage`;
 //   3. the parent's message listener validates origin, sender identity, and
@@ -27,10 +27,9 @@
 //      present and carries the same policy the live daemon sends as a header.
 //
 // Every ablation below is run for real against the actual code, then reverted
-// -- DESIGN.md's own standard ("ablation discipline used throughout the
-// tickets file"): this file's own comments record what a broken version of
-// each property looks like and that check-stage-isolation.mjs actually catches
-// it; DESIGN.md's anchoring slice 10 log records the transcripts.
+// -- ablation discipline used throughout: this file's own comments record what
+// a broken version of each property looks like and that check-stage-isolation.mjs
+// actually catches it; the anchoring slice 10 log records the transcripts.
 
 import assert from 'node:assert/strict';
 import { createBoard, applySubmit } from '../src/board.mjs';
@@ -93,7 +92,7 @@ check('S1: a <script> inside a mock cannot reach the parent document, even thoug
     blocks: [{
       kind: 'html',
       // A real, EXECUTING payload (test/dom-stand-in.mjs's runInlineScripts runs
-      // every <script> the stage document contains, ticket 10's own extension to
+      // every <script> the stage document contains, an extension to
       // that file -- see its header comment) that tries every reach-out this
       // ticket exists to close: mutate the parent's title directly through
       // window.parent, read window.parent.document, and reach window.top.
@@ -140,8 +139,8 @@ check('S1: a <script> inside a mock cannot reach the parent document, even thoug
   assert.equal(form.classList.contains('open'), true, 'the legitimate click-to-anchor gesture must still work in a stage that also runs a hostile script');
 });
 
-// Ablation record (run by hand, reverted immediately after -- DESIGN.md's
-// ablation discipline): restoring `sandbox="allow-same-origin allow-scripts"` in
+// Ablation record (run by hand, reverted immediately after -- ablation
+// discipline): restoring `sandbox="allow-same-origin allow-scripts"` in
 // src/render.mjs's renderHtmlBlock and re-running this file fails the very next
 // check below (the message-protocol checks) differently -- with allow-same-origin
 // back, a real browser would let the mock's script reach `window.parent.document`
@@ -269,7 +268,7 @@ function sentStageBoard() {
   return { board, blockId: board.blocks[0].id };
 }
 
-check('criterion 12 (stage half): the parent sends a stage the sent REF, never the hint -- or the stage de-affordances nothing and a sent element still reads as a target', () => {
+check('(stage half): the parent sends a stage the sent REF, never the hint -- or the stage de-affordances nothing and a sent element still reads as a target', () => {
   const { board, blockId } = sentStageBoard();
   // First, learn the real ref by clicking the button for real.
   const probeDoc = loadBoard(renderBoardPage(board));
@@ -387,7 +386,7 @@ check('S5: a stage message never clobbers a draft the reviewer is part-way throu
 });
 
 // =================================================================================
-// 4. The archive's meta CSP (audit S2).
+// 4. The archive's meta CSP.
 // =================================================================================
 
 check('S2: renderBoardPage emits a <meta http-equiv="Content-Security-Policy"> carrying the exact same policy the live daemon sends as a header', () => {
@@ -415,11 +414,11 @@ check('S2: renderBoardPage emits a <meta http-equiv="Content-Security-Policy"> c
 // Ablation record: commenting out the `<meta http-equiv...>` line in
 // src/render.mjs's renderBoardPage and re-running this file fails the check
 // immediately above with "renderBoardPage must emit a <meta ...>" -- run by
-// hand, reverted immediately after (DESIGN.md's ablation discipline);
-// the transcript is recorded in DESIGN.md's anchoring slice 10 log.
+// hand, reverted immediately after (ablation discipline);
+// the transcript is recorded in the anchoring slice 10 log.
 
 // =================================================================================
-// 5. SPEC_MIGRATION.md criterion 2: a stage nested inside a choose-between-
+// 5. A stage nested inside a choose-between-
 //    rendered-variants option must never be able to select itself.
 //
 //    An earlier version of this widget had the stage report every click over
@@ -472,7 +471,7 @@ function variantsBoard(mocks) {
   });
 }
 
-check('criterion 2: a stage cannot pick its own option -- a "select"-shaped message from a live, correctly-addressed mounted stage records no pick', () => {
+check('A stage cannot pick its own option -- a "select"-shaped message from a live, correctly-addressed mounted stage records no pick', () => {
   const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
   const document = loadBoard(renderBoardPage(board));
   const frame = document.querySelector('.html-stage');
@@ -498,7 +497,7 @@ check('criterion 2: a stage cannot pick its own option -- a "select"-shaped mess
     'a stage must never be able to select its own option -- the agent would be handing itself the answer to its own question');
 });
 
-check('SPEC_STAGES.md criteria 10/11: a forged "height" message from a live, correctly-addressed stage is clamped at the cap, never applied as reported, and a malformed one is silently ignored', () => {
+check('A forged "height" message from a live, correctly-addressed stage is clamped at the cap, never applied as reported, and a malformed one is silently ignored', () => {
   const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
   const document = loadBoard(renderBoardPage(board));
   const frame = document.querySelector('.html-stage');
@@ -566,7 +565,7 @@ check('SPEC_STAGES.md criteria 10/11: a forged "height" message from a live, cor
 // answer on whichever card held focus. Ablation: deleting the
 // `if (ev.metaKey || ev.ctrlKey) return;` guard in src/ui.mjs's card keydown
 // makes this fail.
-check('criterion 2 x Cmd+Enter: the modified chord traverses the board, it never picks the focused variant -- plain Enter still does', () => {
+check('Cmd+Enter: the modified chord traverses the board, it never picks the focused variant -- plain Enter still does', () => {
   const board = variantsBoard([
     '<div class="mock"><button>A</button></div>',
     '<div class="mock"><button>B</button></div>',
@@ -595,7 +594,7 @@ check('criterion 2 x Cmd+Enter: the modified chord traverses the board, it never
     'plain Enter on a focused card must still select it');
 });
 
-check('criterion 2: a click landing inside a nested html stage never selects the option, however it got there -- the stage has no live channel back to a pick', () => {
+check('A click landing inside a nested html stage never selects the option, however it got there -- the stage has no live channel back to a pick', () => {
   const board = variantsBoard([
     '<div class="mock"><button>A</button></div>',
     '<div class="mock"><button>B</button></div>',
@@ -623,7 +622,7 @@ check('criterion 2: a click landing inside a nested html stage never selects the
   assert.equal(cards[1].classList.contains('selected'), false, 'nor must a click inside stage B\'s mock ever select option B');
 });
 
-check('criterion 2: the existing element-level comment-anchor gesture into an html option\'s own stage still works exactly as before -- removing "select" did not collaterally break "click"', () => {
+check('The existing element-level comment-anchor gesture into an html option\'s own stage still works exactly as before -- removing "select" did not collaterally break "click"', () => {
   const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
   const document = loadBoard(renderBoardPage(board));
   enableCommentMode(document);
@@ -640,7 +639,7 @@ check('criterion 2: the existing element-level comment-anchor gesture into an ht
 });
 
 // =================================================================================
-// 5. The lens mounts a SECOND copy of a stage (SPEC_STAGES criteria 3 and 4), and
+// 5. The lens mounts a SECOND copy of a stage, and
 //    everything above has to hold for that copy too.
 //
 //    The lens exists because a variant option's stage is inert in its card by
@@ -751,18 +750,18 @@ check('S1: a real click inside the lens frame\'s own document is inert too -- th
 });
 
 // =================================================================================
-// 5b. The lens's PICK CONTROL (SPEC_STAGES criteria 5, 6 and 7).
+// 5b. The lens's PICK CONTROL.
 //
 //     ADR.md 22: the recommendation was a view-only lens and the decision went the
 //     other way, so this is the one place in the product where a control that
 //     records an answer shares a screen with agent-authored content that is, in
-//     the lens, live and scriptable. Criteria 7 and 8 are the terms that overrule
-//     was accepted on, and criterion 7 is the adversarial one -- so these checks
-//     are attacks, not descriptions, and each names the MECHANISM that defeats it
-//     rather than asserting the outcome and stopping there.
+//     the lens, live and scriptable. The terms the overrule was accepted on include
+//     an adversarial one -- so these checks are attacks, not descriptions, and each
+//     names the MECHANISM that defeats it rather than asserting the outcome and
+//     stopping there.
 //
 //     The stage's own reach is unchanged by any of this: it is still inert inside
-//     its card (criterion 9, above), still has no message that records a pick, and
+//     its card (shown above), still has no message that records a pick, and
 //     in the lens it gains pointer input over its OWN document and nothing else.
 // =================================================================================
 
@@ -793,7 +792,7 @@ function expandOn(section) {
 
 function lensPick(document) { return document.querySelector('.stage-lens .lens-pick'); }
 
-check('criterion 5: activating the expand control on a variant option opens the lens and does not select that option', () => {
+check('Activating the expand control on a variant option opens the lens and does not select that option', () => {
   // INHERITED, not newly built: the card's own click handler already stands
   // down for a click landing on any nested <button> ("a click landing on
   // interactive chrome nested inside this option's OWN rendered block keeps its
@@ -813,7 +812,7 @@ check('criterion 5: activating the expand control on a variant option opens the 
   assert.equal(cards[1].classList.contains('selected'), false, 'and must not pick any other option either');
 });
 
-check('criterion 6: a lens opened from a variant option carries a pick control naming that option; one opened from a standalone stage carries none', () => {
+check('A lens opened from a variant option carries a pick control naming that option; one opened from a standalone stage carries none', () => {
   const board = pickBoard();
   const standaloneId = board.blocks[1].id;
   const document = loadBoard(renderBoardPage(board));
@@ -838,7 +837,7 @@ check('criterion 6: a lens opened from a variant option carries a pick control n
     'a lens opened from a standalone stage must carry no pick control -- there is no option to pick');
 });
 
-check('criterion 7: the pick control is page chrome in the PARENT document, outside the framed stage, and the stage has no way to cover it', () => {
+check('The pick control is page chrome in the PARENT document, outside the framed stage, and the stage has no way to cover it', () => {
   const board = pickBoard();
   const document = loadBoard(renderBoardPage(board));
   expandOn(document.querySelectorAll('.choice-variant')[0]);
@@ -870,7 +869,7 @@ check('criterion 7: the pick control is page chrome in the PARENT document, outs
   }
 });
 
-check('criterion 7: an option label is agent-authored content and reaches the control as TEXT -- markup in a label can never become an element in this document', () => {
+check('An option label is agent-authored content and reaches the control as TEXT -- markup in a label can never become an element in this document', () => {
   // Board content is arbitrary agent-supplied text (src/markdown.mjs's
   // threat-model comment). The control sets it via textContent, so nothing is
   // parsed; this is the same property escHtml gives the card's own label, by a
@@ -888,7 +887,7 @@ check('criterion 7: an option label is agent-authored content and reaches the co
   assert.equal(globalThis.__pwned, undefined, 'nothing in a label may ever execute');
 });
 
-check('criterion 7 (adversarial): a hostile mock in the lens cannot reach, press or forge its way to the pick control -- only draw a fake one inside its own box', () => {
+check('(adversarial): a hostile mock in the lens cannot reach, press or forge its way to the pick control -- only draw a fake one inside its own box', () => {
   // Every attempt a mock can actually make, made for real from inside the lens
   // frame's live document, with what stops each named on the assertion.
   const hostile = '<div class="mock"><button id="fake">Pick Card A</button></div><script>'
@@ -918,7 +917,7 @@ check('criterion 7 (adversarial): a hostile mock in the lens cannot reach, press
   assert.equal(cards[0].classList.contains('selected'), false,
     'and neither forged message records a pick: there is no message type on this channel that selects an option');
 
-  // Its own live pointer input, which in the lens it genuinely has (criterion 4)
+  // Its own live pointer input, which in the lens it genuinely has
   // -- on its own fake chrome, which is all a click inside a frame can ever
   // reach. This is ADR 22's accepted residual risk: the fake button can be
   // DRAWN, and pressing it does nothing.
@@ -935,7 +934,7 @@ check('criterion 7 (adversarial): a hostile mock in the lens cannot reach, press
   assert.equal(cards[0].classList.contains('selected'), true, 'and a real press on it must still record the pick');
 });
 
-check('criterion 7 (adversarial): a forged pick-shaped message from the INLINE stage records nothing either -- the channel has no handler for one, wherever it comes from', () => {
+check('(adversarial): a forged pick-shaped message from the INLINE stage records nothing either -- the channel has no handler for one, wherever it comes from', () => {
   // The lens copy is not in the '.html-stage' walk at all (section 5 above), so
   // the harder version of this attack is the message coming from the frame the
   // parent DOES recognise: correct opaque origin, correct live source, a block
@@ -959,7 +958,7 @@ check('criterion 7 (adversarial): a forged pick-shaped message from the INLINE s
 });
 
 // =================================================================================
-// 6. The html-stage gutter (SPEC_EDGES criteria 4/5, "kill the html-stage
+// 6. The html-stage gutter ("kill the html-stage
 //    gutter"): a bare-fragment `srcdoc` gets the UA default `body { margin:
 //    8px }`, which shows `.html-stage`'s own painted background through an
 //    8px gutter on every side. renderHtmlBlock (src/render.mjs) fixes this by
@@ -970,7 +969,7 @@ check('criterion 7 (adversarial): a forged pick-shaped message from the INLINE s
 //    text itself, never a layout measurement the stand-in cannot make.
 // =================================================================================
 
-check('criterion 4: every html-stage srcdoc opens with the exact margin/padding reset renderHtmlBlock exports as STAGE_MARGIN_RESET, immediately before the mock\'s own markup', () => {
+check('Every html-stage srcdoc opens with the exact margin/padding reset renderHtmlBlock exports as STAGE_MARGIN_RESET, immediately before the mock\'s own markup', () => {
   const board = createBoard({
     title: 'gutter: reset is present and leads',
     blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
@@ -991,20 +990,20 @@ check('criterion 4: every html-stage srcdoc opens with the exact margin/padding 
   // added, so there is no other path that could still satisfy it.
 });
 
-check('criterion 4: the reset carries no color of any kind -- html/body must stay transparent, so a mock that paints no background of its own lands on the parent-controlled --stage-bg, not on a color this file introduced', () => {
+check('The reset carries no color of any kind -- html/body must stay transparent, so a mock that paints no background of its own lands on the parent-controlled --stage-bg, not on a color this file introduced', () => {
   assert.doesNotMatch(STAGE_MARGIN_RESET, /background|color|#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(/,
     `STAGE_MARGIN_RESET must be a pure margin/padding reset, no paint of any kind: ${JSON.stringify(STAGE_MARGIN_RESET)}`);
   assert.match(STAGE_MARGIN_RESET, /margin\s*:\s*0/, 'the reset must actually zero the margin -- that is its whole job');
 });
 
-check('criterion 4: the reset is itself a leading head-only element, so it hoists out of document.body exactly like a mock\'s own leading <style> already does (ticket 08\'s C2 fix) -- body\'s children, and therefore every dom-anchor ref index, are unaffected by its presence', () => {
+check('The reset is itself a leading head-only element, so it hoists out of document.body exactly like a mock\'s own leading <style> already does (the C2 fix) -- body\'s children, and therefore every dom-anchor ref index, are unaffected by its presence', () => {
   // The regression this check exists to catch: an earlier version of this fix
   // wrapped the srcdoc in an explicit <html><head>...</head><body>...</body>
   // </html> document instead of a bare leading <style>. Once <body> is
   // genuinely, explicitly open, the HTML parsing algorithm inserts a
   // SUBSEQUENT style/script tag as an ordinary child of body rather than
   // reopening head for it -- so a mock with its own leading <style> (the
-  // ordinary case ticket 08 exists to support -- see this file's C2-flavoured
+  // ordinary case this fix exists to support -- see this file's C2-flavoured
   // checks below) got body.children shifted by one, and every dom-anchor ref
   // minted against it went off-by-one. Caught by test/check-click.mjs's own C2
   // check the first time this was tried; this is the same property, pinned
@@ -1035,7 +1034,7 @@ check('criterion 4: the reset is itself a leading head-only element, so it hoist
   assert.match(headStyles[1].textContent, /\.mock/, 'the mock\'s own style must be the second, still present and unaltered');
 });
 
-check('criterion 5: an html-kind variant option\'s clipped stage carries the same reset, ahead of that option\'s own mock -- the fix is not special-cased to a standalone stage', () => {
+check('An html-kind variant option\'s clipped stage carries the same reset, ahead of that option\'s own mock -- the fix is not special-cased to a standalone stage', () => {
   const board = createBoard({
     title: 'gutter: variant option stage',
     blocks: [{
@@ -1055,7 +1054,7 @@ check('criterion 5: an html-kind variant option\'s clipped stage carries the sam
   }
 });
 
-check('criterion 5: a compare side\'s html stage carries the same reset -- renderCompareSide/renderBlock share renderHtmlBlock, not a second srcdoc builder', () => {
+check('A compare side\'s html stage carries the same reset -- renderCompareSide/renderBlock share renderHtmlBlock, not a second srcdoc builder', () => {
   const board = createBoard({
     title: 'gutter: compare side stage',
     blocks: [{
@@ -1071,7 +1070,7 @@ check('criterion 5: a compare side\'s html stage carries the same reset -- rende
   assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0, 'the compare side\'s stage must open with the same reset as a standalone stage');
 });
 
-check('criterion 5: the stage lens opens on the exact same srcdoc, reset included -- it is a copy of the live attribute, never a second render', () => {
+check('The stage lens opens on the exact same srcdoc, reset included -- it is a copy of the live attribute, never a second render', () => {
   const board = createBoard({ title: 'gutter: the lens', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
   const document = loadBoard(renderBoardPage(board));
   const inline = document.querySelector('.html-stage');

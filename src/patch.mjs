@@ -1,9 +1,9 @@
 // Pure diff between two board JSON snapshots -- the seam that proves an SSE push
 // is applied additively (new content only) rather than by wholesale re-render. See
-// PROTOCOL.md "Board document" for the shape being diffed, and DESIGN.md
-// Decisions -> "A board is a session-scoped thread with rounds": "the sent round
-// collapsed into a history rail with its answers still readable... and does not
-// disturb fields already filled in but not yet sent."
+// PROTOCOL.md "Board document" for the shape being diffed. A board is a
+// session-scoped thread with rounds: the sent round collapsed into a history
+// rail with its answers still readable... and does not
+// disturb fields already filled in but not yet sent.
 //
 // No DOM, no I/O, no closures over anything outside its own parameters -- this
 // function runs unmodified in two places: imported directly here for the node
@@ -47,7 +47,7 @@ export function computeBoardPatch(prevBoard, nextBoard) {
       if (b.context) flattenBlocks(b.context, out);
       if (b.left && b.left.block) flattenBlocks([b.left.block], out);
       if (b.right && b.right.block) flattenBlocks([b.right.block], out);
-      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's own `block`
+      // choose-between-rendered-variants: an option's own `block`
       // is a nested block with its own id, its own rendered widget and its own
       // comment form, exactly like a compare side's -- walked here for the
       // same reason the two lines above are, or an amend that replaced only an

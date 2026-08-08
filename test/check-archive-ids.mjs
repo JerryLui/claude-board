@@ -1,5 +1,4 @@
-// Audit 2026-07-31, findings P1 (HIGH, pre-existing)/P2/L1: every id
-// src/ui.mjs and src/theme.mjs look up with `document.getElementById` --
+// Every id src/ui.mjs and src/theme.mjs look up with `document.getElementById` --
 // `board-data`, `send-btn`, `discuss-btn`, `send-status`, `theme-toggle`,
 // `comment-mode-toggle`, `comment-form-<blockId>`, `comment-target-<blockId>`,
 // `comment-list-<blockId>`, `blocks` -- can ALSO be minted by board content:
@@ -34,13 +33,13 @@
 // `'file:'` -- never a hand-set `readonly` flag and never a hand-summary of
 // what the scripts do.
 //
-// EXTENDED 2026-07-31 (DESIGN.md polish, post-merge): that audit swept the files
-// as they stood on `direct/theme`. The polish batch landed seven MORE
-// id-by-blockId lookups it never saw -- `comment-list-<blockId>` (the queued
-// comment list), a second `comment-form-<blockId>` (the html-stage message
-// guard), the lens's two `lensAdopt` lookups, the delete handler's
-// `comment-target-<blockId>`, and `round-badge` twice (which ticket 04 also
-// promoted from a <div> to a <button>) -- every one of them a bare
+// Extended, post-merge: the first sweep covered the files as they stood on
+// `direct/theme`. A later batch landed seven MORE id-by-blockId lookups it
+// never saw -- `comment-list-<blockId>` (the queued comment list), a second
+// `comment-form-<blockId>` (the html-stage message guard), the lens's two
+// `lensAdopt` lookups, the delete handler's `comment-target-<blockId>`, and
+// `round-badge` twice (also promoted from a <div> to a <button>) -- every one
+// of them a bare
 // getElementById. Three things guard the class of defect now rather than the
 // seven instances:
 //
@@ -184,7 +183,7 @@ function loadArchiveThemed(html) {
   try {
     new Function('document', 'window', 'location', themeBootScript)(document, window, location);
     new Function('document', 'window', 'location', ui)(document, window, location);
-    // Audit 2026-07-31 (H2): a freshly parsed document now starts `readyState
+    // A freshly parsed document now starts `readyState
     // === 'loading'`, so the theme control's click listener is not wired
     // until this simulates the parser reaching the end of the document (see
     // test/dom-stand-in.mjs's own comment on finishParsing/readyState).
@@ -218,13 +217,13 @@ check('setup: the markdown headings actually collide with the real ids they used
 });
 
 // =================================================================================
-// 1. The client script must not throw -- P1's failure mode was an uncaught
-//    SyntaxError from JSON.parse on the heading's text, killing the whole IIFE.
+// 1. The client script must not throw -- an uncaught SyntaxError from
+//    JSON.parse on the heading's text used to kill the whole IIFE.
 // =================================================================================
 
 check('archive with colliding headings: the real client scripts run to completion without throwing', () => {
   assert.doesNotThrow(() => loadArchiveThemed(fileContents),
-    'themeBootScript + ui must not throw when board content mints headings that collide with board-data/send-btn/theme-toggle -- a throw here means P1\'s total-DoS regressed');
+    'themeBootScript + ui must not throw when board content mints headings that collide with board-data/send-btn/theme-toggle -- a throw here means the total-DoS regressed');
 });
 
 // =================================================================================
@@ -235,7 +234,7 @@ check('archive with colliding headings: the real client scripts run to completio
 check('archive with colliding headings: body.readonly is applied (hydration reached past the board-data lookup)', () => {
   const document = loadArchiveThemed(fileContents);
   assert.equal(document.body.classList.contains('readonly'), true,
-    'body.readonly was never applied -- this is exactly P1\'s symptom: the script returned/threw before reaching the readonly gate, so a file:// archive would render as if it were a live, writable board');
+    'body.readonly was never applied -- the script returned/threw before reaching the readonly gate, so a file:// archive would render as if it were a live, writable board');
 });
 
 check('archive with colliding headings: Send, Discuss and every answer control are hard-disabled', () => {

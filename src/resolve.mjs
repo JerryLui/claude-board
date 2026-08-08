@@ -1,6 +1,5 @@
 // Content-by-reference resolution and sha snapshotting. See PROTOCOL.md "Board
-// document" (the `Ref` shape) and DESIGN.md "Questions by value, content by
-// reference, snapshotted at post time".
+// document" (the `Ref` shape).
 //
 // The agent addresses content with `{ path, section?, lines? }`; this module reads
 // the file exactly once, slices it to the section or line range, and returns the
@@ -14,8 +13,8 @@
 // swallowed. That includes every confinement and stat refusal added below — a
 // refused reference is a block-level error, never an exception that aborts a post.
 //
-// Confinement (audit C2, widened by ADR.md entry 3, narrowed again by audit
-// 2026-07-31): a reference names a file inside the board's project *or* inside one
+// Confinement (widened by ADR.md entry 3, narrowed again since): a reference
+// names a file inside the board's project *or* inside one
 // of a configured set of reference roots, and nothing else. The agent-supplied
 // `ref.path` is untrusted input that ends up verbatim in the board JSON and on the
 // served page, so every path is resolved through `realpathSync` and required to
@@ -35,7 +34,7 @@
 // var must never widen the gate nor take the daemon down. Resolving a reference is
 // only ever a read, so the allowlist is read-only by construction.
 //
-// Liveness (audit H5) and the check/read gap (audit S2, 2026-07-31): the daemon is
+// Liveness and the check/read gap: the daemon is
 // single-threaded and resolves references inline on the request, so a reference naming
 // a fifo (`readFileSync` on one blocks forever) or a character device / multi-GB file
 // would wedge or exhaust the whole process — every board, health and SSE with it. That
@@ -48,7 +47,7 @@
 // regular file? under the byte cap? what are its bytes? — is asked of that one
 // descriptor with `fstatSync`/`readFileSync(fd)` and never of the name again.
 //
-// Known limit, documented rather than fixed (audit S8, 2026-07-31): a HARD link inside
+// Known limit, documented rather than fixed: a HARD link inside
 // an allowlisted root, pointing at a file outside every root, defeats all of the above.
 // A hard link is not a link as far as path resolution is concerned — it is a second,
 // equally real name for one inode, and neither `realpath` nor a descriptor can tell it
@@ -78,7 +77,7 @@ export const MAX_REF_BYTES = 512 * 1024;
  * place this project states it, rather than against a second copy of the same list.
  *
  * Three of the four are under `~/.claude`, and it is those three rather than the whole
- * of it (audit S1, 2026-07-31). The case ADR.md entry 3 argues for is "render the skill,
+ * of it. The case ADR.md entry 3 argues for is "render the skill,
  * command or agent file this session is discussing", and that is exactly these three;
  * `~/.claude` as a whole also holds `settings.json`, `.credentials.json`, shell
  * snapshots, project transcripts and every plugin's private state, none of which any
@@ -115,7 +114,7 @@ const O_NOFOLLOW_ANY = 0x20000000;
  * `O_NOFOLLOW_ANY` (or plain `O_NOFOLLOW` off darwin) is the whole point: the path being
  * opened is already a `realpathSync` result, so by construction it contains no symlink at
  * all, and an open that fails with ELOOP means the tree changed under us between the
- * check and the read — exactly the race audit S2 exploited. Refusing is correct there;
+ * check and the read — exactly the race that was exploited. Refusing is correct there;
  * following would be reading a file nothing ever confined.
  *
  * `O_NONBLOCK` is what keeps the fifo guard a guard: `open` on a fifo with no writer
@@ -138,7 +137,7 @@ function sha256(text) {
  *
  * Confining references to `cwd` buys nothing while the caller also chooses `cwd`:
  * `cwd: '/'` plus a relative path reaches the whole filesystem. This is the other half
- * of that (audit C2). It cannot make the choice unforgeable — see `bindBoardCwd` in
+ * of that. It cannot make the choice unforgeable — see `bindBoardCwd` in
  * src/board.mjs for exactly what this does and does not achieve — but it does make the
  * value CANONICAL (so what is stored on the board is the real directory the reads were
  * confined to, auditable after the fact) and refuses the values whose only purpose is
@@ -158,19 +157,25 @@ export function resolveBoardCwd(cwd) {
   if (!path.isAbsolute(cwd)) {
     return { error: `cwd must be an absolute path, got ${cwd}` };
   }
+  // One undifferentiated refusal for every "not a usable directory" outcome. Splicing
+  // err.code in here made this an existence-and-type oracle over the whole disk for
+  // anything holding the secret: ~/.ssh/id_ed25519 answered ENOTDIR (it exists), a
+  // made-up sibling answered ENOENT. That same shape was removed from resolvePath; it
+  // was left on this path.
+  const unusable = { error: `cwd ${cwd} is not a readable directory` };
   let real;
   try {
     real = realpathSync(cwd);
-  } catch (err) {
-    return { error: `cwd ${cwd} does not exist or is not readable: ${err.code || err.message}` };
+  } catch {
+    return unusable;
   }
   let st;
   try {
     st = statSync(real);
-  } catch (err) {
-    return { error: `cwd ${cwd} is not readable: ${err.code || err.message}` };
+  } catch {
+    return unusable;
   }
-  if (!st.isDirectory()) return { error: `cwd ${cwd} is not a directory` };
+  if (!st.isDirectory()) return unusable;
   if (real === path.parse(real).root) {
     return { error: `refusing cwd ${cwd}: the filesystem root is not a project directory` };
   }
@@ -182,8 +187,8 @@ export function resolveBoardCwd(cwd) {
 
 /** Is the canonical `real` $HOME itself, or a directory above it — under ANY name?
  *
- * This used to be a string comparison against `homedir()`, which macOS defeats twice over
- * (audit S4, 2026-07-31), three ways. `realpathSync` does not correct case on a
+ * This used to be a string comparison against `homedir()`, which macOS defeats twice over,
+ * three ways. `realpathSync` does not correct case on a
  * case-insensitive volume, so `/users/you` canonicalises to itself and reads as "not
  * $HOME"; APFS firmlinks make `/System/Volumes/Data/Users/you` a second canonical
  * spelling of the same directory that no amount of string work relates to the first; and
@@ -237,7 +242,7 @@ function contains(parent, child) {
 /** The allowlist a reference may resolve inside, on top of the board's own `cwd`.
  * `spec` is the raw `CLAUDE_BOARD_REF_ROOTS` value: colon-separated absolute paths.
  *
- * **An absent variable is an EMPTY allowlist** (audit S3, 2026-07-31), and the choice is
+ * **An absent variable is an EMPTY allowlist**, and the choice is
  * deliberate enough to spell out. The alternative — absent meaning `DEFAULT_REF_ROOTS` —
  * reads better in a dev shell and is wrong here, because of how this daemon updates:
  * every install predating ADR.md entry 3 has a plist carrying no such key, and the running
@@ -261,8 +266,7 @@ function contains(parent, child) {
  * exactly the entry it looks like, and `DEFAULT_REF_ROOTS` names three directories not
  * every machine has.
  *
- * One failure is NOT unambiguous, and it fails the whole spec closed (audit S9,
- * 2026-07-31): a non-absolute entry. `:` separates entries and `:` is also legal in a
+ * One failure is NOT unambiguous, and it fails the whole spec closed: a non-absolute entry. `:` separates entries and `:` is also legal in a
  * directory name, so `/data/my:dir` splits into `/data/my` and `dir` — and the old code
  * dropped the unusable `dir` and granted `/data/my`, an unrelated sibling directory the
  * user never named, silently. There is no spelling that recovers the intended root, so
@@ -349,8 +353,8 @@ function nameExists(p) {
  * root alike. The refusal messages are unchanged from the cwd-only boundary: a
  * reference outside everything is refused exactly as it always was.
  *
- * WHICH refusal comes back is decided only on names inside the boundary (audit S7,
- * 2026-07-31). It used to splice `err.code` from the failed `realpathSync` into the
+ * WHICH refusal comes back is decided only on names inside the boundary. It used to
+ * splice `err.code` from the failed `realpathSync` into the
  * message, which made every refusal an existence-and-errno oracle for the whole disk:
  * point a symlink from inside an allowlisted root at any path you like, and ENOENT
  * versus EACCES versus ELOOP told you what was there. Now a reference that is present
@@ -364,7 +368,7 @@ function nameExists(p) {
  * means "inside the boundary", not "a readable regular file": a directory inside a root
  * resolves here and is refused by `resolveRef` on the open descriptor. That split is
  * deliberate rather than an omission — asking the name a second time is the check/read
- * gap audit S2 closed, so the only place entitled to answer "is this a regular file" is
+ * gap already closed, so the only place entitled to answer "is this a regular file" is
  * the descriptor the bytes will actually come from. */
 export function resolvePath(ref, cwd, roots = resolveRefRoots(process.env.CLAUDE_BOARD_REF_ROOTS)) {
   if (!ref || !ref.path) return { error: 'reference has no path' };
@@ -416,7 +420,7 @@ export function resolvePath(ref, cwd, roots = resolveRefRoots(process.env.CLAUDE
   // `real !== root` sits OUTSIDE the disjunction on purpose. It used to be a term of the
   // first branch only, so the `insideRoots` fallback cancelled it whenever the project
   // directory happened to live under an allowlisted root, and `{ path: <the project
-  // directory> }` came back as a successful resolution (audit NEW-3, 2026-07-31). The
+  // directory> }` came back as a successful resolution. The
   // project directory is never a reference target, wherever the project happens to sit.
   if (real !== null && real !== root && (contains(root, real) || insideRoots(real, roots))) {
     return { path: real };
@@ -432,6 +436,11 @@ export function resolvePath(ref, cwd, roots = resolveRefRoots(process.env.CLAUDE
  * error-free slice (rendering an empty <pre> the reviewer cannot interpret) instead
  * of the out-of-range error PROTOCOL.md's `error` field exists for. */
 function fileLines(text) {
+  // An empty file has no lines. ''.split('\n') is [''], and the pop below is guarded
+  // on length > 1, so a 0-byte file used to report 1 line -- which handed `lines: [1, 1]`
+  // exactly the empty, error-free slice this function exists to prevent, and made the
+  // neighbouring out-of-range error read "1 lines".
+  if (text === '') return [];
   const all = text.split('\n');
   if (all.length > 1 && all[all.length - 1] === '') all.pop();
   return all;
@@ -459,7 +468,7 @@ function sliceLines(text, lines) {
 }
 
 /** Is `line` a fenced-code delimiter? src/markdown.mjs consumes fences before it
- * ever looks for a heading, so this scanner has to as well (audit): without the
+ * ever looks for a heading, so this scanner has to as well: without the
  * toggle, a `# Install deps` COMMENT inside a ```sh block reads as a heading here.
  * That truncated the enclosing section at the fence with no error at all, and — far
  * worse — shifted every following heading's duplicate-slug ordinal out of step with
@@ -476,11 +485,11 @@ function isFence(line) {
 function sliceSection(text, section) {
   // Trailing CR stripped per line, matching src/markdown.mjs's identical pass: `$`
   // does not match `\r`, so every heading in a CRLF file failed this regex and every
-  // `section` ref against one reported "not found" (audit).
+  // `section` ref against one reported "not found".
   const lines = text.split('\n').map(s => (s.endsWith('\r') ? s.slice(0, -1) : s));
   const used = new Set();
   // Beside `used`, for the same reason markdown.mjs carries one: without it a file of
-  // N same-slug headings costs O(N^2), and a 512KiB one took 8.8 minutes here (audit).
+  // N same-slug headings costs O(N^2), and a 512KiB one took 8.8 minutes here.
   const ordinals = new Map();
   let startIdx = -1;
   let startLevel = 0;
@@ -520,7 +529,7 @@ function sliceSection(text, section) {
  * cap) returns `{ error }` instead of throwing, so a bad reference surfaces as a
  * block-level error rather than aborting the whole post.
  *
- * "Exactly once" is a security property, not an efficiency one (audit S2, 2026-07-31).
+ * "Exactly once" is a security property, not an efficiency one.
  * This used to `statSync(abs)` for the type and size guards and then `readFileSync(abs)`
  * for the bytes — three separate lookups of one name, counting the `realpathSync` that
  * confined it, and the boundary was therefore decided on one inode while the read
@@ -568,7 +577,14 @@ export function resolveRef(ref, { cwd, roots } = {}) {
   }
 
   let sliced = { text: raw };
-  if (ref.section) {
+  if (ref.section !== undefined && ref.section !== null) {
+    // Presence, not truthiness: `section: ''` is falsy, so it used to skip the selector
+    // and snapshot the WHOLE file under a ref claiming to be one section -- silently,
+    // which is the one thing this module's error contract exists to prevent. `lines`
+    // already validated its own shape; this makes section symmetric.
+    if (typeof ref.section !== 'string' || ref.section === '') {
+      return { error: `section must be a non-empty string, got ${JSON.stringify(ref.section)}` };
+    }
     sliced = sliceSection(raw, ref.section);
   } else if (ref.lines) {
     sliced = sliceLines(raw, ref.lines);
@@ -608,7 +624,7 @@ export function resolveRef(ref, { cwd, roots } = {}) {
  *
  * Every refusal is the SAME refusal — `{ error }` with no detail, which the caller turns
  * into a bare 404. Traversal, a symlink aimed out of a root, a fifo, a missing file and a
- * root nobody configured are indistinguishable from outside, for audit S7's reason: a
+ * root nobody configured are indistinguishable from outside, for the same reason: a
  * route that answers differently for "not there" and "there but refused" is an
  * existence oracle for the whole disk, and this one is reachable by any page the browser
  * has already been authorized to load.
@@ -672,8 +688,8 @@ export function openServed(relPath, roots) {
 
 // Best-effort file-extension -> language guess for a resolved code block's `lang`
 // field, when the caller doesn't pass one explicitly. Unknown extensions fall back
-// to ''; this is display-only (no syntax highlighting — see DESIGN.md "Out of
-// Scope"), so a wrong or missing guess costs nothing but a label.
+// to ''; this is display-only (no syntax highlighting), so a wrong or missing guess
+// costs nothing but a label.
 const EXT_LANG = {
   js: 'javascript', mjs: 'javascript', cjs: 'javascript',
   ts: 'typescript', tsx: 'tsx', jsx: 'jsx',
@@ -686,5 +702,10 @@ const EXT_LANG = {
 
 export function langForPath(p) {
   const ext = path.extname(p || '').slice(1).toLowerCase();
-  return EXT_LANG[ext] || '';
+  // Own-property only: a bare lookup walks the prototype chain, and `toLowerCase`
+  // leaves `__proto__` and `constructor` intact, so `notes.constructor` used to make
+  // `lang` a function -- rendered into the block kicker, then dropped by
+  // JSON.stringify, so the stored page no longer matched the served one. Same guard
+  // as composeHint's in src/anchor.mjs.
+  return Object.prototype.hasOwnProperty.call(EXT_LANG, ext) ? EXT_LANG[ext] : '';
 }

@@ -267,7 +267,7 @@ async function main() {
 
   // The checks above read a STUB daemon's own dump of process.env, which proves what the
   // launcher hands a child but says nothing about the line bin/daemon.mjs prints. That
-  // line is the seam SPEC_TCC.md's Testing section asked for ("a check that reads the
+  // line is the seam asked for ("a check that reads the
   // daemon's own resolved environment back out of its log line"), and a seam nothing
   // reads is a seam that can drift silently into lying -- print values instead of names,
   // or fall behind a debug flag -- while every other check here still passes. So: boot

@@ -305,7 +305,7 @@ function openSseStream(port, boardId) {
  * It used to fabricate a `GET /api/board/:id/clients` route instead — a route
  * src/server.mjs has never served. That kept this check green while the reopen path was
  * dead in production for every real user: the probe 404ed, the count came back null, and
- * the tab was never reopened (audit 2026-07-31 S3). The daemon now reports the count on
+ * the tab was never reopened. The daemon now reports the count on
  * the POST response from its own SSE hub, so this only has to override a real field.
  * `state.clients === null` stands in for a daemon too old to report it at all, which is
  * the field being absent — not a fabricated 404. */
@@ -593,8 +593,8 @@ async function main() {
 
   client.close();
 
-  // --- criterion 1: a round with no question blocks returns as soon as the post lands ---
-  // Ticket 01 (SPEC_MIGRATION.md). No mode flag, no "no questions" guard: whether `ask`
+  // --- a round with no question blocks returns as soon as the post lands ---
+  // No mode flag, no "no questions" guard: whether `ask`
   // waits is derived entirely from whether the round's blocks contain a `kind: 'question'`
   // block anywhere. A round of content blocks only has nothing a human needs to submit, so
   // there is nothing left to wait for. On the unmodified shim this call blocks on
@@ -679,7 +679,7 @@ async function main() {
     const timeoutClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_TIMEOUT_MS: '150', CLAUDE_BOARD_PROGRESS_MS: '40' });
     const start = Date.now();
     // Must carry a question block: a content-only round now returns as soon as the post
-    // succeeds (criterion 1) and never reaches the wait this test means to exercise.
+    // succeeds and never reaches the wait this test means to exercise.
     const res = await timeoutClient.request('tools/call', {
       name: 'ask',
       arguments: { title: 'Timeout check', blocks: [{ kind: 'markdown', text: '# never answered' }, QUESTION] },
@@ -814,8 +814,7 @@ async function main() {
     forcedClient.close();
   });
 
-  // --- the third refusal trigger: the daemon cannot open a tab (SPEC_MIGRATION.md
-  // criterion 10, the VPS case) -------------------------------------------------------
+  // --- the third refusal trigger: the daemon cannot open a tab (the VPS case) -------------------------------------------------------
   // SSH onto a machine with no display passes the interactive-entrypoint check and
   // reaches a live daemon -- neither of the first two refusal triggers fires -- but
   // openBoardTab silently no-ops on a non-darwin platform with no CLAUDE_BOARD_OPEN_CMD
@@ -1179,7 +1178,7 @@ async function main() {
       const afterRound2 = await recorder.waitForOpens(2, 10_000);
       assert.equal(afterRound2.length, 2, 'a round pushed where no client is connected must reopen the tab');
       // The reopened tab lands on a handoff, not on the board URL — that is what makes
-      // it land ALREADY AUTHORIZED (SPEC_LAUNCH.md criterion 2). The board it is for is
+      // it land ALREADY AUTHORIZED. The board it is for is
       // in the mint request, not in the URL, which is the whole point: nothing a
       // bookmark or a `ps` line captures names a credential AND a board.
       assert.match(afterRound2[1], new RegExp(`^${proxyBase}/auth/[0-9a-f]{64}$`), 'the reopened tab must be opened on a one-time handoff');
@@ -1256,10 +1255,10 @@ async function main() {
   // ref; formatAnchor used to agree for `dom` but not `mermaid` (it rendered
   // `mermaid:${ref}` unconditionally), so the ONE channel guaranteed to survive
   // the MCP client (this file's own doc comment on packetResult) told the agent
-  // "mermaid:B" instead of "End" for a diagram comment. Ticket 12. Comments are
+  // "mermaid:B" instead of "End" for a diagram comment. Comments are
   // posted straight through submitBoard with hand-built anchors -- each one a
-  // shape `applySubmit`'s own `sanitizeAnchor` accepts as-is (ticket 08 closed
-  // off anything else — see findings/audit-2026-07-29-anchoring.md V3) -- so
+  // shape `applySubmit`'s own `sanitizeAnchor` accepts as-is (nothing
+  // else is accepted) -- so
   // every kind, hint-present/absent and resolved/lost combination is exercised
   // directly, without depending on the click-to-anchor client wiring covered
   // elsewhere.
@@ -1289,9 +1288,9 @@ async function main() {
           { blockId: 'h1', anchor: { kind: 'dom', ref: '1.1', hint: 'Send' }, text: 'dom comment with hint' },
           // dom: ref only, no hint — degrades to the bare ref either way.
           { blockId: 'h1', anchor: { kind: 'dom', ref: '1.1' }, text: 'dom comment without hint' },
-          // mermaid: ref + hint (ticket 05 shape) — this is the one that regressed.
+          // mermaid: ref + hint — this is the one that regressed.
           { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'B', hint: 'End' }, text: 'mermaid comment with hint' },
-          // mermaid: ref only (pre-ticket-05 shape, no hint/domRef minted) — must
+          // mermaid: ref only (the older shape, no hint/domRef minted) — must
           // degrade to the bare ref, not crash on the missing field.
           { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'B' }, text: 'mermaid comment without hint' },
           // dom, lost: a ref that resolves against nothing in the html block.
@@ -1355,7 +1354,7 @@ async function main() {
   });
 
   // --- the tab lands already authorized ------------------------------------
-  // Reads are gated (SPEC_LAUNCH.md), so the URL the shim hands `open` cannot be the
+  // Reads are gated, so the URL the shim hands `open` cannot be the
   // board URL: a browser with no cookie would land on the refusal page instead of the
   // board. The shim is the only participant holding the secret, so it is the one that
   // asks for the handoff.

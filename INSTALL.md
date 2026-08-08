@@ -1,34 +1,41 @@
 # Installing by hand
 
-Two pieces `install.sh` cannot keep current on its own: the session-start hook it never
-writes, and the board manual it writes only when it runs.
+Two pieces `install.sh` cannot keep current on its own: the board manual it writes only when
+it runs, and the optional session-start hook it never writes.
 
 ## Refreshing the board manual
 
 `skills/claude-board/SKILL.md`, the manual for the `ask` tool, is copied to
-`~/.claude/skills/claude-board/SKILL.md` by step 6 of `install.sh`. Editing the clone
-therefore changes nothing on a machine that already installed: the copy in `~/.claude` is
-what the agent reads. Re-run `install.sh`, or copy the one file:
+`~/.claude/skills/claude-board/SKILL.md` by step 6 of `install.sh`. The copy in `~/.claude`
+is what the agent reads, so editing the clone changes nothing on a machine that already
+installed. Re-run `install.sh`, or copy the one file:
 
 ```sh
 cp skills/claude-board/SKILL.md ~/.claude/skills/claude-board/SKILL.md
 ```
 
-Either way the installed copy must end up byte-identical to the clone's, which is what
-`test/check-install.mjs` asserts. A reinstall overwrites an edited copy rather than
-preserving it, so `~/.claude` is never the place to make the edit.
+Make the edit in the clone: a reinstall overwrites the installed copy rather than
+preserving it, and `test/check-install.mjs` asserts the two are byte-identical.
 
-## The session-start hook
+## The session-start hook — optional, ask first
 
 A `SessionStart` hook that starts a pomodoro work interval when a Claude Code session
-starts. Hand-applied: `install.sh` never reads or writes `~/.claude/settings.json`,
-which is not this repo's file (ADR.md entry 5), and there is no `claude hooks` CLI to
-shell out to.
+starts. The board works without it; it only decides whether the timer starts itself or
+waits for the index page's switch.
+
+**Ask before applying it.** Put a yes/no question to the reader with `AskUserQuestion` —
+"Install the SessionStart hook that starts a pomodoro when a Claude Code session starts?"
+— and edit `~/.claude/settings.json` only on a yes. On a no, stop here: the rest of this
+section is the yes branch, and nothing else in the install depends on it.
+
+Hand-applied because `install.sh` never reads or writes `~/.claude/settings.json`, which
+is not this repo's file, and there is no `claude hooks` CLI to shell out to — so the
+reader's own settings are the one file an agent touches here.
 
 Safe to run on every session: `POST /api/pomodoro/ensure` starts a work interval only
 when no timer exists at all. A running, paused, or mid-break timer is left exactly as
-it was, so a second session, a `/clear`, or a resume is a no-op (PROTOCOL.md "The
-pomodoro clock"; proved in `test/check-http.mjs` and `test/check-install-doc.mjs`).
+it was, so a second session, a `/clear`, or a resume is a no-op (proved in
+`test/check-http.mjs` and `test/check-install-doc.mjs`).
 
 ## The entry
 
@@ -39,11 +46,11 @@ pomodoro clock"; proved in `test/check-http.mjs` and `test/check-install-doc.mjs
 }
 ```
 
-The shape matters, don't simplify it:
+Keep the shape exactly, every part of it load-bearing:
 
-- Secret header from `~/.config/claude-board/secret`; `ensure` is secret-only, the
-  browser cookie is deliberately not accepted (`src/server.mjs`
-  `POMODORO_COOKIE_ACTIONS`).
+- Secret header from `~/.config/claude-board/secret`. A browser reaches `ensure` on the
+  session cookie alone, but this is a shell `curl`, which holds no cookie: the secret is
+  the only credential it can present.
 - `${CLAUDE_BOARD_PORT:-7391}` matches `src/handoff.mjs` `DEFAULT_PORT`.
 - `-m 2`, backgrounded `(… &)`, and `; exit 0` so no daemon state — down, wedged, no
   secret file, connection refused — can delay or fail a session start.
@@ -52,10 +59,10 @@ The shape matters, don't simplify it:
 ## Applying it: append, don't replace
 
 `hooks.SessionStart` is an **array of matcher groups**, each with its own `hooks`
-array, and a real `settings.json` already carries hooks from elsewhere.
+array, and a real `settings.json` already carries hooks from elsewhere. A top-level
+`"SessionStart": [ … ]` key pasted over it clobbers every hook already there.
 
-**Pasting a top-level `"SessionStart": [ … ]` key clobbers every hook already there.**
-Instead, append the entry to the `hooks` array of a group that applies to every session
+Append the entry to the `hooks` array of a group that applies to every session
 (`"matcher": "*"`, or empty/absent). If no such group exists, append a new matcher
 group without touching the existing ones. If there's no `SessionStart` key at all, add
 the whole block:
@@ -68,7 +75,7 @@ the whole block:
         "matcher": "*",
         "hooks": [
           { "type": "command", "command": "…existing, untouched…" },
-          { "type": "command", "command": "(curl -s -m 2 -X POST -H \"x-claude-board-secret: $(cat \"$HOME/.config/claude-board/secret\" 2>/dev/null)\" \"http://127.0.0.1:${CLAUDE_BOARD_PORT:-7391}/api/pomodoro/ensure\" >/dev/null 2>&1 &) ; exit 0" }
+          { "type": "command", "command": "…the entry above, verbatim…" }
         ]
       }
     ],

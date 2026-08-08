@@ -1,29 +1,29 @@
-// Ticket 04 (DESIGN.md): "Anchors survive re-render, and every older
-// board still renders." test/check-http.mjs's own new section proves the live,
-// real-server half of criterion 4 (a page-scoped `dom` anchor round-trips through
-// a real post/submit/re-render without going lost). This file covers the two
-// halves that don't need a daemon:
+// Anchors survive re-render, and every older board still renders.
+// test/check-http.mjs's own new section proves the live, real-server half
+// (a page-scoped `dom` anchor round-trips through a real post/submit/re-render
+// without going lost). This file covers the two halves that don't need a
+// daemon:
 //
 //   - a LOST anchor reports what it lost -- visibly on the page (a pin drawn
 //     `pin-lost`, a comment-list entry reading "lost: <hint>") and in what the
 //     agent reads (buildPacket's own `resolved`/`lost` fields) -- rather than
-//     silently vanishing (criterion 4, second half).
-//   - a board archived BEFORE this ticket -- built with the actual code at
-//     commit 578f666 (the tip before DESIGN.md's tickets started;
-//     test/fixtures/pre-ticket04-board.json, committed alongside this file, is
-//     that commit's own createBoard/applySubmit output, not a hand-written
-//     "old-shaped" anchor) -- still renders its comments and pins unchanged
-//     under today's code (criterion 7, second half). ADR.md entry 28 narrowed
-//     "unchanged" for exactly one part of that fixture: its `markdown` block
-//     carries three stored comments and renders none of them, since a markdown
-//     block has no comment surface any more. That is SPEC_COUNTS.md criterion
-//     19, and it is checked here rather than in a file of its own, because this
-//     fixture is the only genuinely-pre-existing archived board in the repo.
+//     silently vanishing.
+//   - a board archived BEFORE this behavior existed -- built with the actual
+//     code at commit 578f666 (the tip before anchors-survive-re-render
+//     landed; test/fixtures/pre-ticket04-board.json, committed alongside this
+//     file, is that commit's own createBoard/applySubmit output, not a
+//     hand-written "old-shaped" anchor) -- still renders its comments and pins
+//     unchanged under today's code. ADR.md entry 28 narrowed "unchanged" for
+//     exactly one part of that fixture: its `markdown` block carries three
+//     stored comments and renders none of them, since a markdown block has no
+//     comment surface any more. That is checked here rather than in a file of
+//     its own, because this fixture is the only genuinely-pre-existing
+//     archived board in the repo.
 //
 // Both run against the real src/ui.mjs client script over test/dom-stand-in.mjs,
-// not just resolveComment/renderBoardPage in isolation -- the whole lesson this
-// spec's own Testing section states: resolution logic passing on its own proves
-// nothing about the page a reviewer actually sees.
+// not just resolveComment/renderBoardPage in isolation -- the whole lesson:
+// resolution logic passing on its own proves nothing about the page a reviewer
+// actually sees.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -89,9 +89,8 @@ const lostBlockId = lostBoard.blocks[0].id;
 // index -- the same "hand-edited/stale ref" shape every other anchor kind's
 // existing lost-anchor check in this repo already uses (test/check-pure.mjs's
 // '9.9' for an html stage, a heading slug that was never minted for `md`, a
-// node id a diagram never declared for `mermaid`) -- see this ticket's own
-// instructions: content is snapshotted at post time (DESIGN.md
-// Decisions -> "An anchor survives re-render, not editing"), so the only way a
+// node id a diagram never declared for `mermaid`) -- content is snapshotted
+// at post time ("an anchor survives re-render, not editing"), so the only way a
 // `dom` anchor goes lost is exactly this: a ref/hint that never matched what's
 // actually stored, e.g. because the element it named at mint time is gone.
 applySubmit(lostBoard, {
@@ -106,7 +105,7 @@ applySubmit(lostBoard, {
   ],
 }, 1);
 
-check('ticket 04: what the agent reads -- buildPacket reports a lost page-scoped dom anchor as unresolved, naming the stored hint, not dropping the comment', () => {
+check('what the agent reads -- buildPacket reports a lost page-scoped dom anchor as unresolved, naming the stored hint, not dropping the comment', () => {
   const packet = buildPacket(lostBoard, 1, 'http://127.0.0.1/b/x');
   assert.equal(packet.comments.length, 1, 'the comment must still be IN the packet -- lost, not dropped');
   const c = packet.comments[0];
@@ -116,13 +115,13 @@ check('ticket 04: what the agent reads -- buildPacket reports a lost page-scoped
   assert.equal(c.blockId, lostBlockId);
 });
 
-check('ticket 04: resolveComment agrees, directly', () => {
+check('resolveComment agrees, directly', () => {
   const resolved = resolveComment(lostBoard, lostBoard.comments[0]);
   assert.equal(resolved.resolved, false);
   assert.equal(resolved.lost, 'a sentence that used to live here');
 });
 
-check('ticket 04: what the reviewer sees -- a lost page-scoped dom anchor draws a pin-lost pin and a "lost: <hint>" comment-list entry, never a silently missing comment', () => {
+check('what the reviewer sees -- a lost page-scoped dom anchor draws a pin-lost pin and a "lost: <hint>" comment-list entry, never a silently missing comment', () => {
   const pageHtml = renderBoardPage(lostBoard);
 
   // Server-rendered markup: the comment list entry is emitted directly by
@@ -149,7 +148,7 @@ check('ticket 04: what the reviewer sees -- a lost page-scoped dom anchor draws 
 
 // --- ablation-visible contrast: the SAME board, but the ref actually resolves -
 
-check('ticket 04: contrast -- the same shape of board, but a ref/hint that DOES still match, resolves (proving the lost check above is discriminating, not just always-false)', () => {
+check('contrast -- the same shape of board, but a ref/hint that DOES still match, resolves (proving the lost check above is discriminating, not just always-false)', () => {
   const okBoard = createBoard({
     title: 'Ticket 04 -- contrast, a page-scoped anchor that resolves',
     blocks: [{ kind: 'mermaid', source: { path: 'no-such-diagram-04b.mmd' } }],
@@ -183,12 +182,12 @@ check('ticket 04: contrast -- the same shape of board, but a ref/hint that DOES 
   assert.equal(packet.comments[0].lost, undefined);
 });
 
-// --- a board archived before this ticket still renders unchanged --------------
+// --- a board archived before this behavior existed still renders unchanged ----
 
 const fixturePath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'pre-ticket04-board.json');
 const oldBoard = JSON.parse(readFileSync(fixturePath, 'utf8'));
 
-check('ticket 04 / criterion 19: a board built with the actual pre-ticket-04 code (commit 578f666) still resolves every one of its comments, and its stored markdown comments no longer report a verdict of their own', () => {
+check('a board built with the actual pre-existing code (commit 578f666) still resolves every one of its comments, and its stored markdown comments no longer report a verdict of their own', () => {
   // The fixture's own comments, and what 578f666's OWN resolveComment decided
   // about them at build time: see .tmp-578f666/build-fixture.mjs's own choices.
   //
@@ -199,7 +198,7 @@ check('ticket 04 / criterion 19: a board built with the actual pre-ticket-04 cod
   // (n:1, on that same markdown block) has always landed. That is deliberately a
   // deletion rather than a new "unknown kind is lost" rule: `d1` renders no
   // comment list at all now, so there is nothing on the page for either verdict
-  // to decorate -- which is criterion 19, checked directly in the next case. The
+  // to decorate -- checked directly in the next case. The
   // element-level anchors on the two kinds that ARE still commentable (n:3 on the
   // html stage, n:4 on the diagram) resolve exactly as they always did.
   const expected = [
@@ -225,7 +224,7 @@ check('ticket 04 / criterion 19: a board built with the actual pre-ticket-04 cod
   });
 });
 
-check('criterion 19: an archived board carrying stored markdown comments renders without them and without error -- the html-stage and diagram comments on the same board are untouched', () => {
+check('an archived board carrying stored markdown comments renders without them and without error -- the html-stage and diagram comments on the same board are untouched', () => {
   // Renders at all: a stored comment on a block that no longer has anywhere to
   // put one must not throw on the way through commentArea/anchorTag/resolveComment.
   let pageHtml;
@@ -244,8 +243,8 @@ check('criterion 19: an archived board carrying stored markdown comments renders
   assert.equal(document.getElementById('comment-form-d1'), null, 'a markdown block must render no comment form');
   // Asserted over the RENDERED entries, not over the page bytes: the board's own
   // JSON is inlined into #board-data, so every stored comment's text is present
-  // in the file either way. What criterion 19 is about is whether any of it is
-  // rendered as a comment.
+  // in the file either way. What matters is whether any of it is rendered as
+  // a comment.
   const renderedComments = document.querySelectorAll('.comment-item').map(el => el.textContent);
   for (const gone of ['a whole-block comment, from before this spec', 'alpha item', 'findings-li9']) {
     assert.equal(renderedComments.some(t => t.indexOf(gone) !== -1), false,
@@ -263,7 +262,7 @@ check('criterion 19: an archived board carrying stored markdown comments renders
   const layer = section.querySelector('.pin-layer');
   const pins = layer.querySelectorAll('.anchor-pin');
   assert.equal(pins.length, 1, `expected exactly one pin on the pre-existing html-stage comment, got ${pins.length}`);
-  assert.equal(pins[0].classList.contains('pin-lost'), false, 'the pre-ticket-04 html-stage dom anchor must still resolve, unchanged');
+  assert.equal(pins[0].classList.contains('pin-lost'), false, 'the pre-existing html-stage dom anchor must still resolve, unchanged');
   assert.ok(String(pins[0].title || '').indexOf('Send') !== -1, `expected the pin's title to carry the stored hint "Send", got ${JSON.stringify(pins[0].title)}`);
 
   // The mermaid node-id anchor: reachable once the diagram has "rendered" -- this

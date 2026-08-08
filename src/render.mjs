@@ -1,6 +1,6 @@
 // Board JSON -> complete HTML page, as a pure function of the JSON. The page
 // inlines its own board JSON in a script tag: served through the daemon it hydrates
-// and subscribes over SSE (ticket 04, see renderRoundSection and src/server.mjs);
+// and subscribes over SSE (see renderRoundSection and src/server.mjs);
 // opened from Finder it hydrates from the embedded copy and renders read-only
 // (src/ui.mjs decides based on `location.protocol`).
 //
@@ -17,7 +17,7 @@
 // `code`, `question` and `compare` render no comment button, form, list or pin
 // layer, so a stored comment on one of those simply has nowhere to render.
 // Every comment is run through resolveComment (src/board.mjs),
-// via resolveComments' shared per-block cache (ticket 11), exactly once per render
+// via resolveComments' shared per-block cache, exactly once per render
 // -- see groupCommentsByBlock and renderBoardPage below
 // -- and that single resolved/lost verdict feeds both the server-rendered
 // per-block comment list AND whatever gets embedded for the client to hydrate
@@ -33,8 +33,7 @@ import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs
 import { badgeLabel } from './badge.mjs';
 
 /** Content-Security-Policy for every board page, both as the HTTP response
- * header src/server.mjs sends on every live request AND (ticket 10,
- * DESIGN.md, audit S2) as the `<meta http-equiv>` renderBoardPage now
+ * header src/server.mjs sends on every live request AND as the `<meta http-equiv>` renderBoardPage now
  * emits below. One string, not two independently-maintained policies: this is
  * the module both sides import it from, since src/server.mjs already imports
  * `renderBoardPage` itself from here (the reverse import would be circular).
@@ -44,11 +43,11 @@ import { badgeLabel } from './badge.mjs';
  * ignored when a policy is delivered via `<meta>` (a browser platform
  * limitation, not a mistake here) — `default-src`/`script-src`/`style-src`/
  * `img-src`/`font-src`/`connect-src`/`base-uri` are all still honoured, which is
- * the half that actually constrains a mock's own script post-ticket-10: with
+ * the half that actually constrains a mock's own script: with
  * `allow-same-origin` dropped (see renderHtmlBlock's own design comment) the
  * stage can no longer forge same-origin fetches at all, but an archived page's
  * `#board-data` (the reviewer's own answers and comments) is worth defending in
- * depth even so — see the audit's S2 for the exploit this closes (a mock's
+ * depth even so — this closes an exploit (a mock's
  * script, same-origin with a `file://` parent, self-navigating to an external
  * URL with no CSP to stop it). Scoped to what the page genuinely uses: its own
  * inlined `<style>`/`<script>` (both emitted inline below, so `'unsafe-inline'`
@@ -57,10 +56,10 @@ import { badgeLabel } from './badge.mjs';
  * form can post anywhere, no `<base>` can re-point a relative URL. */
 const CSP_CLAUSES = [
   "default-src 'none'",
-  "script-src 'unsafe-inline' https://cdn.jsdelivr.net",
+  "script-src 'unsafe-inline' https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
   "style-src 'unsafe-inline'",
   "img-src 'self' data: blob:",
-  "font-src data: https://cdn.jsdelivr.net",
+  "font-src data: https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
   "connect-src 'self'",
   "frame-ancestors 'none'",
   "base-uri 'none'",
@@ -102,16 +101,16 @@ const COMMENT_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none
 
 /** The comment-mode toggle's icon: a crosshair, distinct from the comment glyph
  * above so the two controls don't read as the same affordance twice. See
- * DESIGN.md Decisions -> "The gesture is an explicit comment mode": this
+ * "The gesture is an explicit comment mode": this
  * button is the one thing on the page that makes the generic element-level
- * gesture discoverable without being told it exists (criterion 2) -- it has to be
+ * gesture discoverable without being told it exists -- it has to be
  * visible chrome, not a held modifier or a hover-only affordance. src/ui.mjs reads
  * its id and toggles `.active` on it and `comment-mode` on `body`; its own click
  * never anchors anything (excluded from the click-to-anchor gesture by class, same
  * as the comment infrastructure it sits beside). */
 const MODE_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>';
 
-/** The diagram-expand control's icon (DESIGN.md polish ticket 05): four arrowheads
+/** The diagram-expand control's icon: four arrowheads
  * pointing out of the corners, the standard "open this full size" glyph and
  * distinct from the three above. Inline SVG for the same reason every other icon
  * here is — the standalone archive has no network to fetch anything from. */
@@ -121,15 +120,15 @@ function commentModeToggle() {
   return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false">${MODE_ICON}<span class="mode-toggle-label">Comment mode: off</span></button>`;
 }
 
-/** DESIGN.md polish ticket 05, criterion 10: the explicit control that opens a
+/** The explicit control that opens a
  * diagram in the full-viewport lens. Explicit, and never the diagram itself —
- * "the click gesture on a diagram keeps its current meaning in both modes" (the
- * spec's own Decision), so clicking a node still means "comment on this node"
+ * "the click gesture on a diagram keeps its current meaning in both modes",
+ * so clicking a node still means "comment on this node"
  * with comment mode on and still means nothing with it off.
  *
  * Rendered server-side rather than injected by src/ui.mjs so it is in the
  * standalone archive's own bytes, where the lens is still expected to pan and
- * zoom (spec: "The lens is view-only under `body.readonly`" — view-only, not
+ * zoom ("The lens is view-only under `body.readonly`" — view-only, not
  * absent). That is also why src/ui.mjs's readonly pass, which hard-disables
  * every other button on the page, skips this one by class.
  *
@@ -137,7 +136,7 @@ function commentModeToggle() {
  * SVG (CDN unreachable, invalid chart): a control that opens an empty lens is
  * worse than no control.
  *
- * SPEC_STAGES criterion 3 puts the same control on every `html` stage, and both
+ * The same control appears on every `html` stage, and both
  * reasons above carry over unchanged — a stage in a standalone archive still
  * opens in the lens, so the button has to be in the archive's own bytes and has
  * to survive the readonly pass. `what` names the thing being opened in the
@@ -159,7 +158,7 @@ function commentButton(blockId) {
 
 /** The short label shown next to a comment's number in its block's comment list:
  * the dom hint ("the Send button"), a diagram
- * node's own hint (ticket 05) falling back to its bare node id for an anchor
+ * node's own hint falling back to its bare node id for an anchor
  * minted before that ticket, or "block" for a whole-block comment — and
  * "lost: <ref>" for any of
  * those once resolveComment (src/board.mjs) has decided the anchor no longer
@@ -169,7 +168,7 @@ function anchorTag(c, lost) {
   if (lost) return `lost: ${c.lost}`;
   const kind = c.anchor && c.anchor.kind;
   if (kind === 'dom') return c.anchor.hint || c.anchor.ref;
-  // Ticket 05: a diagram node's anchor now carries a hint too (composeHint, the
+  // A diagram node's anchor now carries a hint too (composeHint, the
   // same rule as every other element) -- preferred exactly like `dom` above,
   // falling back to the bare node id for a pre-ticket-05 anchor that has none.
   if (kind === 'mermaid') return c.anchor.hint || c.anchor.ref;
@@ -271,7 +270,7 @@ function renderMarkdownBlock(block) {
  * a preview is a glance, not a second content block. */
 function renderOptionPreview(preview) {
   const trimmed = String(preview ?? '').trim();
-  // Parsed, not pattern-matched (audit). The old sniff
+  // Parsed, not pattern-matched. The old sniff
   // `^https?://\S+\.(png|...)(\?\S*)?$` let `\S+` and `\S*` compete for a `$` a
   // trailing newline made unreachable, so a crafted `.png?`-repeated string cost
   // O(n^2) -- ~46s at 400KB, and paid again on every read because the board is
@@ -338,8 +337,8 @@ function renderTextWidget(block, answer, historical) {
 
 /** Drag-to-rank: every option, in the stored order if there is a prior answer, else
  * options order. The answer is the ordered array of option labels; the drag gesture
- * itself lives in src/ui.mjs and is not asserted by the node checks (see
- * DESIGN.md Testing — that check "is not automated and should not pretend to
+ * itself lives in src/ui.mjs and is not asserted by the node checks (that check
+ * "is not automated and should not pretend to
  * be"), but the markup and data shape here are. */
 function renderRankWidget(block, answer, historical) {
   const hasOrder = answer && Array.isArray(answer.choice) && answer.choice.length;
@@ -356,7 +355,7 @@ function renderRankWidget(block, answer, historical) {
   return `<ul class="rank-list" data-question-id="${escAttr(block.id)}">${items}</ul>`;
 }
 
-/** choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): each option carries a nested,
+/** choose-between-rendered-variants: each option carries a nested,
  * fully rendered content block instead of the plain string `preview` every
  * other widget's option has (renderOptionBody/renderOptionPreview above are
  * for those; this widget bypasses both). The reviewer picks by clicking the
@@ -406,7 +405,7 @@ function renderRankWidget(block, answer, historical) {
  * `options[].block` the same way they walk `left`/`right`), rather than this
  * one widget inventing a suppressed, comment-free rendering path of its own.
  *
- * SPEC_STAGES.md criterion 1: an `html`-kind option carries the modifier class
+ * An `html`-kind option carries the modifier class
  * `variant-card--stage` (src/styles.mjs: `grid-column: 1 / -1`), which is what
  * takes it out of `.options-variants`' three-column grid and onto its own full-
  * width row -- three columns leaves an `html` mock's own text unreadably small,
@@ -447,7 +446,7 @@ function renderWidget(block, answer, historical, board, commentsByBlock) {
     case 'choose-between-rendered-variants': return renderVariantChoice(block, answer, historical, board, commentsByBlock);
     // Unreachable through createBoard/addRound/amendRound: src/board.mjs's
     // normalizeBlock rejects any `widget` not in WIDGETS before a block is ever
-    // minted (audit L2), so every block renderWidget ever sees already named
+    // minted, so every block renderWidget ever sees already named
     // one of the five cases above. This used to be `default: return
     // renderSingleChoice(...)` -- permissive, so a SIXTH WIDGETS entry added
     // without a matching case here would render silently as an empty list of
@@ -517,7 +516,17 @@ function renderContextInner(block, board, commentsByBlock, historical) {
     case 'compare':
       return `<div class="compare-grid">${renderContextCompareSide(block.left, board, commentsByBlock, historical)}${renderContextCompareSide(block.right, board, commentsByBlock, historical)}</div>`;
     default:
-      return '';
+      // Anything this switch has no prose form for -- a `question` above all -- renders
+      // as its full block rather than as nothing. Returning '' here meant a question
+      // nested in a stage-carrying question's `context` produced an EMPTY context-item:
+      // no prompt, no widget, nothing on screen. questionBlocks still walked it, so
+      // applySubmit backfilled `unanswered` and the packet told the agent the reviewer
+      // left blank a question they were never shown -- the same outcome src/board.mjs
+      // refuses an unknown widget for. Worse, bin/mcp.mjs counts it as a question and
+      // blocks the ask on /wait, so the call sat for the full two-hour cap on something
+      // the page could not draw. The identical block under a stage-free question always
+      // rendered fine; only this fork dropped it.
+      return renderBlock(block, board, commentsByBlock, historical);
   }
 }
 
@@ -544,7 +553,7 @@ function renderContextCompareSide(side, board, commentsByBlock, historical) {
  * genuinely work rather than merely render.
  *
  * `pageDomPinLayer` rides along on those two kinds for the same reason
- * renderMermaidBlock emits one (audit finding C4): a failed reference renders a
+ * renderMermaidBlock emits one: a failed reference renders a
  * `.resolve-error` note, which is not chrome and IS anchorable, so a click there
  * must have a layer to draw its pin into rather than resolving to a comment with
  * no pin anywhere on the page. */
@@ -614,8 +623,8 @@ function resolveErrorNote(block) {
   return block.error ? `<p class="resolve-error">Could not resolve: ${escHtml(block.error)}</p>` : '';
 }
 
-/** Mermaid stays client-side from its CDN exactly as /visualize does today (see
- * DESIGN.md "The daemon renders markdown; the page renders mermaid") — the
+/** Mermaid stays client-side from its CDN exactly as /visualize does today —
+ * "the daemon renders markdown; the page renders mermaid" — the
  * daemon only emits the raw diagram source in a `pre.mermaid`, and src/ui.mjs finds
  * and renders every such node in the page. The stage-scoped `pin-layer` nested in
  * `.stage-wrap` is an empty, absolutely positioned sibling that src/ui.mjs
@@ -625,8 +634,8 @@ function resolveErrorNote(block) {
  *
  * That stage-scoped layer is NOT a direct child of this `.block` section (it is
  * nested one level deeper, inside `.stage-wrap`), so `directChildPinLayer`
- * (src/ui.mjs) never finds it and `wirePageDomPins` skips this section entirely —
- * audit finding C4. A generic page-scoped `dom` anchor can still land here: on
+ * (src/ui.mjs) never finds it and `wirePageDomPins` skips this section entirely.
+ * A generic page-scoped `dom` anchor can still land here: on
  * `.stage-wrap`'s own padding (not itself excluded from the click gesture), or on
  * the `.resolve-error` note when the diagram source failed to resolve, since
  * neither is chrome and both sit inside a section the reviewer can see. The
@@ -658,7 +667,7 @@ function sourceLabel(source) {
 }
 
 /** A file plus a line range or section, resolved once at post time (see
- * src/resolve.mjs). No syntax highlighting — DESIGN.md Out of Scope calls that a
+ * src/resolve.mjs). No syntax highlighting — a
  * hand-rolled cost zero-dependency packaging doesn't buy.
  *
  * No commentButton/commentArea/pageDomPinLayer, same as renderMarkdownBlock above
@@ -678,15 +687,15 @@ function renderCodeBlock(block) {
 </section>`;
 }
 
-// --- ticket 10 design: genuine stage isolation via postMessage -----------------
+// --- design: genuine stage isolation via postMessage -----------------
 //
-// DESIGN.md's Decision "Isolation of hand-mocked HTML is kept" says a
+// "Isolation of hand-mocked HTML is kept": a
 // mock's CSS and markup must never leak into or clash with the board page. Before
 // this ticket that promise was false for SCRIPT: the iframe below carried
 // `sandbox="allow-same-origin allow-scripts"`, and `allow-same-origin` on a
 // `srcdoc` frame keeps the embedder's origin -- so a `<script>` in agent-supplied
 // `block.html` ran as first-party at the daemon's own origin, could read/write
-// the parent document, and (2026-07-29 audit, S1) could fetch every board on the
+// the parent document, and could fetch every board on the
 // machine and answer another agent's blocked `ask()` with attacker-chosen text.
 // `allow-same-origin` is DROPPED below: the frame's browsing context now has an
 // OPAQUE origin, `frame.contentDocument`/`frame.contentWindow.document` throw or
@@ -741,8 +750,7 @@ function renderCodeBlock(block) {
 //                                          click already used. This is also why
 //                                          `composeHint` needs no THIRD copy
 //                                          embedded here alongside src/ui.mjs's
-//                                          own (single-source discipline,
-//                                          DESIGN.md ticket 10): only
+//                                          own (single-source discipline): only
 //                                          `buildSteps`/`stepsToPath`/
 //                                          `pathToSteps`/`resolveSteps` do, bound
 //                                          below via `.toString()` from
@@ -773,9 +781,8 @@ function renderCodeBlock(block) {
 //                                          `wireHtmlStage`'s old in-parent
 //                                          listeners used, so hover/cursor/click
 //                                          obey the toggle exactly as they did
-//                                          before this ticket -- see "one
-//                                          gesture, toggle-gated everywhere" in
-//                                          DESIGN.md. The hover
+//                                          before this ticket -- one
+//                                          gesture, toggle-gated everywhere. The hover
 //                                          stylesheet itself is injected
 //                                          LAZILY, the first time `commentMode`
 //                                          turns true (not at script start) --
@@ -804,13 +811,12 @@ function renderCodeBlock(block) {
 //                                          `refreshPins` runs (resize, a comment
 //                                          queued, a submit landing).
 //
-// NO 'select' MESSAGE, DELIBERATELY (SPEC_MIGRATION.md criterion 2,
-// choose-between-rendered-variants). An earlier version of this widget had
+// NO 'select' MESSAGE, DELIBERATELY (choose-between-rendered-variants). An earlier version of this widget had
 // the stage post an unconditional, content-free 'select' on every click, so
 // clicking the visible mock content of an html-kind OPTION -- not just the
 // card's own chrome outside the iframe -- could pick that option; the parent
 // acted on it whenever the frame sat inside a '.choice-variant' card. Reverted
-// (director review, before this ticket merged): every message on this channel is
+// (before this ticket merged): every message on this channel is
 // STAGE-AUTHORED input, no different in kind from the mock's own HTML or the
 // agent's own script inside it -- and unlike 'click'/'hover' (which only ever
 // PROPOSE an anchor a human still has to submit) or 'positions' (pure
@@ -894,14 +900,14 @@ function renderCodeBlock(block) {
  * src/ui.mjs already uses for `composeHint` (see that file's own comment on
  * why: dependency-free pure functions can be spliced in verbatim rather than
  * hand-copied a second time, which is what "single-source discipline"
- * (DESIGN.md ticket 10) requires here). Placed AFTER the mock's own
+ * requires here). Placed AFTER the mock's own
  * markup in the `srcdoc` string (renderHtmlBlock, below) rather than before
  * it: every listener here is attached to `document.body` itself (delegation),
  * which needs `document.body` to already exist and works regardless of
  * whether the mock's own content was added before or after this script runs --
  * see test/dom-stand-in.mjs's `runInlineScripts` for why this placement
  * matters for a real browser, not just this stand-in. */
-// Exported (ticket 10) so test/check-pure.mjs and test/check-stage-isolation.mjs
+// Exported so test/check-pure.mjs and test/check-stage-isolation.mjs
 // can inspect and execute this exact string -- the same reason `ui` is exported
 // from src/ui.mjs. Behavioural checks (test/check-click.mjs and friends) already
 // run it for real, inside a rendered board's srcdoc, through test/dom-stand-in.mjs;
@@ -920,13 +926,13 @@ function renderCodeBlock(block) {
  * `--accent` (its own brand color, or deliberately) wins over a `:root`
  * rule in this same document, with no specificity contest -- `!important`
  * on `outline` protects the `outline` declaration, not the `var()` it
- * substitutes. Measured in real Chrome (2026-07-31 audit, finding H5): a
+ * substitutes. Measured in real Chrome: a
  * block under `style="--accent: transparent"` rendered the hover outline
  * `rgba(0, 0, 0, 0)` -- invisible -- and this outline is the ONLY
  * per-element targeting feedback the stage gives, so a reviewer could be led
  * to anchor a comment to an element they never saw highlighted. A literal is
  * the one value untrusted content in the same document cannot override.
- * Spec criterion 6's binding amendment names this file's stage stylesheet as
+ * This file's stage stylesheet is
  * exempt from the "no raw literal outside a token block" rule for exactly
  * this reason -- see test/check-pure.mjs, which asserts the isolation
  * property this comment describes (no custom property at all) rather than
@@ -946,7 +952,7 @@ function renderCodeBlock(block) {
  * on the light one; the DARK accent measures 1.52:1 and 2.13:1, i.e. the same
  * colour that used to sit at 2.61:1 on white is still the wrong one, and now
  * fails on both surfaces rather than on one. Two hexes plumbed through the
- * parent's 'mode' postMessage would also work and is what criterion 7 leaves
+ * parent's 'mode' postMessage would also work and remains
  * open; one literal that clears the bar on both is less machinery, and the
  * surfaces were chosen far enough apart in luminance to leave it room.
  * test/check-pure.mjs asserts the premise (the two --stage-bg values differ,
@@ -959,7 +965,7 @@ export function stageAgentScript() {
   return `<script>(function () {
   var CB = 'cb-stage';
   var HOVER_CLASS = 'cb-anchor-hover';
-  // DESIGN.md polish ticket 02, criterion 12: applied instead of HOVER_CLASS to
+  // Applied instead of HOVER_CLASS to
   // an element whose own ref is already in 'sentRefs' below -- the stage-side
   // half of the same de-affordance src/ui.mjs applies page-side via its own
   // .cb-anchor-sent (same class name, by the convention QUIRKS.md "Two
@@ -972,7 +978,7 @@ export function stageAgentScript() {
   // The dom refs (this block's own, index-chain form -- stepsToPath's output)
   // that already carry a SENT comment, as told by the parent's 'mode' message
   // below. The stage cannot know this on its own: 'sent' is a fact about
-  // board.comments, which lives only in the parent document (ticket 10's
+  // board.comments, which lives only in the parent document (the stage's
   // isolation -- this document never sees the board JSON at all).
   var sentRefs = [];
 
@@ -1008,7 +1014,7 @@ export function stageAgentScript() {
     styleInjected = true;
     try {
       var style = document.createElement('style');
-      // DESIGN.md polish ticket 02 criterion 12: a SENT_CLASS rule alongside the
+      // A SENT_CLASS rule alongside the
       // ordinary hover one. The hover rule's colour is STAGE_ACCENT_HEX, kept in
       // step with src/styles.mjs by hand (QUIRKS.md "Two stylesheets, one
       // palette") because this stylesheet cannot reach the page's tokens -- one
@@ -1040,7 +1046,7 @@ export function stageAgentScript() {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps && steps.length) ? stepsToPath(steps) : null;
-    // Criterion 12: an element whose own ref already carries a SENT comment is
+    // An element whose own ref already carries a SENT comment is
     // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
     // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
     // below still posts 'click' unconditionally, exactly as before; "clicking
@@ -1077,7 +1083,7 @@ export function stageAgentScript() {
     return resolveSteps(document.body, steps);
   }
 
-  // SPEC_STAGES.md criteria 10/11: this document is the only thing that can
+  // This document is the only thing that can
   // ever know its own rendered height -- the parent cannot reach
   // 'contentDocument' at all (see this file's own "ORIGIN VALIDATION" design
   // comment, above stageAgentScript, for why the frame is opaque by design),
@@ -1144,7 +1150,7 @@ export function stageAgentScript() {
     if (!data || typeof data !== 'object' || data.cb !== CB || typeof data.type !== 'string') return;
     if (data.type === 'mode') {
       commentMode = !!data.commentMode;
-      // DESIGN.md polish ticket 02: 'sentRefs' widens this message (still 'mode',
+      // 'sentRefs' widens this message (still 'mode',
       // not a new type -- sent-ness is exactly the kind of fact that matters
       // precisely when mode changes). Shape-checked like every other field this
       // channel carries: an absent or malformed list leaves 'sentRefs'
@@ -1206,7 +1212,7 @@ export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>'
  * context kind passed by value (see PROTOCOL.md Blocks). Rendered inside a
  * sandboxed iframe so the mock's own markup/CSS/script never leaks into or
  * clashes with the board page — including its SCRIPT, not merely its CSS and
- * markup, since ticket 10 dropped `allow-same-origin` (see the design comment
+ * markup, since `allow-same-origin` was dropped (see the design comment
  * above): the frame's browsing context is now genuinely cross-origin from the
  * daemon's own, so `contentDocument`/`contentWindow.document` are unreachable
  * from the parent, and element-level click-to-comment goes over the
@@ -1223,7 +1229,7 @@ function buildStageSrcdoc(block) {
 }
 
 function renderHtmlBlock(block, board, commentsByBlock, historical) {
-  // A referenced source can fail to resolve (SPEC_HTMLREF.md criteria 2-4: sliced
+  // A referenced source can fail to resolve (sliced
   // with lines/section, over the byte cap, or outside the confinement boundary) --
   // same block-level-error shape as renderMarkdownBlock/renderCodeBlock/
   // renderMermaidBlock, stage chrome dropped since there is nothing to stage.
@@ -1255,13 +1261,13 @@ function renderHtmlBlock(block, board, commentsByBlock, historical) {
   // of head-only elements (HEAD_ONLY_TAGS -- style/script/meta/link/title/base)
   // out of `document.body` when the srcdoc is parsed as the bare fragment it
   // actually is (see src/anchor.mjs's own HEAD_ONLY_TAGS comment and the C2 fix
-  // ticket 08 shipped for it). An explicit `<body>` opened before block.html's
+  // shipped for it). An explicit `<body>` opened before block.html's
   // own leading `<style>` (the ordinary case for a mock that styles itself --
   // see this function's own header comment) stops that hoist dead: once body
   // is genuinely, explicitly open, the HTML parsing algorithm inserts a
   // subsequent style/script tag as an ordinary CHILD of body instead of
   // reopening head for it, which shifts every `dom`-anchor ref index by one
-  // and breaks exactly the mocks ticket 08 exists to support (confirmed
+  // and breaks exactly the mocks this exists to support (confirmed
   // against test/check-click.mjs's own C2 check, which fails hard on an
   // explicit-body wrapper here). A leading `<style>` has no such cost: it is
   // itself just the first element of that same leading head-only run, so it
@@ -1304,7 +1310,7 @@ function renderCompareSide(side, board, commentsByBlock, historical) {
  * No commentButton/commentArea/pageDomPinLayer on the wrapper itself (ADR
  * "Commenting is confined to content blocks", 2026-08-01): `compare` is a grid
  * around two nested blocks, not content of its own. This is a narrowing from
- * the audit-C4-era design this comment used to describe -- `.compare-side`'s
+ * the earlier design this comment used to describe -- `.compare-side`'s
  * label and a side with no content block (`renderCompareSide`'s "no content"
  * fallback) were previously anchorable via a page-scoped pin-layer on this
  * outer section; that is an accepted, documented cost now (a comparison can no
@@ -1326,7 +1332,7 @@ function renderCompareBlock(block, board, commentsByBlock, historical) {
  * round has been sent — see renderQuestionBlock for the answer widgets; every
  * other kind threads it into its own commentArea() too, so a sent round's comment
  * form goes inert along with its answers rather than staying a second, live place
- * to add to an exchange that already went out. Exported (ticket 04) so
+ * to add to an exchange that already went out. Exported so
  * src/server.mjs can render a single block's fragment for an SSE amend push
  * without duplicating the dispatch. */
 export function renderBlock(block, board, commentsByBlock, historical = false) {
@@ -1362,9 +1368,9 @@ export function groupCommentsByBlock(resolvedComments) {
  * choice, note all come from board.answers exactly as the open-round path reads
  * them) but every widget renders `disabled` — see renderQuestionBlock — so it
  * collapses into a history rail rather than staying a second, stale place to edit
- * the same question. See DESIGN.md Decisions -> "A board is a session-scoped
+ * the same question. "A board is a session-scoped
  * thread with rounds": "the sent round collapsed into a history rail with its
- * answers still readable." Exported (ticket 04) so this is also what
+ * answers still readable." Exported so this is also what
  * src/server.mjs renders for an SSE push of a brand-new round — the full page and a
  * live push produce byte-identical markup for the same round, which is what makes
  * a client that reconnects mid-thread indistinguishable from one that was there the
@@ -1381,7 +1387,7 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   const title = (round && round.title) || '';
   const base = title ? `Round ${roundN} · ${title}` : `Round ${roundN}`;
   const label = historical ? `${base} · sent` : base;
-  // DESIGN.md round-end criterion 1: an open round has a top (.round-label above) but used
+  // An open round has a top (.round-label above) but used
   // to render nothing at all after its last block, so running out of scroll and
   // reaching the actual end read identically. This closes it with a rail naming the
   // round and its question count -- a sent round already gets its own "· sent" label
@@ -1408,18 +1414,18 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
 /** Render a complete, self-contained HTML page for `board`. Pure function of the
  * board JSON: same input, same output, every time. Blocks are grouped by round
  * (see renderRoundSection) rather than flattened, so a follow-up round renders
- * below the earlier ones without displacing them — see DESIGN.md "A board is
+ * below the earlier ones without displacing them — "A board is
  * a session-scoped thread with rounds". Every comment is run through
  * resolveComment exactly once here (`resolvedComments`), and that single verdict
  * feeds both the server-rendered per-block comment list AND the `#board-data`
  * payload src/ui.mjs hydrates pins from — one source of truth for "does this
  * anchor still resolve", not two independently-computed ones that could disagree
- * (see DESIGN.md's board slice 06 log for what went wrong when the client
+ * (what went wrong when the client
  * re-derived resolved/lost itself against the live DOM/SVG). src/server.mjs's SSE
  * push payloads build `boardForClient` the same way, for the same reason — see
  * "SSE events" in PROTOCOL.md.
  *
- * The send bar carries BOTH ways out of a round (DESIGN.md Decisions → "Two
+ * The send bar carries BOTH ways out of a round ("Two
  * ways out, plus a wall clock"): `#send-btn` posts `action:'send'`, `#discuss-btn`
  * posts `action:'discuss'` with whatever is filled in right now — partial answers
  * are the point — and tells the agent to stop posting boards. Both live inside the
@@ -1431,7 +1437,7 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
  * purely informational -- src/ui.mjs is what makes it live and click-navigable;
  * this function only ever renders its first-paint count and label. */
 /** Is there a round waiting to be answered? Decides whether the send bar is live at
- * HYDRATE time, which nothing used to (audit 2026-07-31 D2): the buttons were rendered
+ * HYDRATE time, which nothing used to: the buttons were rendered
  * enabled unconditionally and only ever disabled by an SSE push handler, so a finished
  * board opened from the index had a live Send. Pressing it posted `round: null`, which
  * the server answers 400 — not the 409 the client special-cases — so the page showed
@@ -1441,10 +1447,10 @@ function hasOpenRound(board) {
   return Boolean(latest && latest.status === 'open');
 }
 
-/** The questions-left pill's own count (DESIGN.md round-end decisions / ADR.md entry
+/** The questions-left pill's own count (ADR.md entry
  * 27): how many of the OPEN round's top-level questions are still outstanding, at
  * the moment this page is rendered. Nothing is answered yet server-side while a
- * round is open -- answers only land in the store on submit (Decisions, "Send is
+ * round is open -- answers only land in the store on submit ("Send is
  * never gated") -- so at render/reload time every one of the open round's questions
  * is unanswered by construction, and this is exactly renderRoundSection's own
  * `questionCount` for that round: the same top-level count src/ui.mjs's
@@ -1465,7 +1471,7 @@ export function renderBoardPage(board) {
   // The page always loads scrolled to the top, so the topmost round -- the
   // first entry of `board.rounds`, always `1` (src/board.mjs never reorders or
   // skips a round number) -- is the correct first-paint value for N before any
-  // client script has run. src/ui.mjs's IntersectionObserver (criterion 7)
+  // client script has run. src/ui.mjs's IntersectionObserver
   // takes over the moment it can measure real layout, and corrects this if the
   // page was opened scrolled elsewhere (e.g. a deep-linked anchor).
   const initialRoundInView = board.rounds[0] ? board.rounds[0].n : 1;
@@ -1522,8 +1528,8 @@ ${faviconLink}
 `;
 }
 
-/** The page a browser holding no credential gets instead of a board (SPEC_LAUNCH.md
- * criterion 1: "the refusal is a page that names the single command which restores
+/** The page a browser holding no credential gets instead of a board ("the
+ * refusal is a page that names the single command which restores
  * access — not a bare status code").
  *
  * A bare 401 is a correct status and a useless answer: the reader sees an empty tab and

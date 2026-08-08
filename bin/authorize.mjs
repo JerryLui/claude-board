@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // The recovery command. One command that re-authorizes a browser holding no
 // credential — a cleared cookie jar, a second profile, a different browser — without
-// reinstalling, restarting the service, or touching the store (SPEC_LAUNCH.md
-// criterion 4).
+// reinstalling, restarting the service, or touching the store.
 //
 // This is part of the read gate, not a convenience beside it. Gating reads means a
 // credential can be lost, and the board's entire value is that the page opens; without

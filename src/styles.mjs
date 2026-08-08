@@ -23,14 +23,14 @@ const mermaidNodeRule = (prefix, suffix = '') =>
   MERMAID_NODE_SELECTOR.split(',').map(s => `${prefix}${s.trim()}${suffix}`).join(',\n');
 
 // Both palettes are plain data: the same key set, one color value each. That is
-// what makes a palette change a one-block edit (DESIGN.md acceptance criterion 6)
+// what makes a palette change a one-block edit
 // no matter how many CSS rules end up referencing a token, and it is what lets
 // test/check-contrast.mjs assert the contrast bar by importing these objects
 // directly instead of regexing them back out of a CSS string. Every dark value
-// below is byte-for-byte what ticket 01 shipped, except --muted: measured at
+// below is byte-for-byte what shipped, except --muted: measured at
 // 4.45:1 on --panel-2 and 4.03:1 on --panel-3 (both below the 4.5:1 bar, and
 // --muted genuinely sits on both), so it moves to the minimal same-hue lift that
-// clears 4.5:1 everywhere it's used (acceptance criterion 2).
+// clears 4.5:1 everywhere it's used.
 const DARK = {
   // surfaces: bg is the page, surface climbs toward the viewer
   '--bg': '#0a0e15',
@@ -114,8 +114,8 @@ const DARK = {
 };
 
 // Designed against --accent's own hue (periwinkle, ~226°), not an inversion of
-// DARK: inverting reliably washes out accent text and near-invisible hairlines
-// (DESIGN.md "Palette origin"). Surfaces don't mirror DARK's monotonic climb
+// DARK: inverting reliably washes out accent text and near-invisible hairlines.
+// Surfaces don't mirror DARK's monotonic climb
 // either -- panel/panel-2 sit at/near white (they carry cards, inputs, code
 // blocks), and panel-3 is the one *deeper* than panel-2, because it is the
 // hover/scrollbar-thumb/inline-code surface and there is nothing lighter than
@@ -131,7 +131,7 @@ const LIGHT = {
   '--scrollbar-hover': '#c9d0e2',
   '--history-bg': 'rgba(255, 255, 255, 0.55)',
   // The key set must match DARK's (test/check-contrast.mjs), but the mark has
-  // no light variant (SPEC_MARK.md, "Out of Scope") and never reads this
+  // no light variant and never reads this
   // value -- it names DARK's '--mark-rest-tile' explicitly, exactly as it
   // names DARK's '--warning' rather than following prefers-color-scheme. Given
   // a light-theme reader anyway: LIGHT's own slate, the scrollbar-hover value
@@ -169,13 +169,13 @@ const LIGHT = {
   '--accent-underline': 'rgba(50, 81, 201, 0.4)',
   '--accent-select': 'rgba(50, 81, 201, 0.3)',
   '--accent-ink': '#f5f8ff',
-  // good/warning/critical (2026-07-31 audit, criterion 7 amendment): the prior
+  // good/warning/critical: the prior
   // values (#146b3f, #8a5a00, #b32432) were tuned to clear 4.5:1 against the
-  // full SURFACES cross product -- a self-imposed bar criterion 7 never asked
+  // full SURFACES cross product -- a self-imposed bar, never asked
   // for, since these three are used as fills/borders at least as often as
   // text, and it is what pushed them into a desaturated dark-green/brown/brick
-  // family instead of the board's amber/green/red. Retuned against the bar
-  // criterion 7 actually states -- 4.5:1 at each one's REAL text sites
+  // family instead of the board's amber/green/red. Retuned against the bar --
+  // 4.5:1 at each one's REAL text sites
   // (test/check-contrast.mjs's TEXT_SITES, the tightest of which is each
   // color composited under its own *-soft background) -- with room to spare,
   // not sitting on the boundary: light --warning on --warning-soft measures
@@ -204,7 +204,7 @@ const LIGHT = {
   '--ring': '0 0 0 3px rgba(50, 81, 201, 0.28)',
 };
 
-// Exported so a later ticket (mermaid's themeVariables, ticket 04) can look the
+// Exported so a later ticket (mermaid's themeVariables) can look the
 // active theme's colors up instead of hand-maintaining a second copy of the palette.
 export const palettes = { dark: DARK, light: LIGHT };
 
@@ -289,7 +289,7 @@ const REST_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3
 
 /** The rest mark's href alone, not a whole `<link>` -- the page that wants it
  * already carries `faviconLink`'s tag and swaps this in as its `href`
- * (criterion 10: inline data URI, no asset file, no network fetch, no
+ * (inline data URI, no asset file, no network fetch, no
  * canvas). `encodeURIComponent` for the same reason as `faviconLink`'s own:
  * a hand-escaped `#` would cut the href off at the first colour. */
 export const restFaviconHref = `data:image/svg+xml,${encodeURIComponent(REST_FAVICON_SVG)}`;
@@ -415,8 +415,8 @@ svg { flex: none; }
 .board-head-title { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .board-head h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.015em; }
 .board-head .meta { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, "SF Mono", Menlo, monospace; margin-top: 2px; }
-/* ticket 04 (DESIGN.md polish criterion 4): the one way back to the thread
-   index. Absent under body.readonly (criterion 14) -- a standalone file://
+/* the one way back to the thread
+   index. Absent under body.readonly -- a standalone file://
    archive has no daemon behind "/" to navigate to -- same idiom as
    .mode-toggle/.send-bar just above/below: kept in the markup (one
    byte-identical page, live or archived) and hidden structurally, not merely
@@ -435,7 +435,7 @@ svg { flex: none; }
 }
 .back-to-index:hover { opacity: 1; }
 body.readonly .back-to-index { display: none; }
-/* font: inherit is not decoration -- ticket 04 turned this from a <span> into a
+/* font: inherit is not decoration -- this was turned from a <span> into a
    <button> (src/render.mjs), and a button does NOT inherit font-family from its
    ancestors: without this the badge renders in the UA's own default (measured in
    Chrome: Arial) beside a .round-label pill in Inter, so the two controls that
@@ -455,10 +455,9 @@ body.readonly .back-to-index { display: none; }
 .board-head .round-badge:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
-/* the comment-mode toggle (DESIGN.md "The gesture is an explicit comment
-   mode"): visible chrome, not a held modifier -- this IS criterion 2's
+/* the comment-mode toggle: visible chrome, not a held modifier -- this IS
    discoverability. Off by default, so the page behaves exactly as before until
-   the reviewer turns it on (criterion 3, true by construction). */
+   the reviewer turns it on (true by construction). */
 .mode-toggle { display: inline-flex; align-items: center; gap: 6px; background: var(--panel-2);
   border: 1px solid var(--hairline); color: var(--ink-2); font-size: 11.5px; font-weight: 600;
   border-radius: var(--r-pill); padding: 6px 13px;
@@ -472,15 +471,15 @@ body.readonly .mode-toggle { display: none; }
    symmetric padding around a single glyph instead of text-plus-icon spacing. */
 .mode-toggle-icon { padding: 7px; }
 /* Unlike .mode-toggle, this control stays live in a read-only archive -- an
-   archive reader is exactly who needs to switch theme (DESIGN.md). An id
+   archive reader is exactly who needs to switch theme. An id
    selector outranks body.readonly .mode-toggle's class selector regardless of
    source order, so that rule's own wording (asserted verbatim by
    test/check-archive.mjs) never has to change to carve this control out of it.
    Tag-qualified ('button#theme-toggle', not bare '#theme-toggle') because
    '#theme-toggle' is not reserved: src/markdown.mjs's slugify turns a heading
    '## Theme toggle' into a second id="theme-toggle" on an <h2>, and board
-   content is exactly the input that gets to choose its own headings (audit
-   2026-07-31, finding L1). The tag qualifier is what the real button has and
+   content is exactly the input that gets to choose its own headings. The tag
+   qualifier is what the real button has and
    a markdown-minted heading never can -- see src/ui.mjs's matching
    'button#theme-toggle' lookup and its own comment on the same collision. */
 body.readonly button#theme-toggle { display: inline-flex; }
@@ -489,7 +488,7 @@ body.readonly button#theme-toggle { display: inline-flex; }
   color: var(--warning-ink); font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }
 body.readonly .readonly-banner { display: block; }
 body.readonly .send-bar { display: none; }
-/* DESIGN.md round-end criterion 6: none of this work's new chrome belongs in a frozen
+/* none of this work's new chrome belongs in a frozen
    archive -- the send bar it would dock is already gone on the line above, and
    the rail loses its reason to exist alongside it (nothing left to arrive at). */
 body.readonly .round-end { display: none; }
@@ -499,9 +498,9 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 
 /* a round is a session-scoped batch: open rounds render live, a sent round
    collapses into a history rail -- still fully readable, never a second place to
-   edit the same answer (see PROTOCOL.md "Board document", ticket 04) */
+   edit the same answer (see PROTOCOL.md "Board document") */
 /* scroll-margin-top clears the sticky .board-head when the round badge
-   (criterion 9) or a resync jumps a round section to the top of the
+   or a resync jumps a round section to the top of the
    viewport. */
 .round { display: flex; flex-direction: column; gap: var(--space-4); scroll-margin-top: var(--head-clear); }
 .round-label {
@@ -517,7 +516,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .round-history .block { background: var(--history-bg); box-shadow: none; }
 .round-history .md-content, .round-history .question-prompt { opacity: 0.86; }
 .round + .round { padding-top: var(--space-5); }
-/* DESIGN.md round-end criterion 1: the round's own bottom -- a divider with a tag
+/* the round's own bottom -- a divider with a tag
    naming the round and its question count, so reaching it is a visible event
    rather than the absence of one (the round's top already has .round-label;
    this is the twin at the other end). Open rounds only -- see
@@ -582,7 +581,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    card exactly as before and is unaffected. */
 .question-block:not(:has(.question-context)) { grid-template-columns: minmax(0, 1fr); }
 /* the send guard's ring around the first outstanding question once a click on
-   Send has armed instead of submitted (DESIGN.md round-end criterion 4) -- toggled
+   Send has armed instead of submitted -- toggled
    client-side by src/ui.mjs's armSendGuard/disarmSend, never present in
    server-rendered markup. Overrides .block's own border/box-shadow (this
    section carries that class too); every other question keeps .block's
@@ -638,7 +637,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .opt-preview-code { background: var(--panel); border: 1px solid var(--hairline); padding: 8px 10px;
   font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
 
-/* choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): each option wraps a fully
+/* choose-between-rendered-variants: each option wraps a fully
    rendered block instead of living inside a <button> -- an iframe cannot nest
    inside one. .options-variants overrides .options' single-column flex layout
    (source order after it decides the tie, same specificity) with a grid, since
@@ -649,14 +648,14 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    keyboard-focus ring for free, the same way it does for every other
    focusable element here. */
 .options-variants { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-3); }
-/* SPEC_STAGES.md criterion 1: an 'html'-kind option (src/render.mjs's
+/* an 'html'-kind option (src/render.mjs's
    renderVariantOption stamps this modifier only on that kind -- see its own
    comment) spans every auto-fit column .options-variants currently has,
    whatever that count is at the page's current width, which is what makes
    this "one per row at full width" rather than a hardcoded column count.
    Every other option kind is untouched: no modifier class, so
    .options-variants' plain grid keeps deciding their layout exactly as it
-   did before this criterion existed. */
+   did before this existed. */
 .variant-card--stage { grid-column: 1 / -1; }
 .variant-card { display: block; cursor: pointer; background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-md); padding: var(--space-3) var(--space-4);
@@ -678,7 +677,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    would render as a card nested inside a card. */
 .variant-card .block { border: none; background: none; padding: 0; box-shadow: none; }
 .variant-card .block:hover { box-shadow: none; }
-/* SECURITY, not polish (director review, before this ticket merged): an
+/* SECURITY, not polish: an
    option's rendered block is untrusted, agent-authored content -- exactly
    like any other block on the page, EXCEPT that here a click deciding which
    option gets picked is a decision only the reviewer may make. An 'html'
@@ -695,15 +694,15 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    DELIBERATELY") for the two paths this closes and why guarding a message
    instead of deleting the channel would not have been enough. */
 .choice-variant .html-stage { pointer-events: none; }
-/* SPEC_STAGES.md criteria 10/11, a SEPARATE rule from the one immediately
+/* a SEPARATE rule from the one immediately
    above rather than folded into it -- that one is a trust boundary
-   (director review, see its own comment) and stays exactly as written, on
+   and stays exactly as written, on
    its own line, byte for byte. '.html-stage''s own floor (min-height: 320px,
    resize: vertical, further down this file) is for a STANDALONE stage only
-   (criterion 13, a different chunk's territory); a variant option's stage
+   (a different chunk's territory); a variant option's stage
    overrides all three: 'min-height: 0' lifts the floor, 'resize: none' drops
    a drag handle 'pointer-events: none' already made ungrabbable here, and
-   'overflow: hidden' is criterion 11's clip -- deliberately with no added
+   'overflow: hidden' is the clip -- deliberately with no added
    "there is more below" marker, the same fault this whole feature exists to
    fix, one level down; the expand control another chunk is landing is the
    way to the rest.
@@ -719,7 +718,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    stage WORSE than the fixed floor it was meant to improve on for as long as
    -- or, in the never-arrives case, for as often as -- that gap lasts. 320px
    makes "no report yet" cost nothing next to today's behaviour; a real
-   report still grows or shrinks the box exactly as criteria 10/11 want the
+   report still grows or shrinks the box exactly as intended the
    moment it lands. 'max-height' is a CSS backstop for the same cap
    handleStageHeight enforces in JS (STAGE_HEIGHT_CAP, src/ui.mjs) --
    hand-kept at the same value, the way QUIRKS.md's "Two stylesheets, one
@@ -777,7 +776,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .comment-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-/* polish ticket 05 (DESIGN.md) criterion 10: the diagram's expand control. Same
+/* the diagram's expand control. Same
    pill chrome as the comment button beside it in the kicker, written out rather
    than folded into the selector above so neither rule's exact text moves (several
    rules in this file are asserted by their text -- QUIRKS.md). It deliberately
@@ -794,14 +793,14 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
   border: 1px solid var(--hairline); border-left: 2px solid var(--hairline-2);
   border-radius: var(--r-sm); padding: 8px 12px;
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
-/* queued locally, not yet sent -- matches the hollow .pin-pending badge. Ticket
-   02 (DESIGN.md polish): only a PENDING entry ever carries a delete control
-   (criterion 3: a sent comment has none), so only it reserves gutter space
+/* queued locally, not yet sent -- matches the hollow .pin-pending badge.
+   Only a PENDING entry ever carries a delete control
+   (a sent comment has none), so only it reserves gutter space
    for one. */
 .comment-item.comment-pending { border-style: dashed; border-color: var(--accent); border-left-color: var(--accent); padding-right: 30px; }
 .comment-item .comment-anchor { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-right: 8px; }
 .comment-item .comment-lost { color: var(--critical); }
-/* polish ticket 02 (DESIGN.md) criterion 2: the "x" on a queued comment's own
+/* the "x" on a queued comment's own
    list entry -- removes that one entry, its hollow pin, and (src/ui.mjs's
    refreshPendingCommentItems) renumbers whatever queued comments are left so
    the sequence stays contiguous. */
@@ -834,8 +833,8 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .mermaid-block pre.mermaid svg { max-width: 100%; height: auto; }
 .mermaid-block .missing { color: var(--warning); font-size: 12.5px; }
 
-/* code: a file plus a line range or section, no syntax highlighting. Ticket 03
- * (DESIGN.md polish): a reference can run to hundreds of lines and previously had
+/* code: a file plus a line range or section, no syntax highlighting. A reference
+ * can run to hundreds of lines and previously had
  * no height cap at all, pushing everything below it off-screen -- capped at
  * ~480px (roughly 24 lines at this font-size/line-height) with overflow: auto
  * and resize: vertical. NOT quite the idiom '.html-stage' below uses, despite
@@ -859,7 +858,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .html-stage { display: block; width: 100%; min-height: 320px; resize: vertical; overflow: auto;
   border: 1px solid var(--hairline); border-radius: var(--r-md); background: var(--stage-bg); }
 
-/* element-level anchoring (ticket 06): pin-layer overlays the html-stage iframe or
+/* element-level anchoring: pin-layer overlays the html-stage iframe or
  * the rendered mermaid SVG exactly, and src/ui.mjs positions numbered .anchor-pin
  * badges inside it once the element they point at is resolvable in the live DOM. */
 .stage-wrap { position: relative; }
@@ -882,24 +881,24 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    was already visible chrome to say). A mermaid node highlights under the cursor (the
    html stage's equivalent is injected into the iframe's own document by src/ui.mjs,
    since this stylesheet deliberately does not reach inside it). Neither applies in a
-   standalone file: archive, where nothing is clickable. Ticket 05: one gesture,
+   standalone file: archive, where nothing is clickable. One gesture,
    toggle-gated everywhere -- a diagram node is no longer a standing exception either,
    so both rules below also require body.comment-mode, the same class setCommentMode
    (src/ui.mjs) toggles for every other anchoring rule. */
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g')} { cursor: pointer; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
-/* polish ticket 02 (DESIGN.md) criterion 12: a node that already carries a SENT
+/* a node that already carries a SENT
    comment is no longer a comment target at all while comment mode is on --
    de-affordanced (not-allowed cursor, no hover outline) rather than marked
    permanently, riding this same body.comment-mode class rather than a
-   standing state (DESIGN.md decision "de-affordanced in comment mode only").
+   standing state.
    .cb-anchor-sent is stamped onto the live SVG node by src/ui.mjs's
    wireMermaidBlock, from board.comments -- placed after the two rules above
    so its equal-specificity override wins by source order. */
 body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent { cursor: not-allowed; }
 body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { outline: none; }
 
-/* --- the diagram lens (ticket 05, DESIGN.md polish criteria 10 and 11) ----------
+/* --- the diagram lens ----------
    A full-viewport <dialog> src/ui.mjs builds once, lazily, and reuses: drag pans,
    scroll zooms, fit and 1:1 reset the view. Modelled on /explain's lens
    (~/.claude/skills/explain/template.html), with two differences that are the
@@ -909,7 +908,7 @@ body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { out
 
    Every value below is a token from :root, and so, now, is the mermaid diagram
    INSIDE the lens: this comment used to say those colours were 'hardcoded' in
-   src/ui.mjs, which was true when ticket 05 shipped and stopped being true when
+   src/ui.mjs, which was true when this shipped and stopped being true when
    the light theme landed -- 'mermaidThemeVariables()' reads the live computed
    value of a CSS token per mermaid variable through MERMAID_TOKEN_MAP (QUIRKS.md
    "Two stylesheets, one palette", which records the same correction; only the
@@ -918,7 +917,7 @@ body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { out
    the stage is one colour). The lens clones an already-rendered SVG, so it
    inherits whatever the ACTIVE palette produced and adds no colour of its own --
    but that also means a clone taken before a theme switch is stale, which is what
-   src/ui.mjs's lensRetheme exists to fix (criterion 15). */
+   src/ui.mjs's lensRetheme exists to fix. */
 .diagram-lens { width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh;
   margin: 0; padding: 0; border: none; background: var(--bg); color: var(--ink); overflow: hidden; }
 .diagram-lens[open] { display: flex; flex-direction: column; }
@@ -935,7 +934,7 @@ body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { out
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .lens-btn:hover { border-color: var(--accent); color: var(--accent); }
 /* The block's OWN comment form is moved in here while the lens is open (src/ui.mjs
-   lensAdopt) rather than duplicated -- criterion 11's "the same comment as one
+   lensAdopt) rather than duplicated -- "the same comment as one
    minted inline" is then true of the markup, not just of the anchor: one <form>,
    one submit handler, one pendingComments queue. Collapses to nothing while the
    form is closed, which is its state until a node is actually clicked. */
@@ -960,13 +959,13 @@ ${mermaidNodeRule('body.comment-mode:not(.readonly) .lens-canvas svg g', ':hover
 body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent { cursor: not-allowed; }
 body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outline: none; }
 
-/* --- the html-stage lens (SPEC_STAGES criteria 3, 4 and 12) --------------------
+/* --- the html-stage lens --------------------
    The second lens src/ui.mjs builds, wearing the first one's chrome ('.lens-bar',
    '.lens-title', '.lens-btn' above are shared verbatim) and none of its view
    maths: what it frames is a live iframe, which scrolls and lays itself out on
    its own, not a cloned SVG on a pannable canvas. Hence no cursor: grab, no
    touch-action and no user-select here -- every one of those would fight the
-   mock's own pointer input, which is the whole of criterion 4.
+   mock's own pointer input, which is the whole point.
 
    Three things this layout is load-bearing for, none of them decoration:
    - 'min-height: 0' on the body. A flex child's default min-height is auto, i.e.
@@ -974,7 +973,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
      document, so without this the body grows past the dialog and the frame
      scrolls the PAGE instead of scrolling itself.
    - the body's padding is the lens's clickable surround. src/ui.mjs closes on a
-     click landing on the dialog or on this element (criterion 12's backdrop
+     click landing on the dialog or on this element (the backdrop
      half); a dialog that filled the viewport edge to edge with the frame would
      leave nothing outside the stage to aim at.
    - the frame is sized in CSS, not by the stage. An iframe's intrinsic size is
@@ -987,7 +986,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
 .stage-lens-body { flex: 1; min-height: 0; padding: var(--space-4); background: var(--bg); }
 .stage-lens-frame { display: block; width: 100%; height: 100%; border: 1px solid var(--hairline);
   border-radius: var(--r-md); background: var(--stage-bg); }
-/* SPEC_STAGES criterion 7: the pick control's slot, between the title (which
+/* the pick control's slot, between the title (which
    carries 'margin-right: auto') and close. Note what is NOT in the two rules
    above, and is load-bearing for this one: neither the body nor the frame is
    positioned or given a z-index, so the framed stage stays in normal flow BELOW
@@ -1005,7 +1004,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
 .lens-pick:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
 .lens-pick:disabled { background: var(--panel-2); border-color: var(--hairline); color: var(--muted); cursor: not-allowed; }
 
-/* the generic comment-mode hover outline (DESIGN.md anchoring criterion 2: "before
+/* the generic comment-mode hover outline ("before
    committing the reviewer can see exactly which element will be anchored"). Set
    from JS (src/ui.mjs) on the innermost element under the cursor, never via a
    :hover rule -- that would outline every ancestor in the chain at once. The
@@ -1014,7 +1013,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
    deliberately does not reach in there -- see QUIRKS.md "two stylesheets, one
    palette". */
 .cb-anchor-hover { outline: 2px solid var(--accent); outline-offset: 2px; cursor: pointer; }
-/* polish ticket 02 (DESIGN.md) criterion 12: applied INSTEAD OF .cb-anchor-hover
+/* applied INSTEAD OF .cb-anchor-hover
    the moment an element already carries a sent comment -- no outline, and a
    cursor that says clicking here does nothing.
 
@@ -1045,12 +1044,12 @@ body.comment-mode .blocks { cursor: crosshair; }
   background: linear-gradient(to top, var(--bg) 55%, var(--bg-fade-80) 85%, var(--bg-fade-0));
   backdrop-filter: blur(10px);
   display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); }
-/* DESIGN.md round-end criterion 2: the scrim's whole job is telling the reviewer content
+/* the scrim's whole job is telling the reviewer content
    still runs on underneath the bar -- at the round's own end (.round-end on screen,
    src/ui.mjs's setupSendBarDock) that stops being true, so the scrim goes with it and
    the bar docks flush instead, a plain opaque panel with a top hairline. */
 .send-bar.docked { background: var(--bg); backdrop-filter: none; border-top: 1px solid var(--hairline-2); }
-/* the questions-left pill (DESIGN.md round-end decisions / ADR.md entry 27): a
+/* the questions-left pill (ADR.md entry 27): a
    live, additive count of the open round's still-unanswered questions, floating
    centered above the send bar. Nested INSIDE .send-bar itself rather than beside
    it -- position: absolute against the bar's own sticky positioning is exactly
@@ -1077,14 +1076,14 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease); }
 .btn-send:hover:not(:disabled) { filter: brightness(1.08); }
 .btn-send:active:not(:disabled) { transform: translateY(1px); }
-/* the send guard's armed state (DESIGN.md round-end criteria 4-5): Send wears this
+/* the send guard's armed state: Send wears this
    only while armSendGuard has it armed because questions are still
    outstanding -- never for the plain Cmd+Enter arm at the end of a fully
    traversed round, which keeps the ordinary accent color and its own label
    (test/check-enter.mjs criterion 3 pins that one unchanged). */
 .btn-send.warn { background: var(--warning-soft); color: var(--warning-ink); border-color: var(--warning-border-strong); box-shadow: none; }
 .btn-send.warn:hover:not(:disabled) { filter: none; }
-/* the second way out (DESIGN.md "Two ways out, plus a wall clock"): returns the
+/* the second way out: returns the
    call now with whatever is filled in. Secondary weight -- Send stays the primary
    action -- but it sits in the same bar, so body.readonly hides both together. */
 .btn-discuss { background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--hairline);
@@ -1118,7 +1117,7 @@ body.comment-mode .blocks { cursor: crosshair; }
 .index-head h1 { font-size: 30px; line-height: 1; margin: 0; font-weight: 650; letter-spacing: -0.02em;
   min-width: 0; }
 
-/* the pomodoro widget (ticket 04, SPEC_POMODORO.md): src/pomodoro-widget.mjs
+/* the pomodoro widget: src/pomodoro-widget.mjs
    is the markup, src/indexpage.mjs's indexScript is the behaviour -- see that
    module's own header comment for the split, the same one theme.mjs draws
    between themeToggle() and themeBootScript. */
@@ -1127,7 +1126,7 @@ body.comment-mode .blocks { cursor: crosshair; }
    text beside it carries, so the pair reads as one label, not an icon plus a
    sentence */
 .pomodoro-icon { color: var(--muted); flex: none; }
-/* Invisible to the flex box (SPEC_MARK.md ticket 03) -- src/pomodoro-widget.mjs
+/* Invisible to the flex box -- src/pomodoro-widget.mjs
    wraps TOMATO_ICON/REST_ICON in this span so indexScript's renderPomodoro has a
    stable element to swap the glyph's MARKUP into (never the 'hidden' property,
    which .pomodoro-icon's own author 'display' rule already defeats -- see that
@@ -1135,7 +1134,7 @@ body.comment-mode .blocks { cursor: crosshair; }
    entirely, so the glyph inside it still lays out as a direct child of
    .pomodoro-widget, gap and alignment unchanged from having no wrapper at all. */
 .pomodoro-icon-slot { display: contents; }
-/* Work only (criterion 15): a running, unpaused work interval turns the tomato
+/* Work only: a running, unpaused work interval turns the tomato
    up to the product's own amber, off the same --warning token the tab mark and
    the "waiting on you" surfaces already spend. Idle and paused stay at
    .pomodoro-icon's plain muted weight -- no class here at all -- because a
@@ -1151,7 +1150,7 @@ body.comment-mode .blocks { cursor: crosshair; }
    on it. */
 .pomodoro-status { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap;
   user-select: none; }
-/* Break/long break only (criterion 14): the status text drops to the SAME muted
+/* Break/long break only: the status text drops to the SAME muted
    weight the rest glyph sits at, so the pair reads as one quiet state rather
    than a glyph that went quiet beside text that didn't. Two classes, same
    specificity reasoning as .pomodoro-icon-amber above. */
@@ -1179,7 +1178,7 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease); }
 .pomodoro-switch:hover { border-color: var(--hairline-2); }
 .pomodoro-switch-knob { width: 16px; height: 16px; border-radius: 50%; background: var(--muted);
-  /* transform, never 'margin-left'/'left' -- the ui-ux-pro-max animation rules
+  /* transform, never 'margin-left'/'left' -- the animation rules
      name animating layout properties as the anti-pattern; a transform stays off
      the layout path entirely. */
   transform: translateX(0);
@@ -1192,9 +1191,9 @@ body.comment-mode .blocks { cursor: crosshair; }
   .pomodoro-switch-knob { transition: none; }
 }
 
-/* Restart/Forward (SPEC_FORWARD.md, criterion 7): one
+/* Restart/Forward: one
    segmented pill between the status text and the switch, round two's picked
-   variant (/tmp/example-forward-restart.html) -- panel background, hairline
+   variant -- panel background, hairline
    border, height matched to the 22px switch beside it so the row stays one
    visual line. overflow: hidden is what lets the two buttons' square corners
    sit flush against the pill's own rounded ends. */
@@ -1215,8 +1214,8 @@ body.comment-mode .blocks { cursor: crosshair; }
 
 /* The settings control is the cogwheel, not the words "Pomodoro settings":
    the header row is a row of controls, and a text link among them read as
-   prose. Icon-only, so it carries an aria-label and a title (ui-ux-pro-max
-   accessibility priority 1: an icon-only button without a label is the named
+   prose. Icon-only, so it carries an aria-label and a title (accessibility
+   priority 1: an icon-only button without a label is the named
    anti-pattern) -- see src/pomodoro-widget.mjs for both.
    'display: flex' is what removes the native disclosure triangle in Firefox;
    'list-style: none' and the ::-webkit-details-marker rule cover the rest. */
@@ -1240,7 +1239,7 @@ body.comment-mode .blocks { cursor: crosshair; }
 .pomodoro-field-check { justify-content: flex-start; }
 .pomodoro-field input[type="number"] { width: 60px; background: var(--panel-2); border: 1px solid var(--hairline);
   color: var(--ink); border-radius: var(--r-sm); padding: 4px 6px; font: inherit; }
-/* The three cue pickers (SPEC_CUES.md) -- same field row, a <select> instead
+/* The three cue pickers -- same field row, a <select> instead
    of a number input. Wider than the duration inputs above: a cue's value
    ("Submarine", "None") needs more than 60px, and unlike a duration there is
    no natural max-width to hold it to, so this caps rather than fixes it. */

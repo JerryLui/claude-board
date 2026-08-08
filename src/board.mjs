@@ -31,10 +31,10 @@ function hex(n) {
   return randomBytes(n).toString('hex');
 }
 
-/** Board ids are 16 bytes, not 4 (audit 2026-07-28, M7). The width was forced when read
+/** Board ids are 16 bytes, not 4. The width was forced when read
  * routes were open and the id was therefore the only thing gating `GET /b/:id`: at 4
  * bytes a local process could enumerate the space in seconds, at 16 it cannot. Reads are
- * gated now (SPEC_LAUNCH.md), so this is defence in depth rather than the whole defence,
+ * gated now, so this is defence in depth rather than the whole defence,
  * and it stays that way — an id still travels in redirect targets and in whatever a
  * reviewer pastes into a chat. Thread ids stay short: a thread is a label in the index,
  * nothing is authorised by knowing one. */
@@ -62,7 +62,7 @@ function nextBlockId(kind, counters) {
 
 // Every minted id matches this shape (kind letter + digits). A caller-supplied
 // `raw.id` is only legitimate for the amendRound "replace this exact block"
-// path (ticket 04); rejecting anything else here, at mint time, closes it as an
+// path; rejecting anything else here, at mint time, closes it as an
 // injection vector everywhere an id later gets spliced into a DOM selector or
 // used to look up a block (src/ui.mjs) rather than leaving each call site to
 // re-derive the same guard.
@@ -91,7 +91,7 @@ function emptyIdLedger() {
  * verbatim -- a hand-crafted id is exactly the string that would otherwise reach
  * a CSS attribute selector unescaped in src/ui.mjs.
  *
- * Throws on a DUPLICATE `raw.id` too (audit H4), and raises `counters` to the
+ * Throws on a DUPLICATE `raw.id` too, and raises `counters` to the
  * accepted ordinal so the next mint cannot land on it either. Both halves matter:
  * `board.answers` is keyed by block id, so two question blocks sharing an id
  * collapse to one answer entry and the packet reports the reviewer's answer to the
@@ -102,7 +102,7 @@ function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
   if (raw.id != null) {
     const m = typeof raw.id === 'string' ? BLOCK_ID_RE.exec(raw.id) : null;
     if (!m) throw new Error(`invalid block id: ${JSON.stringify(raw.id)}`);
-    // The ordinal has to stay a safe integer (audit). `BLOCK_ID_RE` accepts `\d+` of
+    // The ordinal has to stay a safe integer. `BLOCK_ID_RE` accepts `\d+` of
     // any length, and past 2^53 `counters[letter] + 1` is a no-op -- `nextBlockId`
     // then returns the same string forever and the re-mint loop below never
     // terminates. A 21-digit ordinal also round-trips through `parseInt` as `1e+21`,
@@ -112,7 +112,7 @@ function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
     if (m[2].length > MAX_ID_ORDINAL_DIGITS) {
       throw new Error(`invalid block id: ${JSON.stringify(raw.id)} has an implausible ordinal`);
     }
-    // The id's kind letter must be THIS kind's letter (audit). `counters` is keyed
+    // The id's kind letter must be THIS kind's letter. `counters` is keyed
     // by kind letter while the ordinal is read off the id string, so accepting
     // `{ kind: 'markdown', id: 'q2' }` left the `q` counter untouched: a later
     // question then minted `q2`, collided with the markdown block, and replaced it
@@ -126,7 +126,7 @@ function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
       throw new Error(`duplicate block id ${id}: two blocks in this post claim it`);
     }
     // `replaceable` holds the open round's TOP-LEVEL ids, so only a top-level block
-    // may claim one (audit). The check used to ask solely where the id's existing
+    // may claim one. The check used to ask solely where the id's existing
     // owner sat, never where the claiming block sat: a question nested in a `compare`
     // side or another question's `context` could name a live top-level id, and
     // `amendRound` -- which splices on top-level ids only -- appended it instead of
@@ -177,7 +177,7 @@ function resolveContent(raw, cwd) {
 function byValueText(value, field) {
   const text = typeof value === 'string' ? value : String(value ?? '');
   if (Buffer.byteLength(text, 'utf8') > MAX_REF_BYTES) {
-    // Not "use a source reference instead" (SPEC_HTMLREF.md criterion 5): a reference
+    // Not "use a source reference instead": a reference
     // does not raise this cap for any kind. src/resolve.mjs's resolveRef checks the
     // whole file's size from fstat BEFORE any slicing, so a reference to content this
     // size is refused exactly as this by-value payload is -- there is no remedy here,
@@ -190,9 +190,7 @@ function byValueText(value, field) {
 /** Normalise one content block (markdown/mermaid/code/html/compare) or question
  * block into its stored shape, minting an id and, for markdown, rendering html +
  * anchors. Content is resolved once here: by reference (`raw.source`, a Ref) through
- * src/resolve.mjs, or by value (`raw.text`) when there is no source — see
- * DESIGN.md "Questions by value, content by reference, snapshotted at post
- * time". `cwd` is the board's project directory, against which a relative Ref
+ * src/resolve.mjs, or by value (`raw.text`) when there is no source. `cwd` is the board's project directory, against which a relative Ref
  * resolves. `ids` is the pass's id ledger (see `emptyIdLedger`); it is threaded
  * through the recursion so a nested context/compare block competes for ids with
  * every other block in the same post, not just its siblings. */
@@ -248,7 +246,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     }
     case 'html': {
       const id = resolveBlockId(raw, 'html', counters, ids, topLevel);
-      // Path-only (SPEC_HTMLREF.md, "Decisions"): the other referenced kinds slice
+      // Path-only: the other referenced kinds slice
       // because text stays text under a knife, but cutting markup at a line or a
       // section yields unclosed tags and orphaned <style>/<script> -- a broken stage,
       // not a smaller one. Refused as a block-level error, same shape every other
@@ -309,8 +307,8 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     }
     case 'question': {
       const id = resolveBlockId(raw, 'question', counters, ids, topLevel);
-      // An unrecognised widget is a rejection, not a silent fallback to 'single'
-      // (audit L2). `{ widget: 'freetext' }` -- one word off the spec's 'text' --
+      // An unrecognised widget is a rejection, not a silent fallback to 'single'.
+      // `{ widget: 'freetext' }` -- one word off the spec's 'text' --
       // used to render a question with no cards and no textarea: literally
       // unanswerable, and Send then reported it back as `unanswered`, so the agent
       // told the human's colleague "the reviewer left it blank" about a question
@@ -324,7 +322,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       const context = Array.isArray(raw.context)
         ? raw.context.map(c => normalizeBlock(c, round, counters, cwd, ids, false))
         : [];
-      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2) is the one widget whose
+      // choose-between-rendered-variants is the one widget whose
       // options are not a { preview } string: each option's `block` is a real
       // content block, normalized the SAME way normalizeCompareSide (below)
       // normalizes a compare side's own `block` -- same normalizeBlock/
@@ -338,7 +336,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       // with no block does. Every other widget keeps the old string-preview
       // shape unchanged.
       // `label`/`description`/`preview`/`prompt` go through byValueText for the same
-      // reason `text` and `html` do (audit): they were bounded only by the 25MB body
+      // reason `text` and `html` do: they were bounded only by the 25MB body
       // limit, and `preview` additionally feeds a URL sniff in src/render.mjs whose
       // cost is quadratic in its length -- a 400KB preview measured ~46s per render,
       // paid again on every read because the board persists first.
@@ -386,7 +384,7 @@ function countersFromBoard(board) {
     }
     if (blk.kind === 'question') {
       (blk.context || []).forEach(visit);
-      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's nested block
+      // choose-between-rendered-variants: an option's nested block
       // mints an id too, and has to keep the same kind-letter counter ahead of
       // it as a context block or a compare side's block already does -- see
       // this widget's own comment in normalizeBlock above.
@@ -417,7 +415,7 @@ function idLedgerFromBoard(board, replaceRound = null) {
     ledger.taken.set(blk.id, blk.round);
     if (blk.kind === 'question') {
       (blk.context || []).forEach(visit);
-      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): without this, an option's
+      // choose-between-rendered-variants: without this, an option's
       // nested block id would be absent from `ledger.taken` and a subsequent
       // addRound/amendRound could mint a duplicate against it -- exactly the
       // silent-id-collision failure mode resolveBlockId's own comment warns
@@ -445,8 +443,8 @@ function idLedgerFromBoard(board, replaceRound = null) {
  * caller names an existing thread, `threadCwd` is that thread's already-bound directory
  * and the request may only agree with it, never move it.
  *
- * Be precise about what this achieves, because the shape of the remaining hole matters
- * (audit C2, second half). It makes the read AUDITABLE (the board records the canonical
+ * Be precise about what this achieves, because the shape of the remaining hole matters.
+ * It makes the read AUDITABLE (the board records the canonical
  * directory its content came from), STABLE (a live board cannot be retargeted mid-thread
  * — the case where a reviewer approves a diff and a later round quietly re-points the
  * same board at something else), and BOUNDED (`/` and `$HOME` are refused, so the blast
@@ -454,7 +452,7 @@ function idLedgerFromBoard(board, replaceRound = null) {
  * choice unforgeable: any local process that can reach the loopback port can still POST
  * a NEW board naming a `cwd` it picked and read that directory back off the served page.
  * Closing that step needs the daemon to distinguish the session's own shim from any
- * other local caller, i.e. a credential the shim holds — which DESIGN.md's "no
+ * other local caller, i.e. a credential the shim holds — which "no
  * tokens, no login" currently forbids. That is a spec question, deliberately not
  * answered here with an invented token. */
 function bindBoardCwd(requested, threadCwd) {
@@ -515,7 +513,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
  * number. Mutates `board` in place; caller persists it.
  *
  * A caller-supplied id that already exists anywhere on the board is rejected here
- * exactly as `amendRound` rejects a cross-round one (audit H4): a new round can only
+ * exactly as `amendRound` rejects a cross-round one: a new round can only
  * ever ADD blocks, so an incoming id naming an existing block is either a mistake or
  * a Send racing an amend, and appending a second block under that id would silently
  * destroy the original round's answer (`board.answers` is keyed by id) and its
@@ -543,10 +541,7 @@ export function addRound(board, { blocks, cwd, title }) {
 
 /** Push blocks into the round that is CURRENTLY OPEN without minting a new round
  * number: a block whose incoming raw carries an id already on the board replaces
- * that block in place, everything else is appended to the same round. See
- * DESIGN.md Decisions -> "A board is a session-scoped thread with rounds"
- * ("the agent may amend a round that is still open... without disturbing
- * filled-in fields") and ticket 04. Returns the round number amended and the ids
+ * that block in place, everything else is appended to the same round. Returns the round number amended and the ids
  * of exactly the blocks this call added or replaced -- not the round's full
  * history -- so the caller (src/server.mjs) can push only that delta over SSE
  * rather than re-sending blocks the reviewer has already seen and may be mid-edit
@@ -589,7 +584,7 @@ export function amendRound(board, { blocks, cwd, title }) {
  * recurses when minting, so a compare nested inside a question's context, or a
  * compare-inside-compare, is a structurally valid board; findBlock has to be able
  * to reach it too, or a comment anchored to an element inside one always reports
- * lost even though it's live — see DESIGN.md's board slice 06 log). */
+ * lost even though it's live). */
 export function findBlock(board, blockId) {
   const search = b => {
     if (!b) return null;
@@ -599,7 +594,7 @@ export function findBlock(board, blockId) {
         const hit = search(c);
         if (hit) return hit;
       }
-      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's nested block
+      // choose-between-rendered-variants: an option's nested block
       // is exactly as findable as a context block above -- a comment can
       // anchor to it (renderVariantOption, src/render.mjs, renders it through
       // the same renderBlock dispatch a context block or a compare side's
@@ -628,7 +623,7 @@ export function findBlock(board, blockId) {
  * `findBlock` above already recurses through exactly these nestings, and
  * src/render.mjs renders a nested question as a fully live widget that src/ui.mjs
  * collects on Send — but the packet and the unanswered synthesis used to walk
- * top-level `board.blocks` only (audit). The reviewer answered the question, the
+ * top-level `board.blocks` only. The reviewer answered the question, the
  * answer was persisted to `board.answers`, and the agent was never told: for a tool
  * whose whole job is carrying answers back, a silently dropped answer is the worst
  * thing it can do. One traversal, used by everything that asks "which questions are
@@ -640,7 +635,7 @@ export function questionBlocks(board) {
     if (b.kind === 'question') {
       out.push(b);
       (b.context || []).forEach(visit);
-      // choose-between-rendered-variants (SPEC_MIGRATION.md criterion 2): an option's own block can
+      // choose-between-rendered-variants: an option's own block can
       // itself be a nested question (the same generality context/compare
       // already allow), so its answer has to reach applySubmit's answerable
       // set and buildPacket the same way a context/compare-nested question's
@@ -658,7 +653,7 @@ export function questionBlocks(board) {
 
 // Every shape a stored `anchor` is allowed to take (PROTOCOL.md "Answers,
 // comments, anchors"). Anything else degrades to a whole-block comment rather
-// than being stored verbatim -- see sanitizeAnchor below (audit V3).
+// than being stored verbatim -- see sanitizeAnchor below.
 // ADR.md entry 28 deleted the `md` kind (a markdown heading or top-level list
 // item) along with the affordance that minted it: only `html` and `mermaid` are
 // commentable now, and neither ever produced one. A stored `md` anchor arriving
@@ -674,12 +669,12 @@ const MAX_ANCHOR_FIELD = 1024;
 
 /** Reduce an untrusted, client-supplied `anchor` to one of the shapes
  * src/anchor.mjs actually knows how to resolve, dropping anything else rather
- * than persisting it verbatim (audit V3: `applySubmit` used to store `anchor`
+ * than persisting it verbatim. `applySubmit` used to store `anchor`
  * exactly as posted, with no kind/shape check at all -- a forged
  * `{kind:'dom', ref:'1', hint:'...'}` was indistinguishable from a real one,
  * and a non-string `ref`/`hint` would have made every later `String(...)`
  * coercion downstream paper over garbage instead of the submit being rejected
- * at the door). An unrecognised `kind`, or a `dom`/`mermaid` anchor
+ * at the door. An unrecognised `kind`, or a `dom`/`mermaid` anchor
  * missing the one field every resolver requires (`ref`), degrades to a plain
  * `{ kind: 'block' }` -- always resolvable, same fallback `applySubmit`
  * already used for a wholly absent anchor. */
@@ -688,7 +683,7 @@ function sanitizeAnchor(anchor) {
   const kind = ANCHOR_KINDS.has(anchor.kind) ? anchor.kind : 'block';
   if (kind === 'block') return { kind: 'block' };
   if (typeof anchor.ref !== 'string' || !anchor.ref) return { kind: 'block' };
-  // Length is part of the shape (audit). Nothing bounded these, and
+  // Length is part of the shape. Nothing bounded these, and
   // `mermaidRefResolves` costs (len(text) - len(ref)) * len(ref): one stored comment
   // carrying a 256KiB `ref` against a 512KiB mermaid block measured ~23s per
   // renderBoardPage, per SSE resolve and per buildPacket -- for the life of the
@@ -710,7 +705,7 @@ function sanitizeAnchor(anchor) {
  * persists `board`.
  *
  * An answer is only merged if its id names a question block OF THE ROUND BEING
- * SUBMITTED (audit C3). The submit body is untrusted: a forged POST could otherwise
+ * SUBMITTED. The submit body is untrusted: a forged POST could otherwise
  * write `board.answers['ghost9']`, and `buildPacket` hands the agent whatever
  * `board.answers` holds. Answers for a question the reviewer was never shown, for a
  * markdown block, or for an already-sent round's question (which would rewrite a
@@ -724,7 +719,7 @@ function sanitizeAnchor(anchor) {
  * the reviewer picked and then declined to commit to. A field that load-bearing cannot
  * also be a free-text passthrough — an unrecognised value used to round-trip verbatim
  * into the packet, so `{status: 'answered', choice: null}` from a stale tab or a script
- * reported a decision the reviewer never made (audit 2026-07-31 D4). Anything outside
+ * reported a decision the reviewer never made. Anything outside
  * the set falls back to the same inference used when `status` is absent entirely, which
  * is the conservative reading rather than a silent accept. */
 const ANSWER_STATUSES = new Set(['answered', 'unanswered', 'deferred']);
@@ -743,11 +738,18 @@ export function applySubmit(board, { action, answers, comments }, round) {
   for (const a of answers || []) {
     if (!a || !a.id) continue;
     if (!answerable.has(a.id)) continue;
+    // Coerce at the trust boundary, not at each read site. `note` and `choice` came
+    // straight off the wire untyped, and one submit carrying `note: 12345` wedged
+    // src/store.mjs's searchBoards -- which calls .toLowerCase() on it -- for the WHOLE
+    // store, permanently: every archive search 500s, the healthy boards' hits included,
+    // and nothing in the product can repair it (deleteBoard is wired to no route).
     board.answers[a.id] = {
       id: a.id,
       status: normalizeStatus(a),
-      choice: a.choice ?? null,
-      note: a.note ?? '',
+      choice: Array.isArray(a.choice)
+        ? a.choice.map(c => byValueText(c ?? '', 'answer choice'))
+        : (a.choice == null ? null : byValueText(a.choice, 'answer choice')),
+      note: byValueText(a.note ?? '', 'answer note'),
     };
   }
 
@@ -766,7 +768,7 @@ export function applySubmit(board, { action, answers, comments }, round) {
   for (const c of comments || []) {
     if (!c || !c.text) continue;
     // A comment naming no real block is never a request the reviewer made
-    // (audit V3) -- same reasoning as the answer-merge guard above, and the
+    // -- same reasoning as the answer-merge guard above, and the
     // same lookup resolveComment will need at packet-assembly time anyway.
     const targetBlock = c.blockId ? findBlock(board, c.blockId) : null;
     if (!targetBlock) continue;
@@ -778,7 +780,7 @@ export function applySubmit(board, { action, answers, comments }, round) {
       text: c.text,
       createdAt: now,
       round,
-      // The block's OWN kind at the moment this anchor was minted (audit U5):
+      // The block's OWN kind at the moment this anchor was minted:
       // resolveComment's `dom` branch picks resolveDomAnchor vs.
       // resolveDomAnchorInSection by the block's CURRENT kind, which is only
       // safe as long as the kind hasn't drifted since mint time. `amendRound`
@@ -796,7 +798,7 @@ export function applySubmit(board, { action, answers, comments }, round) {
   if (r) {
     r.status = 'sent';
     r.sentAt = now;
-    // Recorded on the round, not just board-wide (audit). `board.state` is reset to
+    // Recorded on the round, not just board-wide. `board.state` is reset to
     // 'open' by addRound, so a concurrent `ask` landing inside the waiter's 120ms
     // poll erased 'discuss' before buildPacket read it -- the blocked call then
     // reported "Board submitted." and the agent never got the stop instruction.
@@ -821,16 +823,14 @@ export function applySubmit(board, { action, answers, comments }, round) {
 const NO_COMMENTS = new Map();
 
 /** The human-readable label a lost anchor reports: the stored hint when the anchor
- * carries one (a `dom` anchor's `hint`, e.g. "Send button in After stage" — see
- * DESIGN.md's ticket 04, "what it was about... is what survives when the
- * element does not"), else the ref (a `mermaid` anchor's ref is already a
+ * carries one (a `dom` anchor's `hint`, e.g. "Send button in After stage"), else the ref (a `mermaid` anchor's ref is already a
  * human-legible node id), else `fallback`. Never undefined, so a malformed or
  * hand-edited anchor still names *something*. */
 function lostLabel(anchor, fallback) {
   return anchor?.hint || anchor?.ref || fallback;
 }
 
-// Ticket 11, audit V4: resolveComment's `dom` (non-html) and `mermaid` branches
+// resolveComment's `dom` (non-html) and `mermaid` branches
 // both re-render the anchored block (renderBlock) and re-parse the result
 // (parseHtmlTree, inside resolveDomAnchorInSection/resolveMermaidAnchor) to walk
 // its structure. Every OTHER call site resolves every comment on the board in one
@@ -857,7 +857,7 @@ function stageRootForBlock(blockCache, block) {
   let entry = blockCache.get(block.id);
   if (!entry) { entry = {}; blockCache.set(block.id, entry); }
   if (!('stageRoot' in entry)) {
-    // htmlBodyRootFrom (audit C2), not a bare parseHtmlTree: the cache exists
+    // htmlBodyRootFrom, not a bare parseHtmlTree: the cache exists
     // to parse/hoist once per block per pass, so it is exactly the place a
     // cached-but-unhoisted root would silently undo C2's fix for every
     // comment after the first on the same html-stage block.
@@ -877,22 +877,20 @@ function stageRootForBlock(blockCache, block) {
  * stage's snapshot, rooted at the block's own section rather than a synthetic
  * document root, and checks the resolved element's identity rather than the full
  * "identity in context" hint — see that function's own comment for why); a
- * `mermaid` anchor (ticket 05 — a diagram node folds into the same generic model,
- * src/anchor.mjs's "ticket 05 design" comment has the full reasoning) is resolved
+ * `mermaid` anchor (a diagram node folds into the same generic model,
+ * src/anchor.mjs's comment has the full reasoning) is resolved
  * by resolveMermaidAnchor, which tries the SAME resolveDomAnchorInSection call
  * this branch already makes for every other block kind first, against `domRef`/
  * `hint`, and falls back to its node id (`ref`) still appearing in the mermaid
- * block's snapshotted diagram source only if that fails — a pre-ticket-05 anchor
- * (no `domRef`/`hint` stored) resolves exactly as before, since the generic
+ * block's snapshotted diagram source only if that fails — an anchor stored before this
+ * fallback existed (no `domRef`/`hint` stored) resolves exactly as before, since the generic
  * attempt returns false immediately for an absent ref; a `block` anchor is always
  * resolved (the block itself, if present). An anchor that no longer exists reports which anchor it lost
- * rather than vanishing (see "Click-to-comment reaches individual elements" in
- * DESIGN.md — that archived-board guarantee is what a lost element-level anchor
- * honours). `lost` always falls back to naming *something* (lostLabel above) rather than
+ * rather than vanishing. `lost` always falls back to naming *something* (lostLabel above) rather than
  * coming back undefined, so a malformed/hand-edited anchor still names what it
  * lost instead of dropping the field.
  *
- * `blockCache` (ticket 11, audit V4) is optional and private to this module: every
+ * `blockCache` is optional and private to this module: every
  * external caller keeps calling `resolveComment(board, comment)` exactly as
  * before, unchanged signature, unchanged per-call cost. `resolveComments` below
  * is what actually passes one, shared across a whole board's worth of comments,
@@ -905,7 +903,7 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     blockKind: block ? block.kind : null,
     anchor: comment.anchor,
     text: comment.text,
-    // `round` and `createdAt` are carried through, not dropped (audit M4): without
+    // `round` and `createdAt` are carried through, not dropped: without
     // them nothing downstream can tell a comment left this round from one settled
     // five rounds ago, which is how round 6's packet ended up re-delivering rounds
     // 1-5 as if they were fresh signal.
@@ -925,7 +923,7 @@ export function resolveComment(board, comment, blockCache = new Map()) {
   // the block it names renders no comment list at all now, so there is nothing for
   // a verdict to decorate.
   if (anchorKind === 'dom') {
-    // Audit U5: `mintBlockKind` (applySubmit, above) is the block's own kind at
+    // `mintBlockKind` (applySubmit, above) is the block's own kind at
     // the moment this anchor was minted -- undefined for a comment stored
     // before this field existed, which resolves exactly as it always did
     // (backward compatible). When it IS known and no longer matches the
@@ -940,9 +938,7 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     // mirroring the guard the `mermaid` branch already has (`block.kind ===
     // 'mermaid' &&`).
     const kindDrifted = comment.mintBlockKind != null && comment.mintBlockKind !== block.kind;
-    // Audit U4 (routed here by the director, ticket 08's resolver-side half --
-    // the client-side minting half is ticket 10's, which owns wireHtmlStage
-    // and how in-stage anchors are minted): an 'html' block has TWO client-
+    // An 'html' block has TWO client-
     // side roots but this branch used to assume only one. `.html-stage` (the
     // iframe) is chrome (ANCHOR_CHROME_SELECTOR) and its OWN content is
     // reached only through wireHtmlStage's dedicated listener, which mints a
@@ -956,9 +952,9 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     // resolver tries both roots rather than assuming block kind alone decides
     // it -- same "generic first, more specific second" shape as
     // resolveMermaidAnchor's domRef-then-node-id fallback, not a new pattern.
-    // ASSUMPTION FLAGGED FOR TICKET 10: this reconciles against today's
+    // ASSUMPTION FLAGGED: this reconciles against today's
     // client-side minting (`anchorRootFor` finds the SECTION for anything
-    // inside an html block that is not `.html-stage`/chrome). If ticket 10's
+    // inside an html block that is not `.html-stage`/chrome). If a future
     // postMessage rewrite changes what root an in-stage click mints against,
     // this fallback needs to change to match, in the same direction.
     const found = !kindDrifted && (block.kind === 'html'
@@ -981,7 +977,7 @@ export function resolveComment(board, comment, blockCache = new Map()) {
 }
 
 /** Resolve every one of `comments` against `board` in one pass, sharing a single
- * per-block render+parse cache across all of them (ticket 11, audit V4) — the
+ * per-block render+parse cache across all of them — the
  * batch counterpart to calling `resolveComment` in a `.map`, which is what every
  * hot call site (`renderBoardPage`, `resolveBoardComments`, `buildPacket` below)
  * used to do and is now updated to call this instead. Behaviourally identical to
@@ -997,7 +993,7 @@ export function resolveComments(board, comments) {
  * with: names the board, the round, each question's status/choice/note, and every
  * comment with the anchor it attached to. See PROTOCOL.md "Packet".
  *
- * Scoped to `round` (audit M4): the packet answers the round that was just sent, not
+ * Scoped to `round`: the packet answers the round that was just sent, not
  * the thread's whole history. It used to map every question block and every comment
  * ever stored, so round 6's packet redelivered rounds 1-5 -- the agent re-addressed
  * settled feedback and re-reported old `unanswered`/`deferred` entries as fresh
@@ -1013,7 +1009,7 @@ export function buildPacket(board, round, url) {
     });
   const comments = resolveComments(board, board.comments.filter(c => (c.round ?? round) === round));
   // The round's own recorded outcome wins over the board-wide state, which a later
-  // round resets to 'open' (audit). Falls back to board.state for rounds sent before
+  // round resets to 'open'. Falls back to board.state for rounds sent before
   // `action` was recorded, and for a round that has not been sent at all.
   const sentRound = board.rounds.find(r => r.n === round);
   return {

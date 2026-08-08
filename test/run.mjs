@@ -1,7 +1,7 @@
 // Runs every check in sequence: `node test/run.mjs`. Each check is also runnable alone.
 //
 // Every check gets a finite deadline. A check that hangs is a failure, not a
-// pending job: the audit found that removing the interactivity guard from
+// pending job: removing the interactivity guard from
 // bin/mcp.mjs makes the suite block forever on a wait nobody will ever answer, so
 // an acceptance-criterion regression presented as a job that never finished
 // instead of as a named failure. Each check therefore runs in its own process

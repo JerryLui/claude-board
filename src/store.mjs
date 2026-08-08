@@ -12,8 +12,7 @@ import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 
-// The default moved out of ~/Documents/renders/board on 2026-07-30 (SPEC_LAUNCH.md
-// "The store moves to a conventional path and nothing migrates"): the renders
+// The default moved out of ~/Documents/renders/board on 2026-07-30: the renders
 // directory is one author's /visualize convention and means nothing to anyone else,
 // while Application Support is where a macOS daemon's own state belongs. No migration
 // is built, deliberately — there is no installed base, and a board is addressed by id
@@ -34,7 +33,7 @@ function pagesDir(home = boardHome()) {
  * THIS module is what turns an id into a filesystem path, and a pattern enforced at the
  * route is a pattern the next route forgets: `POST /api/board` used to hand
  * `body.boardId` straight to readBoard, so an id of `../../../../tmp/victim/settings`
- * read and then OVERWROTE a file outside the store (audit 2026-07-31 S2). Minted ids are
+ * read and then OVERWROTE a file outside the store. Minted ids are
  * `b_<32 hex>` (src/board.mjs); the class is wider than that so an id minted by an older
  * version still resolves, and narrow enough that no member of it contains a separator,
  * a dot, or a NUL. */
@@ -80,7 +79,7 @@ function atomicWrite(targetPath, contents) {
   const tmp = `${targetPath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   const fd = openSync(tmp, 'wx', FILE_MODE);
   try {
-    // Looped on the returned count (audit). `fs.writeSync` issues exactly one
+    // Looped on the returned count. `fs.writeSync` issues exactly one
     // write(2) and returns the byte count -- it does not loop, and a short write
     // returns a partial count WITHOUT throwing. fsync+rename would then publish a
     // truncated file as the authoritative board: readBoard throws SyntaxError,
@@ -160,8 +159,7 @@ export function listBoards(home = boardHome()) {
 
 /** Archive search: what was asked (question prompts, option labels), what was
  * answered (chosen values and notes) and when (round timestamps), across every
- * board in the store — see PROTOCOL.md "HTTP surface" and DESIGN.md Decisions
- * -> "Archived boards are searchable". The store is the only source: this walks
+ * board in the store — see PROTOCOL.md "HTTP surface". The store is the only source: this walks
  * `listBoards` fresh on every call rather than maintaining a side index that could
  * drift from the board files.
  *
@@ -184,10 +182,16 @@ export function searchBoards(query, home = boardHome(), boards = null) {
     return (r && (r.sentAt || r.postedAt)) || fallback;
   };
 
+  // Every field below is coerced with String() rather than assumed. src/board.mjs now
+  // types them at the trust boundary, but this scan walks EVERY board in the store, so
+  // one malformed field in one old file would otherwise throw out of the loop and take
+  // archive search down for the whole store rather than for that board.
+  const low = v => String(v ?? '').toLowerCase();
+
   for (const board of boards) {
     const base = { boardId: board.id, thread: board.thread, cwd: board.cwd, title: board.title };
 
-    if ((board.title || '').toLowerCase().includes(q)) {
+    if (low(board.title).includes(q)) {
       results.push({ ...base, kind: 'title', text: board.title, at: board.createdAt });
     }
 
@@ -195,12 +199,12 @@ export function searchBoards(query, home = boardHome(), boards = null) {
       if (blk.kind !== 'question') continue;
       const askedAt = roundStamp(board, blk.round, board.createdAt);
 
-      if ((blk.prompt || '').toLowerCase().includes(q)) {
+      if (low(blk.prompt).includes(q)) {
         results.push({ ...base, kind: 'question', text: blk.prompt, at: askedAt });
       }
 
       for (const opt of blk.options || []) {
-        if ((opt.label || '').toLowerCase().includes(q)) {
+        if (low(opt.label).includes(q)) {
           results.push({ ...base, kind: 'option', text: `${opt.label} — option for "${blk.prompt}"`, at: askedAt });
         }
       }
@@ -212,11 +216,11 @@ export function searchBoards(query, home = boardHome(), boards = null) {
         ? answer.choice
         : (answer.choice != null ? [answer.choice] : []);
       for (const c of choices) {
-        if (String(c).toLowerCase().includes(q)) {
+        if (low(c).includes(q)) {
           results.push({ ...base, kind: 'answer', text: `${c} — answer to "${blk.prompt}"`, at: answeredAt });
         }
       }
-      if (answer.note && answer.note.toLowerCase().includes(q)) {
+      if (answer.note && low(answer.note).includes(q)) {
         results.push({ ...base, kind: 'note', text: answer.note, at: answeredAt });
       }
     }

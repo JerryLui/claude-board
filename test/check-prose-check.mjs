@@ -1,5 +1,5 @@
 // src/prose-check.mjs check: this repo ships the shared prose-vs-shim checker as a product
-// (SPEC_MIGRATION.md ticket 03 / criterion 12) and proves it here, against a fixture prose
+// and proves it here, against a fixture prose
 // file this repo owns (test/fixtures/prose-check-*.md) — every REAL caller lives outside this
 // repo, so this is the one place the checker's own correctness is on the hook.
 //
@@ -234,9 +234,9 @@ Anchor  = { kind: 'block' }
   // /gamify) live in a different git repo (~/.claude/skills/) and are deliberately NOT
   // exercised here: this repo's own suite proves the checker against a fixture it owns and
   // controls, never against another repo's files at a path this repo has no business
-  // assuming exists (SPEC_MIGRATION.md criterion 12's whole point). That verification was
+  // assuming exists. That verification was
   // done ad hoc instead — see the task report — and belongs to each skill's own check.mjs
-  // once ticket 18 and friends land, not to test/run.mjs here.
+  // once that work lands, not to test/run.mjs here.
 
   // --- checkProse's pure half, directly, with a hand-built tools/list (no shim spawned) --
 

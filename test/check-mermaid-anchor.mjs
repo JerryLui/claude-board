@@ -1,20 +1,18 @@
-// Ticket 05 (DESIGN.md): "A diagram node is anchored like anything
-// else." Extends the end-to-end DOM stand-in seam ticket 01 built (this repo's
-// standard for criterion 8: a check that drives the REAL src/ui.mjs client
-// script, not just the pure module underneath it -- see DESIGN.md's own
-// Testing section and this ticket's instructions for why that distinction is
-// the whole point here). test/check-pure.mjs covers resolveMermaidAnchor's
+// "A diagram node is anchored like anything
+// else." Extends the end-to-end DOM stand-in seam this repo's
+// standard for: a check that drives the REAL src/ui.mjs client
+// script, not just the pure module underneath it -- why that distinction is
+// the whole point here. test/check-pure.mjs covers resolveMermaidAnchor's
 // precedence as a pure function; this file covers the actual click gesture and
 // the three render states a mermaid block can be in.
 //
 // Covers:
-//   - criterion 1 (partial, completing it): clicking a diagram node in comment
+//   - clicking a diagram node in comment
 //     mode opens its block's comment form with a `mermaid` anchor carrying a
 //     node-id ref, a generic domRef, AND a hint naming the node -- the same
 //     "reference plus human hint" shape every other element-level anchor
-//     already carries (criterion 6).
-//   - one gesture, toggle-gated everywhere (ticket 03's product decision,
-//     extended to mermaid by this ticket): with comment mode off, clicking a
+//     already carries.
+//   - one gesture, toggle-gated everywhere: with comment mode off, clicking a
 //     diagram node opens no comment form. The CSS half of "no hover, no pointer
 //     cursor" is a pure :hover/:not() rule with no JS involved for mermaid
 //     (unlike the html stage's or the generic listener's JS-tracked hover) --
@@ -39,7 +37,7 @@
 // this sandbox (no --experimental-network-imports), caught by
 // renderMermaidBlocks' own try/catch, falling through to the raw-source
 // fallback -- proven end to end here, not just asserted from server-rendered
-// markup, because nothing before this ticket drove that fallback's DOM output
+// markup, because nothing before this check drove that fallback's DOM output
 // (as opposed to its markup) through the real client script.
 
 import assert from 'node:assert/strict';
@@ -153,7 +151,7 @@ function findNodeAClickTarget(document) {
   return rect || g;
 }
 
-// --- criterion 1 (partial) / criterion 6: the click gesture, end to end -------
+// --- the click gesture, end to end -------
 
 await check('comment mode: clicking a diagram node opens its block\'s comment form with a mermaid anchor carrying a node-id ref, a generic domRef, and a hint naming the node', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
@@ -195,7 +193,7 @@ await check('comment mode: submitting the opened form drops a numbered, non-lost
   assert.equal(pins.length, 1, `expected exactly one pin after queueing one comment, got ${pins.length}`);
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'a freshly-queued comment must not render as lost');
 
-  // Ticket 07 (DESIGN.md), audit finding V1: position asserted, not just
+  // Position asserted, not just
   // presence -- renderMermaidPins' formula (`hostBox.left - wrapBox.left +
   // hostBox.width / 2`, `... + hostBox.height / 2`, src/ui.mjs) recomputed here
   // independently from the actual clicked node and the actual pin-layer, using
@@ -215,11 +213,11 @@ await check('comment mode: submitting the opened form drops a numbered, non-lost
   assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin's top to be computed from node A's own box, got ${JSON.stringify(pins[0].style.top)}`);
 });
 
-// --- ticket 05's own precedence, proven by POSITION, not just by which ref -----
-// wins (src/anchor.mjs's "ticket 05 design" comment: the generic domRef is tried
+// --- domRef precedence, proven by POSITION, not just by which ref -----
+// wins (src/anchor.mjs's design comment: the generic domRef is tried
 // FIRST for positioning, against the live SVG; the node-id/[id^="flowchart-"] scan
 // is a fallback). Ordinary fixtures never distinguish the two paths, because a
-// unique id only ever finds one candidate either way -- audit finding V1: deleting
+// unique id only ever finds one candidate either way -- deleting
 // ui.mjs:485-491's whole "try domRef first" branch caused ZERO check failures.
 // Mermaid is known to reuse an id across a repeated subgraph/cluster shape in real
 // diagrams, so this constructs exactly that: two live nodes sharing the SAME
@@ -243,7 +241,7 @@ function mockMermaidDuplicateIds() {
   };
 }
 
-await check('comment mode: a pin\'s position comes from the SPECIFIC element clicked (via domRef), not just the first live node sharing its node id -- proves ticket 05\'s "try domRef first" branch actually does something (ablation: deleting it makes this fail)', async () => {
+await check('comment mode: a pin\'s position comes from the SPECIFIC element clicked (via domRef), not just the first live node sharing its node id -- proves the "try domRef first" branch actually does something (ablation: deleting it makes this fail)', async () => {
   const dupBoard = createBoard({
     title: 'Ticket 07 -- domRef precedence, proven by position',
     blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }],
@@ -287,7 +285,7 @@ await check('comment mode: a pin\'s position comes from the SPECIFIC element cli
   assert.equal(pins[0].style.top, expectedTop + 'px');
 });
 
-// --- one gesture, toggle-gated everywhere (ticket 03's decision, extended) ----
+// --- one gesture, toggle-gated everywhere ----
 
 await check('comment mode off: clicking a diagram node opens no comment form -- a diagram node is no longer a standing exception', async () => {
   const document = await loadBoard(pageHtml, mockMermaid()); // comment mode never enabled
@@ -341,7 +339,7 @@ await check('CDN unreachable: pins still render from the server\'s verdict, reso
 
   // No window.mermaid supplied: the dynamic import of the CDN module rejects in
   // this sandbox (no network), exercising the exact fallback path
-  // DESIGN.md requires src/ui.mjs to behave sanely in.
+  // src/ui.mjs must behave sanely in.
   const document = await loadBoard(html, null);
 
   const section = document.querySelector('.mermaid-block');
@@ -386,11 +384,11 @@ await check('rendered, but the node the anchor names is gone from THIS diagram: 
   assert.equal(pins[0].classList.contains('pin-lost'), true, 'a comment naming a node no longer in the diagram must render lost');
 });
 
-// --- DESIGN.md polish ticket 05: the diagram lens ------------------------------
+// --- the diagram lens ------------------------------
 //
-// Criterion 10: "a mermaid block carries an expand control that opens the diagram
+// "A mermaid block carries an expand control that opens the diagram
 // in a full-viewport lens: drag pans, scroll zooms, with fit and 1:1 controls."
-// Criterion 11: "a mermaid node can be commented on from inside the lens, and
+// "A mermaid node can be commented on from inside the lens, and
 // that comment is the same comment as one minted inline -- same anchor, and its
 // pin appears on the inline diagram after Send."
 //
@@ -400,7 +398,7 @@ await check('rendered, but the node the anchor names is gone from THIS diagram: 
 // CLONES the SVG (so this file's checks run under the same duplicate-id
 // condition a browser is under -- asserted, not assumed), and that a click
 // inside the lens mints byte-for-byte the anchor an inline click on the same
-// node mints. That last one is the whole ticket: "same anchor" is checked by
+// node mints. That last one is the whole point: "same anchor" is checked by
 // minting BOTH and comparing, not by re-deriving what the anchor ought to be.
 
 /** The expand control src/render.mjs renders into every mermaid block's kicker. */
@@ -438,7 +436,7 @@ function anchorOnForm(document, blockId) {
   };
 }
 
-await check('criterion 10: a mermaid block carries an expand control, and clicking it opens a lens holding a CLONE of the diagram -- with fit and 1:1 controls', async () => {
+await check('a mermaid block carries an expand control, and clicking it opens a lens holding a CLONE of the diagram -- with fit and 1:1 controls', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   assert.equal(document.querySelectorAll('.diagram-lens').length, 0, 'the lens must not exist before it is asked for -- it is built lazily on the first expand');
 
@@ -447,7 +445,7 @@ await check('criterion 10: a mermaid block carries an expand control, and clicki
 
   // The clone, asserted as a clone rather than assumed: the same generated node
   // id is now present TWICE in this document. That is the condition every
-  // id-based lookup in the lens has to survive (the spec's named trap), so a
+  // id-based lookup in the lens has to survive, so a
   // check that did not establish it would be testing an easier page than the
   // browser renders.
   const idA = nodeDomId('A', 12);
@@ -458,16 +456,16 @@ await check('criterion 10: a mermaid block carries an expand control, and clicki
   assert.ok(inlineSvg.querySelector(`[id="${idA}"]`), 'the inline diagram must still hold its own nodes -- the lens must not have stolen them');
 
   const actions = document.querySelectorAll('.diagram-lens .lens-btn').map(b => b.getAttribute('data-lens'));
-  assert.deepEqual(actions, ['fit', 'one', 'close'], `criterion 10 names fit and 1:1 controls; got ${JSON.stringify(actions)}`);
+  assert.deepEqual(actions, ['fit', 'one', 'close'], `expected fit and 1:1 controls; got ${JSON.stringify(actions)}`);
   // The percentage readout comes from the applied view, so it doubles as proof
   // that a view was actually applied to the canvas on open.
   assert.equal(document.querySelector('.diagram-lens .lens-pct').textContent, '100%');
   assert.match(String(document.querySelector('.diagram-lens .lens-canvas').style.transform || ''), /^translate\(.*\) scale\(1\)$/);
 });
 
-await check('criterion 10: the expand control is the ONLY way in -- clicking the diagram itself never opens the lens, in either mode', async () => {
-  // The spec's Decision: "the click gesture on a diagram keeps its current
-  // meaning in both modes". /explain's lens opens on a diagram click, and
+await check('the expand control is the ONLY way in -- clicking the diagram itself never opens the lens, in either mode', async () => {
+  // The click gesture on a diagram keeps its current
+  // meaning in both modes. /explain's lens opens on a diagram click, and
   // copying that would have silently taken the comment gesture's click away.
   const document = await loadBoard(pageHtml, mockMermaid());
   findNodeAClickTarget(document).dispatchEvent(new StandInEvent('click'));
@@ -476,10 +474,10 @@ await check('criterion 10: the expand control is the ONLY way in -- clicking the
   enableCommentMode(document);
   findNodeAClickTarget(document).dispatchEvent(new StandInEvent('click'));
   assert.equal(document.querySelectorAll('.diagram-lens').length, 0, 'with comment mode on, clicking a diagram node must comment, not open the lens');
-  assert.equal(anchorOnForm(document, blockId).open, true, 'and that click must still open the comment form, exactly as before this ticket');
+  assert.equal(anchorOnForm(document, blockId).open, true, 'and that click must still open the comment form, exactly as before');
 });
 
-await check('criterion 11: an anchor minted from INSIDE the lens is byte-identical to one minted by clicking the same node inline -- ref, domRef and hint alike', async () => {
+await check('an anchor minted from INSIDE the lens is byte-identical to one minted by clicking the same node inline -- ref, domRef and hint alike', async () => {
   // Both minted for real, from the same page, and compared. Nothing here
   // re-derives what the anchor "should" be, because that is precisely how a lens
   // anchor could end up self-consistently wrong (a domRef rooted at the lens
@@ -504,7 +502,7 @@ await check('criterion 11: an anchor minted from INSIDE the lens is byte-identic
     'a lens-minted anchor must be the same anchor an inline click mints -- same kind, same node-id ref, same page-scoped domRef, same hint');
 });
 
-await check('criterion 11: the form a lens comment is typed into is the block\'s OWN form, moved into the lens -- one form, one submit handler, one queue', async () => {
+await check('the form a lens comment is typed into is the block\'s OWN form, moved into the lens -- one form, one submit handler, one queue', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   enableCommentMode(document);
   const formBefore = document.getElementById('comment-form-' + blockId);
@@ -522,7 +520,7 @@ await check('criterion 11: the form a lens comment is typed into is the block\'s
   assert.equal(formAfter.closest('.diagram-lens'), null, 'the form must not be left stranded inside the closed dialog');
 });
 
-await check('criterion 11: a comment minted in the lens lands its pin on the INLINE diagram, positioned on the node that was clicked', async () => {
+await check('a comment minted in the lens lands its pin on the INLINE diagram, positioned on the node that was clicked', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   enableCommentMode(document);
   const lens = openLens(document);
@@ -533,7 +531,7 @@ await check('criterion 11: a comment minted in the lens lands its pin on the INL
   form.querySelector('input[type=text]').value = 'commented from inside the lens';
   form.dispatchEvent(new StandInEvent('submit'));
 
-  // The pin on the block's own diagram -- the thing criterion 11 actually
+  // The pin on the block's own diagram -- the thing this gesture actually
   // promises ("its pin appears on the inline diagram"). Position recomputed
   // independently from the INLINE node A and the INLINE pin-layer, exactly as
   // the pre-existing inline-click check above does, so a pin drawn against the
@@ -558,10 +556,10 @@ await check('criterion 11: a comment minted in the lens lands its pin on the INL
   assert.equal(items[0].getAttribute('data-anchor-ref'), 'A');
 });
 
-await check('criterion 11: the lens draws that same pin too, inside the zoom transform and counter-scaled so it stays 20px on screen', async () => {
-  // The spec's Decision: "Pins in the lens live inside the zoom transform,
+await check('the lens draws that same pin too, inside the zoom transform and counter-scaled so it stays 20px on screen', async () => {
+  // Pins in the lens live inside the zoom transform,
   // counter-scaled. scale(1/s) on each pin keeps it 20px on screen while panning
-  // and zooming move it for free." Both halves are structural and checkable
+  // and zooming move it for free. Both halves are structural and checkable
   // here: WHERE the layer sits, and WHAT transform each pin carries.
   const document = await loadBoard(pageHtml, mockMermaid());
   enableCommentMode(document);
@@ -591,7 +589,7 @@ function lensScale(document) {
   return Number(m[1]);
 }
 
-// --- criterion 10's "scroll zooms", behaviourally ----------------------------
+// --- "scroll zooms", behaviourally ----------------------------
 //
 // Every existing lens check asserted `scale(1)`, which this stand-in produces no
 // matter what lensDoFit does (its getBoundingClientRect is a fold over sibling
@@ -602,7 +600,7 @@ function lensScale(document) {
 // arithmetic those handlers run, which is what these drive: dispatch the event,
 // read the scale back off the canvas, demand it moved in the right direction.
 
-await check('criterion 10: a wheel event over the lens actually zooms -- the scale changes, and in the direction the wheel asked for', async () => {
+await check('a wheel event over the lens actually zooms -- the scale changes, and in the direction the wheel asked for', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   const lens = openLens(document);
   const start = lensScale(document);
@@ -619,7 +617,7 @@ await check('criterion 10: a wheel event over the lens actually zooms -- the sca
   assert.ok(Math.abs(zoomedBack - start) < 1e-9, 'and one notch each way must land back where it started');
 });
 
-await check('criterion 10: a double-click on the lens zooms in by 2x about the cursor', async () => {
+await check('a double-click on the lens zooms in by 2x about the cursor', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   const lens = openLens(document);
   const start = lensScale(document);
@@ -662,7 +660,7 @@ await check('the dialog\'s own close event tears the lens down -- Esc must not s
     'and the form must be adopted again, exactly as on the first open');
 });
 
-// --- the pan threshold, BEHAVIOURALLY (audit finding D5) ---------------------
+// --- the pan threshold, BEHAVIOURALLY ---------------------
 //
 // test/check-pure.mjs already pins the SHAPE of this handler -- that the pointer
 // capture is taken from pointermove and only after `lensDragMoved = true`. That
@@ -682,8 +680,8 @@ await check('the dialog\'s own close event tears the lens down -- Esc must not s
 // pointer capture, so the capture half of that branch remains structural-only
 // (QUIRKS.md's entry on what a capture steals is the record of why it matters),
 // and no hit-testing, so the final click is dispatched at the node directly
-// rather than derived from where the pointer stopped. Neither is what D5 turned
-// on. The accumulated arithmetic is, and that is now driven for real.
+// rather than derived from where the pointer stopped. Neither is what the defect
+// turned on. The accumulated arithmetic is, and that is now driven for real.
 
 /** The `translate(Xpx, Ypx)` half of whatever lensApply last wrote onto the
  * canvas -- the lens's current pan, read back out of the DOM rather than out of
@@ -697,7 +695,7 @@ function lensPan(document) {
 
 const PRESS = { clientX: 200, clientY: 200, pointerId: 7, button: 0 };
 
-await check('finding D5: a slow 120px pan (sixty 2px moves) is understood as a DRAG from the moment it leaves the press point, not per frame', async () => {
+await check('a slow 120px pan (sixty 2px moves) is understood as a DRAG from the moment it leaves the press point, not per frame', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   enableCommentMode(document);
   const lens = openLens(document);
@@ -725,7 +723,7 @@ await check('finding D5: a slow 120px pan (sixty 2px moves) is understood as a D
   assert.equal(after.y - before.y, 0, 'a purely horizontal pan must not drift vertically');
 });
 
-await check('finding D5: the click that ends a slow pan must not queue a comment on the node it merely dragged past', async () => {
+await check('the click that ends a slow pan must not queue a comment on the node it merely dragged past', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   enableCommentMode(document);
   const lens = openLens(document);
@@ -747,7 +745,7 @@ await check('finding D5: the click that ends a slow pan must not queue a comment
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0, 'and must queue nothing');
 });
 
-await check('finding D5: a press that only jitters is still a CLICK -- the threshold must suppress pans without swallowing the comment gesture', async () => {
+await check('a press that only jitters is still a CLICK -- the threshold must suppress pans without swallowing the comment gesture', async () => {
   // The other direction, and the reason the fix is a threshold rather than "any
   // movement at all is a drag": a real click almost always carries a pixel or
   // two of pointer movement between press and release.
@@ -767,7 +765,7 @@ await check('finding D5: a press that only jitters is still a CLICK -- the thres
     'a click with a couple of pixels of jitter must still comment on the node it landed on');
 });
 
-await check('criterion 11 + ticket 02 criterion 1: a second click on the same node inside the lens reopens the queued comment instead of adding a duplicate', async () => {
+await check('a second click on the same node inside the lens reopens the queued comment instead of adding a duplicate', async () => {
   const document = await loadBoard(pageHtml, mockMermaid());
   enableCommentMode(document);
   const lens = openLens(document);
@@ -791,7 +789,7 @@ await check('criterion 11 + ticket 02 criterion 1: a second click on the same no
   assert.ok(String(items[0].textContent || '').indexOf('second thought') !== -1, 'the queued comment must carry the edited text');
 });
 
-await check('criterion 11 + ticket 02 criterion 12: a node that already carries a SENT comment is inert in the lens, exactly as it is inline', async () => {
+await check('a node that already carries a SENT comment is inert in the lens, exactly as it is inline', async () => {
   const sentBoard = createBoard({
     title: 'Ticket 05 -- a sent comment is immutable in the lens too',
     blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }],
@@ -826,7 +824,7 @@ await check('criterion 11 + ticket 02 criterion 12: a node that already carries 
 });
 
 await check('the cloned-id trap: with two nodes sharing one generated id, a lens click anchors the node ACTUALLY clicked -- resolved against the lens root, never the document', async () => {
-  // The spec names this trap rather than leaving it to be discovered: a clone
+  // This trap is worth naming rather than leaving it to be discovered: a clone
   // carries duplicate element ids, so an id lookup against `document` is
   // ambiguous between the two copies. Here the ambiguity is quadrupled on
   // purpose -- the diagram itself declares node A twice (mermaid does this for a
@@ -883,7 +881,7 @@ await check('CDN unreachable: the expand control removes itself rather than offe
   assert.equal(findExpandControl(document), null, 'with no rendered SVG there is nothing to expand, so the control must be gone');
 });
 
-// --- readonly: view-only, per the spec's own Decision --------------------------
+// --- readonly: view-only --------------------------
 // "The lens is view-only under body.readonly. Pan and zoom work in a standalone
 // archive (pure JS, no network, consistent with the archive's guarantee); the
 // comment gesture inside it is gated exactly like every other comment gesture."
@@ -956,9 +954,9 @@ await check('readonly: an archived board still PINS its sent comments inside the
   assert.equal(lensPins[0].textContent, '1', 'and carries the server\'s own comment number');
 });
 
-// --- ticket 04 (light theme): pin survival across a theme-driven redraw -----
+// --- light theme: pin survival across a theme-driven redraw -----
 //
-// DESIGN.md's spec decision names this criterion 8's RISKY half: "diagram
+// The riskiest part of pin survival across a redraw: "diagram
 // anchors key on the source-declared node id and already strip mermaid's
 // unstable generated prefix, so a re-render of unchanged source should
 // preserve them. Confirm this rather than assume it." A theme switch
@@ -1024,7 +1022,7 @@ async function loadBoardWithTheme(pageHtml, mermaidMock) {
   const location = { protocol: 'http:' };
   new Function('document', 'window', 'location', themeBootScript)(document, window, location);
   new Function('document', 'window', 'location', ui)(document, window, location);
-  // Audit 2026-07-31 (H2): a freshly parsed document now starts `readyState
+  // A freshly parsed document now starts `readyState
   // === 'loading'`, so the theme control's click listener is not wired until
   // `document.finishParsing()` simulates the parser reaching the end of the
   // document (test/dom-stand-in.mjs) -- every check below that clicks the
@@ -1034,7 +1032,7 @@ async function loadBoardWithTheme(pageHtml, mermaidMock) {
   return document;
 }
 
-await check('ticket 04: a comment pin placed on a diagram node still resolves to the same anchor after a theme switch, even though the redraw gives the svg a genuinely different generated id -- criterion 8\'s risky half, confirmed rather than assumed', async () => {
+await check('a comment pin placed on a diagram node still resolves to the same anchor after a theme switch, even though the redraw gives the svg a genuinely different generated id -- the risky half, confirmed rather than assumed', async () => {
   const themeBoard = createBoard({
     title: 'Ticket 04 -- pin survival across a theme switch',
     blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }],
@@ -1086,7 +1084,7 @@ await check('ticket 04: a comment pin placed on a diagram node still resolves to
   const pinAfter = layer.querySelector('.anchor-pin');
   assert.ok(pinAfter, 'the pin must still be there after the theme switch redrew the diagram');
   assert.equal(pinAfter.classList.contains('pin-lost'), false,
-    'criterion 8: a comment pin placed before a theme switch must still resolve after it, even though the svg\'s generated id changed');
+    'a comment pin placed before a theme switch must still resolve after it, even though the svg\'s generated id changed');
   assert.notEqual(pinAfter, pinBefore,
     'the pin layer must have been rebuilt fresh against the NEW svg (renderMermaidPins run again), not left as a stale reference from before the switch');
 });

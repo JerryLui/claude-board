@@ -1,7 +1,7 @@
 // Acceptance checks for Cmd+Enter board traversal (src/ui.mjs, search
 // "Cmd+Enter board traversal"): one chord that walks a board's question notes
 // and, on arriving at Send, does exactly what a click on Send would do right
-// now (SPEC_COUNTS.md criteria 20-21, ADR.md entry 29). Same harness idiom as
+// now (ADR.md entry 29). Same harness idiom as
 // test/check-click.mjs and test/check-comment-mode.mjs -- drives the REAL
 // src/ui.mjs client script, in the real DOM stand-in, through the actual
 // keyboard gesture, and asserts on what a reviewer would actually see
@@ -224,7 +224,7 @@ check('criterion 2: plain Enter in a textarea moves no focus, scrolls nothing, a
 });
 
 // === criterion 3 ================================================================
-// SPEC_COUNTS.md criterion 20: "Cmd+Enter on an open round with nothing
+// "Cmd+Enter on an open round with nothing
 // outstanding submits it on that press, with no relabel and no second
 // press." Every question is answered first, through the real widgets, so
 // outstandingBlocks() reports nothing left.
@@ -246,7 +246,7 @@ check('criterion 3: Cmd+Enter arriving at Send with nothing outstanding submits 
 });
 
 // === criterion 4 ================================================================
-// SPEC_COUNTS.md criterion 20's other half: "including on a round that
+// The other half of that rule: "including on a round that
 // carries no question at all." A round holding only a non-question block
 // (a pointer post) still has an open, live send bar, but zero
 // '.question-block' elements -- the blocks.length === 0 branch.
@@ -266,7 +266,7 @@ check('criterion 4: Cmd+Enter on a round with no question block at all submits i
 });
 
 // === criterion 5 ================================================================
-// SPEC_COUNTS.md criterion 21: "Cmd+Enter on an open round with something
+// "Cmd+Enter on an open round with something
 // outstanding arms exactly as a click on Send does: same scroll, same
 // ring, same label, same Escape." Two independently loaded, identically
 // unfilled boards -- every question outstanding -- one driven by the
@@ -296,7 +296,7 @@ check('criterion 5: arriving at Send with something outstanding arms exactly as 
 });
 
 // === criterion 6 ================================================================
-// SPEC_COUNTS.md criterion 21's other half: "A second Cmd+Enter while armed
+// The other half of that rule: "A second Cmd+Enter while armed
 // (because something was outstanding) submits, byte-identical to what a
 // second click on the armed button posts." Same partial-fill on two
 // independent boards -- Q1 answered, Q2 deferred, Q3 left outstanding, same
@@ -376,7 +376,7 @@ check('criterion 8: tabbing to #discuss-btn and pressing Cmd+Enter does not fire
   assert.equal(document.activeElement, discussBtn, 'focus must not move off Discuss -- this keyboard path is dead, not merely redirected');
   assert.equal(sendBtn.textContent, 'Send', 'Cmd+Enter on Discuss must not arm Send either');
   // The assertion that actually makes this criterion true in a browser, and the
-  // one whose absence hid a real hole (director /check finding): the three above
+  // one whose absence hid a real hole: the three above
   // only prove the HANDLER does not itself submit. #discuss-btn is a real
   // <button>, and a browser's default action for Enter on a focused button is to
   // activate it -- modifiers do not suppress that. So a guard that returned bare,
@@ -393,7 +393,7 @@ check('criterion 8: tabbing to #discuss-btn and pressing Cmd+Enter does not fire
 // nothing on a board with no open round (the send bar is already disabled
 // there)." Two separate cases.
 
-// Director-verified ablation, recorded here because it is not self-evident from
+// An ablation recorded here because it is not self-evident from
 // the assertions below: deleting the handler's own `if (readonly) return;` line
 // leaves EVERY check in this file green. That is not a hole in this check, it is
 // readonly being locked twice on purpose -- src/ui.mjs's hydrate-time blanket
@@ -471,7 +471,7 @@ check('criterion 10: a Cmd+Enter chord fired while a submit is still in flight d
 });
 
 // === criterion 11 ================================================================
-// SPEC_COUNTS.md criterion 21: "No second armed appearance exists anywhere
+// "No second armed appearance exists anywhere
 // in the page." An absence check on the deleted `armSend` label -- it must
 // appear nowhere, not in a fresh server-rendered page and not in the client
 // script that used to set it.

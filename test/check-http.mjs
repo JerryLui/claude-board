@@ -114,9 +114,8 @@ process.env.CLAUDE_BOARD_HOME = home;
 
 // The local secret, in this check's own temp dir — never ~/.config/claude-board. Set
 // before startServer below, because the daemon reads it once at startup. Every route
-// but /api/health requires a credential now: writes since DESIGN.md Decisions ->
-// "A loopback Host check, an origin check, and a local secret", reads since
-// SPEC_LAUNCH.md Decisions -> "Read routes are gated".
+// but /api/health requires a credential now: writes require a loopback Host check, an
+// origin check, and a local secret; reads require gated read routes.
 const SECRET_FILE = path.join(home, 'secret');
 const SECRET = 'a'.repeat(64);
 writeFileSync(SECRET_FILE, `${SECRET}\n`, { mode: 0o600 });
@@ -131,7 +130,7 @@ function writeHeaders(extra) {
 
 /** `fetch`, shadowed for this module only, carrying the secret on every call.
  *
- * Reads are gated now (SPEC_LAUNCH.md), so a plain `fetch('/b/:id')` is refused — and
+ * Reads are gated now, so a plain `fetch('/b/:id')` is refused — and
  * this check is a hundred-odd requests exercising rendering, waiting, SSE and the store,
  * none of which are about the credential. Rather than thread a header through every one,
  * the default here is "a caller that holds the secret", which is what the shim is.
@@ -391,10 +390,10 @@ async function main() {
     assert.equal(r.status, 200);
   });
 
-  // --- ticket 04: SSE round pushes into a live thread --------------------------
+  // --- SSE round pushes into a live thread --------------------------
 
   await check('POST /api/board reports how many browsers have the board open, from the real subscriber set', async () => {
-    // The check that was missing when the reopen path died (audit 2026-07-31 S3). The
+    // The check that was missing when the reopen path died. The
     // shim decides whether to reopen a closed tab from this number, and it used to ask a
     // route the daemon never served: it got null every time, so a later round never
     // reopened anything. test/check-mcp.mjs covered the DECISION against a proxy that
@@ -427,7 +426,7 @@ async function main() {
   });
 
   await check('a retried post carrying the same requestId is applied once, not appended twice', async () => {
-    // audit 2026-07-31 D1: the daemon applies the round and broadcasts before the
+    // The daemon applies the round and broadcasts before the
     // response is sent, so a socket that dies in between leaves the round landed and the
     // caller told it failed. The retry used to amend a second copy of every block into
     // the open round -- the reviewer saw the same question twice.
@@ -567,7 +566,7 @@ async function main() {
   });
 
   await check('an amend cannot hijack a block out of an already-sent round by reusing its id', async () => {
-    // Audit finding: amendRound matched an incoming id against ALL board.blocks,
+    // amendRound matched an incoming id against ALL board.blocks,
     // not just the currently open round's, so an "amend" naming a sent round's
     // block id would move that block into the open round -- silently re-opening
     // an already-answered, already-disabled question for edit, and leaving its
@@ -612,7 +611,7 @@ async function main() {
   });
 
   await check('a block id that is not a well-formed minted id (e.g. carrying characters that would break a DOM selector) is rejected at post time', async () => {
-    // Audit finding: a caller-supplied raw.id reaches src/ui.mjs's amend-lookup
+    // A caller-supplied raw.id reaches src/ui.mjs's amend-lookup
     // DOM selector unescaped; rejecting anything that isn't the `letter+digits`
     // shape src/board.mjs itself mints closes that off at the source rather than
     // leaving every DOM-query call site responsible for re-deriving the guard.
@@ -704,7 +703,7 @@ async function main() {
   });
 
   await check('SSE payloads embed board.comments already run through resolveComment, matching what the initial page hydrates from', async () => {
-    // Merge-resolution fix (ticket 04 x ticket 06): src/render.mjs's
+    // Merge-resolution fix: src/render.mjs's
     // renderBoardPage swaps the raw stored `board.comments` for the
     // resolveComment-run-once shape before embedding #board-data, specifically so
     // src/ui.mjs's pin rendering can read `.resolved`/`.lost` directly without
@@ -754,8 +753,8 @@ async function main() {
     assert.ok(lostOne);
     assert.equal(lostOne.resolved, false, 'an unresolvable comment in an SSE payload must carry resolved:false, exactly like a fresh page load would show');
     assert.equal(lostOne.lost, 'ghost');
-    // resolveComment's output CARRIES round and createdAt rather than dropping them
-    // (audit M4): without them nothing downstream -- the packet, the history rail, a
+    // resolveComment's output CARRIES round and createdAt rather than dropping them:
+    // without them nothing downstream -- the packet, the history rail, a
     // second tab diffing its own copy -- can tell this round's feedback from a
     // settled earlier round's.
     assert.equal(resolvedOne.round, 1);
@@ -769,7 +768,7 @@ async function main() {
     assert.equal(r.status, 404);
   });
 
-  // --- ticket 07: thread index, concurrent sessions, archive search ------------
+  // --- thread index, concurrent sessions, archive search ------------
 
   /** Pull the single `<a class="thread-item...">...</a>` element for one thread out
    * of the index page, so an assertion about its rounds-left count or live/settled
@@ -1094,7 +1093,7 @@ async function main() {
     assert.equal(byId[rank].note, '');
   });
 
-  // Found by using this for real (SPEC_LAUNCH.md criterion 7): a round came back
+  // Found by using this for real: a round came back
   // carrying a `deferred` question whose `choice` WAS populated. Every check here and
   // in check-mcp.mjs had only ever exercised `deferred` with `choice: null`, so the
   // suite quietly encoded "deferred means no choice" — an assumption the reviewer
@@ -1185,10 +1184,10 @@ async function main() {
     assert.ok(markup.includes('new copy'));
   });
 
-  // --- ticket 06: element-level anchoring (dom, mermaid) round-trips through submit --
+  // --- element-level anchoring (dom, mermaid) round-trips through submit --
   //
-  // The click gesture itself needs a browser (DESIGN.md Testing puts it out of
-  // automated scope); what's asserted here is the data shape: a comment carrying a
+  // The click gesture itself needs a browser, which puts it out of
+  // automated scope; what's asserted here is the data shape: a comment carrying a
   // `dom` anchor and one carrying a `mermaid` anchor, posted exactly as src/ui.mjs's
   // click handlers would construct them, come back out of the blocked /wait call's
   // packet with their ref/hint intact, and an anchor that never matched anything
@@ -1245,11 +1244,11 @@ async function main() {
 
     const domLost = packet.comments.find(c => c.anchor.kind === 'dom' && c.anchor.ref === '9.9');
     assert.equal(domLost.resolved, false);
-    // Ticket 04: a lost `dom` anchor's `.lost` names the stored HINT ("Launch"),
+    // A lost `dom` anchor's `.lost` names the stored HINT ("Launch"),
     // not the opaque index-chain ref ("9.9") -- the hint is what a human or an
     // agent reading the packet can recognise as "what this comment was about"
-    // once the element is gone (DESIGN.md ticket 04: "the stored hint is
-    // what survives when the element does not"). `c.anchor.ref` still carries
+    // once the element is gone: the stored hint is
+    // what survives when the element does not. `c.anchor.ref` still carries
     // the raw ref for anything that wants it.
     assert.equal(domLost.lost, 'Launch');
     assert.equal(domLost.anchor.ref, '9.9');
@@ -1278,12 +1277,12 @@ async function main() {
     );
   });
 
-  // --- ticket 04: a page-scoped `dom` anchor survives a real post/submit/     ---
+  // --- a page-scoped `dom` anchor survives a real post/submit/     ---
   // re-render round trip -----------------------------------------------------
   //
   // The gap this closes: src/board.mjs's resolveComment used to resolve a `dom`
-  // anchor ONLY when block.kind === 'html' (the stage case ticket 02 built). A
-  // page-scoped `dom` anchor -- ticket 03's generic model, rooted at the
+  // anchor ONLY when block.kind === 'html' (the stage case already built). A
+  // page-scoped `dom` anchor -- the generic model, rooted at the
   // anchored block's own section rather than an iframe -- looked right in the
   // tab that minted it (src/ui.mjs's commentsWithPending marks a freshly-queued
   // comment resolved unconditionally, client-side, before any server round
@@ -1295,7 +1294,7 @@ async function main() {
   // (test/dom-stand-in.mjs, same seam as check-comment-mode.mjs) over the
   // freshly re-fetched page, so it proves the pin a reviewer would actually see,
   // not just a JSON verdict.
-  await check('ticket 04: a page-scoped dom anchor on several content kinds survives post -> submit -> re-render, and every pin returns to the element it named', async () => {
+  await check('a page-scoped dom anchor on several content kinds survives post -> submit -> re-render, and every pin returns to the element it named', async () => {
     const postRes = await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(),
@@ -1338,7 +1337,7 @@ async function main() {
             // Its `context` entries did not -- they render through the same
             // renderBlock dispatch as any other block, with their own id and
             // their own comment area, so an anchor rooted here is exactly the
-            // still-live case ticket 04 needs covered. Entry 28 then decided WHICH
+            // still-live case that still needs covering. Entry 28 then decided WHICH
             // context entries: an html stage keeps it, the prose beside it does not.
             context: [{ kind: 'html', html: '<div class="mock"><button>Confirm</button></div>' }],
           },
@@ -1373,7 +1372,7 @@ async function main() {
 
     /** Click `el` (comment mode already on) and read back the anchor the real
      * client script minted onto `blockId`'s comment form -- the SAME mechanism
-     * test/check-comment-mode.mjs proves criterion 1/6 with, reused here to feed
+     * test/check-comment-mode.mjs already proves, reused here to feed
      * genuine refs/hints into a real HTTP submit rather than hand-writing them. */
     function captureAnchor(document, el, blockId) {
       el.dispatchEvent(new StandInEvent('click'));
@@ -1405,8 +1404,8 @@ async function main() {
       'setup failure: a code block must carry no comment surface (ADR.md entry 28)');
 
     const pairs = [captureAnchor(doc1, compareDiagram, compareLeftId)];
-    // The two html stages, still element (2) of ticket 03's TWO roots (DESIGN.md /
-    // src/anchor.mjs's design comment) -- included so this same round trip also
+    // The two html stages, still element (2) of the TWO roots documented in
+    // src/anchor.mjs's design comment -- included so this same round trip also
     // proves block.kind === 'html' resolution is unchanged, not just the
     // page-scoped path, and that it is unchanged inside a question's context too.
     for (const blockId of [compareRightId, questionContextId]) {
@@ -1643,7 +1642,7 @@ async function main() {
     assert.ok(markup.includes('Could not resolve'));
   });
 
-  // --- ticket 05: snapshot and standalone archive -----------------------------------
+  // --- snapshot and standalone archive -----------------------------------
 
   await check('the served page, the pages/ file on disk, and a fresh renderBoardPage() of the stored JSON are all byte-identical', async () => {
     const served = await (await fetch(`${base}/b/${boardId}`)).text();
@@ -1653,7 +1652,7 @@ async function main() {
     assert.equal(served, freshlyRendered, 're-rendering the stored JSON must reproduce the served page exactly');
     // The read gate lives entirely in headers and cookies, never in markup, which is
     // what keeps the three equal above -- and what makes an archived board still open
-    // from disk with the daemon stopped and no credential anywhere (criterion 6).
+    // from disk with the daemon stopped and no credential anywhere.
     // (Ablation: inline the session token or a handoff into the page and this fails,
     // because renderBoardPage's output would stop being a function of the board JSON.)
     for (const leak of [SESSION_COOKIE, sessionToken(SECRET), SECRET, SECRET_HEADER, '/auth/']) {
@@ -1661,15 +1660,15 @@ async function main() {
     }
   });
 
-  await check('DESIGN.md "archives already on disk stay dark": a pages/*.html frozen before this feature shipped is never rewritten, and GET /b/:id always serves a fresh, themed render regardless of what the frozen file contains', async () => {
-    // Stand in for an archive written by a pre-ticket-05 daemon: hand-written
+  await check('"archives already on disk stay dark": a pages/*.html frozen before this feature shipped is never rewritten, and GET /b/:id always serves a fresh, themed render regardless of what the frozen file contains', async () => {
+    // Stand in for an archive written by an earlier daemon, before this feature existed: hand-written
     // directly to pages/, bypassing writePage entirely, carrying none of
     // src/theme.mjs's machinery (no themeBootScript, no #theme-toggle, no light
     // media query) -- exactly what every archive predating this change looks
     // like, forever, per the spec's own "no migration, no re-render sweep on
     // upgrade" decision.
     const pagePath = path.join(home, 'pages', `${boardId}.html`);
-    // Audit test gap: this check overwrites the SHARED pages/<boardId>.html
+    // This check overwrites the SHARED pages/<boardId>.html
     // fixture and previously never restored it, leaving it corrupted for the
     // rest of the run -- green only by accident, because the next check that
     // touches this board posts a different one first. Captured up front and
@@ -1826,7 +1825,7 @@ async function main() {
     assert.equal(pageAfterDelete, renderBoardPage(storedNow));
   });
 
-  // --- audit fix round: cross-origin writes, round finality, wait liveness ---------
+  // --- cross-origin writes, round finality, wait liveness ---------
 
   const boardsDirPath = path.join(home, 'boards');
   const storeFileCount = () => readdirSync(boardsDirPath).filter(f => f.endsWith('.json')).length;
@@ -1921,7 +1920,7 @@ async function main() {
     const afterFirst = readBoard(finalId, home);
     const sentAt = afterFirst.rounds[0].sentAt;
 
-    // The forgery the audit reproduced live: re-submitting after the round was sent
+    // The forgery: re-submitting after the round was sent
     // rewrote the human's answer, its note, and sentAt itself, with no trace.
     const rewrite = await fetch(`${base}/api/board/${finalId}/submit`, {
       method: 'POST',
@@ -2196,7 +2195,7 @@ async function main() {
 
   // --- the local secret ---------------------------------------------------------
   //
-  // DESIGN.md Decisions -> "A loopback Host check, an origin check, and a local
+  // "A loopback Host check, an origin check, and a local
   // secret". The Host check closes the network and the origin check closes the browser;
   // neither can see a local process, which is what these cover. Every write above sends
   // the secret (writeHeaders), so the ones here that deliberately do not are what make
@@ -2207,7 +2206,7 @@ async function main() {
     const body = JSON.stringify({ title: 'Unauthenticated probe', blocks: [{ kind: 'markdown', text: '# planted' }] });
 
     // (Ablation: drop isAuthorizedWrite from createRequestHandler and every case below
-    // returns 200 -- which is the audit's gadget: a local process posts its own board
+    // returns 200 -- which is the gadget: a local process posts its own board
     // naming any `cwd` it likes and reads that directory off the served page.)
     const none = await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
       headers: { 'content-type': 'application/json' },
@@ -2251,7 +2250,7 @@ async function main() {
     assert.match(JSON.parse(r.body).boardId, /^b_[0-9a-f]{32}$/);
   });
 
-  // --- the read gate (SPEC_LAUNCH.md criteria 1-5) --------------------------------
+  // --- the read gate --------------------------------
   //
   // THIS is the ablation site for the read gate. Delete the `isAuthorizedRead` block
   // from createRequestHandler and every assertion in this section fails while the rest
@@ -2260,7 +2259,7 @@ async function main() {
   const BROWSER_NAV = { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' };
 
   await check('SEC: index, board page, search and the event stream are all refused with no credential', async () => {
-    // The decision SPEC_LAUNCH.md overturned: these four used to answer 200 to anything
+    // The overturned decision: these four used to answer 200 to anything
     // that could open a socket, which handed every local process the source excerpts,
     // questions and answers of every board in the store.
     const index = await rawRequest(port, 'GET', '/', `127.0.0.1:${port}`, { headers: BROWSER_NAV });
@@ -2327,15 +2326,15 @@ async function main() {
     assert.match(setCookie, /Path=\//, 'it covers every read route, not one board');
     assert.doesNotMatch(setCookie, /Domain=/i, 'host-only: no Domain attribute, so no sibling host can claim it');
     // Both halves, because they pull against each other and only one of them used to be
-    // pinned. Long enough that criterion 2's bookmark-days-later works; SHORT enough that
-    // the exposure audit 2026-07-31 S1 found — cookies are not port-scoped, so any other
+    // pinned. Long enough that bookmark-days-later works; SHORT enough that
+    // the exposure — cookies are not port-scoped, so any other
     // loopback server the reviewer visits receives this value — expires while expiring it
     // is still worth something. An unbounded upper end is how this sat at 400 days.
     const maxAge = Number((setCookie.match(/Max-Age=(\d+)/) || [])[1]);
     assert.ok(maxAge > 7 * 24 * 3600, `the cookie must outlive the browser session (Max-Age=${maxAge}s) — a bookmark opened days later still has to work`);
     assert.ok(maxAge <= 90 * 24 * 3600, `the cookie must not be effectively permanent (Max-Age=${maxAge}s) — it reaches every other server on this host`);
 
-    // Criterion 2's second half: the cookie alone, with no handoff and no secret, is
+    // The cookie alone, with no handoff and no secret, is
     // what makes reloading and bookmarking work.
     const cookie = setCookie.split(';')[0];
     const reload = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: { ...BROWSER_NAV, cookie } });
@@ -2343,7 +2342,7 @@ async function main() {
     assert.ok(reload.body.includes('id="board-data"'));
     assert.equal(reload.headers['set-cookie'], undefined, 'the board page hands out no credential of its own — its bytes stay a pure function of the board JSON');
 
-    // Criterion 3: single-use. The replay is what a process that read the URL out of
+    // Single-use. The replay is what a process that read the URL out of
     // `ps` would attempt, and it gains nothing.
     const replay = await rawRequest(port, 'GET', `/auth/${minted.token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
     assert.equal(replay.status, 401, 'a handoff is single-use: replaying it is refused');
@@ -2394,10 +2393,10 @@ async function main() {
     assert.equal(asBrowser.status, 401, 'the session cookie is accepted on submit and nowhere else — least of all on the route that mints credentials');
   });
 
-  await check('SEC: criterion 5 — a process holding neither credential can neither read a board nor forge an answer on it', async () => {
-    // Written as the criterion words it: attempt both, from a caller that cannot read
+  await check('SEC: a process holding neither credential can neither read a board nor forge an answer on it', async () => {
+    // Written to match the requirement's exact wording: attempt both, from a caller that cannot read
     // the secret file and was never handed the browser cookie. This is the whole shape
-    // of the hole SPEC_LAUNCH.md closed, in one check.
+    // of the hole that was closed, in one check.
     const target = JSON.parse((await rawRequest(port, 'POST', '/api/board', `127.0.0.1:${port}`, {
       headers: writeHeaders(),
       body: JSON.stringify({ title: 'Criterion 5', blocks: [{ kind: 'question', prompt: 'Ship?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }] }),
@@ -2466,7 +2465,7 @@ async function main() {
   });
 
   await check('SEC: the documented recovery command re-authorizes a browser that holds nothing', async () => {
-    // Criterion 4, run as the user runs it: the actual command the refusal page prints,
+    // Run as the user runs it: the actual command the refusal page prints,
     // spawned as a real process against this check's daemon. --print rather than the
     // default so no browser is ever launched by the suite.
     const authorizeBin = fileURLToPath(new URL('../bin/authorize.mjs', import.meta.url));
@@ -2526,7 +2525,7 @@ async function main() {
     }
   });
 
-  // --- thread-level cwd binding (audit C2, the call site) -------------------------
+  // --- thread-level cwd binding, the call site -------------------------
 
   await check('C2: a NEW board in an EXISTING thread cannot name a different cwd', async () => {
     const projectA = projectDir('thread-bound-a');
@@ -2623,7 +2622,7 @@ async function main() {
     assert.match(markup, /<div class="round-label">Round 1 · feat\/round-one-branch · sent<\/div>/, 'a sent round keeps its title alongside the sent marker');
   });
 
-  // --- SPEC_MIGRATION.md criterion 11: a fixture round trip per migrated shape ------
+  // --- a fixture round trip per migrated shape ------
   // Three shapes, not five: the visual-choice board (/example), the artifact-only board
   // that returns without an answer (/visualize, /explain, /gamify), and the single-
   // question-with-map-context board (/wayfind). Same cycle as the round trip above
@@ -2634,7 +2633,7 @@ async function main() {
   // the resolved, rendered, read-back result, never on a bare 200 -- see the next check's
   // own comment for why that distinction is the entire point.
 
-  await check('visual-choice round trip (criterion 11, /example\'s shape): post a choose-between-rendered-variants question, render both options\' own rendered blocks, pick one, and read the pick back off the packet', async () => {
+  await check('visual-choice round trip (/example\'s shape): post a choose-between-rendered-variants question, render both options\' own rendered blocks, pick one, and read the pick back off the packet', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(),
@@ -2693,7 +2692,7 @@ async function main() {
     assert.equal(packet.answers[0].choice, 'Top nav', 'the packet must report which rendered option was picked');
   });
 
-  await check('artifact-only round trip (criterion 11, /visualize + /explain + /gamify\'s shape): post an html-only board with no question, render the artifact, and prove the packet a caller reads back reports the post rather than an answer nobody was ever asked for', async () => {
+  await check('artifact-only round trip (/visualize + /explain + /gamify\'s shape): post an html-only board with no question, render the artifact, and prove the packet a caller reads back reports the post rather than an answer nobody was ever asked for', async () => {
     const html = '<!doctype html><html><body><h1>ARTIFACT_ONLY_MARKER dashboard</h1></body></html>';
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
@@ -2720,7 +2719,7 @@ async function main() {
     assert.ok(markup.includes('<iframe class="html-stage" sandbox="allow-scripts" srcdoc="'), 'the artifact must render as a sandboxed html stage');
     assert.ok(markup.includes('ARTIFACT_ONLY_MARKER'), 'the artifact\'s own content must be on the page, inside the rendered iframe\'s srcdoc');
 
-    // no answer: this is criterion 1's (ticket 01) caller -- a round with no question
+    // no answer: this is the no-question caller -- a round with no question
     // block anywhere in it has nothing a human is ever asked to submit. Prove that from
     // the STORED, normalized board, not the raw payload: no question block exists
     // anywhere on this round, and nothing has ever been answered.
@@ -2763,8 +2762,8 @@ async function main() {
     assert.equal(activeWaitCount(), before, 'no submit ever landed on this round -- the only way out was the client leaving');
   });
 
-  await check('map-context question round trip (criterion 11, /wayfind\'s shape): post one question whose context references a map section by its heading SLUG, render it, answer it, and prove the referenced content actually resolved -- not merely that the post returned 200', async () => {
-    // The trap this migration already got bitten by once (ticket 09, SPEC_MIGRATION.md):
+  await check('map-context question round trip (/wayfind\'s shape): post one question whose context references a map section by its heading SLUG, render it, answer it, and prove the referenced content actually resolved -- not merely that the post returned 200', async () => {
+    // The trap this migration already got bitten by once:
     // `section` is the heading's SLUG, never its text. Get it wrong and the block is
     // minted with an `error` and resolves to nothing while the POST still returns 200 --
     // a silently empty context box the reviewer sees with no error anywhere in chat. So
@@ -2848,7 +2847,7 @@ async function main() {
     assert.equal(mode(path.join(home, 'pages', `${boardId}.html`)), 0o600);
   });
 
-  // --- ticket 03: the pomodoro HTTP surface ---------------------------------------
+  // --- the pomodoro HTTP surface ---------------------------------------
   //
   // GET /api/pomodoro, POST /api/pomodoro/{ensure,pause,resume,reset,settings}. See
   // src/server.mjs `handlePomodoro`, PROTOCOL.md "HTTP surface", and src/pomodoro.mjs's
@@ -3009,7 +3008,7 @@ async function main() {
     // `notify: false` is load-bearing, not tidiness. This check deliberately drives a REAL
     // boundary on a real daemon, and startServer wires onBoundary to src/notify.mjs -- so
     // with the default `notify: true` this would shell out to the actual osascript and pop
-    // an actual banner on the machine running the suite. SPEC_POMODORO.md's Testing section
+    // an actual banner on the machine running the suite. The rule
     // is explicit: "No notification ever actually fires during the suite." check-http.mjs
     // stubs no PATH (it has no other reason to), so the toggle is what keeps that true here;
     // test/check-notify.mjs owns notification coverage and stubs osascript properly.
@@ -3065,7 +3064,7 @@ async function main() {
     assert.equal(after.cycle, 0);
   });
 
-  await check('POMODORO: ensure starts a work interval when none exists, and is a no-op against a running, paused, or mid-break timer -- a mid-break ensure leaves the break deadline untouched (criterion 2)', async () => {
+  await check('POMODORO: ensure starts a work interval when none exists, and is a no-op against a running, paused, or mid-break timer -- a mid-break ensure leaves the break deadline untouched', async () => {
     await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
 
     const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
@@ -3084,7 +3083,7 @@ async function main() {
     assert.equal(stillPaused.timer.remainingMs, pausedBefore.timer.remainingMs, 'ensure against a paused timer must not resume or restart it');
 
     // Mid-break, seeded directly: a real work interval reaching a break naturally would
-    // take up to workMin minutes. What's being proved is criterion 2's exact wording --
+    // take up to workMin minutes. What's being proved is the exact wording --
     // "a session starting mid-break does not cut the break short" -- so the break's own
     // deadline must survive ensure UNCHANGED, to the millisecond.
     const seeded = readPomodoroDoc(home);
@@ -3131,7 +3130,7 @@ async function main() {
     assert.deepEqual(after, before, 'every rejected patch above must have left settings byte-for-byte unchanged');
   });
 
-  await check('POMODORO: each cue picker accepts every sound the picker may offer, plus None, and nothing outside that set (criterion 2)', async () => {
+  await check('POMODORO: each cue picker accepts every sound the picker may offer, plus None, and nothing outside that set', async () => {
     for (const key of ['cueWork', 'cueBreak', 'cueLongBreak']) {
       for (const name of cueNames()) {
         const r = await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ [key]: name }) });
@@ -3155,7 +3154,7 @@ async function main() {
     assert.deepEqual(body.settings, before, 'a sound-only patch must change nothing at all');
   });
 
-  await check('POMODORO: settings persist across a daemon restart (criterion 9)', async () => {
+  await check('POMODORO: settings persist across a daemon restart', async () => {
     const sounds = cueNames().filter(n => n !== NO_CUE);
     assert.ok(sounds.length >= 2, 'this machine must ship at least two real sounds for this check to mean anything');
     const [soundA, soundB] = sounds;
@@ -3243,12 +3242,12 @@ async function main() {
   });
 
   // ===================================================================================
-  // SPEC_CUES.md: POST /api/pomodoro/preview -- the picker's "audition a sound before
-  // saving" route (ADR.md entry 20, criterion 7). New section, appended at the very end
+  // POST /api/pomodoro/preview -- the picker's "audition a sound before
+  // saving" route (ADR.md entry 20). New section, appended at the very end
   // of the check sequence on purpose: the settings checks elsewhere in this file are
   // owned by a different slice of this work and are not touched here.
   //
-  // Criterion 11 ("no check in it ever makes an audible sound") applies here exactly as
+  // The rule ("no check in it ever makes an audible sound") applies here exactly as
   // it does in test/check-notify.mjs: `afplay` is stubbed first on PATH, the exact
   // pattern that file already uses for `osascript`, so src/server.mjs's
   // `execFile('afplay', [filePath], ...)` resolves to the stub and nothing here ever
@@ -3330,7 +3329,7 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
     });
   });
 
-  await check('PREVIEW: cue "None" answers 200 {ok:true} and plays nothing (criterion 7: selecting None plays nothing)', async () => {
+  await check('PREVIEW: cue "None" answers 200 {ok:true} and plays nothing', async () => {
     const log = freshPreviewLog();
     await withAfplayStub(log, 200, async () => {
       const r = await fetch(`${base}/api/pomodoro/preview`, {
@@ -3382,7 +3381,7 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
     assert.deepEqual(after, before, 'a preview must never touch pomodoro.json -- it is an audition, not a setting');
   });
 
-  await check('PREVIEW: plays even with settings.notify off -- the notify toggle gates the boundary cue, never the picker\'s own audition (criterion 7)', async () => {
+  await check('PREVIEW: plays even with settings.notify off -- the notify toggle gates the boundary cue, never the picker\'s own audition', async () => {
     const doc = readPomodoroDoc(home);
     writePomodoroDoc({ ...doc, settings: { ...doc.settings, notify: false } }, home);
     const log = freshPreviewLog();
@@ -3441,7 +3440,7 @@ setTimeout(() => process.exit(0), Number(process.env.STUB_AFPLAY_DURATION_MS || 
     assert.equal(r.status, 401, 'an uncredentialled request must never be able to raise a banner on the reader\'s machine');
   });
 
-  await check('PREVIEW: a rapid second preview kills the first rather than overlapping into a chorus (criterion 7)', async () => {
+  await check('PREVIEW: a rapid second preview kills the first rather than overlapping into a chorus', async () => {
     const log = freshPreviewLog();
     // A generous duration -- long enough that if the kill below silently stopped
     // happening, the first stub would still be alive (and this check would catch it via

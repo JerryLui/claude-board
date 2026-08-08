@@ -21,7 +21,7 @@
 export const SYNTHETIC_SECTION = '_body';
 
 /** Reserve `base` in `used`, disambiguating with -2, -3, ... exactly as `slugify`
- * does. List-item refs go through this too (audit): they used to be minted as a bare
+ * does. List-item refs go through this too: they used to be minted as a bare
  * `<slug>-liN` string that was never registered, so a later `## Risks li1` heading
  * could slugify to `risks-li1` — the same id a bullet under `## Risks` already
  * carried. Two elements then shared an id, and src/render.mjs's last-wins
@@ -34,7 +34,7 @@ function reserveRef(base, used, ordinals) {
 /** Append `-2`, `-3`, ... until `base` is free in `used`, then reserve it.
  *
  * `ordinals` is an optional `Map<base, nextOrdinalToTry>` carried alongside `used`
- * (audit: N headings sharing one base cost O(N^2), because every call re-probed from
+ * (N headings sharing one base cost O(N^2), because every call re-probed from
  * `-2`. 131072 headings — 512KiB of `# a`, i.e. the by-value cap — took 10.5 minutes
  * of a single-threaded daemon, and `src/resolve.mjs`'s independent pass the same).
  * Skipping ordinals already observed as taken is safe and output-identical: `used`
@@ -56,7 +56,7 @@ function disambiguate(base, used, ordinals) {
 // --- linear scanners ----------------------------------------------------------
 //
 // Everything below runs server-side, single-threaded, on content resolved from
-// arbitrary files (audit: a table-separator probe took 63s on 400KB and ~7min on
+// arbitrary files (a table-separator probe took 63s on 400KB and ~7min on
 // 1MB, blocking the whole daemon — health, every other board and every SSE stream
 // with it). Two patterns were ambiguously quantified; both are replaced with
 // index scans that cannot backtrack.
@@ -121,7 +121,7 @@ function emphasize(s, delim, tag) {
 }
 
 // C0 controls (and DEL) are stripped from a URL before its scheme is tested and
-// before it is emitted (audit). The scheme regex only matches at offset 0 and JS
+// before it is emitted. The scheme regex only matches at offset 0 and JS
 // `\s` does not cover \x01-\x08 / \x0e-\x1f, while the URL capture `[^)\s]+`
 // happily admits them — so `[x](\x01javascript:alert(1))` sailed past the
 // allowlist. It is not cosmetic: the HTML tokenizer keeps U+0001 inside the
@@ -167,13 +167,13 @@ export function mdToHtmlAndAnchors(md) {
   // Exact inverse of esc(), for the two places that need the PRE-escape source text
   // back: the anchor slug and the anchor label.
   //
-  // The slug (audit M6): src/resolve.mjs slugifies the RAW heading line off disk, so
+  // The slug: src/resolve.mjs slugifies the RAW heading line off disk, so
   // if this module slugified the escaped text the two would disagree -- `## Risk &
   // Reward` minted the anchor `risk-amp-reward` while `section: 'risk-reward'` was
   // the only thing that resolved, i.e. the only slug the agent was ever shown for
   // that heading was the one guaranteed to fail next round.
   //
-  // The label (audit L1): every consumer (src/render.mjs's escHtml/escAttr,
+  // The label: every consumer (src/render.mjs's escHtml/escAttr,
   // src/ui.mjs's comment list) escapes the label at emit time, so carrying an
   // already-escaped label double-escaped it and `Risk & Reward` reached the packet
   // and the page as `Risk &amp; Reward`.
@@ -228,7 +228,7 @@ export function mdToHtmlAndAnchors(md) {
   let currentSlug = null;
   let liCounter = 0;
 
-  /** `quoted` is set for the blockquote recursion (audit): a quoted heading or
+  /** `quoted` is set for the blockquote recursion: a quoted heading or
    * bullet is somebody ELSE's document being cited, so it must not mint an anchor,
    * must not carry an id, and must not consume a slug or a `-liN` ordinal. It used
    * to: a source quoting `> ## Plan` above its own `## Plan` gave the quotation the
@@ -237,7 +237,7 @@ export function mdToHtmlAndAnchors(md) {
    * returned the real body under an id pointing at the quotation. */
   const blocks = (text, quoted = false) => {
     // A trailing CR is stripped per line rather than left for the block regexes to
-    // trip over (audit): `.` and `$` do not match `\r`, so `- a\r` passed the list
+    // trip over: `.` and `$` do not match `\r`, so `- a\r` passed the list
     // guard, failed the item pattern, matched no continuation, and broke out of the
     // item loop WITHOUT advancing `i` -- an infinite loop that pinned a core and took
     // the whole daemon with it, on nothing more exotic than a CRLF file in the
@@ -292,8 +292,8 @@ export function mdToHtmlAndAnchors(md) {
       }
       if (/^\s*-{3,}\s*$/.test(l)) { html += '<hr>'; i++; continue; }
       if (/^(\s*)([-*+]|\d+\.)\s+/.test(l)) {
-        // A list that precedes every heading in the document still gets anchors
-        // (audit P3): acceptance criterion 5 states the rule unconditionally --
+        // A list that precedes every heading in the document still gets anchors,
+        // unconditionally --
         // "one anchor per heading and per top-level list item" -- and a headingless
         // source (a bare criteria list, the single most likely thing to be posted
         // for review) previously yielded ZERO anchors, so nothing in it could be
@@ -301,7 +301,7 @@ export function mdToHtmlAndAnchors(md) {
         // prefix: slugify() strips underscores, so it can never collide with a real
         // heading's slug, and it therefore needs no entry in usedSlugs -- which
         // keeps heading slug numbering byte-identical to src/resolve.mjs's
-        // independent pass over the same file (see M6 above).
+        // independent pass over the same file.
         if (!quoted && currentSlug === null) {
           currentSlug = SYNTHETIC_SECTION;
           liCounter = 0;
@@ -340,7 +340,7 @@ export function mdToHtmlAndAnchors(md) {
           if (!quoted && topLevel && currentSlug) {
             liCounter++;
             ref = reserveRef(currentSlug + '-li' + liCounter, usedSlugs, slugOrdinals);
-            // label from the PRE-escape source text, same as the heading above (L1)
+            // label from the PRE-escape source text, same as the heading above
             anchors.push({ kind: 'md', ref, label: unesc(it.text) });
           }
           out += openTag + (ref ? ' id="' + escAttr(ref) + '"' : '') + '>' + inline(it.text);

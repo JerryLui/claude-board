@@ -2,11 +2,11 @@
 // owns the actual click gesture) and the server (src/board.mjs resolves a stored
 // anchor at packet-assembly time). Kept dependency-free and DOM-free on purpose so
 // it is testable in node with no browser (test/check-pure.mjs) — see
-// DESIGN.md "Click-to-comment reaches individual elements" and PROTOCOL.md
-// "Answers, comments, anchors" for the two shapes this module builds and resolves:
-// { kind: 'dom', ref, hint } and { kind: 'mermaid', ref, domRef, hint }. Ticket
-// 05 added `domRef`/`hint` to the mermaid shape without changing what `ref`
-// means -- see "ticket 05 design" below, further down this file, for why a
+// PROTOCOL.md "Answers, comments, anchors" for the two shapes this module
+// builds and resolves:
+// { kind: 'dom', ref, hint } and { kind: 'mermaid', ref, domRef, hint }. The
+// mermaid shape gained `domRef`/`hint` without changing what `ref`
+// means -- see the diagram-node design below, further down this file, for why a
 // diagram node carries all three rather than replacing `ref` outright.
 //
 // DOM path format: a dot-separated chain of 1-based child indices from a block's
@@ -21,26 +21,24 @@
 // src/ui.mjs carries a duplicate of buildSteps/stepsToPath/pathToSteps/
 // resolveSteps/extractHint/parseMermaidDomId as plain functions inside its
 // template string: the served page is a single self-contained file (no bundler, no
-// build step, opens from file:// per ticket 05), so nothing there can `import` this
+// build step, opens from file://), so nothing there can `import` this
 // module at runtime. This module is the reference the duplicate is kept in sync
 // against; test/check-pure.mjs exercises this module directly.
 
-// --- ticket 03 design: one generic element reference over the board's own DOM --
+// --- design: one generic element reference over the board's own DOM --
 //
-// Written before the implementation, per DESIGN.md's Next Steps ("design
-// the generic element reference at the start of ticket 03"). This is the design;
+// Written before the implementation. This is the design;
 // the code below and in src/ui.mjs is what it produced.
 //
 // WHAT A REFERENCE IS. The wire shape does not change: `{ kind: 'dom', ref, hint }`,
-// exactly what ticket 01/02 already stored for a click inside a hand-mocked html
+// exactly what was already stored for a click inside a hand-mocked html
 // stage. What changes is which ROOT `ref` (a stepsToPath index chain) is measured
 // from, and there are exactly two roots, chosen by the anchored block's own `kind`
 // -- the same discriminator src/board.mjs's resolveComment already reads:
 //
-//   - block.kind === 'html'   -> root is the stage's iframe body (unchanged from
-//     ticket 02). The click happens in a different DOCUMENT (the sandboxed
-//     srcdoc), so this stays the one cross-document case -- see "isolation of
-//     hand-mocked HTML is kept" in DESIGN.md's Decisions. Nothing about
+//   - block.kind === 'html'   -> root is the stage's iframe body (unchanged).
+//     The click happens in a different DOCUMENT (the sandboxed
+//     srcdoc), so this stays the one cross-document case. Nothing about
 //     this case's minting or resolving changes here.
 //   - every other block kind -> root is that block's own rendered `<section
 //     class="block" data-block-id="...">` in the board page's OWN document. A
@@ -55,16 +53,16 @@
 //     SAME id the block's own comment form already uses, so nothing new is
 //     threaded through the wire format.
 //
-//   This is deliberately NOT a path from `<body>`: the ticket calls that out
+//   This is deliberately NOT a path from `<body>`: this design calls that out
 //   explicitly as "exactly the kind of thing that shifts on re-render" --
 //   inserting an earlier round, or a block landing at a different position,
 //   would shift every absolute body-rooted index. Rooting at the block's own,
 //   stably-`id`ed section means a ref only has to survive that ONE block being
 //   re-rendered identically from its own (unchanged) stored content, which is
-//   what ticket 04 gets to rely on rather than invent.
+//   what later work gets to rely on rather than invent.
 //
 //   `mermaid` keeps its own kind and its own node-id ref (parseMermaidDomId
-//   below) -- ticket 05's job to fold in, not deleted here. `md` and `block`
+//   below) -- the diagram-node design below folds it in, not deleted here. `md` and `block`
 //   anchors are untouched. So "one model" means: one path-building/resolving
 //   mechanism (buildSteps/stepsToPath/resolveSteps, all below), with the html
 //   stage's cross-document case and the page's own same-document case both
@@ -72,7 +70,7 @@
 //   that existed. Diagrams stay a documented third case for now.
 //
 //   AMENDED, ADR.md entry 28 ("Only the rendered kinds can be commented on",
-//   2026-08-06): "every other block kind" above is this ticket's own design,
+//   2026-08-06): "every other block kind" above is this section's own design,
 //   predating entry 28 and now too wide. The path-building/resolving mechanism
 //   this section describes is unchanged and still generic, but src/ui.mjs's
 //   `anchorRootFor`/`isNonAnchorableRoot` now gate it to `html` and `mermaid`
@@ -82,17 +80,16 @@
 //   deleted outright, not merely untouched (`src/board.mjs`'s `ANCHOR_KINDS`).
 //
 // HOW A HINT IS DERIVED. `extractHint` (below) is unchanged: it collapses and
-// caps an element's own text. That alone is "identity" -- criterion 6 also
+// caps an element's own text. That alone is "identity" -- the hint also
 // wants "containing context" (its example: "the Send button in the after
 // stage", not "the small card"). The context half is necessarily DOM-shaped
 // (walking ancestors, reading a compare side's own label) and stays in
 // src/ui.mjs, but the RULE for turning those already-gathered, DOM-free inputs
-// into a hint string -- the actual thing criterion 6 is graded on -- is
+// into a hint string -- the actual thing the hint is graded on -- is
 // `composeHint` below, a pure function with no DOM in its signature at all. This
 // split matters for the same reason buildSteps/resolveSteps are pure while "which
 // element did the click land on" is not: it is what makes the composition rule
-// checkable without a browser, and per an earlier draft's mistake (a Director
-// audit caught it -- see this file's git history around ticket 03), a design
+// checkable without a browser, and per an earlier draft's own mistake, a design
 // comment describing the rule is NOT the same thing as the rule being checked.
 // src/ui.mjs embeds `composeHint`'s literal source via `composeHint.toString()`
 // (see `computeBoardPatch`/src/patch.mjs for the established precedent this
@@ -111,7 +108,7 @@
 //     name. That role word is appended to a present text ("Send" -> "Send
 //     button") ONLY alongside real context (below) -- without something to
 //     disambiguate against, an element's own text is already unambiguous on its
-//     own block, and suppressing the role word there is what keeps ticket 02's
+//     own block, and suppressing the role word there is what keeps the
 //     plain html-stage hint ('Send', not 'Send button') unchanged outside a
 //     compare. Never invented from the surrounding copy either way -- see "the
 //     renderer stays mechanical and read-only".
@@ -125,8 +122,8 @@
 //     "block"/"comparison"), read by the caller off a `data-block-kind`
 //     attribute src/render.mjs now stamps on every block section. Elsewhere
 //     (`insideCompare` false) context is empty and the hint is identity alone --
-//     unchanged from ticket 02's plain `extractHint(el.textContent)`, which is
-//     what keeps that ticket's html-stage check asserting the literal hint
+//     unchanged from the plain `extractHint(el.textContent)`, which is
+//     what keeps the html-stage check asserting the literal hint
 //     `'Send'` true without editing it. Compare is the one place in this
 //     codebase two symmetric, identically-shaped bits of content actually sit
 //     side by side on purpose, which is exactly the ambiguity "the small card"
@@ -136,7 +133,7 @@
 //   Because context can add words the clicked element's own text never
 //   contained, `resolveDomAnchor` below (which checks the STORED hint is
 //   contained in the LIVE element's text) only ever has to do that for the
-//   html-stage case today -- ticket 04, when it extends resolution to
+//   html-stage case today -- later work, when it extends resolution to
 //   page-scoped `dom` anchors, will need to resolve against the identity
 //   portion only, not the full "identity in context" string. Flagged here so
 //   that seam isn't rediscovered the hard way.
@@ -145,26 +142,25 @@
 // this. `dom` anchors gain a second root (above) but keep exactly the same
 // wire shape, the same minting helpers, and the same resolution function
 // signature (`resolveDomAnchor(html, ref, hint)`) for the case that already
-// worked. What does NOT yet exist, and is explicitly left for ticket 04 rather
+// worked. What does NOT yet exist, and is explicitly left for later work rather
 // than half-built here: `src/board.mjs`'s `resolveComment` still only resolves
 // a `dom` anchor when `block.kind === 'html'` (see its own comment). A `dom`
 // anchor minted against the new, page-scoped root reports `lost` the moment
 // it round-trips through a real submit + re-render, honestly rather than
-// silently -- DESIGN.md's "an anchor that no longer resolves reports
-// what it lost" -- until ticket 04 teaches it to re-render that one block
+// silently -- until later work teaches it to re-render that one block
 // (`renderBlock` is already exported for exactly this) and resolve the ref
 // against it the same way `resolveDomAnchor` already does for stage html.
-// Nothing in ticket 03's own acceptance criteria (1, 2, 3, 6) depends on that
+// Nothing in this design's own acceptance criteria depends on that
 // round trip: the click, the hint, and the pin all work from the client's own
 // local state the moment a comment is queued (src/ui.mjs's `commentsWithPending`
 // marks a freshly-queued comment resolved unconditionally, never through
 // resolveComment) -- see check-comment-mode.mjs's own comments for why that is
-// enough to prove criteria 1/2/3/6 without needing ticket 04's server-side
+// enough to prove criteria 1/2/3/6 without needing later server-side
 // resolution first.
 
-// --- ticket 05 design: a diagram node folds into the generic model ------------
+// --- design: a diagram node folds into the generic model ------------
 //
-// DESIGN.md's Decision "Mermaid stops being the template" states the
+// This design states the
 // order deliberately: "The generic model comes first; a diagram node is
 // anchored by it like anything else. The node id is kept alongside the generic
 // reference as the more durable of the two ... kept as a fallback the generic
@@ -175,15 +171,15 @@
 //   gains the SAME two fields every other element-level anchor already carries:
 //   `domRef` (a stepsToPath index chain, minted by src/ui.mjs's buildSteps
 //   exactly like a page-scoped `dom` anchor, rooted at the mermaid block's own
-//   `<section data-block-id>`, not at `<body>` -- ticket 03's design comment
+//   `<section data-block-id>`, not at `<body>` -- the generic-reference design comment
 //   above gives the re-render reason) and `hint` (composeHint, the same
 //   function, the same call shape as everywhere else -- a diagram node's hint
 //   can now read "Start in After diagram" instead of carrying no hint at all,
-//   which is what a bare node id gave criterion 6 before this ticket). `ref`
-//   keeps its ticket-02 meaning: the source-declared node id recovered from
+//   which is what a bare node id gave before this design). `ref`
+//   keeps its original meaning: the source-declared node id recovered from
 //   mermaid's own generated element id (parseMermaidDomId below) -- unchanged,
 //   so every anchor `test/fixtures/pre-ticket04-board.json` already carries
-//   (criterion 7) still has everything it needs to resolve exactly as before.
+//   still has everything it needs to resolve exactly as before.
 //
 //   PRECEDENCE, AND WHY IT IS NOT COSMETIC. resolveMermaidAnchor (below) tries
 //   the generic `domRef`+`hint` FIRST, through the exact same
@@ -191,8 +187,7 @@
 //   resolves through -- no new server-side mermaid-specific parsing exists, or
 //   is needed, to make that true. It falls back to mermaidRefResolves (`ref`)
 //   only when that first attempt fails. In practice, for as long as diagram
-//   rendering stays client-side (DESIGN.md's Out of Scope:
-//   "Server-side diagram rendering"), the generic attempt fails server-side
+//   rendering stays client-side, the generic attempt fails server-side
 //   EVERY time: the block's re-rendered section (src/render.mjs's
 //   renderMermaidBlock, exactly what resolveDomAnchorInSection walks) only ever
 //   contains the raw `<pre class="mermaid">source</pre>` -- the SVG a click
@@ -203,10 +198,10 @@
 //   doing the resolving -- not because it is preferred, but because it is the
 //   only one of the two a server that never runs mermaid can corroborate. The
 //   generic attempt is still made genuinely first, through genuinely shared
-//   code, because criterion 7 and this ticket both require a diagram node to
+//   code, because this design requires a diagram node to
 //   behave like every other anchor kind; a special-cased "just check the node
 //   id, skip the rest" branch would be exactly the per-stage-kind design this
-//   ticket exists to retire, and would stop being true the moment diagram
+//   exists to retire, and would stop being true the moment diagram
 //   rendering ever does move server-side.
 //
 //   The CLIENT gets more out of the generic reference than the server can. In
@@ -218,8 +213,8 @@
 //   its own generated id -- cheap cross-check, so a shifted internal structure
 //   (a different mermaid CDN version, say) can never silently position a pin on
 //   the wrong node. When that check fails, or there is no live SVG at all (CDN
-//   unreachable -- ticket 05's other constraint, see src/ui.mjs's
-//   renderMermaidBlocks), positioning falls back to the pre-ticket-05 id-
+//   unreachable -- this design's other constraint, see src/ui.mjs's
+//   renderMermaidBlocks), positioning falls back to the earlier id-
 //   attribute scan over every `[id^="flowchart-"]` node. Positioning is
 //   display-only either way, never authoritative: the resolved/lost verdict a
 //   pin's STYLE is drawn from always comes from the server's resolveComment
@@ -238,7 +233,7 @@ export function extractHint(text, max = DEFAULT_HINT_MAX) {
   return collapsed.slice(0, max - 1).replace(/\s+$/, '') + '…';
 }
 
-/** Compose a criterion-6 hint ("the Send button in the after stage") from
+/** Compose a hint ("the Send button in the after stage") from
  * already-extracted, DOM-free inputs. src/ui.mjs is the only caller that ever
  * has a real element to read `text`/`tagName`/`insideCompare`/`compareLabel`/
  * `blockKind` off of -- gathering those five values IS the DOM-touching half
@@ -261,7 +256,7 @@ export function composeHint(text, tagName, insideCompare, compareLabel, blockKin
   var ROLE_WORD = { button: 'button', a: 'link', img: 'image', input: 'field', textarea: 'field', select: 'menu' };
   var BLOCK_NOUN = { html: 'stage', mermaid: 'diagram', code: 'reference', question: 'question', compare: 'comparison', markdown: 'block' };
   var tag = String(tagName || '').toLowerCase();
-  // Audit C6: `tag`/`blockKind` come from the mock's own markup and the caller's
+  // `tag`/`blockKind` come from the mock's own markup and the caller's
   // block kind respectively -- both attacker/author-influenced strings. An
   // unguarded `ROLE_WORD[tag]` walks the prototype chain for a tag like
   // 'constructor', returning `Object` (the constructor FUNCTION, not a role
@@ -275,11 +270,11 @@ export function composeHint(text, tagName, insideCompare, compareLabel, blockKin
   // The role word ("... button") is appended ONLY alongside real context --
   // without something to disambiguate against, an element's own text is already
   // unambiguous on its own block, and suppressing the role word there is what
-  // keeps ticket 02's plain html-stage hint ('Send', not 'Send button')
+  // keeps the plain html-stage hint ('Send', not 'Send button')
   // unchanged outside a compare.
   var identity = text ? (context && role ? text + ' ' + role : text) : (role || tag);
-  // Coerced to a string so this function can never return anything else (audit
-  // C6) -- every input above is now guarded, but the return stays defensive
+  // Coerced to a string so this function can never return anything else --
+  // every input above is now guarded, but the return stays defensive
   // rather than relying on that staying true forever.
   return String(context ? identity + ' in ' + context : identity);
 }
@@ -346,7 +341,7 @@ export function buildSteps(root, el) {
 // anywhere in the raw html at all" — which false-resolved against tag names and
 // attribute values (a hint of "mock" matching `class="mock"`) and false-"lost"
 // anything spanning nested markup, entities, or extractHint's own truncation
-// ellipsis (ablation/audit-caught: see DESIGN.md's board slice 06 log). Fixed by
+// ellipsis. Fixed by
 // actually parsing enough structure to walk the ref and read that one element's
 // text, the same way a real DOM would, rather than pattern-matching the whole
 // blob.
@@ -358,7 +353,7 @@ export function buildSteps(root, el) {
 // stated ceiling; mermaid's grammar staying client-side below) — a resolve
 // failure here must degrade to "anchor lost", never throw or hang.
 
-// Exported (ticket 07) so test/dom-stand-in.mjs's tokenizer treats exactly the
+// Exported so test/dom-stand-in.mjs's tokenizer treats exactly the
 // same tags as void -- the stand-in's own former copy of this list was missing
 // 'param', a real (if narrow) parity gap this closes by construction rather than
 // by remembering to keep two lists in sync.
@@ -397,7 +392,7 @@ const NAMED_ENTITIES = {
   // entity -- `G&aring;r vidare` -- left the server holding the literal text while the
   // browser's textContent read `Går vidare`, and a live, on-screen element was
   // reported lost. Numeric (`&#229;`) and literal UTF-8 already worked; only the named
-  // spelling was missing (audit).
+  // spelling was missing.
   Agrave: 'À', Aacute: 'Á', Acirc: 'Â', Atilde: 'Ã', Auml: 'Ä', Aring: 'Å', AElig: 'Æ',
   Ccedil: 'Ç', Egrave: 'È', Eacute: 'É', Ecirc: 'Ê', Euml: 'Ë',
   Igrave: 'Ì', Iacute: 'Í', Icirc: 'Î', Iuml: 'Ï',
@@ -421,7 +416,7 @@ const NAMED_ENTITIES = {
 // the one failure mode this module's own invariant forbids (see mermaidRefResolves
 // below for the same rule stated for mermaid). Earlier fixtures used only
 // div/span/button/p nesting, where the two parses happen to agree; the rules below
-// cover the shapes where they did not (audit H6):
+// cover the shapes where they did not:
 //
 //   <table><tr>...            the browser inserts an implied <tbody>
 //   <ul><li>a<li>b</ul>       <li> auto-closes the open <li>
@@ -444,10 +439,10 @@ const CLOSES_P = new Set([
 ]);
 
 /** Pop the elements a `tag` start implies are finished, mutating `stack`. Never pops
- * past index 0 (the synthetic root). Exported (ticket 07, DESIGN.md) so
+ * past index 0 (the synthetic root). Exported so
  * test/dom-stand-in.mjs's own tag-omission handling is this exact function, not a
- * second, hand-ported copy that could silently drift the way it did before ticket
- * 07 (audit finding C3): sharing the DECISION functions is what keeps the two
+ * second, hand-ported copy that could silently drift the way it did before:
+ * sharing the DECISION functions is what keeps the two
  * parsers' trees agreeing on `<ul><li>a<li>b</ul>`-shaped input, even though the
  * stand-in's own tokenizer (which also has to build real Element objects with
  * attributes) stays separate from parseHtmlTree's. */
@@ -483,10 +478,10 @@ export function impliedParentFor(parentTag, tag) {
 // can write just as easily) makes `String.fromCodePoint` throw `RangeError` --
 // this table's whole job is to never let a malformed entity anywhere near that
 // call. See parseHtmlTree's "Never throws" contract just below: this function is
-// the one place that contract used to be false (audit V5a).
+// the one place that contract used to be false.
 const MAX_CODE_POINT = 0x10ffff;
 
-/** Exported (ticket 07) so test/dom-stand-in.mjs decodes entities identically to
+/** Exported so test/dom-stand-in.mjs decodes entities identically to
  * this module -- one entity table, not two that could disagree on, say, `&mdash;`
  * inside an agent-supplied html-stage mock.
  *
@@ -521,7 +516,7 @@ export function decodeEntities(s) {
  * a second backtracking-capable pass over attacker-controlled input the way
  * tokenRe's own comment above warns against avoiding. The only attribute
  * value this otherwise attribute-blind parser reads (see this section's own
- * header comment) -- added (audit V3) so resolveDomAnchorInSection can
+ * header comment) -- added so resolveDomAnchorInSection can
  * recognise the board's own rendered chrome and refuse to resolve a ref that
  * lands there. */
 function parseClassAttr(attrs) {
@@ -579,7 +574,7 @@ export function parseHtmlTree(html) {
   const lower = src.toLowerCase(); // computed once: used to find script/style ends
 
   const open = (tag, attrs) => {
-    // `cls` (audit V3): the one attribute value this otherwise attribute-blind
+    // `cls`: the one attribute value this otherwise attribute-blind
     // parser reads, so resolveDomAnchorInSection can recognise the board's own
     // rendered chrome (`.block-kicker`, `.pin-layer`, ...) and refuse to
     // resolve a ref that lands there -- see isChromeNode below. Scoped to one
@@ -603,8 +598,8 @@ export function parseHtmlTree(html) {
   // alternative in the open-tag branch) both accept plain word characters, so on
   // an unterminated tag the engine tried every possible split between the two
   // groups before giving up: O(n) splits, each requiring an O(n) re-match of the
-  // remainder, for O(n^2) total (measured: 500 K chars -> 73.6s per comment,
-  // audit V5b). The lookahead pins the tag-name group to its one greedy, maximal
+  // remainder, for O(n^2) total (measured: 500 K chars -> 73.6s per comment).
+  // The lookahead pins the tag-name group to its one greedy, maximal
   // match -- it fails in O(1) at every shorter length instead of handing off to
   // the next group -- so a failed match is O(n), not O(n^2). Every input that
   // used to match still matches the same way: a well-formed tag name is always
@@ -612,7 +607,7 @@ export function parseHtmlTree(html) {
   // `[\w-]`, so the lookahead is already satisfied by the same maximal match the
   // greedy quantifier picks first.
   // A quoted attribute value may contain `<`: per HTML's attribute-value states it is
-  // an ordinary character there, not a parse error (audit). Excluding it ended the tag
+  // an ordinary character there, not a parse error. Excluding it ended the tag
   // early, so `<div title="x<y">` swallowed a sibling and every index after it shifted
   // -- either a live element misreported lost, or, with repeated sibling text, a
   // confident resolve against the WRONG element. `onclick="if(a<b)f()"` and
@@ -707,16 +702,15 @@ function roleAwareInPrefix(text, tag) {
   return a.slice(0, commonPrefixLength(a, b));
 }
 
-/** Ticket 04, fixed by the 2026-07-29 audit (finding C1): whether `node`'s own
- * live content still backs a stored `hint`. Content is snapshotted at post time
- * (DESIGN.md Decisions -> "An anchor survives re-render, not editing"),
+/** Whether `node`'s own
+ * live content still backs a stored `hint`. Content is snapshotted at post time,
  * so a still-live element's own text hasn't changed since mint time:
  * re-deriving the IDENTITY half of composeHint's rule from that unchanged text
  * (extractHint of the resolved element's own text, or -- when there's no text
  * at all, e.g. an image -- composeHint's own role-word/tag fallback) reproduces
  * exactly what composeHint started the stored hint with at mint time.
  *
- * The ORIGINAL ticket-04 version checked `hint.startsWith(recomputedIdentity)`,
+ * The ORIGINAL version checked `hint.startsWith(recomputedIdentity)`,
  * which reads right (a hint with an appended role word or "in <context>" suffix
  * really does start with its own identity) but is backwards as a MATCH test: a
  * live element whose text shrank to a literal prefix of some unrelated stored
@@ -724,7 +718,7 @@ function roleAwareInPrefix(text, tag) {
  * element against a stored hint beginning with its bare tag name (`'div is
  * broken'` against an empty `<div>`, whose fallback identity is the string
  * `'div'`) -- also satisfies `startsWith` by coincidence, without the two
- * strings actually being the same identity. That is audit finding C1: it does
+ * strings actually being the same identity: it does
  * not merely fail to catch a lost anchor, it resolves the comment onto the
  * WRONG element and reports it resolved.
  *
@@ -751,7 +745,7 @@ function domIdentityHintMatches(node, hint) {
     && normalizedHint.startsWith(roleInPrefix);
 }
 
-// --- html body root (audit finding C2) ----------------------------------------
+// --- html body root --------------------------------------------------------
 //
 // resolveDomAnchor's `ref` is a step chain minted client-side from a real
 // browser's `document.body` (src/ui.mjs's wireHtmlStage roots buildSteps at
@@ -765,7 +759,7 @@ function domIdentityHintMatches(node, hint) {
 // an ordinary body child, same as this module already modelled). An explicit
 // `<html>`/`<head>`/`<body>` wrapper is honoured as given rather than
 // re-hoisted. Left unmodelled, an ordinary mock that inlines its own styling --
-// which DESIGN.md's own isolation Decision is what makes an author
+// which this codebase's own isolation choice is what makes an author
 // do -- shifts the index of every element that follows the leading `<style>`,
 // so a browser's `body.children[0]` (the real, clicked element) is this
 // module's `root.children[1]`: every ref minted against the real DOM reports
@@ -789,7 +783,7 @@ function bodyRootChildren(root) {
   return withoutHead.slice(i);
 }
 
-// --- resolution surface exclusion (audit finding V3) --------------------------
+// --- resolution surface exclusion -------------------------------------------
 //
 // A block's re-rendered section is mostly the board's OWN chrome, not authored
 // content: src/render.mjs's renderMarkdownBlock, for instance, emits a section
@@ -815,8 +809,8 @@ function bodyRootChildren(root) {
 // PARENT document, outside the sandboxed srcdoc), so this can only ever
 // matter there in the pathological case of a hand-mocked element that
 // happens to reuse one of the board's own internal class names -- narrower
-// and fail-safe (a reported "lost", never a wrong resolve) compared to V3's
-// actual finding of a forged ref reaching real page chrome.
+// and fail-safe (a reported "lost", never a wrong resolve) compared to a
+// forged ref actually reaching real page chrome.
 const CHROME_CLASSES = new Set([
   'block-kicker', 'comment-btn', 'comment-form', 'comment-target',
   'comment-list', 'pin-layer', 'anchor-pin', 'mode-toggle', 'compare-label',
@@ -854,7 +848,7 @@ function resolveStepsRejectingChrome(root, steps) {
 
 /** The ref+hint check every `dom`/`mermaid` resolution path below ultimately
  * reduces to, against an ALREADY-PARSED root. Factored out of resolveDomAnchor/
- * resolveDomAnchorInSection (ticket 11, audit V4): `resolveComment` used to call
+ * resolveDomAnchorInSection: `resolveComment` used to call
  * those two functions once per COMMENT, and each call parsed (and, for the
  * page-scoped case, re-rendered) the anchored block from scratch -- on a board
  * with many comments on the same block, every comment after the first repeated
@@ -866,7 +860,7 @@ function resolveStepsRejectingChrome(root, steps) {
  * right thing to call for a single one-off anchor (as every existing test
  * does), and are now thin wrappers around this.
  *
- * Audit V3: walks via `resolveStepsRejectingChrome` (above) rather than plain
+ * Walks via `resolveStepsRejectingChrome` (above) rather than plain
  * `resolveSteps`, so every caller that bottoms out here refuses to resolve
  * into the board's own rendered chrome, the same exclusion src/ui.mjs's click
  * listener already applies before it ever mints a ref. */
@@ -881,11 +875,11 @@ export function resolveAtRoot(root, ref, hint) {
 /** The root a `dom` anchor rooted at an html stage's iframe body resolves
  * against, given the block's own snapshotted `html` string -- modelled as a
  * browser's `document.body` would see it, not parseHtmlTree's raw synthetic
- * root (see HEAD_ONLY_TAGS/bodyRootChildren above, audit C2). Exported (same
+ * root (see HEAD_ONLY_TAGS/bodyRootChildren above). Exported (same
  * pattern as `sectionRootFrom` below) so a caller resolving several comments
  * against the same html-stage block -- src/board.mjs's `resolveComments`
  * batch path -- can parse and hoist once instead of per comment; that cache
- * is exactly what makes this the one place C2's fix has to live, since a
+ * is exactly what makes this the one place that fix has to live, since a
  * cached-but-unhoisted root would silently undo it for every comment after
  * the first. */
 export function htmlBodyRootFrom(html) {
@@ -906,23 +900,23 @@ export function resolveDomAnchor(html, ref, hint) {
  * `sectionHtml` (a block's own section, re-rendered from its stored content).
  * `renderBlock` emits exactly one top-level element (the `<section>` itself,
  * everything else in its output is surrounding whitespace text), so that
- * element is always `parseHtmlTree(sectionHtml).children[0]`. Exported (ticket
- * 11) so a caller resolving several comments against the same block can parse
+ * element is always `parseHtmlTree(sectionHtml).children[0]`. Exported so
+ * a caller resolving several comments against the same block can parse
  * once and pass the result to `resolveAtRoot`/`resolveMermaidAnchorAtRoot`
  * directly instead of re-parsing per comment. */
 export function sectionRootFrom(sectionHtml) {
   return parseHtmlTree(sectionHtml).children[0] || null;
 }
 
-/** Ticket 04: whether a page-scoped `dom` anchor (root = the anchored block's own
+/** Whether a page-scoped `dom` anchor (root = the anchored block's own
  * `<section data-block-id>`, not an html stage's iframe body — see this file's
- * "ticket 03 design" comment above) still resolves against `sectionHtml`, the
+ * generic-reference design comment above) still resolves against `sectionHtml`, the
  * block's own section re-rendered from its stored content by src/board.mjs's
  * resolveComment (src/render.mjs's `renderBlock`, exported for exactly this).
  * Differs from `resolveDomAnchor` above only in the root: `buildSteps` mints a
  * page-scoped ref from the block's own section element (src/ui.mjs's
  * `anchorRootFor`), not from `<body>` — so resolution has to walk from that same
- * element, not from the parse's synthetic root. Audit V3's chrome exclusion is
+ * element, not from the parse's synthetic root. The chrome exclusion is
  * applied inside `resolveAtRoot`, not repeated here. */
 export function resolveDomAnchorInSection(sectionHtml, ref, hint) {
   const sectionRoot = sectionRootFrom(sectionHtml);
@@ -968,15 +962,14 @@ export const MERMAID_NODE_SELECTOR = '[id*="-flowchart-"], [id^="flowchart-"]';
  * (earlier drafts tried to parse mermaid's arrow/shape grammar to do that; it was
  * both wrong on ordinary syntax like chained arrows and inline-label edges, and
  * had catastrophic-backtracking behaviour on adversarial input, since this runs
- * server-side on every render/packet — see DESIGN.md's board slice 06 log) but
+ * server-side on every render/packet) but
  * "does this exact token still appear in the text at all", answered by a single
  * linear scan with no backtracking-capable pattern. A plain presence check can
  * false-positive if the id string happens to appear inside a label rather than as
  * a real id; it cannot false-negative on a legitimate, still-present id, which is
  * the failure mode that actually matters for "an anchor that no longer resolves
- * reports what it lost" (DESIGN.md) — a live anchor must never be misreported
- * lost. Parsing mermaid's grammar fully stays client-side, from its own CDN engine
- * (DESIGN.md "The daemon renders markdown; the page renders mermaid"). */
+ * reports what it lost" — a live anchor must never be misreported
+ * lost. Parsing mermaid's grammar fully stays client-side, from its own CDN engine. */
 export function mermaidRefResolves(source, ref) {
   if (!ref) return false;
   const text = String(source ?? '');
@@ -1012,23 +1005,23 @@ export function mermaidRefResolves(source, ref) {
   }
 }
 
-/** Ticket 05: whether a mermaid node's anchor still resolves -- the generic,
+/** Whether a mermaid node's anchor still resolves -- the generic,
  * page-scoped dom reference tried first, the node id leaned on as a fallback.
- * See this file's "ticket 05 design" comment above for the full reasoning; this
+ * See this file's diagram-node design comment above for the full reasoning; this
  * is deliberately a thin composition of two functions that already exist and
  * are already independently tested (resolveDomAnchorInSection, mermaidRefResolves)
  * rather than a third parsing path of its own -- the one new thing here is the
- * ORDER, which is the whole point ticket 05 exists to get right and pin down
+ * ORDER, which is the whole point this design exists to get right and pin down
  * somewhere checkable. `sectionHtml` is the mermaid block's own section,
  * re-rendered from its stored content exactly like resolveDomAnchorInSection's
  * other caller (src/board.mjs's resolveComment); `source` is the block's own
  * snapshotted diagram text, exactly what mermaidRefResolves already checked
- * before this ticket. `anchor` is the stored `{ kind: 'mermaid', ref, domRef,
- * hint }` object (or an older, pre-ticket-05 one carrying only `ref` -- both
+ * before this design. `anchor` is the stored `{ kind: 'mermaid', ref, domRef,
+ * hint }` object (or an older one carrying only `ref` -- both
  * `domRef` and `hint` are optional on purpose, see the design comment). */
 /** Same precedence as `resolveMermaidAnchor` below, against an ALREADY-PARSED
- * section root (see `resolveAtRoot`/`sectionRootFrom` above -- ticket 11, audit
- * V4) instead of a raw `sectionHtml` string this function would otherwise parse
+ * section root (see `resolveAtRoot`/`sectionRootFrom` above) instead of a raw
+ * `sectionHtml` string this function would otherwise parse
  * itself on every call. `sectionRoot` may be null (an empty/unrenderable
  * section) -- the generic half then simply cannot resolve, same as
  * `resolveDomAnchorInSection` returning false for a missing section root. */
@@ -1041,15 +1034,15 @@ export function resolveMermaidAnchor(sectionHtml, source, anchor) {
   return resolveMermaidAnchorAtRoot(sectionRootFrom(sectionHtml), source, anchor);
 }
 
-// --- polish ticket 02 (DESIGN.md): the pending-comment queue, pure -------------
+// --- the pending-comment queue, pure ----------------------------------------
 //
 // `pendingComments` itself (an array of `{ id, blockId, anchor, text }`) lives
 // only in src/ui.mjs's page-lifetime state -- there is no server shape for it,
 // nothing here persists it, and ADR.md entry 2 is why: deletion and editing
 // apply only to a comment still queued client-side, never to anything in
 // `board.comments`, which stays append-only. These two functions are the ones
-// ticket 02's own log calls out for extraction: the click-to-edit gesture
-// (criterion 1) and the list entry's delete control (criterion 2) used to be
+// this section's own notes call out for extraction: the click-to-edit gesture
+// and the list entry's delete control used to be
 // logic inline in a click handler, verified only by eye -- this repo's own
 // recorded pattern for how a gesture ships dead under a green suite. Both are
 // embedded verbatim into src/ui.mjs's client script via `.toString()` (the
@@ -1061,19 +1054,19 @@ export function resolveMermaidAnchor(sectionHtml, source, anchor) {
  * `board.comments`) already anchored at `blockId` + the same clicked-element
  * identity as `anchor` -- same `kind`, and the same `ref` (`hint`/`domRef` are
  * cosmetic labels composed for the agent to read, never compared) -- or
- * `undefined` if none. Ticket 02 criterion 1: every anchor-minting click
+ * `undefined` if none. Every anchor-minting click
  * handler in src/ui.mjs (the generic page-wide listener, the html-stage's
  * `handleStageClick`, and `wireMermaidBlock`'s own) calls this BEFORE opening
  * a blank form, so a second click on an element already carrying a queued
  * comment reopens and edits it instead of queuing a duplicate.
  *
  * A SENT comment can never satisfy this by construction, not merely by
- * caller discipline (criterion 3, "no edit path" for a sent comment): it
+ * caller discipline ("no edit path" for a sent comment): it
  * lives in `board.comments`, a different array from `pendingComments` in
  * every real call site -- this function has no notion of "sent" at all, it
  * only ever searches whatever list it is given. (src/ui.mjs also calls this
  * same function with `board.comments` itself, deliberately, to answer a
- * different question -- criterion 12's "does this element already carry a
+ * different question -- "does this element already carry a
  * SENT comment" -- reusing the one match rule rather than a second copy of
  * it; that reuse is what "no notion of sent" buys.) */
 export function findPendingCommentForAnchor(pendingComments, blockId, anchor) {
@@ -1091,7 +1084,7 @@ export function findPendingCommentForAnchor(pendingComments, blockId, anchor) {
 
 /** `pendingComments` with the entry whose own `id` is `id` removed -- a NEW
  * array, never a mutation of the one passed in (a caller still holding the
- * old reference is unaffected). Criterion 2: "using it removes the entry ...
+ * old reference is unaffected). "Using it removes the entry ...
  * and renumbers the remaining provisional pins so they stay contiguous."
  * Renumbering needs no extra step here: a provisional comment's number is
  * never stored ON it, it is derived from its POSITION in this array

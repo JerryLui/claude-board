@@ -1,4 +1,4 @@
-// Native pomodoro-boundary notification (SPEC_POMODORO.md criterion 5, ticket 02).
+// Native pomodoro-boundary notification.
 //
 // NO REAL NOTIFICATION MAY EVER FIRE FROM THIS SUITE. Every check below stubs
 // `osascript` with a fake executable placed first on PATH -- the exact shape
@@ -26,7 +26,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 // "enumerated rather than hardcoded" rule, extended to the checks: a fixed
 // ['Glass', 'Sosumi', ...] list would be right about a stock Mac and wrong about a
 // reader's pruned one). Three distinct real cues are what "three phases set to three
-// different sounds produce three different sounds" (criterion 3) needs to tell apart;
+// different sounds produce three different sounds" needs to tell apart;
 // NO_CUE ('None') is imported separately since it is never one of these.
 const REAL_CUES = cueNames().filter(n => n !== NO_CUE);
 assert.ok(REAL_CUES.length >= 3, 'this machine needs at least 3 real sounds in /System/Library/Sounds for this check to tell three phases apart');
@@ -127,7 +127,7 @@ async function main() {
     });
   });
 
-  await check('notify: false fires nothing at all (criterion 6: notify is a master switch over the cue too)', async () => {
+  await check('notify: false fires nothing at all (notify is a master switch over the cue too)', async () => {
     const log = freshLog();
     await withStubOnPath(log, {}, async () => {
       notifyBoundary('work', { notify: false, cueWork: CUE_WORK });
@@ -168,7 +168,7 @@ async function main() {
     assert.doesNotMatch(body, /settings|readDoc/, 'notifyTest must not consult the saved settings');
   });
 
-  await check('criterion 3: each phase crosses ITS OWN cue by name, and three different phases play three different sounds', async () => {
+  await check('each phase crosses ITS OWN cue by name, and three different phases play three different sounds', async () => {
     const log = freshLog();
     await withStubOnPath(log, {}, async () => {
       const settings = { notify: true, cueWork: CUE_WORK, cueBreak: CUE_BREAK, cueLongBreak: CUE_LONG_BREAK };
@@ -197,7 +197,7 @@ async function main() {
     });
   });
 
-  await check('criterion 3: a phase set to None crosses no sound argument at all', async () => {
+  await check('a phase set to None crosses no sound argument at all', async () => {
     const log = freshLog();
     await withStubOnPath(log, {}, async () => {
       notifyBoundary('break', { notify: true, cueWork: CUE_WORK, cueBreak: NO_CUE, cueLongBreak: CUE_LONG_BREAK });
@@ -389,7 +389,7 @@ process.exit(0);
     });
   });
 
-  await check('inside a bundle, the phase\'s cue crosses as a third argv argument, criterion 4 (same sound on each install)', async () => {
+  await check('inside a bundle, the phase\'s cue crosses as a third argv argument (same sound on each install)', async () => {
     const launcherLog = path.join(workDir, 'launcher-invocations-2.log');
     const { mod } = await importFromFakeBundle('claude-board-2');
     await withStubOnPath(freshLog(), { STUB_LAUNCHER_LOG: launcherLog }, async () => {
@@ -445,7 +445,7 @@ process.exit(0);
     }
   });
 
-  await check('criterion 10: no audio file is tracked anywhere in the repo', async () => {
+  await check('no audio file is tracked anywhere in the repo', async () => {
     const r = spawnSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     const audioExt = /\.(aiff|wav|mp3|m4a|caf|aac|ogg)$/i;

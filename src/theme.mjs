@@ -26,7 +26,7 @@
 /** The `localStorage` key an explicit override is stored under. Only 'light' or
  * 'dark' is ever written -- System is the ABSENCE of this key (removed with
  * `removeItem`, never a stored 'system' sentinel), so returning to System
- * leaves nothing behind to be residue (criterion 4). */
+ * leaves nothing behind to be residue. */
 export const THEME_STORAGE_KEY = 'cb-theme';
 
 /** Dispatched on `window`, by `themeBootScript` below, every time it applies a
@@ -35,7 +35,7 @@ export const THEME_STORAGE_KEY = 'cb-theme';
  * light/dark preference change while System is in force. src/ui.mjs's client
  * script -- a SEPARATE `<script>` on the page, with no shared scope this file
  * could call into directly -- listens for this to redraw every mermaid diagram
- * in whatever the new active palette is (ticket 04, DESIGN.md: "Mermaid.
+ * in whatever the new active palette is ("Mermaid.
  * Re-initialize and re-run every diagram on a switch"). Named in the repo's
  * `cb-`-prefixed style, matching `cb-stage` in src/render.mjs's
  * `stageAgentScript`/src/ui.mjs's own `STAGE_CB`. */
@@ -79,7 +79,7 @@ const DARK_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" s
  * lookups (here and src/ui.mjs) are tag-qualified, not bare `#theme-toggle`
  * -- a heading `## Theme toggle` mints a second `id="theme-toggle"` on an
  * `<h2>` (src/markdown.mjs's slugify), and `button#theme-toggle` is what the
- * real control has that a heading never can (audit 2026-07-31, finding L1). */
+ * real control has that a heading never can. */
 export function themeToggle() {
   return `<button type="button" id="theme-toggle" class="mode-toggle mode-toggle-icon" aria-label="${STATE_LABEL.system}" title="${STATE_LABEL.system}">${SYSTEM_ICON}</button>`;
 }
@@ -107,9 +107,9 @@ export function themeToggle() {
  *    a plain, unconditional `:root[data-theme="light"]` for an explicit
  *    override) reads this attribute the very first time the stylesheet is
  *    evaluated -- there is no second pass. Setting it a tick later, after
- *    paint, is exactly what produces the dark-then-light flash criterion 1
+ *    paint, is exactly what produces the dark-then-light flash this
  *    rules out. In System mode (no stored override) NO attribute is ever set
- *    at all, which is what makes criterion 4's "no residue" real: the CSS
+ *    at all, which is what makes "no residue" real: the CSS
  *    media query alone then drives the page's own colors, no JS listener
  *    needed for THAT. A live OS preference change still needs one for a
  *    different reason -- job 3 below.
@@ -122,7 +122,7 @@ export function themeToggle() {
  *    icon matching whatever state actually won step 1, and wire its click to
  *    cycle System -> Light -> Dark -> System.
  *
- * 3. Ticket 04 (DESIGN.md): notify the REST of the page that the active
+ * 3. Notify the REST of the page that the active
  *    theme may just have changed. A mermaid diagram is rendered once,
  *    client-side, into a fixed set of colors baked into its SVG at render
  *    time (src/ui.mjs) -- CSS custom properties do nothing for content that
@@ -139,7 +139,7 @@ export function themeToggle() {
  *    actually in force (checked at fire time, not baked in at registration,
  *    since which one is true can itself change between now and then).
  *
- * 4. Audit finding M4: listen for a `'storage'` event -- the platform's own
+ * 4. Listen for a `'storage'` event -- the platform's own
  *    notification that `cb-theme` changed in ANOTHER browsing context
  *    sharing this origin (never fired in the tab that made the write, so
  *    this can never double-apply a click `setState` already handled
@@ -155,7 +155,7 @@ export function themeToggle() {
  *
  * Storage contract: only 'light' / 'dark' is ever written; System is the
  * ABSENCE of the key (`removeItem`, never a stored 'system' sentinel -- an
- * explicit sentinel is residue, which is exactly what criterion 4 rules out).
+ * explicit sentinel is residue, which is exactly what gets ruled out).
  * Every storage access is gated on BOTH `location.protocol !== 'file:'` (the
  * product decision -- a standalone archive persists nothing) AND wrapped in
  * try/catch (private-mode / disabled-storage throws even when the protocol
@@ -252,7 +252,7 @@ export const themeBootScript = `
     else if (systemQuery.addListener) systemQuery.addListener(onSystemPreferenceChange); // Safari < 14
   }
 
-  // Audit finding M4: a second tab must not silently overwrite what the
+  // A second tab must not silently overwrite what the
   // reader just chose. 'cb-theme' is one value per origin, but each
   // document's own cycle position (currentState(), read off ITS OWN
   // data-theme attribute) is snapshotted at boot and never told about a

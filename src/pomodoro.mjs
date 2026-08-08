@@ -29,8 +29,8 @@ import { boardHome } from './store.mjs';
 import { isCue, pickCue, NO_CUE, SOUNDS_DIRS } from './cues.mjs';
 
 // ---------------------------------------------------------------------------------
-// Settings, defaults, and the document shape (a contract other tickets build against
-// — see SPEC_POMODORO.md; do not change field names without checking who reads them).
+// Settings, defaults, and the document shape (a contract other tickets build against;
+// do not change field names without checking who reads them).
 // ---------------------------------------------------------------------------------
 
 // The three per-phase cue defaults go through pickCue (src/cues.mjs) rather than
@@ -49,7 +49,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   longBreakMin: 15,
   longEvery: 4,
   notify: true,
-  // Three DIFFERENT cues (spec criterion 9) -- one per phase, so the reader tells
+  // Three DIFFERENT cues -- one per phase, so the reader tells
   // work/short-break/long-break apart by ear without looking at the screen.
   cueWork: pickCue('Hero'),
   cueBreak: pickCue('Purr'),
@@ -58,8 +58,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 /** How late a deadline is allowed to run before the interval counts as EXPIRED rather
  * than merely late. Below this, `settleBoundary` advances the loop as if it ran on
- * time; above it, the timer is discarded with no advance and no notification
- * (criterion 7). 30s covers a `setTimeout`'s own ordinary slack (event loop backlog,
+ * time; above it, the timer is discarded with no advance and no notification.
+ * 30s covers a `setTimeout`'s own ordinary slack (event loop backlog,
  * a heavy GC pause) without covering anything that looks like real sleep — a laptop
  * lid closing is minutes to hours late, never single-digit seconds. */
 export const EXPIRY_GRACE_MS = 30_000;
@@ -109,7 +109,7 @@ export function formatCountdown(ms) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-/** The local-midnight reset (criterion 4, second half). Cheap and total: called at
+/** The local-midnight reset. Cheap and total: called at
  * the top of every function that is about to do cycle arithmetic, never as a
  * standalone background job — there is nothing to reset ahead of time, since the
  * value only ever matters at the next place that reads it, and every such place
@@ -120,7 +120,7 @@ export function normalizeCycle(doc, now) {
   return { ...doc, cycle: 0, cycleDate: today };
 }
 
-/** The "ensure" half (criterion 2's no-op rule, and what a session-start hook —
+/** The "ensure" half (what a session-start hook —
  * wired by another slice — calls through the impure ensureTimer below). Starts a
  * fresh work interval ONLY when there is no timer at all: a running timer, a paused
  * timer, and a timer mid-break are every one of them left untouched, which is what
@@ -131,8 +131,8 @@ export function startWork(doc, now) {
   return { ...base, timer: { phase: 'work', deadline: now + base.settings.workMin * 60_000, paused: false } };
 }
 
-/** The loop's one boundary-crossing rule (criteria 3, 4, 7), and the seam ticket 02
- * hangs a notification off: this function only REPORTS that a boundary occurred
+/** The loop's one boundary-crossing rule, and the seam a notification hangs
+ * off: this function only REPORTS that a boundary occurred
  * ({ phase }); it fires nothing itself.
  *
  * `now < doc.timer.deadline` is the overwhelmingly common case (called on every real
@@ -180,27 +180,27 @@ export function settleBoundary(doc, now) {
   return { doc: nextDoc, boundary: { phase: nextPhase } };
 }
 
-/** Forward (SPEC_FORWARD.md, criteria 1-4; ADR.md entry 24).
- * No-op — returns `doc` UNCHANGED, by reference — against no timer at all (criterion
- * 4): idle has no interval to end early, and inventing one here would be `startWork`'s
+/** Forward (ADR.md entry 24).
+ * No-op — returns `doc` UNCHANGED, by reference — against no timer at all: idle has no
+ * interval to end early, and inventing one here would be `startWork`'s
  * job, not this one's.
  *
  * Otherwise this reuses `settleBoundary` itself rather than re-deriving its cycle
  * bookkeeping (ADR 24's whole point): it forges a doc whose timer already looks like
- * it hit its deadline exactly now — `paused: false` (criterion 3: forwarding a paused
+ * it hit its deadline exactly now — `paused: false` (forwarding a paused
  * timer both advances AND leaves the next phase running, so the paused flag a real
  * boundary would never see is cleared before settleBoundary ever looks at it) and
  * `deadline: now` (so `late === 0`, comfortably inside EXPIRY_GRACE_MS — a forward is
  * never the EXPIRED path; that path is what happens when nobody was there to press
  * anything). `settleBoundary` then computes the exact same next phase and cycle
- * arithmetic a natural boundary would have, which is criterion 1 verbatim: a forwarded
+ * arithmetic a natural boundary would have: a forwarded
  * work interval still earns its break, a forwarded break still increments the cycle, a
  * forwarded long break still resets it.
  *
  * The `boundary` half of settleBoundary's return is deliberately discarded: that value
  * is what src/pomodoro.mjs's own reconcile() feeds to `onBoundary` (the notification
  * seam), and forward's caller (createPomodoro.forward below) never sees it, which is
- * what makes criterion 2 (no notification, no cue) true by construction rather than by
+ * what makes "no notification, no cue" true by construction rather than by
  * a caller remembering to suppress it. */
 export function forwardTimer(doc, now) {
   if (!doc.timer) return doc;
@@ -209,21 +209,21 @@ export function forwardTimer(doc, now) {
   return next;
 }
 
-/** Restart (same slice, criteria 5-6). No-op — returns `doc` UNCHANGED, by reference —
+/** Restart. No-op — returns `doc` UNCHANGED, by reference —
  * against no timer at all, same reasoning as forwardTimer above.
  *
  * Otherwise re-mints `deadline` to a FULL interval of whatever phase is already
- * running, read from `doc.settings` at call time (criterion 5: "the current settings",
+ * running, read from `doc.settings` at call time ("the current settings",
  * not whatever was in effect when the interval first started — the same
  * read-at-the-boundary rule mergeSettings' own comment already applies to every OTHER
  * boundary). `phase` and `cycle`/`cycleDate` are carried through untouched, spelled
- * out rather than left to normalizeCycle: criterion 5 says restart touches neither, and
+ * out rather than left to normalizeCycle: restart touches neither, and
  * a midnight rollover crossed by a restart click is still normalizeCycle's job at the
  * next real boundary, not this one's.
  *
  * Builds a fresh `{ phase, deadline, paused: false }` rather than spreading
  * `doc.timer`, which is what drops a stale `remainingMs` left over from a paused timer
- * (criterion 6: restart unpauses) instead of leaving it beside a `deadline` a future
+ * (restart unpauses) instead of leaving it beside a `deadline` a future
  * reader could mistake for still meaning something — the same shape pauseTimer/
  * resumeTimer already keep exactly one of `deadline` or `remainingMs` for. */
 export function restartTimer(doc, now) {
@@ -233,7 +233,7 @@ export function restartTimer(doc, now) {
   return { ...doc, timer: { phase, deadline: now + durationMin * 60_000, paused: false } };
 }
 
-/** Pause (spec criterion 8). No-op — returns `doc` UNCHANGED, by reference, so callers
+/** Pause. No-op — returns `doc` UNCHANGED, by reference, so callers
  * can skip a needless write — against no timer at all and against a timer that is
  * already paused; pressing pause twice, or pausing a board with nothing running, must
  * not throw and must not fabricate a paused state out of nothing.
@@ -265,7 +265,7 @@ export function resumeTimer(doc, now) {
 
 /** Reset: ends the loop outright rather than merely clearing the running interval —
  * `cycle` goes back to 0 alongside `timer: null` because reset ends the loop the cycle
- * was counting, not just the one interval inside it (spec criterion 8's own wording).
+ * was counting, not just the one interval inside it.
  * Unlike pause/resume there is no nonsensical state to no-op against: resetting an
  * already-idle document just restates `timer: null, cycle: 0`, which is already true, so
  * this never needs to inspect `doc` before acting. `now` is accepted and ignored, purely
@@ -286,7 +286,7 @@ export function resetTimer(doc, _now) {
 
 const DURATION_KEYS = ['workMin', 'breakMin', 'longBreakMin'];
 const TOGGLE_KEYS = ['notify'];
-// The three per-phase cue settings (SPEC_CUES.md criterion 1) -- validated against
+// The three per-phase cue settings -- validated against
 // src/cues.mjs's isCue, the one place the closed set of legal values (the 14 sounds
 // macOS ships, plus `None`) is enumerated. Not re-enumerated here on purpose (this
 // file's own comment above already says do not re-derive that set anywhere else).
@@ -306,6 +306,14 @@ const MAX_DURATION_MIN = 24 * 60;
  * generous-not-tight ceiling as MAX_DURATION_MIN — nobody plans a 100-pomodoro day, but
  * this only exists to keep the arithmetic sane, not to enforce a sensible schedule. */
 const MAX_LONG_EVERY = 100;
+
+/** Node's setTimeout coerces anything past this to 1ms rather than clamping to it. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** The closed set of phases a stored timer may name — settleBoundary's advance rule and
+ * durationMin both fall through to `break` for anything unrecognised, so a document
+ * naming a phase that does not exist would silently run on break durations forever. */
+const PHASES = ['work', 'break', 'longBreak'];
 
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -415,12 +423,12 @@ function atomicWrite(targetPath, contents) {
  * complete: there is no separate one-shot migration pass, only "the next write
  * carries the normalized shape back to disk".
  *
- * Migration (SPEC_CUES.md criterion 9): the retired `sound` boolean, if present,
+ * Migration: the retired `sound` boolean, if present,
  * becomes a THIRD layer of defaults — `Glass` on all three cues for `sound: true`,
  * `None` for `sound: false` — spread in UNDER whatever the document already states
  * explicitly for `cueWork`/`cueBreak`/`cueLongBreak`, exactly the way DEFAULT_SETTINGS
  * itself is already a layer under the parsed settings a few lines below. That is a
- * deliberate choice, not the only reading of criterion 9: a document could instead
+ * deliberate choice, not the only reading: a document could instead
  * carry both a `sound` key and already-present cue keys if an already-migrated
  * document (one that had already gone through this function once, been written back
  * without `sound`, and then had its cues hand-picked) had `sound` re-added by a hand
@@ -432,18 +440,51 @@ function atomicWrite(targetPath, contents) {
 export function normalizeDoc(parsed) {
   const parsedSettings = parsed && typeof parsed.settings === 'object' && parsed.settings ? parsed.settings : {};
   const { sound, ...rest } = parsedSettings;
-  // pickCue('Glass'), not the bare literal criterion 9 words it as: on a machine whose
+  // pickCue('Glass'), not the bare literal the spec words it as: on a machine whose
   // /System/Library/Sounds has no Glass.aiff, a migration writing the literal would put a
   // value in the document that mergeSettings then REFUSES, so the reader's next save of
   // any unrelated field 400s on a cue they never chose. pickCue degrades that one case to
-  // `None` and leaves criterion 9 satisfied verbatim everywhere Glass actually exists,
+  // `None` and leaves the requirement satisfied verbatim everywhere Glass actually exists,
   // which is every stock machine.
   const migrated = sound ? pickCue('Glass') : NO_CUE;
   const soundMigration = 'sound' in parsedSettings ? { cueWork: migrated, cueBreak: migrated, cueLongBreak: migrated } : {};
+  // `rest` and `timer` come off disk unvalidated, and this file is hand-editable by
+  // design. Both are run through the same validators mergeSettings uses at the HTTP
+  // boundary, because an unvalidated document does not merely render oddly -- it makes
+  // the daemon ACT. A timer with no `deadline` compares `now < undefined` as false and
+  // `NaN > EXPIRY_GRACE_MS` as false, so settleBoundary skipped its EXPIRED guard and
+  // took the ADVANCE branch: a real notification and cue for an interval that never ran.
+  // A non-numeric workMin yielded setTimeout(NaN) -> 1ms -> a full write per millisecond.
+  // Deliberately weaker than mergeSettings, which is the HTTP trust boundary and stays
+  // strict (bounded integers). This layer only has to guarantee the arithmetic downstream
+  // cannot produce NaN -- `deadline = now + workMin * 60_000` with a string workMin gave
+  // setTimeout(NaN) -> 1ms -> a full write per millisecond. A finite positive number is
+  // therefore the whole requirement: a fractional duration written straight to disk is a
+  // legitimate thing to do (the suite seeds sub-second intervals that way) and harmless,
+  // now that arm() clamps the far end too.
   const settings = { ...DEFAULT_SETTINGS, ...soundMigration, ...rest };
+  const isPositiveFinite = v => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  for (const key of ['workMin', 'breakMin', 'longBreakMin', 'longEvery']) {
+    if (!isPositiveFinite(settings[key])) settings[key] = DEFAULT_SETTINGS[key];
+  }
+  if (typeof settings.notify !== 'boolean') settings.notify = DEFAULT_SETTINGS.notify;
+  for (const key of ['cueWork', 'cueBreak', 'cueLongBreak']) {
+    if (!isCue(settings[key])) settings[key] = DEFAULT_SETTINGS[key];
+  }
+
   const cycle = Number.isInteger(parsed && parsed.cycle) ? parsed.cycle : 0;
   const cycleDate = typeof (parsed && parsed.cycleDate) === 'string' ? parsed.cycleDate : null;
-  const timer = parsed && typeof parsed.timer === 'object' ? parsed.timer : null;
+
+  // A timer is kept only if it can actually be settled: a known phase, plus whichever of
+  // deadline/remainingMs its paused state calls for. Anything else is dropped to null,
+  // which reads as "no interval running" -- the same outcome a missing file gives.
+  const raw = parsed && isPlainObject(parsed.timer) ? parsed.timer : null;
+  let timer = null;
+  if (raw && PHASES.includes(raw.phase)) {
+    const paused = raw.paused === true;
+    const anchor = paused ? raw.remainingMs : raw.deadline;
+    if (typeof anchor === 'number' && Number.isFinite(anchor)) timer = { ...raw, paused };
+  }
   return { settings, cycle, cycleDate, timer };
 }
 
@@ -471,8 +512,8 @@ export function writeDoc(doc, home = boardHome()) {
 // ---------------------------------------------------------------------------------
 
 /** Boots and owns the live clock for one daemon instance. `onBoundary({ phase, settings
- * })` is the seam ticket 02 hangs a real notification off (src/notify.mjs) — ponytail:
- * this module still fires nothing itself, by design (criterion 10's "no tool learns of
+ * })` is the seam a real notification hangs off (src/notify.mjs) — ponytail:
+ * this module still fires nothing itself, by design ("no tool learns of
  * the timer" extends to this module too; the no-op default below is what a caller that
  * wants no notifications, e.g. a check, gets for free). */
 export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {}) {
@@ -488,7 +529,14 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
   function arm(doc, now) {
     clearArmed();
     if (!doc.timer || doc.timer.paused) return;
-    const delay = Math.max(0, doc.timer.deadline - now);
+    // Clamped at BOTH ends. Node coerces any delay over 2^31-1 ms to 1ms, so a deadline
+    // more than ~24.8 days out -- a backward clock jump (a dead-battery Mac booting
+    // before NTP syncs, a restored VM snapshot) or a hand-edited file, both of which
+    // readDoc promises to survive -- re-armed every millisecond without ever reaching
+    // the deadline, so it never converged. Measured at 846 re-arms per second on the
+    // daemon's only thread. Clamping instead re-arms once per MAX_TIMEOUT_MS and lets
+    // reconcile settle it when the deadline finally arrives.
+    const delay = Math.min(Math.max(0, doc.timer.deadline - now), MAX_TIMEOUT_MS);
     timeoutHandle = setTimeout(() => reconcile(Date.now()), delay);
     // Belt and suspenders with close() below, same reasoning as the SSE heartbeat a
     // few lines over in src/server.mjs: a live pomodoro must never be the reason an
@@ -508,13 +556,13 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     arm(next, now);
     // `settings` rides along here, not inside settleBoundary's own boundary object: the
     // pure function (above) knows nothing about notification toggles, only the loop --
-    // src/notify.mjs (ticket 02) reads settings.notify/settings.sound off this.
+    // src/notify.mjs reads settings.notify/settings.sound off this.
     if (boundary) onBoundary({ ...boundary, settings: next.settings });
     return next;
   }
 
   return {
-    /** Boot-time reconciliation (criteria 6, 7): apply the expiry rule to whatever is
+    /** Boot-time reconciliation: apply the expiry rule to whatever is
      * on disk and arm the next real boundary if a timer survives it. Deliberately
      * does NOT start a fresh timer when there is none — a daemon restart alone must
      * not begin a pomodoro nobody asked for; that is ensureTimer's job, called by
@@ -522,7 +570,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     boot(now = Date.now()) {
       return reconcile(now);
     },
-    /** The session-start seam (criterion 2's "starting when one is already running is
+    /** The session-start seam ("starting when one is already running is
      * a no-op", extended to "starting is starting a NEW work interval"). Safe to call
      * on every session start: startWork is a no-op against anything already in
      * `timer`, running, paused or mid-break alike. */
@@ -589,7 +637,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     },
     /** Restart (src/server.mjs POST /api/pomodoro/restart). Same wrapper shape as
      * forward above — read, apply the pure restartTimer, and only persist/re-arm on an
-     * actual change (idle stays a no-op, criterion 6). */
+     * actual change (idle stays a no-op). */
     restart(now = Date.now()) {
       const doc = readDoc(home);
       const next = restartTimer(doc, now);

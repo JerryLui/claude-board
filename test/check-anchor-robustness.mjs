@@ -1,4 +1,4 @@
-// Ticket 11 (DESIGN.md), audit V5a: `decodeEntities` used to raise
+// `decodeEntities` used to raise
 // `RangeError` on an out-of-range numeric entity (`&#1114112;`, one past Unicode's
 // max; `&#x999999999;`, wildly larger), contradicting parseHtmlTree's own "Never
 // throws" contract. The only reachable input is raw `block.html` on an `html`
@@ -12,8 +12,7 @@
 // this check's first `check()` failed the submit with a 500 (the throw happening
 // inside `renderBoardPage` at src/server.mjs's old writeBoard-then-writePage
 // ordering, AFTER the board was already durably written) and every GET/`/wait`
-// after it also 500'd, forever -- see this file's "ablation" note in the ticket
-// report for the actual captured output.
+// after it also 500'd, forever.
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -52,7 +51,7 @@ function writeHeaders(extra) {
 }
 
 /** `fetch`, shadowed for this module only, carrying the secret on every call — reads are
- * gated too now (SPEC_LAUNCH.md), and nothing in this file is about the credential.
+ * gated too now, and nothing in this file is about the credential.
  * test/check-http.mjs owns the gate itself and does the same thing for the same reason. */
 const rawFetch = globalThis.fetch;
 function fetch(input, init = {}) {
@@ -167,8 +166,8 @@ async function main() {
     const packet = await waitRes.json();
     assert.equal(packet.status, 'submitted');
     assert.equal(packet.comments.length, 1);
-    // The comment may resolve true or false depending on ticket 08's hint-match
-    // semantics (out of this ticket's scope) -- what matters here is that
+    // The comment may resolve true or false depending on hint-match semantics
+    // (out of scope here) -- what matters here is that
     // resolving it never throws and always comes back as a well-formed verdict.
     assert.equal(typeof packet.comments[0].resolved, 'boolean');
   });

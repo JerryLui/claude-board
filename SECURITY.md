@@ -1,17 +1,33 @@
 # Security
 
 claude-board runs an always-on HTTP daemon as your login user and serves it pages
-containing excerpts of your source files. That is a meaningful thing to install, so this
-document states plainly what it defends against and what it does not.
+containing excerpts of your source files.
 
-**Status: pre-release.** [What is deliberately not defended](#not-defended-by-design) is
-worth reading before installing.
+**Status: pre-release.** [Known and unclosed](#known-and-unclosed) and [what is
+deliberately not defended](#not-defended-by-design) are both worth reading before
+installing.
 
 ## Threat model
 
 One human, one machine, one browser. Everything below assumes an attacker who is *not*
 you and not on your machine, plus a partial defence against local software that is not
 the daemon's own session.
+
+**What is being protected**, in the order that matters:
+
+- **The integrity of the reviewer's decision.** A submitted board is not a record; it is
+  an input the agent then acts on. Everything else here is data, and this one is
+  authority. Board content is agent-authored and untrusted, and it shares a screen with
+  the controls that record an answer — so the invariant the rest of this document
+  enforces is that **a stage may propose; it may never decide**. A forged submit is worse
+  than a leaked board, because what gets counterfeited is the human's judgement.
+- **Board content, and the source excerpts inside it.** A board embeds whatever it
+  resolved, snapshotted at post time, plus every question, answer and comment. Reading a
+  board is reading the code it quotes — including anything an allowlisted root can reach.
+- **The daemon's TCC grants.** The bundle holds access to `~/Documents`, `~/Desktop` and
+  `~/Downloads`. That is a capability the terminal-hosted agent does not itself have, so
+  anything that can make the daemon read a file is spending the daemon's grants, not its
+  own.
 
 ### Defended
 
@@ -43,78 +59,57 @@ squats the port during a restart window is handed the credential it could not re
 
 **What the launcher bundle is for.** Those same three directories are why the plist runs
 `~/Applications/claude-board.app` rather than `node` directly. TCC identifies an
-application by its code signature and its enclosing bundle, so if launchd is told to run
-the interpreter, the only grant that lets a board render a file from `~/Documents` is a
-grant to *every* node program on the machine — and, since homebrew's node is ad-hoc
-signed under a versioned Cellar path, one that silently dies at the next `brew upgrade
-node`. `install.sh` compiles `bin/launcher.c` into a bundle of our own instead (ad-hoc
-signed, identifier `io.github.jerrylui.claude-board`), and that bundle is what the user
-grants: one application, one folder, revocable on its own, listed under its own name. The
-launcher forks node rather than exec'ing it, because TCC decides against the responsible
-process and a child inherits its parent's — an exec would put node's identity back in the
-frame and undo the whole arrangement.
+application by its code signature and its enclosing bundle, so telling launchd to run the
+interpreter would mean granting `~/Documents` to *every* node program on the machine.
+`install.sh` compiles `bin/launcher.c` into a bundle of our own instead (ad-hoc signed,
+identifier `io.github.jerrylui.claude-board`): one application, one folder, revocable on
+its own, listed under its own name. It forks node rather than exec'ing it, because TCC
+decides against the responsible process and a child inherits its parent's.
 
-The launcher takes no arguments on the supervising path, and the path it runs is compiled
-in rather than read from the plist. The bundle is an identity the user has granted a
-folder to; if it ran whatever the plist named, anything able to rewrite a file in
-`~/Library/LaunchAgents` — which is to say any process running as you, including one TCC
-has refused — could spend that grant on its own code.
+The path the launcher runs is compiled in rather than read from the plist. If it ran
+whatever the plist named, anything able to rewrite a file in `~/Library/LaunchAgents` —
+which is to say any process running as you, including one TCC has refused — could spend
+the bundle's grant on its own code.
 
 **The environment the daemon runs in.** The launcher `execve`s with an environment it
 constructs itself rather than passing its own through (`bin/launcher.c`, `OVERRIDE_ENV` /
-`PASSTHROUGH_NAMES`). `HOME`, `PATH`, `CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS` and
-`CLAUDE_BOARD_SERVE_ROOTS` — the five variables that decide what the daemon may read,
-serve and write — are compiled in, alongside `CLAUDE_BOARD_NODE`, `CLAUDE_BOARD_DAEMON`
-and `CLAUDE_BOARD_REPO_ROOT`. `PATH` is baked to a fixed `/usr/bin:/bin:/usr/sbin:/sbin`,
-since the daemon shells out to `osascript` and `open` and an inherited `PATH` would be a
-code-execution path of its own. Only a short allowlist of timing and port knobs —
-`CLAUDE_BOARD_PORT`, `CLAUDE_BOARD_SHUTDOWN_MS`, `CLAUDE_BOARD_SSE_HEARTBEAT_MS`,
-`CLAUDE_BOARD_TIMEOUT_MS`, `CLAUDE_BOARD_HANDOFF_TTL_MS`, `TMPDIR` — is read from the
-plist, none of which can change what directory the grant reaches. Everything else,
-`NODE_OPTIONS` and `CLAUDE_BOARD_SECRET_FILE` included, is simply absent from the child's
-process: not stripped from an inherited environment, never placed there at all. `HOME`
-being baked is what makes `CLAUDE_BOARD_SECRET_FILE` safe to drop rather than allowlist —
-with it fixed, `~/.config/claude-board/secret` is the only secret path the process can
-reach.
+`PASSTHROUGH_NAMES`). The five variables that decide what the daemon may read, serve and
+write — `HOME`, `PATH`, `CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS`,
+`CLAUDE_BOARD_SERVE_ROOTS` — are compiled in, alongside `CLAUDE_BOARD_NODE`,
+`CLAUDE_BOARD_DAEMON` and `CLAUDE_BOARD_REPO_ROOT`. `PATH` is baked fixed, since the
+daemon shells out to `osascript` and `open`. Only a short allowlist of timing and port
+knobs is read from the plist, none of which can change what directory the grant reaches.
+Everything else, `NODE_OPTIONS` and `CLAUDE_BOARD_SECRET_FILE` included, is never placed
+in the child's environment at all — and with `HOME` baked, `~/.config/claude-board/secret`
+is the only secret path the process can reach. The three boundary variables are therefore
+**not** written into the plist when a launcher bundle is in use, since a copy there would
+read as though rewriting the plist could still move the boundary; a customised value is
+carried across reinstalls through a record file in the 0700 directory beside the secret.
 
-`CLAUDE_BOARD_REF_ROOTS`, `CLAUDE_BOARD_SERVE_ROOTS` and `CLAUDE_BOARD_HOME` are
-therefore **not** written into the plist when a launcher bundle is in use: the launcher
-ignores it for these regardless of what it says, so a copy there would read as though
-rewriting the plist could still move the boundary. They are written unconditionally on
-the degraded (no-launcher) path, where node reads its environment straight from launchd
-because there is nowhere else for it to come from. A customised value is carried across
-reinstalls through a record file in the same 0700 directory as the secret, rather than by
-reading the plist back.
-
-**The build.** `install.sh` stages `bin/launcher.c` into the same throwaway `mktemp -d`
-directory it generates `launcher_paths.h` and `Info.plist` into, and compiles that copy
-with `-iquote`. The source's own `#include "launcher_paths.h"` is a *quoted* include, and
-a quoted include searches the including file's own directory first — so with the source
-and its real header staged together and no include path reaching back into the clone, a
-`launcher_paths.h` dropped next to `bin/launcher.c` cannot shadow the generated one. The
-fix is structural rather than a check that can rot. `install.sh` still prints one
-non-fatal warning naming the file if `bin/launcher_paths.h` exists in the clone: refusing
-outright would turn a stale, innocent leftover into a failed install, and silence would
-leave a planted one un-named.
+**The build.** `install.sh` compiles a *staged copy* of `bin/launcher.c` with `-iquote`,
+inside the throwaway directory it generates `launcher_paths.h` into. Since a quoted
+`#include` searches the including file's own directory first and no include path reaches
+back into the clone, a `launcher_paths.h` planted next to `bin/launcher.c` cannot shadow
+the generated one — structural, rather than a check that can rot. A leftover in the clone
+still draws one non-fatal warning naming it.
 
 **The code the bundle runs.** `bin/daemon.mjs` and the whole of `src/` are staged into
-`claude-board.app/Contents/Resources` before the `codesign` call, preserving their
-relative layout, so the ad-hoc signature and `codesign --verify` cover the payload exactly
-as they cover the launcher binary. `bin/mcp.mjs` and `bin/authorize.mjs` are deliberately
-not copied — they are the shim, invoked at the clone's own absolute path, never through
-the launcher or under the TCC-granted identity. The rebuild stamp
-(`~/.config/claude-board/launcher.stamp`) folds in a deterministic digest of that payload
-— every file's sha256 paired with its relative path, sorted before hashing, so the result
-depends only on content and never on mtime or directory-walk order — plus the sha256 of
-the *installed* executable computed after the atomic `mv`. A reinstall that changed
-nothing rebuilds nothing, so an already-granted user is never re-prompted by a routine
-`git pull && ./install.sh`.
+`claude-board.app/Contents/Resources` before the `codesign` call, so the ad-hoc signature
+covers the payload's bytes at the moment it is made. **Nothing re-checks those bytes at
+launch — see [Known and unclosed](#known-and-unclosed).** `bin/mcp.mjs` and
+`bin/authorize.mjs` are deliberately not copied: they are the shim, invoked at the clone's
+own absolute path, never under the TCC-granted identity. The rebuild stamp folds in a
+content-only digest of that payload, so a reinstall that changed nothing rebuilds nothing
+and an already-granted user is never re-prompted by a routine `git pull && ./install.sh`.
+The digest refuses any non-regular file outright and the staging copy dereferences with
+`cp -RL`, so the digest and the signed payload describe the same bytes.
 
 The clone is a build input, not a live execution path: a `git pull` alone changes nothing
 about what is running until `install.sh` runs again, and a bare `launchctl kickstart` no
-longer picks up a source edit (QUIRKS.md).
+longer picks up a source edit (QUIRKS.md). There is no auto-update and nothing checks for
+one, so pulling and reinstalling a security fix is the reader's job, not the daemon's.
 
-**Known limits of that, stated plainly rather than implied away.**
+**Known limits of that:**
 
 - **A rebuild costs the grant, on purpose.** Every value that decides what the daemon may
   read, serve or write is an input to the bundle's own bytes, so changing any of them
@@ -128,48 +123,32 @@ longer picks up a source edit (QUIRKS.md).
   poisoned bundle carries a different cdhash than the one already granted, so the
   reinstall re-prompts, and an attacker who cannot click through that prompt gets nothing.
   Treat the clone directory and the LaunchAgents plist as inside the trust boundary.
-- **`DYLD_INSERT_LIBRARIES` on the launcher's own load is untouched by any of this.** The
-  `execve`-built environment governs what the launcher hands *node*; it has no say over
-  what launchd hands the *launcher*, one hop earlier, because dyld reads its own family of
-  variables while loading the launcher's image, before a line of `main()` runs (QUIRKS.md).
-  Closing this needs hardened-runtime signing (`codesign --options runtime`), which carries
-  its own entitlement and TCC consequences.
-
-A board can render any file inside the board's project directory or the reference
-allowlist, and the launcher holds whatever folder access you gave it while it is running.
 
 **Where a reference can reach.** A reference resolves in exactly two places: inside the
 board's own project directory, or inside the reference allowlist —
 `CLAUDE_BOARD_REF_ROOTS`, colon-separated absolute paths. Anywhere else is refused, as a
-visible error on the block rather than a silent empty read. Every path is resolved through
-`realpath` before it is checked, so `../` traversal and a symlink aimed out of the project
-or out of a root are refused alike. Each configured root gets the same validation the
-project directory gets: it must be an existing directory, and `/`, `$HOME` and anything
-above `$HOME` are refused. That last one is decided on the directory's `dev` and `inode`
-rather than on how it is spelled, because macOS gives `$HOME` several equally real paths
-(a case-insensitive volume, the `/System/Volumes/Data` firmlink) that a string comparison
-sees as unrelated. A root that fails validation is dropped, never widened and never fatal;
-a spec that cannot be parsed as written — an entry that is not an absolute path, which is
-what a directory name containing `:` degenerates into — grants nothing at all rather than
-granting some neighbouring directory nobody named.
+visible error on the block rather than a silent empty read. `PROTOCOL.md` carries the
+enumerated rules — what is refused, in what order, and on what. What matters here is that
+every path is resolved through `realpath` before it is checked, so `../` traversal and a
+symlink aimed out of the project or out of a root are refused alike; that `/`, `$HOME` and
+anything above `$HOME` are never usable as roots; and that a root or a spec that fails
+validation is dropped rather than widened, so a malformed `CLAUDE_BOARD_REF_ROOTS` grants
+nothing rather than granting a neighbouring directory nobody named.
 
-**What the default allowlist is, and how it gets there.** `~/.claude/skills`,
-`~/.claude/commands`, `~/.claude/agents` and `~/Documents/renders`. Under `~/.claude`
-that is three directories, not the whole of it, which also holds `.credentials.json`,
-`settings.json`, shell snapshots and every project's transcripts. The fourth is the
-render directory the render skills already write into, so a page an agent just rendered
-can be posted by reference rather than pasted in by value; it is the same directory
-`CLAUDE_BOARD_SERVE_ROOTS` defaults to, and the two remain separate grants on separate
-variables. Every default root is a directory only this user writes to: a world-writable
-one (`/tmp`) is deliberately not a default, since a default reaches every install on the
-next upgrade and a reference root is read on an agent's say-so. Name it yourself if you
-want it. An *absent* `CLAUDE_BOARD_REF_ROOTS` means an empty
-allowlist, the project directory alone. The default lives in `install.sh` rather than in
-the daemon's code, so the boundary only ever widens during an install that prints the
-roots it resolved, and a value you narrowed once is carried forward rather than reset by
-the next upgrade. Set the variable and it does exactly what it says, including
-`CLAUDE_BOARD_REF_ROOTS=$HOME/.claude` for the whole tree or `CLAUDE_BOARD_REF_ROOTS=` for
-none.
+**What the default allowlist is.** `~/.claude/skills`, `~/.claude/commands`,
+`~/.claude/agents` and `~/Documents/renders`. Under `~/.claude` that is three directories,
+not the whole of it, which also holds `.credentials.json`, `settings.json`, shell
+snapshots and every project's transcripts. The fourth is the render directory the render
+skills already write into, so a page an agent just rendered can be posted by reference
+rather than pasted in by value; it is the same directory `CLAUDE_BOARD_SERVE_ROOTS`
+defaults to, and the two remain separate grants on separate variables. Every default root
+is a directory only this user writes to: a world-writable one (`/tmp`) is deliberately not
+a default, since a default reaches every install on the next upgrade and a reference root
+is read on an agent's say-so. Name it yourself if you want it. An *absent*
+`CLAUDE_BOARD_REF_ROOTS` means the project directory alone. The default lives in
+`install.sh` rather than in the daemon's code, so the boundary only ever widens during an
+install that prints the roots it resolved, and a value you narrowed once is carried
+forward rather than reset by the next upgrade.
 
 The allowlist is wider than a project-directory-only boundary (`ADR.md` entry 3):
 resolving a reference is only ever a read, and a session that could never show you the
@@ -179,13 +158,12 @@ can end up quoted into a board and readable by anyone holding the session creden
 allowlist is the set of directories you are willing to have quoted. Neither the daemon nor
 a reference ever writes to any of it.
 
-**The file that is checked is the file that is read.** The boundary above is enforced on a
-path, and a path is a name, not a thing: checking a name and then re-opening it is two
-lookups with a gap, and anything that can write inside an allowlisted root can change what
-the name means during that gap. So a reference is opened exactly once, refusing to follow
-a symlink in any component while it does, and every subsequent question — is it a regular
-file, is it under the 512 KiB cap, what are its bytes — is asked of that one open
-descriptor rather than of the name again.
+**The file that is checked is the file that is read.** A path is a name, not a thing:
+checking a name and then re-opening it is two lookups with a gap, and anything that can
+write inside an allowlisted root can change what the name means during that gap. So a
+reference is opened exactly once, refusing to follow a symlink in any component while it
+does, and every later question — regular file, under the cap, what are its bytes — is
+asked of that one descriptor rather than of the name again.
 
 **Another local process reading your boards, or forging an answer on one.** Every route
 but `GET /api/health` and `GET /auth/<token>` requires a credential — the index, a board
@@ -193,44 +171,37 @@ page, archive search, the blocking wait and the event stream alike. (`/auth/<tok
 the route that *hands out* the credential, so it cannot require one; it is protected by
 the token being unguessable, single-use and seconds-lived.) There are exactly two
 credentials: the secret file above, and a cookie the daemon derives from it and hands to
-your browser. **The cookie has a caveat worth reading before you rely on it — see "Any
-other HTTP server on your machine" below.** The browser gets it through a single-use
-handoff that lives about thirty seconds: the session's shim asks the daemon for one, opens
-that URL, and the daemon consumes it, sets the cookie and redirects to the plain board
-URL. Nothing you can bookmark carries a credential. If a browser ends up holding nothing —
-cleared cookies, a second profile, a different browser — the refusal page names one command
-that fixes it: `node bin/authorize.mjs` from your clone.
+your browser through that single-use handoff. **The cookie has a caveat worth reading
+before you rely on it — see "Any other HTTP server on your machine" under [Known and
+unclosed](#known-and-unclosed).** Nothing you can bookmark carries a credential. If a
+browser ends up holding nothing — cleared cookies, a second profile, a different browser —
+the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone.
 
 **What the cookie may write.** The secret authorizes every write. The cookie authorizes a
-strictly smaller, closed set: `submit`, and nine pomodoro actions — `ensure`, `pause`,
-`resume`, `reset`, `settings`, `preview`, `notifyTest`, `forward`, `restart`
-(`POMODORO_COOKIE_ACTIONS`, `src/server.mjs`). That set is a
+strictly smaller, closed set: `submit` plus the pomodoro actions named in
+`POMODORO_COOKIE_ACTIONS` (`src/server.mjs`). That set is a
 named list rather than a `/api/pomodoro/*` prefix match, so a pomodoro route added later is
-secret-only until someone adds it deliberately. The reasoning is that the cookie is already
-worth "may read every board in the store and may answer any open round", and an advisory
-clock that never touches a board, never gates an `ask` and never reaches a tool is less
-than that. What it does mean in practice: a browser holding only the cookie can start a
-work interval, and so can trigger the notification that fires at its boundary. The
-same-origin write check stands in front of all of it.
+secret-only until someone adds it deliberately. What it means in practice, and it is more
+than the name suggests: a browser holding only the cookie can start, pause, resume and
+reset a work interval, skip or rewind a phase (`forward`, `restart`), trigger the
+notification that fires at an interval boundary (`notifyTest`), play a cue through
+`afplay` (`preview`), and — through `settings` — rewrite every duration along with both
+the notify and cue settings. The same-origin write check stands in front of all of it.
 
-**Guessing a board URL.** Board ids are 16 random bytes. This is defence in depth rather
-than the only thing between a local process and your boards.
+**Guessing a board URL.** Board ids are 16 random bytes — but that entropy is not what
+protects the board. Every route requires a credential, reads included, so a guessed id
+buys a refusal rather than a page. The id's unguessability is defence in depth behind that
+gate, never the gate itself; nothing you can bookmark carries a credential.
 
 **Content injection through rendered material.** Markdown, code and file content is escaped
-in both HTML text and attribute positions. Hand-mocked HTML stages render inside a
-sandboxed iframe that the parent never evaluates or trusts, with an isolation check
-asserting the parent ignores hostile messages that carry a correct origin.
-
-**A referenced `html` file runs on the same footing as a hand-mocked one.** `html` is the
-one kind whose `source` names a file rather than only carrying markup by value
-(`SPEC_HTMLREF.md`, `ADR.md` entry 7), resolved through the same reader, confinement and
-cap as every other reference. It renders inside an iframe with `sandbox="allow-scripts"`
-and no `allow-same-origin`, so its browsing context is cross-origin from the daemon's own
-and `contentDocument`/`contentWindow` are unreachable from the parent, under the same page
-CSP (`default-src 'none'`, `script-src 'unsafe-inline' https://cdn.jsdelivr.net`). This
-adds no new defence because none is needed: whether the markup was typed by the agent into
-the request body or read off disk by the daemon, it is agent-authored and untrusted either
-way.
+in both HTML text and attribute positions. HTML stages render inside an iframe with
+`sandbox="allow-scripts"` and no `allow-same-origin`, so the stage's browsing context is
+cross-origin from the daemon's own and `contentDocument`/`contentWindow` are unreachable
+from the parent; an isolation check asserts the parent ignores hostile messages that carry
+a correct origin. `html` is the one kind whose `source` may name a file rather than only
+carrying markup by value (`ADR.md` entry 7), and it gets no extra footing for it: whether
+the markup was typed into the request body or read off disk by the daemon, it is
+agent-authored and untrusted either way.
 
 **The agent answering its own question.** The `choose-between-rendered-variants` widget
 puts a rendered block inside each option, and that block may be an HTML stage — an iframe
@@ -244,6 +215,79 @@ a comment); it may never decide.
 
 **Your review content at rest.** The store and the daemon logs are owner-only (0700); the
 logs carry your own questions and answers, so they get the same posture as the store.
+
+### Known and unclosed
+
+Real holes, not chosen ones. Nothing below is defended today; each is here because a
+reader deciding whether to install should price it.
+
+**The payload is signed at install time and unverified at launch.** `bin/launcher.c`
+`execve`s node against `Contents/Resources/bin/daemon.mjs` and checks nothing about it
+first; `codesign --verify` runs only when a human re-runs `install.sh`. Those Resources
+files are writable by you, and TCC matches the *main executable's* cdhash alone — so
+editing one leaves the cdhash unchanged, triggers no re-prompt, and the edited code runs
+under the grant the original earned. The signature is a build-time record, not a runtime
+gate. A payload digest compiled into the launcher and checked before `execve` would close
+this; it is **not implemented, and not planned** — the risk is accepted as it stands.
+Do not read it as a fix in progress.
+
+**`DYLD_INSERT_LIBRARIES` on the launcher's own load is untouched by any of this.** The
+`execve`-built environment governs what the launcher hands *node*; it has no say over
+what launchd hands the *launcher*, one hop earlier, because dyld reads its own family of
+variables while loading the launcher's image, before a line of `main()` runs (QUIRKS.md).
+Closing this needs hardened-runtime signing (`codesign --options runtime`), which carries
+its own entitlement and TCC consequences.
+
+**Any other HTTP server on your machine, whatever port it listens on.** Cookies are not
+scoped by port (RFC 6265 §8.5) and `SameSite` is not port-aware — a "site" is a scheme plus
+a host, so every port on `127.0.0.1` is the same site. If you authorize a board and then
+visit `http://127.0.0.1:3000` in the same browser — your own dev server, a notebook kernel,
+a container you published on loopback — that server receives the `cb_session` cookie on a
+plain navigation, and can replay it here to read every board and answer any open round. It
+never touches the secret file, so this sits *outside* the "any process running as you"
+boundary further down: a container that cannot read your home directory can still do it.
+
+Nothing here closes it. The daemon cannot tell a replay from the browser it minted the
+cookie for, and while the index lives at `/` on `127.0.0.1` the cookie is scoped to every
+port on that host. Cookies *are* scoped by host, so serving boards from a name of their
+own (`isLoopbackHost` already admits `*.localhost`) would scope `cb_session` away from
+`127.0.0.1:3000` — at the price of an `/etc/hosts` line on Safari and broken bookmarked
+board URLs. That has not been done. What is done instead is bounding it:
+
+- **there is no expiry bound worth relying on.** The cookie's value is
+  `HMAC(secret, "claude-board/session/v1")` — a constant with no timestamp in it — and
+  `SESSION_MAX_AGE_S` appears only as a `Set-Cookie` attribute, which instructs an honest
+  browser's jar and constrains nothing about a value already copied out of it. A leaked
+  cookie stays valid until the secret is rotated, and the secret is never rotated
+  automatically;
+- a cookie-authenticated request must also look same-origin (`Origin` / `Sec-Fetch-Site`),
+  which stops a *web page* on another origin using it through your browser. It does not
+  stop the case above, because a local process sets its own headers;
+- rotating the secret revokes every cookie on the next *request* — the daemon re-reads the
+  secret per request rather than at startup. It does **not** close connections already
+  open: the read gate is evaluated once, when a request starts, so an SSE stream
+  (`/api/board/:id/events`) established before the rotation keeps receiving every later
+  round and every submitted answer for that board, and an in-flight `/wait` still returns
+  its packet. Both last until the daemon restarts. If you are rotating because a cookie
+  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`.
+
+If you run other services on loopback and this matters to you, use a separate browser
+profile for boards.
+
+**Third-party code executing in the board's own origin.** A board with a diagram on it
+does `await import('https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.esm.min.mjs')`
+(`src/ui.mjs`), which is why `script-src` names a host nobody here controls
+(`src/render.mjs`, `src/server.mjs`). Unlike a referenced `html` stage, that module does
+not land in a sandboxed opaque-origin iframe — it runs in the board page itself, where
+`#board-data` holds every answer and every comment and `connect-src 'self'` is the ability
+to POST a submit under the session cookie. The version is pinned exactly and both
+`script-src` allowlists name that exact path rather than the bare host, so an upstream
+11.x publish cannot change what runs and jsdelivr cannot substitute a different file from
+the same origin. What remains: dynamic `import()` takes no `integrity` attribute, so there
+is no hash — anything that can serve different bytes *at that path* gets read-every-board
+plus forge-an-answer, on every board rendered after it. Closing it means vendoring mermaid
+into the signed payload and dropping the host from the CSP. The availability consequence —
+boards render fine without network, diagrams do not — is the smaller half of it.
 
 ### Not defended, by design
 
@@ -276,46 +320,20 @@ into by the same route.
 larger grant than the reference boundary, which is why it is a separate allowlist and why
 an absent value means the route is off. The session cookie is `HttpOnly` and
 `SameSite=Strict`, but same-origin is same-origin: a served page could otherwise `fetch` a
-submit and answer a question as you. The served response's `connect-src 'none'` and
-`form-action 'none'` are what close that, and they are load-bearing rather than defence in
-depth. What remains open deliberately: a served page can still trigger a **top-level
-navigation** to a daemon URL. Those reach read routes only, by GET, and land in a tab the
-reviewer can see; the header that would stop them (`navigate-to`) exists in no shipping
-browser. The practical boundary is the allowlist itself — a serve root is a directory whose
-contents you are choosing to execute, and the shipped default is the one directory the
-render skills generate into.
+submit and answer a question as you. Two headers close that, both load-bearing rather than
+defence in depth. `connect-src 'none'` and `form-action 'none'` make the document inert
+toward the daemon. CSP is per-realm, though, so those say nothing about a same-origin
+*board* window the page opens — which is why the response also carries
+`Cross-Origin-Opener-Policy: same-origin` (`src/server.mjs`), putting a served document in
+its own browsing-context group so the handle `window.open` returns comes back severed.
+What remains open deliberately: a served page can still trigger a **top-level navigation**
+to a daemon URL. Those reach read routes only, by GET, and land in a tab the reviewer can
+see; the header that would stop them (`navigate-to`) exists in no shipping browser. The
+practical boundary is the allowlist itself — a serve root is a directory whose contents you
+are choosing to execute.
 
 **A browser extension with host permissions on the profile holding the credential.** It can
 read boards and submit as you. `HttpOnly` stops page script, not extensions.
-
-**Any other HTTP server on your machine, whatever port it listens on.** Cookies are not
-scoped by port (RFC 6265 §8.5) and `SameSite` is not port-aware — a "site" is a scheme plus
-a host, so every port on `127.0.0.1` is the same site. If you authorize a board and then
-visit `http://127.0.0.1:3000` in the same browser — your own dev server, a notebook kernel,
-a container you published on loopback — that server receives the `cb_session` cookie on a
-plain navigation, and can replay it here to read every board and answer any open round. It
-never touches the secret file, so this sits *outside* the "any process running as you"
-boundary above: a container that cannot read your home directory can still do it.
-
-This is not closable at this layer. The daemon cannot tell a replay from the browser it
-minted the cookie for, and the cookie cannot be scoped away from other ports while the
-index lives at `/`. What is done instead is bounding it:
-
-- the cookie expires after 30 days, so a leaked one stops being worth anything on a horizon
-  you can reason about;
-- a cookie-authenticated request must also look same-origin (`Origin` / `Sec-Fetch-Site`),
-  which stops a *web page* on another origin using it through your browser. It does not
-  stop the case above, because a local process sets its own headers;
-- rotating the secret revokes every cookie on the next *request* — the daemon re-reads the
-  secret per request rather than at startup. It does **not** close connections already
-  open: the read gate is evaluated once, when a request starts, so an SSE stream
-  (`/api/board/:id/events`) established before the rotation keeps receiving every later
-  round and every submitted answer for that board, and an in-flight `/wait` still returns
-  its packet. Both last until the daemon restarts. If you are rotating because a cookie
-  leaked, restart the daemon too — `launchctl kickstart -k gui/$(id -u)/claude-board`.
-
-If you run other services on loopback and this matters to you, use a separate browser
-profile for boards.
 
 **A process watching `ps` at the instant a tab opens.** Opening a URL puts it in an argument
 list, so the handoff token is briefly visible to any process running as you. The mitigation
@@ -333,28 +351,17 @@ owner-only" above.
 **Anything multi-user or remote.** There is no authentication, no accounts, no
 cross-machine access, and none is planned. Do not expose the port.
 
-**Diagrams need the network.** Mermaid loads from a CDN, and the page's content security
-policy permits inline script as a consequence of how the page ships its own hydration. Both
-are known and accepted rather than overlooked. Boards render fine without network; diagrams
-do not.
-
-**What a board file contains.** Whatever source you asked the agent to render, snapshotted
-at post time, plus every question and answer. Treat the store as you would treat the
-repository it quotes — and the allowlisted roots it may also quote, above.
+**What a board file contains.** Treat the store as you would treat the repository it
+quotes, and the allowlisted roots it may also quote.
 
 ## How this record is kept
 
-Security work on this project is recorded in three places, and nowhere else:
-
-- **This file** — the current posture, which is the only thing a reader needs to decide
-  whether to install. It states what is true now; it does not narrate how it got that way.
-- **[CHANGELOG.md](CHANGELOG.md)** — a `Security` entry per release for anything found and
-  fixed.
-- **[ADR.md](ADR.md) and git history** — the reasoning, per decision and per change.
-
-The full internal review reports that produced the fixes above are not published. They are
-a per-commit adversarial audit of a pre-release codebase, and shipping them would mean
-maintaining a second, staler security narrative alongside this one.
+Two places, and nowhere else: **this file** for the current posture, and
+**[ADR.md](ADR.md)** plus git history for the reasoning. Nothing has been released yet, so
+there is no per-release security note to keep; `git log` carries the fixes until there is
+a tag. The internal review reports behind them stay unpublished: a per-commit adversarial
+audit of a pre-release codebase would be a second, staler security narrative beside this
+one.
 
 ## Reporting
 

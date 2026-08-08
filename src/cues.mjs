@@ -1,5 +1,5 @@
 // The cue vocabulary: which sounds exist, what a stored cue value may be, and where the
-// file for one lives. See CONTEXT.md "Cue" for the term and ADR.md entry 20 for why the
+// file for one lives. See ADR.md entry 20 for why the
 // cue is the notification's own sound rather than something this daemon plays beside it.
 //
 // The directories macOS resolves a bare sound name against, read here and shared by three

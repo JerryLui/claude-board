@@ -1,6 +1,5 @@
 // The one-time handoff: how a browser that holds nothing becomes a browser that holds
-// the session cookie. See SPEC_LAUNCH.md Decisions -> "One-time handoff, then a session
-// cookie", and PROTOCOL.md "Authorizing a browser".
+// the session cookie. See PROTOCOL.md "Authorizing a browser".
 //
 // The shape, and why each half is the way it is:
 //
@@ -11,8 +10,8 @@
 // the opposite of the session cookie it hands out (src/secret.mjs `sessionToken`), which
 // is derived from the secret precisely so it survives a daemon restart — and the
 // contrast is deliberate. A handoff that survived a restart would be a long-lived
-// credential sitting in a URL, which is the thing DESIGN.md rejected and
-// SPEC_LAUNCH.md kept rejecting; a session cookie that did NOT survive one would log
+// credential sitting in a URL, which was rejected outright; a session cookie that did
+// NOT survive one would log
 // every browser out on each `launchctl kickstart`.
 //
 // Accepted residual risk, stated rather than closed: opening a URL puts it in a process
@@ -52,7 +51,7 @@ export const HANDOFF_TOKEN_RE = /^[0-9a-f]{64}$/;
 //
 // Re-exported from src/store.mjs rather than declared twice. The store is what turns an
 // id into a filesystem path, so it owns the definition; two copies of one pattern is how
-// a tightening in one place silently leaves the other wide (audit 2026-07-31 S2).
+// a tightening in one place silently leaves the other wide.
 export { SAFE_BOARD_ID } from './store.mjs';
 import { SAFE_BOARD_ID } from './store.mjs';
 
@@ -105,7 +104,7 @@ export function shellQuote(s) {
  * anywhere; named verbatim by the refusal page, by bin/mcp.mjs when it cannot mint a
  * handoff, and by README.md. All three read it from here so they cannot drift apart.
  *
- * Carries the port when it is not the default (audit 2026-07-31 S7). bin/authorize.mjs
+ * Carries the port when it is not the default. bin/authorize.mjs
  * reads CLAUDE_BOARD_PORT from the shell that runs it, not from the daemon it is
  * recovering, so on a non-default-port install the command as printed talked to 7391 —
  * which is either nothing at all, or somebody else's service, to which it would then

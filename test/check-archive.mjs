@@ -1,10 +1,10 @@
-// Ticket 06 (DESIGN.md), criterion 5: "An archived board opened from disk
+// "An archived board opened from disk
 // with no daemon shows every pin in the right place, read-only, and invites no
 // gesture it cannot honour."
 //
 // Every other check that drives the real client script (test/check-click.mjs,
 // test/check-comment-mode.mjs, test/check-anchor-rerender.mjs, test/check-http.mjs's
-// own ticket-04 round trip) loads the board with `location.protocol` set to
+// own round trip) loads the board with `location.protocol` set to
 // `'http:'` -- the live path. None of them ever set it to `'file:'`, which is the
 // ONE branch src/ui.mjs actually reads to decide read-only mode
 // (`var readonly = (location.protocol === 'file:')`). This file is the first thing
@@ -16,15 +16,15 @@
 // `readonly` variable by hand, which would prove nothing about the branch a real
 // double-click in Finder actually takes.
 //
-// The board carries one already-resolved comment per acceptance-criterion-1
+// The board carries one already-resolved comment per acceptance-criterion
 // content kind (prose, a list item, a table cell, a line of a code reference, one
 // side of a comparison, a question's own `context` entry, a hand-mocked stage, the
 // diagram), each minted through the REAL client script in a separate, ordinary
-// (`http:`) session first -- exactly test/check-http.mjs's own ticket-04 round-trip
+// (`http:`) session first -- exactly test/check-http.mjs's own round-trip
 // pattern -- so every ref/hint this file submits is a genuine one the client would
 // actually produce, not a hand-guessed index chain. Those, plus one deliberately
 // stale anchor (so "every pin in the right place" is checked against a LOST one
-// too, per DESIGN.md's "a lost anchor still reports what it lost"), are
+// too, since "a lost anchor still reports what it lost"), are
 // submitted server-side with no HTTP involved (src/board.mjs's own applySubmit --
 // there is no daemon in this file, on purpose), then re-rendered, written to disk,
 // and read back for the actual archive pass.
@@ -37,7 +37,7 @@
 // this ADR says stays fully live -- rather than the question's own widget, which
 // no longer has anywhere to mint a comment onto at all.
 //
-// Mermaid is ticket 05's territory (wireMermaidBlock, renderMermaidPins,
+// Mermaid is a separate territory (wireMermaidBlock, renderMermaidPins,
 // renderMermaidBlocks, the `mermaid` anchor kind, the `body:not(.readonly)
 // .mermaid-block ...` rules) -- this file includes a mermaid block, and its
 // resolved-vs-lost verdict is asserted the same way test/check-anchor-rerender.mjs
@@ -45,7 +45,7 @@
 // actually driving wireMermaidBlock here would mean waiting on the same
 // CDN-unreachable async fallback that file's own comment documents, and because
 // editing or second-guessing wireMermaidBlock/renderMermaidPins is explicitly out
-// of scope for this ticket.
+// of scope here.
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
@@ -116,10 +116,10 @@ function enableCommentMode(document) {
 
 /** Click `el` (comment mode already on) and read back the anchor the real client
  * script minted onto `blockId`'s comment form -- test/check-http.mjs's own
- * ticket-04 `captureAnchor`, reused so every ref/hint fed into applySubmit below is
+ * `captureAnchor`, reused so every ref/hint fed into applySubmit below is
  * one the real gesture actually produced.
  *
- * Ticket 07 (DESIGN.md), audit finding V2: this used to just click and
+ * This used to just click and
  * read the form back, never closing it first. Six of the eight captures below
  * SHARE a block (three on the markdown block, two on the html-stage blocks), so
  * they share one <form> element across calls -- a click that does NOTHING (the
@@ -127,8 +127,8 @@ function enableCommentMode(document) {
  * failed for that particular element) left the PREVIOUS capture's ref/hint sitting
  * on the still-open form, and the old code read that back as if it were fresh: two
  * different fixture elements ended up sharing the exact same minted anchor, with
- * nothing here or in the check functions below ever noticing. Demonstrated by the
- * audit: making buildSteps return null for TD turned test/check-comment-mode.mjs
+ * nothing here or in the check functions below ever noticing. Demonstrated by
+ * making buildSteps return null for TD, which turned test/check-comment-mode.mjs
  * red while this file stayed fully green, with its "table cell" and "list item"
  * pins turning out to be the very same <li>.
  *
@@ -175,7 +175,7 @@ function pinLayerFor(document, blockId) {
   return layer;
 }
 
-// --- fixture: one board covering every criterion-1 content kind, plus a lost ---
+// --- fixture: one board covering every content kind, plus a lost --------------
 // anchor, submitted with real refs minted through the real client script -------
 
 const board = createBoard({
@@ -263,12 +263,12 @@ for (const p of mintedPairs) {
   assert.ok(p.anchor.ref, `setup failure: empty ref minted for block ${p.blockId}`);
 }
 
-// Ticket 07 (DESIGN.md), audit finding V2, second guard: every capture
+// Second guard: every capture
 // must be genuinely distinct from every other one that shares its block -- three
 // captures used to share mdBlockId's form (prose/list-item/table-cell), and the
 // html-stage blocks mint through their own iframes. Two captures on the same
-// block landing on the exact same (kind, ref) pair is exactly the symptom the
-// audit measured (the "table cell" and "list item" pins turning out to be the
+// block landing on the exact same (kind, ref) pair is exactly the symptom
+// measured (the "table cell" and "list item" pins turning out to be the
 // same <li>) -- captureAnchor's own reset-before-click fix (see its comment)
 // already turns a dead click into a loud failure there; this is the second,
 // independent way the same bug would show up even for a click that legitimately
@@ -294,7 +294,7 @@ const submittedComments = [
   // Deliberately stale: no re-rendered block has 99 children at any depth, so this
   // can never accidentally resolve.
   { blockId: errorDiagramId, anchor: { kind: 'dom', ref: '99.99', hint: 'a sentence that used to live here' }, text: 'this used to point at something real' },
-  // Criterion 19: comments stored against a `markdown` and a `code` block, in the
+  // Comments stored against a `markdown` and a `code` block, in the
   // exact shapes a pre-ADR-28 board carries them -- a whole-block one and an
   // element-level `dom` one. Neither block renders a comment surface any more, so
   // the archive has to come out without them and without erroring on the way.
@@ -322,7 +322,7 @@ check('setup: the file actually landed on disk at a real path', () => {
   assert.equal(fileContents.length > 0, true);
 });
 
-// The whole archive/live split is one byte-identical page (DESIGN.md "JSON is
+// The whole archive/live split is one byte-identical page ("JSON is
 // truth, the page is a projection", proven at the daemon level by
 // test/check-http.mjs's own "served page / pages/ file / fresh render" check): the
 // SAME markup src/render.mjs emits for a live GET is what gets written to disk and
@@ -351,7 +351,7 @@ function loadArchive() {
   };
 }
 
-// Ticket 05: like loadArchive() above, but also runs src/theme.mjs's
+// Like loadArchive() above, but also runs src/theme.mjs's
 // themeBootScript -- the SAME bytes read off disk above, run through BOTH real
 // client scripts in the real page's own order (the inline pre-<style> boot
 // script first, then ui's deferred module script second), with
@@ -377,7 +377,7 @@ function loadArchiveThemed(storage) {
   const location = { protocol: 'file:' };
   new Function('document', 'window', 'location', themeBootScript)(document, window, location);
   new Function('document', 'window', 'location', ui)(document, window, location);
-  // Audit 2026-07-31 (H2): a freshly parsed document now starts `readyState
+  // A freshly parsed document now starts `readyState
   // === 'loading'`, so the theme control's click listener is not wired until
   // this simulates the parser reaching the end of the document (see
   // test/dom-stand-in.mjs's own comment on finishParsing/readyState) --
@@ -445,10 +445,10 @@ check('archive: a lost page-scoped anchor still reports what it lost -- a pin-lo
   } finally { restore(); }
 });
 
-check('archive: the diagram\'s (mermaid) comment renders resolved, by its node id -- not routed through any mermaid wiring this ticket does not own', () => {
+check('archive: the diagram\'s (mermaid) comment renders resolved, by its node id -- not routed through any mermaid wiring owned elsewhere', () => {
   // Deliberately server-rendered-text only (see this file's header comment): the
   // client script's own mermaid rendering is async against an unreachable CDN and
-  // owned by ticket 05, not asserted here.
+  // not asserted here.
   assert.ok(fileContents.includes(`#${mermaidCommentN} · A`), 'the mermaid node-id comment must render resolved (its node id, not "lost: ...")');
   assert.ok(!fileContents.includes(`#${mermaidCommentN} · lost:`), 'the mermaid comment must not report lost');
 });
@@ -457,8 +457,8 @@ check('archive: the diagram\'s (mermaid) comment renders resolved, by its node i
 // 2. Read-only throughout, and the toggle claim specifically.
 // =================================================================================
 
-check('archive: ticket 03\'s claim -- the comment-mode toggle is both CSS-hidden and hard-disabled in readonly -- verified, not trusted', () => {
-  // The CSS side, read directly rather than assumed from ticket 03's own report.
+check('archive: the claim -- the comment-mode toggle is both CSS-hidden and hard-disabled in readonly -- verified, not trusted', () => {
+  // The CSS side, read directly rather than assumed.
   assert.match(styles, /body\.readonly \.mode-toggle \{[^}]*display: none/, 'expected a body.readonly rule hiding .mode-toggle');
 
   // The behavioural side: the SAME toggle element the live page renders, run
@@ -480,7 +480,7 @@ check('archive: ticket 03\'s claim -- the comment-mode toggle is both CSS-hidden
   } finally { restore(); }
 });
 
-check('archive: ticket 04\'s back-to-index control is absent, not merely disabled -- there is no daemon behind "/" in a file:// archive', () => {
+check('archive: the back-to-index control is absent, not merely disabled -- there is no daemon behind "/" in a file:// archive', () => {
   // The CSS side, read directly rather than assumed.
   assert.match(styles, /body\.readonly \.back-to-index \{[^}]*display: none/, 'expected a body.readonly rule hiding .back-to-index');
 
@@ -492,7 +492,7 @@ check('archive: ticket 04\'s back-to-index control is absent, not merely disable
   } finally { restore(); }
 });
 
-// Audit finding H3: `body.readonly button#theme-toggle { display: inline-flex;
+// `body.readonly button#theme-toggle { display: inline-flex;
 // }` (src/styles.mjs) is the readonly carve-out that keeps the theme control
 // visible while `body.readonly .mode-toggle { display: none; }` hides every
 // OTHER control wearing `.mode-toggle`'s chrome (the comment-mode toggle
@@ -500,11 +500,11 @@ check('archive: ticket 04\'s back-to-index control is absent, not merely disable
 // theme control inherits the SAME `display: none` the comment-mode toggle
 // gets, in every archive, silently -- QUIRKS.md's own "readonly is locked
 // twice" entry names exactly this shape of gap. Asserted as the COMPUTED
-// display (test/dom-stand-in.mjs's resolveComputedProperty, audit C1/H3),
+// display (test/dom-stand-in.mjs's resolveComputedProperty),
 // against the file's own <style> text and the REAL button element from a
 // loaded archive -- not the rule's spelling, which is what QUIRKS.md warns
 // against asserting.
-check('archive: audit finding H3 -- the theme control\'s COMPUTED display is inline-flex under body.readonly, not silently inheriting .mode-toggle\'s own display:none', () => {
+check('archive: the theme control\'s COMPUTED display is inline-flex under body.readonly, not silently inheriting .mode-toggle\'s own display:none', () => {
   const cssText = extractStyleBlock(fileContents);
 
   const { document, restore } = loadArchive();
@@ -639,7 +639,7 @@ check('archive: clicking a compare side\'s diagram, a standalone diagram, prose,
   } finally { restore(); }
 });
 
-check('criterion 19: an archived board carrying stored markdown and code comments renders without them and without error', () => {
+check('an archived board carrying stored markdown and code comments renders without them and without error', () => {
   const { document, restore } = loadArchive();
   try {
     for (const [name, blockId] of [['markdown', mdBlockId], ['code', codeBlockId]]) {
@@ -720,7 +720,7 @@ check('archive: the emitted page still has no external script or stylesheet refe
 });
 
 // =================================================================================
-// 4. Ticket 05 (light theme): the archive follows the OS, its control still
+// 4. Light theme: the archive follows the OS, its control still
 //    works for the sitting, and nothing persists across a reopen -- spec:
 //    "Follow the OS; the control still works for the sitting but persists
 //    nothing." Exercised against the SAME bytes read off disk above, the same
@@ -729,7 +729,7 @@ check('archive: the emitted page still has no external script or stylesheet refe
 //    own header comment).
 // =================================================================================
 
-// Audit 2026-07-31 (C1): this used to assert the two light rules by their
+// This used to assert the two light rules by their
 // SPELLING -- a regex matching the literal `@media { :root:not(...) { ... } }`
 // nesting and a separate `:root[data-theme="light"] { ... }` match, each
 // checked for a substring. That is exactly the trap QUIRKS.md's "the
@@ -738,7 +738,7 @@ check('archive: the emitted page still has no external script or stylesheet refe
 // INSIDE the media query -- breaking a dark-OS reader's Light choice, the one
 // case this feature exists for -- still contains both substrings, so the old
 // version of this check stayed green through it. Replaced with the real
-// cascade resolver (test/dom-stand-in.mjs, audit C1) run against the file's
+// cascade resolver (test/dom-stand-in.mjs) run against the file's
 // OWN `<style>` text (not the in-memory `styles` export -- if render.mjs ever
 // diverged from it, this would still catch that too), asserting the full
 // {OS dark, OS light} x {no attribute, data-theme="light", data-theme="dark"}

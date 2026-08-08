@@ -1,6 +1,6 @@
-// Ticket 02 (DESIGN.md): a numbered pin actually lands after the click.
+// A numbered pin actually lands after the click.
 //
-// test/check-click.mjs (ticket 01) proves the click gesture opens the right
+// test/check-click.mjs proves the click gesture opens the right
 // comment form with the right anchor filled in, but stops there -- it never
 // submits the form, so it never observes the other half of the acceptance
 // criterion: "a numbered pin lands on it". Per src/ui.mjs's file comment, a pin
@@ -11,7 +11,7 @@
 // REAL (post-loadSrcdoc) stage document -- not the about:blank placeholder.
 //
 // Deliberately a separate file rather than an addition to test/check-click.mjs:
-// ticket 02's instructions are not to edit that file's existing assertions.
+// the goal is not to edit that file's existing assertions.
 
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
@@ -32,7 +32,7 @@ function check(name, fn) {
 }
 
 const board = createBoard({
-  title: 'Ticket 02 -- the pin actually lands',
+  title: 'the pin actually lands',
   blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
 });
 const blockId = board.blocks[0].id;
@@ -47,7 +47,7 @@ check('clicking an element, then submitting the opened comment form, draws a num
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage iframe on the rendered page');
 
-  // Ticket 03: the stage click is gated on comment mode now, same as everywhere
+  // The stage click is gated on comment mode now, same as everywhere
   // else -- turn it on through the real toggle before driving the click (see
   // check-click.mjs's own comment on the same change).
   const modeToggle = document.getElementById('comment-mode-toggle');
@@ -88,7 +88,7 @@ check('clicking an element, then submitting the opened comment form, draws a num
   assert.equal(pin.classList.contains('pin-lost'), false, 'a freshly-queued comment anchored to the element that was actually clicked must not render as lost');
   assert.ok(String(pin.title || '').indexOf('Send') !== -1, `expected the pin's title to name the clicked element ("Send"), got ${JSON.stringify(pin.title)}`);
 
-  // Ticket 07 (DESIGN.md), audit finding V1: test/dom-stand-in.mjs's
+  // V1: test/dom-stand-in.mjs's
   // getBoundingClientRect used to return an unconditional all-zero box, so this
   // check's own name -- "positioned from the real (loaded) stage document" -- was
   // never actually true: the director confirmed that replacing BOTH of
@@ -112,7 +112,7 @@ check('clicking an element, then submitting the opened comment form, draws a num
 
 check('two different elements inside the same stage get two different, independently correct pin positions -- not the same fallback offset, not each other\'s box', () => {
   const twoElBoard = createBoard({
-    title: 'Ticket 07 -- two elements, two distinguishable pin positions',
+    title: 'two elements, two distinguishable pin positions',
     blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>a caption</p></div>' }],
   });
   const twoElBlockId = twoElBoard.blocks[0].id;

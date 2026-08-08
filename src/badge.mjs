@@ -1,8 +1,8 @@
 // The round badge's label -- pure and DOM-free, so it is checkable with no
-// browser (test/check-pure.mjs). See PROTOCOL.md "Board document" for `rounds`,
-// and DESIGN.md, polish Decisions -> "The round badge states position and total,
-// not just total" for why `total` alone (the old label, `round ${rounds.length}`)
-// was a real bug rather than a wording nitpick: on a two-round board it read
+// browser (test/check-pure.mjs). See PROTOCOL.md "Board document" for `rounds`.
+// The round badge states position and total, not just total: `total` alone
+// (the old label, `round ${rounds.length}`) was a real bug rather than a
+// wording nitpick: on a two-round board it read
 // "ROUND 2" while the reviewer was still looking at round 1.
 //
 // `current` is the round crossing the sticky header line, tracked client-side

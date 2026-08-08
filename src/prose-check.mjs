@@ -1,5 +1,5 @@
-// The prose-vs-shim checker, shipped as a product (SPEC_MIGRATION.md ticket 03 / criterion
-// 12), generalised out of `test/check-grill.mjs`'s hand-rolled assertions. Every real caller
+// The prose-vs-shim checker, shipped as a product, generalised out of
+// `test/check-grill.mjs`'s hand-rolled assertions. Every real caller
 // of this module lives OUTSIDE this repo, in some `~/.claude/skills/<name>/check.mjs` or a
 // command's own check script — a different git repo that must keep working when this one is
 // not installed at all. This repo only proves the checker itself, against a fixture it owns
@@ -40,8 +40,8 @@
 // Which assertions generalise and which stay caller-specific was a judgement call: grill's
 // "no HTML template of its own", "one question per call is gone" and "revive command" checks
 // were about *that command's* own history and never generalised here. `test/check-grill.mjs`
-// held them until SPEC_MIGRATION.md criterion 14 took its subject out of this repo entirely
-// (ticket 04); whichever repo now owns `/grill`'s prose is where assertions like those belong.
+// held them until its subject was taken out of this repo entirely; whichever repo now owns
+// `/grill`'s prose is where assertions like those belong.
 //
 // --- Resolution story: how a caller outside this repo finds this file --------------------
 //
@@ -61,14 +61,14 @@
 // function solves — so the same handful of lines have to be copied, once, into the caller's
 // own `check.mjs`. That copy is documented in `PROTOCOL.md` ("The prose-vs-shim checker") as
 // the canonical, copy-pasteable bootstrap, kept in sync with the implementation here. Once
-// pasted, using it is the one-liner criterion 2 asks for:
+// pasted, using it is the one-liner below:
 //
 //   const checker = await loadClaudeBoardChecker();
 //   if (!checker) { console.log('skip: claude-board not installed'); process.exit(0); }
 //   await checker.assertProseMatchesShim(new URL('./SKILL.md', import.meta.url).pathname);
 //
 // A consumer with no claude-board installed gets `null` back, never a thrown error — degrade,
-// not explode (criterion 2).
+// not explode.
 
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -213,8 +213,7 @@ export function extractClaims(proseText, toolName = 'ask') {
 // arguments they name in the clearest possible form — asserting a formatting convention
 // instead of the behaviour ("does the prose demonstrably show this argument"). Deliberately
 // NOT a bare substring match: `title` and `blocks` are ordinary English words, and matching
-// them unscoped would make the assertion vacuous (SPEC_MIGRATION.md's own "Testing" section
-// names exactly this failure mode).
+// them unscoped would make the assertion vacuous.
 // ---------------------------------------------------------------------------
 
 /** Every fenced code block's contents, concatenated — where the object-key convention is
@@ -402,7 +401,7 @@ export async function getLiveTools({ mcpPath, env = {} } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// The one-call entry point criterion 3 asks for: given a prose file path, do the whole thing
+// The one-call entry point: given a prose file path, do the whole thing
 // — spin up a throwaway daemon and shim (never the caller's real installed one; a check run
 // must never touch a real store or a real secret), fetch the live tools/list, read this same
 // clone's own PROTOCOL.md, and run checkProse. `mcpPath`/`protocolText` resolve against

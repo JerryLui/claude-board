@@ -1,12 +1,11 @@
-// Ticket 07 (DESIGN.md): audit finding V1, the SSE row -- the one the
-// audit calls out as "the one that matters most" and "drivable today": deleting
+// The SSE row -- the one that matters most and drivable today: deleting
 // all three of src/ui.mjs's `wireRoot(...)` calls inside its SSE push handlers
 // (`applyRoundPush`'s `wireRoot(wrap)` for a brand-new round and `wireRoot(frag)`
 // for an amend, `applySubmittedPush`'s `wireRoot(replacement)`) left only TWO
 // failures anywhere in the suite, and both were `ui.includes(...)` string
-// assertions over the source text (test/check-pure.mjs) -- "SSE-pushed anchoring
-// has no behavioural check at all, the exact anti-pattern this spec names as root
-// cause."
+// assertions over the source text (test/check-pure.mjs) -- SSE-pushed anchoring
+// has no behavioural check at all, the exact anti-pattern named as root
+// cause.
 //
 // This file drives the real subscription src/ui.mjs itself opens: it stubs
 // `EventSource` (test/dom-stand-in.mjs's `StandInEventSource`), runs the real `ui`
@@ -183,9 +182,9 @@ check('a block amended into the still-open round over SSE (mode: amend) is genui
 
 // --- src/ui.mjs:1418 -- applySubmittedPush: wireRoot(replacement) -------------
 //
-// The audit's own framing: "a round that just went out can still carry an html/
-// mermaid stage whose EXISTING pins/comments are worth showing correctly." So
-// this submits a comment on round 2's html block FIRST (through a real click, in
+// A round that just went out can still carry an html/mermaid stage whose
+// EXISTING pins/comments are worth showing correctly. So this submits a
+// comment on round 2's html block FIRST (through a real click, in
 // a live session, same as every other check in this suite mints an anchor), then
 // fires the 'submitted' push a second, already-subscribed tab would receive, and
 // asserts that second tab's swapped-in (now-historical) stage still shows the
@@ -253,7 +252,7 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'the comment minted against this exact element moments earlier must not render as lost');
 });
 
-// --- ticket 09 -- audit finding U3: the html-stage case above self-corrects  ----
+// --- the html-stage case above self-corrects  ----
 // (the pin is (re)computed from the iframe's own 'load' event, which only ever
 // fires once the frame is actually attached), so it cannot see U3's specific
 // defect -- a PAGE-scoped pin has no such later event to hang a recompute off of.
@@ -263,12 +262,12 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
 // computed from the element's ancestor-index chain as it sits under the
 // still-detached `wrap` div, not as it sits under #blocks/body/html once
 // attached. test/dom-stand-in.mjs's getBoundingClientRect derives its box purely
-// from that chain (ticket 07), so the two are provably DIFFERENT, not merely
+// from that chain, so the two are provably DIFFERENT, not merely
 // unproven -- this check recomputes the same formula src/ui.mjs's renderDomPins
 // uses, live, against the NOW-ATTACHED DOM, and compares it to what the pin
 // actually got.
 
-check('a round that just went sent, pushed over SSE (\'submitted\'), positions an existing PAGE-SCOPED comment\'s pin correctly on its (now historical) mermaid block -- not wherever wireRoot(replacement) computed while still detached (ablation: deleting applySubmittedPush\'s post-attach refreshPins call, ticket 09 audit finding U3)', () => {
+check('a round that just went sent, pushed over SSE (\'submitted\'), positions an existing PAGE-SCOPED comment\'s pin correctly on its (now historical) mermaid block -- not wherever wireRoot(replacement) computed while still detached (ablation: deleting applySubmittedPush\'s post-attach refreshPins call)', () => {
   const board = freshBoard();
   // A mermaid block whose source failed to resolve: ADR.md entry 28 leaves
   // `mermaid` commentable and its `.resolve-error` note is the one part of the
@@ -328,7 +327,7 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the ATTACHED .resolve-error note (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
 });
 
-// --- ticket 04, criterion 8: the round badge used to be written server-side ---
+// --- the round badge used to be written server-side ---
 // only, and the SSE round-push path never touched it -- stale until reload on a
 // live tab, invisible on a fresh load because a reload always renders the
 // current total. Drives the same subscription every other check in this file
@@ -370,13 +369,13 @@ check('a round going sent over SSE (\'submitted\') leaves the badge total unchan
   assert.equal(badge.textContent, 'round 1 of 2', 'a submit never changes board.rounds.length, so M is unchanged');
 });
 
-// --- the code cap's once-only marker (DESIGN.md polish, audit finding D1) -------
+// --- the code cap's once-only marker -------
 //
 // Same family as every check above it, and the same push paths: something that
 // runs during `wireRoot(wrap)`/`wireRoot(frag)` sees a DETACHED subtree.
 // `unlockCodeCapForDrag` is the one thing in that pass which MEASURES rather
 // than merely wiring -- it converts a `max-height`-capped <pre> to a plain
-// inline height so the native resize handle can move it (criterion 5), but only
+// inline height so the native resize handle can move it, but only
 // for a block that is genuinely capped, which it decides from
 // `scrollHeight > clientHeight`. Both are 0 on a detached node, so the
 // once-only marker being claimed BEFORE that test settled the question as
@@ -426,7 +425,7 @@ check('a CAPPED code block arriving over SSE gets its cap unlocked once it is at
   assert.equal(pre.__cbCapUnlocked, true,
     'the pushed <pre> must have been measured and marked AFTER it was attached -- a marker claimed during the detached wiring pass is never revisited');
   assert.equal(pre.style.maxHeight, 'none',
-    'a capped block that arrived by push must have its max-height lifted, or the reviewer\'s resize drag is clamped and the block is undraggable for the life of the page (criterion 5)');
+    'a capped block that arrived by push must have its max-height lifted, or the reviewer\'s resize drag is clamped and the block is undraggable for the life of the page');
   // The height's VALUE comes from getBoundingClientRect, which this stand-in
   // derives structurally rather than from layout -- so what is asserted is that
   // an explicit inline height was set at all, which is the part that removes the
@@ -437,9 +436,9 @@ check('a CAPPED code block arriving over SSE gets its cap unlocked once it is at
 
 check('...and a SHORT code block arriving the same way is left completely alone -- the unlock must stay conditional, not become "always unlock once attached"', () => {
   // The negative half, so the check above cannot be satisfied by a version that
-  // simply unlocks everything: criterion 6 is that a block under the cap renders
-  // at its natural height with no handle-induced empty space, which an
-  // unconditional inline height would take away.
+  // simply unlocks everything: a block under the cap must render at its natural
+  // height with no handle-induced empty space, which an unconditional inline
+  // height would take away.
   const board = freshBoard();
   const pageHtml = renderBoardPage(board);
   const { document, es } = loadBoardWithEventSource(pageHtml);

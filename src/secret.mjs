@@ -10,11 +10,11 @@
 // would otherwise gate ~/Documents, ~/Desktop and ~/Downloads per application. The
 // secret is what a caller has to hold to make the daemon resolve a file for it.
 //
-// It is a FILE, not a URL parameter: DESIGN.md rejects tokens in URLs because
+// It is a FILE, not a URL parameter: tokens in URLs are rejected because
 // bookmarks and stale links carry them around. A 0600 file read by the shim and sent
 // in a request header has neither problem.
 //
-// Why the session cookie exists. SPEC_LAUNCH.md overturned "read routes stay open":
+// Why the session cookie exists. The daemon overturned "read routes stay open":
 // every read now needs a credential too, and the reviewer's browser cannot read a
 // 0600 file. So the browser gets a cookie instead, handed to it once through a
 // single-use handoff (src/handoff.mjs) and never visible in a URL a bookmark can
@@ -40,12 +40,12 @@ export const SESSION_COOKIE = 'cb_session';
 
 /** How long that cookie lives, in seconds.
  *
- * It is deliberately NOT a session cookie: SPEC_LAUNCH.md criterion 2 says
- * bookmarking a board and opening the bookmark days later still works, and a
+ * It is deliberately NOT a session cookie: bookmarking a board and opening the
+ * bookmark days later still works, and a
  * cookie that dies with the browser window turns every morning into a
  * re-authorization.
  *
- * 30 days, cut from 400 on 2026-07-31 (audit S1). 400 was the Chrome clamp ceiling —
+ * 30 days, cut from 400 on 2026-07-31. 400 was the Chrome clamp ceiling —
  * i.e. the longest the browser would honour, chosen for no reason but that. Lifetime is
  * one of only two levers that bound the cookie's exposure, because the other one people
  * reach for does not exist: cookies are NOT port-scoped (RFC 6265 §8.5), so this value
@@ -118,7 +118,7 @@ export function secretMatches(provided, expected) {
  *    port-scoped (RFC 6265 §8.5) and SameSite is not port-aware — site is scheme plus
  *    host — so a reviewer who opens `http://127.0.0.1:3000` in the same browser hands
  *    that server this cookie on a plain navigation, and it can then replay it here.
- *    Found 2026-07-31 (audit S1) and NOT fixable at this layer: the daemon cannot
+ *    Found 2026-07-31 and NOT fixable at this layer: the daemon cannot
  *    distinguish a replay from the browser it minted for, and Path cannot be narrowed
  *    below `/` while the index lives at `/`. What is done instead is bounding it —
  *    SESSION_MAX_AGE_S above — and refusing browser-driven cross-origin use in
@@ -141,19 +141,40 @@ export function sessionToken(secret) {
  * cookie, no secret on disk) rather than throwing. */
 export function sessionCookieMatches(cookieHeader, secret) {
   if (!secret) return false;
-  return secretMatches(parseCookies(cookieHeader)[SESSION_COOKIE], sessionToken(secret));
+  const expected = sessionToken(secret);
+  // Order-INDEPENDENT: accept if any `cb_session` in the header matches.
+  //
+  // Picking one end was the bug, in both directions. RFC 6265 §5.4 orders cookies with
+  // LONGER paths first, and this daemon's cookie is `Path=/` -- the shortest there is --
+  // so it sorts LAST among duplicates, the opposite of what first-wins assumed. Any other
+  // loopback server (cookies are not port-scoped, §8.5) could set
+  // `cb_session=junk; Path=/b` and shadow the real credential on every /b/<id> forever;
+  // bin/authorize.mjs re-mints the `Path=/` key and cannot clear a longer-path duplicate,
+  // so the one command the refusal page names could not recover it. §5.4 is only a SHOULD
+  // and its own note calls servers that depend on this order "erroneously" dependent, so
+  // last-wins is no better -- searching every value is the only parse that does not bet on
+  // an ordering. It leaks nothing: supplying a value that matches means already holding
+  // the credential.
+  return cookieValues(cookieHeader, SESSION_COOKIE).some(v => secretMatches(v, expected));
 }
 
-/** Parse a Cookie header into a plain object. Values are not URL-decoded: everything
- * this daemon sets is hex.
- *
- * FIRST wins, not last (audit 2026-07-31 S5). RFC 6265 §5.4 sends the most specific
- * match first, so the first `cb_session` in the header is the one set for this exact
- * host and path — this daemon's own. Last-wins let any other loopback server set a
- * second `cb_session` that sorted later and SHADOWED the real one, which locked the
- * reviewer out permanently: every board answered with the refusal page, and
- * `bin/authorize.mjs` could not fix it because a re-mint writes the same (host, path)
- * key and leaves the shadowing duplicate untouched. */
+/** Every value carried under `name`, in header order. */
+function cookieValues(header, name) {
+  const values = [];
+  if (!header) return values;
+  for (const part of String(header).split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    values.push(part.slice(eq + 1).trim());
+  }
+  return values;
+}
+
+/** Parse a Cookie header into a plain object, first occurrence of each name winning.
+ * Values are not URL-decoded: everything this daemon sets is hex. Credential checks do
+ * NOT go through here — see sessionCookieMatches on why one value per name cannot be
+ * the basis of an auth decision. */
 export function parseCookies(header) {
   const out = {};
   if (!header) return out;

@@ -1,6 +1,6 @@
-// Pure-logic checks for src/pomodoro.mjs (ADR.md entry 8, SPEC_POMODORO.md) plus one
+// Pure-logic checks for src/pomodoro.mjs (ADR.md entry 8) plus one
 // real-daemon restart check in the style of test/check-http.mjs. No notification is
-// ever fired by this file -- there is none to fire yet (ticket 02 owns that seam) --
+// ever fired by this file -- there is none to fire yet, a different piece of work owns that seam --
 // and nothing here shells out.
 
 import assert from 'node:assert/strict';
@@ -119,7 +119,7 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // settleBoundary -- the loop, criteria 3 and 4, across a full N-break run
+  // settleBoundary -- the loop across a full N-break run
   // (default longEvery: 4) including the long break and the reset after it.
   // -------------------------------------------------------------------------------
 
@@ -192,7 +192,7 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // The expiry rule (criterion 7) -- the whole reason this is a wall-clock deadline
+  // The expiry rule -- the whole reason this is a wall-clock deadline
   // rather than a countdown of remaining seconds.
   // -------------------------------------------------------------------------------
 
@@ -231,7 +231,7 @@ async function main() {
   // SCALE. The two below write staleness as an absolute duration, naming no constant,
   // and are the ones that would still fail if EXPIRY_GRACE_MS were rescaled to hours
   // -- i.e. if a lid closed over lunch started firing the break you slept through,
-  // which is the exact failure criterion 7 exists to forbid.
+  // which is the exact failure this rule exists to forbid.
 
   await check('settleBoundary: a deadline 4 hours stale (lid closed over lunch) expires -- no advance, no boundary', () => {
     const now = Date.now();
@@ -255,7 +255,7 @@ async function main() {
     // Below this range, ordinary event-loop slack (a GC pause, a busy tick) would
     // expire a perfectly healthy timer instead of advancing it; above it, real sleep
     // -- minutes at the very least -- would be miscounted as "still basically on
-    // time" and fire a stale boundary, which is the exact failure criterion 7 exists
+    // time" and fire a stale boundary, which is the exact failure this rule exists
     // to forbid. This does not replace the two absolute-duration checks above; it is
     // the one assertion that catches a rescaling of the constant even before any
     // deadline math runs.
@@ -270,7 +270,7 @@ async function main() {
   // check above pins, just triggered by a click instead of a real deadline.
   // -------------------------------------------------------------------------------
 
-  await check('forwardTimer: idle is a no-op, by reference -- nothing thrown, nothing invented (criterion 4)', () => {
+  await check('forwardTimer: idle is a no-op, by reference -- nothing thrown, nothing invented', () => {
     const doc = defaultDoc();
     assert.equal(forwardTimer(doc, Date.now()), doc);
   });
@@ -284,7 +284,7 @@ async function main() {
     assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
   });
 
-  await check('forwardTimer: forwarding a PAUSED timer advances, and the next phase starts running (criterion 3)', () => {
+  await check('forwardTimer: forwarding a PAUSED timer advances, and the next phase starts running', () => {
     const now = Date.now();
     // The real shape pauseTimer leaves behind: no deadline, remainingMs instead.
     const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
@@ -295,7 +295,7 @@ async function main() {
     assert.equal('remainingMs' in next.timer, false);
   });
 
-  await check('forwardTimer: long-break cadence intact across a full loop -- forwarded work still earns its break, forwarded break still increments the cycle, forwarded long break resets it (criterion 1)', () => {
+  await check('forwardTimer: long-break cadence intact across a full loop -- forwarded work still earns its break, forwarded break still increments the cycle, forwarded long break resets it', () => {
     const t0 = new Date(2026, 7, 4, 9, 0, 0).getTime();
     let doc = { ...defaultDoc(), cycleDate: localDateStr(t0), timer: { phase: 'work', deadline: t0 + 999_000, paused: false } };
     let now = t0;
@@ -327,8 +327,8 @@ async function main() {
 
   // -------------------------------------------------------------------------------
   // restartTimer -- re-mints the CURRENT interval's deadline to a full phase
-  // duration; phase and cycle are untouched (criterion 5), and it shares forward's
-  // edge rules (criterion 6).
+  // duration; phase and cycle are untouched, and it shares forward's
+  // edge rules.
   // -------------------------------------------------------------------------------
 
   await check('restartTimer: idle is a no-op, by reference -- nothing thrown, nothing invented', () => {
@@ -350,7 +350,7 @@ async function main() {
     }
   });
 
-  await check('restartTimer: unpauses -- a paused timer restarts running, with a fresh deadline instead of remainingMs (criterion 6)', () => {
+  await check('restartTimer: unpauses -- a paused timer restarts running, with a fresh deadline instead of remainingMs', () => {
     const now = Date.now();
     const doc = { ...defaultDoc(), timer: { phase: 'break', paused: true, remainingMs: 4_000 } };
     const next = restartTimer(doc, now);
@@ -371,7 +371,7 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // startWork -- the "ensure, not start" rule (criterion 2), pure half.
+  // startWork -- the "ensure, not start" rule, pure half.
   // -------------------------------------------------------------------------------
 
   await check('startWork: begins a fresh work interval when there is no timer at all', () => {
@@ -401,7 +401,7 @@ async function main() {
 
   // -------------------------------------------------------------------------------
   // DEFAULT_SETTINGS / normalizeDoc -- the three per-phase cue defaults and the
-  // `sound` migration (SPEC_CUES.md criterion 9). Driven directly through
+  // `sound` migration. Driven directly through
   // normalizeDoc: it's a pure function of whatever JSON.parse would have handed
   // back, so none of this needs a real file or a temp dir.
   // -------------------------------------------------------------------------------
@@ -410,7 +410,7 @@ async function main() {
     assert.equal('sound' in DEFAULT_SETTINGS, false);
     const { cueWork, cueBreak, cueLongBreak } = DEFAULT_SETTINGS;
     for (const v of [cueWork, cueBreak, cueLongBreak]) assert.equal(typeof v, 'string');
-    // Criterion 9: "starts with three different cues" -- a picker offering the same
+    // "Starts with three different cues" -- a picker offering the same
     // sound under three different labels would satisfy every other assertion here
     // and still fail the actual point of the feature (telling phases apart by ear).
     assert.notEqual(cueWork, cueBreak);
@@ -570,7 +570,7 @@ async function main() {
   rmSync(home, { recursive: true, force: true });
 
   // -------------------------------------------------------------------------------
-  // Criterion 10: nothing about the agent's behaviour changes. Cheap, direct proof
+  // Nothing about the agent's behaviour changes. Cheap, direct proof
   // that this slice touched nothing on that path, rather than trusting the diff.
   // -------------------------------------------------------------------------------
 
@@ -584,7 +584,7 @@ async function main() {
   // Restart behaviour, driven the way test/check-http.mjs drives it: a real
   // in-process daemon on an ephemeral port against a temp CLAUDE_BOARD_HOME. A
   // deadline written before a restart is the identical deadline after one --
-  // criterion 6, "the countdown survives a daemon restart" -- because the document
+  // "the countdown survives a daemon restart" -- because the document
   // stores an absolute wall clock time, not a remaining-seconds counter for the new
   // process to have to guess how to resume.
   // -------------------------------------------------------------------------------
@@ -700,7 +700,7 @@ async function main() {
     });
   });
 
-  await check('POST /api/pomodoro/forward: idle is a no-op all the way through the route -- 200, nothing thrown, the document on disk is byte-for-byte unchanged (criterion 4)', async () => {
+  await check('POST /api/pomodoro/forward: idle is a no-op all the way through the route -- 200, nothing thrown, the document on disk is byte-for-byte unchanged', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       writeDoc(defaultDoc(), home);
       const pomodoroFile = path.join(home, 'pomodoro.json');

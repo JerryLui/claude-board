@@ -1,4 +1,4 @@
-// The diagram lens's view math (DESIGN.md polish ticket 05), pure and separate from
+// The diagram lens's view math, pure and separate from
 // the DOM that renders it. A "view" is `{ x, y, s }` — exactly what
 // `translate(x, y) scale(s)` on the lens canvas means, with the canvas's
 // transform-origin pinned at its own top-left, so a canvas-local point `p` lands

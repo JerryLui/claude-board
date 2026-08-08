@@ -1,10 +1,8 @@
 // The node:http daemon: routes, the loopback Host check, a polling wait on
-// /api/board/:id/wait, and (ticket 04) the SSE push on /api/board/:id/events. See
+// /api/board/:id/wait, and the SSE push on /api/board/:id/events. See
 // PROTOCOL.md "HTTP surface" and "SSE events".
 //
-// Four gates, in this order (DESIGN.md Decisions -> "A loopback Host check, an
-// origin check, and a local secret"; SPEC_LAUNCH.md Decisions -> "Read routes are
-// gated", "One-time handoff, then a session cookie"):
+// Four gates, in this order:
 //
 //   1. Host is loopback, on every route          -> 403, no body
 //   2. non-GET is same-origin                    -> 403, no body
@@ -27,7 +25,7 @@
 //     single-use handoff (src/handoff.mjs). It reads boards and answers them, and is
 //     refused in the secret header, so it can never resolve a file.
 //
-// SPEC_LAUNCH.md overturned DESIGN.md's "read routes stay open", and deleted the
+// This overturned "read routes stay open", and deleted the
 // board-scoped submit token that decision forced. What that decision cost, plainly:
 // any local process that could reach the port read every board — source excerpts,
 // questions, answers — and could forge an answer on any board whose page it could
@@ -40,9 +38,8 @@
 // disconnected would see. SSE survives it too, but differently: nothing can mutate
 // the board while the daemon is down, so a client whose connection drops on
 // restart just reconnects (EventSource does this natively) and picks up live
-// pushes again with nothing missed in between — see DESIGN.md "Always on under
-// launchd" (KeepAlive restarts the daemon on a crash; ./install.sh restarts it to
-// take an update).
+// pushes again with nothing missed in between (KeepAlive restarts the daemon on a
+// crash; ./install.sh restarts it to take an update).
 
 import http from 'node:http';
 import { createReadStream, readFileSync } from 'node:fs';
@@ -105,7 +102,7 @@ function createSseHub() {
      * so the shim can tell "the reviewer closed the tab" from "the reviewer is looking
      * at it", which is what decides whether a later round reopens the tab. The shim used
      * to ask for this over a `GET /api/board/:id/clients` route that was never routed
-     * here, so it always got null and never reopened (audit 2026-07-31 S3). */
+     * here, so it always got null and never reopened. */
     clientCount(boardId) {
       const set = subs.get(boardId);
       return set ? set.size : 0;
@@ -187,7 +184,7 @@ export function isLoopbackHost(hostHeader) {
  * will not let that page forge is `Origin`/`Sec-Fetch-Site`, so those are what gate a
  * write. Both are absent on a non-browser client (the shim, curl, the checks), which is
  * deliberate: this closes the browser-driven CSRF hole the Host check cannot see, not
- * local processes, which DESIGN.md's "Localhost, one human" boundary already trusts. */
+ * local processes, which "Localhost, one human" boundary already trusts. */
 function isSameOriginWrite(req) {
   const origin = req.headers.origin;
   if (origin && origin !== `http://${req.headers.host}`) return false;
@@ -206,8 +203,8 @@ function isSameOriginWrite(req) {
  * spending it, and `Origin`/`Sec-Fetch-Site` are the two headers a page cannot forge.
  *
  * Be honest about the reach of this. It stops a PAGE on another origin reading boards
- * through the reviewer's browser. It does NOT stop the attack that motivated it (audit
- * 2026-07-31 S1): a local process that harvested the cookie — cookies are not port-scoped,
+ * through the reviewer's browser. It does NOT stop the attack that motivated it: a local
+ * process that harvested the cookie — cookies are not port-scoped,
  * so any other http server on this host receives it — sets whatever headers it likes and
  * is indistinguishable from the browser here. That exposure is bounded by the cookie's
  * lifetime and named in SECURITY.md; it is not closed by this function, and this comment
@@ -221,7 +218,7 @@ function isAuthorizedRead(req, secret) {
 
 /** Origin/Sec-Fetch-Site as they apply to a cookie-authenticated READ. Absence passes,
  * exactly as it does for writes: the shim, curl and the checks send neither, and a
- * top-level browser navigation — the bookmark case criterion 2 turns on — sends
+ * top-level browser navigation — the bookmark case — sends
  * `Sec-Fetch-Site: none`. Requiring presence would refuse both and buy nothing, since
  * the caller this would be aimed at can set the header anyway. */
 function isSameOriginRead(req) {
@@ -237,7 +234,7 @@ function isSameOriginRead(req) {
  * `parts[1] === 'pomodoro'` prefix match, which would silently hand the cookie every
  * pomodoro write this file ever grows, including ones that should stay secret-only.
  * `ensure` was originally left OUT of this set, on the reasoning that its one caller
- * (ticket 05's session-start hook) is a shell script holding the secret and never a
+ * (the session-start hook) is a shell script holding the secret and never a
  * browser. It is in now, because that stopped being true: the index widget's switch
  * starts a pomodoro by hand, and a browser is exactly what performs it. The reach it
  * adds is the smallest of the five — `startWork` is a no-op against any timer that
@@ -248,7 +245,7 @@ function isSameOriginRead(req) {
  * is still secret-only until someone deliberately types it here.
  *
  * `preview` joins for the same reason `ensure` did: its one caller is the settings
- * popover's picker (ADR.md entry 20, criterion 7 — a picker must audition a cue the
+ * popover's picker (ADR.md entry 20 — a picker must audition a cue the
  * instant the reader selects it, before anything is saved, which only a browser holding
  * the cookie can reach), and it is advisory in the same sense — it reads and writes
  * NOTHING (not pomodoro.json, not settings.notify), so a cookie holder gains at most
@@ -294,8 +291,7 @@ function isPomodoroCookieWrite(parts) {
  *    pausing an advisory clock that never touches a board, never gates an `ask`, and
  *    never reaches a tool is strictly less than that — `isSameOriginWrite` still stands
  *    in front of it, exactly as it does for submit. The board-scoped fallback token that
- *    used to sit here is deleted rather than kept beside it (SPEC_LAUNCH.md: "Submit
- *    collapses into the read credential").
+ *    used to sit here is deleted rather than kept beside it.
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. The
@@ -343,7 +339,7 @@ function wantsHtmlRefusal(req, pathname) {
  * No `WWW-Authenticate` header, deliberately. 401 is the honest status, but that header
  * is what makes a browser throw up a username/password prompt — and there is no password
  * here, so a prompt would be an unanswerable dialog in front of the one page that
- * explains the actual fix. SPEC_LAUNCH.md rejected Basic auth for the same reason. */
+ * explains the actual fix. Basic auth was rejected for the same reason. */
 function sendCredentialRefusal(req, res, pathname) {
   const command = recoveryCommand();
   if (wantsHtmlRefusal(req, pathname)) {
@@ -391,7 +387,7 @@ function sendJson(res, status, obj) {
 
 // Content-Security-Policy for every HTML response, plus the X-Frame-Options that
 // says the same thing to anything that predates `frame-ancestors` -- `CSP`
-// itself now lives in src/render.mjs (ticket 10, DESIGN.md, audit S2),
+// itself now lives in src/render.mjs,
 // single-sourced with the `<meta http-equiv>` renderBoardPage now also emits, so
 // an archived board opened from disk with no daemon (and so no HTTP response to
 // carry this header) still carries the policy. See render.mjs's own comment on
@@ -437,7 +433,7 @@ function sendText(res, status, text) {
 // in script, and blocking them would need `navigate-to`, which no shipping browser has.
 const SERVE_CSP = [
   "default-src 'none'",
-  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
@@ -504,10 +500,24 @@ function handleServeFile(req, res, relPath) {
     'x-content-type-options': 'nosniff',
     'x-frame-options': 'DENY',
     'referrer-policy': 'no-referrer',
+    // CSP is per-REALM, so connect-src 'none' below only binds fetches this document
+    // makes -- it says nothing about a same-origin window it opens. A served document is
+    // same-origin with the board pages, so `window.open('/b/<id>')` used to hand it a
+    // live WindowProxy whose realm carries connect-src 'self' AND 'unsafe-inline': the
+    // opened board could be scripted directly, read, and submitted as the reviewer.
+    // Board pages send no COOP, so a `same-origin` header here puts this document in its
+    // own browsing-context group and the opener handle comes back severed.
+    'cross-origin-opener-policy': 'same-origin',
     // These are local files a generator rewrites in place under a stable name; a
     // reviewer reloading after a re-render must not get yesterday's document.
     'cache-control': 'no-store',
   });
+  // pipe() does not destroy the source when the destination goes away, and autoClose
+  // only fires on the stream's OWN end/error -- so every aborted download leaked a
+  // descriptor. This daemon runs for days under KeepAlive, and at the fd ceiling every
+  // route fails (openSync, readFileSync, atomicWrite) WITHOUT the process exiting, so
+  // KeepAlive never restarts it. Measured: 300 aborts, 300 leaked descriptors.
+  res.on('close', () => stream.destroy());
   stream.pipe(res);
 }
 
@@ -549,7 +559,7 @@ async function waitForRound(boardId, round, home, { intervalMs = 120, isAborted 
 /** Every comment run through resolveComment (src/board.mjs) exactly once, same
  * as renderBoardPage: `commentsByBlock` for whatever gets rendered here, and
  * `boardForClient` -- `board` with resolved-shape comments -- for whatever gets
- * embedded for the client to hydrate `board` from. Ticket 06's pin rendering
+ * embedded for the client to hydrate `board` from. Pin rendering
  * reads `.resolved`/`.lost` off `board.comments` directly rather than
  * re-deriving them; if an SSE payload's `board` field carried the raw stored
  * comment shape instead (no `.resolved`, no `.lost`), a client's local `board`
@@ -615,13 +625,13 @@ async function handlePostBoard(req, res, home, sse) {
     if (body.boardId) {
       board = readBoard(body.boardId, home);
       if (!board) return sendJson(res, 404, { error: 'board not found' });
-      // Idempotency (audit 2026-07-31 D1). Everything after readJsonBody is synchronous,
+      // Idempotency. Everything after readJsonBody is synchronous,
       // so a socket that dies before the response lands — a reload-on-change exit, a
       // kickstart, the shim's own inactivity timeout — leaves the round fully applied and
       // the caller told it failed. The agent then retries, and amendRound APPENDS a second
       // copy of every block: the reviewer sees the same question twice in one round. A
       // retry carrying the same `requestId` is answered from what that id already did.
-      // Scoped to the round it guarded (audit). `lastRequestId` used to persist for
+      // Scoped to the round it guarded. `lastRequestId` used to persist for
       // the life of the board, and `requestId` is derived from the round's CONTENT --
       // so the ordinary fix-and-reconfirm loop ("show file, ask, fix, show the same
       // file, ask again") posted a byte-identical body and was answered as a retry.
@@ -643,8 +653,7 @@ async function handlePostBoard(req, res, home, sse) {
       const latestRound = board.rounds[board.rounds.length - 1];
       if (latestRound && latestRound.status === 'open') {
         // The open round hasn't been sent yet: amend it in place rather than
-        // minting round N+1 (see DESIGN.md "the agent may amend a round that
-        // is still open... without disturbing filled-in fields").
+        // minting round N+1.
         //
         // `title` is passed through on both paths: `ask` requires a non-empty title on
         // every call and commands/grill.md tells the agent to make it the branch name,
@@ -652,7 +661,7 @@ async function handlePostBoard(req, res, home, sse) {
         // an unlabelled "Round 2". Storing it on the round object is src/board.mjs's
         // half and rendering it is src/render.mjs's — both owned elsewhere; this side
         // stops throwing the value away.
-        // `cwd` is forwarded so assertCwdNotRetargeted can actually refuse it (audit).
+        // `cwd` is forwarded so assertCwdNotRetargeted can actually refuse it.
         // It was dropped here, so the guard only ever saw `undefined` and returned at
         // once: a post naming a different `cwd` alongside `boardId` got a 200 and the
         // caller believed it had retargeted the board. PROTOCOL.md and the guard's own
@@ -684,7 +693,7 @@ async function handlePostBoard(req, res, home, sse) {
   } catch (err) {
     return sendJson(res, 400, { error: String(err.message || err) });
   }
-  // Rendered BEFORE either persist call (ticket 11, audit V5a): renderBoardPage
+  // Rendered BEFORE either persist call: renderBoardPage
   // walks every comment's anchor through resolveComment, which used to be able to
   // throw (decodeEntities' RangeError on an out-of-range numeric entity -- fixed
   // in src/anchor.mjs, but the ordering here is a second, independent guard
@@ -707,7 +716,7 @@ async function handlePostBoard(req, res, home, sse) {
   if (pushMode) sse.broadcast(board.id, 'round', buildRoundPushPayload(board, round, pushMode, touchedBlockIds));
   // `clients` is the count at the instant this round landed, which is what lets the shim
   // tell "the reviewer closed the tab" from "the reviewer is looking at it" and reopen
-  // only in the first case. See createSseHub.clientCount (audit 2026-07-31 S3).
+  // only in the first case. See createSseHub.clientCount.
   return sendJson(res, 200, {
     boardId: board.id,
     thread: board.thread,
@@ -722,7 +731,7 @@ async function handlePostBoard(req, res, home, sse) {
  * credential in the markup. That keeps the served page's bytes a pure function of the
  * board JSON, which is what makes the standalone `pages/*.html` archive byte-identical
  * to what the daemon serves — and what makes an archived board openable from disk with
- * no daemon and no credential at all (SPEC_LAUNCH.md criterion 6). */
+ * no daemon and no credential at all. */
 function handleGetPage(req, res, id, home) {
   const board = readBoard(id, home);
   if (!board) return sendText(res, 404, 'board not found');
@@ -775,7 +784,7 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
     // on a cold browser start, and Chrome's prerender spending the token before the
     // visible navigation. Refusing the replay is still right; telling a fully authorized
     // browser it holds no credential, and naming a command that changes nothing for it,
-    // is not (audit 2026-07-31 D3). Send it where the token would have sent it.
+    // is not. Send it where the token would have sent it.
     if (isAuthorizedRead(req, secret)) {
       res.writeHead(302, { location: handoffTarget(null), 'cache-control': 'no-store', 'content-length': '0' });
       return res.end();
@@ -836,7 +845,7 @@ async function handleSubmit(req, res, id, home, sse) {
   // everything else unanswered. A stale client is the normal case, not an attack: a
   // laptop waking from sleep with no SSE replay, a second tab, or a plain double-click
   // on Send. The board is meant to be the durable record of what was decided
-  // (DESIGN.md board criterion 4), so a submit that does not name the currently-open round
+  // so a submit that does not name the currently-open round
   // is refused with 409 and changes nothing — which is also what makes a client retry
   // safe, rather than duplicating every comment (and its pin number, PROTOCOL.md
   // "Identifiers") and re-applying every answer.
@@ -849,7 +858,7 @@ async function handleSubmit(req, res, id, home, sse) {
     // button is pressed on a finished board, because openRoundNumber() returns null
     // there. Answering 400 sent the client down its generic error path (it special-cases
     // only 409), which showed `submit failed: 400` and re-enabled the buttons for an
-    // identical retry, forever (audit 2026-07-31 D2). 409 is both truer and handled.
+    // identical retry, forever. 409 is both truer and handled.
     if (openN === null) {
       return sendJson(res, 409, { error: 'this board has already been submitted', board: board.id, round: null });
     }
@@ -865,8 +874,17 @@ async function handleSubmit(req, res, id, home, sse) {
     });
   }
   const round = openN;
-  applySubmit(board, { action: body.action, answers: body.answers, comments: body.comments }, round);
-  // Rendered BEFORE either persist call below (ticket 11, audit V5a) -- see
+  try {
+    applySubmit(board, { action: body.action, answers: body.answers, comments: body.comments }, round);
+  } catch (err) {
+    // Same shape as handlePostBoard's guard above, and for the same reason: applySubmit
+    // now runs answers through byValueText, which throws a plain Error carrying no
+    // `.status`. Without this the router's top-level catch would default it to 500, so an
+    // over-cap note -- a reviewer typing too much, not an attack -- would read as a daemon
+    // fault instead of a rejected request.
+    return sendJson(res, 400, { error: String(err.message || err) });
+  }
+  // Rendered BEFORE either persist call below -- see
   // handlePostBoard's identical ordering, and its comment, for the full
   // reasoning: a board that fails to render must never become the persisted
   // state, since GET /b/:id and /wait both re-render that same persisted board
@@ -926,8 +944,8 @@ function handleEvents(req, res, id, home, sse) {
 }
 
 // The one in-flight preview child, module scope rather than per-request: there is one
-// daemon and one reader, and criterion 7 ("a rapid series of changes never overlaps
-// into a chorus") means the SECOND picker change must kill the FIRST preview, which is
+// daemon and one reader, and "a rapid series of changes never overlaps
+// into a chorus" means the SECOND picker change must kill the FIRST preview, which is
 // only possible if both requests can see the same handle. No per-session or per-socket
 // keying -- a preview belongs to the one settings popover open at a time, the same way
 // the pomodoro clock itself is one global timer and not one per request (ADR.md entry 8).
@@ -937,7 +955,7 @@ let previewChild = null;
  * one path ADR.md entry 20 calls out as deliberately unfiltered, because auditioning a
  * cue from a picker must not raise a banner. Kills whatever is still playing FIRST,
  * so a rapid series of picker changes each cut the previous one off rather than layering
- * into a chorus (criterion 7) -- the kill happens even when `cue` turns out to be `None`
+ * into a chorus -- the kill happens even when `cue` turns out to be `None`
  * or invalid, so selecting None while something is still playing silences it too.
  *
  * Async only and every failure swallowed, never thrown -- the same discipline
@@ -996,7 +1014,7 @@ async function handlePomodoro(req, res, parts, pomo, home) {
     const action = parts[2];
     // Bodyless by design: `readJsonBody` is never called on this branch, which is what
     // makes a curl-shaped `POST /api/pomodoro/ensure` with no body and no
-    // `content-type` succeed rather than 415 — ticket 05's session-start hook is a
+    // `content-type` succeed rather than 415 — the session-start hook is a
     // one-line shell `curl`, and it must not have to construct or parse anything.
     if (action === 'ensure') return sendPomodoro(res, pomo.ensureTimer());
     if (action === 'pause') return sendPomodoro(res, pomo.pause());
@@ -1024,10 +1042,10 @@ async function handlePomodoro(req, res, parts, pomo, home) {
       }
     }
     // `{ cue: "<name>" }` -- what a picker sends the instant the reader selects it
-    // (ADR.md entry 20, criterion 7). Deliberately NOT routed through `pomo`: this is
+    // (ADR.md entry 20). Deliberately NOT routed through `pomo`: this is
     // an audition, not a setting, so it never reads or writes pomodoro.json and never
     // looks at settings.notify -- the notify toggle silences the boundary cue, not the
-    // picker's own preview (criterion 7's "even while the notify toggle is off").
+    // picker's own preview ("even while the notify toggle is off").
     if (action === 'preview') {
       let body;
       try {
@@ -1079,7 +1097,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // Per-instance, like the SSE hub and for the same reason: two daemons in one process
   // (as the checks spin up) must not redeem each other's handoffs.
   const handoffs = createHandoffStore();
-  // Re-read PER REQUEST, not once at startup (audit 2026-07-31 S4). SECURITY.md,
+  // Re-read PER REQUEST, not once at startup. SECURITY.md,
   // PROTOCOL.md, CHANGELOG.md and src/secret.mjs all name rotating the secret as THE way
   // to revoke every browser at once. With the value captured in a closure that was false
   // in the worst direction: the running daemon kept honouring the OLD secret — so a

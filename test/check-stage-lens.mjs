@@ -1,33 +1,33 @@
-// SPEC_STAGES criteria 3, 4, 12 and 13: the html-stage lens, driven end to end
+// The html-stage lens, driven end to end
 // through the DOM stand-in the same way test/check-mermaid-anchor.mjs drives the
 // diagram lens -- the real src/render.mjs markup, the real src/ui.mjs client
 // script, a real click on the real control.
 //
 // Covers:
-//   - criterion 3: every html stage carries an expand control that opens it in
+//   - every html stage carries an expand control that opens it in
 //     the lens -- standalone and inside a variant option alike, and the control
 //     is in the server-rendered markup rather than injected, so an archive
 //     carries it in its own bytes.
-//   - criterion 4: the stage in the lens receives real pointer input. What that
+//   - the stage in the lens receives real pointer input. What that
 //     means for a check with no browser is set out at that check's own comment;
 //     the half that is genuinely assertable here is that nothing on the parent's
 //     side makes the frame inert, asserted against the REAL stylesheet through
 //     the stand-in's cascade resolver rather than against a rule's spelling.
-//   - criterion 12: Esc and a backdrop click both close the lens, and focus goes
+//   - Esc and a backdrop click both close the lens, and focus goes
 //     back to the control that opened it.
-//   - criterion 13: a standalone stage is otherwise untouched -- the inline frame
+//   - a standalone stage is otherwise untouched -- the inline frame
 //     stays where it was rendered, stays the only '.html-stage' on the page while
 //     the lens is open, and its own click-to-comment gesture still works after.
 //
 // The trust-boundary half of this feature -- the lens frame's sandbox attribute,
 // and what happens when that frame speaks on the stage message channel -- lives
-// in test/check-stage-isolation.mjs instead, next to the audit findings it
-// belongs to.
+// in test/check-stage-isolation.mjs instead, next to the related checks it
+// belongs with.
 //
 // What this file cannot do, stated rather than faked (QUIRKS.md "The stand-in has
 // no layout"): there is no scrolling, no hit-testing and no pointer-events
 // enforcement here, so "the mock can be SCROLLED in the lens" is not directly
-// observable. Criterion 4 is therefore checked as its preconditions -- a live
+// observable. This is therefore checked as its preconditions -- a live
 // frame carrying the same document, given a real box by the stylesheet, with no
 // rule making it inert -- and the last mile belongs to a browser.
 
@@ -51,7 +51,7 @@ function check(name, fn) {
 }
 
 // A mock that is taller than any stage will ever be and runs its own script --
-// the two things criterion 4 is about (content that has somewhere to scroll to,
+// the two things this is about (content that has somewhere to scroll to,
 // and a document that is genuinely live rather than a picture of one).
 const MOCK = '<div class="mock" style="height: 2000px"><button>Send</button>'
   + '<p>bottom of a very tall mock</p></div>'
@@ -118,9 +118,9 @@ function variantBoard() {
   });
 }
 
-// --- criterion 3 ---------------------------------------------------------------
+// -------------------------------------------------------------------------------
 
-check('criterion 3: a standalone html stage carries an expand control naming its own block, and clicking it opens the lens on that stage', () => {
+check('a standalone html stage carries an expand control naming its own block, and clicking it opens the lens on that stage', () => {
   const document = loadBoard();
   const btn = expandControl(document);
   assert.ok(btn, 'an html block\'s kicker must carry an expand control');
@@ -136,7 +136,7 @@ check('criterion 3: a standalone html stage carries an expand control naming its
     'the lens must show THIS stage -- same srcdoc, byte for byte, as the block\'s own frame');
 });
 
-check('criterion 3: a variant option\'s html stage carries the same control, and it opens the lens too -- the case the spec exists for', () => {
+check('a variant option\'s html stage carries the same control, and it opens the lens too -- the case the spec exists for', () => {
   const document = loadBoard(renderBoardPage(variantBoard()));
   const card = document.querySelector('.choice-variant');
   assert.ok(card, 'setup failure: no variant card rendered');
@@ -150,7 +150,7 @@ check('criterion 3: a variant option\'s html stage carries the same control, and
     'and it must be that option\'s own mock, not some other block\'s');
 });
 
-check('criterion 3: the expand control is SERVER-rendered, so a standalone archive carries it without ever running the client script', () => {
+check('the expand control is SERVER-rendered, so a standalone archive carries it without ever running the client script', () => {
   // Same reasoning as the diagram control's (src/render.mjs's expandButton): the
   // lens has to work from a file: archive's own bytes. Asserted on the rendered
   // markup, before any script runs, so an implementation that injected the button
@@ -160,7 +160,7 @@ check('criterion 3: the expand control is SERVER-rendered, so a standalone archi
     'the rendered page must already contain the html stage\'s expand control');
 });
 
-check('criterion 3: an html block whose source failed to resolve carries NO expand control -- there is no stage to open', () => {
+check('an html block whose source failed to resolve carries NO expand control -- there is no stage to open', () => {
   // Same rule the diagram control already follows (src/ui.mjs's
   // wireDiagramExpand deletes it when mermaid left no SVG): a control that opens
   // an empty lens is worse than no control. Here it is decided server-side,
@@ -172,9 +172,9 @@ check('criterion 3: an html block whose source failed to resolve carries NO expa
   assert.ok(!markup.includes('html-stage'), 'setup failure: the error branch must render no stage either');
 });
 
-// --- criterion 4 ---------------------------------------------------------------
+// -------------------------------------------------------------------------------
 
-check('criterion 4: the lens frame is a live document running the mock\'s own script, not a picture of one', () => {
+check('the lens frame is a live document running the mock\'s own script, not a picture of one', () => {
   const document = loadBoard();
   const lens = openStageLens(document);
   lens.frame.loadSrcdoc(); // the srcdoc navigation completing, as a browser would
@@ -184,16 +184,16 @@ check('criterion 4: the lens frame is a live document running the mock\'s own sc
     'and the mock\'s own markup must be there to receive that input');
 });
 
-check('criterion 4: nothing in the stylesheet makes the lens frame inert, while a variant option\'s INLINE stage stays inert -- the trust boundary is untouched', () => {
+check('nothing in the stylesheet makes the lens frame inert, while a variant option\'s INLINE stage stays inert -- the trust boundary is untouched', () => {
   // The real cascade, over the real src/styles.mjs text (test/dom-stand-in.mjs's
   // resolveComputedProperty), not a match against a rule's spelling: this asks
-  // what pointer-events each of the two frames actually computes to, which is the
-  // question criterion 4 and criterion 9 are two halves of.
+  // what pointer-events each of the two frames actually computes to -- the
+  // property that decides whether a stage is live or inert.
   const document = loadBoard(renderBoardPage(variantBoard()));
   const inline = document.querySelector('.choice-variant .html-stage');
   assert.ok(inline, 'setup failure: no inline stage inside the variant card');
   assert.equal(resolveComputedProperty(styles, inline, true, 'pointer-events'), 'none',
-    'a variant option\'s inline stage must stay pointer-events: none -- criterion 9, and the spec\'s Decisions pin this rule verbatim');
+    'a variant option\'s inline stage must stay pointer-events: none -- this rule is pinned verbatim, not merely implied');
 
   document.querySelector('.choice-variant .expand-btn').dispatchEvent(new StandInEvent('click'));
   const frame = document.querySelector('.stage-lens .stage-lens-frame');
@@ -208,7 +208,7 @@ check('criterion 4: nothing in the stylesheet makes the lens frame inert, while 
   assert.equal(resolveComputedProperty(styles, frame, true, 'width'), '100%');
 });
 
-check('criterion 4: the lens frame is not one of the page\'s wired stages -- it never joins the message-sender walk', () => {
+check('the lens frame is not one of the page\'s wired stages -- it never joins the message-sender walk', () => {
   // src/ui.mjs's findStageFrame walks qsa('.html-stage', document) and assumes
   // every frame it finds is one block's INLINE stage (it reads the block id, the
   // pin layer and the sentRefs off that frame's '.html-block' ancestor). The lens
@@ -224,7 +224,7 @@ check('criterion 4: the lens frame is not one of the page\'s wired stages -- it 
   assert.equal(lens.frame.classList.contains('html-stage'), false, 'the lens frame must not carry the .html-stage class');
 });
 
-// --- criterion 12 --------------------------------------------------------------
+// -------------------------------------------------------------------------------
 //
 // Every close path is this page's own code rather than the browser's, and that is
 // deliberate: the DOM stand-in has no showModal(), no native Esc handling for a
@@ -233,7 +233,7 @@ check('criterion 4: the lens frame is not one of the page\'s wired stages -- it 
 // a cross-origin frame, unreliable in a browser too -- see wireStageLensChrome's
 // own comment).
 
-check('criterion 12: Esc closes the lens and returns focus to the control that opened it', () => {
+check('Esc closes the lens and returns focus to the control that opened it', () => {
   const document = loadBoard();
   const lens = openStageLens(document);
   assert.notEqual(document.activeElement, lens.btn, 'setup failure: focus must not already be on the control, or the assertion below proves nothing');
@@ -243,7 +243,7 @@ check('criterion 12: Esc closes the lens and returns focus to the control that o
   assert.equal(document.activeElement, lens.btn, 'and focus must go back to the expand control that opened it');
 });
 
-check('criterion 12: a backdrop click closes the lens and returns focus -- both the dialog itself and the surround around the framed stage', () => {
+check('a backdrop click closes the lens and returns focus -- both the dialog itself and the surround around the framed stage', () => {
   for (const targetName of ['dlg', 'body']) {
     const document = loadBoard();
     const lens = openStageLens(document);
@@ -253,10 +253,10 @@ check('criterion 12: a backdrop click closes the lens and returns focus -- both 
   }
 });
 
-check('criterion 12: a click on the lens chrome is NOT a backdrop click -- the bar and its title leave the lens open', () => {
+check('a click on the lens chrome is NOT a backdrop click -- the bar and its title leave the lens open', () => {
   // Without this, the "backdrop" test above would be satisfied by a lens that
-  // closes on any click anywhere, which would make the pick control criteria 5-8
-  // add unreachable.
+  // closes on any click anywhere, which would make the pick control checks
+  // below unreachable.
   const document = loadBoard();
   const lens = openStageLens(document);
   document.querySelector('.stage-lens .lens-title').dispatchEvent(new StandInEvent('click'));
@@ -265,7 +265,7 @@ check('criterion 12: a click on the lens chrome is NOT a backdrop click -- the b
   assert.equal(lens.dlg.hasAttribute('open'), true, 'nor a click on the bar itself');
 });
 
-check('criterion 12: the close control closes the lens, returns focus, and ends the copy\'s document rather than hiding it', () => {
+check('the close control closes the lens, returns focus, and ends the copy\'s document rather than hiding it', () => {
   const document = loadBoard();
   const lens = openStageLens(document);
   document.querySelector('.stage-lens .lens-btn[data-lens="close"]').dispatchEvent(new StandInEvent('click'));
@@ -275,7 +275,7 @@ check('criterion 12: the close control closes the lens, returns focus, and ends 
     'the frame must be dropped, not merely hidden -- a mock left mounted behind a closed dialog goes on running its own timers');
 });
 
-check('criterion 12: closing and reopening works, and a second open while already open is refused rather than stacking frames', () => {
+check('closing and reopening works, and a second open while already open is refused rather than stacking frames', () => {
   const document = loadBoard();
   const first = openStageLens(document);
   first.btn.dispatchEvent(new StandInEvent('click')); // already open
@@ -288,9 +288,9 @@ check('criterion 12: closing and reopening works, and a second open while alread
   assert.ok(second.frame, 'and reopening must mount the stage again');
 });
 
-// --- criterion 13 --------------------------------------------------------------
+// -------------------------------------------------------------------------------
 
-check('criterion 13: opening the lens leaves the standalone block\'s own stage exactly where it was rendered', () => {
+check('opening the lens leaves the standalone block\'s own stage exactly where it was rendered', () => {
   const document = loadBoard();
   const inlineBefore = document.querySelector('.html-block .html-stage');
   const lens = openStageLens(document);
@@ -301,7 +301,7 @@ check('criterion 13: opening the lens leaves the standalone block\'s own stage e
   assert.notEqual(lens.frame, inlineBefore, 'the lens shows a second mount, never the block\'s own frame');
 });
 
-check('criterion 13: the standalone stage\'s own click-to-comment gesture still works, before and after a trip through the lens', () => {
+check('the standalone stage\'s own click-to-comment gesture still works, before and after a trip through the lens', () => {
   const document = loadBoard();
   enableCommentMode(document);
   const inline = document.querySelector('.html-block .html-stage');
@@ -322,7 +322,7 @@ check('criterion 13: the standalone stage\'s own click-to-comment gesture still 
   assert.equal(form.getAttribute('data-anchor-ref'), refBefore, 'and mint the same anchor it did before');
 });
 
-// --- criterion 8 ---------------------------------------------------------------
+// -------------------------------------------------------------------------------
 //
 // "Picking from the lens records the answer and closes the lens in one act."
 // RECORDS is asserted the way this repo already prefers over reaching into
@@ -351,8 +351,8 @@ function twoOptionBoard() {
 /** Press Send with a stubbed `fetch` and hand back the posted body.
  *
  * Presses twice when the first press only armed the button: the round-end send
- * guard (DESIGN.md round-end criteria 4-5) arms instead of submitting while any
- * question still carries no status, and the forced-press check below needs its
+ * guard arms instead of submitting while any question still carries no status,
+ * and the forced-press check below needs its
  * round to stay deliberately incomplete -- that a forced press records nothing
  * IS its subject, so answering the round to get past the guard would delete the
  * thing it measures. The second press is the guard's own "send anyway", which is
@@ -384,7 +384,7 @@ function openVariantLens(document, index) {
   return { cards, card: cards[index], btn, pick: document.querySelector('.stage-lens .lens-pick') };
 }
 
-check('criterion 8: picking from the lens records the answer -- it reaches the submit body as that option, through the same path every other pick uses', () => {
+check('picking from the lens records the answer -- it reaches the submit body as that option, through the same path every other pick uses', () => {
   const board = twoOptionBoard();
   const qid = board.blocks[0].id;
   const document = loadBoard(renderBoardPage(board));
@@ -400,7 +400,7 @@ check('criterion 8: picking from the lens records the answer -- it reaches the s
   assert.equal(answer.status, 'answered');
 });
 
-check('criterion 8: picking closes the lens in the same act, and hands focus back to the control that opened it', () => {
+check('picking closes the lens in the same act, and hands focus back to the control that opened it', () => {
   const board = twoOptionBoard();
   const document = loadBoard(renderBoardPage(board));
   const { btn, pick } = openVariantLens(document, 0);
@@ -413,7 +413,7 @@ check('criterion 8: picking closes the lens in the same act, and hands focus bac
   assert.equal(document.querySelectorAll('.stage-lens .lens-pick').length, 0, 'the control must not outlive the lens that carried it');
 });
 
-check('criterion 8: there is ONE selection per question -- picking B from its lens after A moves the answer rather than adding one', () => {
+check('there is ONE selection per question -- picking B from its lens after A moves the answer rather than adding one', () => {
   const board = twoOptionBoard();
   const qid = board.blocks[0].id;
   const document = loadBoard(renderBoardPage(board));
@@ -431,7 +431,7 @@ check('criterion 8: there is ONE selection per question -- picking B from its le
   assert.equal(answer.choice, 'Card B', 'exactly one choice reaches the submit body, and it is the last one picked');
 });
 
-check('criterion 8: the lens control is a caller, not an authority -- comment mode disables it, and a forced press records nothing', () => {
+check('the lens control is a caller, not an authority -- comment mode disables it, and a forced press records nothing', () => {
   // selectVariant refuses in comment mode, the same as it does for a direct
   // click on the card (every widget handler in src/ui.mjs stands down while
   // comment mode is on). The control mirrors that refusal so it never reads as
@@ -453,7 +453,7 @@ check('criterion 8: the lens control is a caller, not an authority -- comment mo
   assert.ok(!answers || answers.status !== 'answered', 'and nothing may reach the submit body as an answer');
 });
 
-check('criterion 8: a historical option\'s lens carries a disabled control, and a read-only archive\'s carries none at all', () => {
+check('a historical option\'s lens carries a disabled control, and a read-only archive\'s carries none at all', () => {
   const board = twoOptionBoard();
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   const pageHtml = renderBoardPage(board);

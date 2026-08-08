@@ -251,7 +251,7 @@ async function main() {
     );
   });
 
-  // --- acceptance criterion 1: an edit to the clone does not change what runs ----------
+  // --- an edit to the clone does not change what runs ----------------------------------
 
   const cloneServerPath = path.join(cloneDir, 'src', 'server.mjs');
   const originalServerText = readFileSync(cloneServerPath, 'utf8');
@@ -277,7 +277,7 @@ async function main() {
     }
   });
 
-  // --- acceptance criterion 2 (the other direction): the edit DOES force a rebuild -----
+  // --- the other direction: the edit DOES force a rebuild ------------------------------
 
   const second = runInstall();
   await check('...but the SAME edit makes the next install rebuild rather than report "already current"', async () => {

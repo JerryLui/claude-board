@@ -1,4 +1,4 @@
-// Ticket 03 (light-theme spec): drives the REAL src/theme.mjs boot script --
+// Drives the REAL src/theme.mjs boot script --
 // not a hand-summary of what it does -- against rendered board and index pages
 // in test/dom-stand-in.mjs, proving the three-state control (System -> Light ->
 // Dark -> System), its accessible name/tooltip, storage persistence across a
@@ -8,7 +8,7 @@
 // of someone else's renderer is worth exactly as much as the last time someone
 // checked it against the real thing").
 //
-// Criterion 1's no-flash half is checked structurally here (see section 2): a
+// The no-flash half is checked structurally here (see section 2): a
 // real browser is out of scope for this suite, so what IS checked is that the
 // boot script's own, real text -- not a hand-written stand-in for it that could
 // drift -- appears before <style> and before <body> in both pages' emitted
@@ -41,7 +41,7 @@ function check(name, fn) {
 // origin's localStorage outliving any one page load, never auto-created per
 // window (see StandInLocalStorage's own comment in dom-stand-in.mjs).
 //
-// Audit 2026-07-31 (H2): a freshly parsed document now starts `readyState ===
+// A freshly parsed document now starts `readyState ===
 // 'loading'` (dom-stand-in.mjs), matching a real page at the moment this
 // inline <head> script runs -- so themeBootScript takes its real, only
 // production branch (`document.addEventListener('DOMContentLoaded', wire)`)
@@ -116,8 +116,9 @@ function click(el) { el.dispatchEvent(new StandInEvent('click')); }
   });
 
   // --- persistence: a FRESH document (a DIFFERENT board entirely), same
-  // storage, comes up already themed -- before any click. This is criterion 3's
-  // "survives a reload and applies to any other board opened afterwards".
+  // storage, comes up already themed -- before any click. This is the
+  // "survives a reload and applies to any other board opened afterwards"
+  // guarantee.
   check('theme: a freshly loaded, different board comes up data-theme="light" before any click', () => {
     const boardB = createBoard({ title: 'Theme B', blocks: [{ kind: 'markdown', text: '# B' }] });
     const htmlB = renderBoardPage(boardB);
@@ -127,8 +128,8 @@ function click(el) { el.dispatchEvent(new StandInEvent('click')); }
     assert.equal(btnB.getAttribute('aria-label'), 'Theme: Light', 'the control itself must reflect the stored state at load, not just the attribute');
   });
 
-  // --- the index page, using storage the BOARD page wrote -- the half of
-  // criterion 3 a board-only test would miss.
+  // --- the index page, using storage the BOARD page wrote -- the half
+  // a board-only test would miss.
   check('theme: the index page, loaded fresh from the SAME storage a board page wrote, also comes up data-theme="light" before any click', () => {
     const idxHtml = renderIndexPage({ threads: [] });
     const idxDoc = loadWithTheme(idxHtml, 'http:', storage);
@@ -138,7 +139,7 @@ function click(el) { el.dispatchEvent(new StandInEvent('click')); }
   });
 
   // --- returning to System removes the key -- no sentinel left behind
-  // (criterion 4: "no residue from the previous explicit choice").
+  // ("no residue from the previous explicit choice").
   check('theme: cycling back to System removes the storage key entirely -- no "system" sentinel written', () => {
     click(btn); // light -> dark
     click(btn); // dark -> system
@@ -252,7 +253,7 @@ check('theme: the control is present and NOT disabled in a read-only (file://) b
 });
 
 // =================================================================================
-// 5. Audit finding M4: a second tab must not silently overwrite what the
+// 5. A second tab must not silently overwrite what the
 //    reader just chose. localStorage is one value per origin, but each
 //    document's own cycle position is read off ITS OWN data-theme attribute,
 //    snapshotted at boot -- nothing ever told a quiet tab that ANOTHER tab
@@ -327,11 +328,11 @@ check('theme: on file:, a storage event must never act -- the listener is gated 
 });
 
 // =================================================================================
-// 6. Audit finding H2: themeBootScript's only production branch (readyState
+// 6. themeBootScript's only production branch (readyState
 //    'loading' at the moment it runs, since it is inline in <head> before
 //    <body> even exists) actually runs, and the two jobs inside it happen in
 //    the order that matters -- data-theme is applied SYNCHRONOUSLY, before
-//    any DOMContentLoaded dispatch (the no-flash guarantee, criterion 1), and
+//    any DOMContentLoaded dispatch (the no-flash guarantee), and
 //    the control is wired only AFTER it (wiring needs the button, which does
 //    not exist yet at synchronous-boot time). Both of H2's mutations --
 //    deleting the DOMContentLoaded listener entirely, or moving
@@ -354,7 +355,7 @@ check('theme: readyState starts "loading" (a real page\'s state when this inline
   // Job 1 (data-theme) must already be correct -- synchronous, no
   // DOMContentLoaded needed. Fails if applyAttr(readStored()) is moved into
   // wire() (H2's second mutation): that would restore the dark-then-light
-  // flash criterion 1 rules out.
+  // flash this guards against.
   assert.equal(document.documentElement.getAttribute('data-theme'), 'light',
     'data-theme must be applied synchronously, before <body> (and its #theme-toggle) even exist');
 
@@ -376,7 +377,7 @@ check('theme: readyState starts "loading" (a real page\'s state when this inline
 });
 
 // =================================================================================
-// 7. Audit test gap: a throwing localStorage backend (private mode / disabled
+// 7. A throwing localStorage backend (private mode / disabled
 //    storage) must never crash the boot script -- a read failure degrades to
 //    System, a write failure is silently swallowed, and the page keeps
 //    theming itself locally either way (src/theme.mjs's own comment: "an
@@ -403,7 +404,7 @@ check('theme: a throwing localStorage backend never crashes the boot script -- a
 });
 
 // =================================================================================
-// 8. Audit test gap: without a CustomEvent constructor (an old browser), the
+// 8. Without a CustomEvent constructor (an old browser), the
 //    control must still apply data-theme and relabel itself -- only the
 //    mermaid-redraw notification is silently skipped (src/theme.mjs's
 //    notifyThemeChange: `if (typeof CustomEvent !== 'function') return;`).

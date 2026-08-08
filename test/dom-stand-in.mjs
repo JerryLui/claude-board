@@ -1,37 +1,37 @@
-// A minimal, zero-dependency DOM stand-in for test/check-click.mjs (ticket 01,
-// DESIGN.md) and test/check-click-pin.mjs (ticket 02). It exists to run
+// A minimal, zero-dependency DOM stand-in for test/check-click.mjs
+// and test/check-click-pin.mjs. It exists to run
 // the REAL src/ui.mjs client script -- not a hand-summary of what it does --
 // against something DOM-shaped enough that a real click gesture can travel
 // through it end to end.
 //
 // It is deliberately NOT a browser: it implements exactly the surface src/ui.mjs
 // touches while wiring an html-stage iframe, handling a click inside it, and (for
-// ticket 02's pin check) queueing the comment that click opens a form for --
+// the pin check) queueing the comment that click opens a form for --
 // element/attribute/classList/className/style/dataset plumbing, createTextNode,
-// cloneNode (polish ticket 05 (DESIGN.md) -- the diagram lens clones an SVG, and
+// cloneNode (the diagram lens clones an SVG, and
 // the duplicate ids that produces are the whole point of the trap it navigates),
-// innerHTML (ticket 04 -- a real setter, parsing the assigned markup with this
+// innerHTML (a real setter, parsing the assigned markup with this
 // file's own parseNodes, not a no-op; see Element's own comment for why that
-// used to matter), firstElementChild/outerHTML (ticket 07 -- see Element's own
+// used to matter), firstElementChild/outerHTML (see Element's own
 // comments: these used to be silently absent, so applySubmittedPush/applyResync
 // silently no-op'd against `undefined` instead of erroring, which is exactly the
 // "quietly does nothing" failure mode this whole file exists to catch elsewhere;
-// implemented for real rather than stubbed to throw, since ticket 07's own SSE
+// implemented for real rather than stubbed to throw, since the SSE
 // push checks (test/check-anchor-push.mjs) need firstElementChild to work), a
 // small CSS-selector subset (tag, .class, #id, [attr], [attr="value"],
 // [attr^="value"], :not(), comma lists and descendant combinators -- no >, +, ~
 // or nth-child, none of which ui.mjs uses), bubbling addEventListener/
-// dispatchEvent, `clientHeight`/`scrollHeight` (DESIGN.md polish finding D1 -- a
+// dispatchEvent, `clientHeight`/`scrollHeight` (a
 // deliberately minimal model: 0 when the node is not in a document, and
 // otherwise whatever the fixture declared; see Element's own comment for why
 // that is one true statement about the browser rather than the beginning of a
-// layout engine), and (ticket 07) a stand-in EventSource so a 'round'/'submitted'
+// layout engine), and a stand-in EventSource so a 'round'/'submitted'
 // push can be driven end to end without a real network. Anything ui.mjs touches
 // on a path no check here exercises (fetch, Notification, canvas, DOMParser) is
 // simply left undefined/inert -- `typeof x !== 'undefined'` guards and untaken
 // branches mean the script never needs them to exist or do anything.
 //
-// Ticket 07 (DESIGN.md), addressing audit finding C3: this file's HTML
+// This file's HTML
 // parser now shares its tag-omission DECISIONS (autoCloseFor/impliedParentFor,
 // which elements auto-close on which start tags, which parents are implied) with
 // src/anchor.mjs's own parseHtmlTree, imported directly rather than re-derived --
@@ -47,8 +47,7 @@
 // to disagree and asserts identical trees, so a future edit to either side's rules
 // that breaks agreement fails a check rather than shipping silently.
 //
-// The one piece of browser behaviour this stand-in exists to reproduce faithfully
-// (see DESIGN.md Decisions -> "Criterion 8 runs in a DOM stand-in"): an
+// The one piece of browser behaviour this stand-in exists to reproduce faithfully: an
 // <iframe> does not start out empty. The moment it is parsed, a real browser has
 // already given it a live `contentDocument` for `about:blank` -- readyState
 // 'complete', a real (empty) `<body>` -- well before the `srcdoc` navigation has
@@ -59,14 +58,14 @@
 // `load`. Getting this ordering right is the entire point of the check that uses
 // this module -- collapsing it to a single synchronous document would make the
 // check green against the still-broken src/ui.mjs, which is exactly the failure
-// mode DESIGN.md's Testing section warns about.
+// mode a test suite exists to catch.
 
-// Ticket 07 (DESIGN.md), audit finding C3: the tag-omission rules and
+// The tag-omission rules and
 // entity table are the SAME implementation src/anchor.mjs's parseHtmlTree uses,
 // imported directly rather than hand-ported a second time -- see the parsing
 // section below and test/check-parser-parity.mjs.
 //
-// Ticket 10 (DESIGN.md): this file now also models `window`/
+// This file now also models `window`/
 // `postMessage` and actually EXECUTES a document's own `<script>` elements --
 // new capability, not previously implemented at all (a `<script>`'s body used
 // to be parsed and blanked, matching the browser's tree shape, but never run).
@@ -76,20 +75,20 @@
 // way this file already runs the real src/ui.mjs -- and it is what lets a
 // check prove the OTHER direction too: that a `<script>` an agent supplies in
 // `block.html` cannot reach back out to the parent page's own `document`, the
-// property ticket 10 exists to establish (S1 in the 2026-07-29 audit). See
+// property this file exists to establish. See
 // StandInWindow, IframeElement.loadSrcdoc and runInlineScripts below.
 //
-// Ticket 08 (DESIGN.md), audit finding C2: `HEAD_ONLY_TAGS`, imported
+// `HEAD_ONLY_TAGS`, imported
 // the same way as the tag-omission rules above, is what makes `parseHTML`
 // hoist a leading run of head-only elements (`<style>`, `<script>`, `<meta>`,
 // `<link>`, `<title>`, `<base>`) out of the synthetic body the same way a real
 // browser's `document.body` never contains them -- see parseHTML's own
 // comment, further down, for where that hoist runs. `resolveDomAnchor`
 // (src/anchor.mjs) does the identical hoist server-side; both documents this
-// file ever builds (the outer page AND an html stage's own srcdoc, ticket 10's
-// addition) go through this same parseHTML, so both get it.
+// file ever builds (the outer page AND an html stage's own srcdoc)
+// go through this same parseHTML, so both get it.
 import { autoCloseFor, impliedParentFor, decodeEntities, VOID_ELEMENTS, HEAD_ONLY_TAGS } from '../src/anchor.mjs';
-// Audit 2026-07-31 (C1): StandInWindow's getComputedStyle below used to
+// StandInWindow's getComputedStyle below used to
 // resolve a requested custom property against the imported `palettes` object
 // directly -- a hand-written copy of theme precedence that never read this
 // text at all. It now runs the real cascade resolver (further down this
@@ -101,11 +100,11 @@ import { styles } from '../src/styles.mjs';
 // --- HTML parsing: just enough to build a tree from the exact markup
 // src/render.mjs's renderBoardPage emits, and (unlike this file's own header
 // comment used to claim) from arbitrary agent-supplied `srcdoc` HTML too --
-// ticket 07 (DESIGN.md), audit finding C3: this file's tag-omission
+// This file's tag-omission
 // handling is now genuinely shared with src/anchor.mjs's parseHtmlTree (see the
 // file header comment), not a second, narrower hand-port of the same rules. -----
 
-// Exported by src/anchor.mjs (ticket 07) so the two tokenizers never carry two,
+// Exported by src/anchor.mjs so the two tokenizers never carry two,
 // independently-maintained lists of the same facts.
 export const VOID_TAGS = VOID_ELEMENTS;
 
@@ -380,7 +379,7 @@ function searchDescendants(root, selectorText) {
 // is one src/ui.mjs relies on reaching an ancestor listener, so a universal
 // bubble is simpler and never wrong for this check's purposes). -------------------
 //
-// Ticket 07 follow-up (DESIGN.md, audit finding C5): 'dragstart' needs no
+// 'dragstart' needs no
 // dedicated event class or `dataTransfer` stub -- deliberately. src/ui.mjs's own
 // `list.addEventListener('dragstart', ...)` handler (the one comment mode's
 // `commentMode ||` guard sits in) reads exactly one thing off the event: `.target`
@@ -399,7 +398,7 @@ function searchDescendants(root, selectorText) {
 // dispatches a 'dragover') and is named, not silently skipped, in
 // test/check-comment-mode.mjs's own comment: this stand-in has no pointer
 // position or native drag-and-drop state machine, the same documented ceiling
-// DESIGN.md's Testing section already states for the rank drag in general. No
+// that already applies to the rank drag in general. No
 // `dataTransfer` object is stubbed at all: nothing in src/ui.mjs's drag handlers
 // ever reads or writes one, so leaving it absent means a future edit that DID try
 // to touch `ev.dataTransfer.setData(...)` throws immediately (a TypeError on
@@ -408,7 +407,7 @@ function searchDescendants(root, selectorText) {
 // omission rather than a stub that would have to guess at a shape nothing needs
 // yet.
 
-/** `props` (DESIGN.md polish, audit finding D5) carries whatever else the handler
+/** `props` carries whatever else the handler
  * under test reads off the event -- in practice the pointer fields
  * (`clientX`/`clientY`/`pointerId`/`button`) the diagram lens's pan gesture
  * needs. Copied on verbatim rather than declared as named parameters, so this
@@ -423,7 +422,7 @@ function searchDescendants(root, selectorText) {
  * it DOES make reachable is the arithmetic the sequence feeds: whether a
  * gesture that moves 120px in sixty 2px steps is understood as a drag. That is
  * a question about accumulated numbers, not about layout, and it was the one
- * thing standing between finding D5 and a check that could see it -- the
+ * thing standing between that bug and a check that could see it -- the
  * existing assertion could only regex-match the handler's SHAPE, which is
  * precisely how a threshold measuring the wrong quantity survived review.
  *
@@ -449,7 +448,7 @@ class EventTarget {
     if (!this.listeners.has(type)) this.listeners.set(type, []);
     this.listeners.get(type).push(fn);
   }
-  // Ticket 10: previously absent (the old throwaway `window` stub each check
+  // Previously absent (the old throwaway `window` stub each check
   // file constructed by hand supplied its own no-op instead). A real
   // implementation, not a no-op -- see this file's header comment on keeping
   // "unimplemented surface throws rather than silently no-ops" from drifting
@@ -464,8 +463,8 @@ class EventTarget {
     if (idx !== -1) arr.splice(idx, 1);
   }
   dispatchEvent(event) {
-    // A plain StandInEvent's `target` is a normal writable field, but ticket 04
-    // (src/theme.mjs's `cb-theme-change` notification) dispatches a REAL
+    // A plain StandInEvent's `target` is a normal writable field, but
+    // src/theme.mjs's `cb-theme-change` notification dispatches a REAL
     // platform `CustomEvent` through here -- window.dispatchEvent has to accept
     // one in a real browser too, since a hand-rolled plain object fails there
     // with "parameter 1 is not of type 'Event'". A genuine Event's `.target` is
@@ -485,7 +484,7 @@ class EventTarget {
 }
 
 /** Stand-in for `MediaQueryList` (`window.matchMedia(query)`'s return value) --
- * ticket 04, src/ui.mjs's `isDarkThemeActive`/`mermaidThemeVariables` and
+ * src/ui.mjs's `isDarkThemeActive`/`mermaidThemeVariables` and
  * src/theme.mjs's own OS-preference-change listener both read `.matches` and
  * `.addEventListener('change', ...)` off one of these. `_setMatches` is a test
  * hook with no real-`MediaQueryList` equivalent (a real one has no settable
@@ -525,7 +524,7 @@ function matchesPrefersColorScheme(query, systemPrefersDark) {
   return false;
 }
 
-// --- CSS cascade resolver (audit 2026-07-31, C1/H3) ----------------------------
+// --- CSS cascade resolver ----------------------------
 //
 // StandInWindow's getComputedStyle used to reimplement theme precedence by hand,
 // in JS, from the imported `palettes` object -- it never read `styles`
@@ -549,7 +548,7 @@ function matchesPrefersColorScheme(query, systemPrefersDark) {
 //     (`:root` always refers to a document's root element, i.e. `<html>`).
 //   - ordinary tag/.class/#id/[attr]/:not()/descendant-chain selectors -- e.g.
 //     `body.readonly button#theme-toggle` -- matched against any real element
-//     and its ancestors, needed by audit finding H3 (the readonly carve-out:
+//     and its ancestors, needed for the readonly carve-out:
 //     asserting the COMPUTED display a real button ends up with, not any one
 //     rule's spelling -- QUIRKS.md's own warning against the latter).
 // One tolerant parser (parseCascadeCompound below) covers both: a leading
@@ -783,7 +782,7 @@ function specificityEqual(a, b) { return a.ids === b.ids && a.classes === b.clas
  * a tie by source order (a LATER rule of equal specificity wins, same as a real
  * cascade) -- exactly the mechanism that makes `:root[data-theme="light"]`'s
  * unconditional override beat `:root:not([data-theme="dark"])`'s media-gated
- * one when both match (audit C1's whole point: nest the override inside the
+ * one when both match (nest the override inside the
  * media query and it stops matching on a dark OS at all, which THIS walk --
  * unlike a hand-copied precedence rule -- actually notices). */
 export function resolveComputedProperty(cssText, targetEl, systemPrefersDark, propName) {
@@ -808,7 +807,7 @@ export function resolveComputedProperty(cssText, targetEl, systemPrefersDark, pr
   return winner ? winner.value : '';
 }
 
-// --- window / postMessage (ticket 10, DESIGN.md) -----------------------
+// --- window / postMessage -----------------------
 //
 // A minimal stand-in for the two `window` objects a board page and one of its
 // html-stage iframes each get in a real browser, existing ONLY to carry
@@ -842,7 +841,7 @@ export class StandInWindow extends EventTarget {
     super();
     this.parent = this; // matches a real un-framed window: window.parent === window
     this._mediaQueries = new Map();
-    // Ticket 04: the one underlying "does the OS prefer dark" fact both
+    // The one underlying "does the OS prefer dark" fact both
     // `matchMedia('(prefers-color-scheme: dark)')` and `...light)` are derived
     // from (see matchesPrefersColorScheme above). Defaults to dark, matching
     // this repo's own dark-first default (src/styles.mjs: the plain `:root`
@@ -861,7 +860,7 @@ export class StandInWindow extends EventTarget {
   postMessage(data) {
     this.dispatchEvent({ type: 'message', data, origin: 'self', source: this });
   }
-  // Ticket 04: `window.matchMedia(query)` -- one `StandInMediaQueryList` per
+  // `window.matchMedia(query)` -- one `StandInMediaQueryList` per
   // distinct query string, cached, so a check that grabs the same instance the
   // script under test registered its 'change' listener on (by calling
   // `matchMedia` again with the identical query) can drive that listener via
@@ -883,13 +882,13 @@ export class StandInWindow extends EventTarget {
     this._systemPrefersDark = !!next;
     this._mediaQueries.forEach(mql => mql._setMatches(matchesPrefersColorScheme(mql.media, this._systemPrefersDark)));
   }
-  /** Ticket 04: `window.getComputedStyle(el).getPropertyValue('--token')` --
+  /** `window.getComputedStyle(el).getPropertyValue('--token')` --
    * src/ui.mjs's mermaidThemeVariables reads mermaid's whole palette this way
    * rather than importing src/styles.mjs's `palettes` directly into the client
    * script, specifically so it reflects whatever the CASCADE actually resolved
    * (System mode, an explicit override, a future selector change) rather than
-   * a second, independent read of the same preference. Audit 2026-07-31 (C1):
-   * this used to reimplement that precedence by hand from `palettes`, which
+   * a second, independent read of the same preference. This used to
+   * reimplement that precedence by hand from `palettes`, which
    * meant it could never notice a broken STYLESHEET (see "CSS cascade
    * resolver" above); it now runs the real resolver over `styles`
    * (src/styles.mjs's exported string), the same text a real browser parses.
@@ -897,7 +896,7 @@ export class StandInWindow extends EventTarget {
    * repo ever reads lives on `:root`); any other element's computed style is
    * empty, which is fine -- nothing in this codebase asks `getComputedStyle`
    * about anything else (a check that needs a non-custom-property, non-:root
-   * value -- e.g. audit finding H3's `display` on a real button -- calls the
+   * value -- e.g. a real button's `display` -- calls the
    * exported `resolveComputedProperty` directly, not through this method). */
   getComputedStyle(el) {
     const win = this;
@@ -938,7 +937,7 @@ export class Element extends EventTarget {
   // functions need this rather than `.tagName`).
   get tag() { return this.tagName.toLowerCase(); }
   get firstElementChild() { return this.children[0] || null; }
-  // Ticket 10: walks .parentElement up to the owning StandInDocument (nodeType
+  // Walks .parentElement up to the owning StandInDocument (nodeType
   // 9), the bubbling terminus every element chain already ends at -- real DOM's
   // `Element.ownerDocument`. Computed on demand rather than stamped in at parse
   // time: IframeElement.loadSrcdoc uses it to find ITS OWN outer window (via
@@ -951,7 +950,7 @@ export class Element extends EventTarget {
   }
   // --- box metrics: exactly one true statement, deliberately not a layout model -
   //
-  // DESIGN.md polish audit, finding D1 turns on ONE fact about the browser, and it
+  // This turns on ONE fact about the browser, and it
   // is not a fact about layout: a node that is not in a document has no box, so
   // `clientHeight` and `scrollHeight` are both 0 no matter what it contains.
   // Every push path in src/ui.mjs wires its subtree while it is still DETACHED
@@ -1052,9 +1051,9 @@ export class Element extends EventTarget {
     t.parentElement = this;
     this.childNodes = [t];
   }
-  // Ticket 04: previously undefined (this file's own header comment used to list
+  // Previously undefined (this file's own header comment used to list
   // innerHTML alongside fetch/EventSource/canvas as "left undefined/inert" --
-  // nothing before this ticket asserted on a re-render of a block that ALREADY
+  // nothing before this asserted on a re-render of a block that ALREADY
   // carried a persisted comment through wireHtmlStage's two-pass wiring, so the
   // gap never showed). `layer.innerHTML = ''` (src/ui.mjs's renderDomPins/
   // renderMermaidPins, run once at hydrate and again on refresh) silently did
@@ -1063,7 +1062,7 @@ export class Element extends EventTarget {
   // moment the stage's placeholder-then-real document lifecycle ran both wiring
   // passes (exactly what test/check-anchor-rerender.mjs's old-board fixture
   // check does, and a real browser does on every page load). Fidelity added, not
-  // weakened (same precedent as ticket 02's className/style/createTextNode): a
+  // weakened (same precedent as className/style/createTextNode): a
   // real setter, reusing this file's own `parseNodes` (the exact parser that
   // already builds the page/iframe tree) so an assignment of real markup (e.g.
   // src/ui.mjs's comment-item innerHTML) gets real child nodes, not just an
@@ -1074,7 +1073,7 @@ export class Element extends EventTarget {
     nodes.forEach(n => { n.parentElement = this; });
     this.childNodes = nodes;
   }
-  // Ticket 07 (DESIGN.md), audit finding V6: previously absent entirely
+  // Previously absent entirely
   // (accessing it returned `undefined`, not even an empty string), so
   // src/ui.mjs's applyResync -- `html += el.outerHTML` inside a loop, `''`
   // concatenated with `undefined` -- silently built the STRING "undefined" into
@@ -1101,10 +1100,10 @@ export class Element extends EventTarget {
     return '<' + tag + attrs + '>' + inner + '</' + tag + '>';
   }
   appendChild(node) { node.parentElement = this; this.childNodes.push(node); return node; }
-  // DESIGN.md polish ticket 05: the diagram lens clones the rendered mermaid SVG
+  // The diagram lens clones the rendered mermaid SVG
   // into its own canvas (src/ui.mjs's lensOpen), which is what puts TWO elements
   // carrying each mermaid node id in the document at once -- the duplicate-id
-  // trap that ticket exists to get right. Previously absent here, so a check
+  // trap this exists to get right. Previously absent here, so a check
   // could not drive the lens at all. Real semantics, deliberately including the
   // part that matters: a deep clone reproduces element ORDER and ATTRIBUTES
   // exactly (ids included, duplicated on purpose), and carries no listeners, so
@@ -1121,7 +1120,7 @@ export class Element extends EventTarget {
     }
     return copy;
   }
-  // Ticket 04: src/ui.mjs's mermaid loader (renderMermaidBlocks) calls
+  // src/ui.mjs's mermaid loader (renderMermaidBlocks) calls
   // `n.replaceWith(wrap)` on its CDN-unreachable/offline fallback path -- the
   // ordinary case in this stand-in, which never has real network access, and
   // previously undefined here for the same reason as innerHTML above (nothing
@@ -1188,8 +1187,7 @@ export class Element extends EventTarget {
     this.scrollIntoViewCallCount++;
     this.scrollIntoViewLastOptions = options === undefined ? null : options;
   }
-  // Ticket 07 (DESIGN.md), audit finding V1 (director-verified
-  // separately): this used to return an unconditional all-zero box for every
+  // This used to return an unconditional all-zero box for every
   // element, attached or not -- so a pin placed correctly and a pin placed at
   // (0,0) were byte-identical in every assertion, and the director confirmed
   // replacing BOTH of src/ui.mjs's position computations with a hardcoded
@@ -1256,7 +1254,7 @@ export class StandInDocument extends EventTarget {
     this._activeElement = null;
     const titleEl = findChildByTag(this.head, 'title');
     this._title = titleEl ? titleEl.textContent : '';
-    // Audit 2026-07-31 (H2): defaults to 'loading', matching a real browser's
+    // Defaults to 'loading', matching a real browser's
     // `document.readyState` at the moment an inline <head> script runs (this
     // repo's boot script, src/theme.mjs's themeBootScript, is placed BEFORE
     // <style>, i.e. before the parser has even reached <body> -- see that
@@ -1277,7 +1275,7 @@ export class StandInDocument extends EventTarget {
     // `themeBootScript`'s deferred branch actually waits for, so the two can
     // never drift apart.
     this.readyState = 'loading';
-    // Ticket 10: real DOM's `document.defaultView` -- the window this document
+    // Real DOM's `document.defaultView` -- the window this document
     // belongs to. Wired by whoever CONSTRUCTS a document (parseHTML /
     // aboutBlankDocument below), never here in the constructor itself: a
     // StandInDocument has to exist before its matching StandInWindow can be
@@ -1294,7 +1292,7 @@ export class StandInDocument extends EventTarget {
   get activeElement() { return this._activeElement || this.body; }
   set activeElement(el) { this._activeElement = el; }
   hasFocus() { return true; }
-  /** Audit 2026-07-31 (H2): simulates the HTML parser reaching the end of the
+  /** Simulates the HTML parser reaching the end of the
    * document -- flips `readyState` to 'complete' and dispatches a real
    * 'DOMContentLoaded', the one event `themeBootScript`'s deferred branch
    * (registered because `readyState` was 'loading' when it ran) actually
@@ -1338,7 +1336,7 @@ function aboutBlankDocument() {
   html.appendChild(head);
   html.appendChild(body);
   const doc = new StandInDocument(html);
-  // Unlike StandInDocument's own new default (audit 2026-07-31, H2: 'loading',
+  // Unlike StandInDocument's own new default ('loading',
   // matching a real page's inline <head> boot script) -- about:blank really is
   // immediately 'complete' in a real browser, per this file's own header
   // comment on why IframeElement manufactures this placeholder eagerly at all;
@@ -1352,13 +1350,13 @@ function aboutBlankDocument() {
 }
 
 /** Run every `<script>` element found in `doc`, in document order, against
- * `win` -- ticket 10 (DESIGN.md): new capability, not previously
+ * `win` -- new capability, not previously
  * implemented (a script's body used to be parsed and blanked, matching the
  * browser's tree shape, but never executed). This is what lets IframeElement's
  * `loadSrcdoc` actually run the stage-side agent script src/render.mjs now
  * injects into every html-stage `srcdoc` -- and, just as load-bearing, whatever
  * a MOCK's own `block.html` supplies alongside it, since the whole point of
- * this ticket is proving what such a script can and cannot reach.
+ * this is proving what such a script can and cannot reach.
  *
  * Deliberately NOT interleaved with parsing: a real browser executes a
  * `<script>` the instant its parser reaches it (which is why a script placed
@@ -1377,7 +1375,7 @@ function aboutBlankDocument() {
  * throws is swallowed and the rest still run, same as a real browser logging
  * one script's error to the console rather than aborting the page -- letting a
  * broken or deliberately hostile mock script abort `loadSrcdoc()` entirely
- * would make the very isolation property this ticket exists to prove
+ * would make the very isolation property this exists to prove
  * untestable. */
 function runInlineScripts(doc, win) {
   const scripts = doc.querySelectorAll('script');
@@ -1397,12 +1395,12 @@ function runInlineScripts(doc, win) {
 // agent never needs to validate this string -- only `event.source ===
 // window.parent`, an identity no script anywhere can forge, matters on that
 // side of the channel. The PARENT's own receive-side check (the one that
-// actually matters for S1) validates the STAGE's reported origin instead --
+// actually matters for isolation) validates the STAGE's reported origin instead --
 // see wireFrameMessaging below and src/ui.mjs's own message listener.
 const PARENT_TO_STAGE_ORIGIN = 'http://board.local';
 
 /** Wire the two-way postMessage relationship between one iframe and its owning
- * page -- ticket 10. Called once, from IframeElement.loadSrcdoc, the moment the
+ * page. Called once, from IframeElement.loadSrcdoc, the moment the
  * REAL srcdoc content (never the about:blank placeholder, which runs no script
  * and so never sends anything) is parsed. Two independent closures, each bound
  * to exactly the two window objects THIS relationship connects -- deliberately
@@ -1455,7 +1453,7 @@ export class IframeElement extends Element {
    * script on the page has already run. Must be called explicitly by the check,
    * AFTER the client script's initial synchronous pass, for the same reason.
    *
-   * Ticket 10: now also wires this frame's own two-way postMessage channel
+   * Now also wires this frame's own two-way postMessage channel
    * (wireFrameMessaging, above -- a no-op if this element is not currently
    * inside a document with its own window, which the parent -> child direction
    * genuinely cannot function without) and RUNS every `<script>` the parsed
@@ -1464,10 +1462,10 @@ export class IframeElement extends Element {
    * script an adversarial mock supplies alongside it, against a window whose
    * `.parent` is a narrow object exposing ONLY `postMessage` -- never
    * `.document`, never the real outer `window` -- which is the isolation
-   * property this ticket exists to prove (see test/check-stage-isolation.mjs). */
+   * property this exists to prove (see test/check-stage-isolation.mjs). */
   loadSrcdoc() {
     this.contentDocument = parseHTML(this.getAttribute('srcdoc') || '');
-    // Audit 2026-07-31 (H2): parseHTML's documents now default to 'loading'
+    // parseHTML's documents now default to 'loading'
     // (matching the OUTER page at the moment its own inline boot script
     // runs), but this method models the srcdoc navigation ALREADY having
     // finished (it dispatches 'load' at the end, and nothing here interleaves
@@ -1494,26 +1492,25 @@ export class IframeElement extends Element {
  * exactly as a real browser does when it parses `srcdoc` content that is not
  * itself a full document -- including hoisting a LEADING run of head-only
  * elements (style/script/meta/link/title/base) into the synthetic `<head>`
- * rather than leaving them as `<body>`'s first children (ticket 08,
- * DESIGN.md, audit C2): this stand-in mints every html-stage `dom` ref
+ * rather than leaving them as `<body>`'s first children: this stand-in mints every html-stage `dom` ref
  * from `frame.contentDocument.body`, same as a real browser, so if this parser
  * disagreed with src/anchor.mjs's own HEAD_ONLY_TAGS-hoisting `resolveDomAnchor`
  * (imported above, one shared list, not a second one), a check driving a real
- * click through this stand-in could never actually exercise the bug C2 fixed --
+ * click through this stand-in could never actually exercise the bug this fixed --
  * both would agree with each other, just not with a real browser. An explicit
  * top-level `<head>` or `<body>` is honoured as given, same as src/anchor.mjs's
  * own `bodyRootChildren`.
  *
- * Ticket 10: also constructs this document's own `StandInWindow` and wires the
+ * Also constructs this document's own `StandInWindow` and wires the
  * mutual `defaultView`/`document` reference a real `document`/`window` pair
  * always has -- every document this file ever builds (the outer page, an html
  * stage's real srcdoc content, the about:blank placeholder above) goes through
  * here or aboutBlankDocument, so every document always has a window, and the
- * SAME hoisting applies to both the outer page and a stage's srcdoc: ticket
- * 10's `stageAgentScript` is appended to `block.html` and relies on
+ * SAME hoisting applies to both the outer page and a stage's srcdoc:
+ * `stageAgentScript` is appended to `block.html` and relies on
  * `document.body` meaning what a real browser's does, exactly like the
  * `dom`-ref-minting a mock's own content already depended on before this
- * ticket. */
+ * capability existed. */
 export function parseHTML(htmlString) {
   const topNodes = parseNodes(htmlString);
   let htmlEl = topNodes.find(n => n.nodeType === 1 && n.tagName === 'HTML');
@@ -1550,14 +1547,14 @@ export function parseHTML(htmlString) {
   return doc;
 }
 
-// --- EventSource stand-in (ticket 07, DESIGN.md) -----------------------
+// --- EventSource stand-in -----------------------
 //
 // src/ui.mjs reads a bare, unqualified `EventSource` (never `typeof EventSource
 // !== 'undefined'`-guarded for the constructor call itself -- only for whether to
 // open the subscription at all), resolved out of whatever global scope the check
 // running `new Function('document','window','location', ui)(...)` executes
 // in -- exactly like `globalThis.fetch` is already stubbed in
-// test/check-comment-mode.mjs. This is what closes audit finding V1's SSE row:
+// test/check-comment-mode.mjs. This is what closes the SSE gap:
 // "stub EventSource in the stand-in and fire a round push, then assert the pushed
 // content is actually anchorable" -- see test/check-anchor-push.mjs, which sets
 // `globalThis.EventSource` to a subclass of this before running `ui`, captures the
@@ -1600,12 +1597,12 @@ export class StandInEventSource {
   close() { this.readyState = 2; }
 }
 
-// --- localStorage stand-in (ticket 03, src/theme.mjs) ---------------------------
+// --- localStorage stand-in (src/theme.mjs) ---------------------------
 //
 // A plain Map-backed getItem/setItem/removeItem, string keys and values only --
 // the one thing src/theme.mjs's `themeBootScript` needs, and all it needs (it
 // never reads `.length`, iterates keys, or reacts to a 'storage' event). Belongs
-// here rather than inside one check file: a later ticket needs the exact same
+// here rather than inside one check file: another check needs the exact same
 // stand-in to prove a `file:` archive never touches it at all, and duplicating
 // it per check would risk the two copies drifting apart the way QUIRKS.md warns
 // a hand-copied mock always eventually does.
@@ -1628,7 +1625,7 @@ export class StandInLocalStorage {
   get size() { return this.map.size; }
 }
 
-// --- IntersectionObserver stand-in (DESIGN.md round-end criterion 2) ------------------
+// --- IntersectionObserver stand-in ------------------
 //
 // QUIRKS.md "The stand-in has no layout" already explains why this file never had
 // one: nothing here lays anything out, so there is no real geometry for a real
@@ -1638,7 +1635,7 @@ export class StandInLocalStorage {
 // which the stand-in's total absence of the constructor was always enough to
 // exercise.
 //
-// setupSendBarDock (src/ui.mjs, DESIGN.md round-end criterion 2) is the first thing in
+// setupSendBarDock (src/ui.mjs) is the first thing in
 // this codebase that needs to DRIVE an IntersectionObserver's callback in both
 // directions, not just prove the missing-constructor guard is safe: "rail on
 // screen -> docked" and "rail off screen -> floating" are both real, checkable

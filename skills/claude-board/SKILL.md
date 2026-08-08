@@ -41,14 +41,14 @@ answer in this round waits for the next one.
 The reference lives under `source`; path fields at the top level resolve to nothing. The
 board snapshots the file at post time.
 
-**Only `mermaid` and `html` are commentable.** Only the rendered kinds are — `mermaid` and
-`html` — and they are wherever they appear, including inside a question's `context` and
-inside a `compare` side. `markdown` and `code` are not, anywhere. The rule is drawn on
-kind, never on position.
+**A commentable block carries the comment control and the click-to-anchor gesture.**
+Only the rendered kinds are — `mermaid` and `html` — and they are wherever
+they appear, including inside a question's `context` and inside a `compare` side. `markdown`
+and `code` are not, anywhere. The rule is drawn on kind, never on position.
 
 **`section` is the heading's slug, not its text**: lowercase, spaces to hyphens, so
 `## Open questions` is `section: 'open-questions'`. Get it wrong and the block resolves to
-nothing while the post still returns 200.
+nothing.
 
 `markdown` and `mermaid` may carry `text` by value and `html` may carry `html`, for a
 hand-mocked stage or a note with no file behind it. `code` always needs a `source`.
@@ -57,19 +57,17 @@ you paraphrased.
 
 A reference resolves inside the board's project directory or a configured reference root
 (`~/.claude/skills`, `~/.claude/commands`, `~/.claude/agents`, `~/Documents/renders` by
-default), and nowhere else. One that fails to resolve still lands, carrying a visible
-`error` naming the reason, so check the packet's blocks if a board looks empty.
+default), and nowhere else. One that fails to resolve still lands and the post still
+returns 200: the block renders "Could not resolve: …" on the page, and the packet carries
+no blocks, so nothing in the return value tells you a reference broke.
 
 **Write a generated stage into the render directory and reference it**, rather than
 pasting its bytes into the call: `{ kind: 'html', source: { path: '<file>.html' } }`
 against a file in `~/Documents/renders` costs one line for a byte-identical board, where
 the same stage inlined as `html` runs to several KB per option. Keep `html` by value only
-for stages small enough to read inline.
-
-Minifying a by-value stage's CSS was weighed against this and rejected as a mechanism:
-it saves roughly 30% where a `source` ref saves roughly 95%, and it costs the one thing
-an inlined stage is good for, which is being readable where it sits. Reference the file
-instead; on the stages still small enough to inline, the saving was never the point.
+for stages small enough to read inline, and leave those readable: readability is the only
+reason a stage is inline at all, so a stage you would be tempted to minify belongs in a
+file you reference instead.
 
 ## Pointing at a rendered file
 
@@ -112,26 +110,35 @@ Two to four options reads best, and every answer carries a free-text note beside
 choice. A widget outside that list, or empty `options` on any widget but `text`, is a 400.
 
 For a question about something rendered — `choose-between-rendered-variants`, or any
-question whose `context` holds a mock or a diagram — skip the code excerpt: a rendered
+question whose `context` holds a mock or a diagram — skip the code excerpt: the rendered
 stage is the thing being judged, and it lays out full width for exactly that reason.
 `context` renders as prose under the prompt, not a card beside it, so reach for `markdown`
-there and save `code` for a question that is genuinely about the code.
+there and save `code` for a question genuinely about the code.
 
 ## What comes back
 
 A round carrying a question blocks until the reviewer submits or the wall clock runs out; a
-round of content only returns the instant it lands. `status` is one of:
+round of content only returns the instant it lands.
 
-- **`posted`**: nothing was asked, so there is nothing to report.
+```js
+{
+  board, thread, title, round,
+  status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'error'
+  answers:  [ { id, round, prompt, widget, status, choice, note } ],
+  comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, resolved, lost? } ],
+  url,
+}
+```
+
+- **`posted`**: nothing was asked, so `answers` and `comments` are empty.
 - **`submitted`**: read every answer, then every comment.
 - **`discuss`**: the reviewer chose Discuss in chat. Post no more boards this session and
   pick the remaining branches up in chat, using the partial answers.
 - **`timeout`**: an explicit no-response, not a hang. Say so, then either wait for the
-  reviewer to reopen the board URL the packet names or move on in chat. Never silently
-  retry the round.
+  reviewer to reopen `url` or move on in chat. Never silently retry the round.
 - **`error`**: posted, but the wait did not complete, so nothing was answered and nothing
-  about intent can be inferred. Report the message verbatim, name the packet's board URL,
-  and stop rather than re-posting into a board that may already hold the round.
+  about intent can be inferred. Report the message verbatim, name `url`, and stop rather
+  than re-posting into a board that may already hold the round.
 
 **Branch on each answer's `status`, never on `choice` being non-null:**
 

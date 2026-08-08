@@ -1,19 +1,19 @@
-// DESIGN.md round-end criteria 1, 2, and the rail's half of 6 ("the end of a round" --
+// The round-end rail and the send bar's docking behaviour ("the end of a round" --
 // see that section's own preamble: a round has a top but no bottom, and the send
 // bar's scrim floats over content identically whether the round is three
 // questions from over or none). Same rung as test/check-enter.mjs, which owns
-// criteria 3-5 and the arming half of 6 -- this file never touches the Send
+// the Send button's arming behaviour -- this file never touches the Send
 // button's label, click handler or arming behaviour, only the rail
 // (renderRoundSection's .round-end) and the send bar's docked/floating state.
 //
-// Two shapes, matching the house idioms named in this ticket:
-//   - test/check-pure.mjs's shape for criterion 1: rendered markup and exact CSS
+// Two shapes, matching the house idioms:
+//   - test/check-pure.mjs's shape: rendered markup and exact CSS
 //     rule wording, asserted directly against renderRoundSection/styles output.
-//   - test/check-archive.mjs's shape for the rail's half of criterion 6: a real
+//   - test/check-archive.mjs's shape for the rail's half: a real
 //     rendered page written to a real temp file and read back with
 //     location.protocol genuinely 'file:'.
 //
-// Criterion 2 (the docking toggle) is the interesting part: setupSendBarDock
+// The docking toggle is the interesting part: setupSendBarDock
 // (src/ui.mjs) drives it with an IntersectionObserver on the rail, and
 // test/dom-stand-in.mjs had none at all before this file (QUIRKS.md "The
 // stand-in has no layout"). StandInIntersectionObserver (added alongside this
@@ -131,11 +131,11 @@ function observerWatching(observers, target) {
 }
 
 // =====================================================================================
-// Criterion 1: "An open round renders a visible end after its last block, naming
+// "An open round renders a visible end after its last block, naming
 // the round and how many questions it held."
 // =====================================================================================
 
-check('criterion 1: an open round renders a .round-end rail after its last block, naming the round and its (pluralized) question count', () => {
+check('an open round renders a .round-end rail after its last block, naming the round and its (pluralized) question count', () => {
   const board = createBoard({ title: 'Round end - plural', blocks: [
     Q1,
     { kind: 'markdown', text: 'Some context that is not a question.' },
@@ -153,13 +153,13 @@ check('criterion 1: an open round renders a .round-end rail after its last block
   assert.equal(tagMatch[1], 'end of round 1 · 2 questions',
     'the rail must name the round and its TOP-LEVEL question count -- the markdown block must not inflate it, and 2 must be pluralized');
 
-  // The mock's own shape (findings/round-end/c-terminator.html): a divider line
+  // The mock's own shape: a divider line
   // on either side of the tag, not just a bare label.
   assert.equal((html.match(/<span class="line"><\/span>/g) || []).length, 2,
     'expected two .line dividers flanking the .tag, matching the design\'s "end of round" rail');
 });
 
-check('criterion 1: a round with exactly one question renders "1 question", singular, not "1 questions"', () => {
+check('a round with exactly one question renders "1 question", singular, not "1 questions"', () => {
   const board = createBoard({ title: 'Round end - singular', blocks: [Q1] });
   const html = renderRoundSection(board, 1, new Map());
   const tagMatch = html.match(/<span class="tag">([^<]*)<\/span>/);
@@ -167,14 +167,14 @@ check('criterion 1: a round with exactly one question renders "1 question", sing
   assert.equal(tagMatch[1], 'end of round 1 · 1 question');
 });
 
-check('criterion 1: a sent (historical) round renders NO .round-end -- the rail is for the round still asking for an answer', () => {
+check('a sent (historical) round renders NO .round-end -- the rail is for the round still asking for an answer', () => {
   const board = createBoard({ title: 'Round end - historical', blocks: [Q1] });
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   const html = renderRoundSection(board, 1, new Map());
   assert.ok(!html.includes('round-end'), 'a historical round must never carry a .round-end rail');
 });
 
-check('criterion 1 / out of scope: the round badge\'s own label is untouched -- this spec is about position WITHIN a round, not across rounds', () => {
+check('out of scope: the round badge\'s own label is untouched -- this spec is about position WITHIN a round, not across rounds', () => {
   const board = createBoard({ title: 'Round end - badge untouched', blocks: [Q1] });
   const html = renderBoardPage(board);
   assert.ok(html.includes('round 1 of 1'), 'the round badge must keep stating position and total across rounds, unrelated to this rail');
@@ -194,7 +194,7 @@ check('the .round-end rail\'s CSS uses real design tokens (spacing/hairline/pill
 });
 
 // =====================================================================================
-// Criterion 2: "The send bar is visually docked, without its scrim, when the end
+// "The send bar is visually docked, without its scrim, when the end
 // of the round is on screen, and floating over content when it is not."
 // =====================================================================================
 
@@ -203,7 +203,7 @@ check('the .send-bar.docked rule drops both the gradient scrim AND the blur, and
     'expected the docked rule to replace the scrim with a flat background and no blur');
 });
 
-check('criterion 2: the send bar starts floating (no .docked class) on an ordinary hydrate, before any intersection has been reported', () => {
+check('the send bar starts floating (no .docked class) on an ordinary hydrate, before any intersection has been reported', () => {
   const board = createBoard({ title: 'Round end - dock initial', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   const { document } = loadBoardWithIntersectionObserver(html);
@@ -212,7 +212,7 @@ check('criterion 2: the send bar starts floating (no .docked class) on an ordina
   assert.equal(sendBar.classList.contains('docked'), false, 'the bar must not start docked -- nothing has reported the rail on screen yet');
 });
 
-check('criterion 2: the send bar docks when the rail comes on screen, and floats again when it leaves -- both directions', () => {
+check('the send bar docks when the rail comes on screen, and floats again when it leaves -- both directions', () => {
   const board = createBoard({ title: 'Round end - dock toggle', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   const { document, observers } = loadBoardWithIntersectionObserver(html);
@@ -232,7 +232,7 @@ check('criterion 2: the send bar docks when the rail comes on screen, and floats
   assert.equal(sendBar.classList.contains('docked'), true, 'toggling back on must re-dock it -- not a one-shot latch');
 });
 
-check('criterion 2: with no open round at all (every round sent), there is no rail to observe and the bar is never docked', () => {
+check('with no open round at all (every round sent), there is no rail to observe and the bar is never docked', () => {
   const board = createBoard({ title: 'Round end - no open round', blocks: [Q1] });
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   const html = renderBoardPage(board);
@@ -245,7 +245,7 @@ check('criterion 2: with no open round at all (every round sent), there is no ra
   assert.equal(observers.length, 1, 'setupSendBarDock must not construct an IntersectionObserver when there is no rail to watch');
 });
 
-check('criterion 2: guarded for absence -- with no IntersectionObserver defined at all, the page still hydrates and the bar simply stays floating', () => {
+check('guarded for absence -- with no IntersectionObserver defined at all, the page still hydrates and the bar simply stays floating', () => {
   const original = globalThis.IntersectionObserver;
   delete globalThis.IntersectionObserver;
   try {
@@ -262,7 +262,7 @@ check('criterion 2: guarded for absence -- with no IntersectionObserver defined 
   }
 });
 
-check('criterion 2: the rail moves live over SSE -- the round a push collapses into history loses its rail, the round it opens gets its own, matching server markup for each', () => {
+check('the rail moves live over SSE -- the round a push collapses into history loses its rail, the round it opens gets its own, matching server markup for each', () => {
   const board = createBoard({ title: 'Round end - SSE parity', blocks: [Q1] });
   const pageHtml = renderBoardPage(board);
   const { document, es } = loadBoardWithEventSource(pageHtml);
@@ -284,7 +284,7 @@ check('criterion 2: the rail moves live over SSE -- the round a push collapses i
 });
 
 // =====================================================================================
-// Rider fix, unrelated to the timer (spec criterion 8): the send bar's
+// Rider fix, unrelated to the timer: the send bar's
 // post-submit status message ("Sent." / "This round has been sent. Waiting
 // for the next one.") must clear the moment a new round lands, and must never
 // show beside an open round. src/render.mjs already gets the SERVER-rendered
@@ -315,7 +315,7 @@ check('rider fix: the send bar\'s post-submit status message clears the moment a
 });
 
 // =====================================================================================
-// Criterion 6 (rail's half): "... none of this appears in a read-only archive
+// "... none of this appears in a read-only archive
 // opened from disk." Same rigor as test/check-archive.mjs's own .mode-toggle/
 // .back-to-index checks: the CSS rule's exact wording, plus proof the rail is
 // structurally PRESENT in the archive's markup (one page, live or archived --
@@ -324,7 +324,7 @@ check('rider fix: the send bar\'s post-submit status message clears the moment a
 // stand-in's getComputedStyle has no CSS engine behind it").
 // =====================================================================================
 
-check('criterion 6 (rail half): body.readonly hides .round-end by exact rule, and a real file:// archive still carries the rail structurally', () => {
+check('body.readonly hides .round-end by exact rule, and a real file:// archive still carries the rail structurally', () => {
   assert.match(styles, /body\.readonly \.round-end \{ display: none; \}/, 'expected an exact body.readonly rule hiding .round-end, alongside the .send-bar one right next to it');
 
   const board = createBoard({ title: 'Round end - archive', blocks: [Q1] });
@@ -341,7 +341,7 @@ check('criterion 6 (rail half): body.readonly hides .round-end by exact rule, an
   assert.ok(document.querySelector('.round-end'), 'the rail must still be IN the archive\'s DOM -- readonly hides it by CSS (asserted above), never by omitting it server-side');
 });
 
-check('criterion 6 (docking half): the docking observer never runs in a read-only archive -- belt and suspenders alongside .send-bar\'s own display:none', () => {
+check('the docking observer never runs in a read-only archive -- belt and suspenders alongside .send-bar\'s own display:none', () => {
   const board = createBoard({ title: 'Round end - archive dock', blocks: [Q1] });
   const html = renderBoardPage(board);
   const { document, observers } = loadBoardWithIntersectionObserver(html, 'file:');
@@ -352,7 +352,7 @@ check('criterion 6 (docking half): the docking observer never runs in a read-onl
 });
 
 // =====================================================================================
-// "The page ends where the last control is" (spec chunk, 2026-08-05). Root cause:
+// "The page ends where the last control is." Root cause:
 // .board-shell used to carry a 128px bottom padding, so at full scroll the sticky
 // .send-bar (the shell's own last child) rested 128px above the document's actual
 // bottom edge -- a band of bare background below the one control that should have
@@ -366,7 +366,7 @@ check('criterion 6 (docking half): the docking observer never runs in a read-onl
 // rule's spelling (QUIRKS.md's own warning about that shape).
 // =====================================================================================
 
-check('criterion 1/8: .board-shell carries no bottom padding -- reverting to a trailing px value (e.g. the old 128px) must fail this check', () => {
+check('.board-shell carries no bottom padding -- reverting to a trailing px value (e.g. the old 128px) must fail this check', () => {
   const board = createBoard({ title: 'Flush bottom - open round', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -377,7 +377,7 @@ check('criterion 1/8: .board-shell carries no bottom padding -- reverting to a t
     'expected .board-shell\'s padding to carry no bottom value -- a trailing px reopens the band below the send bar (or, in readonly, below the last block)');
 });
 
-check('criterion 1: .send-bar is .board-shell\'s own last element child -- nothing rendered after it that would sit in the flush-bottom padding\'s place', () => {
+check('.send-bar is .board-shell\'s own last element child -- nothing rendered after it that would sit in the flush-bottom padding\'s place', () => {
   const board = createBoard({ title: 'Flush bottom - last child', blocks: [Q1] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -388,7 +388,7 @@ check('criterion 1: .send-bar is .board-shell\'s own last element child -- nothi
     '.send-bar must be .board-shell\'s last element child for a zero bottom padding to actually land the bar\'s own lower edge on the document\'s lower edge');
 });
 
-check('criterion 3: a read-only file:// archive (send bar hidden) shares the same zero-bottom-padding .board-shell rule -- no separate readonly override reintroduces the band below the last block', () => {
+check('a read-only file:// archive (send bar hidden) shares the same zero-bottom-padding .board-shell rule -- no separate readonly override reintroduces the band below the last block', () => {
   const board = createBoard({ title: 'Flush bottom - archive', blocks: [Q1] });
   const html = renderBoardPage(board);
   const dir = mkdtempSync(path.join(tmpdir(), 'claude-board-flush-bottom-archive-'));
@@ -405,28 +405,27 @@ check('criterion 3: a read-only file:// archive (send bar hidden) shares the sam
 });
 
 // =====================================================================================
-// The questions-left pill (DESIGN.md round-end decisions / ADR.md entry 27,
-// criteria 5, 7, 8, 10; criterion 6's own agreement-with-the-guard case lives in
-// test/check-send-guard.mjs per this ticket's testing note; criterion 9 is a
-// regression guard already pinned above -- untouched by this work). A live,
+// The questions-left pill (round-end decisions / ADR.md entry 27). Its own
+// agreement-with-the-guard case lives in test/check-send-guard.mjs; a
+// regression guard is already pinned above, untouched by this work. A live,
 // additive count of the open round's still-unanswered questions, floating grey
 // and centered above the send bar, on screen exactly while the round's own
 // closing rail is not: the SAME IntersectionObserver that already docks the
-// send bar (criterion 2's own harness, reused rather than duplicated), and it
+// send bar, reused rather than duplicated, and it
 // never touches the send guard.
 // =====================================================================================
 
-// === criterion 5: rendered while the round has unanswered questions, reading
+// === rendered while the round has unanswered questions, reading
 // "N question(s) left" ===================================================
 
-check('criterion 5: the open round\'s pill renders with the live count, pluralized, and starts VISIBLE -- the rail is assumed off screen until an observer says otherwise, same default as the bar\'s own undocked start', () => {
+check('the open round\'s pill renders with the live count, pluralized, and starts VISIBLE -- the rail is assumed off screen until an observer says otherwise, same default as the bar\'s own undocked start', () => {
   const board = createBoard({ title: 'Pill - initial count', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   assert.match(html, /<button type="button" class="questions-left-pill visible" id="questions-left-pill">2 questions left<\/button>/,
     'expected a visible pill naming both outstanding questions at first paint');
 });
 
-check('criterion 5: singular at exactly one outstanding question', () => {
+check('singular at exactly one outstanding question', () => {
   const board = createBoard({ title: 'Pill - singular', blocks: [Q1] });
   const html = renderBoardPage(board);
   assert.match(html, /class="questions-left-pill visible" id="questions-left-pill">1 question left</);
@@ -439,13 +438,13 @@ check('the pill is grey (--panel-2/--ink-2, the same chrome .round-badge and .mo
     'expected the pill centered (left: 50%, translateX(-50%)) and floating above the send bar (bottom: 100%, i.e. its OWN bottom edge sits at the bar\'s top edge)');
 });
 
-// === criterion 6 (live half): "answering a question lowers it with no reload...
+// === "answering a question lowers it with no reload...
 // a deferred question counts as complete, matching the guard's rule." (The
 // half proving this can never disagree with the send guard's own arming rule
 // lives in test/check-send-guard.mjs, driving both off the one shared
 // outstandingBlocks() rather than two independent assertions.) ===============
 
-check('criterion 6 (live half): the count lowers with no reload as questions are answered, and a deferred question counts as complete', () => {
+check('the count lowers with no reload as questions are answered, and a deferred question counts as complete', () => {
   const board = createBoard({ title: 'Pill - live count', blocks: [Q1, Q2, Q3] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -457,19 +456,19 @@ check('criterion 6 (live half): the count lowers with no reload as questions are
   assert.equal(pill.textContent, '2 questions left', 'answering one question must lower the count immediately, no reload');
 
   deferBlock(blocks[1]);
-  assert.equal(pill.textContent, '1 question left', 'a deferred question must count as complete, exactly like the send guard\'s own rule (criterion 3)');
+  assert.equal(pill.textContent, '1 question left', 'a deferred question must count as complete, exactly like the send guard\'s own rule');
 
   answerSingle(blocks[2], 'Alpha');
   assert.equal(pill.textContent, '0 questions left', 'the last question answered must bring the count to zero');
   assert.equal(pill.classList.contains('visible'), false, 'a count of zero must never be shown, even with the rail still off screen');
 });
 
-// === criterion 7: clicking (or activating by keyboard) moves the reviewer to the
+// === clicking (or activating by keyboard) moves the reviewer to the
 // first still-outstanding question -- the send guard's own target
 // (outstandingBlocks()[0]), never a second notion of "next question" -- and the
 // button's own visible text is its accessible name. ==========================
 
-check('criterion 7: clicking the pill focuses the FIRST still-outstanding question\'s note field -- the exact block armSendGuard would flag, not merely any outstanding one', () => {
+check('clicking the pill focuses the FIRST still-outstanding question\'s note field -- the exact block armSendGuard would flag, not merely any outstanding one', () => {
   const board = createBoard({ title: 'Pill - click target', blocks: [Q1, Q2, Q3] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -485,7 +484,7 @@ check('criterion 7: clicking the pill focuses the FIRST still-outstanding questi
   assert.equal(expectedNote.scrollIntoViewCallCount >= 1, true, 'the target question\'s note field must be scrolled into view (focusNoteField\'s own contract)');
 });
 
-check('criterion 7: the pill is a native <button> in the ordinary tab order -- no custom role or tabindex substituting for it', () => {
+check('the pill is a native <button> in the ordinary tab order -- no custom role or tabindex substituting for it', () => {
   const board = createBoard({ title: 'Pill - keyboard', blocks: [Q1] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -494,7 +493,7 @@ check('criterion 7: the pill is a native <button> in the ordinary tab order -- n
   assert.equal(pill.hasAttribute('tabindex'), false, 'no tabindex override -- a native button is already reachable by Tab');
 });
 
-check('criterion 7: the pill carries no separate aria-label -- its own visible text IS the accessible name, so it can never say a different count than what is on screen', () => {
+check('the pill carries no separate aria-label -- its own visible text IS the accessible name, so it can never say a different count than what is on screen', () => {
   const board = createBoard({ title: 'Pill - accessible name', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -503,12 +502,11 @@ check('criterion 7: the pill carries no separate aria-label -- its own visible t
   assert.equal(pill.textContent, '2 questions left');
 });
 
-// === criterion 8: the pill leaves the screen the instant the round's closing
+// === the pill leaves the screen the instant the round's closing
 // rail is on screen -- the SAME observer that already docks the send bar, never
 // a second one -- and it is never shown at a count of zero.
 //
-// What this proves and what it cannot (spelled out per this ticket's own
-// instruction to be explicit about the split): StandInIntersectionObserver
+// What this proves and what it cannot: StandInIntersectionObserver
 // fakes the one fact src/ui.mjs's callback ever reads off an entry
 // (isIntersecting) and lets a check fire it directly, in both directions --
 // proving the DECISION ("given the rail is reported intersecting, is the pill
@@ -518,12 +516,12 @@ check('criterion 7: the pill carries no separate aria-label -- its own visible t
 // fires that callback at the right moment -- that is real layout (QUIRKS.md
 // "The stand-in has no layout: no IntersectionObserver, no scrollHeight, no
 // clientHeight"), and this feature rests on the exact same construction
-// criterion 2's own docking checks already trust rather than re-proving it:
+// the docking checks above already trust rather than re-proving it:
 // one IntersectionObserver, on the one .round-end element, feeding both
 // consumers. Nothing in this file drives a real browser.
 // =====================================================================================
 
-check('criterion 8: the pill and the send bar\'s dock are driven by the SAME observer instance -- toggling it flips both, in both directions', () => {
+check('the pill and the send bar\'s dock are driven by the SAME observer instance -- toggling it flips both, in both directions', () => {
   const board = createBoard({ title: 'Pill - shared observer', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   const { document, observers } = loadBoardWithIntersectionObserver(html);
@@ -539,7 +537,7 @@ check('criterion 8: the pill and the send bar\'s dock are driven by the SAME obs
   assert.equal(pill.classList.contains('visible'), true, 'setup failure: the pill must start visible -- two outstanding questions, rail not yet reported on screen');
 
   dockObserver._setIntersecting(rail, true);
-  assert.equal(sendBar.classList.contains('docked'), true, 'setup failure: the rail coming on screen must dock the bar (criterion 2, unchanged by this work)');
+  assert.equal(sendBar.classList.contains('docked'), true, 'setup failure: the rail coming on screen must dock the bar, unchanged by this work');
   assert.equal(pill.classList.contains('visible'), false, 'the rail coming on screen must hide the pill, in the SAME callback that docks the bar');
 
   dockObserver._setIntersecting(rail, false);
@@ -547,7 +545,7 @@ check('criterion 8: the pill and the send bar\'s dock are driven by the SAME obs
   assert.equal(pill.classList.contains('visible'), true, 'the rail leaving the screen must show the pill again, symmetrically with the bar undocking');
 });
 
-check('criterion 8: never shown at a count of zero, even while the rail is reported off screen', () => {
+check('never shown at a count of zero, even while the rail is reported off screen', () => {
   const board = createBoard({ title: 'Pill - never at zero', blocks: [Q1] });
   const html = renderBoardPage(board);
   const { document, observers } = loadBoardWithIntersectionObserver(html);
@@ -564,7 +562,7 @@ check('criterion 8: never shown at a count of zero, even while the rail is repor
   assert.equal(pill.textContent, '0 questions left');
 });
 
-check('criterion 8: guarded for absence -- with no IntersectionObserver at all, the pill still renders (assuming the rail is permanently off screen, matching the send bar\'s own floating fallback) and its count still tracks live answers', () => {
+check('guarded for absence -- with no IntersectionObserver at all, the pill still renders (assuming the rail is permanently off screen, matching the send bar\'s own floating fallback) and its count still tracks live answers', () => {
   const original = globalThis.IntersectionObserver;
   delete globalThis.IntersectionObserver;
   try {
@@ -582,10 +580,10 @@ check('criterion 8: guarded for absence -- with no IntersectionObserver at all, 
   }
 });
 
-// === criterion 10: no pill on a historical (sent) round, and none in a
+// === no pill on a historical (sent) round, and none in a
 // read-only (file://) archive. ===============================================
 
-check('criterion 10: a board with every round already sent renders the pill at zero, never visible', () => {
+check('a board with every round already sent renders the pill at zero, never visible', () => {
   const board = createBoard({ title: 'Pill - sent round', blocks: [Q1] });
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   const html = renderBoardPage(board);
@@ -599,7 +597,7 @@ check('a round that asks nothing renders the pill at zero, never visible -- matc
   assert.match(html, /class="questions-left-pill" id="questions-left-pill">0 questions left</);
 });
 
-check('criterion 10: the pill never appears in a read-only (file://) archive -- structurally present (readonly hides it by CSS, same convention as .round-end), hard-disabled, and inert to a click', () => {
+check('the pill never appears in a read-only (file://) archive -- structurally present (readonly hides it by CSS, same convention as .round-end), hard-disabled, and inert to a click', () => {
   const board = createBoard({ title: 'Pill - archive', blocks: [Q1, Q2] });
   const html = renderBoardPage(board);
   assert.ok(html.includes('id="questions-left-pill"'), 'setup failure: the live page must render the pill for its still-open round');

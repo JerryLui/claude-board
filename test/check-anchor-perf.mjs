@@ -1,20 +1,20 @@
-// Ticket 11 (DESIGN.md), audit V4 and V5b: two independent cost claims
-// about the same hot path (resolveComment, walked on every render/SSE push/
-// archive write/packet build), each fixed differently, each checked here as a
-// regression guard with a generous-but-real deadline -- not just "does it still
-// work", but "does it still work FAST", since a future edit that reintroduces
-// either quadratic behaviour would otherwise ship behind a suite that stays
-// green right up until a real board's daemon starts burning CPU for seconds per
-// request (DESIGN.md anchoring criterion 7: "no board can be wedged by content
-// that fails to parse" -- pathologically slow is its own kind of wedge on a
-// single-threaded daemon).
+// Two independent cost claims about the same hot path (resolveComment, walked
+// on every render/SSE push/archive write/packet build), each fixed
+// differently, each checked here as a regression guard with a
+// generous-but-real deadline -- not just "does it still work", but "does it
+// still work FAST", since a future edit that reintroduces either quadratic
+// behaviour would otherwise ship behind a suite that stays green right up
+// until a real board's daemon starts burning CPU for seconds per request:
+// no board can be wedged by content that fails to parse, and pathologically
+// slow is its own kind of wedge on a single-threaded daemon.
 //
-// Both measured through the real call sites, not a unit call on the regex or the
-// cache: V5b drives src/anchor.mjs's parseHtmlTree (the function tokenRe lives
-// in, and the one resolveDomAnchor calls on an html-stage block's raw html) and
-// also resolveComment/board.mjs end to end over an html block; V4 drives
-// src/board.mjs's resolveComments, exactly what renderBoardPage/
-// resolveBoardComments/buildPacket call.
+// Both measured through the real call sites, not a unit call on the regex or
+// the cache: the backtrack guard drives src/anchor.mjs's parseHtmlTree (the
+// function tokenRe lives in, and the one resolveDomAnchor calls on an
+// html-stage block's raw html) and also resolveComment/board.mjs end to end
+// over an html block; the shared-parse guard drives src/board.mjs's
+// resolveComments, exactly what renderBoardPage/resolveBoardComments/
+// buildPacket call.
 
 import assert from 'node:assert/strict';
 import { parseHtmlTree } from '../src/anchor.mjs';
@@ -38,13 +38,13 @@ function timeMs(fn) {
   return Number(process.hrtime.bigint() - start) / 1e6;
 }
 
-// --- V5b: tokenRe must not backtrack quadratically ----------------------------
+// --- tokenRe must not backtrack quadratically ----------------------------
 //
 // An open tag whose "name" is a huge run of word characters with no terminating
 // '>' anywhere is exactly the shape that used to overlap the tag-name group's
 // `[\w-]*` with the quantifier immediately following it (both the close-tag and
-// open-tag branches) -- measured pre-fix (audit V5b, and independently
-// reproduced while building this check): 20K -> 136ms / 131ms measured, 100K ->
+// open-tag branches) -- measured pre-fix, and independently
+// reproduced while building this check: 20K -> 136ms / 131ms measured, 100K ->
 // 2.8s / 3.26s measured, 500K -> 73.6s / 82.7s measured. The deadlines below sit
 // two to three orders of magnitude above the FIXED cost (measured well under
 // 5ms at every size below) and two to three orders of magnitude below the
@@ -56,14 +56,14 @@ function adversarialUnterminatedTag(n) {
 }
 
 for (const [n, deadlineMs] of [[20_000, 2_000], [100_000, 2_000], [500_000, 5_000]]) {
-  check(`V5b: parseHtmlTree on a ${n}-char unterminated tag completes within ${deadlineMs}ms (no quadratic backtracking)`, () => {
+  check(`parseHtmlTree on a ${n}-char unterminated tag completes within ${deadlineMs}ms (no quadratic backtracking)`, () => {
     const ms = timeMs(() => parseHtmlTree(adversarialUnterminatedTag(n)));
     console.log(`    ${n} chars -> ${ms.toFixed(1)}ms`);
     assert.ok(ms < deadlineMs, `parseHtmlTree took ${ms.toFixed(1)}ms on ${n} chars, expected under ${deadlineMs}ms`);
   });
 }
 
-check('V5b: the same adversarial input reaches the same guard through the real path -- a dom comment resolved against an html-stage block', () => {
+check('the same adversarial input reaches the same guard through the real path -- a dom comment resolved against an html-stage block', () => {
   const board = createBoard({ title: 'v5b real path', blocks: [{ kind: 'html', html: adversarialUnterminatedTag(200_000) }] });
   const block = board.blocks[0];
   const comment = { n: 1, blockId: block.id, anchor: { kind: 'dom', ref: '1', hint: 'x' }, text: 'probe', createdAt: new Date().toISOString(), round: 1 };
@@ -72,11 +72,11 @@ check('V5b: the same adversarial input reaches the same guard through the real p
   assert.ok(ms < 3_000, `resolveComment took ${ms.toFixed(1)}ms, expected under 3000ms`);
 });
 
-// --- V4: resolveComments must render+parse each block ONCE per pass, not once
+// --- resolveComments must render+parse each block ONCE per pass, not once
 // per comment -------------------------------------------------------------------
 //
 // A large block with many comments anchored to it used to pay a fresh
-// renderBlock + parseHtmlTree for every single comment (audit V4: measured
+// renderBlock + parseHtmlTree for every single comment (measured
 // 2186ms for 300 comments on a 3.3MB block; independently reproduced while
 // building this check at ~3000ms for 300 comments on a ~600KB rendered
 // section). resolveComments now shares one render+parse per block across the
@@ -114,14 +114,14 @@ function boardWithComments(commentCount) {
   return board;
 }
 
-check('V4: resolveComments on 0 comments against a ~500KB diagram block is effectively free', () => {
+check('resolveComments on 0 comments against a ~500KB diagram block is effectively free', () => {
   const board = boardWithComments(0);
   const ms = timeMs(() => resolveComments(board, board.comments));
   console.log(`    0 comments -> ${ms.toFixed(1)}ms`);
   assert.ok(ms < 200, `resolveComments took ${ms.toFixed(1)}ms on 0 comments, expected under 200ms`);
 });
 
-check('V4: resolveComments on 300 comments against the SAME block renders+parses that block once, not 300 times', () => {
+check('resolveComments on 300 comments against the SAME block renders+parses that block once, not 300 times', () => {
   const board = boardWithComments(300);
   const ms = timeMs(() => resolveComments(board, board.comments));
   console.log(`    300 comments -> ${ms.toFixed(1)}ms`);

@@ -1,13 +1,12 @@
-// Ticket 04 (light-theme spec): "Mermaid diagrams are drawn in the active
-// theme after a switch, and comment pins already placed on a diagram still
-// point at the same nodes afterwards" (acceptance criterion 8). This file
-// covers the FIRST half -- the diagram itself following the theme -- end to
-// end through the real src/theme.mjs boot script and the real src/ui.mjs
-// client script running together, exactly as they do on a real page (one
-// script in <head>, one deferred module script near the end of <body>). The
-// SECOND half (pin survival across the redraw, criterion 8's risky half) is
-// covered in test/check-mermaid-anchor.mjs, the file that already owns every
-// other mermaid-anchoring assertion -- see the "ticket 04" section appended
+// "Mermaid diagrams are drawn in the active theme after a switch, and
+// comment pins already placed on a diagram still point at the same nodes
+// afterwards." This file covers the FIRST half -- the diagram itself
+// following the theme -- end to end through the real src/theme.mjs boot
+// script and the real src/ui.mjs client script running together, exactly as
+// they do on a real page (one script in <head>, one deferred module script
+// near the end of <body>). The SECOND half (pin survival across the redraw)
+// is covered in test/check-mermaid-anchor.mjs, the file that already owns
+// every other mermaid-anchoring assertion -- see the section appended
 // there.
 //
 // Covers:
@@ -38,7 +37,7 @@
 // mermaid parse error would). A mock that always redraws unconditionally
 // would stay green even if src/ui.mjs never restored anything.
 //
-// Audit 2026-07-31 (D1/D2/M1/M2): the mock above this comment used to be
+// The mock above this comment used to be
 // `async` in name only -- its body was a fully synchronous forEach, so it
 // could never interleave two calls, and every check up to this point in the
 // file drives exactly one `click(); await flush();` at a time. That is
@@ -50,8 +49,8 @@
 // claiming 'data-processed' before its own per-node await, and clearing
 // innerHTML before ITS first await -- so a test that fires two clicks with NO
 // await between them can actually land one pass's write inside the other's
-// gap, the way a real double-tap does. The sections below "D1/D2 (audit
-// 2026-07-31)" exercise exactly that.
+// gap, the way a real double-tap does. The sections below "D1/D2" exercise
+// exactly that.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -117,7 +116,7 @@ function tick() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-/** Audit 2026-07-31 (D1/D2): unlike the ORIGINAL version of this mock (an
+/** Unlike the ORIGINAL version of this mock (an
  * `async` function whose body was a fully synchronous forEach, so `run()`
  * always resolved within the same microtask turn it was called in, and two
  * calls could therefore never interleave), this one processes nodes ONE AT A
@@ -178,8 +177,8 @@ function mockMermaidThemeAware() {
 /** Runs the REAL boot script and the REAL client script together, in the same
  * order a real page executes them (the head boot script first -- it owns
  * THEME_CHANGE_EVENT's dispatch -- then ui's own deferred module script,
- * which listens for it), against a freshly parsed document. Audit 2026-07-31
- * (H2): a freshly parsed document now starts `readyState === 'loading'`, so
+ * which listens for it), against a freshly parsed document. A freshly parsed
+ * document now starts `readyState === 'loading'`, so
  * `document.finishParsing()` (dom-stand-in.mjs) is needed after both scripts
  * have run to simulate the parser reaching the end of the document -- that is
  * what actually wires the theme control's click listener (themeBootScript's
@@ -205,7 +204,7 @@ function clickThemeToggle(document) {
 }
 
 // =================================================================================
-// 0. Audit finding C1: the stand-in's getComputedStyle now runs a real cascade
+// 0. The stand-in's getComputedStyle now runs a real cascade
 //    resolver over the ACTUAL styles text (test/dom-stand-in.mjs), not a
 //    hand-copied precedence rule built from `palettes` -- so this asserts the
 //    full {OS dark, OS light} x {no attribute, data-theme="light",
@@ -373,7 +372,7 @@ await check('mermaid: cycling the theme control repeatedly does not stack click 
 
 // =================================================================================
 // 5. MERMAID_TOKEN_MAP is a real, checked mapping -- not a second unchecked
-//    copy of the palette's key set (audit 2026-07-31, M2's root cause).
+//    copy of the palette's key set (M2's root cause).
 // =================================================================================
 
 await check('mermaid: every MERMAID_TOKEN_MAP value names a real key of BOTH palettes.dark and palettes.light -- a renamed/removed token must fail HERE, not just resolve to \'\' at runtime', async () => {
@@ -389,7 +388,7 @@ await check('mermaid: every MERMAID_TOKEN_MAP value names a real key of BOTH pal
 });
 
 // =================================================================================
-// 6. D1 (audit 2026-07-31): two redraws started before the first settles
+// 6. D1: two redraws started before the first settles
 //    never corrupt a diagram.
 // =================================================================================
 
@@ -408,7 +407,7 @@ await check('mermaid (D1): two redraws started before the first settles leave ev
   assert.equal(document.querySelectorAll('pre.mermaid svg').length, 2, 'setup failure: both diagrams must render before either click');
 
   // Two clicks with NO await between them -- the worst-case compression of
-  // the audit's measured 40-200ms window: System -> Light -> Dark.
+  // the measured 40-200ms window: System -> Light -> Dark.
   clickThemeToggle(document);
   clickThemeToggle(document);
   await flush();
@@ -449,7 +448,7 @@ await check('mermaid (D1): three theme clicks queued back to back before any set
 });
 
 // =================================================================================
-// 7. D2 (audit 2026-07-31): a redraw overlapping the initial render never
+// 7. D2: a redraw overlapping the initial render never
 //    drops a diagram that DID render to a .missing fallback.
 // =================================================================================
 
@@ -469,7 +468,7 @@ await check('mermaid (D2): a redraw overlapping the initial render never replace
   const location = { protocol: 'http:' };
   new Function('document', 'window', 'location', themeBootScript)(document, window, location);
   new Function('document', 'window', 'location', ui)(document, window, location);
-  // Audit 2026-07-31 (H2): wires the theme control's click listener (see
+  // Wires the theme control's click listener (see
   // loadBoard's own comment) -- synchronous, so it does not disturb the
   // still-in-flight mermaid render this check depends on below.
   document.finishParsing();
@@ -492,7 +491,7 @@ await check('mermaid (D2): a redraw overlapping the initial render never replace
 });
 
 // =================================================================================
-// 8. M1 (audit 2026-07-31): initialize runs before EVERY run(), not just the
+// 8. M1: initialize runs before EVERY run(), not just the
 //    very first ever.
 // =================================================================================
 
@@ -532,7 +531,7 @@ function loadBoardWithEventSource(pageHtml, mermaidMock) {
     const location = { protocol: 'http:' };
     new Function('document', 'window', 'location', themeBootScript)(document, window, location);
     new Function('document', 'window', 'location', ui)(document, window, location);
-    document.finishParsing(); // audit 2026-07-31 (H2): see loadBoard's own comment
+    document.finishParsing(); // see loadBoard's own comment
     assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource -- fix the fixture (readonly must be false), not this file');
     return { document, es: captured, window };
   } finally {
@@ -556,8 +555,8 @@ await check('mermaid (M1): initialize runs before EVERY run(), not just the very
   assert.equal(mock.initCalls[0].themeVariables.primaryColor, palettes.dark['--panel-2'], 'setup failure: round 1 must be drawn dark');
 
   // Now the diagram leaves the page by some route OTHER than a mermaid
-  // failure (an amend, a resolve error, anything) -- the audit's own
-  // scenario is a parse failure specifically, but the mechanism this test
+  // failure (an amend, a resolve error, anything) -- a parse failure is one
+  // concrete scenario, but the mechanism this test
   // isolates is simpler and more general: WHATEVER the reason, once zero
   // pre.mermaid remain, a theme switch has no redraw work to do, and mermaidMod
   // is already non-null.
@@ -593,7 +592,7 @@ await check('mermaid (M1): initialize runs before EVERY run(), not just the very
 });
 
 // =================================================================================
-// 9. M2 (audit 2026-07-31): an unresolvable token aborts the redraw BEFORE
+// 9. M2: an unresolvable token aborts the redraw BEFORE
 //    the destructive restore -- diagrams stay live SVGs, never stripped to
 //    raw source.
 // =================================================================================
@@ -647,7 +646,7 @@ await check('mermaid (M2): an unresolvable/renamed token aborts the redraw befor
 });
 
 // =================================================================================
-// 10. H4 (audit 2026-07-31): the System branch is exercised for real -- a live
+// 10. H4: the System branch is exercised for real -- a live
 //     OS preference flip while System is in force re-applies the theme (via
 //     the real cascade, not a hand-copied one) and fires THEME_CHANGE_EVENT
 //     exactly once, driving a mermaid redraw; the same flip is correctly
@@ -701,12 +700,12 @@ await check('mermaid (H4): the OS preference flipping is correctly ignored while
 });
 
 // =================================================================================
-// 8. DESIGN.md polish criterion 15: an OPEN diagram lens rethemes with the page.
+// 8. An OPEN diagram lens rethemes with the page.
 //
-//    The lens (DESIGN.md polish ticket 05) holds a cloneNode(true) of the inline
+//    The lens holds a cloneNode(true) of the inline
 //    svg, and a redraw REPLACES that svg with a new element. The two features
 //    were built on separate branches, so nothing connected them: measured in
-//    Chrome 2026-07-31, switching to Light with the lens open left the lens's
+//    Chrome, switching to Light with the lens open left the lens's
 //    node rects at rgb(24, 32, 47) with rgb(234, 238, 246) labels -- a dark
 //    diagram inside light chrome -- while the inline diagram behind the dialog
 //    had correctly become light. Fixed by lensRetheme (src/ui.mjs).
@@ -760,7 +759,7 @@ await check('the lens: a theme switch while the lens is OPEN re-clones the redra
   const lensSvgs = document.querySelectorAll('.diagram-lens .lens-canvas svg');
   assert.equal(lensSvgs.length, 1, `the lens canvas must hold exactly one diagram after a retheme, got ${lensSvgs.length}`);
   assert.equal(lensSvgs[0].getAttribute('id'), inlineAfter.getAttribute('id'),
-    'the open lens is still showing a clone of the svg the redraw replaced -- it must be re-cloned from the freshly redrawn one, or the reviewer sees a dark diagram inside light chrome (DESIGN.md polish criterion 15)');
+    'the open lens is still showing a clone of the svg the redraw replaced -- it must be re-cloned from the freshly redrawn one, or the reviewer sees a dark diagram inside light chrome');
 
   assert.equal(canvas.style.transform, transformBefore,
     'the reviewer\'s pan/zoom must survive a retheme they did not ask for -- the source is unchanged, so the layout is unchanged and there is nothing to refit');

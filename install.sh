@@ -1,7 +1,7 @@
 #!/bin/bash
 # install.sh — one idempotent command from a fresh clone of claude-board to a
 # running service. Owns the two things that sit outside this repository (see
-# DESIGN.md Decisions -> "One install command, because a clone is not
+# "One install command, because a clone is not
 # enough"):
 #
 #   1. MCP registration (Claude Code owns the config): `claude mcp add
@@ -59,8 +59,7 @@
 #
 # CLAUDE_BOARD_HOME is NOT one of these. It is documented configuration — where the
 # store lives — in README.md and PROTOCOL.md. This comment used to cite it as the
-# example of a test seam, which is the description SPEC_LAUNCH.md criterion 15
-# specifically retired.
+# example of a test seam -- that description has since been retired.
 #
 #   CLAUDE_BOARD_LAUNCH_AGENTS_DIR   default: ~/Library/LaunchAgents
 #   CLAUDE_BOARD_LOG_DIR             default: ~/Library/Logs/claude-board
@@ -160,8 +159,8 @@ BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
 # project directory (ADR.md entry 3, src/resolve.mjs): colon-separated absolute paths,
 # so a session can render the skill, command or agent file it is discussing.
 #
-# Under ~/.claude the default is three directories, NOT the whole tree (audit S1,
-# 2026-07-31): the rest of it is settings.json, .credentials.json, shell snapshots and
+# Under ~/.claude the default is three directories, NOT the whole tree: the rest
+# of it is settings.json, .credentials.json, shell snapshots and
 # every project's transcripts, none of which a board has a reason to quote.
 # `CLAUDE_BOARD_REF_ROOTS=$HOME/.claude ./install.sh` still installs the whole tree for
 # anyone who wants it. The fourth entry is the render directory (2026-08-05), the same
@@ -171,14 +170,14 @@ BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
 # narrower one only. Keep all four in step with DEFAULT_REF_ROOTS in src/resolve.mjs;
 # test/check-install.mjs asserts they match.
 #
-# This is also the ONLY place the default exists (audit S3): src/resolve.mjs reads an
+# This is also the ONLY place the default exists: src/resolve.mjs reads an
 # absent CLAUDE_BOARD_REF_ROOTS as an EMPTY allowlist, so that a default living in code
 # cannot widen the boundary on machines whose plist predates it — the daemon restarts
 # itself on any src/ change, so such a default would go live during a `git pull`,
 # unannounced. Written here, the default arrives when someone runs the installer, which
 # is a thing a person does deliberately.
 #
-# Which leaves the upgrade path, and it used to leak the same way (audit NEW-2): this
+# Which leaves the upgrade path, and it used to leak the same way: this
 # script rewrote the plist unconditionally and never read the old one back, so an
 # operator who ran `CLAUDE_BOARD_REF_ROOTS= ./install.sh` to get a cwd-only daemon had
 # that decision reverted to the default by the next `git pull && ./install.sh` from a
@@ -248,7 +247,7 @@ else
   SERVE_ROOTS_FROM="default"
 fi
 
-# CLAUDE_BOARD_HOME, resolved the same way and for the same reason (audit). It is
+# CLAUDE_BOARD_HOME, resolved the same way and for the same reason. It is
 # documented configuration (README.md, PROTOCOL.md), but it was never written into
 # the plist -- and a launchd job inherits nothing from the shell that ran this
 # script, so pointing the store at an encrypted volume produced a green install and
@@ -361,8 +360,8 @@ fi
 
 # --- 0. the local secret ----------------------------------------------------
 # The credential that tells this machine's shim from any other local process
-# (DESIGN.md Decisions -> "A loopback Host check, an origin check, and a
-# local secret"; SPEC_LAUNCH.md -> "Read routes are gated"). The daemon requires
+# ("A loopback Host check, an origin check, and a
+# local secret"; "Read routes are gated"). The daemon requires
 # it on every route but /api/health -- reads included, since the cookie a browser
 # holds is derived from this file -- and bin/mcp.mjs reads it at startup and sends
 # it. /api/health stays open precisely so the health check below can use plain
@@ -459,6 +458,19 @@ payload_digest() {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) out = out.concat(walk(full));
         else if (entry.isFile()) out.push(full);
+        // Refuse loudly rather than skip. isFile() is FALSE for a symlink, so a symlinked
+        // file under src/ used to fall through this loop silently: its bytes never entered
+        // PAYLOAD_DIGEST, while cp -R staged it into the signed bundle as a link whose
+        // target lives outside the seal. codesign then vouched for the link, the stamp
+        // stayed unchanged, and "bundle already current" skipped the rebuild -- so both
+        // the signature and the stamp actively attested to content neither covered.
+        // Refuse, but as a one-line message and a clean exit code rather than a thrown
+        // stack trace: the caller turns this into launcher_degraded, the same graceful
+        // path every other build-input problem in this section takes.
+        else {
+          process.stderr.write("src/ contains a non-regular file the bundle signature cannot cover: " + path.relative(root, full) + "\n");
+          process.exit(1);
+        }
       }
       return out;
     }
@@ -480,8 +492,8 @@ payload_digest() {
 # Two destinations, two rules, and a clone path is a filename in both: it may legally
 # contain any byte but NUL and `/`.
 #
-# LC_ALL=C on both, because a filename is bytes and a locale is an opinion about them
-# (audit S9, 2026-07-31). Under a UTF-8 locale BSD sed refuses input that is not valid
+# LC_ALL=C on both, because a filename is bytes and a locale is an opinion about them.
+# Under a UTF-8 locale BSD sed refuses input that is not valid
 # UTF-8 with "RE error: illegal byte sequence" and exits non-zero — and under `set -euo
 # pipefail` that failing command substitution aborts the entire install, part-way
 # through, on a clone path or a reference root containing one stray byte. In the C locale
@@ -599,10 +611,20 @@ case "$NODE_BIN$DAEMON_PATH$BUNDLED_DAEMON_PATH$REPO_DIR" in
   *) LAUNCHER_NEWLINE_IN_PATH=0 ;;
 esac
 
+# Computed up front so a payload the signature cannot honestly cover degrades the way
+# every other build-input problem here does, rather than aborting the whole install under
+# `set -e` with a raw stack trace.
+PAYLOAD_DIGEST_ERR=""
+if ! PAYLOAD_DIGEST="$(payload_digest "$REPO_DIR" 2>&1)"; then
+  PAYLOAD_DIGEST_ERR="$PAYLOAD_DIGEST"
+  PAYLOAD_DIGEST=""
+fi
+
 if [ "$LAUNCHER_NEWLINE_IN_PATH" -eq 1 ]; then
   launcher_degraded "the node or daemon path contains a newline, which cannot be baked into the launcher"
+elif [ -n "$PAYLOAD_DIGEST_ERR" ]; then
+  launcher_degraded "$PAYLOAD_DIGEST_ERR"
 else
-  PAYLOAD_DIGEST="$(payload_digest "$REPO_DIR")"
   cat > "$STAGED_HEADER" <<HEADER
 /* Generated by install.sh — not checked in, rebuilt from scratch on every run.
  * CLAUDE_BOARD_NODE and CLAUDE_BOARD_DAEMON are the only two things bin/launcher.c will
@@ -761,7 +783,7 @@ INFO
   elif ! {
     mkdir -p "$STAGED_APP/Contents/Resources/bin" "$STAGED_APP/Contents/Resources/src" \
       && cp "$REPO_DIR/bin/daemon.mjs" "$STAGED_APP/Contents/Resources/bin/daemon.mjs" \
-      && cp -R "$REPO_DIR/src/." "$STAGED_APP/Contents/Resources/src/" \
+      && cp -RL "$REPO_DIR/src/." "$STAGED_APP/Contents/Resources/src/" \
       && { [ ! -f "$LAUNCHER_ICON_SRC" ] || cp "$LAUNCHER_ICON_SRC" "$STAGED_APP/Contents/Resources/${LABEL}.icns"; }
   }; then
     launcher_degraded "could not stage bin/daemon.mjs and src/ into the bundle before signing"

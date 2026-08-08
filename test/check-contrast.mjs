@@ -83,12 +83,12 @@ function resolveSurface(palette, token) {
 // --- the bar ------------------------------------------------------------------
 
 const MIN_RATIO = 4.5;
-// Criterion 7: "Body text, muted text and accent text each clear 4.5:1 against
+// "Body text, muted text and accent text each clear 4.5:1 against
 // every surface token they are used on." `--accent-soft` (`.md-content
 // blockquote`, `.mode-toggle.active`, `.comment-btn:hover`) and
 // `--history-bg` (`.round-history .block`) are two more surfaces body/accent
 // text demonstrably sits on that this list used to omit -- a coverage gap, not
-// a live failure (2026-07-31 audit: all pairs already clear the bar, worst is
+// a live failure (all pairs already clear the bar, worst is
 // light `--accent` on `--accent-soft` at 4.87:1). Both are alpha, so
 // resolveSurface above composites them over `--bg` first.
 const SURFACES = ['--bg', '--bg-tint', '--panel', '--panel-2', '--panel-3', '--accent-soft', '--history-bg'];
@@ -100,7 +100,7 @@ function assertClears(themeName, palette, textToken, surfaceToken) {
     `${themeName}: ${textToken} on ${surfaceToken}: ${ratio.toFixed(2)}:1, need ${MIN_RATIO}:1`);
 }
 
-// 2026-07-31 audit: criterion 7 only ever asked for body/muted/accent text
+// The 4.5:1 bar only ever asked for body/muted/accent text
 // against every surface (the cross product above) -- it never named
 // --accent-hi/--code-ink/--good/--warning/--warning-ink/--critical, which are
 // used as FILLS and BORDERS at least as often as text. The suite used to hold
@@ -149,7 +149,7 @@ const TEXT_SITES = [
 
 for (const [themeName, palette] of Object.entries(palettes)) {
   // Deliberately the full cross product, not a hand-maintained list of which text
-  // sits on which surface (criterion 7 only requires the latter): the cross
+  // sits on which surface (only the latter is required): the cross
   // product is mechanical and can't rot as rules move a text token onto a surface
   // it wasn't originally styled for. Both palettes are expected to pass it.
   check(`${themeName}: body/muted/accent text clears ${MIN_RATIO}:1 against every surface token`, () => {
