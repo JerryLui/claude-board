@@ -3,7 +3,13 @@
 // daemon, no DOM -- imports the palette objects directly.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { styles, palettes } from '../src/styles.mjs';
+
+// src/styles.mjs's own source text, for the palette-object-read scan below --
+// a handful of tokens (the tab mark's colours) are drawn straight from JS,
+// never through a CSS var(), so `styles` alone can't see them referenced.
+const STYLES_SOURCE = readFileSync(new URL('../src/styles.mjs', import.meta.url), 'utf8');
 
 let failures = 0;
 function check(name, fn) {
@@ -79,7 +85,7 @@ function resolveSurface(palette, token) {
 const MIN_RATIO = 4.5;
 // Criterion 7: "Body text, muted text and accent text each clear 4.5:1 against
 // every surface token they are used on." `--accent-soft` (`.md-content
-// blockquote`, `.mode-toggle.active`, `.md-content [id].anchor-target`) and
+// blockquote`, `.mode-toggle.active`, `.comment-btn:hover`) and
 // `--history-bg` (`.round-history .block`) are two more surfaces body/accent
 // text demonstrably sits on that this list used to omit -- a coverage gap, not
 // a live failure (2026-07-31 audit: all pairs already clear the bar, worst is
@@ -130,7 +136,7 @@ const TEXT_SITES = [
   // `.answer-status[data-status="deferred"]`, `.mermaid-block .missing`.
   ['--warning', '--panel'],
   ['--warning', '--history-bg'],
-  // `.btn-defer.active`, `.pending-badge.has-pending` -- both are text
+  // `.btn-defer.active`, `.rounds-left-badge` -- both are text
   // directly on their own --warning-soft background.
   ['--warning', '--warning-soft'],
   // `.readonly-banner` -- text directly on its own --warning-soft background.
@@ -180,6 +186,14 @@ check('every palette token is referenced somewhere in the stylesheet, or by anot
       for (const m of String(value).matchAll(/var\((--[\w-]+)/g)) varRefs.add(m[1]);
     }
   }
+  // The tab mark (src/styles.mjs, beside MARK_SHAPES/REST_SHAPES) draws
+  // straight from the DARK object in JS -- a favicon gets no CSS, so it can
+  // carry no var() -- so a token read as DARK['--x'] there looks orphaned to
+  // the scan above even though it is wired up, just not through CSS. Scanning
+  // styles.mjs's own source text for that bracket-read shape closes the gap
+  // without loosening the check: a key nothing reads either way still shows up
+  // as an orphan below, same as before this scan existed.
+  for (const m of STYLES_SOURCE.matchAll(/\b(?:DARK|LIGHT)\[(['"])(--[\w-]+)\1\]/g)) varRefs.add(m[2]);
   const orphans = Object.keys(palettes.dark).filter(k => !varRefs.has(k));
   assert.deepEqual(orphans, [], `declared in the palette but never referenced anywhere: ${orphans.join(', ')}`);
 });

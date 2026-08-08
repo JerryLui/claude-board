@@ -32,7 +32,7 @@ import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { parseHTML, StandInIntersectionObserver, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
+import { parseHTML, StandInIntersectionObserver, StandInEventSource, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -48,6 +48,25 @@ function check(name, fn) {
 
 const Q1 = { kind: 'question', prompt: 'Q1: pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
 const Q2 = { kind: 'question', prompt: 'Q2: pick another', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] };
+const Q3 = { kind: 'question', prompt: 'Q3: pick a third', widget: 'single', options: [{ label: 'Alpha' }, { label: 'Beta' }] };
+
+/** Answer a single-choice question by clicking the option carrying `label`, through
+ * the real widget -- same idiom as test/check-send-guard.mjs's own answerSingle,
+ * copied rather than imported across files (no shared test-helper module exists
+ * here, and this file already carries its own loadBoard/loadBoardWithIntersectionObserver
+ * pair rather than reaching into check-send-guard.mjs's). */
+function answerSingle(block, label) {
+  const opt = [...block.querySelectorAll('.choice-single')].find(el => el.textContent.trim() === label);
+  assert.ok(opt, `setup failure: no "${label}" option rendered in this block`);
+  opt.dispatchEvent(new StandInEvent('click'));
+}
+
+/** Defer a question through its real Defer button. */
+function deferBlock(block) {
+  const btn = block.querySelector('.btn-defer');
+  assert.ok(btn, 'setup failure: no Defer button rendered in this block');
+  btn.dispatchEvent(new StandInEvent('click'));
+}
 
 /** Parse `html` and run the real `ui` client script against it -- same idiom as
  * test/check-enter.mjs's loadBoard. */
@@ -383,6 +402,223 @@ check('criterion 3: a read-only file:// archive (send bar hidden) shares the sam
   const padding = resolveComputedProperty(styles, shell, true, 'padding');
   assert.equal(padding, '0 var(--space-5)',
     'the archive shares .board-shell\'s rule with the live page -- readonly must never carry its own bottom-padding override');
+});
+
+// =====================================================================================
+// The questions-left pill (DESIGN.md round-end decisions / ADR.md entry 27,
+// criteria 5, 7, 8, 10; criterion 6's own agreement-with-the-guard case lives in
+// test/check-send-guard.mjs per this ticket's testing note; criterion 9 is a
+// regression guard already pinned above -- untouched by this work). A live,
+// additive count of the open round's still-unanswered questions, floating grey
+// and centered above the send bar, on screen exactly while the round's own
+// closing rail is not: the SAME IntersectionObserver that already docks the
+// send bar (criterion 2's own harness, reused rather than duplicated), and it
+// never touches the send guard.
+// =====================================================================================
+
+// === criterion 5: rendered while the round has unanswered questions, reading
+// "N question(s) left" ===================================================
+
+check('criterion 5: the open round\'s pill renders with the live count, pluralized, and starts VISIBLE -- the rail is assumed off screen until an observer says otherwise, same default as the bar\'s own undocked start', () => {
+  const board = createBoard({ title: 'Pill - initial count', blocks: [Q1, Q2] });
+  const html = renderBoardPage(board);
+  assert.match(html, /<button type="button" class="questions-left-pill visible" id="questions-left-pill">2 questions left<\/button>/,
+    'expected a visible pill naming both outstanding questions at first paint');
+});
+
+check('criterion 5: singular at exactly one outstanding question', () => {
+  const board = createBoard({ title: 'Pill - singular', blocks: [Q1] });
+  const html = renderBoardPage(board);
+  assert.match(html, /class="questions-left-pill visible" id="questions-left-pill">1 question left</);
+});
+
+check('the pill is grey (--panel-2/--ink-2, the same chrome .round-badge and .mode-toggle already use), never the send guard\'s warning amber, and floats centered above the send bar', () => {
+  assert.match(styles, /\.questions-left-pill\s*\{[^}]*background:\s*var\(--panel-2\)[^}]*color:\s*var\(--ink-2\)[^}]*\}/,
+    'expected the pill\'s base rule to use the same grey chrome tokens as .round-badge/.mode-toggle');
+  assert.match(styles, /\.questions-left-pill\s*\{[^}]*position:\s*absolute[^}]*left:\s*50%[^}]*bottom:\s*100%[^}]*transform:\s*translateX\(-50%\)[^}]*\}/,
+    'expected the pill centered (left: 50%, translateX(-50%)) and floating above the send bar (bottom: 100%, i.e. its OWN bottom edge sits at the bar\'s top edge)');
+});
+
+// === criterion 6 (live half): "answering a question lowers it with no reload...
+// a deferred question counts as complete, matching the guard's rule." (The
+// half proving this can never disagree with the send guard's own arming rule
+// lives in test/check-send-guard.mjs, driving both off the one shared
+// outstandingBlocks() rather than two independent assertions.) ===============
+
+check('criterion 6 (live half): the count lowers with no reload as questions are answered, and a deferred question counts as complete', () => {
+  const board = createBoard({ title: 'Pill - live count', blocks: [Q1, Q2, Q3] });
+  const html = renderBoardPage(board);
+  const document = loadBoard(html);
+  const pill = document.getElementById('questions-left-pill');
+  const blocks = [...document.querySelectorAll('.round-open .question-block')];
+  assert.equal(pill.textContent, '3 questions left', 'setup failure: expected all three outstanding at hydrate');
+
+  answerSingle(blocks[0], 'Yes');
+  assert.equal(pill.textContent, '2 questions left', 'answering one question must lower the count immediately, no reload');
+
+  deferBlock(blocks[1]);
+  assert.equal(pill.textContent, '1 question left', 'a deferred question must count as complete, exactly like the send guard\'s own rule (criterion 3)');
+
+  answerSingle(blocks[2], 'Alpha');
+  assert.equal(pill.textContent, '0 questions left', 'the last question answered must bring the count to zero');
+  assert.equal(pill.classList.contains('visible'), false, 'a count of zero must never be shown, even with the rail still off screen');
+});
+
+// === criterion 7: clicking (or activating by keyboard) moves the reviewer to the
+// first still-outstanding question -- the send guard's own target
+// (outstandingBlocks()[0]), never a second notion of "next question" -- and the
+// button's own visible text is its accessible name. ==========================
+
+check('criterion 7: clicking the pill focuses the FIRST still-outstanding question\'s note field -- the exact block armSendGuard would flag, not merely any outstanding one', () => {
+  const board = createBoard({ title: 'Pill - click target', blocks: [Q1, Q2, Q3] });
+  const html = renderBoardPage(board);
+  const document = loadBoard(html);
+  const blocks = [...document.querySelectorAll('.round-open .question-block')];
+  answerSingle(blocks[0], 'Yes'); // Q1 answered -- Q2 must be the target, not Q1 and not Q3
+  const pill = document.getElementById('questions-left-pill');
+
+  pill.dispatchEvent(new StandInEvent('click'));
+
+  const expectedNote = blocks[1].querySelector('[data-note-for]');
+  assert.equal(document.activeElement, expectedNote,
+    'the pill\'s click must move focus to the first still-outstanding question\'s note field');
+  assert.equal(expectedNote.scrollIntoViewCallCount >= 1, true, 'the target question\'s note field must be scrolled into view (focusNoteField\'s own contract)');
+});
+
+check('criterion 7: the pill is a native <button> in the ordinary tab order -- no custom role or tabindex substituting for it', () => {
+  const board = createBoard({ title: 'Pill - keyboard', blocks: [Q1] });
+  const html = renderBoardPage(board);
+  const document = loadBoard(html);
+  const pill = document.getElementById('questions-left-pill');
+  assert.equal(pill.tagName, 'BUTTON', 'the pill must be a real <button>, not a div wearing role="button"');
+  assert.equal(pill.hasAttribute('tabindex'), false, 'no tabindex override -- a native button is already reachable by Tab');
+});
+
+check('criterion 7: the pill carries no separate aria-label -- its own visible text IS the accessible name, so it can never say a different count than what is on screen', () => {
+  const board = createBoard({ title: 'Pill - accessible name', blocks: [Q1, Q2] });
+  const html = renderBoardPage(board);
+  const document = loadBoard(html);
+  const pill = document.getElementById('questions-left-pill');
+  assert.equal(pill.hasAttribute('aria-label'), false);
+  assert.equal(pill.textContent, '2 questions left');
+});
+
+// === criterion 8: the pill leaves the screen the instant the round's closing
+// rail is on screen -- the SAME observer that already docks the send bar, never
+// a second one -- and it is never shown at a count of zero.
+//
+// What this proves and what it cannot (spelled out per this ticket's own
+// instruction to be explicit about the split): StandInIntersectionObserver
+// fakes the one fact src/ui.mjs's callback ever reads off an entry
+// (isIntersecting) and lets a check fire it directly, in both directions --
+// proving the DECISION ("given the rail is reported intersecting, is the pill
+// shown") is wired to the identical observer instance that docks the bar, and
+// that a zero count overrides it either way. It cannot prove that a real
+// .round-end rail crossing a real viewport at a real scroll position actually
+// fires that callback at the right moment -- that is real layout (QUIRKS.md
+// "The stand-in has no layout: no IntersectionObserver, no scrollHeight, no
+// clientHeight"), and this feature rests on the exact same construction
+// criterion 2's own docking checks already trust rather than re-proving it:
+// one IntersectionObserver, on the one .round-end element, feeding both
+// consumers. Nothing in this file drives a real browser.
+// =====================================================================================
+
+check('criterion 8: the pill and the send bar\'s dock are driven by the SAME observer instance -- toggling it flips both, in both directions', () => {
+  const board = createBoard({ title: 'Pill - shared observer', blocks: [Q1, Q2] });
+  const html = renderBoardPage(board);
+  const { document, observers } = loadBoardWithIntersectionObserver(html);
+  const sendBar = document.querySelector('.send-bar');
+  const pill = document.getElementById('questions-left-pill');
+  const rail = document.querySelector('.round-end');
+  assert.ok(rail, 'setup failure: no .round-end rendered for the open round');
+  const dockObserver = observerWatching(observers, rail);
+  assert.ok(dockObserver, 'setup failure: no observer is watching the rail');
+  assert.equal(observers.length, 2,
+    'expected exactly two observers on this page: the round badge\'s own (every .round section), and setupSendBarDock\'s single shared one -- never a second, pill-only observer');
+
+  assert.equal(pill.classList.contains('visible'), true, 'setup failure: the pill must start visible -- two outstanding questions, rail not yet reported on screen');
+
+  dockObserver._setIntersecting(rail, true);
+  assert.equal(sendBar.classList.contains('docked'), true, 'setup failure: the rail coming on screen must dock the bar (criterion 2, unchanged by this work)');
+  assert.equal(pill.classList.contains('visible'), false, 'the rail coming on screen must hide the pill, in the SAME callback that docks the bar');
+
+  dockObserver._setIntersecting(rail, false);
+  assert.equal(sendBar.classList.contains('docked'), false);
+  assert.equal(pill.classList.contains('visible'), true, 'the rail leaving the screen must show the pill again, symmetrically with the bar undocking');
+});
+
+check('criterion 8: never shown at a count of zero, even while the rail is reported off screen', () => {
+  const board = createBoard({ title: 'Pill - never at zero', blocks: [Q1] });
+  const html = renderBoardPage(board);
+  const { document, observers } = loadBoardWithIntersectionObserver(html);
+  const blocks = [...document.querySelectorAll('.round-open .question-block')];
+  const pill = document.getElementById('questions-left-pill');
+  const rail = document.querySelector('.round-end');
+  const dockObserver = observerWatching(observers, rail);
+  dockObserver._setIntersecting(rail, false); // rail explicitly off screen
+  assert.equal(pill.classList.contains('visible'), true, 'setup failure: expected the pill visible with one outstanding question and the rail off screen');
+
+  answerSingle(blocks[0], 'Yes');
+
+  assert.equal(pill.classList.contains('visible'), false, 'a count of zero must never be shown, even though the rail is still off screen');
+  assert.equal(pill.textContent, '0 questions left');
+});
+
+check('criterion 8: guarded for absence -- with no IntersectionObserver at all, the pill still renders (assuming the rail is permanently off screen, matching the send bar\'s own floating fallback) and its count still tracks live answers', () => {
+  const original = globalThis.IntersectionObserver;
+  delete globalThis.IntersectionObserver;
+  try {
+    const board = createBoard({ title: 'Pill - no observer', blocks: [Q1, Q2] });
+    const html = renderBoardPage(board);
+    let document;
+    assert.doesNotThrow(() => { document = loadBoard(html); }, 'the client script must not throw when IntersectionObserver is missing');
+    const pill = document.getElementById('questions-left-pill');
+    const blocks = [...document.querySelectorAll('.round-open .question-block')];
+    assert.equal(pill.classList.contains('visible'), true, 'with no way to observe the rail, the pill must default to shown, matching the send bar\'s own permanently-floating default');
+    answerSingle(blocks[0], 'Yes');
+    assert.equal(pill.textContent, '1 question left', 'the count must still update live from the answer handlers even with no IntersectionObserver at all');
+  } finally {
+    globalThis.IntersectionObserver = original;
+  }
+});
+
+// === criterion 10: no pill on a historical (sent) round, and none in a
+// read-only (file://) archive. ===============================================
+
+check('criterion 10: a board with every round already sent renders the pill at zero, never visible', () => {
+  const board = createBoard({ title: 'Pill - sent round', blocks: [Q1] });
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  const html = renderBoardPage(board);
+  assert.match(html, /class="questions-left-pill" id="questions-left-pill" disabled>0 questions left</,
+    'a fully-sent board must render the pill with no outstanding count and no .visible class');
+});
+
+check('a round that asks nothing renders the pill at zero, never visible -- matching the send guard, which also never arms on such a round', () => {
+  const board = createBoard({ title: 'Pill - no questions this round', blocks: [{ kind: 'markdown', text: 'Just an FYI, nothing to answer.' }] });
+  const html = renderBoardPage(board);
+  assert.match(html, /class="questions-left-pill" id="questions-left-pill">0 questions left</);
+});
+
+check('criterion 10: the pill never appears in a read-only (file://) archive -- structurally present (readonly hides it by CSS, same convention as .round-end), hard-disabled, and inert to a click', () => {
+  const board = createBoard({ title: 'Pill - archive', blocks: [Q1, Q2] });
+  const html = renderBoardPage(board);
+  assert.ok(html.includes('id="questions-left-pill"'), 'setup failure: the live page must render the pill for its still-open round');
+
+  const dir = mkdtempSync(path.join(tmpdir(), 'claude-board-pill-archive-'));
+  const file = path.join(dir, 'board.html');
+  writeFileSync(file, html, 'utf8');
+  const fileBytes = readFileSync(file, 'utf8');
+  const document = loadBoard(fileBytes, 'file:');
+  assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
+
+  const pill = document.querySelector('#questions-left-pill');
+  assert.ok(pill, 'the pill must still be IN the archive\'s DOM -- readonly hides it by CSS, never by omitting it server-side');
+  assert.ok(pill.closest('.send-bar'), 'the pill must be nested inside .send-bar, so it inherits body.readonly .send-bar { display: none } for free rather than needing a second rule (QUIRKS.md "Readonly is locked twice")');
+  assert.equal(pill.disabled, true, 'the readonly blanket-disable loop (qsa(\'textarea, input, button\')) must reach the pill too, exactly as it reaches every other button');
+
+  const activeBefore = document.activeElement;
+  assert.doesNotThrow(() => pill.dispatchEvent(new StandInEvent('click')));
+  assert.equal(document.activeElement, activeBefore, 'a click in a read-only archive must never move focus anywhere -- the pill\'s own readonly guard must hold, belt-and-suspenders alongside the disabled attribute (QUIRKS.md: a stand-in dispatchEvent does not model native click-suppression on a disabled element, so the guard is what actually earns this)');
 });
 
 if (failures) {

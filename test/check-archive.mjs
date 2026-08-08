@@ -199,7 +199,11 @@ const board = createBoard({
     { kind: 'code', text: 'const x = 1;\nconst y = 2;', lang: 'javascript' },
     {
       kind: 'compare',
-      left: { label: 'Before', block: { kind: 'markdown', text: 'the old copy, unchanged' } },
+      // ADR.md entry 28: a compare SIDE holding a rendered kind keeps that kind's
+      // affordance -- the rule is drawn on kind, never on position. An errored
+      // diagram, because its `.resolve-error` note is the one element of a mermaid
+      // section the generic page-scoped gesture can reach.
+      left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-arch-a.mmd' } } },
       right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Ship it</button></div>' } },
     },
     { kind: 'html', html: '<div class="mock"><button>Launch</button></div>' },
@@ -209,13 +213,14 @@ const board = createBoard({
       prompt: 'Pick one',
       widget: 'single',
       options: [{ label: 'Yes' }, { label: 'No' }],
-      // ADR.md entry 6: the wrapper itself lost the comment affordance, but a
-      // `context` entry renders through the same renderBlock dispatch as any
-      // other block, with its own id and its own comment area -- the still-live
-      // case this fixture needs to cover a page-scoped anchor nested inside a
-      // question.
-      context: [{ kind: 'markdown', text: 'Context for the question, nested one level in.' }],
+      // ADR.md entry 6 took the affordance off the wrapper; entry 28 decides what
+      // a `context` entry keeps, on its own kind. An html stage here is exactly as
+      // commentable as one at the top level -- the nested case this fixture needs.
+      context: [{ kind: 'html', html: '<div class="mock"><button>Confirm</button></div>' }],
     },
+    // A second errored diagram, so the page-scoped half has two independent
+    // targets (the markdown/code blocks used to supply four).
+    { kind: 'mermaid', source: { path: 'no-such-diagram-arch-b.mmd' } },
   ],
 });
 const mdBlockId = board.blocks[0].id;
@@ -226,6 +231,7 @@ const stageBlockId = board.blocks[3].id;
 const mermaidBlockId = board.blocks[4].id;
 const questionId = board.blocks[5].id;
 const questionContextId = board.blocks[5].context[0].id;
+const errorDiagramId = board.blocks[6].id;
 
 // Mint every `dom` anchor through the real gesture, in an ordinary (`http:`) live
 // session -- comment mode on, one click per content kind -- exactly as a reviewer
@@ -234,30 +240,23 @@ const mintHtml = renderBoardPage(board);
 const mintDoc = loadBoard(mintHtml, 'http:');
 enableCommentMode(mintDoc);
 
-const prose = mintDoc.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1);
-const listItem = mintDoc.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha item');
-const tableCell = mintDoc.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42');
-const codeLine = mintDoc.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;');
-const compareProse = mintDoc.querySelectorAll('.compare-side .md-content p').find(el => el.textContent.indexOf('old copy') !== -1);
-const questionContext = mintDoc.querySelectorAll('.question-context .md-content p').find(el => el.textContent.indexOf('Context for the question') !== -1);
-assert.ok(prose && listItem && tableCell && codeLine && compareProse && questionContext, 'setup failure: could not find every fixture element to mint an anchor on');
+const errorNote = blockId => mintDoc.querySelector(`[data-block-id="${blockId}"] .resolve-error`);
+const compareDiagramNote = errorNote(compareLeftId);
+const standaloneDiagramNote = errorNote(errorDiagramId);
+assert.ok(compareDiagramNote && standaloneDiagramNote, 'setup failure: could not find every fixture element to mint an anchor on');
 
 const mintedPairs = [
-  captureAnchor(mintDoc, prose, mdBlockId, 'prose comment'),
-  captureAnchor(mintDoc, listItem, mdBlockId, 'list-item comment'),
-  captureAnchor(mintDoc, tableCell, mdBlockId, 'table-cell comment'),
-  captureAnchor(mintDoc, codeLine, codeBlockId, 'code-line comment'),
-  captureAnchor(mintDoc, compareProse, compareLeftId, 'compare-side comment'),
-  captureAnchor(mintDoc, questionContext, questionContextId, 'question-context comment'),
+  captureAnchor(mintDoc, compareDiagramNote, compareLeftId, 'compare-side comment'),
+  captureAnchor(mintDoc, standaloneDiagramNote, errorDiagramId, 'errored-diagram comment'),
 ];
 
-const compareFrame = mintDoc.querySelectorAll('.html-stage')[0];
-compareFrame.loadSrcdoc();
-mintedPairs.push(captureAnchor(mintDoc, compareFrame.contentDocument.querySelector('button'), compareRightId, 'compare-stage comment'));
-
-const standaloneFrame = mintDoc.querySelectorAll('.html-stage')[1];
-standaloneFrame.loadSrcdoc();
-mintedPairs.push(captureAnchor(mintDoc, standaloneFrame.contentDocument.querySelector('button'), stageBlockId, 'standalone-stage comment'));
+const frameFor = blockId => mintDoc.querySelector(`[data-block-id="${blockId}"] .html-stage`);
+for (const [blockId, text] of [[compareRightId, 'compare-stage comment'], [stageBlockId, 'standalone-stage comment'], [questionContextId, 'question-context comment']]) {
+  const frame = frameFor(blockId);
+  assert.ok(frame, `setup failure: no html stage rendered for block ${blockId}`);
+  frame.loadSrcdoc();
+  mintedPairs.push(captureAnchor(mintDoc, frame.contentDocument.querySelector('button'), blockId, text));
+}
 
 for (const p of mintedPairs) {
   assert.equal(p.anchor.kind, 'dom');
@@ -266,8 +265,8 @@ for (const p of mintedPairs) {
 
 // Ticket 07 (DESIGN.md), audit finding V2, second guard: every capture
 // must be genuinely distinct from every other one that shares its block -- three
-// captures share mdBlockId's form (prose/list-item/table-cell) and two share the
-// html-stage blocks' forms (through their own iframes). Two captures on the same
+// captures used to share mdBlockId's form (prose/list-item/table-cell), and the
+// html-stage blocks mint through their own iframes. Two captures on the same
 // block landing on the exact same (kind, ref) pair is exactly the symptom the
 // audit measured (the "table cell" and "list item" pins turning out to be the
 // same <li>) -- captureAnchor's own reset-before-click fix (see its comment)
@@ -292,9 +291,16 @@ for (const p of mintedPairs) {
 const submittedComments = [
   ...mintedPairs,
   { blockId: mermaidBlockId, anchor: { kind: 'mermaid', ref: 'A' }, text: 'diagram comment' },
-  // Deliberately stale: no re-rendered markdown block has 99 children at any
-  // depth, so this can never accidentally resolve.
-  { blockId: mdBlockId, anchor: { kind: 'dom', ref: '99.99', hint: 'a sentence that used to live here' }, text: 'this used to point at something real' },
+  // Deliberately stale: no re-rendered block has 99 children at any depth, so this
+  // can never accidentally resolve.
+  { blockId: errorDiagramId, anchor: { kind: 'dom', ref: '99.99', hint: 'a sentence that used to live here' }, text: 'this used to point at something real' },
+  // Criterion 19: comments stored against a `markdown` and a `code` block, in the
+  // exact shapes a pre-ADR-28 board carries them -- a whole-block one and an
+  // element-level `dom` one. Neither block renders a comment surface any more, so
+  // the archive has to come out without them and without erroring on the way.
+  { blockId: mdBlockId, anchor: { kind: 'block' }, text: 'ARCHIVED-MARKDOWN-BLOCK-COMMENT' },
+  { blockId: mdBlockId, anchor: { kind: 'dom', ref: '2.1', hint: 'Findings' }, text: 'ARCHIVED-MARKDOWN-DOM-COMMENT' },
+  { blockId: codeBlockId, anchor: { kind: 'dom', ref: '2.1', hint: 'const x = 1;' }, text: 'ARCHIVED-CODE-DOM-COMMENT' },
 ];
 applySubmit(board, { action: 'send', answers: [], comments: submittedComments }, 1);
 const mermaidCommentN = submittedComments.findIndex(c => c.text === 'diagram comment') + 1;
@@ -388,17 +394,17 @@ function loadArchiveThemed(storage) {
 // 1. Every pin in the right place, including a lost one.
 // =================================================================================
 
-check('archive: the page-scoped pins (prose, list item, table cell, code line, compare side, a question\'s own context entry) all land resolved, in their own block\'s pin-layer', () => {
+check('archive: the page-scoped pins (a compare side\'s diagram, a standalone diagram) all land resolved, in their own block\'s pin-layer', () => {
   const { document, restore } = loadArchive();
   try {
     assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
-    const pageScoped = mintedPairs.filter(p => [mdBlockId, codeBlockId, compareLeftId, questionContextId].includes(p.blockId));
+    const pageScoped = mintedPairs.filter(p => [compareLeftId, errorDiagramId].includes(p.blockId));
     const byBlock = new Map();
     for (const p of pageScoped) byBlock.set(p.blockId, (byBlock.get(p.blockId) || 0) + 1);
     for (const [blockId, expectedCount] of byBlock) {
       const layer = pinLayerFor(document, blockId);
-      // The markdown block also carries the deliberately-lost anchor's own pin
-      // (see the dedicated lost-anchor check below) -- filtered out here by class,
+      // The standalone errored diagram also carries the deliberately-lost anchor's
+      // own pin (see the dedicated lost-anchor check below) -- filtered out by class,
       // not by count, so this check stays about "the minted ones resolve" and the
       // lost one's own check stays the one place that asserts it.
       const resolvedPins = layer.querySelectorAll('.anchor-pin').filter(p => !p.classList.contains('pin-lost'));
@@ -411,7 +417,7 @@ check('archive: the compare-side and standalone html-stage pins land resolved on
   const { document, restore } = loadArchive();
   try {
     const frames = document.querySelectorAll('.html-stage');
-    assert.equal(frames.length, 2, 'setup failure: expected two html stages (compare-right, standalone)');
+    assert.equal(frames.length, 3, 'setup failure: expected three html stages (compare-right, standalone, question-context)');
     frames.forEach(f => f.loadSrcdoc());
 
     const compareLayer = pinLayerFor(document, compareRightId);
@@ -429,9 +435,9 @@ check('archive: the compare-side and standalone html-stage pins land resolved on
 check('archive: a lost page-scoped anchor still reports what it lost -- a pin-lost pin and a "lost: <hint>" comment-list entry, not silence', () => {
   const { document, restore } = loadArchive();
   try {
-    const layer = pinLayerFor(document, mdBlockId);
+    const layer = pinLayerFor(document, errorDiagramId);
     const lostPins = layer.querySelectorAll('.anchor-pin.pin-lost');
-    assert.equal(lostPins.length, 1, `expected exactly one lost pin in the markdown block's pin-layer, got ${lostPins.length}`);
+    assert.equal(lostPins.length, 1, `expected exactly one lost pin in the errored diagram's pin-layer, got ${lostPins.length}`);
     assert.ok(String(lostPins[0].title || '').indexOf('lost: a sentence that used to live here') !== -1,
       `expected the lost pin's title to name what it lost, got ${JSON.stringify(lostPins[0].title)}`);
     assert.ok(fileContents.includes(`#${lostCommentN} · lost: a sentence that used to live here`), 'the comment list must name what the anchor lost, on the page itself');
@@ -564,7 +570,7 @@ check('archive: hovering ordinary content adds no highlight class -- the afforda
     const targets = [
       document.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1),
       document.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha item'),
-      document.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;'),
+      document.querySelector('.code-block pre'),
       document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1),
     ];
     for (const el of targets) {
@@ -611,23 +617,49 @@ check('archive: hovering inside the isolated html-stage document adds no outline
   } finally { restore(); }
 });
 
-check('archive: clicking prose, a list item, a table cell, a code line, a compare side, and a question\'s own context entry opens no comment form', () => {
+check('archive: clicking a compare side\'s diagram, a standalone diagram, prose, a table cell or a code reference opens no comment form anywhere', () => {
   const { document, restore } = loadArchive();
   try {
     const cases = [
-      [document.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1), mdBlockId],
-      [document.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha item'), mdBlockId],
-      [document.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42'), mdBlockId],
-      [document.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;'), codeBlockId],
-      [document.querySelectorAll('.compare-side .md-content p').find(el => el.textContent.indexOf('old copy') !== -1), compareLeftId],
-      [document.querySelectorAll('.question-context .md-content p').find(el => el.textContent.indexOf('Context for the question') !== -1), questionContextId],
+      document.querySelector(`[data-block-id="${compareLeftId}"] .resolve-error`),
+      document.querySelector(`[data-block-id="${errorDiagramId}"] .resolve-error`),
+      document.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1),
+      document.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42'),
+      document.querySelector('.code-block pre'),
     ];
-    for (const [el, blockId] of cases) {
+    for (const el of cases) {
       assert.ok(el, 'setup failure: a click target was not found');
       el.dispatchEvent(new StandInEvent('click'));
-      const form = document.getElementById('comment-form-' + blockId);
-      assert.equal(form.classList.contains('open'), false, `clicking must not open block ${blockId}'s comment form in a read-only archive`);
     }
+    // Checked over the page as a whole: the markdown and code blocks render no
+    // comment-form at all any more (ADR.md entry 28), so a blockId-keyed lookup
+    // would find null on exactly the targets this check exists to cover.
+    const anyOpen = document.querySelectorAll('.comment-form').some(f => f.classList.contains('open'));
+    assert.equal(anyOpen, false, 'clicking must not open any comment form in a read-only archive');
+  } finally { restore(); }
+});
+
+check('criterion 19: an archived board carrying stored markdown and code comments renders without them and without error', () => {
+  const { document, restore } = loadArchive();
+  try {
+    for (const [name, blockId] of [['markdown', mdBlockId], ['code', codeBlockId]]) {
+      const section = document.querySelector(`[data-block-id="${blockId}"]`);
+      assert.ok(section, `setup failure: the ${name} block did not render at all`);
+      assert.equal(section.querySelectorAll('.comment-item').length, 0, `a ${name} block must render no comment entries`);
+      assert.equal(section.querySelectorAll('.comment-btn').length, 0, `a ${name} block must render no comment button`);
+      assert.equal(section.querySelectorAll('.pin-layer').length, 0, `a ${name} block must render no pin-layer`);
+      assert.equal(document.getElementById('comment-form-' + blockId), null, `a ${name} block must render no comment form`);
+    }
+    // The stored text appears nowhere a reviewer reads it -- asserted over the
+    // rendered entries, not over the file's bytes, since the board's own JSON is
+    // inlined into #board-data either way.
+    const rendered = document.querySelectorAll('.comment-item').map(el => el.textContent);
+    for (const gone of ['ARCHIVED-MARKDOWN-BLOCK-COMMENT', 'ARCHIVED-MARKDOWN-DOM-COMMENT', 'ARCHIVED-CODE-DOM-COMMENT']) {
+      assert.equal(rendered.some(t => t.indexOf(gone) !== -1), false, `a stored comment on a markdown/code block must not render: ${gone}`);
+    }
+    // ...and the same archive's comments on the rendered kinds are all still there,
+    // so this cannot pass against a page that dropped every comment.
+    assert.ok(rendered.length >= mintedPairs.length, `the comments on html/mermaid blocks must still render, got ${rendered.length} entries`);
   } finally { restore(); }
 });
 
@@ -672,11 +704,11 @@ check('archive: clicking inside either html stage (compare-side or standalone) o
 check('archive: the block-level "comment" button opens no form either -- disabled AND inert, not one masquerading as the other', () => {
   const { document, restore } = loadArchive();
   try {
-    const btn = document.querySelector(`.comment-btn[data-block-id="${mdBlockId}"]`);
-    assert.ok(btn, 'setup failure: no block-level comment button rendered for the markdown block');
+    const btn = document.querySelector(`.comment-btn[data-block-id="${mermaidBlockId}"]`);
+    assert.ok(btn, 'setup failure: no block-level comment button rendered for the diagram block');
     assert.equal(btn.disabled, true);
     btn.dispatchEvent(new StandInEvent('click'));
-    const form = document.getElementById('comment-form-' + mdBlockId);
+    const form = document.getElementById('comment-form-' + mermaidBlockId);
     assert.equal(form.classList.contains('open'), false, 'the block-level comment button must not open a form in a read-only archive');
   } finally { restore(); }
 });

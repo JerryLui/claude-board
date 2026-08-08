@@ -659,7 +659,12 @@ export function questionBlocks(board) {
 // Every shape a stored `anchor` is allowed to take (PROTOCOL.md "Answers,
 // comments, anchors"). Anything else degrades to a whole-block comment rather
 // than being stored verbatim -- see sanitizeAnchor below (audit V3).
-const ANCHOR_KINDS = new Set(['block', 'md', 'dom', 'mermaid']);
+// ADR.md entry 28 deleted the `md` kind (a markdown heading or top-level list
+// item) along with the affordance that minted it: only `html` and `mermaid` are
+// commentable now, and neither ever produced one. A stored `md` anchor arriving
+// from an older client degrades to a whole-block comment, the same as any other
+// unrecognised kind.
+const ANCHOR_KINDS = new Set(['block', 'dom', 'mermaid']);
 
 /** Ceiling on every stored anchor string. `extractHint` caps a hint at 80 and
  * `composeHint` adds a short frame around it; a node id or a step chain is tens of
@@ -674,7 +679,7 @@ const MAX_ANCHOR_FIELD = 1024;
  * `{kind:'dom', ref:'1', hint:'...'}` was indistinguishable from a real one,
  * and a non-string `ref`/`hint` would have made every later `String(...)`
  * coercion downstream paper over garbage instead of the submit being rejected
- * at the door). An unrecognised `kind`, or a `dom`/`md`/`mermaid` anchor
+ * at the door). An unrecognised `kind`, or a `dom`/`mermaid` anchor
  * missing the one field every resolver requires (`ref`), degrades to a plain
  * `{ kind: 'block' }` -- always resolvable, same fallback `applySubmit`
  * already used for a wholly absent anchor. */
@@ -691,10 +696,6 @@ function sanitizeAnchor(anchor) {
   // one. A real node id, step chain or hint is tens of bytes.
   if (anchor.ref.length > MAX_ANCHOR_FIELD) return { kind: 'block' };
   const out = { kind, ref: anchor.ref };
-  if (kind === 'md') {
-    if (typeof anchor.label === 'string') out.label = anchor.label.slice(0, MAX_ANCHOR_FIELD);
-    return out;
-  }
   if (typeof anchor.hint === 'string') out.hint = anchor.hint.slice(0, MAX_ANCHOR_FIELD);
   // Dropped rather than truncated: a shortened step chain is still a WELL-FORMED
   // chain, so it would resolve confidently against the wrong element. Absent is
@@ -822,8 +823,8 @@ const NO_COMMENTS = new Map();
 /** The human-readable label a lost anchor reports: the stored hint when the anchor
  * carries one (a `dom` anchor's `hint`, e.g. "Send button in After stage" — see
  * DESIGN.md's ticket 04, "what it was about... is what survives when the
- * element does not"), else the ref (an `md`/`mermaid` anchor's ref is already a
- * human-legible slug/node-id), else `fallback`. Never undefined, so a malformed or
+ * element does not"), else the ref (a `mermaid` anchor's ref is already a
+ * human-legible node id), else `fallback`. Never undefined, so a malformed or
  * hand-edited anchor still names *something*. */
 function lostLabel(anchor, fallback) {
   return anchor?.hint || anchor?.ref || fallback;
@@ -865,14 +866,12 @@ function stageRootForBlock(blockCache, block) {
   return entry.stageRoot;
 }
 
-/** Resolve one stored comment against the board's current blocks: a `md` anchor is
- * resolved if its ref still appears in the block's anchor list; a `dom` anchor
+/** Resolve one stored comment against the board's current blocks: a `dom` anchor
  * anchored to an html stage is resolved if its ref addresses an element in that
  * block's snapshotted markup whose own text contains the hint (src/anchor.mjs's
  * resolveDomAnchor — both ref and hint have to agree, not just the hint appearing
- * somewhere in the block); a `dom` anchor anchored to any other block kind (ticket
- * 04 — prose, a list item, a table cell, a code line, a question widget, one side
- * of a comparison) is resolved the same way against that block RE-RENDERED from
+ * somewhere in the block); a `dom` anchor anchored to any other block kind is
+ * resolved the same way against that block RE-RENDERED from
  * its own stored content (src/render.mjs's `renderBlock`, exported for exactly
  * this — resolveDomAnchorInSection walks it the way resolveDomAnchor walks an html
  * stage's snapshot, rooted at the block's own section rather than a synthetic
@@ -887,10 +886,9 @@ function stageRootForBlock(blockCache, block) {
  * (no `domRef`/`hint` stored) resolves exactly as before, since the generic
  * attempt returns false immediately for an absent ref; a `block` anchor is always
  * resolved (the block itself, if present). An anchor that no longer exists reports which anchor it lost
- * rather than vanishing (see PROTOCOL.md "Anchors at headings and list items" and
- * "Click-to-comment reaches individual elements" in DESIGN.md — the same
- * archived-board guarantee extends from markdown anchors to element-level ones).
- * `lost` always falls back to naming *something* (lostLabel above) rather than
+ * rather than vanishing (see "Click-to-comment reaches individual elements" in
+ * DESIGN.md — that archived-board guarantee is what a lost element-level anchor
+ * honours). `lost` always falls back to naming *something* (lostLabel above) rather than
  * coming back undefined, so a malformed/hand-edited anchor still names what it
  * lost instead of dropping the field.
  *
@@ -921,14 +919,12 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     return out;
   }
   const anchorKind = comment.anchor?.kind;
-  if (anchorKind === 'md') {
-    const anchors = block.anchors || [];
-    const found = anchors.some(a => a.ref === comment.anchor.ref);
-    if (!found) {
-      out.resolved = false;
-      out.lost = lostLabel(comment.anchor, '(unknown)');
-    }
-  } else if (anchorKind === 'dom') {
+  // ADR.md entry 28: there is no `md` branch any more. A stored `md` anchor from an
+  // archived board falls through every branch below and stays `resolved`, exactly
+  // like the whole-block comment on a `question` entry 6 already left unsupported --
+  // the block it names renders no comment list at all now, so there is nothing for
+  // a verdict to decorate.
+  if (anchorKind === 'dom') {
     // Audit U5: `mintBlockKind` (applySubmit, above) is the block's own kind at
     // the moment this anchor was minted -- undefined for a comment stored
     // before this field existed, which resolves exactly as it always did

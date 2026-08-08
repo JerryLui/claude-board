@@ -1,6 +1,7 @@
 // Acceptance checks for Cmd+Enter board traversal (src/ui.mjs, search
 // "Cmd+Enter board traversal"): one chord that walks a board's question notes
-// and, on the last question, arms then sends. Same harness idiom as
+// and, on arriving at Send, does exactly what a click on Send would do right
+// now (SPEC_COUNTS.md criteria 20-21, ADR.md entry 29). Same harness idiom as
 // test/check-click.mjs and test/check-comment-mode.mjs -- drives the REAL
 // src/ui.mjs client script, in the real DOM stand-in, through the actual
 // keyboard gesture, and asserts on what a reviewer would actually see
@@ -12,14 +13,23 @@
 //   1. Cmd+Enter in a note or answer textarea advances focus to the NEXT
 //      question's note field and scrolls it into view (both entry points).
 //   2. plain Enter is left alone everywhere.
-//   3. Cmd+Enter on the last question arms Send (focus + relabel), no submit.
-//   4. a second Cmd+Enter while armed submits, byte-identical to a mouse
-//      click on Send given the same filled-in answers.
-//   5. Escape while armed disarms, restoring the label, no submit.
-//   6. Discuss has no keyboard path at all.
-//   7. Cmd+Enter is inert in a file:// archive, and inert when no round is
+//   3. arriving at Send with nothing outstanding submits on that press --
+//      no relabel, no second press.
+//   4. arriving at Send on a round with no question blocks at all also
+//      submits on that press, the same rule with nothing to be outstanding.
+//   5. arriving at Send with something outstanding arms exactly as a mouse
+//      click on Send does -- same scroll, same ring, same label, same
+//      send-status.
+//   6. a second Cmd+Enter while armed (something was outstanding) submits,
+//      byte-identical to what a second click on the armed button posts.
+//   7. Escape while armed disarms fully -- label, ring, warning treatment
+//      and send-status all restored, no submit.
+//   8. Discuss has no keyboard path at all.
+//   9. Cmd+Enter is inert in a file:// archive, and inert when no round is
 //      open (the send bar already disabled).
-//   8. a chord fired while a submit is in flight does not double-send.
+//   10. a chord fired while a submit is in flight does not double-send.
+//   11. the deleted "Press Enter again to send" arm and its label appear
+//      nowhere -- in the rendered page or in the client script itself.
 //
 // What this file deliberately does NOT do, and why:
 //   - It never asserts that a newline character was inserted by plain Enter.
@@ -89,10 +99,9 @@ function openBlocks(document) {
 
 /** Fill in a real, distinguishable answer on every question -- two chosen
  * single-select cards and typed free text -- through the real widgets, not
- * by writing into `board.answers` directly. Used by criterion 4 so the
- * keyboard-armed submit and a plain mouse-click submit are compared with
- * identically-filled boards, not two empty ones (which could accidentally
- * match even if collectAnswers were broken). */
+ * by writing into `board.answers` directly. Used by criterion 3 so a board
+ * with nothing outstanding is filled in through a real gesture, not merely
+ * asserted to be empty. */
 function fillAnswers(document) {
   const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.trim() === 'Yes');
   assert.ok(yes, 'setup failure: no "Yes" option rendered');
@@ -104,6 +113,24 @@ function fillAnswers(document) {
   assert.ok(textarea, 'setup failure: no free-text answer textarea rendered');
   textarea.value = 'a filled-in free-text answer';
   textarea.dispatchEvent(new StandInEvent('input'));
+}
+
+/** Answer a single-choice question by clicking the option carrying `label`,
+ * through the real widget -- same idiom test/check-send-guard.mjs uses.
+ * Used by criterion 6 to build a genuinely partial (something outstanding)
+ * board rather than a fully- or entirely-unfilled one. */
+function answerSingle(block, label) {
+  const opt = block.querySelectorAll('.choice-single').find(el => el.textContent.trim() === label);
+  assert.ok(opt, `setup failure: no "${label}" option rendered in this block`);
+  opt.dispatchEvent(new StandInEvent('click'));
+}
+
+/** Defer a question through its real Defer button -- complete, but not
+ * "answered" (outstandingBlocks' own distinction). */
+function deferBlock(block) {
+  const btn = block.querySelector('.btn-defer');
+  assert.ok(btn, 'setup failure: no Defer button rendered in this block');
+  btn.dispatchEvent(new StandInEvent('click'));
 }
 
 /** Stub globalThis.fetch for the duration of `fn()`, capturing the single
@@ -197,11 +224,14 @@ check('criterion 2: plain Enter in a textarea moves no focus, scrolls nothing, a
 });
 
 // === criterion 3 ================================================================
-// "Cmd+Enter on the last question focuses #send-btn and visibly relabels it
-// to indicate it is armed; the board is not submitted."
+// SPEC_COUNTS.md criterion 20: "Cmd+Enter on an open round with nothing
+// outstanding submits it on that press, with no relabel and no second
+// press." Every question is answered first, through the real widgets, so
+// outstandingBlocks() reports nothing left.
 
-check('criterion 3: Cmd+Enter on the last question focuses #send-btn and relabels it armed, without submitting', () => {
+check('criterion 3: Cmd+Enter arriving at Send with nothing outstanding submits on that press -- no relabel, no second press', () => {
   const document = loadBoard();
+  fillAnswers(document);
   const blocks = openBlocks(document);
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
   const sendBtn = document.getElementById('send-btn');
@@ -210,67 +240,128 @@ check('criterion 3: Cmd+Enter on the last question focuses #send-btn and relabel
 
   const calls = withFetchCapture(() => lastNote.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)));
 
-  assert.equal(document.activeElement, sendBtn, 'Cmd+Enter on the last question must move focus to #send-btn');
-  assert.equal(sendBtn.textContent, 'Press Enter again to send', 'Send must be visibly relabelled to show it is armed');
-  assert.equal(calls.length, 0, 'the first chord on the last question must NOT submit the board');
+  assert.equal(calls.length, 1, 'the single chord must submit the board immediately -- nothing was outstanding');
+  assert.equal(sendBtn.textContent, 'Send', 'a round with nothing outstanding must never relabel Send on arrival');
+  assert.equal(sendBtn.classList.contains('warn'), false, 'a round with nothing outstanding must never apply the warning treatment');
 });
 
 // === criterion 4 ================================================================
-// "A second Cmd+Enter while Send is armed submits the board, identically to
-// a mouse click on Send." The strongest form: compare the actual posted
-// body from the armed second chord against the body a plain click produces,
-// from two independently but identically filled-in boards.
+// SPEC_COUNTS.md criterion 20's other half: "including on a round that
+// carries no question at all." A round holding only a non-question block
+// (a pointer post) still has an open, live send bar, but zero
+// '.question-block' elements -- the blocks.length === 0 branch.
 
-check('criterion 4: a second Cmd+Enter while armed submits, posting the exact same body a mouse click on Send would', () => {
-  // Path A: fill in answers, then arm and fire via two keyboard chords.
+check('criterion 4: Cmd+Enter on a round with no question block at all submits immediately, the same rule with nothing to be outstanding', () => {
+  const noQBoard = createBoard({ title: 'No questions here', blocks: [{ kind: 'markdown', text: 'Just a pointer, nothing to answer.' }] });
+  const document = parseHTML(renderBoardPage(noQBoard));
+  new Function('document', 'window', 'location', ui)(document, document.defaultView, { protocol: 'http:' });
+  const sendBtn = document.getElementById('send-btn');
+  assert.equal(openBlocks(document).length, 0, 'setup failure: this fixture must render no question blocks');
+  assert.equal(sendBtn.disabled, false, 'setup failure: the round is open, so Send must not start disabled');
+
+  const calls = withFetchCapture(() => document.body.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)));
+
+  assert.equal(calls.length, 1, 'Cmd+Enter on a question-less open round must submit on that single press');
+  assert.equal(sendBtn.textContent, 'Send', 'a question-less round must never relabel Send on arrival');
+});
+
+// === criterion 5 ================================================================
+// SPEC_COUNTS.md criterion 21: "Cmd+Enter on an open round with something
+// outstanding arms exactly as a click on Send does: same scroll, same
+// ring, same label, same Escape." Two independently loaded, identically
+// unfilled boards -- every question outstanding -- one driven by the
+// keyboard chord, one by a plain click, compared field by field.
+
+check('criterion 5: arriving at Send with something outstanding arms exactly as a click on Send does -- same scroll, same ring, same label', () => {
   const docA = loadBoard();
-  fillAnswers(docA);
   const blocksA = openBlocks(docA);
   const lastNoteA = blocksA[blocksA.length - 1].querySelector('[data-note-for]');
   const sendBtnA = docA.getElementById('send-btn');
   lastNoteA.focus();
-  lastNoteA.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)); // arms
-  assert.equal(sendBtnA.textContent, 'Press Enter again to send', 'setup failure: first chord must arm Send');
+  const callsA = withFetchCapture(() => lastNoteA.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)));
+
+  const docB = loadBoard();
+  const blocksB = openBlocks(docB);
+  const sendBtnB = docB.getElementById('send-btn');
+  const callsB = withFetchCapture(() => sendBtnB.dispatchEvent(new StandInEvent('click')));
+
+  assert.equal(callsA.length, 0, 'arriving with something outstanding must not submit');
+  assert.equal(callsB.length, 0, 'setup failure: a click with something outstanding must not submit either');
+  assert.equal(sendBtnA.textContent, sendBtnB.textContent, 'the keyboard arm must show the identical label a click arm shows');
+  assert.equal(sendBtnA.textContent, '3 questions unanswered — send anyway?', 'setup failure: all three questions are untouched, so the count must be 3');
+  assert.equal(sendBtnA.classList.contains('warn'), sendBtnB.classList.contains('warn'), 'the keyboard arm must carry the identical warning ring as a click arm');
+  assert.equal(blocksA[0].classList.contains('flagged'), blocksB[0].classList.contains('flagged'), 'the keyboard arm must flag the same (first outstanding) question a click arm flags');
+  assert.equal(blocksA[0].scrollIntoViewCallCount, blocksB[0].scrollIntoViewCallCount, 'the keyboard arm must scroll the flagged question exactly as many times as a click arm does');
+  assert.equal(docA.getElementById('send-status').textContent, docB.getElementById('send-status').textContent, 'the keyboard arm must set the identical send-status text a click arm sets');
+});
+
+// === criterion 6 ================================================================
+// SPEC_COUNTS.md criterion 21's other half: "A second Cmd+Enter while armed
+// (because something was outstanding) submits, byte-identical to what a
+// second click on the armed button posts." Same partial-fill on two
+// independent boards -- Q1 answered, Q2 deferred, Q3 left outstanding, same
+// shape test/check-send-guard.mjs's own criterion-5 check uses -- one driven
+// end to end by the keyboard, one by clicks.
+
+check('criterion 6: a second Cmd+Enter while armed submits, posting the exact same body a second click on Send would', () => {
+  const docA = loadBoard();
+  const blocksA = openBlocks(docA);
+  answerSingle(blocksA[0], 'Yes');
+  deferBlock(blocksA[1]);
+  // blocksA[2] left entirely untouched -- the one outstanding question.
+  const lastNoteA = blocksA[blocksA.length - 1].querySelector('[data-note-for]');
+  const sendBtnA = docA.getElementById('send-btn');
+  lastNoteA.focus();
+  lastNoteA.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)); // arms (something outstanding)
+  assert.notEqual(sendBtnA.textContent, 'Send', 'setup failure: first chord must arm Send');
   const callsA = withFetchCapture(() => sendBtnA.dispatchEvent(new StandInEvent('keydown', CMD_ENTER))); // sends
   assert.equal(callsA.length, 1, 'the second chord while armed must submit exactly once');
 
-  // Path B: fill in the SAME answers on an independent, freshly-loaded
-  // board, then submit via the ordinary mouse gesture.
   const docB = loadBoard();
-  fillAnswers(docB);
-  const callsB = withFetchCapture(() => docB.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
-  assert.equal(callsB.length, 1, 'setup failure: a plain click on Send must submit exactly once');
+  const blocksB = openBlocks(docB);
+  answerSingle(blocksB[0], 'Yes');
+  deferBlock(blocksB[1]);
+  const sendBtnB = docB.getElementById('send-btn');
+  sendBtnB.dispatchEvent(new StandInEvent('click')); // click-arms
+  const callsB = withFetchCapture(() => sendBtnB.dispatchEvent(new StandInEvent('click'))); // sends
+  assert.equal(callsB.length, 1, 'setup failure: a second click on the armed button must submit exactly once');
 
   assert.equal(callsA[0].method, 'POST');
   assert.match(callsA[0].url, /\/api\/board\/.+\/submit$/, `expected the submit route, got ${JSON.stringify(callsA[0].url)}`);
   assert.deepEqual(callsA[0].body, callsB[0].body,
-    'the body posted by the armed second chord must be identical to the body a mouse click on Send posts, given the same filled-in board');
+    'the body posted by the armed second chord must be identical to the body a second click on Send posts, given the same filled-in board');
 });
 
-// === criterion 5 ================================================================
-// "Escape while Send is armed disarms it, restoring the button's label, with
+// === criterion 7 ================================================================
+// "Escape while Send is armed disarms it fully, restoring the button's
+// label, ring and warning treatment, and clearing send-status, with
 // nothing submitted."
 
-check('criterion 5: Escape while armed disarms Send, restoring its original label, without submitting', () => {
+check('criterion 7: Escape while armed disarms Send fully -- label, ring, warning treatment and send-status all restored, without submitting', () => {
   const document = loadBoard();
   const blocks = openBlocks(document);
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
   const sendBtn = document.getElementById('send-btn');
   lastNote.focus();
-  lastNote.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)); // arm
-  assert.equal(sendBtn.textContent, 'Press Enter again to send', 'setup failure: Send must be armed before Escape is tested');
+  lastNote.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)); // arm (something outstanding)
+  assert.notEqual(sendBtn.textContent, 'Send', 'setup failure: Send must be armed before Escape is tested');
+  const flagged = blocks.find(b => b.classList.contains('flagged'));
+  assert.ok(flagged, 'setup failure: some question must be flagged before Escape is tested');
 
   const calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' })));
 
   assert.equal(sendBtn.textContent, 'Send', 'Escape must restore Send\'s original label');
+  assert.equal(sendBtn.classList.contains('warn'), false, 'Escape must remove the warning treatment');
+  assert.equal(flagged.classList.contains('flagged'), false, 'Escape must remove the ring from the flagged question');
+  assert.equal(document.getElementById('send-status').textContent, '', 'Escape must clear the "jumped to" status the arm set');
   assert.equal(calls.length, 0, 'Escape must not submit the board');
 });
 
-// === criterion 6 ================================================================
+// === criterion 8 ================================================================
 // "No keyboard path reaches #discuss-btn. Tabbing to it and pressing
 // Cmd+Enter does not fire it."
 
-check('criterion 6: tabbing to #discuss-btn and pressing Cmd+Enter does not fire it -- Discuss has no keyboard path at all', () => {
+check('criterion 8: tabbing to #discuss-btn and pressing Cmd+Enter does not fire it -- Discuss has no keyboard path at all', () => {
   const document = loadBoard();
   const discussBtn = document.getElementById('discuss-btn');
   const sendBtn = document.getElementById('send-btn');
@@ -297,7 +388,7 @@ check('criterion 6: tabbing to #discuss-btn and pressing Cmd+Enter does not fire
   assert.equal(ev.defaultPrevented, true, 'the handler must preventDefault on Discuss -- otherwise the browser natively activates the focused button and fires the irreversible Discuss submit');
 });
 
-// === criterion 7 ================================================================
+// === criterion 9 ================================================================
 // "Cmd+Enter does nothing at all in a read-only (file://) archive and
 // nothing on a board with no open round (the send bar is already disabled
 // there)." Two separate cases.
@@ -316,7 +407,7 @@ check('criterion 6: tabbing to #discuss-btn and pressing Cmd+Enter does not fire
 // mutation handler in src/ui.mjs carries the same redundant guard, and the
 // element-level lock has documented exceptions (.expand-btn, the theme control)
 // that a future one could easily extend to the send bar.
-check('criterion 7a: Cmd+Enter does nothing at all in a read-only (file://) archive', () => {
+check('criterion 9a: Cmd+Enter does nothing at all in a read-only (file://) archive', () => {
   const document = loadBoard('file:');
   const before = document.activeElement;
   assert.equal(before, document.body, 'setup failure: nothing should be focused yet');
@@ -328,7 +419,7 @@ check('criterion 7a: Cmd+Enter does nothing at all in a read-only (file://) arch
   assert.equal(document.getElementById('send-btn').textContent, 'Send', 'Cmd+Enter must not arm Send in a read-only archive');
 });
 
-check('criterion 7b: Cmd+Enter does nothing on a board with no open round (send-btn is rendered disabled, the real production mechanism)', () => {
+check('criterion 9b: Cmd+Enter does nothing on a board with no open round (send-btn is rendered disabled, the real production mechanism)', () => {
   // A separate board, sent server-side through applySubmit exactly like the
   // daemon would once a round goes out, so renderBoardPage itself emits the
   // bare `disabled` attribute on #send-btn (src/render.mjs:1053-1056,
@@ -347,18 +438,18 @@ check('criterion 7b: Cmd+Enter does nothing on a board with no open round (send-
   assert.equal(sendBtn.textContent, 'Send', 'Cmd+Enter must not arm an already-disabled Send button');
 });
 
-// === criterion 8 ================================================================
+// === criterion 10 ===============================================================
 // "Cmd+Enter on the last question of a board that is mid-submit does not
 // double-send." Mid-submit: submitBoard has already run
 // setSendBarEnabled(false), but the fetch has not resolved yet.
 
-check('criterion 8: a Cmd+Enter chord fired while a submit is still in flight does not double-send', () => {
+check('criterion 10: a Cmd+Enter chord fired while a submit is still in flight does not double-send', () => {
   const document = loadBoard();
   const blocks = openBlocks(document);
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
   const sendBtn = document.getElementById('send-btn');
   lastNote.focus();
-  lastNote.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)); // arm
+  lastNote.dispatchEvent(new StandInEvent('keydown', CMD_ENTER)); // arm (nothing is filled in, so something is outstanding)
 
   const originalFetch = globalThis.fetch;
   let fetchCallCount = 0;
@@ -377,6 +468,17 @@ check('criterion 8: a Cmd+Enter chord fired while a submit is still in flight do
   }
 
   assert.equal(fetchCallCount, 1, 'a Cmd+Enter fired while the send bar is disabled (mid-submit) must not fire a second submit');
+});
+
+// === criterion 11 ================================================================
+// SPEC_COUNTS.md criterion 21: "No second armed appearance exists anywhere
+// in the page." An absence check on the deleted `armSend` label -- it must
+// appear nowhere, not in a fresh server-rendered page and not in the client
+// script that used to set it.
+
+check('criterion 11: the deleted "Press Enter again to send" label appears nowhere -- not in the rendered page, not in the client script', () => {
+  assert.ok(!pageHtml.includes('Press Enter again to send'), 'the deleted arm label must not appear in server-rendered markup');
+  assert.ok(!ui.includes('Press Enter again to send'), 'the deleted arm label must not appear anywhere in the client script source');
 });
 
 if (failures) {

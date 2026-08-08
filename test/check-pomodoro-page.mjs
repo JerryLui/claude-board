@@ -106,23 +106,26 @@ async function main() {
     // already follow, per that file's own header comment).
     // ---------------------------------------------------------------------------
     const now = Date.now();
-    const running = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false } };
+    // cycle: 2 (against the default settings' longEvery of 4) so the position half
+    // of the status text is actually exercised end to end, not just the countdown --
+    // criterion 11's "Work 3/4 · 12:34" shape rides on these two checks rather than
+    // earning new ones (SPEC_COUNTS.md's own testing section).
+    const running = { ...defaultDoc(), cycle: 2, cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false } };
     writePomodoroDoc(running, home);
 
-    await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone (no secret header) -- exactly what a browser tab holds', async () => {
+    await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone (no secret header) -- exactly what a browser tab holds, position and all (criterion 11)', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
         const status = tab.document.querySelector('span#pomodoro-status');
         assert.ok(status, 'setup failure: no #pomodoro-status rendered');
-        assert.match(status.textContent, /Work/, `expected a running Work countdown, got: "${status.textContent}"`);
-        assert.match(status.textContent, /\d\d:\d\d/, `expected a real countdown, got: "${status.textContent}"`);
+        assert.match(status.textContent, /^Work 3\/4 · \d\d:\d\d$/, `expected "Work 3/4 · mm:ss"-shaped text over real HTTP, got: "${status.textContent}"`);
       } finally {
         tab.restoreFetch();
       }
     });
 
-    await check('pomodoro widget: two independently-loaded "tabs" against the SAME live daemon render the identical remaining time (criterion 6)', async () => {
+    await check('pomodoro widget: two independently-loaded "tabs" against the SAME live daemon render the identical remaining time, position included (criterion 12)', async () => {
       const tabA = loadIndexAgainstDaemon(server.port);
       const tabB = loadIndexAgainstDaemon(server.port);
       try {
@@ -130,6 +133,9 @@ async function main() {
         const textA = tabA.document.querySelector('span#pomodoro-status').textContent;
         const textB = tabB.document.querySelector('span#pomodoro-status').textContent;
         assert.equal(textA, textB, 'two tabs independently fetching the same running timer from the same daemon must show the identical remaining time -- each computes its own clock offset from the daemon\'s own "now", so real per-tab timing jitter must not be visible at 1-second resolution');
+        // Not just equal to each other -- actually the new position-carrying shape,
+        // so this check cannot pass by both tabs agreeing on stale pre-position text.
+        assert.match(textA, /^Work 3\/4 · \d\d:\d\d$/, `expected "Work 3/4 · mm:ss"-shaped text, got: "${textA}"`);
       } finally {
         tabA.restoreFetch();
         tabB.restoreFetch();
@@ -242,16 +248,18 @@ async function main() {
     // already proves the DOCUMENT survives a restart; this proves the PAGE reads
     // it identically across one, through the real widget end to end.
     // ---------------------------------------------------------------------------
-    await check('pomodoro widget: the rendered countdown survives a daemon restart -- same deadline, same offset math, same text on either side of it', async () => {
+    await check('pomodoro widget: the rendered countdown survives a daemon restart -- same deadline, same offset math, same text (position included) on either side of it (criterion 11)', async () => {
       const now2 = Date.now();
-      const stable = { ...defaultDoc(), cycleDate: localDateStr(now2), timer: { phase: 'break', deadline: now2 + 8 * 60_000, paused: false } };
+      // cycle: 1 -> position 2/4, so the restart proves the POSITION survives
+      // reading `doc.cycle` back off disk, not only the countdown.
+      const stable = { ...defaultDoc(), cycle: 1, cycleDate: localDateStr(now2), timer: { phase: 'break', deadline: now2 + 8 * 60_000, paused: false } };
       writePomodoroDoc(stable, home);
 
       const beforeTab = loadIndexAgainstDaemon(server.port);
       await flush();
       const before = beforeTab.document.querySelector('span#pomodoro-status').textContent;
       beforeTab.restoreFetch();
-      assert.match(before, /Break/, `setup failure: expected a running Break countdown before the restart, got "${before}"`);
+      assert.match(before, /^Break 2\/4 · \d\d:\d\d$/, `setup failure: expected "Break 2/4 · mm:ss"-shaped text before the restart, got "${before}"`);
 
       const port = server.port;
       await new Promise(resolve => server.server.close(resolve));
@@ -262,7 +270,7 @@ async function main() {
       const after = afterTab.document.querySelector('span#pomodoro-status').textContent;
       afterTab.restoreFetch();
 
-      assert.equal(before, after, 'the same absolute deadline must render the identical text across a daemon restart -- the countdown must not reset, jump, or go blank');
+      assert.equal(before, after, 'the same absolute deadline and the same cycle must render the identical text across a daemon restart -- the countdown and the position must not reset, jump, or go blank');
     });
   } finally {
     await new Promise(resolve => server.server.close(resolve));

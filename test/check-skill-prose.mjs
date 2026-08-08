@@ -87,6 +87,38 @@ check('the section-slug rule is stated with a worked example', () => {
   assert.match(prose, /open-questions/);
 });
 
+// --- criterion 22: one commenting rule, matching CONTEXT.md's own words --------
+// ADR.md entry 28 ("Only the rendered kinds can be commented on") supersedes the
+// comment half of entry 26 and narrows entry 6: only `html` and `mermaid` carry the
+// comment control and the click-to-anchor gesture, wherever they appear, and
+// `markdown`/`code` carry neither, anywhere. CONTEXT.md's **Commentable** entry is
+// the canonical wording the spec (SPEC_COUNTS.md criterion 22) measures both this
+// manual and PROTOCOL.md against. CONTEXT.md itself is gitignored and unreachable
+// from this repo, so the rule is pinned here by hand rather than read live —
+// exactly the shape every other check in this file already takes.
+// Prose wraps at the line, so the rule is matched on whitespace-normalized text
+// rather than a regex threaded with \s* at every wrap point.
+const norm = s => s.replace(/\s+/g, ' ');
+const COMMENTABLE_RULE = norm(
+  "Only the rendered kinds are — `mermaid` and `html` — and they are wherever they " +
+  "appear, including inside a question's `context` and inside a `compare` side. " +
+  "`markdown` and `code` are not, anywhere. The rule is drawn on kind, never on position",
+);
+check('the manual states the narrowed commenting rule, in CONTEXT.md\'s own words', () => {
+  assert.ok(norm(prose).includes(COMMENTABLE_RULE), 'manual is missing the CONTEXT.md-worded rule');
+});
+check('PROTOCOL.md states the narrowed commenting rule, in CONTEXT.md\'s own words', () => {
+  assert.ok(norm(protocol).includes(COMMENTABLE_RULE), 'PROTOCOL.md is missing the CONTEXT.md-worded rule');
+});
+check('the manual does not promise the wider "anything rendered" commenting rule', () => {
+  assert.doesNotMatch(prose, /comments? on any element/i);
+  assert.doesNotMatch(prose, /regardless of kind/i);
+});
+check('PROTOCOL.md does not promise the wider "anything rendered" commenting rule', () => {
+  assert.doesNotMatch(protocol, /comments? on any element/i);
+  assert.doesNotMatch(protocol, /regardless of kind/i);
+});
+
 // --- the other direction --------------------------------------------------------
 // A check that only ever passes is worth nothing (test/check-prose-check.mjs's own
 // rule, applied here). The absence checks above are the ones at risk of being vacuous —
@@ -109,6 +141,30 @@ check('the vocabulary checks fail on prose that lost a packet status', () => {
 });
 check('the trap checks fail on prose that lost the status-not-choice rule', () => {
   assert.doesNotMatch(drifted(/never on `choice`/g), /never on `choice`/i);
+});
+check('the criterion-22 rule check fails on prose that lost the narrowed rule', () => {
+  const text = norm(prose).replace(COMMENTABLE_RULE, '');
+  assert.ok(!text.includes(COMMENTABLE_RULE), 'removing the rule did not fail the rule check');
+});
+check('the criterion-22 absence check fails if the manual regains the old claim', () => {
+  // The exact sentence SKILL.md carried before this pass (SPEC_COUNTS.md criterion 22):
+  // "The reviewer answers in any order, comments on any element by clicking it, and
+  // submits once." Reintroducing it must trip the absence check.
+  const marker = 'comments on a rendered stage or diagram by clicking it';
+  assert.ok(prose.includes(marker), 'the sentence being reverted no longer exists in the manual');
+  const reverted = prose.replace(marker, 'comments on any element by clicking it');
+  assert.match(reverted, /comments? on any element/i);
+});
+check('the criterion-22 absence check fails if PROTOCOL.md regains the old claim', () => {
+  // PROTOCOL.md's choose-between-rendered-variants section used to close on:
+  // "...and every option's whole-block comment button still works regardless of
+  // kind (it renders in the parent document, not the iframe)." Reintroducing that
+  // claim anywhere must trip the absence check.
+  const marker = /so an `html` or `mermaid`\s*\noption still carries one regardless of the iframe\./;
+  assert.match(protocol, marker, 'the sentence being reverted no longer exists in PROTOCOL.md');
+  const reverted = protocol.replace(marker,
+    "so every option's whole-block comment button still works regardless of kind (it\nrenders in the parent document, not the iframe).");
+  assert.match(reverted, /regardless of kind/i);
 });
 
 if (failed) {

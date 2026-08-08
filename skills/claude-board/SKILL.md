@@ -10,9 +10,9 @@ description: Manual for the local claude-board daemon's `ask` tool - call shape,
 
 A board is a browser page carrying a round of questions with their real context beside
 them: rendered markdown, a diagram, a code excerpt, a comparison. The reviewer answers in
-any order, comments on any element by clicking it, and submits once. You supply references
-and question text; the board owns all markup and styling, and everything you reference
-stays read-only.
+any order, comments on a rendered stage or diagram by clicking it, and submits once. You
+supply references and question text; the board owns all markup and styling, and everything
+you reference stays read-only.
 
 ## The call
 
@@ -40,6 +40,11 @@ answer in this round waits for the next one.
 
 The reference lives under `source`; path fields at the top level resolve to nothing. The
 board snapshots the file at post time.
+
+**Only `mermaid` and `html` are commentable.** Only the rendered kinds are — `mermaid` and
+`html` — and they are wherever they appear, including inside a question's `context` and
+inside a `compare` side. `markdown` and `code` are not, anywhere. The rule is drawn on
+kind, never on position.
 
 **`section` is the heading's slug, not its text**: lowercase, spaces to hyphens, so
 `## Open questions` is `section: 'open-questions'`. Get it wrong and the block resolves to
@@ -105,6 +110,12 @@ A question carries its `prompt` by value, a `widget`, and its own `context` arra
 
 Two to four options reads best, and every answer carries a free-text note beside its
 choice. A widget outside that list, or empty `options` on any widget but `text`, is a 400.
+
+For a question about something rendered — `choose-between-rendered-variants`, or any
+question whose `context` holds a mock or a diagram — skip the code excerpt: a rendered
+stage is the thing being judged, and it lays out full width for exactly that reason.
+`context` renders as prose under the prompt, not a card beside it, so reach for `markdown`
+there and save `code` for a question that is genuinely about the code.
 
 ## What comes back
 

@@ -15,9 +15,10 @@
 //      relabels the button (correctly singular at exactly one), without
 //      posting anything.
 //   5. a second click on the armed button submits the partial round, byte-
-//      identical to what the existing (unchanged) Cmd+Enter arm/send route
-//      posts for the same filled-in state; Escape disarms without submitting,
-//      restoring the label, the button's color, and the ring.
+//      identical to what the Cmd+Enter arm/send route posts for the same
+//      filled-in state (both call the identical armSendGuard, ADR.md entry
+//      29); Escape disarms without submitting, restoring the label, the
+//      button's color, and the ring.
 //   one shared armed state: arming by click then confirming by Cmd+Enter (and
 //      the reverse) sends on the second input, not a re-arm -- one sendArmed
 //      flag, not two independently tracked ones.
@@ -27,10 +28,10 @@
 //
 // What this file deliberately does NOT do: re-litigate the Cmd+Enter
 // traversal itself (advance-to-next-question, plain Enter, Discuss's dead
-// keyboard path, the mid-submit double-send guard) -- all of that is
-// test/check-enter.mjs's contract, pinned unchanged by this change, and
-// re-asserting it here would just be a second, driftable copy of the same
-// checks.
+// keyboard path, the mid-submit double-send guard, or arriving at Send with
+// nothing outstanding) -- all of that is test/check-enter.mjs's contract,
+// and re-asserting it here would just be a second, driftable copy of the
+// same checks.
 
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
@@ -174,8 +175,8 @@ check('criterion 4: the flagged question is the FIRST one with no status, not me
 // today, and Escape disarms it, so a reviewer who genuinely wants a partial
 // send never leaves the board."
 
-check('criterion 5: a second click on the armed button submits, posting exactly what the existing (unchanged) Cmd+Enter arm/send route posts for the same partial state', () => {
-  // Path A: the new click guard. Answer Q1, defer Q2, leave Q3 outstanding,
+check('criterion 5: a second click on the armed button submits, posting exactly what the Cmd+Enter arm/send route posts for the same partial state', () => {
+  // Path A: the click guard. Answer Q1, defer Q2, leave Q3 outstanding,
   // click Send twice -- arm, then confirm.
   const docA = loadBoard();
   const blocksA = openBlocks(docA);
@@ -188,10 +189,12 @@ check('criterion 5: a second click on the armed button submits, posting exactly 
   assert.equal(callsA.length, 1, 'the second click while armed must submit exactly once');
 
   // Path B: the SAME partial answers on an independent board, submitted via
-  // the pre-existing Cmd+Enter arm/send pair -- unchanged by this feature,
-  // and the ground truth for "exactly as today" (test/check-enter.mjs pins
-  // this route's own contract). Proves the guard reuses submitBoard/
-  // collectAnswers rather than posting its own, potentially divergent, body.
+  // the Cmd+Enter arm/send pair -- arriving at Send with something
+  // outstanding now arms through the identical armSendGuard function the
+  // click path calls (src/ui.mjs, ADR.md entry 29), the ground truth for
+  // "exactly the same" (test/check-enter.mjs pins this route's own
+  // contract). Proves the guard reuses submitBoard/collectAnswers rather
+  // than posting its own, potentially divergent, body.
   const docB = loadBoard();
   const blocksB = openBlocks(docB);
   answerSingle(blocksB[0], 'Yes');
@@ -199,14 +202,14 @@ check('criterion 5: a second click on the armed button submits, posting exactly 
   const lastNoteB = blocksB[blocksB.length - 1].querySelector('[data-note-for]');
   const sendBtnB = docB.getElementById('send-btn');
   lastNoteB.focus();
-  lastNoteB.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true })); // arms (unconditionally, the old contract)
+  lastNoteB.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true })); // arms (Q3 still outstanding)
   const callsB = withFetchCapture(() => sendBtnB.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true }))); // sends
   assert.equal(callsB.length, 1, 'setup failure: the Cmd+Enter route must still submit exactly once');
 
   assert.equal(callsA[0].method, 'POST');
   assert.match(callsA[0].url, /\/api\/board\/.+\/submit$/, `expected the submit route, got ${JSON.stringify(callsA[0].url)}`);
   assert.deepEqual(callsA[0].body, callsB[0].body,
-    'the click guard\'s second press must post the identical body the pre-existing Cmd+Enter arm/send route posts for the same partial state');
+    'the click guard\'s second press must post the identical body the Cmd+Enter arm/send route posts for the same partial state');
   assert.deepEqual(callsA[0].body.answers.map(a => a.status), ['answered', 'deferred', 'unanswered'],
     'the partial round must go out exactly as filled in -- Q3 still unanswered, not silently completed by sending');
 });
@@ -263,12 +266,68 @@ check('one shared armed state: arming by Cmd+Enter, then a plain click on Send, 
   const lastNote = blocks[blocks.length - 1].querySelector('[data-note-for]');
   const sendBtn = document.getElementById('send-btn');
   lastNote.focus();
-  lastNote.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true })); // keyboard-arms
-  assert.equal(sendBtn.textContent, 'Press Enter again to send', 'setup failure: Cmd+Enter must arm via the plain keyboard label');
+  lastNote.dispatchEvent(new StandInEvent('keydown', { key: 'Enter', metaKey: true })); // keyboard-arms (all three questions still outstanding)
+  assert.equal(sendBtn.textContent, '3 questions unanswered — send anyway?', 'setup failure: Cmd+Enter must arm via the same guard label a click would show');
 
   const calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
 
   assert.equal(calls.length, 1, 'a click on an already Cmd+Enter-armed Send must submit -- the SAME sendArmed flag, not a second arm');
+});
+
+// === the questions-left pill's own criterion 6 (DESIGN.md round-end decisions /
+// ADR.md entry 27 -- NOT the round-end spec's criterion 6 covered just below,
+// which is about a read-only archive) ============================================
+// "The count is live... and it reaches zero exactly when the send guard would no
+// longer arm." This file owns the send guard's own outstanding-question rule, so
+// this is where the agreement case belongs (this ticket's own testing note): one
+// check driving BOTH the pill (src/ui.mjs's questions-left-pill, via
+// outstandingBlocks()) and the guard (a real click on Send) off the identical
+// board state at each step, asserting they agree -- not two independent
+// assertions that a version reading two different notions of "outstanding" could
+// each still individually satisfy.
+
+check('the questions-left pill and the send guard read the identical outstanding set at every step, and the pill reaches zero at the EXACT point a click on Send stops arming and submits instead', () => {
+  const document = loadBoard();
+  const blocks = openBlocks(document);
+  const pill = document.getElementById('questions-left-pill');
+  const sendBtn = document.getElementById('send-btn');
+  assert.ok(pill, 'setup failure: no questions-left pill rendered');
+
+  // All three outstanding: the guard arms on Q1 (first), and the pill already
+  // agrees on the count before a single click is made.
+  assert.equal(pill.textContent, '3 questions left');
+  let calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 0, 'setup check: three outstanding must arm, not send');
+  assert.equal(blocks[0].classList.contains('flagged'), true, 'setup check: the guard must flag Q1 first');
+  document.body.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' })); // disarm, back to a clean slate
+
+  // Answer Q1 -- two left. The guard now flags Q2 (the new first outstanding
+  // question), and the pill's count agrees.
+  answerSingle(blocks[0], 'Yes');
+  assert.equal(pill.textContent, '2 questions left');
+  calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 0);
+  assert.equal(blocks[1].classList.contains('flagged'), true, 'the guard must now flag Q2');
+  document.body.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
+
+  // Defer Q2 -- one left (Q3). Criterion 3's "deferred counts as complete" and
+  // the pill's own matching rule (round-end criterion 6 / ADR.md entry 27) must
+  // agree: neither the guard nor the pill count it.
+  deferBlock(blocks[1]);
+  assert.equal(pill.textContent, '1 question left', 'a deferred question must not count toward the pill\'s own outstanding total, exactly as it does not for the guard');
+  calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 0);
+  assert.equal(blocks[2].classList.contains('flagged'), true, 'the guard must skip the deferred Q2 and flag Q3');
+  document.body.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
+
+  // Answer Q3 -- nothing left. The pill must read zero and hide itself, and
+  // THIS is the exact moment the guard stops arming: a click on Send now
+  // submits on the first press rather than arming a second time.
+  answerSingle(blocks[2], 'Alpha');
+  assert.equal(pill.textContent, '0 questions left', 'the pill must reach zero at the exact point nothing remains outstanding');
+  assert.equal(pill.classList.contains('visible'), false, 'a count of zero must never be shown');
+  calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 1, 'the guard must no longer arm once the pill reads zero -- a click now submits on the first press, exactly the moment criterion 6 names');
 });
 
 // === criterion 6 (this chunk's half) ============================================

@@ -206,11 +206,14 @@ widget whose options are not `{ preview }` strings: each option's `block` is a r
 block of any kind, normalized the same way a `compare` side's own `block` is — same
 `normalizeBlock`/`resolveBlockId` path, the same shared id ledger a post's other blocks
 compete against, so it mints a real, unique block id rather than an inert string. It renders
-through the same block dispatch every other content block does, so a comment can anchor to
-an option's block, at least at the whole-block level, exactly like a `compare` side's or a
-question's own `context` block's. The reviewer picks by clicking the option's own rendered
-block rather than a label on a text prompt, but the answer shape does not change: `choice` is
-still the picked option's `label`, a plain string, identical to `single`.
+through the same block dispatch every other content block does, so an `html` or `mermaid`
+option's block carries the same whole-block comment control a top-level block of that kind
+does, exactly like a `compare` side's or a question's own `context` block's — the rule is
+drawn on kind, never on position (`ADR.md` entry 28). A `markdown` or `code` option's block
+carries no comment control at all, the same as everywhere else those two kinds appear. The
+reviewer picks by clicking the option's own rendered block rather than a label on a text
+prompt, but the answer shape does not change: `choice` is still the picked option's `label`,
+a plain string, identical to `single`.
 
 An option's block is untrusted, agent-authored content, same as any block on the page — but
 here a click deciding WHICH option gets picked is a decision only the reviewer may make, and
@@ -221,10 +224,12 @@ thing that can ever record a pick. The html-stage postMessage protocol (`src/ren
 `src/ui.mjs`) carries no message that could select an option on the stage's own say-so — that
 was tried and reverted before this shipped; see `src/render.mjs`'s "NO 'select' MESSAGE,
 DELIBERATELY" design comment. One consequence: an `html` option's own element-level
-comment-anchor gesture is unreachable too, the same way its click is — the other content
-kinds (markdown/code/mermaid/compare) render inline with no iframe at all, so theirs is
-unaffected, and every option's whole-block comment button still works regardless of kind (it
-renders in the parent document, not the iframe).
+comment-anchor gesture is unreachable too, the same way its click is — a `mermaid` option's
+isn't, since a diagram renders inline with no iframe at all. Either way the whole-block
+comment control renders in the parent document, not the iframe, so an `html` or `mermaid`
+option still carries one regardless of the iframe. `markdown` and `code` options carry
+neither the button nor the gesture, on the same footing as every other `markdown`/`code`
+block.
 
 No caller in this repo posts this widget yet — `/example` is its real caller, and ships
 outside this repo (see "The skills stay personal" in SPEC_MIGRATION.md).
@@ -322,6 +327,12 @@ value is, just as a block-level `error` rather than a 400.
 
 ### Answers, comments, anchors
 
+Only the rendered kinds are — `mermaid` and `html` — and they are wherever they appear,
+including inside a question's `context` and inside a `compare` side. `markdown` and `code`
+are not, anywhere. The rule is drawn on kind, never on position. `ADR.md` entry 28
+supersedes the comment half of entry 26 and narrows entry 6; `CONTEXT.md`'s **Commentable**
+entry is the canonical wording.
+
 ```js
 Answer  = { id, status, choice, note }
           // status: 'answered' | 'unanswered' | 'deferred'
@@ -331,10 +342,10 @@ Answer  = { id, status, choice, note }
 Comment = { n, blockId, anchor, text, createdAt, round }
 
 Anchor  = { kind: 'block' }                             // whole block
-        | { kind: 'md',      ref, label }               // heading slug + ordinal
         | { kind: 'dom',     ref, hint }                // "N.N.N" child-index path + a composed hint,
-                                                         // see below -- applies page-wide, not just to
-                                                         // an html stage (DESIGN.md ticket 03)
+                                                         // see below -- an html stage's iframe body,
+                                                         // or a mermaid block's own chrome
+                                                         // (DESIGN.md ticket 03)
         | { kind: 'mermaid', ref, domRef, hint }        // node id, plus the same "N.N.N" path + hint
                                                          // every other element-level anchor carries;
                                                          // ref is the fallback the generic domRef/hint
@@ -343,27 +354,17 @@ Anchor  = { kind: 'block' }                             // whole block
                                                          // anchor minted before that ticket
 ```
 
-Markdown anchor ids are the heading slug, plus `-liN` for the Nth top-level list item under
-that heading: `acceptance-criteria`, `acceptance-criteria-li4`. Stable while the section's
-shape is unchanged. An anchor of any kind that no longer resolves at render time is
-reported, not dropped: the comment survives with `resolved: false` and a `lost` field
-naming what it lost (`src/board.mjs`'s `lostLabel`) — the stored `hint` for a `dom` anchor
-or a `mermaid` anchor minted since ticket 05 (DESIGN.md), the bare `ref` for
-everything else, including a `mermaid` anchor minted before that ticket (no `hint` to fall
-back to).
+The markdown-heading, top-level-list-item and code-line anchor kinds this section once
+documented (a `{ kind: 'md', ref, label }` shape, keyed off a heading's slug) are gone —
+`ADR.md` entry 28 deleted them along with the affordance that minted them, and
+`src/board.mjs`'s `ANCHOR_KINDS` no longer admits `md`. A `md` anchor stored by an older
+client degrades to a whole-block comment, the same fallback an unrecognised kind always got.
 
-Additive (audit 2026-07-28), all three keeping ids unique and resolvable:
-
-- **Top-level list items that precede every heading** anchor under the synthetic section
-  prefix `_body`: `_body-li1`, `_body-li2`. Criterion 5 states the rule unconditionally,
-  and a headingless source (a bare criteria list) previously yielded zero anchors. The
-  underscore is what makes the prefix safe: `slugify` strips `_`, so no heading can ever
-  produce this string.
-- **Slug and label come from the RAW heading text**, before HTML escaping. `## Risk &
-  Reward` is `ref: 'risk-reward'`, `label: 'Risk & Reward'` — the same slug
-  `section: 'risk-reward'` resolves, and a label every consumer escapes exactly once.
-- **A quoted (`>`) heading or bullet mints no anchor and carries no id**, and consumes
-  neither a slug nor a `-liN` ordinal.
+An anchor of any kind that no longer resolves at render time is reported, not dropped: the
+comment survives with `resolved: false` and a `lost` field naming what it lost
+(`src/board.mjs`'s `lostLabel`) — the stored `hint` for a `dom` anchor or a `mermaid` anchor
+minted since ticket 05 (DESIGN.md), the bare `ref` for everything else, including a
+`mermaid` anchor minted before that ticket (no `hint` to fall back to).
 
 A `dom` ref's index chain is 1-based over `Element.children` **as the browser parses the
 markup** — implied `tbody`, auto-closed `p`/`li`/`tr`/`td`/`option`, and `script`/`style`
@@ -373,11 +374,15 @@ element reports lost.
 
 A `dom` anchor's root depends on which block it names (DESIGN.md ticket 03/04):
 for an `html` block, root is that stage's sandboxed iframe body, resolved by
-`resolveDomAnchor`; for the other content kinds (markdown, code, and a `mermaid` block's
-own chrome), root is the anchored block's own `<section data-block-id>`, re-rendered from
-its stored content (`src/render.mjs`'s `renderBlock`) and resolved by
-`resolveDomAnchorInSection`. This is what makes a `dom` anchor page-wide — any element the
-board renders as content can carry one, not only content inside an html stage.
+`resolveDomAnchor`; for a `mermaid` block's own chrome (anything but a diagram node
+itself, which mints a `mermaid`-kind anchor instead), root is the anchored block's own
+`<section data-block-id>`, re-rendered from its stored content (`src/render.mjs`'s
+`renderBlock`) and resolved by `resolveDomAnchorInSection`. `markdown` and `code` mint no
+`dom` anchor at all, anywhere they appear — `src/ui.mjs`'s `ANCHORABLE_BLOCK_KINDS` names
+only `html` and `mermaid`, so a click on a paragraph or a code line never reaches the
+gesture in the first place. This is what makes a `dom` anchor reach further than the stage
+that first carried it — an `html` stage or a `mermaid` diagram nested in a question's
+`context` or a `compare` side is exactly as anchorable as one at the top level.
 
 **A `question` or `compare` section is never a `dom` anchor root.** Those two kinds render
 no content of their own — a card around a widget, a grid around two nested blocks — and
@@ -385,7 +390,9 @@ carry no comment area, no pin-layer and no click-to-anchor gesture at all; `src/
 refuses the root by `data-block-kind` before minting. What is nested inside them is
 unaffected: a question's `context` entry and a compare side's block go through the same
 `renderBlock` dispatch with their own `data-block-id`, and each is a root in its own right
-under the rule above. See `ADR.md` entry 6, "Commenting is confined to content blocks".
+under the rule above, when its own kind is `html` or `mermaid`. `ADR.md` entry 6 drew the
+wrapper-versus-content line this rests on; entry 28 narrows it further, by kind rather than
+position — see `CONTEXT.md`'s **Commentable** entry.
 
 `hint` is not a bare text snippet either. `composeHint` (`src/anchor.mjs`, mirrored
 client-side in `src/ui.mjs`) starts from the clicked element's own text, falling back to a
@@ -782,21 +789,30 @@ which `body.readonly` hides wholesale — so the standalone `file:` archive offe
 ### Marking an already-open tab
 
 "Open once, then badge and notify" (DESIGN.md) splits across two owners. Page side, on a
-`round` push: a **countless** mark drawn onto a data-URI favicon (canvas, no asset file — the
+`round` push: a **counted** mark drawn onto a data-URI favicon (canvas, no asset file — the
 page must stay a single self-contained file), and, only when the document is hidden or
-unfocused, a `Notification`, which does carry the round number. `document.title` is left
-alone — it used to take a `(n) ` prefix and no longer does (see CHANGELOG, "The pending-round
-mark on a tab lost its number, not its mark"): knowing you owe an answer is worth a glance,
-knowing it is three answers was not worth a second mark that could drift out of step with the
-round count. Unmarked, the tab carries the board mark every page emits
+unfocused, a `Notification`, which also carries the round number. `document.title` is left
+alone — it used to take a `(n) ` prefix and no longer does: a numeral in the tab makes the
+case for a title prefix weaker, not stronger, and a second count could drift out of step with
+the first. Unmarked, the tab carries the board mark every page emits
 in its `<head>` (`faviconLink`, `src/styles.mjs`): an inline `data:image/svg+xml` link, painted
 from the dark palette's `--warning`/`--accent-ink`, so the same rule holds and the `file:` archive
-shows the mark with the network off. The pending mark is that same tile inverted — a `--bg` ground
-carrying a `--warning` pip, no digit — rather than anything added on top of it, because
-`--warning` is also the "waiting on you" hue and at 16px the two states have to differ in value,
-not merely in contents (ADR.md entry 12). The same mark, from the same rects, is what the board head's back control and the
+shows the mark with the network off. The pending mark is that same tile, unchanged — the count
+is a bold `--accent-ink` numeral drawn onto it with canvas `fillText`, sized 22/18/17px for one
+digit, two digits and the `9+` overflow past 99. The tile colour is the one thing the mark cannot
+spend and stay recognisably this product, so ink mass, not hue, is what separates the two states
+at 16px: three hairline rows cover about a third of the tile, a numeral covers over half. Canvas
+text rather than a second SVG data URI, because SVG favicons resolve fonts inconsistently and a
+dropped family would leave a blank amber tile reading as idle (ADR.md entry 30, superseding
+entry 12's inversion). The same mark, from the same rects, is what the board head's back control and the
 index title carry (`markSvg`). Clearing the pending mark restores the unbadged one rather than
-blanking the href. Permission is requested lazily on the first round that
+blanking the href. A third mark exists, on the index tab only: while the pomodoro is running
+unpaused in a break or long break, `renderPomodoro` (`src/indexpage.mjs`) swaps the href for
+`restFaviconHref` (`src/styles.mjs`) — a slate `--mark-rest-tile` ground carrying two amber
+bars, the same tile geometry turned down rather than off. It is inline SVG, not canvas, and no
+board tab ever takes it: only the index carries the clock, and a phase no poll has reported yet
+leaves the mark alone rather than flickering through rest (ADR.md entry 31). A pending count
+outranks it outright; there is no hybrid, and those three are all the marks there are. Permission is requested lazily on the first round that
 would actually notify, and also on a Send click — the one moment the tab is definitely focused,
 so Chrome raises the prompt in the foreground instead of queuing it. A denial is never re-prompted,
 and every part degrades silently: a failure anywhere leaves the round pushed and the page working,

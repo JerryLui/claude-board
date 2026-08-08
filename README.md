@@ -4,8 +4,8 @@ A local review surface for Claude Code. Instead of answering questions one at a 
 in a terminal, the agent hands you a **board** — a browser page carrying every question
 at once with its real context beside it: rendered markdown, a diagram, a code
 reference, a side-by-side comparison. You answer in any order, comment on any element
-by clicking it, and submit once. The agent's tool call returns the whole packet as
-structured data.
+of a rendered stage or diagram by clicking it, and submit once. The agent's tool call
+returns the whole packet as structured data.
 
 **macOS only.** The daemon is supervised by launchd and the tab is opened with `open`.
 There is no Linux or Windows path and none is planned; see [Portability](#portability).
@@ -135,8 +135,8 @@ file for the source of truth on what it does. As an example: run it on a decisio
 design, or a spec. When it has more than a couple of
 questions it posts a board and a tab opens. Answer what you want, leave the rest
 unanswered — unanswered comes back explicitly marked, never defaulted — add a note
-beside any answer, click **comment mode** and click any element on the page to attach a
-comment to it, then **Send**. Follow-up rounds push into the same tab, with the
+beside any answer, click **comment mode** and click any element of an HTML stage or a
+diagram to attach a comment to it, then **Send**. Follow-up rounds push into the same tab, with the
 previous round collapsed into a history rail and its answers still readable.
 
 The page follows your OS's light/dark preference by default; a control in the header
@@ -149,7 +149,7 @@ two hours) returns an explicit no-response rather than blocking the call forever
 Closing the tab is deliberately *not* a cancel — the board stays live and its URL
 reopens it.
 
-`http://127.0.0.1:7391/` lists every thread with its pending count, and filters that list
+`http://127.0.0.1:7391/` lists every thread with its rounds-left count, and filters that list
 to the sessions a query names — by title, project folder or thread id. Searching *inside*
 archived boards (what was asked, what was answered, when) is `GET /api/search?q=`.
 

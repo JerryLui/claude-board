@@ -10,11 +10,33 @@
 //   - the file is substantial prose, not a stub
 //   - it names the tool (default `ask`) literally
 //   - the tool is real, and every argument name its live schema declares is named in the prose
+//   - OR, with `delegatesTo` set, the inverse: the prose is a *caller* that points at the
+//     manual instead of restating it, so those two assertions are replaced by "names the
+//     skill that owns the call". See "Delegating callers" below.
 //   - the prose does not claim an argument the shim's real schema does not have (parsed out of
 //     a "`tool` with `{ a, b }`" sentence, the convention commands/grill.md already uses — when
 //     that sentence is absent, this direction is skipped rather than guessed at)
 //   - every block kind / widget the prose shows in a worked example (`kind: '...'`,
 //     `widget: '...'`) is one PROTOCOL.md's own "### Blocks" section actually defines
+// --- Delegating callers -------------------------------------------------------------------
+//
+// The full battery above assumes the prose file DOCUMENTS the call — true of the manual
+// (`skills/claude-board/SKILL.md`, checked by test/check-skill-prose.mjs), and true of
+// `commands/grill.md` back when every caller restated the call shape for itself. That is the
+// duplication the manual was shipped to retire, so a caller that has been migrated now names
+// the manual and stops there. Running the full battery against a migrated caller asserts the
+// restatement is still present — it fails the file for having been fixed.
+//
+// `delegatesTo: 'claude-board'` is the mode for those callers. It swaps the two
+// "documents the call" assertions for one — the pointer at the owner must be there, so a
+// caller cannot drop it and quietly own nothing — and keeps every other assertion untouched.
+// The negative checks are the point of running this at all on a caller: a caller may still
+// show a `kind:`/`widget:` in a worked example, or pin an argument to a caller-specific value
+// (`/wayfind` pins `title` to the map's own `# MAP: <title>`), and those must still be real.
+// Deliberately NOT asserted: that a delegating caller names no argument at all. That pin is
+// exactly the caller-specific fact the manual cannot know, so banning it would push callers
+// back to restating the whole shape to say the one thing that is theirs.
+//
 // Which assertions generalise and which stay caller-specific was a judgement call: grill's
 // "no HTML template of its own", "one question per call is gone" and "revive command" checks
 // were about *that command's* own history and never generalised here. `test/check-grill.mjs`
@@ -145,7 +167,7 @@ export function parseBlockShapes(protocolText) {
   const section = after.slice(fenceStart, fenceEnd);
 
   // Scoped to that one fence deliberately: the later "### Answers, comments, anchors" section
-  // also declares `{ kind: 'block' }` / `{ kind: 'md' }` / etc for Anchor, a different
+  // also declares `{ kind: 'block' }` / `{ kind: 'mermaid' }` / etc for Anchor, a different
   // vocabulary entirely, and must never leak into "real block kinds".
   const blockKinds = [...new Set([...section.matchAll(/\{\s*kind:\s*'([\w-]+)'/g)].map(m => m[1]))];
   const widgetLine = section.match(/^widget\s*=\s*(.+)$/m);
@@ -223,7 +245,9 @@ export function argumentNamedInProse(proseText, argName, fencedCode = extractFen
 /** Runs the battery and returns `{ ok, failures, claims, schemaProps }` — it never throws
  * itself (each assertion is caught and recorded), so a caller can decide how to report or
  * exit. `claimedArgNames`, when passed explicitly, overrides the auto-detected `{ a, b }`
- * sentence — the opt-in escape hatch for prose that states its arguments some other way. */
+ * sentence — the opt-in escape hatch for prose that states its arguments some other way.
+ * `delegatesTo`, when set, names the skill that owns the call and puts the run in delegating-
+ * caller mode (see "Delegating callers" in the file comment). */
 export function checkProse({
   proseText,
   tools,
@@ -231,6 +255,7 @@ export function checkProse({
   toolName = 'ask',
   minLength = 100,
   claimedArgNames,
+  delegatesTo,
 } = {}) {
   const failures = [];
   const record = (name, fn) => {
@@ -248,9 +273,19 @@ export function checkProse({
     );
   });
 
-  record(`names the \`${toolName}\` tool literally`, () => {
-    assert.match(proseText, new RegExp('`' + escapeRegExp(toolName) + '`'), `prose must reference \`${toolName}\``);
-  });
+  if (delegatesTo) {
+    record(`names \`${delegatesTo}\`, the skill that owns the call`, () => {
+      assert.match(
+        proseText,
+        new RegExp('`' + escapeRegExp(delegatesTo) + '`'),
+        `delegating prose must point at \`${delegatesTo}\` for the call shape`
+      );
+    });
+  } else {
+    record(`names the \`${toolName}\` tool literally`, () => {
+      assert.match(proseText, new RegExp('`' + escapeRegExp(toolName) + '`'), `prose must reference \`${toolName}\``);
+    });
+  }
 
   const tool = (tools || []).find(t => t.name === toolName);
   record(`\`${toolName}\` is a tool the shim's live tools/list actually exposes`, () => {
@@ -259,7 +294,9 @@ export function checkProse({
 
   const schemaProps = tool ? Object.keys((tool.inputSchema && tool.inputSchema.properties) || {}) : [];
 
-  if (tool) {
+  // A delegating caller is exempt: naming every argument is the manual's job, and demanding
+  // it here is demanding the restatement the manual retired.
+  if (tool && !delegatesTo) {
     const fencedCode = extractFencedCode(proseText);
     record(`every real \`${toolName}\` argument is named in the prose`, () => {
       const missing = schemaProps.filter(name => !argumentNamedInProse(proseText, name, fencedCode));

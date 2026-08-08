@@ -81,9 +81,9 @@ from the tokens above.
 | Rank | `rank-list` `rank-grip` `rank-index` `dragging` |
 | Text answer | `answer-textarea` `answer-status` `note-field` |
 | Buttons | `btn-send` (accent, the primary action) `btn-discuss` (secondary) `btn-defer` (pill) `send-bar` `send-status` |
-| Comments | `comment-btn` `comment-form` `comment-list` `comment-item` `comment-anchor` `comment-pending` `comment-delete` `anchor-pin` `anchor-target` |
+| Comments | `comment-btn` `comment-form` `comment-list` `comment-item` `comment-anchor` `comment-pending` `comment-delete` `anchor-pin` |
 | Lens | `lens-stage` `lens-bar` `lens-btn` `lens-canvas` `lens-pct` `lens-hint` `diagram-lens` |
-| State | `empty-state` (dashed border) `pending-badge` `live` `live-dot` `readonly` `readonly-banner` `selected` `active` `open` `missing` |
+| State | `empty-state` (dashed border) `rounds-left-badge` `live` `live-dot` `readonly` `readonly-banner` `selected` `active` `open` `missing` |
 
 ## Read the real thing
 

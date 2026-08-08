@@ -40,6 +40,18 @@ const DARK = {
   '--panel-3': '#1e2839',
   '--scrollbar-hover': '#2c3852',
   '--history-bg': 'rgba(19, 26, 39, 0.55)',
+  // The tab mark's own rest-tile colour (src/styles.mjs's REST_SHAPES, below).
+  // Not a page surface -- nothing in this file's CSS ever paints with it, and
+  // it is read by name from the palette object in JS, the same way MARK_SHAPES
+  // reads --warning and --accent-ink by name a little further down. Today's
+  // value is byte-identical to --scrollbar-hover above, which is the color a
+  // slate tile picked on chroma (not value) against Chrome's tab strip happens
+  // to land on -- but the mark owns this name, not that one: a scrollbar
+  // restyle changes --scrollbar-hover and leaves the tab mark exactly where it
+  // is. The "declared and never wired up" trip-wire (test/check-contrast.mjs)
+  // still watches this key because that check learns to scan palette-object
+  // reads, not because the key borrows a CSS reference. See ADR.md entry 31.
+  '--mark-rest-tile': '#2c3852',
   // The html stage's artboard ('.html-stage', '.stage-lens-frame'). Neutral and
   // per-palette, and not a page surface: a mock owns its own background, so this
   // is only ever what shows through one that paints none. Two constraints decide
@@ -118,6 +130,14 @@ const LIGHT = {
   '--panel-3': '#e2e6f0',
   '--scrollbar-hover': '#c9d0e2',
   '--history-bg': 'rgba(255, 255, 255, 0.55)',
+  // The key set must match DARK's (test/check-contrast.mjs), but the mark has
+  // no light variant (SPEC_MARK.md, "Out of Scope") and never reads this
+  // value -- it names DARK's '--mark-rest-tile' explicitly, exactly as it
+  // names DARK's '--warning' rather than following prefers-color-scheme. Given
+  // a light-theme reader anyway: LIGHT's own slate, the scrollbar-hover value
+  // two lines up, so a light rest tile would separate from a light tab strip
+  // by the same chroma logic DARK's does, if this ever grows a caller.
+  '--mark-rest-tile': '#c9d0e2',
   // the artboard, one step BELOW --panel-2 (1.14:1) rather than at/near white,
   // so a mock that paints nothing reads as a recessed stage and not as another
   // card. Black srcdoc text 17.14:1, stage hover outline 5.43:1 -- DARK's own
@@ -209,11 +229,14 @@ export const palettes = { dark: DARK, light: LIGHT };
 // hierarchy the mark carries. rx 9 rather than 8 to match the heavier bars.
 //
 // --warning is also how the product says "waiting on you" (.live-dot,
-// .pending-badge.has-pending, .thread-item.live), so the pending badge in
-// src/ui.mjs INVERTS this tile rather than drawing a count on it: an amber count
-// on an amber tile makes idle and pending the same object at 16px, whereas a value
-// flip is the one change peripheral vision catches in the unfocused tab that is
-// the only tab this has to work in. ADR.md records what that costs.
+// .rounds-left-badge, .thread-item.live), but the pending badge in src/ui.mjs
+// does not spend it a second way: the tile stays this same constant amber in
+// every state, and ink mass is the signal instead of hue -- three hairline
+// rows here already read as "some ink"; a pending round replaces them with a
+// bold numeral drawn as canvas text over the same fill, "a lot more ink", the
+// way peripheral vision reads a mass difference at 16px far more reliably than
+// a value flip. No state ever paints a second tile colour. ADR.md records what
+// that used to cost, back when it did.
 const MARK_SHAPES =
   `<rect width="32" height="32" rx="9" fill="${DARK['--warning']}"/>`
   + `<rect x="7" y="6.6" width="18" height="4.6" rx="2.3" fill="${DARK['--accent-ink']}" opacity=".34"/>`
@@ -234,6 +257,42 @@ export const markSvg = (size) =>
  * href off at the first colour. */
 export const faviconLink =
   `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}">`;
+
+// The rest mark: the board's own rows, stood up. On a break the index tab has
+// nothing to ask for, so the three ink rows above collapse to two -- taller,
+// upright, at rest -- on a tile that stops alerting. Same geometry as
+// MARK_SHAPES (32x32, rx 9) and the same corner, so swapping one href for the
+// other (a later ticket's job, not this one's) reads as the SAME mark turned
+// down, not a different icon.
+//
+// The tile is DARK['--mark-rest-tile'], not DARK['--scrollbar-hover'] -- see
+// that key's own comment, above, and ADR.md entry 31: the colour is
+// load-bearing for a shipped drawing now, so it gets a name that says so.
+// Picked on chroma, not value: Chrome's tab strip is a neutral grey, so a
+// slate tile close to it in VALUE still separates by chroma, leaving the
+// amber bars to supply the tile's value contrast from inside it rather than
+// around it. No light variant, same reasoning as MARK_SHAPES above -- this
+// names DARK explicitly and reads no CSS var().
+//
+// Bars, not rows: two vertical amber bars at 86% opacity read as a pause
+// glyph, the same family as the work mark's ink rows, one register down. Two,
+// not one -- a single rest bar at 16px is indistinguishable from a tile that
+// failed to load after the browser's downsample; two survive the squint as
+// something specific. Geometry is the design's own: x 10.4 and 17.2, y 8.6,
+// 4.4 wide by 14.8 tall, rx 2.2.
+const REST_SHAPES =
+  `<rect width="32" height="32" rx="9" fill="${DARK['--mark-rest-tile']}"/>`
+  + `<rect x="10.4" y="8.6" width="4.4" height="14.8" rx="2.2" fill="${DARK['--warning']}" opacity=".86"/>`
+  + `<rect x="17.2" y="8.6" width="4.4" height="14.8" rx="2.2" fill="${DARK['--warning']}" opacity=".86"/>`;
+
+const REST_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">${REST_SHAPES}</svg>`;
+
+/** The rest mark's href alone, not a whole `<link>` -- the page that wants it
+ * already carries `faviconLink`'s tag and swaps this in as its `href`
+ * (criterion 10: inline data URI, no asset file, no network fetch, no
+ * canvas). `encodeURIComponent` for the same reason as `faviconLink`'s own:
+ * a hand-escaped `#` would cut the href off at the first colour. */
+export const restFaviconHref = `data:image/svg+xml,${encodeURIComponent(REST_FAVICON_SVG)}`;
 
 /** Render a palette object as one `selector { ... }` rule's custom-property
  * declarations, plus `color-scheme` so the browser's own chrome (native form
@@ -285,8 +344,8 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
      115.4px, and a hardcoded 88 then parks the target 27px BEHIND the header it
      was supposed to clear. One token, overridden in that same media query, so
      the two can never disagree again. Every scroll-margin-top on the page reads
-     it (.round for the round badge's jump, .md-content [id] for a comment's
-     jump to its anchor). */
+     it (.round for the round badge's jump, and a resync jumping a round
+     section to the top of the viewport). */
   --head-clear: 88px;
 }
 
@@ -443,7 +502,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    edit the same answer (see PROTOCOL.md "Board document", ticket 04) */
 /* scroll-margin-top clears the sticky .board-head when the round badge
    (criterion 9) or a resync jumps a round section to the top of the
-   viewport -- same value as .md-content [id]'s below, for the same reason. */
+   viewport. */
 .round { display: flex; flex-direction: column; gap: var(--space-4); scroll-margin-top: var(--head-clear); }
 .round-label {
   align-self: flex-start;
@@ -510,14 +569,17 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
   letter-spacing: 0.05em; text-transform: uppercase; }
 .md-content tr:last-child td { border-bottom: none; }
 .md-content hr { border: none; border-top: 1px solid var(--hairline); margin: 1.4em 0; }
-/* clears the sticky .board-head when a comment jumps to its anchor */
-.md-content [id] { scroll-margin-top: var(--head-clear); }
-/* applied by src/ui.mjs to the heading/list item a comment is anchored to, when
-   that comment's list entry is clicked -- exactly one element carries it at a time */
-.md-content [id].anchor-target { background: var(--accent-soft); box-shadow: 0 0 0 4px var(--accent-soft);
-  border-radius: var(--r-sm); }
 
 .question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+/* ADR.md entry 26: a question carrying a rendered stage (anywhere in its
+   options or its context, src/render.mjs's questionCarriesStage) never emits
+   a '.question-context' card at all -- its context renders as prose inside
+   '.question-main' instead (see '.question-context-prose' below). That is
+   the whole full-width mechanism: this ONE selector already collapsed a
+   context-free question to one column before this entry existed, and a
+   stage-carrying question now qualifies the same way, with no separate
+   modifier class. A stage-free question keeps a real '.question-context'
+   card exactly as before and is unaffected. */
 .question-block:not(:has(.question-context)) { grid-template-columns: minmax(0, 1fr); }
 /* the send guard's ring around the first outstanding question once a click on
    Send has armed instead of submitted (DESIGN.md round-end criterion 4) -- toggled
@@ -529,6 +591,15 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
 .question-main { min-width: 0; }
 .question-context { min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-md); padding: var(--space-3) var(--space-4); }
+/* The prose counterpart to '.question-context' above, for a question that
+   carries a rendered stage (ADR.md entry 26): no background, no border, no
+   padding -- just vertical stacking between the prompt and the widget, each
+   context item in reading order. Each item supplies its own typography
+   ('.md-content', '.mermaid-block', '.html-stage') exactly as it would
+   top-level; only '.compare-side''s own card look is stripped below, since a
+   compare nested here is still "context", not a card. */
+.question-context-prose { display: flex; flex-direction: column; gap: var(--space-3); margin: 0 0 var(--space-3); }
+.context-item .compare-side { background: none; border: none; padding: 0; }
 .question-prompt { font-size: 16px; font-weight: 600; line-height: 1.4; letter-spacing: -0.01em; margin: 0 0 var(--space-3); }
 
 .options { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -717,32 +788,12 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .expand-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-/* the compact glyph-only variant injected after an anchored heading/list item
-   (src/render.mjs commentButton, inline = true) -- the class name here must stay
-   the one the markup emits; it once named a class the markup never used, so these
-   buttons silently fell back to base styling (see test/check-pure.mjs) */
-/* render.mjs injects it directly after the anchored element's opening tag, i.e.
-   before its text, so left inline it pushed every anchored heading and list item
-   sideways by a glyph's width. Lifted into the block's left gutter instead: no
-   layout shift, and it appears on hover of the line it belongs to. */
-.md-content h1, .md-content h2, .md-content h3, .md-content h4, .md-content li { position: relative; }
-.inline-anchor-btn { position: absolute; left: -22px; top: 0.15em; border-color: transparent;
-  padding: 2px 4px; opacity: 0; transition: opacity var(--dur) var(--ease); }
-.md-content li:hover > .inline-anchor-btn, .md-content h1:hover > .inline-anchor-btn,
-.md-content h2:hover > .inline-anchor-btn, .md-content h3:hover > .inline-anchor-btn,
-.md-content h4:hover > .inline-anchor-btn, .inline-anchor-btn:focus-visible { opacity: 1; }
-/* discoverability floor: on a touch/coarse pointer there is no hover to reveal them */
-@media (hover: none) { .inline-anchor-btn { opacity: 0.5; } }
 
 .comment-list { margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
 .comment-item { position: relative; font-size: 12.5px; color: var(--ink-2); background: var(--panel-2);
   border: 1px solid var(--hairline); border-left: 2px solid var(--hairline-2);
   border-radius: var(--r-sm); padding: 8px 12px;
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
-/* an entry whose anchor is an element in this very page: clicking it highlights
-   that element (.anchor-target below), wired in src/ui.mjs */
-.comment-item[data-anchor-kind="md"] { cursor: pointer; }
-.comment-item[data-anchor-kind="md"]:hover { border-color: var(--accent); background: var(--panel-3); }
 /* queued locally, not yet sent -- matches the hollow .pin-pending badge. Ticket
    02 (DESIGN.md polish): only a PENDING entry ever carries a delete control
    (criterion 3: a sent comment has none), so only it reserves gutter space
@@ -813,14 +864,6 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
  * badges inside it once the element they point at is resolvable in the live DOM. */
 .stage-wrap { position: relative; }
 .pin-layer { position: absolute; inset: 0; pointer-events: none; }
-/* Polish ticket 03 (DESIGN.md): a capped code block's pin-layer is the same div as
- * every other block's, but src/ui.mjs resizes it (inline style) to exactly the
- * <pre>'s own box rather than leaving it at inset: 0 over the whole section --
- * overflow: hidden here is what turns "a pin computed outside that box" into
- * "not drawn" instead of "drawn over the kicker or the comment list", the safe
- * failure direction the spec calls for. No effect on any other block kind,
- * whose pin-layer keeps the plain inset: 0 above. */
-.code-block .pin-layer { overflow: hidden; }
 .anchor-pin { position: absolute; transform: translate(-50%, -50%); pointer-events: auto;
   min-width: 20px; height: 20px; padding: 0 5px; border-radius: var(--r-pill); background: var(--accent);
   color: var(--accent-ink); font-size: 11px; font-weight: 700; line-height: 20px; text-align: center;
@@ -842,7 +885,7 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    standalone file: archive, where nothing is clickable. Ticket 05: one gesture,
    toggle-gated everywhere -- a diagram node is no longer a standing exception either,
    so both rules below also require body.comment-mode, the same class setCommentMode
-   (src/ui.mjs) toggles for every other anchor-target rule. */
+   (src/ui.mjs) toggles for every other anchoring rule. */
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g')} { cursor: pointer; }
 ${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
 /* polish ticket 02 (DESIGN.md) criterion 12: a node that already carries a SENT
@@ -1007,6 +1050,28 @@ body.comment-mode .blocks { cursor: crosshair; }
    src/ui.mjs's setupSendBarDock) that stops being true, so the scrim goes with it and
    the bar docks flush instead, a plain opaque panel with a top hairline. */
 .send-bar.docked { background: var(--bg); backdrop-filter: none; border-top: 1px solid var(--hairline-2); }
+/* the questions-left pill (DESIGN.md round-end decisions / ADR.md entry 27): a
+   live, additive count of the open round's still-unanswered questions, floating
+   centered above the send bar. Nested INSIDE .send-bar itself rather than beside
+   it -- position: absolute against the bar's own sticky positioning is exactly
+   "floating over the content, centered above the send bar" with no separate
+   fixed-position layer or z-index of its own to reason about, and it inherits
+   body.readonly .send-bar { display: none } for free (QUIRKS.md "Readonly is
+   locked twice" -- here nesting buys the second mechanism at no cost, rather than
+   needing one hand-written). Hidden by default -- no .visible class -- rather than
+   the 'hidden' attribute (QUIRKS.md "el.hidden does nothing when a class in our
+   own stylesheet sets display"): .visible is the only rule that ever turns
+   display on, so there is exactly one place deciding it, in src/ui.mjs's
+   updateQuestionsLeftPill. Grey, not the send guard's warning amber -- amber
+   stays "you got into a state", this is the ordinary unanswered-mid-round case. */
+.questions-left-pill { display: none; position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%);
+  margin-bottom: var(--space-3); background: var(--panel-2); color: var(--ink-2);
+  border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 7px 16px;
+  font: inherit; font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-2);
+  cursor: pointer; white-space: nowrap;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.questions-left-pill.visible { display: inline-flex; align-items: center; }
+.questions-left-pill:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .btn-send { background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; border-radius: var(--r-md);
   padding: 11px 24px; font: inherit; font-size: 13.5px; font-weight: 650; box-shadow: var(--shadow-2);
   transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease); }
@@ -1062,7 +1127,35 @@ body.comment-mode .blocks { cursor: crosshair; }
    text beside it carries, so the pair reads as one label, not an icon plus a
    sentence */
 .pomodoro-icon { color: var(--muted); flex: none; }
-.pomodoro-status { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Invisible to the flex box (SPEC_MARK.md ticket 03) -- src/pomodoro-widget.mjs
+   wraps TOMATO_ICON/REST_ICON in this span so indexScript's renderPomodoro has a
+   stable element to swap the glyph's MARKUP into (never the 'hidden' property,
+   which .pomodoro-icon's own author 'display' rule already defeats -- see that
+   rule's own history). 'display: contents' drops the wrapper out of the box tree
+   entirely, so the glyph inside it still lays out as a direct child of
+   .pomodoro-widget, gap and alignment unchanged from having no wrapper at all. */
+.pomodoro-icon-slot { display: contents; }
+/* Work only (criterion 15): a running, unpaused work interval turns the tomato
+   up to the product's own amber, off the same --warning token the tab mark and
+   the "waiting on you" surfaces already spend. Idle and paused stay at
+   .pomodoro-icon's plain muted weight -- no class here at all -- because a
+   break dropping to muted only reads as "turned down" if the running state was
+   turned up, and idle was never turned up to begin with (spec decision).
+   Two classes, not a lone modifier, so this can never outrank .pomodoro-icon
+   itself on specificity regardless of declaration order. */
+.pomodoro-icon.pomodoro-icon-amber { color: var(--warning); }
+/* user-select: none on the status text alone -- the rest of the widget is
+   buttons, which never need it, and the settings panel's inputs and labels sit
+   outside this element entirely and stay selectable. Denies a double-click or a
+   drag across a string that repaints every second from ever landing a selection
+   on it. */
+.pomodoro-status { font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap;
+  user-select: none; }
+/* Break/long break only (criterion 14): the status text drops to the SAME muted
+   weight the rest glyph sits at, so the pair reads as one quiet state rather
+   than a glyph that went quiet beside text that didn't. Two classes, same
+   specificity reasoning as .pomodoro-icon-amber above. */
+.pomodoro-status.pomodoro-status-rest { color: var(--muted); }
 
 /* The start/pause/resume control: a real switch, knob left for off, knob right
    for on -- NOT the .mode-toggle pill it used to borrow. Two reasons it could
@@ -1215,10 +1308,11 @@ body.comment-mode .blocks { cursor: crosshair; }
   70% { box-shadow: 0 0 0 7px var(--warning-fade); }
   100% { box-shadow: 0 0 0 0 var(--warning-fade); }
 }
-.pending-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink-2);
-  background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 4px 12px; }
-.pending-badge.zero { color: var(--muted); }
-.pending-badge.has-pending { color: var(--warning); border-color: var(--warning-border-strong); background: var(--warning-soft); }
+/* Only ever rendered when count > 0 (ADR.md entry 25) -- there is no zero state
+   to style, so the amber "waiting on you" treatment is the whole rule. */
+.rounds-left-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
+  border-radius: var(--r-pill); padding: 4px 12px; }
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a
    phone-width window without a horizontal scrollbar or a two-column squeeze --- */

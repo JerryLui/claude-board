@@ -8,17 +8,23 @@
 // stand-in", and its own Testing section).
 //
 // Covers, against the REAL src/ui.mjs client script run in the stand-in:
-//   - criterion 1 (partial): one content kind per acceptance-criterion example --
-//     prose, a list item, a table cell, a line of a code reference, one side of a
-//     comparison -- each clicked in comment mode, each opening its block's
-//     comment form with a `dom` reference and a hint naming it. Table-driven,
-//     over the SAME rendered board, rather than six near-copies of
-//     check-click.mjs. ("a question's own widget" used to be a seventh, opening
-//     row here -- moved out and inverted by the ADR "Commenting is confined to
-//     content blocks" (2026-08-01), further down: a question is a wrapper, not
-//     content, so that same click now mints nothing. See that section for the
-//     full question/compare wrapper-gating coverage, including nested blocks
-//     staying live one level in.)
+//   - criterion 1, as ADR.md entry 28 leaves it: the generic page-scoped gesture
+//     over the kinds that are still commentable -- a diagram, and a diagram
+//     inside a compare side -- each clicked in comment mode, each opening its
+//     block's comment form with a `dom` reference and a hint naming it.
+//     Table-driven over the SAME rendered board. This table used to hold one row
+//     per acceptance-criterion example (prose, a list item, a table cell, a line
+//     of a code reference); entry 28 inverts those into the criterion-18 table
+//     immediately below it, which drives the same gesture and asserts it mints
+//     nothing. ("a question's own widget" was inverted the same way one ADR
+//     earlier, by entry 6.)
+//   - criterion 17: an `html` stage and a `mermaid` diagram are commentable
+//     WHEREVER they appear -- including inside a question's `context` and inside
+//     a compare side. Checked by driving the real gesture in each position, not
+//     by reading the kind check.
+//   - criterion 18: a `markdown` block and a `code` block offer no comment
+//     control (no button, no form, no list, no pin-layer) and no click-to-anchor
+//     gesture, at the top level or nested inside a wrapper.
 //   - criterion 2: with comment mode on, hovering marks the exact element under
 //     the cursor and never an ancestor.
 //   - criterion 3: with comment mode OFF (the default -- these checks never touch
@@ -84,16 +90,35 @@ const BLOCK_SPEC = [
       ].join('\n'),
     },
     { kind: 'code', text: 'const x = 1;\nconst y = 2;', lang: 'javascript' },
+    // Two diagrams whose source cannot resolve. ADR.md entry 28 leaves `mermaid`
+    // commentable, and an errored one is the shape whose `.resolve-error` note the
+    // GENERIC page-scoped gesture can reach -- `pre.mermaid` and `.stage-wrap` are
+    // chrome, and a click on a rendered node is the diagram's own gesture (covered
+    // end to end in test/check-mermaid-anchor.mjs). Two of them, because several
+    // checks below need two independent, simultaneously-live anchor targets.
+    { kind: 'mermaid', source: { path: 'no-such-diagram-28a.mmd' } },
+    { kind: 'mermaid', source: { path: 'no-such-diagram-28b.mmd' } },
     {
       kind: 'compare',
-      left: { label: 'Before', block: { kind: 'markdown', text: 'the old copy, unchanged' } },
+      left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-28c.mmd' } } },
       right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Send</button></div>' } },
     },
     { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
   { kind: 'question', prompt: 'Explain', widget: 'text', options: [] },
 ];
 const board = createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC });
-const [mdBlock, codeBlock, compareBlock, choiceBlock, textBlock] = board.blocks;
+const [mdBlock, codeBlock, diagramBlock, diagram2Block, compareBlock, choiceBlock, textBlock] = board.blocks;
+for (const b of [diagramBlock, diagram2Block, compareBlock.left.block]) {
+  assert.equal(typeof b.error, 'string',
+    'setup failure: the diagram fixtures must actually fail to resolve, or they render no .resolve-error note to anchor against');
+}
+
+/** The one generic-gesture target a mermaid section offers: its resolve-error
+ * note. Looked up by block id rather than by a wrapper class, so a layout change
+ * around a question's context or a compare side cannot silently retarget it. */
+function errorNoteFor(document, blockId) {
+  return document.querySelector(`[data-block-id="${blockId}"] .resolve-error`);
+}
 const pageHtml = renderBoardPage(board);
 
 /** Parse the page and run the real `ui` client script against it, exactly like
@@ -141,42 +166,20 @@ function loadSoloStageBoard() {
 
 const KIND_CASES = [
   {
-    name: 'prose',
-    blockId: mdBlock.id,
-    find: doc => doc.querySelectorAll('.md-content p')
-      .find(el => el.textContent.indexOf('paragraph of prose') !== -1),
-    hintIncludes: ['paragraph of prose'],
+    name: 'a diagram',
+    blockId: diagramBlock.id,
+    find: doc => errorNoteFor(doc, diagramBlock.id),
+    hintIncludes: ['could not resolve'],
   },
   {
-    name: 'a list item',
-    blockId: mdBlock.id,
-    find: doc => doc.querySelectorAll('.md-content li')
-      .find(el => el.textContent.trim() === 'alpha item'),
-    hintIncludes: ['alpha item'],
-  },
-  {
-    name: 'a table cell',
-    blockId: mdBlock.id,
-    find: doc => doc.querySelectorAll('.md-content td')
-      .find(el => el.textContent.trim() === '42'),
-    hintIncludes: ['42'],
-  },
-  {
-    name: 'a line of a code reference',
-    blockId: codeBlock.id,
-    find: doc => doc.querySelectorAll('.code-line')
-      .find(el => el.textContent.trim() === 'const y = 2;'),
-    hintIncludes: ['const y = 2;'],
-  },
-  {
-    name: 'one side of a comparison',
+    name: 'a diagram on one side of a comparison',
     blockId: compareBlock.left.block.id,
-    find: doc => doc.querySelectorAll('.compare-side .md-content p')
-      .find(el => el.textContent.indexOf('old copy') !== -1),
-    // Inside a compare side, the hint also carries context (criterion 6) -- "the
-    // old copy" identity, "Before block" context (this side's own label plus the
-    // nested block's kind noun -- see src/anchor.mjs's design comment).
-    hintIncludes: ['old copy', 'before', 'block'],
+    find: doc => errorNoteFor(doc, compareBlock.left.block.id),
+    // Inside a compare side, the hint also carries context (criterion 6) -- the
+    // note's own text as identity, "Before diagram" as context (this side's own
+    // label plus the nested block's kind noun -- see src/anchor.mjs's design
+    // comment).
+    hintIncludes: ['could not resolve', 'before', 'diagram'],
   },
 ];
 
@@ -206,16 +209,59 @@ for (const kindCase of KIND_CASES) {
   });
 }
 
+// --- criterion 18: markdown and code offer neither control nor gesture ---------
+//
+// The inverse of the table above, driven exactly the same way. Each of these was
+// a POSITIVE row until ADR.md entry 28; keeping them as negatives is what stops
+// the affordance quietly coming back on a kind the reviewer never wanted it on.
+
+const NON_ANCHORABLE_KIND_CASES = [
+  { name: 'prose', find: doc => doc.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1) },
+  { name: 'a list item', find: doc => doc.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha item') },
+  { name: 'a table cell', find: doc => doc.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42') },
+  { name: 'a heading', find: doc => doc.querySelector('.md-content h1') },
+  { name: 'the body of a code reference', find: doc => doc.querySelector('.code-block pre') },
+  { name: 'a line of a code reference', find: doc => doc.querySelector('.code-block code') },
+];
+
+for (const kindCase of NON_ANCHORABLE_KIND_CASES) {
+  check(`criterion 18: clicking ${kindCase.name} in comment mode mints no comment and shows no hover affordance`, () => {
+    const document = loadBoard();
+    enableCommentMode(document);
+    assertNotAnchorable(document, kindCase.find(document), kindCase.name);
+  });
+}
+
+check('criterion 18: a markdown block and a code block render no comment button, no comment form, no comment list, no comment target and no pin-layer', () => {
+  const document = loadBoard();
+  for (const [name, blockId] of [['markdown', mdBlock.id], ['code', codeBlock.id]]) {
+    const section = document.querySelector(`[data-block-id="${blockId}"]`);
+    assert.ok(section, `setup failure: no ${name} section rendered`);
+    assert.equal(section.querySelectorAll('.comment-btn').length, 0, `a ${name} block must render no comment button`);
+    assert.equal(document.getElementById('comment-form-' + blockId), null, `a ${name} block must render no comment form`);
+    assert.equal(document.getElementById('comment-list-' + blockId), null, `a ${name} block must render no comment list`);
+    assert.equal(document.getElementById('comment-target-' + blockId), null, `a ${name} block must render no comment target`);
+    assert.equal(section.querySelectorAll('.pin-layer').length, 0, `a ${name} block must render no pin-layer`);
+  }
+  // ...and the two kinds that DO keep the affordance still have all of it, in the
+  // same document -- so this cannot pass against a page that lost it everywhere.
+  const diagramSection = document.querySelector(`[data-block-id="${diagramBlock.id}"]`);
+  assert.equal(diagramSection.querySelectorAll('.comment-btn').length, 1, 'a mermaid block must still render its comment button');
+  assert.ok(document.getElementById('comment-form-' + diagramBlock.id), 'a mermaid block must still render its comment form');
+  const stageId = compareBlock.right.block.id;
+  assert.ok(document.getElementById('comment-form-' + stageId), 'an html block must still render its comment form');
+});
+
 check('comment mode: a numbered pin lands on the anchored element once the opened form is submitted, same as the html-stage gesture', () => {
   const document = loadBoard();
   enableCommentMode(document);
-  const el = document.querySelectorAll('.md-content p').find(e => e.textContent.indexOf('paragraph of prose') !== -1);
+  const el = errorNoteFor(document, diagramBlock.id);
   el.dispatchEvent(new StandInEvent('click'));
 
-  const form = document.getElementById('comment-form-' + mdBlock.id);
-  const section = document.querySelectorAll('.markdown-block')[0];
+  const form = document.getElementById('comment-form-' + diagramBlock.id);
+  const section = document.querySelector(`[data-block-id="${diagramBlock.id}"]`);
   const layer = section.children.find(c => c.classList && c.classList.contains('pin-layer'));
-  assert.ok(layer, 'setup failure: the markdown block has no page-scoped pin-layer');
+  assert.ok(layer, 'setup failure: the diagram block has no page-scoped pin-layer');
   assert.equal(layer.querySelectorAll('.anchor-pin').length, 0, 'setup failure: a pin already exists before anything was queued');
 
   const input = form.querySelector('input[type=text]');
@@ -229,27 +275,36 @@ check('comment mode: a numbered pin lands on the anchored element once the opene
 
 // --- criterion 2: hovering marks exactly the hovered element ------------------
 
+// Driven inside a hand-mocked html stage rather than over markdown prose: ADR.md
+// entry 28 left `html` and `mermaid` as the only commentable kinds, and a stage's
+// own mock (`<div class="mock"><button>Send</button></div>`) is now the only
+// NESTED anchorable markup on any board -- which is what "the exact element, never
+// an ancestor" needs to be observable at all.
 check('comment mode: hovering marks the exact (innermost) hovered element, never an ancestor', () => {
-  const document = loadBoard();
+  const { document } = loadSoloStageBoard();
   enableCommentMode(document);
-  const strong = document.querySelectorAll('.md-content strong').find(el => el.textContent === 'bold text');
-  assert.ok(strong, 'setup failure: no <strong> in the fixture markdown');
-  const p = strong.parentElement;
-  assert.ok(p, 'setup failure: the <strong> has no parent paragraph');
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const button = frame.contentDocument.querySelector('button');
+  assert.ok(button, 'setup failure: the loaded stage has no <button>');
+  const wrapper = button.parentElement;
+  assert.ok(wrapper, 'setup failure: the <button> has no parent element in the mock');
 
-  strong.dispatchEvent(new StandInEvent('mouseover'));
+  button.dispatchEvent(new StandInEvent('mouseover'));
 
-  assert.equal(strong.classList.contains('cb-anchor-hover'), true,
+  assert.equal(button.classList.contains('cb-anchor-hover'), true,
     'the exact hovered element must be marked as the one that will be anchored');
-  assert.equal(p.classList.contains('cb-anchor-hover'), false,
+  assert.equal(wrapper.classList.contains('cb-anchor-hover'), false,
     'the hovered element\'s ancestor must NOT also be marked -- hovering must name one element, not a chain');
 });
 
 check('comment mode off: hovering marks nothing at all (the affordance itself is part of the explicit mode, not ambient)', () => {
-  const document = loadBoard(); // comment mode never enabled here
-  const strong = document.querySelectorAll('.md-content strong').find(el => el.textContent === 'bold text');
-  strong.dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(strong.classList.contains('cb-anchor-hover'), false, 'hovering must do nothing while comment mode is off');
+  const { document } = loadSoloStageBoard(); // comment mode never enabled here
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const button = frame.contentDocument.querySelector('button');
+  button.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(button.classList.contains('cb-anchor-hover'), false, 'hovering must do nothing while comment mode is off');
 });
 
 // --- criterion 3: comment mode OFF (never touched below) never steals an ------
@@ -566,22 +621,18 @@ check('comment mode: turning it on adds body.comment-mode -- every CSS rule behi
 
 // --- src/ui.mjs:700 -- ev.preventDefault() in the generic click listener ------
 
-check('comment mode: clicking a rendered link calls ev.preventDefault(), so it never navigates away mid-review (ablation: deleting ev.preventDefault())', () => {
-  const linkBoard = createBoard({
-    title: 'Ticket 07 -- preventDefault on an anchored click',
-    blocks: [{ kind: 'markdown', text: 'a paragraph with a [link](https://example.com/) inside' }],
-  });
-  const linkHtml = renderBoardPage(linkBoard);
-  const document = parseHTML(linkHtml);
-  const window = document.defaultView;
-  const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+// The target used to be a rendered markdown link, the most legible case of "an
+// anchoring click must not ALSO do the element's own thing". ADR.md entry 28 left
+// no anchorable link on any page, so the ablation is driven on the one target the
+// generic gesture still has -- the assertion is on preventDefault itself, which is
+// element-agnostic.
+check('comment mode: an anchoring click calls ev.preventDefault(), so an element\'s own default action never fires alongside it mid-review (ablation: deleting ev.preventDefault())', () => {
+  const document = loadBoard();
   enableCommentMode(document);
-
-  const link = document.querySelectorAll('.md-content a').find(a => a.textContent === 'link');
-  assert.ok(link, 'setup failure: no rendered link found in the markdown fixture');
+  const note = errorNoteFor(document, diagramBlock.id);
+  assert.ok(note, 'setup failure: no anchorable element found in the fixture');
   const event = new StandInEvent('click');
-  link.dispatchEvent(event);
+  note.dispatchEvent(event);
   assert.equal(event.defaultPrevented, true,
     'the generic comment-mode click listener must call ev.preventDefault(), or a clicked <a href> fires its own navigation alongside anchoring');
 });
@@ -591,32 +642,32 @@ check('comment mode: clicking a rendered link calls ev.preventDefault(), so it n
 check('comment mode: hovering a second element (with no intervening mouseout) still clears the first element\'s highlight (ablation: deleting clearAnchorHover() at the top of the generic mouseover handler, src/ui.mjs:679)', () => {
   const document = loadBoard();
   enableCommentMode(document);
-  const prose = document.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1);
-  const codeLine = document.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;');
-  assert.ok(prose && codeLine, 'setup failure: fixture elements not found');
+  const first = errorNoteFor(document, diagramBlock.id);
+  const second = errorNoteFor(document, diagram2Block.id);
+  assert.ok(first && second, 'setup failure: fixture elements not found');
 
-  prose.dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(prose.classList.contains('cb-anchor-hover'), true, 'setup failure: hovering the first element did not mark it');
+  first.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(first.classList.contains('cb-anchor-hover'), true, 'setup failure: hovering the first element did not mark it');
 
-  codeLine.dispatchEvent(new StandInEvent('mouseover')); // no mouseout on `prose` first
+  second.dispatchEvent(new StandInEvent('mouseover')); // no mouseout on `first` first
 
-  assert.equal(prose.classList.contains('cb-anchor-hover'), false,
+  assert.equal(first.classList.contains('cb-anchor-hover'), false,
     'moving the hover to a second element must clear the first element\'s highlight, even with no intervening mouseout -- criterion 2 names "that element, and not its ancestors", which a highlight trailing behind on the PREVIOUS element also violates');
-  assert.equal(codeLine.classList.contains('cb-anchor-hover'), true, 'the newly-hovered element must still be marked');
+  assert.equal(second.classList.contains('cb-anchor-hover'), true, 'the newly-hovered element must still be marked');
 });
 
 check('comment mode: a mouseout with no specific next target clears the currently hovered element\'s highlight (ablation: deleting the document mouseout listener\'s clearAnchorHover() call, src/ui.mjs:688)', () => {
   const document = loadBoard();
   enableCommentMode(document);
-  const prose = document.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1);
-  assert.ok(prose, 'setup failure: fixture element not found');
+  const note = errorNoteFor(document, diagramBlock.id);
+  assert.ok(note, 'setup failure: fixture element not found');
 
-  prose.dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(prose.classList.contains('cb-anchor-hover'), true, 'setup failure: hovering did not mark the element');
+  note.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(note.classList.contains('cb-anchor-hover'), true, 'setup failure: hovering did not mark the element');
 
   document.dispatchEvent(new StandInEvent('mouseout'));
 
-  assert.equal(prose.classList.contains('cb-anchor-hover'), false,
+  assert.equal(note.classList.contains('cb-anchor-hover'), false,
     'mousing out (the pointer leaving the page\'s anchorable content entirely) must clear the currently-hovered element\'s highlight');
 });
 
@@ -662,14 +713,14 @@ check('comment mode: the toggle\'s aria-pressed attribute and visible label both
 check('comment mode: clicking a block\'s own "comment" kicker chrome (not the button itself, which self-excludes via the anchorRootFor/el===root guard -- the surrounding .block-kicker div, which carries no data-block-id of its own) opens no comment form at all (ablation: dropping .block-kicker, .comment-btn from ANCHOR_CHROME_SELECTOR mints a dom anchor against it instead)', () => {
   const document = loadBoard();
   enableCommentMode(document);
-  const btn = document.querySelector(`.comment-btn[data-block-id="${mdBlock.id}"]`);
-  assert.ok(btn, 'setup failure: no comment-btn for the markdown block');
+  const btn = document.querySelector(`.comment-btn[data-block-id="${diagramBlock.id}"]`);
+  assert.ok(btn, 'setup failure: no comment-btn for the diagram block');
   const kicker = btn.closest('.block-kicker');
   assert.ok(kicker, 'setup failure: the comment button is not inside a .block-kicker');
 
   kicker.dispatchEvent(new StandInEvent('click'));
 
-  const form = document.getElementById('comment-form-' + mdBlock.id);
+  const form = document.getElementById('comment-form-' + diagramBlock.id);
   assert.equal(form.classList.contains('open'), false,
     'clicking the kicker chrome around the comment button (not the button itself) must not open any comment form -- with the kicker unexcluded, the generic listener mints a dom anchor against it instead, since the kicker itself carries no data-block-id to trip the self-guard the button has');
 });
@@ -755,99 +806,33 @@ check('comment mode: clicking the html-stage iframe element itself (the outer-do
     'clicking the iframe element itself must not ALSO open a page-scoped dom-anchor form via the generic page-wide listener');
 });
 
-// --- the markdown anchor button (DESIGN.md polish criteria 1 and 12) -----------
+// --- the whole-block comment button (DESIGN.md polish criteria 1 and 12) -------
 //
-// `.comment-btn[data-anchor-kind="md"]` -- the inline control injectAnchorButtons
-// (src/render.mjs) puts after every markdown heading and list item -- is the ONLY
-// producer of `md` anchors on the page, and it was the one anchor-minting path
-// that never learned either of ticket 02's two rules (audit findings P1/P2): its
-// handler called openCommentForm with four arguments, with no
-// findPendingCommentForAnchor lookup and no isSentAnchor gate. So a second click
-// on a heading queued a SECOND independent comment with a second pin, which is
-// verbatim the Problem statement this batch exists to fix and is the alternative
-// the spec's Decisions explicitly reject; and a heading carrying a SENT comment
-// kept a live, unmarked control. Every other gesture (the generic dom click, the
-// diagram node, the lens) was already covered; these close the last one.
+// This section used to be about `.comment-btn[data-anchor-kind="md"]` -- the
+// inline control injectAnchorButtons (src/render.mjs) put after every markdown
+// heading and list item, the ONLY producer of `md` anchors on the page, and the
+// one anchor-minting path that never learned either of ticket 02's two rules
+// (audit findings P1/P2: no findPendingCommentForAnchor lookup, no isSentAnchor
+// gate, so a second click on a heading queued a second independent comment).
+// ADR.md entry 28 deletes that control and the `md` anchor kind with it, and
+// those two checks go with them -- the editing and sent-gate rules they covered
+// still hold for the gestures that survive (`dom` and `mermaid`), which have
+// their own checks in this file and in test/check-mermaid-anchor.mjs.
 //
-// The `block`-kind button on the same page is checked alongside, because the
-// distinction is deliberate rather than incidental: "several separate remarks on
-// one block" stays legal, which is exactly why removePendingComment is keyed by
-// entry id (src/anchor.mjs). A fix that made every .comment-btn edit would break
-// that, and nothing else would notice.
-
-/** The md-kind anchor button for `ref` (a heading/list-item id) on `mdBlock`. */
-function mdAnchorButton(document, ref) {
-  const btn = document.querySelectorAll(`.comment-btn[data-anchor-kind="md"][data-block-id="${mdBlock.id}"]`)
-    .find(b => b.getAttribute('data-anchor-ref') === ref);
-  assert.ok(btn, `setup failure: no md anchor button for ref ${JSON.stringify(ref)}`);
-  return btn;
-}
-
-/** Every md ref the page actually rendered an anchor button for. */
-function mdRefs(document) {
-  return document.querySelectorAll(`.comment-btn[data-anchor-kind="md"][data-block-id="${mdBlock.id}"]`)
-    .map(b => b.getAttribute('data-anchor-ref'));
-}
-
-check('criterion 1 (md): clicking a heading\'s anchor button twice reopens the comment already on it -- prefilled, stamped as an edit -- instead of queuing a second one', () => {
-  const document = loadBoard();
-  const refs = mdRefs(document);
-  assert.ok(refs.length, 'setup failure: the markdown block rendered no anchor buttons at all');
-  const ref = refs[0];
-
-  mdAnchorButton(document, ref).dispatchEvent(new StandInEvent('click'));
-  const form = document.getElementById('comment-form-' + mdBlock.id);
-  assert.equal(form.classList.contains('open'), true, 'setup failure: the first click did not open the form');
-  assert.equal(form.getAttribute('data-editing-id'), null, 'a FIRST click has nothing to edit');
-  form.querySelector('input[type=text]').value = 'the heading is wrong';
-  form.dispatchEvent(new StandInEvent('submit'));
-
-  const pinsAfterFirst = document.querySelectorAll('.anchor-pin').length;
-  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1);
-
-  mdAnchorButton(document, ref).dispatchEvent(new StandInEvent('click'));
-  const reopened = document.getElementById('comment-form-' + mdBlock.id);
-  assert.ok(reopened.getAttribute('data-editing-id'),
-    'the reopened form must be stamped with the queued entry it is editing -- without it, submit pushes a duplicate');
-  assert.equal(reopened.querySelector('input[type=text]').value, 'the heading is wrong',
-    'and prefilled with that comment\'s own text (criterion 1, verbatim)');
-
-  reopened.querySelector('input[type=text]').value = 'the heading is fine, the table is wrong';
-  reopened.dispatchEvent(new StandInEvent('submit'));
-
-  const items = document.querySelectorAll('.comment-item.comment-pending');
-  assert.equal(items.length, 1, `submitting must REPLACE, not add -- got ${items.length} queued comments`);
-  assert.ok(String(items[0].textContent || '').indexOf('the table is wrong') !== -1, 'and carry the edited text');
-  assert.equal(document.querySelectorAll('.anchor-pin').length, pinsAfterFirst,
-    'criterion 1: "the pin count on the block does not change"');
-});
-
-check('criterion 1 (md): two DIFFERENT headings still get their own comments -- the edit rule keys on the anchor, not on the block', () => {
-  const document = loadBoard();
-  const refs = mdRefs(document);
-  assert.ok(refs.length >= 2, `setup failure: need at least two anchored elements, got ${refs.length}`);
-
-  for (const ref of [refs[0], refs[1]]) {
-    mdAnchorButton(document, ref).dispatchEvent(new StandInEvent('click'));
-    const form = document.getElementById('comment-form-' + mdBlock.id);
-    assert.equal(form.getAttribute('data-editing-id'), null, `a first click on ${ref} must not inherit the previous anchor's edit target`);
-    form.querySelector('input[type=text]').value = 'about ' + ref;
-    form.dispatchEvent(new StandInEvent('submit'));
-  }
-
-  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 2,
-    'two distinct anchors are two distinct comments');
-});
+// What is left is the deliberate contrast: `commentButton` now emits exactly one
+// shape, and it is ADDITIVE. "Several separate remarks on one block" stays legal,
+// which is exactly why removePendingComment is keyed by entry id
+// (src/anchor.mjs).
 
 check('the whole-block "comment" button stays ADDITIVE -- several separate remarks on one block remain legal, which is why the edit rule is scoped to anchored kinds', () => {
   const document = loadBoard();
-  const btn = document.querySelector(`.comment-btn[data-block-id="${codeBlock.id}"]`);
-  assert.ok(btn, 'setup failure: no comment button on the code block');
+  const btn = document.querySelector(`.comment-btn[data-block-id="${diagramBlock.id}"]`);
+  assert.ok(btn, 'setup failure: no comment button on the diagram block');
   assert.equal(btn.getAttribute('data-anchor-kind'), 'block', 'setup failure: expected the whole-block button');
 
   for (const text of ['first remark', 'second, unrelated remark']) {
     btn.dispatchEvent(new StandInEvent('click'));
-    const form = document.getElementById('comment-form-' + codeBlock.id);
+    const form = document.getElementById('comment-form-' + diagramBlock.id);
     assert.equal(form.getAttribute('data-editing-id'), null, 'a whole-block comment must never be treated as an edit of an earlier one');
     form.querySelector('input[type=text]').value = text;
     form.dispatchEvent(new StandInEvent('submit'));
@@ -855,55 +840,6 @@ check('the whole-block "comment" button stays ADDITIVE -- several separate remar
 
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 2,
     'the whole-block gesture must still queue two independent comments');
-});
-
-check('criterion 12 (md): a heading that already carries a SENT comment is not a comment target -- the button does nothing and is marked, while its neighbours stay live', () => {
-  // A separate board, because this one has to be rendered with the comment
-  // already SENT -- server-side, through applySubmit, so board.comments carries
-  // the resolveComment verdict the page actually embeds.
-  const sentBoard = createBoard({
-    title: 'criterion 12 -- a sent md comment is immutable',
-    blocks: [{ kind: 'markdown', text: '# Alpha\n\ntext\n\n# Beta\n\nmore text' }],
-  });
-  const sentBlockId = sentBoard.blocks[0].id;
-  const anchors = sentBoard.blocks[0].anchors || [];
-  assert.ok(anchors.length >= 2, `setup failure: expected two md anchors, got ${anchors.length}`);
-  const sentRef = anchors[0].ref;
-  const liveRef = anchors[1].ref;
-  applySubmit(sentBoard, {
-    action: 'send',
-    answers: [],
-    comments: [{ blockId: sentBlockId, anchor: { kind: 'md', ref: sentRef, label: anchors[0].label }, text: 'already sent' }],
-  }, 1);
-
-  const document = parseHTML(renderBoardPage(sentBoard));
-  const window = document.defaultView;
-  new Function('document', 'window', 'location', ui)(document, window, { protocol: 'http:' });
-  enableCommentMode(document);
-
-  const buttons = document.querySelectorAll(`.comment-btn[data-anchor-kind="md"][data-block-id="${sentBlockId}"]`);
-  const sentBtn = buttons.find(b => b.getAttribute('data-anchor-ref') === sentRef);
-  const liveBtn = buttons.find(b => b.getAttribute('data-anchor-ref') === liveRef);
-  assert.ok(sentBtn && liveBtn, 'setup failure: expected an anchor button for each heading');
-
-  // "visibly not a comment target": the same de-affordance class every other
-  // surface uses, whose stylesheet rule is gated on body.comment-mode so the
-  // reading view stays unmarked (the spec's Decision).
-  assert.equal(sentBtn.classList.contains('cb-anchor-sent'), true,
-    'a heading with a sent comment must be visibly de-affordanced');
-  assert.equal(liveBtn.classList.contains('cb-anchor-sent'), false,
-    'a heading with no sent comment must not be');
-
-  sentBtn.dispatchEvent(new StandInEvent('click'));
-  const form = document.getElementById('comment-form-' + sentBlockId);
-  assert.equal(form.classList.contains('open'), false, 'criterion 12: "clicking it does nothing"');
-  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0, 'and queues nothing');
-
-  // The negative, so this cannot pass against a dead button: the OTHER heading
-  // is still perfectly clickable.
-  liveBtn.dispatchEvent(new StandInEvent('click'));
-  assert.equal(form.classList.contains('open'), true, 'an un-commented heading must still open the form');
-  assert.equal(form.getAttribute('data-anchor-ref'), liveRef);
 });
 
 // --- criterion 2: the delete control, driven rather than asserted into ---------
@@ -919,23 +855,24 @@ check('criterion 12 (md): a heading that already carries a SENT comment is not a
 check('criterion 2: a queued comment\'s delete control removes it, its pin, and renumbers everything after it', () => {
   const document = loadBoard();
   enableCommentMode(document);
-  const lines = document.querySelectorAll('.code-block .code-line');
-  assert.ok(lines.length >= 2, 'setup failure: need at least two code lines to anchor on');
+  // Three queued comments: two dom-anchored on the first diagram's neighbouring
+  // sections (so they draw pins), one whole-block on a THIRD block (so
+  // renumbering is observed to cross block boundaries, which is exactly what the
+  // shared sequence means).
+  const targets = [errorNoteFor(document, diagramBlock.id), errorNoteFor(document, diagram2Block.id)];
+  assert.ok(targets[0] && targets[1], 'setup failure: need two independent anchor targets');
 
-  // Three queued comments: two dom-anchored on the code block (so they draw
-  // pins), one whole-block on the markdown block (so renumbering is observed to
-  // cross block boundaries, which is exactly what the shared sequence means).
-  lines[0].dispatchEvent(new StandInEvent('click'));
+  targets[0].dispatchEvent(new StandInEvent('click'));
   let form = document.querySelector('.comment-form.open');
   form.querySelector('input[type=text]').value = 'remark-alpha';
   form.dispatchEvent(new StandInEvent('submit'));
 
-  lines[1].dispatchEvent(new StandInEvent('click'));
+  targets[1].dispatchEvent(new StandInEvent('click'));
   form = document.querySelector('.comment-form.open');
   form.querySelector('input[type=text]').value = 'remark-beta';
   form.dispatchEvent(new StandInEvent('submit'));
 
-  document.querySelector(`.comment-btn[data-block-id="${mdBlock.id}"][data-anchor-kind="block"]`).dispatchEvent(new StandInEvent('click'));
+  document.querySelector(`.comment-btn[data-block-id="${compareBlock.right.block.id}"][data-anchor-kind="block"]`).dispatchEvent(new StandInEvent('click'));
   form = document.querySelector('.comment-form.open');
   form.querySelector('input[type=text]').value = 'remark-gamma';
   form.dispatchEvent(new StandInEvent('submit'));
@@ -950,7 +887,7 @@ check('criterion 2: a queued comment\'s delete control removes it, its pin, and 
   const numberOf = text => Number(/#(\d+)/.exec(itemFor(text).textContent)[1]);
   assert.deepEqual(numbers(), [1, 2, 3], 'setup failure: three queued comments must number 1, 2, 3');
   assert.equal(numberOf('remark-gamma'), 3, 'setup failure: the third comment queued must be numbered 3');
-  assert.equal(document.querySelectorAll('.code-block .anchor-pin.pin-pending').length, 2,
+  assert.equal(document.querySelectorAll('.mermaid-block .anchor-pin.pin-pending').length, 2,
     'setup failure: the two dom-anchored comments must each have drawn a pin');
 
   // Delete the MIDDLE one (by queue number, not by document position -- entries
@@ -967,7 +904,7 @@ check('criterion 2: a queued comment\'s delete control removes it, its pin, and 
     'criterion 2: the remaining provisional numbers must stay contiguous after a deletion, with no gap where #2 was');
   assert.equal(numberOf('remark-gamma'), 2,
     'criterion 2: deleting #2 must renumber the comment that was #3 down to #2 -- and it lives on a DIFFERENT block, so the renumber has to be board-wide');
-  assert.equal(document.querySelectorAll('.code-block .anchor-pin.pin-pending').length, 1,
+  assert.equal(document.querySelectorAll('.mermaid-block .anchor-pin.pin-pending').length, 1,
     'the deleted comment\'s hollow pin must be gone too, and the surviving one must remain');
 });
 
@@ -979,44 +916,47 @@ check('criterion 12 (page-scoped half): an element carrying a SENT dom comment i
   // anchor shape the gesture itself produces.
   const probe = loadBoard();
   enableCommentMode(probe);
-  const probeLines = probe.querySelectorAll('.code-block .code-line');
-  probeLines[0].dispatchEvent(new StandInEvent('click'));
+  errorNoteFor(probe, diagramBlock.id).dispatchEvent(new StandInEvent('click'));
   const probeForm = probe.querySelector('.comment-form.open');
   const sentRef = probeForm.getAttribute('data-anchor-ref');
   const sentHint = probeForm.getAttribute('data-anchor-label');
   assert.ok(sentRef, 'setup failure: the probe click minted no ref');
 
   const sentBoard = createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC });
-  const sentCodeId = sentBoard.blocks[1].id;
+  const sentDiagramId = sentBoard.blocks[2].id;
+  const liveDiagramId = sentBoard.blocks[3].id;
   applySubmit(sentBoard, {
     action: 'send',
     answers: [],
-    comments: [{ blockId: sentCodeId, anchor: { kind: 'dom', ref: sentRef, hint: sentHint }, text: 'already sent' }],
+    comments: [{ blockId: sentDiagramId, anchor: { kind: 'dom', ref: sentRef, hint: sentHint }, text: 'already sent' }],
   }, 1);
   assert.equal(sentBoard.comments.length, 1, 'setup failure: the comment was not stored');
 
   const document = parseHTML(renderBoardPage(sentBoard));
   new Function('document', 'window', 'location', ui)(document, document.defaultView, { protocol: 'http:' });
   enableCommentMode(document);
-  const lines = document.querySelectorAll('.code-block .code-line');
+  const sentNote = errorNoteFor(document, sentDiagramId);
+  const liveNote = errorNoteFor(document, liveDiagramId);
+  assert.ok(sentNote && liveNote, 'setup failure: both diagram sections must render a .resolve-error note');
 
   // Hover first: criterion 12 is "visibly not a comment target" as well as inert.
-  lines[0].dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(lines[0].classList.contains('cb-anchor-sent'), true,
+  sentNote.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(sentNote.classList.contains('cb-anchor-sent'), true,
     'the element carrying a sent comment must be de-affordanced on hover, not marked as an ordinary target');
-  assert.equal(lines[0].classList.contains('cb-anchor-hover'), false, 'and must not carry the ordinary outline as well');
+  assert.equal(sentNote.classList.contains('cb-anchor-hover'), false, 'and must not carry the ordinary outline as well');
 
-  lines[0].dispatchEvent(new StandInEvent('click'));
-  const form = document.getElementById('comment-form-' + sentCodeId);
+  sentNote.dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + sentDiagramId);
   assert.equal(form.classList.contains('open'), false, 'criterion 12: clicking it must do nothing');
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0, 'and queue nothing');
 
-  // The negative: the very next line is still an ordinary target, so this cannot
-  // pass against a listener that is simply dead.
-  lines[1].dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(lines[1].classList.contains('cb-anchor-hover'), true, 'a neighbouring line must still hover as a target');
-  lines[1].dispatchEvent(new StandInEvent('click'));
-  assert.equal(form.classList.contains('open'), true, 'and must still open the comment form when clicked');
+  // The negative: the neighbouring block's own note is still an ordinary target,
+  // so this cannot pass against a listener that is simply dead.
+  liveNote.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(liveNote.classList.contains('cb-anchor-hover'), true, 'a neighbouring element must still hover as a target');
+  liveNote.dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.getElementById('comment-form-' + liveDiagramId).classList.contains('open'), true,
+    'and must still open its own block\'s comment form when clicked');
 });
 
 // =================================================================================
@@ -1026,9 +966,15 @@ check('criterion 12 (page-scoped half): an element carrying a SENT dom comment i
 // inviting a click or minting a comment: no hover affordance, no anchor. A block
 // nested one level in -- a question's `context` entry, a compare side's content
 // -- renders through the same renderBlock dispatch as every other block and
-// keeps its own [data-block-id]/[data-block-kind], so it stays fully live.
-// `markdown`, `mermaid`, `html` and `code` are unaffected -- every check above
-// this section already proves that, unchanged.
+// keeps its own [data-block-id]/[data-block-kind], so it is judged on its OWN
+// kind, before the wrapper is ever reached.
+//
+// ADR.md entry 28 is what decides that judgement now, and criterion 17 is the
+// claim these nested checks carry: an `html` stage and a `mermaid` diagram are
+// commentable WHEREVER they appear, a question's context and a compare side
+// included, while `markdown` and `code` are inert in exactly those same
+// positions. Both directions are driven below, in the same document, so neither
+// can pass by the gesture simply being dead.
 //
 // Driven the same way as the rest of this file: the real click/mouseover
 // gesture through the real src/ui.mjs, never the gating logic underneath it.
@@ -1042,7 +988,20 @@ const WRAPPER_BOARD = createBoard({
       prompt: 'Pick a favorite',
       widget: 'single',
       options: [{ label: 'Red' }, { label: 'Blue' }],
-      context: [{ kind: 'markdown', text: 'Some supporting prose.' }],
+      // Criterion 17: an html stage inside a question's `context`. Its own kind
+      // is what decides, so it is exactly as commentable here as at the top
+      // level. The markdown entry beside it is the contrast (criterion 18):
+      // same slot, same wrapper, no affordance.
+      context: [
+        { kind: 'html', html: '<div class="mock"><button>Ship</button></div>' },
+        // A diagram in the same slot. `mermaid` is not a "stage" for the
+        // full-width rule (blockCarriesStage, src/render.mjs), so it only ever
+        // reaches the prose context path alongside something that IS one -- which
+        // makes this the case that would go unnoticed if the affordance were
+        // restored for `html` alone.
+        { kind: 'mermaid', source: { path: 'no-such-diagram-28e.mmd' } },
+        { kind: 'markdown', text: 'Some supporting prose.' },
+      ],
     },
     {
       kind: 'question',
@@ -1052,14 +1011,21 @@ const WRAPPER_BOARD = createBoard({
     },
     {
       kind: 'compare',
-      left: { label: 'Left', block: { kind: 'markdown', text: 'left side prose' } },
+      // Criterion 17's other position: a mermaid diagram in a compare side.
+      left: { label: 'Left', block: { kind: 'mermaid', source: { path: 'no-such-diagram-28d.mmd' } } },
       right: { label: 'Right' }, // no `block` -- "a side that carries no content block"
     },
   ],
 });
 const [wrapperChoiceBlock, wrapperRankBlock, wrapperCompareBlock] = WRAPPER_BOARD.blocks;
-const wrapperContextBlock = wrapperChoiceBlock.context[0];
+const wrapperContextStage = wrapperChoiceBlock.context[0];
+const wrapperContextDiagram = wrapperChoiceBlock.context[1];
+const wrapperContextProse = wrapperChoiceBlock.context[2];
+assert.equal(typeof wrapperContextDiagram.error, 'string',
+  'setup failure: the context diagram must actually fail to resolve, or it renders no .resolve-error note to anchor against');
 const wrapperCompareLeftBlock = wrapperCompareBlock.left.block;
+assert.equal(typeof wrapperCompareLeftBlock.error, 'string',
+  'setup failure: the compare side\'s diagram must actually fail to resolve, or it renders no .resolve-error note to anchor against');
 
 /** Fresh document/window for WRAPPER_BOARD, same pattern as loadBoard() -- never
  * shared across checks. */
@@ -1147,60 +1113,107 @@ for (const c of COMPARE_WRAPPER_CASES) {
 
 // --- nested blocks stay fully live one level in --------------------------------
 
-check("comment mode: a markdown block nested inside a question's context still mints a comment against that nested block, even though the question's own prompt (a sibling in the same section) does not", () => {
+check("criterion 17: an html stage nested inside a question's context is commentable exactly as it is anywhere else, even though the question's own prompt (a sibling in the same section) is not", () => {
   const document = loadWrapperBoard();
   enableCommentMode(document);
 
-  const contextParagraph = document.querySelectorAll('.question-context .md-content p')
-    .find(el => el.textContent.indexOf('supporting prose') !== -1);
-  assert.ok(contextParagraph, 'setup failure: no rendered paragraph found inside the question\'s context block');
+  // Looked up by block id, never by a wrapper class: a question's context is
+  // being re-laid-out in a sibling change, and this check is about the comment
+  // rule, not about where the context sits on the page.
+  const stageSection = document.querySelector(`[data-block-id="${wrapperContextStage.id}"]`);
+  assert.ok(stageSection, "setup failure: the question's context stage did not render");
+  const frame = stageSection.querySelector('.html-stage');
+  assert.ok(frame, 'setup failure: the nested html block rendered no stage iframe');
+  frame.loadSrcdoc();
+  const button = frame.contentDocument.querySelector('button');
+  assert.ok(button, 'setup failure: the loaded stage has no <button>');
 
-  contextParagraph.dispatchEvent(new StandInEvent('mouseover'));
-  assert.equal(contextParagraph.classList.contains('cb-anchor-hover'), true,
-    "a question's context entry must still show the ordinary hover affordance -- it is content, not chrome");
+  button.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(button.classList.contains('cb-anchor-hover'), true,
+    "an html stage inside a question's context must show the ordinary hover affordance -- position is not part of the rule");
 
-  contextParagraph.dispatchEvent(new StandInEvent('click'));
-  const nestedForm = document.getElementById('comment-form-' + wrapperContextBlock.id);
-  assert.ok(nestedForm, "setup failure: the question's own context block (a markdown block) must still render its own comment form");
+  button.dispatchEvent(new StandInEvent('click'));
+  const nestedForm = document.getElementById('comment-form-' + wrapperContextStage.id);
+  assert.ok(nestedForm, "setup failure: the question's own context stage must render its own comment form");
   assert.equal(nestedForm.classList.contains('open'), true,
-    "clicking inside a question's context block must still mint a comment against that NESTED block's own id");
+    "clicking inside a question's context stage must mint a comment against that NESTED block's own id");
   assert.equal(nestedForm.getAttribute('data-anchor-kind'), 'dom');
+  assert.ok(String(nestedForm.getAttribute('data-anchor-label') || '').indexOf('Ship') !== -1,
+    'and carry a hint naming what was clicked');
 
-  // And the wrapper itself is still inert in the SAME document/click sequence.
-  // The question wrapper renders no comment-form of its own at all any more
-  // (sibling ticket 01), so this is checked the same way the wrapper-gating
-  // checks above do: no hover affordance, and no ADDITIONAL open form/queued
-  // comment appears anywhere on the page beyond the nested one that already
-  // opened -- proving the prompt's click did nothing, not that a particular
-  // element is missing.
+  // Criterion 18, same slot: the markdown entry beside it carries no affordance
+  // at all, and the wrapper's own prompt is inert -- in the SAME document, in the
+  // same click sequence, so neither result can be "the gesture is dead".
+  assert.equal(document.getElementById('comment-form-' + wrapperContextProse.id), null,
+    "a markdown block in a question's context must render no comment form");
+  const contextParagraph = document.querySelectorAll('.md-content p')
+    .find(el => el.textContent.indexOf('supporting prose') !== -1);
+  assert.ok(contextParagraph, 'setup failure: the context prose did not render');
+  contextParagraph.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(contextParagraph.classList.contains('cb-anchor-hover'), false,
+    "a markdown block in a question's context must show no hover affordance");
+
   const prompt = document.querySelector('.question-prompt');
   prompt.dispatchEvent(new StandInEvent('mouseover'));
   assert.equal(prompt.classList.contains('cb-anchor-hover'), false,
-    "the question's own prompt must show no hover affordance, in the same document where its context block just did");
+    "the question's own prompt must show no hover affordance, in the same document where its context stage just did");
   prompt.dispatchEvent(new StandInEvent('click'));
   const openForms = document.querySelectorAll('.comment-form.open');
   assert.equal(openForms.length, 1,
-    "clicking the question's own prompt must not open any additional comment form");
+    "clicking the question's own prompt, or its markdown context, must not open any additional comment form");
   assert.equal(openForms[0].id, nestedForm.id,
-    "the only open form afterward must still be the nested context block's own -- the prompt minted nothing");
+    "the only open form afterward must still be the nested stage's own");
 });
 
-check("comment mode: a block nested inside a compare side still mints a comment against that nested block, even though the compare's own kicker/grid (a sibling in the same section) does not", () => {
+check("criterion 17: a mermaid diagram in the SAME prose context keeps its affordance too -- the prose path is a layout, not a second comment rule", () => {
   const document = loadWrapperBoard();
   enableCommentMode(document);
 
-  const sideParagraph = document.querySelectorAll('.compare-side .md-content p')
-    .find(el => el.textContent.indexOf('left side prose') !== -1);
-  assert.ok(sideParagraph, 'setup failure: no rendered paragraph found inside the compare side\'s nested block');
+  const section = document.querySelector(`[data-block-id="${wrapperContextDiagram.id}"]`);
+  assert.ok(section, "setup failure: the question's context diagram did not render");
+  const note = section.querySelector('.resolve-error');
+  assert.ok(note, 'setup failure: no .resolve-error note in the context diagram');
 
-  sideParagraph.dispatchEvent(new StandInEvent('click'));
+  // The whole-block button first: the affordance is there at all.
+  const btn = section.querySelector('.comment-btn');
+  assert.ok(btn, 'a mermaid diagram in a question\'s context must render its comment button');
+
+  note.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(note.classList.contains('cb-anchor-hover'), true,
+    'a mermaid diagram in a question\'s context must show the ordinary hover affordance');
+
+  note.dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + wrapperContextDiagram.id);
+  assert.ok(form, "setup failure: the context diagram must render its own comment form");
+  assert.equal(form.classList.contains('open'), true, 'clicking it must mint a comment against that nested block');
+  assert.equal(form.getAttribute('data-anchor-kind'), 'dom');
+
+  // ...and the pin actually lands, in that item's own layer -- the half a
+  // markup-only check cannot see (audit finding C4: an anchorable surface with no
+  // layer to draw into resolves to a comment with no pin anywhere on the page).
+  const layer = Array.prototype.slice.call(section.children).find(c => c.classList && c.classList.contains('pin-layer'));
+  assert.ok(layer, 'a mermaid context item must carry a page-scoped pin-layer of its own');
+  form.querySelector('input[type=text]').value = 'this diagram never loaded';
+  form.dispatchEvent(new StandInEvent('submit'));
+  const pins = layer.querySelectorAll('.anchor-pin');
+  assert.equal(pins.length, 1, `expected exactly one pin in the context diagram's own layer, got ${pins.length}`);
+});
+
+check("criterion 17: a mermaid diagram nested inside a compare side is commentable exactly as it is anywhere else, even though the compare's own kicker/grid (a sibling in the same section) is not", () => {
+  const document = loadWrapperBoard();
+  enableCommentMode(document);
+
+  const sideNote = document.querySelector(`[data-block-id="${wrapperCompareLeftBlock.id}"] .resolve-error`);
+  assert.ok(sideNote, "setup failure: no anchorable element found inside the compare side's nested diagram");
+
+  sideNote.dispatchEvent(new StandInEvent('click'));
   const nestedForm = document.getElementById('comment-form-' + wrapperCompareLeftBlock.id);
-  assert.ok(nestedForm, "setup failure: the compare side's own nested block (a markdown block) must still render its own comment form");
+  assert.ok(nestedForm, "setup failure: the compare side's own nested diagram must render its own comment form");
   assert.equal(nestedForm.classList.contains('open'), true,
-    "clicking inside a compare side's own content must still mint a comment against that NESTED block's own id");
+    "clicking inside a compare side's own diagram must mint a comment against that NESTED block's own id");
 
   // The compare wrapper renders no comment-form of its own at all any more
-  // (sibling ticket 01), so this is checked the same way the wrapper-gating
+  // (ADR.md entry 6), so this is checked the same way the wrapper-gating
   // checks above do: no hover affordance, and no ADDITIONAL open form/queued
   // comment appears anywhere on the page beyond the nested one that already
   // opened -- proving the grid's click did nothing, not that a particular

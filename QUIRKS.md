@@ -1286,3 +1286,47 @@ Two habits, either of which is enough: give every `writeDoc` in a check an expli
 `home`, and assert against `readDoc(home)` rather than trusting the write. If a check does not
 need daemon state at all, prefer asserting the property structurally: `notifyTest.length === 0`
 says "reads no settings" more directly than seeding a document to prove it ignores one.
+
+## The render directory is a SERVE root, not a REFERENCE root
+
+`skills/claude-board/SKILL.md` tells the caller to write a generated stage into
+`~/Documents/renders` and reference it as `{ kind: 'html', source: { path: '<file>.html' } }`.
+On this machine that silently produces four empty option cards: the installed launcher bakes
+
+```
+CLAUDE_BOARD_REF_ROOTS=~/.claude/skills:~/.claude/commands:~/.claude/agents
+CLAUDE_BOARD_SERVE_ROOTS=~/Documents/renders
+```
+
+so the render directory is reachable by `GET /file/<basename>` and by nothing else. The two
+allowlists are deliberately separate (`src/resolve.mjs`, "Consequently the allowlist is its
+OWN env var"), and `resolvePath` refuses an absolute path outside every REF root and resolves
+a relative one against the board's `cwd` only — so neither spelling of a render-dir path can
+ever resolve as a block reference.
+
+The post still returns 200. Each block lands carrying `error: cannot read <name>: no such
+file`, which renders as a red "Could not resolve" card, and a question whose every option is
+one of those cards is unanswerable. Read the posted board's own JSON
+(`~/Library/Application Support/claude-board/boards/<id>.json`) after any round whose blocks
+carry references — the `error` field is there, and it is the only place it is.
+
+Two ways out, and only two: inline the stage as `html` by value, or write it somewhere inside
+the board's project directory. Check the launcher's real environment before assuming a root
+exists — the plist carries only `CLAUDE_BOARD_PORT`, so `strings` on the binary named in
+`ProgramArguments.0` is what actually answers it (ADR 13).
+
+## A rendered page contains every comment's text twice, so "it must not render" cannot be grepped
+
+`renderBoardPage` inlines the whole board as JSON in `<script id="board-data">` (that is what
+the client hydrates from, and what makes an archive standalone). So the text of a comment the
+page deliberately does NOT render is still in the page's bytes -- `pageHtml.includes('...')`
+is true either way, and an "it must not render" assertion written that way passes before the
+change and fails after it, for the wrong reason.
+
+Hit while checking ADR.md entry 28's criterion 19 ("an archived board carrying a stored
+`markdown` or `code` comment renders without it"): the first version asserted
+`!pageHtml.includes(<the comment's text>)` and failed against a page that was already correct.
+Assert over the parsed DOM instead -- `document.querySelectorAll('.comment-item')` and read
+`textContent` -- which sees only what actually rendered. The same trap applies to any "the
+page must not show X" check where X is a value carried in the board document: block text,
+answer choices, notes, block ids.

@@ -3,9 +3,11 @@
 //
 // Hydrates from the embedded board JSON, wires all four answer widgets (single,
 // multi, text, rank) plus the per-question defer toggle, renders mermaid
-// client-side from its CDN, wires comments anchored at block, markdown, and
-// element level (a dom path + hint inside an html stage, a mermaid node id inside
-// a rendered diagram), and the two ways out of a round — Send and Discuss in
+// client-side from its CDN, wires comments anchored at block and at element level
+// (a dom path + hint inside an html stage, a mermaid node id inside a rendered
+// diagram) on the two kinds ADR.md entry 28 leaves commentable -- 'html' and
+// 'mermaid', wherever they appear, and nothing else -- and the two ways out of a
+// round — Send and Discuss in
 // chat, never gated on how much is filled in, but disabled once the round has
 // actually gone out, since the send bar sits outside the round section and no
 // history collapse can reach it. Subscribes over SSE so a follow-up round pushes
@@ -412,8 +414,8 @@ export const ui = `
   // comment target at all -- a sent comment's element is not prefilled, not
   // editable, and not even hoverable as a target: it is simply no longer one.
   // Kind-agnostic on purpose: it matches on whatever kind+ref it is handed, so
-  // the 'md' anchor button, the generic 'dom' click, the diagram node and the
-  // stage all ask it the same question about their own anchor shape.
+  // the generic 'dom' click, the diagram node and the stage all ask it the same
+  // question about their own anchor shape.
   function isSentAnchor(blockId, anchor) {
     return !!findPendingCommentForAnchor(liveSentComments(), blockId, anchor);
   }
@@ -424,8 +426,8 @@ export const ui = `
   // what holds board.comments, and the stage's isolation (ticket 10: no
   // allow-same-origin, so contentDocument is unreachable) means it has no way
   // to learn this on its own. Only 'dom'-kind anchors: an html-stage's own
-  // ref shape is always 'dom' (see handleStageClick), so a 'block'/'md'/
-  // 'mermaid' comment on the same block is simply not this stage's concern.
+  // ref shape is always 'dom' (see handleStageClick), so a 'block' comment on
+  // the same block is simply not this stage's concern.
   //
   // Sourced from liveSentComments(), not board.comments raw: a ref whose
   // comment no longer resolves is a STALE index path, and shipping it to the
@@ -664,7 +666,6 @@ export const ui = `
    * this file's header comment). */
   function pendingAnchorTag(anchor) {
     var kind = anchor && anchor.kind;
-    if (kind === 'md') return anchor.label;
     if (kind === 'dom') return anchor.hint || anchor.ref;
     if (kind === 'mermaid') return anchor.hint || anchor.ref;
     return 'block';
@@ -722,85 +723,27 @@ export const ui = `
     });
   }
 
-  // Half a pin's own minimum size ('.anchor-pin { min-width: 20px; height: 20px }',
-  // src/styles.mjs) -- how far inside a clipping edge its CENTRE has to sit for
-  // the whole badge to stay visible. See renderDomPins below.
-  var PIN_HALF = 10;
-
+  /** Page-scoped 'dom' pins for one block section. ADR.md entry 28 narrowed what
+   * can reach here: a code block's own <pre> used to be full of anchorable lines,
+   * so this function carried a whole clipping regime (resize the layer to the
+   * pre's box, nudge a pin half its width off the clip edge, re-run on the pre's
+   * internal scroll) to keep a pin on a line scrolled out of view from being drawn
+   * somewhere else in the section. 'code' is not commentable at all now, and
+   * neither is 'markdown', so all of that is gone with them -- the only sections
+   * that still carry a direct-child pin-layer are 'mermaid' and a failed 'html'
+   * block, neither of which scrolls internally. */
   function renderDomPins(blockId, stageRoot, layer) {
     layer.innerHTML = '';
     resetStackedOffset(layer);
-    // Polish ticket 03 (DESIGN.md): a code block's own <pre> gets a height cap
-    // (src/styles.mjs) and scrolls internally once its content passes it. This
-    // layer otherwise spans the WHOLE section -- fine for markdown/compare/
-    // question, whose content never scrolls on its own, but wrong for a capped
-    // code block: a line scrolled out of the pre's own viewport would still
-    // land somewhere INSIDE the section's box (over the kicker, say) and draw
-    // its pin at the wrong spot instead of the right one. Decision: clip
-    // rather than track. Resizing the layer (inline style) to exactly the
-    // <pre>'s own box -- combined with '.code-block .pin-layer' overflow:
-    // hidden (src/styles.mjs) -- means a line's computed position, once it
-    // falls outside that box, is simply clipped by the browser rather than
-    // drawn somewhere else in the section; no separate "is this line visible"
-    // check needed, and no change at all for a code block that failed to
-    // resolve (no <pre> to measure, so origin stays the whole section, exactly
-    // as every other block kind above). It reappears correctly the instant it
-    // scrolls back into view, since position is recomputed from a live
-    // getBoundingClientRect() on every call -- including the 'scroll' listener
-    // wirePageDomPins attaches to the <pre> below.
-    var pre = stageRoot.classList && stageRoot.classList.contains('code-block')
-      ? stageRoot.querySelector('pre') : null;
-    var originEl = pre || stageRoot;
-    var clipBox = null;
-    if (pre && stageRoot.getBoundingClientRect && pre.getBoundingClientRect) {
-      var sectionBox = stageRoot.getBoundingClientRect();
-      var preBox = pre.getBoundingClientRect();
-      // clientTop/clientLeft, not zero (finding NEW-4): getBoundingClientRect
-      // returns BORDER boxes, but an absolutely-positioned child's top/left
-      // resolve against its containing block's PADDING box. '.block' carries a
-      // 1px border, so every pin in a code block was drawn 1px down and 1px
-      // right of where it belonged -- small, but it is also the exact offset
-      // that pushed a pin anchored at the pre's own origin fully outside the
-      // clipping box. Guarded with '|| 0': the DOM stand-in has no such
-      // property, and an undefined here would turn every offset into NaN.
-      layer.style.top = (preBox.top - sectionBox.top - (stageRoot.clientTop || 0)) + 'px';
-      layer.style.left = (preBox.left - sectionBox.left - (stageRoot.clientLeft || 0)) + 'px';
-      layer.style.width = preBox.width + 'px';
-      layer.style.height = preBox.height + 'px';
-      layer.style.right = 'auto';
-      layer.style.bottom = 'auto';
-      clipBox = preBox;
-    }
     commentsWithPending().forEach(function (c) {
       if (c.blockId !== blockId || !c.anchor || c.anchor.kind !== 'dom') return;
       var steps = pathToSteps(c.anchor.ref);
       var el = steps.length && stageRoot ? resolveSteps(stageRoot, steps) : null;
       var position = null;
-      if (el && el.getBoundingClientRect && originEl.getBoundingClientRect) {
-        var originBox = originEl.getBoundingClientRect();
+      if (el && el.getBoundingClientRect && stageRoot.getBoundingClientRect) {
+        var originBox = stageRoot.getBoundingClientRect();
         var elBox = el.getBoundingClientRect();
         position = { left: elBox.left - originBox.left, top: elBox.top - originBox.top };
-        // A pin is drawn centred on its point ('translate(-50%, -50%)',
-        // src/styles.mjs), so a point sitting exactly on the clipping box's own
-        // edge loses three quarters of the pin -- its number included -- to
-        // '.code-block .pin-layer { overflow: hidden }'. Reachable, and not
-        // hypothetically: a <pre> is not in ANCHOR_CHROME_SELECTOR, so a
-        // comment-mode click on its padding gutter anchors the <pre> ITSELF and
-        // lands the pin at exactly {0, 0} (finding NEW-4).
-        //
-        // Nudged inside ONLY when the anchored element genuinely overlaps the
-        // visible box. That condition is what keeps the spec's decision intact
-        // -- "pins in a capped code block are clipped, not repositioned", so a
-        // line scrolled out of the pre's own viewport still HIDES rather than
-        // being drawn at the wrong line. This moves a pin at most half its own
-        // width, and only for an element that really is on screen.
-        if (clipBox && elBox.right > clipBox.left && elBox.left < clipBox.right
-          && elBox.bottom > clipBox.top && elBox.top < clipBox.bottom) {
-          position = {
-            left: Math.min(Math.max(position.left, PIN_HALF), Math.max(clipBox.width - PIN_HALF, PIN_HALF)),
-            top: Math.min(Math.max(position.top, PIN_HALF), Math.max(clipBox.height - PIN_HALF, PIN_HALF)),
-          };
-        }
       }
       placePin(layer, c, !!c.resolved, position);
     });
@@ -2179,24 +2122,13 @@ export const ui = `
     qsa('[data-block-id]', root).forEach(function (section) {
       var layer = directChildPinLayer(section);
       if (layer) renderDomPins(section.getAttribute('data-block-id'), section, layer);
-      // Polish ticket 03 (DESIGN.md): renderDomPins' code-block branch clips pins
-      // to the <pre>'s own box, but is otherwise only ever re-run from here --
-      // on resize, a comment queued, or Send (refreshPins above), never on the
-      // pre's own internal scroll. Wired once per <pre> (a marker on the
-      // element itself, not a set here, since this whole function re-runs on
-      // every one of those triggers and must never stack a second listener
-      // inside the same scrolling element).
+      // A code block carries no pin-layer at all any more (ADR.md entry 28), so
+      // nothing here is about pins -- but polish ticket 03's cap-unlock still has
+      // to run on every <pre> this pass sees, and this is the pass that already
+      // walks every section on every push/resize.
       if (section.classList && section.classList.contains('code-block')) {
         var pre = section.querySelector('pre');
-        if (pre) {
-          unlockCodeCapForDrag(pre);
-          if (layer && !pre.__cbPinsScrollWired) {
-            pre.__cbPinsScrollWired = true;
-            pre.addEventListener('scroll', function () {
-              renderDomPins(section.getAttribute('data-block-id'), section, layer);
-            });
-          }
-        }
+        if (pre) unlockCodeCapForDrag(pre);
       }
     });
   }
@@ -2364,28 +2296,30 @@ export const ui = `
     return el.closest ? el.closest('[data-block-id]') : null;
   }
 
-  // ADR "Commenting is confined to content blocks" (2026-08-01): question and
-  // compare are wrappers, not content -- a comment anchored to either names no
-  // item the agent can act on. This is a kind check on the ROOT the click/hover
-  // actually landed on, not a chrome-selector addition, because a chrome
-  // selector can only exclude specific elements *within* a section; it can't
-  // stop the section itself from being a valid anchorRootFor result. And
-  // anchorRootFor's closest('[data-block-id]') already finds the NESTED
-  // section first, so this only ever fires when 'root' IS the question/compare
-  // section itself: a click on a question's prompt, an option card, a rank
-  // item, the answer textarea, the note field or the status line, or on a
-  // compare's kicker, grid, a side's label, or a side with no content block,
-  // all resolve 'root' to that wrapper section directly, since none of them
-  // sit inside a nested [data-block-id] of their own. A block nested one level
-  // in -- a question's context entry, a compare side's content -- renders
-  // through the same renderBlock dispatch as every other block (src/render.mjs)
-  // and so carries its OWN data-block-id/data-block-kind, which
-  // closest('[data-block-id]') finds first, before ever reaching the wrapper;
-  // its root's kind is markdown/mermaid/html/code, not question/compare, so it
-  // stays fully live and untouched by this check.
-  var NON_ANCHORABLE_BLOCK_KINDS = { question: true, compare: true };
+  // ADR.md entry 28 ("Only the rendered kinds can be commented on", 2026-08-06,
+  // superseding the comment half of 26 and narrowing 6): the comment button and
+  // the click-to-anchor gesture belong to 'html' and 'mermaid' and to nothing
+  // else. This started life as a DENY list of the two wrapper kinds (question,
+  // compare); entry 28 inverts it, because the rule is now drawn on kind rather
+  // than on what a kind happens to wrap -- 'markdown' and 'code' are content and
+  // still carry no affordance, so naming what IS anchorable is the only spelling
+  // that stays true.
+  //
+  // A kind check on the ROOT the click/hover actually landed on, not a
+  // chrome-selector addition, because a chrome selector can only exclude specific
+  // elements *within* a section; it can't stop the section itself from being a
+  // valid anchorRootFor result.
+  //
+  // Position is not part of the rule, and this is where that is true rather than
+  // merely stated: anchorRootFor's closest('[data-block-id]') finds the NEAREST
+  // section, so a block nested one level in -- a question's context entry, a
+  // compare side's content -- is judged on its OWN data-block-kind, before the
+  // wrapper is ever reached. An html stage or a mermaid diagram is therefore
+  // exactly as anchorable inside a context or a compare side as it is at the top
+  // level, and a markdown or code block is exactly as inert.
+  var ANCHORABLE_BLOCK_KINDS = { html: true, mermaid: true };
   function isNonAnchorableRoot(root) {
-    return !!(root && NON_ANCHORABLE_BLOCK_KINDS[root.getAttribute('data-block-kind')]);
+    return !(root && ANCHORABLE_BLOCK_KINDS[root.getAttribute('data-block-kind')]);
   }
 
   var anchorHovered = null;
@@ -2475,6 +2409,7 @@ export const ui = `
     qsa('.choice-variant[data-question-id="' + qid + '"]').forEach(function (c) {
       c.classList.toggle('selected', c === card);
     });
+    updateQuestionsLeftPill();
   }
 
   // --- wiring, factored so it can run once at hydrate (root = document) and again
@@ -2499,6 +2434,7 @@ export const ui = `
       qsa('.choice-single[data-question-id="' + qid + '"]').forEach(function (b) {
         b.classList.toggle('selected', b === btn);
       });
+      updateQuestionsLeftPill();
     });
   });
 
@@ -2517,6 +2453,7 @@ export const ui = `
       selections[qid] = arr;
       touched[qid] = true;
       btn.classList.toggle('selected', idx === -1);
+      updateQuestionsLeftPill();
     });
   });
 
@@ -2582,6 +2519,7 @@ export const ui = `
       if (readonly) return;
       selections[qid] = ta.value;
       touched[qid] = true;
+      updateQuestionsLeftPill();
     });
   });
 
@@ -2618,6 +2556,7 @@ export const ui = `
       selections[qid] = rankOrder(list);
       touched[qid] = true;
       renumberRankList(list);
+      updateQuestionsLeftPill();
     });
     list.addEventListener('dragover', function (ev) {
       if (readonly || !dragging) return;
@@ -2657,65 +2596,28 @@ export const ui = `
       if (readonly || commentMode) return;
       deferred[qid] = !deferred[qid];
       btn.classList.toggle('active', !!deferred[qid]);
+      updateQuestionsLeftPill();
     });
   });
 
-  // --- comments: block-level, an inline markdown-anchor button, or an element-  --
-  // level click inside an html stage / mermaid diagram (ticket 06, wired further
-  // below) -- all target the one shared comment-form for their block, via
-  // openCommentForm (declared above wireRoot, alongside the other anchor helpers
-  // it's shared with).
+  // --- comments: block-level, or an element-level click inside an html stage /  --
+  // mermaid diagram (ticket 06, wired further below) -- both target the one shared
+  // comment-form for their block, via openCommentForm (declared above wireRoot,
+  // alongside the other anchor helpers it's shared with).
 
-  // This loop wires BOTH shapes src/render.mjs's commentButton emits, and they
-  // are not the same gesture (DESIGN.md polish criteria 1 and 12, audit findings
-  // P1/P2):
-  //
-  //   kind 'block'  the whole-block "Add comment" affordance. Several separate
-  //                 remarks on one block stay legal -- this codebase's own
-  //                 design says so explicitly (removePendingComment's comment,
-  //                 src/anchor.mjs, is keyed by entry id precisely because
-  //                 several queued comments can legitimately share this
-  //                 anchor), so it never edits and never de-affordances.
-  //   kind 'md'     the inline anchor button injected after a markdown heading
-  //                 or list item (injectAnchorButtons, src/render.mjs). This IS
-  //                 an anchored element, and the ONLY producer of 'md' anchors
-  //                 on the page -- so it takes exactly the same two rules the
-  //                 'dom' and 'mermaid' gestures already take: a second click
-  //                 on one that already carries a QUEUED comment reopens and
-  //                 edits it rather than minting a duplicate (criterion 1), and
-  //                 one that already carries a SENT comment is not a comment
-  //                 target at all (criterion 12).
-  //
-  // Both rules were absent here until finding P1/P2: this handler called
-  // openCommentForm with four arguments -- no editing lookup, no sent gate --
-  // so clicking a heading anchor twice queued two independent comments with two
-  // pins, which is verbatim the Problem statement this batch exists to fix and
-  // is the alternative the spec's Decisions explicitly reject ("a second click
-  // on an anchored element edits, it does not add").
-  //
-  // The sent gate is NOT conditioned on comment mode, unlike the hover
-  // de-affordance below: this button is live in both modes, and a sent comment
-  // is immutable in both. What IS comment-mode-scoped is the VISIBLE half --
-  // .cb-anchor-sent, whose stylesheet rule requires body.comment-mode (the
-  // spec's Decision: "de-affordanced in comment mode only ... the reading view
-  // stays unmarked"). Stamped at wire time from board.comments, and correct for
-  // as long as that stays true of this button: sent-ness only ever changes
-  // through a real Send, which replaces the whole round section server-side and
-  // re-runs this loop over the replacement (applySubmittedPush).
+  // src/render.mjs's commentButton emits exactly one shape now: the whole-block
+  // "Add comment" affordance, on the two kinds ADR.md entry 28 leaves commentable.
+  // The inline 'md' variant (a button injected after a markdown heading or list
+  // item) went with the anchor kind behind it, and with it the editing/sent rules
+  // audit findings P1/P2 added for that one button -- a whole-block comment is
+  // deliberately additive, never an edit, since this codebase's own design lets
+  // several separate remarks share one block anchor (removePendingComment's
+  // comment, src/anchor.mjs, is keyed by entry id precisely for that).
   qsa('.comment-btn', root).forEach(function (btn) {
     var blockId = btn.getAttribute('data-block-id');
-    var anchorKind = btn.getAttribute('data-anchor-kind') || 'block';
-    var anchorRef = btn.getAttribute('data-anchor-ref') || '';
-    var anchorLabel = btn.getAttribute('data-anchor-label') || '';
-    // Only an ANCHORED kind gets an identity to match a queued or sent comment
-    // against; 'block' deliberately gets none, which is what keeps it additive.
-    var anchor = anchorKind === 'md' ? { kind: 'md', ref: anchorRef } : null;
-    if (anchor && isSentAnchor(blockId, anchor)) btn.classList.add('cb-anchor-sent');
     btn.addEventListener('click', function () {
       if (readonly) return;
-      if (anchor && isSentAnchor(blockId, anchor)) return;
-      openCommentForm(blockId, anchorKind, anchorRef, anchorLabel, '',
-        anchor ? findPendingCommentForAnchor(pendingComments, blockId, anchor) : null);
+      openCommentForm(blockId, 'block', '', '', '', null);
     });
   });
 
@@ -2735,8 +2637,7 @@ export const ui = `
       // comment for why. Read regardless of anchorKind (harmless: only the
       // 'mermaid' branch below uses it), same as every other attribute here.
       var anchorDomRef = form.getAttribute('data-anchor-domref') || '';
-      var anchor = anchorKind === 'md' ? { kind: 'md', ref: anchorRef, label: anchorLabel }
-        : anchorKind === 'dom' ? { kind: 'dom', ref: anchorRef, hint: anchorLabel }
+      var anchor = anchorKind === 'dom' ? { kind: 'dom', ref: anchorRef, hint: anchorLabel }
         : anchorKind === 'mermaid' ? { kind: 'mermaid', ref: anchorRef, domRef: anchorDomRef, hint: anchorLabel }
         : { kind: 'block' };
       // DESIGN.md polish ticket 02 criterion 1: a form reopened on an anchor that
@@ -2807,49 +2708,15 @@ export const ui = `
 
   wireRoot(document);
 
-  // --- click a comment's list entry to highlight the thing it is about ---------
-  //
-  // A markdown-anchored comment names a heading or list item that is right there
-  // on the page; .anchor-target (src/styles.mjs) outlines it. Delegated from the
-  // document rather than wired per element inside wireRoot, deliberately: entries
-  // appear three ways -- server-rendered at load, appended locally the moment a
-  // comment is queued, and inside a round pushed over SSE -- and a single
-  // delegated listener covers all three without any risk of the double-registration
-  // that scoping every wireRoot loop to 'root' exists to prevent.
-  //
-  // Not gated on readonly: highlighting reads the page, it never mutates the
-  // board, and it is exactly as useful in a standalone archive as in a live tab.
-
-  function highlightAnchor(blockId, ref) {
-    qsa('.anchor-target').forEach(function (el) { el.classList.remove('anchor-target'); });
-    if (!ref) return;
-    var section = findBlockEl(document, blockId);
-    if (!section) return;
-    // Matched by iteration, never by splicing ref into a selector string: a ref
-    // containing a quote or bracket would otherwise throw or match the wrong
-    // element (same reasoning as findBlockEl / renderMermaidPins above).
-    var target = null;
-    qsa('.md-content [id]', section).forEach(function (el) {
-      if (!target && el.getAttribute('id') === ref) target = el;
-    });
-    if (!target) return;
-    target.classList.add('anchor-target');
-    if (target.scrollIntoView) target.scrollIntoView({ block: 'center' });
-  }
-
-  document.addEventListener('click', function (ev) {
-    var item = ev.target && ev.target.closest ? ev.target.closest('.comment-item') : null;
-    if (!item) return;
-    // DESIGN.md polish ticket 02: the delete "x" has its own listener, just below --
-    // it must not ALSO trigger this entry's highlight-on-click behaviour.
-    if (ev.target.closest && ev.target.closest('.comment-delete')) return;
-    if (item.getAttribute('data-anchor-kind') !== 'md') return;
-    highlightAnchor(item.getAttribute('data-block-id'), item.getAttribute('data-anchor-ref'));
-  });
+  // (ADR.md entry 28: the "click a comment's list entry to highlight the heading
+  // it is about" gesture lived here, and went with the 'md' anchor kind it was
+  // the reading half of -- an element-level comment on a stage or a diagram
+  // already carries a numbered pin drawn ON the thing it is about, so there is
+  // nothing left for a second, list-side highlight to point at.)
 
   // --- delete a queued (unsent) comment from its own list entry -----------------
-  // (DESIGN.md polish ticket 02, criterion 2). Delegated from the document, same
-  // reasoning as the highlight listener just above: a pending entry can appear
+  // (DESIGN.md polish ticket 02, criterion 2). Delegated from the document: a
+  // pending entry can appear
   // at any time after hydrate (queued locally, or -- reopened and re-edited --
   // rebuilt by refreshPendingCommentItems), so there is no single wireRoot pass
   // that could wire a "delete" button once and for all. A SENT comment's
@@ -3184,6 +3051,10 @@ export const ui = `
   var discussBtn = document.querySelector('button#discuss-btn');
   var sendStatus = document.querySelector('span#send-status');
   var sendBar = document.querySelector('div.send-bar');
+  // Tag-qualified, same reason as every other id-by-string lookup in this file --
+  // '## Questions left' is exactly as mintable as '## Board data' (see the
+  // Send-btn lookup's own comment just below).
+  var questionsLeftPill = document.querySelector('button#questions-left-pill');
 
   /** Collect the open round's answers exactly as they stand right now. Shared
    * verbatim by both actions -- Discuss reads the identical surface Send does, so
@@ -3219,6 +3090,35 @@ export const ui = `
       if (a.status === 'unanswered') outstanding.push(blocks[i]);
     });
     return outstanding;
+  }
+
+  /** Best-known answer to "is the round's own closing rail on screen right now" --
+   * written ONLY by setupSendBarDock's own IntersectionObserver callback, below,
+   * the exact signal that already docks the send bar (DESIGN.md round-end
+   * decisions / ADR.md entry 27: "one IntersectionObserver on the closing rail
+   * drives both, so the two can never disagree and no scroll handler is
+   * introduced"). Defaults to false -- "the rail is not on screen" -- matching
+   * setupSendBarDock's own pre-report default (no '.docked' class until an
+   * intersection actually arrives) and its "no IntersectionObserver at all"
+   * fallback (the bar stays permanently floating): both are exactly the state
+   * this pill assumes too until told otherwise. */
+  var railIntersecting = false;
+
+  /** The pill's own count and label, reusing outstandingBlocks -- the send guard's
+   * own single source of truth for what is still outstanding (criterion 6: the
+   * count "reaches zero exactly when the send guard would no longer arm"; these
+   * two can never disagree, because they read the identical function). Called
+   * from every place an answer can change (below) and from setupSendBarDock's
+   * callback whenever the rail's on-screen state changes -- the union of the two
+   * is "the count or its visibility might now be different". Visible only at a
+   * nonzero count AND the rail off screen (criterion 8: never at zero, and gone
+   * the moment the rail is on screen); text is the button's own accessible name,
+   * so no separate aria-label is needed to satisfy criterion 7. */
+  function updateQuestionsLeftPill() {
+    if (!questionsLeftPill) return;
+    var count = outstandingBlocks().length;
+    questionsLeftPill.textContent = count + (count === 1 ? ' question left' : ' questions left');
+    questionsLeftPill.classList.toggle('visible', count > 0 && !railIntersecting);
   }
 
   /** The round this page can still submit: the latest round that is not yet sent.
@@ -3424,17 +3324,27 @@ export const ui = `
    * elements on the page changes exactly when the set of '.round' sections
    * does -- a round arriving over SSE adds one, a round collapsing into history
    * (markRoundHistory) removes one. No '.round-end' at all (every round sent,
-   * nothing left to reach) leaves the bar in its ordinary floating state. */
+   * nothing left to reach) leaves the bar in its ordinary floating state.
+   *
+   * DESIGN.md round-end decisions / ADR.md entry 27: this is also the pill's own
+   * signal now -- "one IntersectionObserver on the closing rail drives both, so
+   * the two can never disagree and no scroll handler is introduced". railIntersecting
+   * (above) is written ONLY here, and updateQuestionsLeftPill is called on every
+   * branch that changes what it should read -- never a second, independent
+   * observer, which is the whole point. */
   function setupSendBarDock() {
     if (readonly) return;
     if (!sendBar) return;
     if (typeof IntersectionObserver !== 'function') return;
     if (sendBarDockObserver) sendBarDockObserver.disconnect();
     var rail = document.querySelector('.round-end');
-    if (!rail) { sendBar.classList.remove('docked'); return; }
+    if (!rail) { sendBar.classList.remove('docked'); railIntersecting = false; updateQuestionsLeftPill(); return; }
     sendBarDockObserver = new IntersectionObserver(function (entries) {
       var entry = entries[0];
-      sendBar.classList.toggle('docked', !!entry && entry.isIntersecting);
+      var intersecting = !!entry && entry.isIntersecting;
+      sendBar.classList.toggle('docked', intersecting);
+      railIntersecting = intersecting;
+      updateQuestionsLeftPill();
     });
     sendBarDockObserver.observe(rail);
   }
@@ -3638,14 +3548,17 @@ export const ui = `
   // only the modified chord (meta or ctrl -- no platform detection, that exact
   // test on every platform) is ever intercepted.
   //
-  // Advancing to Send is a two-step confirm, not a one-shot send: the first
-  // chord at the last question (or already on Send) ARMS the button -- focuses
-  // it, relabels it, submits nothing -- and only a SECOND chord while armed
-  // calls submitBoard('send'), identically to a mouse click. The deliberate
-  // second keystroke is the confirmation, the same way a single click is a
-  // deliberate act. Escape disarms without sending. Discuss has no keyboard
-  // path at all: it ends board posting for the whole session and is
-  // irreversible, so it stays mouse-only by design.
+  // Arriving at Send -- on the button itself, on the last question, or on a
+  // round with no question blocks at all -- reads outstandingBlocks() and
+  // does exactly what a mouse click on Send would do with that same answer:
+  // nothing outstanding sends on that press, no relabel, no second press
+  // (ADR.md entry 29); anything outstanding arms with the click guard's own
+  // treatment (armSendGuard below) -- scroll, ring, label, Escape, all
+  // identical to a click. The keyboard path never re-derives "outstanding"
+  // itself, so it can never disagree with what submitBoard or the click guard
+  // see. Escape disarms without sending. Discuss has no keyboard path at all:
+  // it ends board posting for the whole session and is irreversible, so it
+  // stays mouse-only by design.
   //
   // Advance always targets the NEXT question's note field, never "the next
   // unanswered one" -- a key that jumps a different distance depending on
@@ -3653,32 +3566,23 @@ export const ui = `
   //
   // sendArmed is shared with the plain mouse click on Send (see the sendBtn
   // listener above, which calls armSendGuard/disarmSend below) -- one flag,
-  // not two independently tracked "armed" states, so Escape disarms whichever
-  // way the button got armed and a press from either input is what a second
-  // press from EITHER input expects: submit. The two arm flavors stay visually
-  // distinct because they mean different things -- armSend (keyboard, reaching
-  // the end of a traversal) is "you're done, confirm"; armSendGuard (a click
-  // with questions still outstanding, DESIGN.md round-end criteria 3-5) is "this
-  // round isn't finished, are you sure" -- but both set the identical sendArmed
-  // flag and both are undone by the identical disarmSend.
+  // one arm (armSendGuard), one way out (disarmSend), reached from either
+  // input. There used to be a second, keyboard-only arm (armSend, "you're
+  // done, confirm") that fired unconditionally on arrival regardless of what
+  // was outstanding -- deleted along with its label (ADR.md entry 29):
+  // arriving at Send now always means what a click on Send means.
 
   var sendArmed = false;
   var sendOriginalLabel = sendBtn ? sendBtn.textContent : '';
   var flaggedBlock = null; // the outstanding question-block armSendGuard rang, if any
 
-  function armSend() {
-    if (!sendBtn) return;
-    sendBtn.focus();
-    sendBtn.textContent = 'Press Enter again to send';
-    sendArmed = true;
-  }
-
-  /** The click guard's own arm: scrolls to and rings the first outstanding
-   * question (outstanding[0], already in round order -- see
-   * outstandingBlocks) and relabels Send with the count and its warning
-   * treatment, correctly singular at exactly one. Never called with an empty
-   * outstanding array -- the sendBtn click listener only reaches here when
-   * there is something to flag. */
+  /** Scrolls to and rings the first outstanding question (outstanding[0],
+   * already in round order -- see outstandingBlocks) and relabels Send with
+   * the count and its warning treatment, correctly singular at exactly one.
+   * The one arm the page has: reached from a mouse click on Send and from
+   * Cmd+Enter arriving at Send, identically either way. Never called with an
+   * empty outstanding array -- both callers only reach here when there is
+   * something to flag. */
   function armSendGuard(outstanding) {
     if (!sendBtn) return;
     flaggedBlock = outstanding[0];
@@ -3697,9 +3601,9 @@ export const ui = `
     sendBtn.textContent = sendOriginalLabel;
     sendArmed = false;
     if (flaggedBlock) {
-      // Only the guard flavor touches the warning class, the ring, and
-      // send-status -- armSend (plain keyboard arm) never sets any of these,
-      // so a Cmd+Enter arm/disarm leaves send-status exactly as it found it.
+      // Guards a disarm fired when nothing was actually armed (e.g. Escape
+      // on an unarmed board) -- armSendGuard is the only arm left, and it
+      // always sets flaggedBlock in the same call that sets sendArmed.
       sendBtn.classList.remove('warn');
       flaggedBlock.classList.remove('flagged');
       flaggedBlock = null;
@@ -3716,6 +3620,24 @@ export const ui = `
     if (!el) return;
     el.focus();
     if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+  }
+
+  /** DESIGN.md round-end decisions / ADR.md entry 27: "the pill's click target is
+   * the send guard's target, not a second notion of 'next question'" -- the exact
+   * same outstandingBlocks()[0] armSendGuard flags, reached the same way the
+   * Cmd+Enter traversal already lands on a question (focusNoteField), rather than
+   * armSendGuard's own scroll-and-ring: the pill leaves the guard alone entirely
+   * (never touches sendArmed, the 'warn' class or send-status), it only moves the
+   * reviewer there. Gated on commentMode like every other action-taking control
+   * wireRoot wires -- see the single/multi/defer handlers above -- so a click
+   * meant to anchor a comment can never also be read as "go answer this". */
+  if (questionsLeftPill) {
+    questionsLeftPill.addEventListener('click', function () {
+      if (readonly || commentMode) return;
+      var outstanding = outstandingBlocks();
+      if (!outstanding.length) return;
+      focusNoteField(outstanding[0]);
+    });
   }
 
   document.addEventListener('keydown', function (ev) {
@@ -3757,22 +3679,37 @@ export const ui = `
       return;
     }
 
-    ev.preventDefault(); // every branch below either arms Send or moves focus -- never leave the chord to the textarea
+    ev.preventDefault(); // every branch below either arrives at Send or moves focus -- never leave the chord to the textarea
     var blocks = qsa('.round-open .question-block'); // the exact set, exact order, collectAnswers itself walks
-    if ((target && target.closest && target.closest('button#send-btn')) || blocks.length === 0) {
-      armSend();
-      return;
+    var arrived = (target && target.closest && target.closest('button#send-btn')) || blocks.length === 0;
+    if (!arrived) {
+      var current = target && target.closest ? target.closest('.question-block') : null;
+      var idx = current ? blocks.indexOf(current) : -1;
+      if (idx === -1) {
+        // Focus is on the body, the header, etc. -- not inside any open
+        // question block. Start the traversal from the top.
+        focusNoteField(blocks[0]);
+        return;
+      }
+      if (idx !== blocks.length - 1) {
+        focusNoteField(blocks[idx + 1]);
+        return;
+      }
+      // idx === blocks.length - 1: traversal reached the last question, which
+      // arrives at Send exactly like being on the button itself or a round
+      // with no question blocks at all -- fall through to the same rule.
     }
-    var current = target && target.closest ? target.closest('.question-block') : null;
-    var idx = current ? blocks.indexOf(current) : -1;
-    if (idx === -1) {
-      // Focus is on the body, the header, etc. -- not inside any open
-      // question block. Start the traversal from the top.
-      focusNoteField(blocks[0]);
-    } else if (idx === blocks.length - 1) {
-      armSend();
+    // Arrived at Send. Criterion 20/21: read outstandingBlocks() -- the same
+    // rule submitBoard and the click guard use -- and do exactly what a click
+    // on Send would do right now. Nothing outstanding sends on this press, no
+    // relabel, no second press; anything outstanding arms with the click
+    // guard's own treatment (armSendGuard), identical to a click.
+    var outstanding = outstandingBlocks();
+    if (outstanding.length) {
+      armSendGuard(outstanding);
     } else {
-      focusNoteField(blocks[idx + 1]);
+      requestNotifyPermissionFromSend();
+      submitBoard('send');
     }
   });
 
@@ -3781,13 +3718,14 @@ export const ui = `
   // The tab is opened exactly once, for a thread's first board; every later round
   // arrives over SSE into that same tab, so the page itself has to be what tells
   // the reviewer something new landed. Two marks, both page-side, neither of which
-  // steals focus (the whole reason the tab is not reopened): a countless "you owe
-  // an answer" pip drawn onto a data-URI favicon, and -- only when this document
-  // is hidden or unfocused -- a system notification that does carry the round
-  // number, because Notification Center is not a tab strip glanced at in passing.
-  // The title used to carry a "(n) " prefix too; it doesn't any more -- knowing
-  // you owe an answer is worth a glance, knowing it's three answers wasn't worth
-  // the extra mark, so document.title is just left alone.
+  // steals focus (the whole reason the tab is not reopened): the page's own amber
+  // tile carrying a bold ink numeral for how many rounds are owed, drawn onto a
+  // data-URI favicon, and -- only when this document is hidden or unfocused -- a
+  // system notification that does carry the round number, because Notification
+  // Center is not a tab strip glanced at in passing.
+  // The title used to carry a "(n) " prefix too; it doesn't any more -- a numeral
+  // already sitting in the tab mark makes that case weaker, not stronger, so
+  // document.title is just left alone.
   //
   // Every part degrades silently and never blocks: no canvas, no Notification
   // constructor, permission denied or a throw from any of them leaves the round
@@ -3802,45 +3740,53 @@ export const ui = `
   var faviconLink = null;
   var baseFavicon = null;
 
-  /** Draw the countless pending mark as a data URI: no digit anywhere -- it is the
-   * page's own mark with the two colours SWAPPED, an ink tile carrying an amber
-   * pip. Canvas, not a file: PROTOCOL.md's zero-dependency /
-   * single-self-contained-file rule means no new asset can ship beside the page.
-   * Returns null if canvas is unavailable, and the caller just leaves the favicon
-   * alone. Both colours are interpolated from src/styles.mjs's dark palette so the
-   * pip and the tile it replaces can't drift apart (they had: this used to paint a
-   * hardcoded blue that was two palette edits behind --accent).
+  /** Draw the pending mark as a data URI: the SAME amber tile the page's own
+   * unmarked mark uses (src/styles.mjs's MARK_SHAPES -- same fill, same rx 9
+   * corner), carrying a bold ink numeral. No state paints a second tile colour;
+   * ink mass, not a colour swap, is what peripheral vision reads at 16px in a
+   * tab that is by definition unfocused. Canvas, not a file: PROTOCOL.md's
+   * zero-dependency / single-self-contained-file rule means no new asset can
+   * ship beside the page. Canvas TEXT, not another SVG data URI, is deliberate --
+   * SVG favicons resolve fonts inconsistently, and a missing family there would
+   * silently drop the digit and leave a blank amber tile reading as idle, the
+   * worst failure this mark could have. Returns null on any canvas or font
+   * failure, and the caller (setFaviconBadge) just leaves the tab's existing
+   * mark alone rather than risk that blank tile. Both colours are interpolated
+   * from src/styles.mjs's dark palette so the tile and its numeral can't drift
+   * from the page's own mark (they had: this used to paint a hardcoded blue that
+   * was two palette edits behind --accent).
    *
-   * Inverted rather than drawn on the amber tile, because --warning is already how
-   * the product says "waiting on you" everywhere else (.live-dot,
-   * .pending-badge.has-pending): an amber pip on an amber tile is the same object
-   * as idle at 16px, and the tab this has to work in is by definition the
-   * unfocused one, where a value flip is the only change peripheral vision
-   * reliably catches. Same rx 9 as the mark, so idle and pending are one object in
-   * two states rather than two shapes -- which is also why the tile is a roundRect
-   * and not the circle this used to draw. roundRect needs Safari 16.4+ /
-   * Chrome 99+, fine for a macOS-only tool, and where it is missing the catch
-   * below returns null and the tab keeps its unbadged mark. See ADR.md entry 12. */
-  function drawFavicon() {
+   * Sizes are optical, not linear: one digit sets 22px; two digits step down to
+   * 18px rather than scaling proportionally, because the pair reads as one mass
+   * and only its height matters; the 9+ overflow (any count past 99 -- a real
+   * board rarely passes three open rounds, so an honest two-digit count like 12
+   * is worth keeping rather than flattening early) drops to 17px. 22 on a 32px
+   * tile is deliberately oversized -- the digit has to survive the downsample to
+   * 16px, where its stem lands on roughly 1.5 device pixels at 1x. See ADR.md
+   * entry 30, which supersedes entry 12's inverted tile. */
+  function drawFavicon(n) {
     try {
       var canvas = document.createElement('canvas');
       canvas.width = 32;
       canvas.height = 32;
       var ctx = canvas.getContext && canvas.getContext('2d');
       if (!ctx) return null;
-      ctx.fillStyle = '${palettes.dark['--bg']}';
+      ctx.fillStyle = '${palettes.dark['--warning']}';
       ctx.beginPath();
       ctx.roundRect(0, 0, 32, 32, 9);
       ctx.fill();
-      ctx.fillStyle = '${palettes.dark['--warning']}';
-      ctx.beginPath();
-      ctx.arc(16, 16, 6, 0, Math.PI * 2);
-      ctx.fill();
+      var label = n > 99 ? '9+' : String(n);
+      var size = n > 99 ? 17 : (n >= 10 ? 18 : 22);
+      ctx.fillStyle = '${palettes.dark['--accent-ink']}';
+      ctx.font = 'bold ' + size + 'px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, 16, 16.8);
       return canvas.toDataURL('image/png');
     } catch (e) { return null; }
   }
 
-  /** Show (pending truthy) or hide (falsy) the tab's countless favicon mark.
+  /** Show (pending truthy) or hide (falsy) the tab's pending-count favicon mark.
    * Hiding puts back the page's own mark (faviconLink, src/styles.mjs) rather
    * than clearing the href, which would leave the tab blank once every round is
    * answered; the <link> is still created here if the document somehow carries
@@ -3861,7 +3807,7 @@ export const ui = `
         else faviconLink.removeAttribute('href');
         return;
       }
-      var href = drawFavicon();
+      var href = drawFavicon(pending);
       if (href) faviconLink.setAttribute('href', href);
     } catch (e) { /* no favicon mark; the notification still covers a hidden tab */ }
   }
@@ -3916,8 +3862,8 @@ export const ui = `
   }
 
   // Coming back to the tab is the acknowledgement: the mark clears the moment the
-  // document becomes visible/focused again, so a stale favicon pip never outlives
-  // the rounds it stood for.
+  // document becomes visible/focused again, so a stale numeral never outlives
+  // the rounds it counted.
   document.addEventListener('visibilitychange', function () { if (!document.hidden) clearPendingMark(); });
   window.addEventListener('focus', function () { clearPendingMark(); });
 
@@ -4108,6 +4054,12 @@ export const ui = `
     // to look at the document as it stands now, not as it stood before either
     // change landed.
     setupSendBarDock();
+    // The pill's COUNT (unlike the dock/rail half, which only resyncs once the
+    // observer above actually reports) is a plain count over the document as it
+    // now stands, so it is refreshed here rather than waiting on that async
+    // report -- a round collapsing into history or a fresh one arriving both
+    // change what outstandingBlocks() sees.
+    updateQuestionsLeftPill();
 
     // Criterion 8: a round arriving over SSE used to leave the badge reading
     // whatever the page happened to render at load, stale until reload -- the
@@ -4180,6 +4132,10 @@ export const ui = `
     // the dock observer has to re-read the document rather than keep watching a
     // node that may no longer be attached.
     setupSendBarDock();
+    // Same reasoning as applyRoundPush's own call just above it: a plain count
+    // over the document as it now stands, refreshed immediately rather than
+    // waiting on the dock observer's own async report.
+    updateQuestionsLeftPill();
     // U3: same fix as applyRoundPush above -- wireRoot(replacement) ran against
     // a detached node, so any page-scoped pin it drew is positioned wrong now
     // that the section is actually attached. Recompute once, here, after attach.

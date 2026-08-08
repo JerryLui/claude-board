@@ -268,10 +268,17 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
 // uses, live, against the NOW-ATTACHED DOM, and compares it to what the pin
 // actually got.
 
-check('a round that just went sent, pushed over SSE (\'submitted\'), positions an existing PAGE-SCOPED comment\'s pin correctly on its (now historical) markdown block -- not wherever wireRoot(replacement) computed while still detached (ablation: deleting applySubmittedPush\'s post-attach refreshPins call, ticket 09 audit finding U3)', () => {
+check('a round that just went sent, pushed over SSE (\'submitted\'), positions an existing PAGE-SCOPED comment\'s pin correctly on its (now historical) mermaid block -- not wherever wireRoot(replacement) computed while still detached (ablation: deleting applySubmittedPush\'s post-attach refreshPins call, ticket 09 audit finding U3)', () => {
   const board = freshBoard();
-  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: '# H\n\n- alpha\n- beta\n- gamma' }] });
-  const round2BlockId = board.blocks.find(b => b.round === round2).id;
+  // A mermaid block whose source failed to resolve: ADR.md entry 28 leaves
+  // `mermaid` commentable and its `.resolve-error` note is the one part of the
+  // section the generic page-scoped gesture can reach (`pre.mermaid` and
+  // `.stage-wrap` are chrome). This used to be a markdown block with three list
+  // items; markdown carries no page-scoped pin-layer at all now.
+  const round2 = addRound(board, { blocks: [{ kind: 'mermaid', source: { path: 'no-such-diagram-u3.mmd' } }] });
+  const round2Block = board.blocks.find(b => b.round === round2);
+  const round2BlockId = round2Block.id;
+  assert.equal(typeof round2Block.error, 'string', 'setup failure: the pushed block must actually fail to resolve');
 
   // Mint the comment through a REAL client session first, same pattern as the
   // html-stage check above.
@@ -279,9 +286,9 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   const mintDoc = parseHTML(mintHtml);
   new Function('document', 'window', 'location', ui)(mintDoc, mintDoc.defaultView, { protocol: 'http:' });
   enableCommentMode(mintDoc);
-  const mintLi = mintDoc.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha');
-  assert.ok(mintLi, 'setup failure: no "alpha" list item in the minting session\'s markdown block');
-  mintLi.dispatchEvent(new StandInEvent('click'));
+  const mintTarget = mintDoc.querySelector(`[data-block-id="${round2BlockId}"] .resolve-error`);
+  assert.ok(mintTarget, 'setup failure: no .resolve-error note in the minting session\'s mermaid block');
+  mintTarget.dispatchEvent(new StandInEvent('click'));
   const mintForm = mintDoc.getElementById('comment-form-' + round2BlockId);
   assert.ok(mintForm && mintForm.classList.contains('open'), 'setup failure: minting the comment through the real client did not open its form');
   const mintedAnchor = {
@@ -289,8 +296,9 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
     ref: mintForm.getAttribute('data-anchor-ref'),
     hint: mintForm.getAttribute('data-anchor-label'),
   };
+  assert.equal(mintedAnchor.kind, 'dom', 'setup failure: the generic page-scoped gesture must mint a dom anchor');
 
-  applySubmit(board, { action: 'send', answers: [], comments: [{ blockId: round2BlockId, anchor: mintedAnchor, text: 'nice list' }] }, round2);
+  applySubmit(board, { action: 'send', answers: [], comments: [{ blockId: round2BlockId, anchor: mintedAnchor, text: 'what happened here' }] }, round2);
 
   // A second, already-open tab, about to receive the 'submitted' push.
   const { document, es } = loadBoardWithEventSource(mintHtml);
@@ -300,24 +308,24 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   es.dispatch('submitted', JSON.stringify(payload));
 
   const section = document.querySelector(`[data-block-id="${round2BlockId}"]`);
-  assert.ok(section, 'setup failure: the submitted round\'s markdown block is not in the document after the push');
+  assert.ok(section, 'setup failure: the submitted round\'s mermaid block is not in the document after the push');
   const roundSection = document.querySelector('.round[data-round="' + round2 + '"]');
   assert.equal(roundSection.classList.contains('round-history'), true, 'a submitted push must collapse the round into history');
 
   const layer = Array.prototype.slice.call(section.children).find(c => c.classList && c.classList.contains('pin-layer'));
-  assert.ok(layer, 'setup failure: the swapped-in markdown block has no page-scoped pin-layer');
+  assert.ok(layer, 'setup failure: the swapped-in mermaid block has no page-scoped pin-layer');
   const pins = layer.querySelectorAll('.anchor-pin');
-  assert.equal(pins.length, 1, `expected the pre-existing comment's pin to render on the swapped-in (historical) markdown block, got ${pins.length}`);
+  assert.equal(pins.length, 1, `expected the pre-existing comment's pin to render on the swapped-in (historical) mermaid block, got ${pins.length}`);
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'the comment minted against this exact element moments earlier must not render as lost');
 
-  const li = section.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha');
-  assert.ok(li, 'setup failure: no "alpha" list item in the swapped-in (second-tab) section');
-  const liBox = li.getBoundingClientRect();
+  const note = section.querySelector('.resolve-error');
+  assert.ok(note, 'setup failure: no .resolve-error note in the swapped-in (second-tab) section');
+  const noteBox = note.getBoundingClientRect();
   const sectionBox = section.getBoundingClientRect();
-  const expectedLeft = liBox.left - sectionBox.left;
-  const expectedTop = liBox.top - sectionBox.top;
-  assert.equal(pins[0].style.left, expectedLeft + 'px', `expected the pin positioned at the ATTACHED "alpha" list item (${expectedLeft}px), got ${JSON.stringify(pins[0].style.left)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
-  assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the ATTACHED "alpha" list item (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
+  const expectedLeft = noteBox.left - sectionBox.left;
+  const expectedTop = noteBox.top - sectionBox.top;
+  assert.equal(pins[0].style.left, expectedLeft + 'px', `expected the pin positioned at the ATTACHED .resolve-error note (${expectedLeft}px), got ${JSON.stringify(pins[0].style.left)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
+  assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the ATTACHED .resolve-error note (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
 });
 
 // --- ticket 04, criterion 8: the round badge used to be written server-side ---

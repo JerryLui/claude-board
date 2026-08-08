@@ -577,7 +577,10 @@ function formatAnchor(anchor) {
   if (!anchor || !anchor.kind) return 'whole block';
   switch (anchor.kind) {
     case 'block': return 'whole block';
-    case 'md': return `md:${anchor.ref}${anchor.label ? ` ("${anchor.label}")` : ''}`;
+    // No `md` case: ADR.md entry 28 deleted that anchor kind along with the
+    // affordance that minted it. An `md` anchor stored on an archived board is
+    // rejected by src/board.mjs's sanitizeAnchor before it can reach a packet, and
+    // one hand-edited into a board file falls through to the default below.
     case 'dom': return `dom:${anchor.ref}${anchor.hint ? ` ("${anchor.hint}")` : ''}`;
     // Ticket 05: a diagram node's anchor carries a hint too (composeHint, the same
     // rule as every other element-level anchor) -- prefer it exactly like `dom`

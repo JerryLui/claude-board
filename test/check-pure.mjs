@@ -29,9 +29,10 @@ import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd,
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { ui } from '../src/ui.mjs';
-import { styles, palettes, faviconLink } from '../src/styles.mjs';
+import { styles, palettes, faviconLink, restFaviconHref } from '../src/styles.mjs';
 import { indexScript, buildThreadIndex, renderIndexPage, folderName, roundCount } from '../src/indexpage.mjs';
 import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
+import { TOMATO_ICON, REST_ICON } from '../src/pomodoro-widget.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
 import { badgeLabel } from '../src/badge.mjs';
@@ -689,7 +690,10 @@ check('packet shape names board, round, and every question status/choice/note', 
   const board = createBoard({
     title: 'Widget check',
     blocks: [
-      { kind: 'markdown', text: '# Acceptance Criteria\n\n- one\n- two' },
+      // A diagram, not prose: ADR.md entry 28 deleted the `md` anchor kind along
+      // with the affordance that minted it, so the resolved/lost pair below is
+      // carried by the two kinds that are still commentable.
+      { kind: 'mermaid', text: 'flowchart LR\n  one --> two' },
       { kind: 'question', prompt: 'Answered?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
       { kind: 'question', prompt: 'Untouched?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] },
       { kind: 'question', prompt: 'Deferred?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }] },
@@ -704,8 +708,8 @@ check('packet shape names board, round, and every question status/choice/note', 
       // q2 deliberately left out -> must come back explicitly unanswered
     ],
     comments: [
-      { blockId: 'd1', anchor: { kind: 'md', ref: 'acceptance-criteria-li2', label: 'two' }, text: 'criterion 2 needs work' },
-      { blockId: 'd1', anchor: { kind: 'md', ref: 'acceptance-criteria-li9', label: 'ghost' }, text: 'anchor that no longer exists' },
+      { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'two' }, text: 'criterion 2 needs work' },
+      { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'ghost' }, text: 'anchor that no longer exists' },
       { blockId: 'q1', anchor: { kind: 'block' }, text: 'whole-block comment' },
     ],
   }, 1);
@@ -729,14 +733,14 @@ check('packet shape names board, round, and every question status/choice/note', 
   assert.equal(byId.q3.note, 'ask later');
 
   assert.equal(packet.comments.length, 3);
-  const resolved = packet.comments.find(c => c.anchor.ref === 'acceptance-criteria-li2');
+  const resolved = packet.comments.find(c => c.anchor.ref === 'two');
   assert.equal(resolved.resolved, true);
-  assert.equal(resolved.blockKind, 'markdown');
+  assert.equal(resolved.blockKind, 'mermaid');
   assert.equal(resolved.lost, undefined);
 
-  const lost = packet.comments.find(c => c.anchor.ref === 'acceptance-criteria-li9');
+  const lost = packet.comments.find(c => c.anchor.ref === 'ghost');
   assert.equal(lost.resolved, false);
-  assert.equal(lost.lost, 'acceptance-criteria-li9');
+  assert.equal(lost.lost, 'ghost');
 
   const blockLevel = packet.comments.find(c => c.blockId === 'q1');
   assert.equal(blockLevel.resolved, true);
@@ -1667,8 +1671,13 @@ check('renderBoardPage is a pure function that inlines its own board JSON', () =
   assert.equal(html1, html2);
   assert.ok(html1.includes('id="board-data"'));
   assert.ok(html1.includes(JSON.stringify(board.id)));
+  // The heading/list-item `id` attributes survive ADR.md entry 28 -- they are what
+  // test/check-archive-ids.mjs's collision guard is about and what a `section:`
+  // reference slugifies against (src/resolve.mjs). What went with entry 28 is the
+  // inline anchor BUTTON that used to sit beside them (`data-anchor-ref`).
   assert.ok(html1.includes('id="acceptance-criteria"'));
-  assert.ok(html1.includes('data-anchor-ref="acceptance-criteria-li1"'));
+  assert.ok(!html1.includes('data-anchor-ref="acceptance-criteria-li1"'),
+    'a markdown heading/list item must carry no comment anchor button (ADR.md entry 28)');
   assert.ok(html1.includes('data-choice="A"'));
   assert.ok(html1.includes('id="send-btn"'));
 });
@@ -2041,20 +2050,20 @@ check('a history round\'s comment form is disabled too, on every CONTENT block k
   // fresh page load of a board with a sent round left every comment form fully
   // live even though the round's answer controls were correctly disabled --
   // divergent from what the client-side collapse (markRoundHistory) already did.
-  // Covers code too, not just markdown, since renderBlock threads `historical`
-  // into every CONTENT kind's commentArea call. `question` is deliberately not
-  // one of the two fixture blocks any more (ADR "Commenting is confined to
-  // content blocks", 2026-08-01): it carries no commentArea at all, so it would
-  // prove nothing about historical-threading here.
+  // Covers both commentable kinds, since renderBlock threads `historical` into
+  // each one's commentArea call. `question`/`compare` are deliberately not fixture
+  // blocks (ADR.md entry 6) and neither are `markdown`/`code` any more (entry 28):
+  // none of the four carries a commentArea at all, so none would prove anything
+  // about historical-threading here.
   const board = createBoard({
     title: 'Comment form disabled',
     blocks: [
-      { kind: 'markdown', text: '# Notes' },
-      { kind: 'code', text: 'const x = 1;', lang: 'javascript' },
+      { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
+      { kind: 'html', html: '<div class="mock"></div>' },
     ],
   });
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
-  addRound(board, { blocks: [{ kind: 'markdown', text: '# more' }] });
+  addRound(board, { blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  C --> D' }] });
 
   const html = renderBoardPage(board);
   const historySection = /<section class="round round-history"[\s\S]*?<section class="round round-open"/.exec(html)[0];
@@ -2120,9 +2129,11 @@ check('all five context kinds render into the page: markdown, code, mermaid, htm
   assert.ok(markup.includes('some text'));
 
   assert.ok(markup.includes('class="block code-block"'));
-  // Ticket 03: every source line is its own element (criterion 1's "a line of a
-  // code reference" needs an element the generic dom anchor can build a path to).
-  assert.ok(markup.includes('<pre><code><span class="code-line">const x = 1;</span></code></pre>'));
+  // ADR.md entry 28 deleted the per-line `<span class="code-line">` wrapping with
+  // the affordance behind it: a code line is no longer a comment target anywhere,
+  // so the body is the escaped text and nothing else.
+  assert.ok(markup.includes('<pre><code>const x = 1;</code></pre>'));
+  assert.ok(!markup.includes('code-line'), 'a code block must emit no per-line anchor spans');
   assert.ok(markup.includes('Code · javascript'));
 
   assert.ok(markup.includes('class="block mermaid-block"'));
@@ -2201,9 +2212,9 @@ check('criterion 2: a compare block renders no comment button, no comment form, 
   assert.ok(!markup.slice(wrapperStart, gridStart).includes('class="pin-layer"'), 'no pin-layer between the compare wrapper\'s kicker and its grid');
 });
 
-check('criterion 1 + the ADR\'s wrapper/content split: markdown, mermaid, html and code keep their comment button, form and pin-layer exactly as before -- unaffected by the question/compare narrowing', () => {
+check('criterion 18 / ADR.md entry 28: mermaid and html keep their comment button, form and pin-layer; markdown and code carry none of it', () => {
   const board = createBoard({
-    title: 'Content kinds keep their button',
+    title: 'Only the rendered kinds keep their button',
     blocks: [
       { kind: 'markdown', text: '# Prose' },
       { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
@@ -2214,64 +2225,85 @@ check('criterion 1 + the ADR\'s wrapper/content split: markdown, mermaid, html a
   const [mdId, mermaidId, htmlId, codeId] = board.blocks.map(b => b.id);
   const markup = renderedMarkup(renderBoardPage(board));
 
-  for (const id of [mdId, mermaidId, htmlId, codeId]) {
+  for (const id of [mermaidId, htmlId]) {
     assert.ok(markup.includes(`data-block-id="${id}" data-anchor-kind="block"`), `expected a whole-block comment button for ${id}`);
     assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${id}"`), `expected a comment-form for ${id}`);
     assert.ok(markup.includes(`id="comment-target-${id}"`), `expected a comment-target for ${id}`);
     assert.ok(markup.includes(`id="comment-list-${id}"`), `expected a comment-list for ${id}`);
   }
+  for (const id of [mdId, codeId]) {
+    assert.ok(!markup.includes(`data-block-id="${id}" data-anchor-kind="block"`), `a markdown/code block must render no comment button (${id})`);
+    assert.ok(!markup.includes(`comment-form-${id}`), `a markdown/code block must render no comment form (${id})`);
+    assert.ok(!markup.includes(`comment-target-${id}`), `a markdown/code block must render no comment target (${id})`);
+    assert.ok(!markup.includes(`comment-list-${id}`), `a markdown/code block must render no comment list (${id})`);
+    const section = markup.slice(markup.indexOf(`data-block-id="${id}"`));
+    assert.ok(!section.slice(0, section.indexOf('</section>')).includes('class="pin-layer"'),
+      `a markdown/code block's own section must carry no page-scoped pin-layer (${id})`);
+  }
 });
 
 check('criterion 7: the whole-block comment button still opens the comment form when a content block has nothing to point at -- a failed reference, and an empty stage', () => {
-  // A reference that failed to resolve: markdown and code both render a
-  // .resolve-error note instead of content, but the button/form survive --
-  // they live in the kicker/commentArea, outside the `block.error` branch.
+  // A reference that failed to resolve renders a .resolve-error note instead of
+  // content, but the button/form survive -- they live in the kicker/commentArea,
+  // outside the `block.error` branch. Checked on `mermaid` rather than `code`:
+  // ADR.md entry 28 leaves a code block no button to survive with.
   const board = createBoard({
     title: 'Blank content, button still works',
     cwd: fixturesDir,
     blocks: [
-      { kind: 'code', source: { path: 'does-not-exist.js' } },
+      { kind: 'mermaid', source: { path: 'does-not-exist.mmd' } },
       { kind: 'html', html: '' }, // a stage that came up blank
     ],
   });
-  const codeId = board.blocks[0].id;
+  const diagramId = board.blocks[0].id;
   const htmlId = board.blocks[1].id;
   const markup = renderedMarkup(renderBoardPage(board));
 
-  assert.ok(markup.includes('class="resolve-error"'), 'setup failure: the code block must have failed to resolve');
-  assert.ok(markup.includes(`data-block-id="${codeId}" data-anchor-kind="block"`), 'a code block with a failed reference must still render its whole-block comment button');
-  assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${codeId}"`), 'and still render the form that button opens');
+  assert.ok(markup.includes('class="resolve-error"'), 'setup failure: the mermaid block must have failed to resolve');
+  assert.ok(markup.includes(`data-block-id="${diagramId}" data-anchor-kind="block"`), 'a mermaid block with a failed reference must still render its whole-block comment button');
+  assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${diagramId}"`), 'and still render the form that button opens');
 
   assert.ok(markup.includes(`data-block-id="${htmlId}" data-anchor-kind="block"`), 'an html block with a blank stage must still render its whole-block comment button');
   assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${htmlId}"`), 'and still render the form that button opens');
 });
 
-check('a question\'s nested context block and a compare side\'s nested block keep their own comment button/form/pin-layer untouched -- the rule is about the wrapper, not what is inside it', () => {
+check('criterion 17: a rendered kind nested inside a question\'s context or a compare side keeps its own comment button and form -- and a markdown one in the same slot keeps none', () => {
   const board = createBoard({
-    title: 'Nested blocks stay commentable',
+    title: 'Nested blocks are judged on their own kind',
     blocks: [
       {
         kind: 'question',
         prompt: 'Ship it?',
         widget: 'single',
         options: [{ label: 'Yes' }],
-        context: [{ kind: 'markdown', text: '# Context' }],
+        context: [
+          { kind: 'html', html: '<div class="mock"></div>' },
+          { kind: 'markdown', text: '# Context' },
+        ],
       },
       {
         kind: 'compare',
-        left: { label: 'Before', block: { kind: 'markdown', text: '# Before' } },
-        right: { label: 'After', block: { kind: 'markdown', text: '# After' } },
+        left: { label: 'Before', block: { kind: 'mermaid', text: 'flowchart LR\n  A --> B' } },
+        right: { label: 'After', block: { kind: 'code', text: 'const x = 1;', lang: 'javascript' } },
       },
     ],
   });
-  const contextId = board.blocks[0].context[0].id;
+  const contextStageId = board.blocks[0].context[0].id;
+  const contextProseId = board.blocks[0].context[1].id;
   const leftId = board.blocks[1].left.block.id;
   const rightId = board.blocks[1].right.block.id;
   const markup = renderedMarkup(renderBoardPage(board));
 
-  for (const id of [contextId, leftId, rightId]) {
+  // ADR.md entry 28 draws the rule on kind, never on position: these two are as
+  // commentable nested as they would be at the top level.
+  for (const id of [contextStageId, leftId]) {
     assert.ok(markup.includes(`data-block-id="${id}" data-anchor-kind="block"`), `expected a whole-block comment button for nested block ${id}`);
     assert.ok(markup.includes(`<form class="comment-form" id="comment-form-${id}"`), `expected a comment-form for nested block ${id}`);
+  }
+  // ...and these two are as inert nested as they would be at the top level.
+  for (const id of [contextProseId, rightId]) {
+    assert.ok(!markup.includes(`data-block-id="${id}" data-anchor-kind="block"`), `a nested markdown/code block must render no comment button (${id})`);
+    assert.ok(!markup.includes(`comment-form-${id}`), `a nested markdown/code block must render no comment form (${id})`);
   }
 });
 
@@ -2509,7 +2541,12 @@ check('a mermaid-anchored comment renders its node id and number in the block\'s
   assert.ok(markup.includes('#2 · lost: Ghost'));
 });
 
-check('a question carrying non-markdown context kinds normalises and renders them inline', () => {
+// ADR.md entry 26: this board's context carries an 'html' block, so the question
+// carries a rendered stage and renders full width -- context stacks as prose
+// inside .question-main (.question-context-prose), never the .question-context
+// card. See the "full width, context as prose" block below for the stage-free
+// counterpart, which still gets the old .question-context card unchanged.
+check('a question carrying non-markdown context kinds normalises and renders them inline, as prose once one of them is a rendered stage', () => {
   const board = createBoard({
     title: 'Question with mixed context',
     blocks: [{
@@ -2528,9 +2565,191 @@ check('a question carrying non-markdown context kinds normalises and renders the
   assert.equal(q.context[0].kind, 'mermaid');
   assert.equal(q.context[1].kind, 'html');
   const markup = renderedMarkup(renderBoardPage(board));
-  assert.ok(markup.includes('class="question-context"'));
+  assert.ok(!markup.includes('class="question-context"'), 'a stage-carrying question must not render the .question-context card');
+  assert.ok(markup.includes('class="question-context-prose"'));
   assert.ok(markup.includes('<pre class="mermaid">flowchart TD'));
   assert.ok(markup.includes('class="html-stage"'));
+});
+
+// --- ADR.md entry 26: full width, context as prose ---------------------------
+//
+// See DESIGN.md Decisions -> "The full-width rule keys on the presence of a
+// rendered stage, not on the widget" and ADR.md entry 26. Two changes, one
+// condition (src/render.mjs's questionCarriesStage): a question whose options
+// or context carry a rendered stage (an 'html' block, whole or nested inside a
+// 'compare' side) drops its .question-context card and renders context as bare
+// prose inside .question-main instead -- no .block card, no .block-kicker, no
+// comment button/form/pin-layer on the context items themselves. A question
+// with no stage anywhere renders exactly as it did before this entry: unchanged.
+
+check('criterion 15: a question whose CONTEXT carries a rendered stage renders full width -- no .question-context card, no second grid column', () => {
+  const board = createBoard({
+    title: 'Stage in context',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Does this mock look right?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [{ kind: 'html', html: '<button>Ship</button>' }],
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(!markup.includes('class="question-context"'), 'must not render the two-column card wrapper');
+  assert.ok(markup.includes('class="question-context-prose"'), 'must render the prose wrapper instead');
+  assert.ok(markup.includes('class="html-stage"'), 'the stage itself must still render');
+});
+
+check('criterion 15: a question whose OPTIONS carry a rendered stage (choose-between-rendered-variants) ALSO renders full width when it has unrelated context too', () => {
+  const board = createBoard({
+    title: 'Stage in options, plain context',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which mock is right?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'html', html: '<p>a</p>' } },
+        { label: 'B', block: { kind: 'html', html: '<p>b</p>' } },
+      ],
+      context: [{ kind: 'markdown', text: 'Some code excerpt as context.' }],
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(!markup.includes('class="question-context"'), 'the rule keys on the stage in OPTIONS, not on what kind the context happens to be');
+  assert.ok(markup.includes('class="question-context-prose"'));
+});
+
+check('criterion 15 (negative case): a question with NO rendered stage anywhere -- in options or context -- is genuinely unaffected and keeps the .question-context card (ablation: this must fail if questionCarriesStage or the branch reading it is ever deleted in favour of "always full width")', () => {
+  const board = createBoard({
+    title: 'No stage anywhere',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Ship it?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [{ kind: 'markdown', text: 'Some prose context, no mock.' }],
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('class="question-context"'), 'a stage-free question must keep today\'s .question-context card');
+  assert.ok(!markup.includes('class="question-context-prose"'), 'and must never render the prose wrapper');
+  // The card still goes through the ordinary renderBlock path -- kicker, comment
+  // button and all -- exactly as it did before this entry.
+  assert.ok(markup.includes('Markdown'), 'the nested block\'s own kicker label must still render, unaffected');
+});
+
+check('criterion 15: a stage nested inside a compare side, inside a question\'s context, also counts as a rendered stage (blockCarriesStage recurses into compare)', () => {
+  const board = createBoard({
+    title: 'Stage inside compare inside context',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Before or after?',
+      widget: 'single',
+      options: [{ label: 'Before' }, { label: 'After' }],
+      context: [{
+        kind: 'compare',
+        left: { label: 'Before', block: { kind: 'markdown', text: 'old copy' } },
+        right: { label: 'After', block: { kind: 'html', html: '<p>new mock</p>' } },
+      }],
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(!markup.includes('class="question-context"'), 'a stage nested inside a compare side must still trigger full width');
+  assert.ok(markup.includes('class="question-context-prose"'));
+  assert.ok(markup.includes('class="compare-grid"'), 'the compare\'s own side-by-side grid is untouched, out of scope');
+  assert.ok(markup.includes('class="html-stage"'));
+});
+
+check('criterion 16: a stage-carrying question\'s context renders no card, no border-carrying wrapper, and no kicker -- only prose, above the options', () => {
+  const board = createBoard({
+    title: 'No card, no kicker',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Read this note, then pick.',
+      widget: 'single',
+      options: [{ label: 'A' }, { label: 'B' }],
+      context: [
+        { kind: 'markdown', text: 'A short note.' },
+        { kind: 'html', html: '<p>the mock</p>' },
+      ],
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const sectionStart = markup.indexOf('<section class="block question-block"');
+  const sectionEnd = markup.indexOf('</section>', sectionStart) + '</section>'.length;
+  const section = markup.slice(sectionStart, sectionEnd);
+
+  // Scoped to the context prose region alone -- the question's OWN top-level
+  // kicker ("Question · single") legitimately keeps .block-kicker, so the
+  // absence check has to look only between the prose wrapper and the options,
+  // not across the whole section.
+  const contextIdx = section.indexOf('question-context-prose');
+  const optionsIdx = section.indexOf('class="options"');
+  assert.ok(contextIdx !== -1 && optionsIdx !== -1 && contextIdx < optionsIdx, 'setup failure: must find both markers in order');
+  const contextRegion = section.slice(contextIdx, optionsIdx);
+
+  // No card, no border-carrying wrapper, no kicker label anywhere in the context
+  // prose -- the markdown context's own "Markdown" kicker text (which the
+  // pre-existing renderBlock path would have emitted) must be entirely absent.
+  assert.ok(!contextRegion.includes('block-kicker'), 'no .block-kicker inside the context prose');
+  assert.ok(!contextRegion.includes('>Markdown<'), 'no "Markdown" kicker label for the context markdown item');
+  assert.ok(!contextRegion.includes('class="block '), 'no .block card wrapper on a context item');
+
+  // The comment affordance is scoped per ITEM, by kind. This check used to assert
+  // "no comment-btn, no comment-form anywhere in the context prose", which was
+  // ADR.md entry 26's "no comment control" read across every kind at once. Entry
+  // 28 supersedes that half of 26: the rule is drawn on kind and never on
+  // position, so the html item here keeps the affordance it has everywhere else,
+  // and the markdown item beside it keeps none. Criterion 16's own words -- "no
+  // card, no border, no kicker" -- are asserted above and are untouched by that:
+  // a comment button is none of the three.
+  const proseItem = markdownContextId => {
+    const start = contextRegion.indexOf(`data-block-id="${markdownContextId}"`);
+    assert.ok(start !== -1, `setup failure: no context item for ${markdownContextId}`);
+    const next = contextRegion.indexOf('class="context-item', start);
+    return contextRegion.slice(start, next === -1 ? contextRegion.length : next);
+  };
+  const mdItem = proseItem(board.blocks[0].context[0].id);
+  const stageItem = proseItem(board.blocks[0].context[1].id);
+  assert.ok(!mdItem.includes('comment-btn'), 'no whole-block comment button on a markdown context item');
+  assert.ok(!mdItem.includes('comment-form-'), 'no comment form on a markdown context item');
+  assert.ok(!mdItem.includes('pin-layer'), 'no pin layer on a markdown context item');
+  assert.ok(stageItem.includes('comment-btn'), 'an html stage in a question\'s context keeps its comment button (ADR.md entry 28)');
+  assert.ok(stageItem.includes(`comment-form-${board.blocks[0].context[1].id}`), 'and its own comment form');
+
+  // Prose, positioned between the prompt and the options.
+  const promptIdx = section.indexOf('question-prompt');
+  assert.ok(promptIdx < contextIdx && contextIdx < optionsIdx, 'context prose must sit under the prompt and above the options');
+});
+
+check('criteria 16 + 18: a code block in a stage-carrying question\'s context renders as plain prose -- no per-line anchor spans, no comment affordance, and no ReferenceError on the way', () => {
+  // The prose context path is the one place `code` is rendered by something
+  // other than renderCodeBlock. When ADR.md entry 28 deleted renderCodeLines it
+  // was still being CALLED from there, so this whole branch threw
+  // "renderCodeLines is not defined" -- unreachable from every other fixture in
+  // the suite, because a code context item only reaches it alongside a stage.
+  const board = createBoard({
+    title: 'Code beside a stage',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Does the mock match the snippet?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [
+        { kind: 'html', html: '<p>the mock</p>' },
+        { kind: 'code', text: 'const x = 1;\nconst y = 2;', lang: 'javascript' },
+      ],
+    }],
+  });
+  const codeId = board.blocks[0].context[1].id;
+  let markup;
+  assert.doesNotThrow(() => { markup = renderedMarkup(renderBoardPage(board)); },
+    'a code block in a stage-carrying question\'s context must render at all');
+
+  assert.ok(markup.includes('class="question-context-prose"'), 'setup failure: this fixture must take the prose context path');
+  assert.ok(markup.includes('<pre><code>const x = 1;\nconst y = 2;</code></pre>'), 'the snippet renders as plain escaped text');
+  assert.ok(!markup.includes('code-line'), 'no per-line anchor spans anywhere (ADR.md entry 28)');
+  assert.ok(!markup.includes(`comment-form-${codeId}`), 'a code context item carries no comment form');
+  assert.ok(!markup.includes(`data-block-id="${codeId}" data-anchor-kind="block"`), 'and no comment button');
 });
 
 // --- ticket 05: snapshot and standalone archive ------------------------------------
@@ -4030,10 +4249,14 @@ check('L1: an anchor label is the raw source text, escaped once at emit time -- 
   assert.equal(anchors[0].label, 'Risk & Reward');
   assert.equal(anchors[1].label, 'a & b');
   assert.ok(html.includes('Risk &amp; Reward'), 'the HTML body itself is still escaped exactly once');
+  // The rendered page used to carry the same label on an inline anchor button;
+  // ADR.md entry 28 deleted that button, so what is pinned here is the escaping of
+  // the body itself, which must still happen exactly once.
   const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', text: '## Risk & Reward\n' }] });
   const markup = renderedMarkup(renderBoardPage(board));
-  assert.ok(markup.includes('data-anchor-label="Risk &amp; Reward"'));
+  assert.ok(markup.includes('Risk &amp; Reward'));
   assert.ok(!markup.includes('Risk &amp;amp; Reward'));
+  assert.ok(!markup.includes('data-anchor-label'), 'no markdown anchor button carries a label any more');
 });
 
 // --- N6 / N7 / N8: the two heading scanners must agree, and ids must be unique ----
@@ -4582,7 +4805,9 @@ check('choose-between-rendered-variants: a click on the option\'s own comment bu
     title: 'variants',
     blocks: [{
       kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
-      options: [{ label: 'A', block: { kind: 'markdown', text: '# heading' } }],
+      // An html option, not a markdown one: ADR.md entry 28 leaves a markdown
+      // block no comment button anywhere, nested in a variant card included.
+      options: [{ label: 'A', block: { kind: 'html', html: '<div class="mock"><button>Go</button></div>' } }],
     }],
   });
   const document = loadVariantBoard(board);
@@ -5198,12 +5423,12 @@ check('removePendingComment with an id that matches nothing queued is a no-op', 
 
 // --- P2 (page side): mark the tab and notify, never steal focus ---------------
 //
-// DESIGN.md Decisions -> "Open once, then badge and notify": a countless mark on
-// the favicon, and a macOS notification instead of a focus steal when the tab is
-// open but unfocused. The title used to carry a "(n) " prefix and the favicon
-// used to carry a digit; both lost their count -- knowing you owe an answer is
-// worth a glance, knowing it's three answers wasn't worth a second mark that
-// could drift out of sync with the round count.
+// DESIGN.md Decisions -> "Open once, then badge and notify": the page's own
+// amber tile carrying a bold ink numeral on the favicon, and a macOS
+// notification instead of a focus steal when the tab is open but unfocused.
+// The title used to carry a "(n) " prefix; it lost it for good -- a numeral
+// already sitting in the tab mark makes that case weaker, not stronger, so
+// document.title stays untouched even though the mark itself counts again.
 
 check('document.title never takes a pending-count prefix -- setTitleBadge is gone, not just unused', () => {
   assert.equal(namedFunctionBody(ui, 'setTitleBadge'), null, 'the "(n) " title prefix must be deleted, not left as dead code');
@@ -5224,58 +5449,128 @@ check('an SSE round push marks the tab: favicon mark and a notification, no titl
   assert.match(mark, /if \(readonly\) return;/, 'marking must be inert in readonly mode');
 });
 
-check('the favicon mark is drawn inline as a data URI, with no digit -- countless, not zero', () => {
+check('the favicon mark draws the page\'s own amber tile with a bold ink numeral -- no inverted tile anywhere', () => {
   const draw = namedFunctionBody(ui, 'drawFavicon');
   assert.ok(draw, 'expected drawFavicon in src/ui.mjs');
   assert.match(draw, /createElement\('canvas'\)/);
   assert.match(draw, /toDataURL\(/, 'the mark must be a data URI the page draws, not a fetched or bundled file');
-  assert.ok(!/fillText/.test(draw), 'no digit may be drawn onto the favicon any more -- the mark is countless');
-  assert.ok(!/9\+/.test(draw), 'the old "9+" overflow text must be gone along with every other digit');
-  // The pending mark INVERTS the tile rather than adding to it: dark ground where the
-  // page mark is amber, same rx 9. --warning is already the product's "waiting on you"
-  // hue, so at 16px idle and pending have to differ in VALUE, not merely in contents,
-  // and a circle would have made pending a different shape rather than a second state.
-  assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--bg']}'`),
-    'the pending tile must be the dark --bg, off the palette rather than hand-copied');
+  assert.match(draw, /fillText\(/, 'the count is drawn as canvas text, not an SVG data URI -- criterion 3');
+  assert.ok(!/<svg/.test(draw), 'the pending mark must never be built as an SVG string -- a missing font there would silently drop the digit');
+  // The tile is the SAME amber tile the unmarked tab shows, same fill, same rx 9
+  // corner -- no state paints a second tile colour, and the inverted dark ground
+  // plus its arc pip are gone outright, not merely unused.
   assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--warning']}'`),
-    'and the pip must be --warning -- the exact inverse of the page mark, which is what makes this a value flip');
-  assert.ok(!draw.includes(palettes.dark['--accent-ink']),
-    `--accent-ink on the --bg tile is ${palettes.dark['--accent-ink']} on ${palettes.dark['--bg']}: a pip nobody can see`);
+    'the pending tile must be the SAME amber --warning the unmarked tab shows, off the palette rather than hand-copied');
+  assert.ok(!draw.includes(palettes.dark['--bg']),
+    'no state may paint a second (dark) tile colour -- the inverted tile is gone, not just unused');
+  assert.ok(!/\.arc\(/.test(draw), 'the amber pip is gone, not unused -- no inverted mark is reachable anywhere');
   assert.match(draw, /roundRect\(0, 0, 32, 32, 9\)/,
     'same tile as the page mark, same corner: pending is a state of it, not a different drawing');
+  // The numeral is ink on amber -- the same ink MARK_SHAPES' rows already use.
+  assert.match(draw, new RegExp(`fillStyle = '${palettes.dark['--accent-ink']}'`),
+    'the numeral must be --accent-ink, off the palette rather than hand-copied');
+  // Criterion 2: the sizing ladder, optical steps rather than a linear scale --
+  // 22px at one digit, 18px at two, 17px for the 9+ overflow, capped at 99.
+  assert.match(draw, /22/, 'expected the one-digit size in the sizing ladder');
+  assert.match(draw, /18/, 'expected the two-digit size in the sizing ladder');
+  assert.match(draw, /17/, 'expected the 9+ overflow size in the sizing ladder');
+  assert.match(draw, /9\+/, 'the 9+ overflow token must still exist, now capped at 99 rather than 9');
   const set = namedFunctionBody(ui, 'setFaviconBadge');
   assert.match(set, /baseFavicon/, 'clearing the mark must restore the page\'s own mark, not leave the badge on it');
-  assert.match(set, /removeAttribute\('href'\)/, 'and with no mark to restore it must still unmark rather than keep the badge');
+  assert.match(set, /removeAttribute\('href'\)/, 'and with no mark to restore it must still unmark rather than keep the count');
+  assert.match(set, /drawFavicon\(pending\)/, 'the drawn mark must carry the real pending count, not a countless pip');
   // Nothing about this may add an external reference to the emitted page.
   const html = renderBoardPage(createBoard({ title: 'Fav', blocks: [{ kind: 'markdown', text: '# A' }] }));
   assert.ok(!/<link[^>]+href=["']?http/.test(html));
 });
 
-check('a countless mark applies while a round is pending, and the page\'s own mark comes back once nothing is', () => {
-  // setFaviconBadge is exercised directly, the same shape the deleted title-badge
-  // check used: pull the real function body out of the client script (source
-  // text, not a browser) and run it against a stand-in document + canvas.
+check('a numbered mark applies while a round is pending, sized by the digit ladder, and the page\'s own mark comes back once nothing is', () => {
+  // drawFavicon/setFaviconBadge are exercised directly, the same shape the prior
+  // countless-mark check used: pull the real function bodies out of the client
+  // script (source text, not a browser) and run them against a stand-in document
+  // plus a stand-in canvas context that records what got drawn.
   const drawBody = namedFunctionBody(ui, 'drawFavicon');
   const setBody = namedFunctionBody(ui, 'setFaviconBadge');
   assert.ok(drawBody && setBody, 'expected drawFavicon and setFaviconBadge in src/ui.mjs');
   function run(pending) {
+    const calls = { fillText: null, font: null };
     const link = { rel: 'icon', href: 'data:image/svg+xml,BASE', getAttribute(n) { return this[n]; }, setAttribute(n, v) { this[n] = v; }, removeAttribute(n) { this[n] = undefined; } };
-    const doc = { querySelector: () => link, createElement: () => ({ getContext: () => ({ fillStyle: '', beginPath() {}, arc() {}, roundRect() {}, fill() {} }), toDataURL: () => 'data:image/png,PIP' }), head: { appendChild() {} } };
+    const doc = {
+      querySelector: () => link,
+      createElement: () => ({
+        getContext: () => ({
+          fillStyle: '', font: '', textAlign: '', textBaseline: '',
+          beginPath() {}, roundRect() {}, fill() {},
+          fillText(text, x, y) { calls.fillText = [text, x, y]; calls.font = this.font; },
+        }),
+        toDataURL: () => 'data:image/png,PIP',
+      }),
+      head: { appendChild() {} },
+    };
     // ui.mjs's `${palettes.dark[...]}` interpolations already resolved to literal
     // hex strings when the `ui` template literal itself was evaluated at import
     // time, so the extracted bodies below reference no free `palettes` variable.
     const scope = new Function(
       'document', 'pending',
       `var faviconLink = null; var baseFavicon = null;
-       function drawFavicon() {${drawBody}}
+       function drawFavicon(n) {${drawBody}}
        function setFaviconBadge(pending) {${setBody}}
        setFaviconBadge(pending);
        return faviconLink.href;`
     );
-    return scope(doc, pending);
+    const href = scope(doc, pending);
+    return { href, calls };
   }
-  assert.equal(run(1), 'data:image/png,PIP', 'something pending must swap in the drawn mark');
-  assert.equal(run(0), 'data:image/svg+xml,BASE', 'nothing pending must restore the page\'s own unbadged mark, not leave the drawn one or go blank');
+
+  let r = run(1);
+  assert.equal(r.href, 'data:image/png,PIP', 'something pending must swap in the drawn mark');
+  assert.equal(r.calls.fillText[0], '1', 'a single digit must render as itself');
+  assert.equal(r.calls.fillText[1], 16, 'the numeral is centred at x 16');
+  assert.equal(r.calls.fillText[2], 16.8, 'the numeral is centred at y 16.8');
+  assert.match(r.calls.font, /22px/, 'one digit renders at 22px');
+
+  r = run(12);
+  assert.equal(r.calls.fillText[0], '12', '12 must render honestly as 12, not flattened to an overflow token');
+  assert.match(r.calls.font, /18px/, 'two digits render at 18px');
+
+  r = run(150);
+  assert.equal(r.calls.fillText[0], '9+', 'a count above 99 renders as the 9+ overflow token');
+  assert.match(r.calls.font, /17px/, 'the 9+ overflow renders at 17px');
+
+  r = run(0);
+  assert.equal(r.href, 'data:image/svg+xml,BASE', 'nothing pending must restore the page\'s own unbadged mark, not leave the drawn one or go blank');
+});
+
+check('a canvas or font failure during drawFavicon leaves the tab\'s existing mark alone, never a blank amber tile', () => {
+  // Criterion 3: canvas text can fail (unsupported context, a throwing font
+  // path) the way an SVG data URI's font resolution silently degrades -- but
+  // unlike the SVG case, a throw here is caught and the caller keeps whatever
+  // mark the tab already had, rather than swap in a half-drawn or blank tile.
+  const drawBody = namedFunctionBody(ui, 'drawFavicon');
+  const setBody = namedFunctionBody(ui, 'setFaviconBadge');
+  const link = { rel: 'icon', href: 'data:image/png,PRIOR-BADGE', getAttribute(n) { return this[n]; }, setAttribute(n, v) { this[n] = v; }, removeAttribute(n) { this[n] = undefined; } };
+  const doc = {
+    querySelector: () => link,
+    createElement: () => ({
+      getContext: () => ({
+        fillStyle: '', font: '', textAlign: '', textBaseline: '',
+        beginPath() {}, roundRect() {}, fill() {},
+        fillText() { throw new Error('font failure'); },
+      }),
+      toDataURL: () => 'data:image/png,SHOULD-NOT-BE-USED',
+    }),
+    head: { appendChild() {} },
+  };
+  const scope = new Function(
+    'document', 'pending',
+    `var faviconLink = null; var baseFavicon = null;
+     function drawFavicon(n) {${drawBody}}
+     function setFaviconBadge(pending) {${setBody}}
+     setFaviconBadge(pending);
+     return faviconLink.href;`
+  );
+  const href = scope(doc, 5);
+  assert.equal(href, 'data:image/png,PRIOR-BADGE', 'a drawing failure must leave whatever mark the tab already had, never paint a blank amber tile');
 });
 
 check('every page carries the same inline mark, and unbadging has something to restore', () => {
@@ -5363,37 +5658,21 @@ check('coming back to the tab clears the mark', () => {
 
 // --- dead/mismatched CSS --------------------------------------------------------
 
-check('the inline anchor-button class the markup emits is the one the stylesheet rules on', () => {
+// Both of these used to be POSITIVE wiring checks -- one on the inline anchor
+// button's own class, one on `.anchor-target`, the highlight a comment list entry
+// applied to the heading it named. ADR.md entry 28 deleted the `md` anchor kind
+// and both of those surfaces with it, so what is pinned now is their absence: the
+// class-purity check below catches an orphaned RULE, but only an explicit check
+// catches the markup, the client function and the rule all coming back together.
+check('the inline anchor button and the .anchor-target highlight are gone, markup and stylesheet alike (ADR.md entry 28)', () => {
   const board = createBoard({ title: 'Anchors', blocks: [{ kind: 'markdown', text: '# Heading\n\n- one' }] });
   const markup = renderedMarkup(renderBoardPage(board));
-  const m = markup.match(/class="comment-btn ([a-z-]+)"/);
-  assert.ok(m, 'expected the markdown block to emit an inline anchor button');
-  const cls = m[1];
-  assert.ok(
-    styles.includes('.' + cls),
-    `src/styles.mjs has no rule for ".${cls}", the class src/render.mjs actually emits -- inline anchor buttons fall back to base styling`
-  );
+  assert.ok(!/class="comment-btn [a-z-]+"/.test(markup), 'a markdown block must emit no inline anchor button');
+  assert.ok(!markup.includes('data-anchor-kind="md"'), 'nothing may emit an md-kind anchor');
+  assert.ok(!/\.inline-anchor-btn\b/.test(styles), 'the orphaned .inline-anchor-btn rule must be gone with the button it styled');
   assert.ok(!/\.comment-inline\b/.test(styles), 'the orphaned .comment-inline rule must be gone, not left beside its replacement');
-});
-
-check('.anchor-target is wired: a comment list entry names the anchor it points at, and the client applies the class', () => {
-  const board = createBoard({ title: 'Target', blocks: [{ kind: 'markdown', text: '# Acceptance Criteria\n\n- one' }] });
-  const blockId = board.blocks[0].id;
-  applySubmit(board, {
-    action: 'send',
-    answers: [],
-    comments: [{ blockId, anchor: { kind: 'md', ref: 'acceptance-criteria', label: 'Acceptance Criteria' }, text: 'this one' }],
-  }, 1);
-  const markup = renderedMarkup(renderBoardPage(board));
-  assert.match(markup, /class="comment-item" data-anchor-kind="md" data-anchor-ref="acceptance-criteria"/,
-    'a comment list entry must carry the anchor it targets, so clicking it can highlight that anchor');
-  // ...and the client actually applies the class the stylesheet rules on, rather
-  // than the rule staying orphaned as it was.
-  const highlight = namedFunctionBody(ui, 'highlightAnchor');
-  assert.ok(highlight, 'expected highlightAnchor in src/ui.mjs');
-  assert.match(highlight, /classList\.add\('anchor-target'\)/);
-  assert.match(highlight, /classList\.remove\('anchor-target'\)/, 'exactly one anchor may be highlighted at a time');
-  assert.ok(styles.includes('.anchor-target'), 'the rule the client applies must still exist');
+  assert.ok(!/\.anchor-target\b/.test(styles), 'the orphaned .anchor-target rule must be gone with the gesture it styled');
+  assert.equal(namedFunctionBody(ui, 'highlightAnchor'), null, 'highlightAnchor must be gone from src/ui.mjs');
 });
 
 // --- computeBoardPatch sees NESTED blocks ---------------------------------------
@@ -5540,13 +5819,15 @@ check('the subscription resyncs on every open, through the same computeBoardPatc
 // --- the "commenting on:" line is rendered on every block, so it must be hidden ---
 
 check('.comment-target is emitted for every block and has a rule that keeps it hidden until a comment is being composed', () => {
+  // Six COMMENTABLE blocks: ADR.md entry 28 means "every block" now names the two
+  // rendered kinds, and a markdown fixture would emit none at all.
   const board = createBoard({
     title: 'Six blocks',
-    blocks: [1, 2, 3, 4, 5, 6].map(i => ({ kind: 'markdown', text: `# H${i}` })),
+    blocks: [1, 2, 3, 4, 5, 6].map(i => ({ kind: 'mermaid', text: `flowchart LR\n  A${i} --> B${i}` })),
   });
   const markup = renderedMarkup(renderBoardPage(board));
   const emitted = [...markup.matchAll(/class="comment-target"/g)];
-  assert.equal(emitted.length, 6, 'render.mjs emits one per block, unconditionally');
+  assert.equal(emitted.length, 6, 'render.mjs emits one per commentable block, unconditionally');
   assert.ok(
     /\.comment-target \{[^}]*display: none/.test(styles),
     'without a rule, six blocks render six stray lines each claiming a comment is in progress'
@@ -5691,7 +5972,7 @@ function extractThreadItem(html, boardId) {
 }
 
 /** What a person actually sees, not what the markup happens to contain: strips
- * every tag and attribute (href, data-thread-id, data-pending, the machine
+ * every tag and attribute (href, data-thread-id, data-rounds-left, the machine
  * `datetime` value, ...) and collapses whitespace, leaving only rendered text.
  * A "distinct rows" check comparing raw item HTML instead of this is worthless
  * -- href and data-thread-id differ by board id on every row regardless of
@@ -5724,68 +6005,80 @@ check('roundCount: a board doc\'s own rounds-array length, zero for a shape that
   assert.equal(roundCount({}), 0, 'must read as zero, not throw, on a board-shaped object with no rounds at all');
 });
 
-check('the pending badge counts only what the reviewer still owes: deferred and never-submitted, NOT unanswered', () => {
-  // Regression, from real use: a fully-submitted 4-round board showed "5 pending"
-  // — 3 `unanswered` plus 2 `deferred`. `unanswered` is an explicit signal the
-  // reviewer sent (PROTOCOL.md: status is the only thing that says whether a
-  // question was decided), so counting it left a badge nothing could clear:
-  // leaving an optional "anything else?" blank IS answering it.
-  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'pending');
+check('the rounds-left badge counts open rounds that still ask something, not question blocks -- correctly singular at one, plural at two (AC 1)', () => {
+  // Two board docs in one thread, the ordinary shape for a session that starts a
+  // second board without closing the first. boardA's single open round carries
+  // TWO question blocks; boardB's carries one. The count must read 2 -- one round
+  // apiece -- never 3, which is what a question-block count (the predecessor this
+  // replaces) would have read.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'rounds-left');
   mkdirSync(dir, { recursive: true });
-  const board = createBoard({
-    title: 'four states',
+  const boardA = createBoard({
+    title: 'first',
     cwd: dir,
     blocks: [
-      { kind: 'question', prompt: 'decided', widget: 'text' },
-      { kind: 'question', prompt: 'left blank on purpose', widget: 'text' },
-      { kind: 'question', prompt: 'revisit later', widget: 'text' },
-      { kind: 'question', prompt: 'never submitted at all', widget: 'text' },
+      { kind: 'question', prompt: 'q1', widget: 'text' },
+      { kind: 'question', prompt: 'q2', widget: 'text' },
     ],
   });
-  const ids = board.blocks.filter(b => b.kind === 'question').map(b => b.id);
-  board.answers = {
-    [ids[0]]: { status: 'answered', choice: 'yes', note: '' },
-    [ids[1]]: { status: 'unanswered', choice: null, note: '' },
-    // ids[2] deferred WITH a populated choice: the shape PROTOCOL.md pins as
-    // legal, so the count must key on status and not on choice being non-null.
-    [ids[2]]: { status: 'deferred', choice: 'leaning this way', note: '' },
-    // ids[3] deliberately absent.
-  };
+  const boardB = createBoard({
+    title: 'second',
+    cwd: dir,
+    thread: boardA.thread,
+    blocks: [{ kind: 'question', prompt: 'q3', widget: 'text' }],
+  });
+  const [thread] = buildThreadIndex([boardA, boardB]);
+  assert.equal(thread.roundsLeft, 2, 'two open rounds that each ask something, regardless of how many question blocks either carries');
+  assert.notEqual(thread.roundsLeft, 3, 'setup sanity: must not be counting the three question BLOCKS');
 
+  const item = extractThreadItem(renderIndexPage({ threads: [thread] }), thread.boardId);
+  assert.match(item, /2 rounds left/, 'plural at two');
+
+  // Settle boardB's round, leaving exactly one open round on the thread.
+  const qidB = boardB.blocks.find(b => b.kind === 'question').id;
+  boardB.answers = { [qidB]: { status: 'answered', choice: 'x', note: '' } };
+  boardB.rounds[0].status = 'sent';
+  const [oneLeft] = buildThreadIndex([boardA, boardB]);
+  assert.equal(oneLeft.roundsLeft, 1);
+  const item2 = extractThreadItem(renderIndexPage({ threads: [oneLeft] }), oneLeft.boardId);
+  assert.match(item2, /1 round left/, 'correctly singular at one');
+  assert.doesNotMatch(item2, /1 rounds left/, 'never "1 rounds left"');
+});
+
+check('an index row with no open asking round renders no badge element at all -- not a zero-reading one (AC 2)', () => {
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'rounds-left-zero');
+  mkdirSync(dir, { recursive: true });
+  const board = createBoard({ title: 'settled', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
+  const qid = board.blocks[0].id;
+  board.answers = { [qid]: { status: 'answered', choice: 'x', note: '' } };
+  board.rounds[0].status = 'sent';
   const [thread] = buildThreadIndex([board]);
-  assert.equal(thread.pending, 2, 'exactly the deferred one and the missing one');
-
+  assert.equal(thread.roundsLeft, 0);
   const item = extractThreadItem(renderIndexPage({ threads: [thread] }), board.id);
-  assert.match(item, /2 pending/, 'and the badge a reviewer actually reads says 2');
-  assert.doesNotMatch(item, /4 pending/, 'never the raw question count');
+  assert.doesNotMatch(item, /rounds-left-badge/, 'no badge element at all, zero-reading or otherwise');
+  assert.doesNotMatch(item, /\brounds? left\b/, 'no leftover badge text either');
+  assert.doesNotMatch(item, /class="thread-status"/, 'no empty status wrapper left in its place');
 });
 
-check('a board whose every question is answered or explicitly left blank reads as zero pending', () => {
-  // The state the reviewer must be able to reach. Before the fix above, a board
-  // carrying one blank optional question could never show a clear badge.
-  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'pending-zero');
+check('a question left deferred inside an already-SENT round contributes nothing to the count (AC 3)', () => {
+  // A sent round cannot be returned to (SPEC_COUNTS.md Open Questions, ADR.md
+  // entry 25's own stated cost) -- so once `applySubmit` marks a round `sent`,
+  // whatever any of its questions were left as is no longer an open trip back to
+  // the board, `deferred` included.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'rounds-left-deferred');
   mkdirSync(dir, { recursive: true });
-  const board = createBoard({
-    title: 'done',
-    cwd: dir,
-    blocks: [
-      { kind: 'question', prompt: 'the real question', widget: 'text' },
-      { kind: 'question', prompt: 'anything else?', widget: 'text' },
-    ],
-  });
-  const ids = board.blocks.filter(b => b.kind === 'question').map(b => b.id);
-  board.answers = {
-    [ids[0]]: { status: 'answered', choice: 'yes', note: '' },
-    [ids[1]]: { status: 'unanswered', choice: null, note: '' },
-  };
+  const board = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
+  const qid = board.blocks[0].id;
+  board.answers = { [qid]: { status: 'deferred', choice: null, note: '' } };
+  board.rounds[0].status = 'sent';
   const [thread] = buildThreadIndex([board]);
-  assert.equal(thread.pending, 0, 'a submitted board with nothing outstanding must be able to read zero');
+  assert.equal(thread.roundsLeft, 0, 'a deferred question inside a SENT round is not an open round');
 });
 
-check('a round that asks nothing never reads as live -- there is no gesture that could clear it', () => {
+check('a round that asks nothing contributes nothing to the count, and the badge and the live dot never disagree (AC 4)', () => {
   // `applySubmit` is the only thing that marks a round `sent`, and a reviewer submits by
   // answering. So a round with no question block had no reachable way out of `open`, and
-  // its row pulsed a live dot forever right beside its own honest `0 pending`.
+  // its row pulsed a live dot forever right beside its own honest empty badge.
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'asks-nothing');
   mkdirSync(dir, { recursive: true });
 
@@ -5798,8 +6091,10 @@ check('a round that asks nothing never reads as live -- there is no gesture that
   assert.equal(pointer.rounds[0].status, 'open', 'the round really is open -- nothing submitted it');
   const [pointerThread] = buildThreadIndex([pointer]);
   assert.equal(pointerThread.live, false, 'but nobody owes it anything, so it is not live');
-  assert.equal(pointerThread.pending, 0);
-  assert.doesNotMatch(extractThreadItem(renderIndexPage({ threads: [pointerThread] }), pointer.id), /live-dot/);
+  assert.equal(pointerThread.roundsLeft, 0);
+  const pointerItem = extractThreadItem(renderIndexPage({ threads: [pointerThread] }), pointer.id);
+  assert.doesNotMatch(pointerItem, /live-dot/);
+  assert.doesNotMatch(pointerItem, /rounds-left-badge/, 'badge and live dot must agree: neither renders here');
 
   // A round that DOES ask is still live -- the fix must not silence a real prompt.
   const asking = createBoard({
@@ -5809,7 +6104,10 @@ check('a round that asks nothing never reads as live -- there is no gesture that
   });
   const [askingThread] = buildThreadIndex([asking]);
   assert.equal(askingThread.live, true, 'an unanswered question is exactly what the dot is for');
-  assert.match(extractThreadItem(renderIndexPage({ threads: [askingThread] }), asking.id), /live-dot/);
+  assert.equal(askingThread.roundsLeft, 1);
+  const askingItem = extractThreadItem(renderIndexPage({ threads: [askingThread] }), asking.id);
+  assert.match(askingItem, /live-dot/);
+  assert.match(askingItem, /1 round left/, 'badge and live dot must agree: both render here');
 
   // And the case from the reported screenshot: a thread whose questions were all answered
   // and sent, then closed out with a summary round that asks nothing.
@@ -5824,6 +6122,7 @@ check('a round that asks nothing never reads as live -- there is no gesture that
   addRound(closed, { title: 'wrap-up', blocks: [{ kind: 'markdown', text: 'here is the summary' }] });
   const [closedThread] = buildThreadIndex([closed]);
   assert.equal(closedThread.live, false, 'a closing summary must not re-arm the dot on a finished thread');
+  assert.equal(closedThread.roundsLeft, 0, 'the wrap-up round asks nothing, so it must not re-arm the badge either');
 });
 
 check('an index row headlines the board title; the project is shown as a folder basename only, full path on a title attribute', () => {
@@ -6712,6 +7011,23 @@ check('pomodoro widget: the settings control is an icon, and the icon carries a 
   assert.match(summary[1], /stroke="currentColor"/, 'the glyph must be a stroke-based inline SVG in the same family as src/theme.mjs\'s icons');
 });
 
+check('pomodoro widget: the status text alone denies selection; the settings panel\'s inputs and labels are untouched (criterion 14)', () => {
+  const statusRule = styles.match(/\.pomodoro-status\s*\{[^}]*\}/);
+  assert.ok(statusRule, 'setup failure: no .pomodoro-status rule found in src/styles.mjs');
+  assert.match(statusRule[0], /user-select:\s*none/, '.pomodoro-status must deny selection -- a double-click or a drag across the countdown must select nothing');
+
+  // The rest of the widget is buttons, which never need it, and the settings
+  // panel is real <input>/<label> form controls the reader must still be able to
+  // select and copy from. No OTHER pomodoro-scoped rule may carry the same
+  // property -- a broad `.pomodoro-widget *` or similar would also catch the
+  // form.
+  const otherPomodoroRules = [...styles.matchAll(/\.pomodoro-[a-z-]+(?:[^{]*)\{[^}]*\}/g)]
+    .filter(m => !m[0].startsWith('.pomodoro-status'));
+  for (const m of otherPomodoroRules) {
+    assert.doesNotMatch(m[0], /user-select:\s*none/, `only .pomodoro-status may deny selection, found it in: ${m[0].slice(0, 60)}...`);
+  }
+});
+
 check('pomodoro widget: reuses formatCountdown verbatim -- indexScript embeds the real function source, not a second mm:ss formatter', () => {
   assert.ok(indexScript.includes(formatCountdown.toString()), 'indexScript must contain formatCountdown\'s own real source, spliced in via .toString() (src/ui.mjs\'s badgeLabel/computeBoardPatch technique), not a hand-copied restatement of it');
   // A second, independently written formatter would very likely reach for the
@@ -6792,6 +7108,7 @@ await checkAsync('pomodoro widget: no timer running renders a calm idle state (t
   assert.match(status.textContent, /idle/i, 'no timer must read as a calm idle state, not an error (spec: "a real state, not an error")');
   assert.match(status.textContent, /25/, 'idle state must show the configured work length -- spec: "the durations, or a dash"');
   assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no timer must never render a countdown');
+  assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'no timer must never render a cycle position either (criterion 13)');
   assert.equal(toggle.getAttribute('aria-checked'), 'false', 'idle is the switch\'s off state');
   assert.equal(toggle.getAttribute('aria-label'), 'Start pomodoro', 'idle: the switch\'s job is to START one, and its name has to say so');
   // The predecessor set `hidden` here and relied on it to disappear -- which it
@@ -6814,6 +7131,66 @@ await checkAsync('pomodoro widget: a running timer renders "<Phase> mm:ss" from 
   assert.match(status.textContent, /12:3[0-9]/, `expected roughly 12:34 in ${status.textContent}`);
   assert.equal(toggle.getAttribute('aria-checked'), 'true', 'a running, unpaused timer is the switch\'s ON state');
   assert.equal(toggle.getAttribute('aria-label'), 'Pause pomodoro');
+});
+
+await checkAsync('pomodoro widget: a running work or short-break interval names its position in the cycle as "Work 3/4 · 12:34"; a long break carries no position (criterion 11)', async () => {
+  const nowMs = Date.now();
+  // cycle: 2 means two work intervals already completed this cycle -- the THIRD
+  // is the one now running, out of POMODORO_SETTINGS.longEvery (4).
+  const workDoc = { settings: POMODORO_SETTINGS, cycle: 2, cycleDate: '2020-01-01', timer: { phase: 'work', deadline: nowMs + 12 * 60_000 + 34_000, paused: false }, now: nowMs };
+  let document;
+  await withPomodoroFetch(() => workDoc, async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  let status = document.querySelector('span#pomodoro-status');
+  assert.match(status.textContent, /^Work 3\/4 · 12:3[0-9]$/, `expected "Work 3/4 · 12:34"-shaped text, got "${status.textContent}"`);
+
+  // A short break inherits the SAME cycle value as the work interval it follows
+  // (settleBoundary only increments `cycle` when a BREAK ends, src/pomodoro.mjs)
+  // -- so it carries the identical position, not a fresh count of its own.
+  const breakDoc = { settings: POMODORO_SETTINGS, cycle: 2, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 4 * 60_000, paused: false }, now: nowMs };
+  await withPomodoroFetch(() => breakDoc, async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  status = document.querySelector('span#pomodoro-status');
+  assert.match(status.textContent, /^Break 3\/4 · 04:00$/, `expected "Break 3/4 · 04:00"-shaped text, got "${status.textContent}"`);
+
+  // A long break carries no position at all -- the plain pre-position shape.
+  const longBreakDoc = { settings: POMODORO_SETTINGS, cycle: 3, cycleDate: '2020-01-01', timer: { phase: 'longBreak', deadline: nowMs + 15 * 60_000, paused: false }, now: nowMs };
+  await withPomodoroFetch(() => longBreakDoc, async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  status = document.querySelector('span#pomodoro-status');
+  assert.match(status.textContent, /^Long break 15:00$/, `a long break must carry no position, got "${status.textContent}"`);
+  assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'a long break must never render a cycle position');
+});
+
+await checkAsync('pomodoro widget: lowering longEvery mid-cycle never renders a position past the end of the cycle (criterion 11)', async () => {
+  // Reachable by an ordinary act: the reviewer drops "long break every" from 8
+  // to 2 while `cycle` is already 5. settleBoundary does not renormalise cycle
+  // on a settings write -- it resets only at the next long break -- so the bare
+  // ordinal would read "6/2" for up to one whole interval. cycle + 1 is the
+  // breakNumber settleBoundary is about to test for `% longEvery`, and at or
+  // past longEvery the next break IS the long one, so the clamped reading
+  // ("the last interval of this cycle") is the true one, not a cosmetic fudge.
+  const nowMs = Date.now();
+  const doc = {
+    settings: { ...POMODORO_SETTINGS, longEvery: 2 },
+    cycle: 5,
+    cycleDate: '2020-01-01',
+    timer: { phase: 'work', deadline: nowMs + 5 * 60_000, paused: false },
+    now: nowMs,
+  };
+  let document;
+  await withPomodoroFetch(() => doc, async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  const status = document.querySelector('span#pomodoro-status');
+  assert.match(status.textContent, /^Work 2\/2 · 05:00$/, `expected the position clamped to the cycle's own length, got "${status.textContent}"`);
 });
 
 await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs, shows Resume, and never ticks locally', async () => {
@@ -6839,6 +7216,123 @@ await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs
   const before = status.textContent;
   pomodoroTickFn(intervals)();
   assert.equal(status.textContent, before, 'a paused timer must render identical text after a tick -- ticking it would silently un-freeze the countdown');
+});
+
+// SPEC_MARK.md ticket 03: the phase -> mark mapping (favicon + header glyph)
+// and the null-phase guard. The pure predicates are extracted and driven
+// directly first (the non-trivial logic the spec names as needing a runnable
+// check), then the same states are driven end to end through the real
+// indexScript + renderIndexPage markup, the same DOM-stand-in shape every
+// other pomodoro widget check above already uses.
+
+check('pomodoroIsResting: only a RUNNING, UNPAUSED break or long break counts as resting -- work, idle, a paused timer in ANY phase (including mid-break), and a phase the daemon has never reported all read false (criteria 7-9, 13)', () => {
+  const isResting = extractIndexScriptFn('pomodoroIsResting');
+  assert.equal(isResting(null), false, 'no timer at all (no poll has returned yet) must never read as resting -- criterion 9\'s anti-flicker guard');
+  assert.equal(isResting(undefined), false);
+  assert.equal(isResting({ phase: 'work', paused: false }), false);
+  assert.equal(isResting({ phase: 'break', paused: false }), true);
+  assert.equal(isResting({ phase: 'longBreak', paused: false }), true, 'a long break must satisfy the identical rest condition as a short break -- criterion 8');
+  assert.equal(isResting({ phase: 'break', paused: true }), false, 'a PAUSED break must keep the ordinary mark -- idle and paused both keep it regardless of which phase they are paused in');
+  assert.equal(isResting({ phase: 'longBreak', paused: true }), false);
+  assert.equal(isResting({ phase: 'idle', paused: false }), false, 'a phase name the daemon has never actually sent must never be read as resting');
+  assert.equal(isResting({ phase: undefined, paused: false }), false);
+});
+
+check('pomodoroIsActiveWork: only a RUNNING, UNPAUSED work interval turns the glyph amber -- idle and paused (any phase) stay muted (criterion 15)', () => {
+  const isActiveWork = extractIndexScriptFn('pomodoroIsActiveWork');
+  assert.equal(isActiveWork(null), false);
+  assert.equal(isActiveWork({ phase: 'work', paused: false }), true);
+  assert.equal(isActiveWork({ phase: 'work', paused: true }), false, 'a paused work interval must not read as active -- paused keeps the muted tomato, not amber');
+  assert.equal(isActiveWork({ phase: 'break', paused: false }), false);
+  assert.equal(isActiveWork({ phase: 'longBreak', paused: false }), false);
+});
+
+// The two glyphs told apart by their <path> count/geometry, read off the REAL
+// TOMATO_ICON/REST_ICON exports (src/pomodoro-widget.mjs) rather than a
+// hand-typed expectation that could drift from the actual drawings --
+// TOMATO_ICON carries the stem-and-leaves pair (two <path>s), REST_ICON is
+// "stemless" (one <path>, the two vertical stems as two subpaths of it).
+const TOMATO_PATHS = [...TOMATO_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
+const REST_PATHS = [...REST_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
+assert.equal(TOMATO_PATHS.length, 2, 'setup sanity: TOMATO_ICON must carry the stem/leaves pair as two <path>s');
+assert.equal(REST_PATHS.length, 1, 'setup sanity: REST_ICON must be stemless -- one <path> for both stems');
+
+const BASE_FAVICON_HREF = faviconLink.match(/href="([^"]+)"/)[1];
+
+function pomodoroGlyphPaths(document) {
+  const slot = document.querySelector('span#pomodoro-icon-slot');
+  return [...slot.querySelectorAll('path')].map(p => p.getAttribute('d'));
+}
+
+await checkAsync('SPEC_MARK.md ticket 03: a running, unpaused break or long break swaps the index tab to the rest mark and the header glyph to the pause glyph, both muted; work alone turns the glyph amber; idle, paused, and a paused break all keep the ordinary mark (criteria 7-9, 13-16)', async () => {
+  const nowMs = Date.now();
+  const cases = [
+    { name: 'idle', timer: null, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'running work', timer: { phase: 'work', deadline: nowMs + 5 * 60_000, paused: false }, favicon: 'base', paths: TOMATO_PATHS, amber: true, restStatus: false },
+    { name: 'paused work', timer: { phase: 'work', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'running short break', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, favicon: 'rest', paths: REST_PATHS, amber: false, restStatus: true },
+    { name: 'running long break', timer: { phase: 'longBreak', deadline: nowMs + 15 * 60_000, paused: false }, favicon: 'rest', paths: REST_PATHS, amber: false, restStatus: true },
+    // Criterion 15 ("idle and paused keep the muted tomato") applies even mid-break:
+    // pausing never hands the rest mark to a phase that would otherwise earn it.
+    { name: 'paused short break', timer: { phase: 'break', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
+  ];
+  for (const c of cases) {
+    const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: c.timer, now: nowMs };
+    let document;
+    await withPomodoroFetch(() => doc, async () => {
+      ({ document } = loadIndexWithPomodoro());
+      await flushPomodoro();
+    });
+    const favicon = document.querySelector('link[rel="icon"]');
+    assert.equal(favicon.getAttribute('href'), c.favicon === 'rest' ? restFaviconHref : BASE_FAVICON_HREF,
+      `${c.name}: expected the ${c.favicon} favicon href`);
+    assert.deepEqual(pomodoroGlyphPaths(document), c.paths, `${c.name}: expected the ${c.paths === REST_PATHS ? 'rest' : 'tomato'} glyph`);
+    const icon = document.querySelector('span#pomodoro-icon-slot .pomodoro-icon');
+    assert.equal(icon.classList.contains('pomodoro-icon-amber'), c.amber, `${c.name}: amber class mismatch`);
+    // Accessible name never changes (criterion 16), whichever glyph is mounted.
+    assert.equal(icon.getAttribute('aria-label'), 'Pomodoro', `${c.name}: the glyph's accessible name must still read "Pomodoro"`);
+    const status = document.querySelector('span#pomodoro-status');
+    assert.equal(status.classList.contains('pomodoro-status-rest'), c.restStatus, `${c.name}: status-muted class mismatch`);
+  }
+});
+
+await checkAsync('SPEC_MARK.md ticket 03: before the first pomodoro fetch resolves, the tab and the header stay exactly as server-rendered -- never flicker through the rest mark even though the (stubbed, not-yet-answered) daemon reports a break the moment it does answer (criterion 9)', async () => {
+  const nowMs = Date.now();
+  const restingDoc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
+  await withPomodoroFetch(() => restingDoc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    // Deliberately NO flushPomodoro() -- the opening fetch has been ISSUED but
+    // has not resolved, so pomodoroDoc is still null and nothing has run
+    // renderPomodoro (or its new favicon/glyph logic) even once yet.
+    const favicon = document.querySelector('link[rel="icon"]');
+    assert.equal(favicon.getAttribute('href'), BASE_FAVICON_HREF, 'the favicon must still read the plain server-rendered mark before any poll has returned');
+    assert.deepEqual(pomodoroGlyphPaths(document), TOMATO_PATHS, 'the glyph must still be the plain tomato before any poll has returned');
+  });
+});
+
+await checkAsync('SPEC_MARK.md ticket 03: the mark returns to the ordinary tile within one poll interval of a break ending, with no reload (criterion 12)', async () => {
+  const nowMs = Date.now();
+  const resting = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
+  const backToWork = { ...resting, cycle: 1, timer: { phase: 'work', deadline: nowMs + 25 * 60_000, paused: false } };
+  let document, intervals, current = resting;
+  await withPomodoroFetch(() => current, async () => {
+    ({ document, intervals } = loadIndexWithPomodoro());
+    await flushPomodoro();
+    assert.equal(document.querySelector('link[rel="icon"]').getAttribute('href'), restFaviconHref, 'setup failure: expected the rest mark while the break is still running');
+    assert.deepEqual(pomodoroGlyphPaths(document), REST_PATHS, 'setup failure: expected the rest glyph while the break is still running');
+
+    // The break ends on the DAEMON's own clock, never client-side (this
+    // section's own header comment: tickPomodoro only ever asks, it never
+    // decides) -- so the only thing that can move this page is the widget's own
+    // re-fetch poll, fired here by hand instead of waiting POMODORO_POLL_MS for
+    // real.
+    current = backToWork;
+    fetchPomodoroFn(intervals)();
+    await flushPomodoro();
+  });
+  assert.equal(document.querySelector('link[rel="icon"]').getAttribute('href'), BASE_FAVICON_HREF, 'the favicon must revert to the ordinary mark within one poll of the break ending');
+  assert.deepEqual(pomodoroGlyphPaths(document), TOMATO_PATHS, 'the glyph must revert to the tomato within one poll of the break ending');
 });
 
 await checkAsync('pomodoro widget: the local tick never advances the phase on its own -- an expired countdown re-fetches instead of guessing the next phase', async () => {

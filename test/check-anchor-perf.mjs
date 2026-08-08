@@ -75,7 +75,7 @@ check('V5b: the same adversarial input reaches the same guard through the real p
 // --- V4: resolveComments must render+parse each block ONCE per pass, not once
 // per comment -------------------------------------------------------------------
 //
-// A large markdown block with many comments anchored to it used to pay a fresh
+// A large block with many comments anchored to it used to pay a fresh
 // renderBlock + parseHtmlTree for every single comment (audit V4: measured
 // 2186ms for 300 comments on a 3.3MB block; independently reproduced while
 // building this check at ~3000ms for 300 comments on a ~600KB rendered
@@ -86,16 +86,20 @@ check('V5b: the same adversarial input reaches the same guard through the real p
 // cost, so a regression that goes back to resolving inside the per-comment loop
 // fails this check rather than merely getting slower with every comment added.
 
-function bigMarkdown(targetBytes) {
-  const line = '- item filler text to bulk up the byte count of this markdown list so the rendered section is large\n';
-  let out = '';
+// ADR.md entry 28 leaves `mermaid` commentable, so the big block is a diagram
+// rather than a markdown list -- a shape a board can genuinely still accumulate
+// comments on. What the cache is measured over (renderBlock + parseHtmlTree, once
+// per block per pass rather than once per comment) is the same code either way.
+function bigDiagram(targetBytes) {
+  const line = 'flowchart LR\n';
+  let out = line;
   let i = 0;
-  while (Buffer.byteLength(out, 'utf8') < targetBytes) out += line.replace('item', `item ${i++}`);
+  while (Buffer.byteLength(out, 'utf8') < targetBytes) out += `  n${i} --> n${i + 1}\n`, i++;
   return out;
 }
 
 function boardWithComments(commentCount) {
-  const board = createBoard({ title: 'v4 perf', blocks: [{ kind: 'markdown', text: bigMarkdown(500 * 1024) }] });
+  const board = createBoard({ title: 'v4 perf', blocks: [{ kind: 'mermaid', text: bigDiagram(500 * 1024) }] });
   const block = board.blocks[0];
   for (let i = 0; i < commentCount; i++) {
     board.comments.push({
@@ -110,7 +114,7 @@ function boardWithComments(commentCount) {
   return board;
 }
 
-check('V4: resolveComments on 0 comments against a ~500KB markdown block is effectively free', () => {
+check('V4: resolveComments on 0 comments against a ~500KB diagram block is effectively free', () => {
   const board = boardWithComments(0);
   const ms = timeMs(() => resolveComments(board, board.comments));
   console.log(`    0 comments -> ${ms.toFixed(1)}ms`);

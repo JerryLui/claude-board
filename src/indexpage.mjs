@@ -7,12 +7,12 @@
 // (see PROTOCOL.md "A board is a session-scoped thread with rounds"); grouping by
 // `thread` rather than assuming a 1:1 board:thread mapping keeps this correct even
 // in the edge case where a caller reuses a thread id across board docs. Two threads
-// with the same `cwd` are still two separate rows here, each with its own pending
+// with the same `cwd` are still two separate rows here, each with its own rounds-left
 // count — the exact case DESIGN.md's Decisions section calls out as the failure
 // of keying by project directory instead.
 
 import path from 'node:path';
-import { styles, faviconLink, markSvg } from './styles.mjs';
+import { styles, faviconLink, restFaviconHref, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { questionBlocks } from './board.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
@@ -22,7 +22,7 @@ import { questionBlocks } from './board.mjs';
 // src/ui.mjs already uses for computeBoardPatch/composeHint/badgeLabel (see
 // that file's own comment) -- one mm:ss formatter, not two that can drift.
 import { formatCountdown } from './pomodoro.mjs';
-import { pomodoroWidget } from './pomodoro-widget.mjs';
+import { pomodoroWidget, TOMATO_ICON, REST_ICON } from './pomodoro-widget.mjs';
 
 function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -40,68 +40,41 @@ export function folderName(cwd) {
   return path.basename(cwd) || cwd;
 }
 
-/** A question block is pending while the reviewer still owes it something:
- * **missing** (never submitted) or **`deferred`** (they explicitly said "revisit
- * later"). `answered` and `unanswered` are both finished states.
- *
- * `unanswered` used to count here, on the reasoning that a blank is still open
- * work. It is not, and counting it produced a badge the reviewer could not clear
- * by any legitimate action: leaving an optional catch-all ("anything else?")
- * blank IS the answer to it, so the row sat at a permanent non-zero count for the
- * whole life of the thread. Reported from real use — a fully-submitted 4-round
- * board reading `5 pending`, which was 3 `unanswered` plus 2 `deferred`.
- * PROTOCOL.md ("`status` is the only thing that says whether a question was
- * decided") backs the split: `unanswered` is an explicit signal the reviewer sent,
- * not an absence of one. `deferred` is the only status that means "come back".
- *
- * Known limitation, deliberately not papered over: a `deferred` question resolved
- * in a LATER round — or outside the board entirely — still counts here, because
- * nothing in the protocol can mark one settled. The count is honest about the
- * board's own record rather than guessing at intent. */
 /** A board's `updatedAt` as a sortable string, with anything non-string treated as
  * absent (i.e. oldest) rather than stringified. `String(undefined)` is "undefined",
  * which sorts above every ISO timestamp. */
 const stamp = b => (typeof b?.updatedAt === 'string' ? b.updatedAt : '');
 
-function pendingCount(board) {
-  const answers = board.answers || {};
-  // questionBlocks, not a top-level walk of board.blocks (audit). Questions nest
-  // inside a compare side, another question's `context`, and an option's block; the
-  // top-level-only version reported "0 pending" for a board whose only question was
-  // nested and explicitly deferred -- the reviewer's own recall surface saying
-  // nothing was owed on a thread that was waiting on them. Every other traversal
-  // (findBlock, countersFromBoard, the packet, the patch) already recurses.
-  return questionBlocks(board).filter(b => {
-    const a = answers[b.id];
-    if (!a) return true;                    // never submitted
-    return a.status === 'deferred';         // explicitly "revisit later"
-  }).length;
+/** A board's rounds that are still open **and still ask something** — a trip back
+ * to the board the reviewer genuinely owes (ADR.md entry 25, CONTEXT.md "Rounds
+ * left"). This is the one predicate both the index badge's count and `isLiveBoard`
+ * below read, so the two can never disagree: a round carrying no question block
+ * has no gesture that could ever clear it (`POST /api/board/:id/submit` is the
+ * only thing that marks a round `sent`, and a reviewer submits by answering), so a
+ * skill that renders a document and posts a pointer to it — `/explain`,
+ * `/visualize`, `/gamify` — asks nothing by design and must count as settled, not
+ * as a permanent false alarm.
+ *
+ * questionBlocks, not a top-level walk of board.blocks (audit, inherited from the
+ * predecessor this replaces). Questions nest inside a compare side, another
+ * question's `context`, and an option's block; the top-level-only version missed
+ * a board whose only question was nested. Every other traversal (findBlock,
+ * countersFromBoard, the packet, the patch) already recurses. */
+function openAskingRounds(board) {
+  const roundsThatAsk = new Set(questionBlocks(board).map(b => b.round));
+  return (board.rounds || []).filter(r => r.status === 'open' && roundsThatAsk.has(r.n));
 }
 
-/** A board is "live and waiting" while it has a posted round nobody has sent yet **that
- * actually asks something** — the same signal `POST /api/board/:id/submit` clears.
- *
- * The question clause is not a refinement, it is what keeps the state reachable. A round
- * is marked `sent` in exactly one place (`applySubmit`), and a reviewer submits by
- * answering — so a round carrying no question block has no gesture that could ever clear
- * it, and the row pulsed forever. That used to be a corner case and is now the common one:
- * a skill that renders a document and posts a pointer to it asks nothing by design, so
- * every `/explain`, `/visualize` and `/gamify` post was a permanent false alarm, and a
- * thread that had genuinely finished kept the dot because its closing summary was a round
- * with nothing to answer.
- *
- * The row was already contradicting itself out loud — `pendingCount` counts question
- * blocks, so these rows rendered a pulsing "someone owes you something" dot immediately
- * beside their own `0 pending`. This makes `live` agree with the count next to it: both
- * now mean "the reviewer owes this board something", and neither invents work.
+/** A board is "live and waiting" while `openAskingRounds` finds at least one round —
+ * derived from that same predicate, never a second test of its own, so this and the
+ * index badge's count are structurally incapable of disagreeing.
  *
  * Deliberately NOT a "visited" flag. Tracking whether someone had opened the page needs
  * per-reader state the store does not have, and a GET that writes; nothing is owed here
  * regardless of whether anyone looked, so the honest signal is the question, not the
  * visit. */
 function isLiveBoard(board) {
-  const roundsThatAsk = new Set(questionBlocks(board).map(b => b.round));
-  return (board.rounds || []).some(r => r.status === 'open' && roundsThatAsk.has(r.n));
+  return openAskingRounds(board).length > 0;
 }
 
 /** How many rounds one board doc has reached. */
@@ -111,7 +84,7 @@ export function roundCount(board) {
 
 /** Group every board in the store by `board.thread` into one index row per thread.
  * Each session's board(s) stay isolated from every other session's, including one
- * with the exact same `cwd` — no cross-thread aggregation of pending counts or
+ * with the exact same `cwd` — no cross-thread aggregation of rounds-left counts or
  * "which board is live" happens across threads, only within one. */
 export function buildThreadIndex(boards) {
   const byThread = new Map();
@@ -131,10 +104,13 @@ export function buildThreadIndex(boards) {
     group.sort((a, b) => stamp(b).localeCompare(stamp(a)));
     const liveBoards = group.filter(isLiveBoard);
     const primary = liveBoards[0] || group[0];
-    const pending = group.reduce((sum, b) => sum + pendingCount(b), 0);
+    // Summed across every board doc in the thread (unlike `rounds` below): a
+    // reader's trip count is a fact about the whole thread, not about whichever
+    // board doc the row happens to link to.
+    const roundsLeft = group.reduce((sum, b) => sum + openAskingRounds(b).length, 0);
     const cwd = (group.find(b => b.cwd) || {}).cwd || null;
     const updatedAt = group.reduce((max, b) => (stamp(b) > max ? stamp(b) : max), '');
-    // NOT summed across the group, unlike `pending` above: the row links to
+    // NOT summed across the group, unlike `roundsLeft` above: the row links to
     // `primary.id`, one specific board doc, so its round count has to describe
     // THAT board, or it contradicts the page the row opens. A two-board thread
     // (2 rounds each) summed to "4" and linked to a board whose own header read
@@ -148,7 +124,7 @@ export function buildThreadIndex(boards) {
       boardId: primary.id,
       cwd,
       title: primary.title || '',
-      pending,
+      roundsLeft,
       live: liveBoards.length > 0,
       updatedAt,
       boardCount: group.length,
@@ -179,7 +155,13 @@ function formatDate(iso) {
  * attribute wherever it is the only thing standing in for a name. */
 function threadRow(t) {
   const liveCls = t.live ? ' live' : '';
-  const pendingCls = t.pending > 0 ? 'pending-badge has-pending' : 'pending-badge zero';
+  // Absent entirely at zero (AC 2), never a zero-reading badge: `roundsLeft` and
+  // `live` are both derived from `openAskingRounds` (src/indexpage.mjs), so this
+  // element and the pulsing `.live-dot` above it can never disagree about whether
+  // the row owes the reader anything.
+  const badge = t.roundsLeft > 0
+    ? `<div class="thread-status"><span class="rounds-left-badge">${t.roundsLeft} round${t.roundsLeft === 1 ? '' : 's'} left</span></div>`
+    : '';
   const folder = folderName(t.cwd);
   const headline = t.title || folder || '(untitled)';
   const headlineIsFolder = !t.title && !!folder;
@@ -222,15 +204,13 @@ function threadRow(t) {
   // that resolves to nothing is worse than no hash.
   const href = `/b/${escAttr(t.boardId)}${t.live ? '#open-round' : ''}`;
   return `
-<a class="thread-item${liveCls}" href="${href}" data-thread-id="${escAttr(t.thread)}" data-pending="${t.pending}" data-live="${t.live}">
+<a class="thread-item${liveCls}" href="${href}" data-thread-id="${escAttr(t.thread)}" data-rounds-left="${t.roundsLeft}" data-live="${t.live}">
   <div class="thread-main">
     <div class="thread-title"${headlineIsFolder ? ` title="${escAttr(t.cwd)}"` : ''}>${liveDot}${escHtml(headline)}</div>
     ${pathLine}
     <div class="thread-meta">${roundsText}updated <time class="rel-time" datetime="${updatedIso}" title="${updatedAbs}">${updatedAbs}</time> · ${escHtml(t.thread)}</div>
   </div>
-  <div class="thread-status">
-    <span class="${pendingCls}">${t.pending} pending</span>
-  </div>
+  ${badge}
 </a>`;
 }
 
@@ -353,6 +333,14 @@ setInterval(refresh, 15000);
 //    pause, paused -> resume -- so it always has something to do and never has
 //    to hide (the old hidden-button shape did not actually hide; see
 //    src/pomodoro-widget.mjs's own comment for why).
+//  - The tab favicon and the header glyph (SPEC_MARK.md ticket 03) both read the
+//    SAME running-unpaused-break predicate -- pomodoroIsResting below, defined
+//    once and called from both renderPomodoroFavicon and renderPomodoroGlyph --
+//    so the tab and the header can never disagree about which phase counts as
+//    "resting". A null phase (pomodoroDoc still null, before the first fetch
+//    resolves) is not a break: the predicate requires a real timer object, so a
+//    slow first load renders the ordinary mark and glyph, never flickers
+//    through rest (criterion 9).
 
 var POMODORO_POLL_MS = 15000; // same order of magnitude as refresh's own poll above
 var pomodoroDoc = null; // last-fetched { settings, cycle, cycleDate, timer, now }
@@ -387,6 +375,32 @@ function pomodoroPhaseLabel(phase) {
   return 'Break';
 }
 
+// The running interval's position in the cycle -- 'N/M', or null for a phase
+// that carries none. Derived from doc.cycle exactly the way settleBoundary
+// (src/pomodoro.mjs) itself advances it, never a second count kept in the
+// browser: cycle counts the work intervals already completed since the last
+// long break (or local midnight), incremented only when a BREAK ends, so it
+// stays UNCHANGED for the short break that follows a work interval and is read
+// again there. cycle + 1 is therefore the ordinal of whichever work-or-break
+// interval is currently running, out of settings.longEvery -- and a long break
+// itself is deliberately excluded, since the breakNumber that selected it was
+// already a multiple of longEvery, and CONTEXT.md's Cycle entry never wants a
+// break bucketed against the interval count it resets. No server-side or
+// protocol change needed for this: doc.cycle is already in the document the
+// browser polls (SPEC_COUNTS.md Decisions).
+//
+// Clamped at longEvery, which only matters when the reviewer LOWERS longEvery
+// mid-cycle: cycle is already past the new divisor, so the bare ordinal reads
+// '6/2' -- not a position in a cycle of two, and visibly wrong for the up-to-one
+// interval it takes settleBoundary to reset cycle at the next long break. The
+// clamp is not a guess: cycle + 1 is the breakNumber settleBoundary is about to
+// test, and once it is at or past longEvery the next break IS the long one, so
+// 'last interval of the cycle' is exactly what is true.
+function pomodoroCyclePosition(phase, cycle, longEvery) {
+  if (phase !== 'work' && phase !== 'break') return null;
+  return Math.min(cycle + 1, longEvery) + '/' + longEvery;
+}
+
 // The switch is ON exactly when a timer is running unpaused. Idle and paused
 // both read as off, and both turn back on -- one 'ensure', the other 'resume'.
 // The label names the ACTION, which is what the control is for; the state is
@@ -401,6 +415,98 @@ function pomodoroSwitchLabel(action) {
   if (action === 'resume') return 'Resume pomodoro';
   return 'Pause pomodoro';
 }
+` + '\n' +
+'var REST_FAVICON_HREF = ' + JSON.stringify(restFaviconHref) + ';\n' +
+'var TOMATO_ICON = ' + JSON.stringify(TOMATO_ICON) + ';\n' +
+'var REST_ICON = ' + JSON.stringify(REST_ICON) + ';\n'
++ `
+// SPEC_MARK.md ticket 03: real values spliced in from src/pomodoro-widget.mjs
+// and src/styles.mjs (JSON.stringify, the same "embed the real source, never a
+// hand copy" discipline formatCountdown.toString() already uses just above) --
+// TOMATO_ICON/REST_ICON/REST_FAVICON_HREF above are literally
+// src/pomodoro-widget.mjs's and src/styles.mjs's own exports, not a second
+// drawing that could drift from either.
+
+// The one predicate both the tab mark and the header glyph read (criteria 7-9,
+// 13, 14): true only for a REAL timer, RUNNING (not paused), on a break or long
+// break. Idle, paused -- in ANY phase, including mid-break -- and work all read
+// false, and so does a timer pomodoroDoc has not been fetched yet (timer is
+// null/undefined then, same as genuinely idle): "no poll has returned" and
+// "idle" are indistinguishable on purpose, since a phase this is at most one
+// poll interval stale about is not evidence of a break (spec decision: "a null
+// phase means no mark change, never on break"). Exported to neither the tab nor
+// the glyph individually -- both call this SAME function, so they cannot render
+// two different opinions about which phase counts as "resting".
+function pomodoroIsResting(timer) {
+  return !!timer && !timer.paused && (timer.phase === 'break' || timer.phase === 'longBreak');
+}
+
+// The glyph's amber condition (criterion 15) -- deliberately a SEPARATE
+// predicate from pomodoroIsResting rather than its negation: idle and paused
+// both fail this AND fail pomodoroIsResting, and still have to render the
+// plain muted tomato, not amber -- "idle has nothing to turn up for" (spec
+// decision) is exactly the asymmetry a bare negation of pomodoroIsResting
+// would erase.
+function pomodoroIsActiveWork(timer) {
+  return !!timer && !timer.paused && timer.phase === 'work';
+}
+
+// The index tab's own favicon swap (criterion 7: applying the rest mark built
+// by ticket 02). Same base-href capture/restore SHAPE as src/ui.mjs's
+// setFaviconBadge -- captured lazily on first call, from whatever the page's
+// own <link rel="icon"> (faviconLink, src/styles.mjs) already carries, and
+// restored exactly rather than hardcoded, so this still does the right thing
+// if the link's initial href is ever something other than the plain mark.
+// Deliberately NOT a shared module with setFaviconBadge (this section's own
+// header comment) -- the two pages have nothing else in common to justify one.
+var pomodoroFaviconLink = null;
+var pomodoroBaseFaviconHref = null;
+function renderPomodoroFavicon(timer) {
+  if (!pomodoroFaviconLink) {
+    pomodoroFaviconLink = document.querySelector('link[rel="icon"]');
+    if (pomodoroFaviconLink) pomodoroBaseFaviconHref = pomodoroFaviconLink.getAttribute('href');
+  }
+  if (!pomodoroFaviconLink) return; // faviconLink is always server-rendered; nothing to degrade to if it is somehow absent
+  // Criterion 13 (a pending count wins outright): the index page owns no
+  // pending-count favicon state of its own -- that is src/ui.mjs's
+  // setFaviconBadge, reachable only from a BOARD tab (design decision: "the
+  // rest mark is index-only"), so there is nothing on THIS page that could ever
+  // need to outrank the rest mark. The precedence still belongs here, not only
+  // in this comment: pomodoroIsResting is the ONLY thing that may pick
+  // REST_FAVICON_HREF, so nothing else this script does -- now or if a pending
+  // signal is ever added to this page later -- can set it by accident.
+  pomodoroFaviconLink.setAttribute('href', pomodoroIsResting(timer) ? REST_FAVICON_HREF : pomodoroBaseFaviconHref);
+}
+
+// The header glyph swap (criteria 14-16). Swaps the glyph's MARKUP, never the
+// 'hidden' property -- .pomodoro-icon carries an author 'display' rule that
+// the UA stylesheet's '[hidden] { display: none }' can never outrank (this
+// section's own header comment: the exact trap that once left a dead pill
+// stuck in the header). pomodoroIconKind remembers which glyph is currently
+// mounted so the 1s local-repaint tick (tickPomodoro, which calls renderPomodoro
+// every second regardless of whether anything changed) does not re-parse the
+// same SVG string every second -- the swap itself is still instant either way
+// (criterion 16: nothing here animates or transitions), this only skips
+// redundant DOM writes.
+var pomodoroIconKind = null; // 'tomato' | 'rest', null before the first render
+function renderPomodoroGlyph(timer) {
+  var slot = document.querySelector('span#pomodoro-icon-slot');
+  var statusEl = document.querySelector('span#pomodoro-status');
+  var resting = pomodoroIsResting(timer);
+  var kind = resting ? 'rest' : 'tomato';
+  if (slot && kind !== pomodoroIconKind) {
+    slot.innerHTML = resting ? REST_ICON : TOMATO_ICON;
+    pomodoroIconKind = kind;
+  }
+  // The colour swap is independent of which glyph is mounted: work is the only
+  // phase that turns the tomato up to amber, and idle/paused keep the plain
+  // tomato at .pomodoro-icon's own muted weight -- no class at all, not a
+  // "not resting" class, which is what makes idle/paused/rest all read as the
+  // same quiet weight rather than rest reading as a second, different colour.
+  var icon = slot && slot.querySelector('.pomodoro-icon');
+  if (icon) icon.classList.toggle('pomodoro-icon-amber', pomodoroIsActiveWork(timer));
+  if (statusEl) statusEl.classList.toggle('pomodoro-status-rest', resting);
+}
 
 // Render only -- never decides anything. No branch here mutates
 // pomodoroDoc.timer or invents a next phase: an expired countdown just prints
@@ -409,6 +515,11 @@ function pomodoroSwitchLabel(action) {
 function renderPomodoro() {
   var statusEl = document.querySelector('span#pomodoro-status');
   var toggleBtn = document.querySelector('button#pomodoro-toggle');
+  // The null-doc guard (criterion 9): before the first fetch resolves there is
+  // no timer to read at all, and the server-rendered markup (the plain tomato,
+  // the plain mark) is already the correct anti-flicker default -- so this
+  // returns before touching the favicon or the glyph, exactly as it already did
+  // before either existed.
   if (!pomodoroDoc) return;
   var timer = pomodoroDoc.timer;
   if (!timer) {
@@ -417,7 +528,12 @@ function renderPomodoro() {
     if (statusEl) statusEl.textContent = 'Idle (' + pomodoroDoc.settings.workMin + ' min)';
   } else {
     var ms = pomodoroRemainingMs(timer, pomodoroOffset, Date.now());
-    var text = pomodoroPhaseLabel(timer.phase) + ' ' + formatCountdown(ms);
+    var position = pomodoroCyclePosition(timer.phase, pomodoroDoc.cycle, pomodoroDoc.settings.longEvery);
+    var text = pomodoroPhaseLabel(timer.phase);
+    // The dot only ever separates a position from the countdown -- a long break,
+    // which carries no position, keeps the plain 'Long break 12:34' shape this
+    // read before positions existed.
+    text += position ? ' ' + position + ' · ' + formatCountdown(ms) : ' ' + formatCountdown(ms);
     if (timer.paused) text += ' (paused)';
     if (statusEl) statusEl.textContent = text;
   }
@@ -428,6 +544,8 @@ function renderPomodoro() {
     toggleBtn.setAttribute('aria-label', label);
     toggleBtn.setAttribute('title', label);
   }
+  renderPomodoroFavicon(timer);
+  renderPomodoroGlyph(timer);
   pomodoroSyncForm();
 }
 
@@ -772,7 +890,7 @@ export function filterThreads(threads, query) {
     .some(v => typeof v === 'string' && v.toLowerCase().includes(q)));
 }
 
-/** Render the complete index page: the thread list (with pending counts, round
+/** Render the complete index page: the thread list (with rounds-left counts, round
  * counts and a visual live/settled distinction), filtered to `query` when one is
  * given — a plain GET-form round trip needing no client JS of its own. The
  * page's one script (`indexScript` above) only ever touches `.rel-time` text

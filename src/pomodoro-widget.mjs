@@ -41,7 +41,28 @@ import { cueNames } from './cues.mjs';
 // repeat something the icon says once. `role="img"` + `<title>` is what keeps
 // the name available to a screen reader now that no visible text carries it --
 // the status span itself only ever says the phase and the clock.
-const TOMATO_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pomodoro"><title>Pomodoro</title><circle cx="12" cy="14.6" r="6.8"/><path d="M12 7.8V4.6"/><path d="M12 7.8 8.2 5.9M12 7.8l3.8-1.9"/></svg>';
+export const TOMATO_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pomodoro"><title>Pomodoro</title><circle cx="12" cy="14.6" r="6.8"/><path d="M12 7.8V4.6"/><path d="M12 7.8 8.2 5.9M12 7.8l3.8-1.9"/></svg>';
+
+/** The break glyph (SPEC_MARK.md ticket 03, criterion 14): the SAME circle as
+ * TOMATO_ICON above -- identical cx/cy/r, identical outer <svg> attributes
+ * (viewBox, size, stroke, role, aria-label, the "Pomodoro" title) -- so the
+ * accessible name never changes and the swap reads as the same glyph turned
+ * down, not a different icon (criterion 16). Two differences only: the stem
+ * and leaves on top are gone ("a stemless circle"), and two short vertical
+ * stems sit inside it where they were -- the pause-glyph family, and the same
+ * "two bars, not one" call src/styles.mjs's REST_SHAPES already made for the
+ * tab mark (a single rest stroke reads as a rendering failure at this size;
+ * two read as deliberate). Exported alongside TOMATO_ICON so indexpage.mjs's
+ * indexScript can splice both in as real values (JSON.stringify, the same
+ * "real value, not a hand-copy" discipline formatCountdown.toString() already
+ * gets there) rather than owning a second copy of either drawing.
+ *
+ * Colour is NOT baked in here: idle and paused keep this exact glyph but at
+ * TOMATO_ICON's own muted weight (spec decision: "idle has nothing to turn up
+ * for"), so the amber-vs-muted choice is a CSS class indexScript toggles on
+ * whichever glyph is currently mounted (.pomodoro-icon-amber, src/styles.mjs),
+ * never a colour attribute drawn into either string. */
+export const REST_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pomodoro"><title>Pomodoro</title><circle cx="12" cy="14.6" r="6.8"/><path d="M10 11v7.2M14 11v7.2"/></svg>';
 
 const GEAR_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.47V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9.1 19.4a1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 1-1.47V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>';
 
@@ -100,8 +121,17 @@ function cueOptionsHtml() {
  * against `!doc.timer`), so there is no idle-disabled state to render either. */
 export function pomodoroWidget() {
   const cueOptions = cueOptionsHtml();
+  // The icon sits in its own slot, not bare, so indexScript's renderPomodoro can
+  // swap the whole glyph (TOMATO_ICON <-> REST_ICON, SPEC_MARK.md criterion 14)
+  // by replacing this ONE stable element's innerHTML -- a real markup swap, never
+  // the `hidden` property (this file's own header comment: an author `display`
+  // rule on .pomodoro-icon already beats the UA stylesheet's [hidden], the exact
+  // trap that once left a dead pill stuck in the header). `display: contents`
+  // (src/styles.mjs) is what keeps this wrapper invisible to the flex layout --
+  // the icon still lays out as a direct child of .pomodoro-widget, gap and all,
+  // exactly as when it had no wrapper.
   return `<div class="pomodoro-widget" id="pomodoro-widget">
-  ${TOMATO_ICON}
+  <span class="pomodoro-icon-slot" id="pomodoro-icon-slot">${TOMATO_ICON}</span>
   <span class="pomodoro-status" id="pomodoro-status">…</span>
   <span class="pomodoro-ctl-group">
     <button type="button" class="pomodoro-ctl" id="pomodoro-restart" aria-label="Restart interval" title="Restart interval">${RESTART_ICON}</button>

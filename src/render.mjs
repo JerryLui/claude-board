@@ -11,9 +11,12 @@
 // push of the same round are byte-identical.
 //
 // All four answer widgets (single, multi, text, rank), all five context kinds
-// (markdown, code, mermaid, html, compare), and comments anchored at block,
-// markdown heading/list-item, and element level (dom path + hint, mermaid node
-// id) render here. Every comment is run through resolveComment (src/board.mjs),
+// (markdown, code, mermaid, html, compare), and comments anchored at block and at
+// element level (dom path + hint, mermaid node id) render here. Only `html` and
+// `mermaid` carry a comment affordance at all (ADR.md entry 28) -- `markdown`,
+// `code`, `question` and `compare` render no comment button, form, list or pin
+// layer, so a stored comment on one of those simply has nowhere to render.
+// Every comment is run through resolveComment (src/board.mjs),
 // via resolveComments' shared per-block cache (ticket 11), exactly once per render
 // -- see groupCommentsByBlock and renderBoardPage below
 // -- and that single resolved/lost verdict feeds both the server-rendered
@@ -146,33 +149,16 @@ function expandButton(blockId, what) {
   return `<button type="button" class="expand-btn" data-expand-for="${escAttr(blockId)}" aria-label="Open this ${what || 'diagram'} in the lens">${EXPAND_ICON}expand</button>`;
 }
 
-function commentButton(blockId, kind, ref, label, inline) {
-  const attrs = [`data-block-id="${escAttr(blockId)}"`, `data-anchor-kind="${kind}"`];
-  if (ref) attrs.push(`data-anchor-ref="${escAttr(ref)}"`);
-  if (label) attrs.push(`data-anchor-label="${escAttr(label)}"`);
-  const cls = inline ? 'comment-btn inline-anchor-btn' : 'comment-btn';
-  // The inline variant is glyph-only, so it carries its target in an accessible
-  // name instead of visible text.
-  const name = label ? `Comment on ${label}` : 'Comment on this block';
-  if (inline) attrs.push(`aria-label="${escAttr(name)}" title="${escAttr(name)}"`);
-  const body = inline ? COMMENT_ICON : `${COMMENT_ICON}comment`;
-  return `<button type="button" class="${cls}" ${attrs.join(' ')}>${body}</button>`;
-}
-
-/** Insert a small comment-trigger button right after every anchored heading/list
- * item's opening tag, using the block's own anchor list for the label. Buttons are
- * phrasing content, valid inside both headings and list items, so this never needs
- * to nest a <form>. */
-function injectAnchorButtons(html, anchors, blockId) {
-  const labelByRef = new Map((anchors || []).map(a => [a.ref, a.label]));
-  return html.replace(/<(h[1-6]|li) id="([^"]+)"([^>]*)>/g, (whole, tag, ref) => {
-    const label = labelByRef.get(ref) || ref;
-    return whole + commentButton(blockId, 'md', ref, label, true);
-  });
+/** The whole-block comment control. Emitted only by the two kinds ADR.md entry 28
+ * leaves commentable (`html` and `mermaid`); every anchored comment on either of
+ * those is minted by a click on the stage itself, never by a button, so this has
+ * no inline/anchored variant any more. */
+function commentButton(blockId) {
+  return `<button type="button" class="comment-btn" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">${COMMENT_ICON}comment</button>`;
 }
 
 /** The short label shown next to a comment's number in its block's comment list:
- * the md heading/list-item label, the dom hint ("the Send button"), a diagram
+ * the dom hint ("the Send button"), a diagram
  * node's own hint (ticket 05) falling back to its bare node id for an anchor
  * minted before that ticket, or "block" for a whole-block comment — and
  * "lost: <ref>" for any of
@@ -182,7 +168,6 @@ function injectAnchorButtons(html, anchors, blockId) {
 function anchorTag(c, lost) {
   if (lost) return `lost: ${c.lost}`;
   const kind = c.anchor && c.anchor.kind;
-  if (kind === 'md') return c.anchor.label;
   if (kind === 'dom') return c.anchor.hint || c.anchor.ref;
   // Ticket 05: a diagram node's anchor now carries a hint too (composeHint, the
   // same rule as every other element) -- preferred exactly like `dom` above,
@@ -201,9 +186,11 @@ function commentArea(blockId, commentsByBlock, historical) {
   const items = comments.map(c => {
     const lost = !c.resolved;
     const tag = anchorTag(c, lost);
-    // The anchor a list entry points at, re-emitted as data attributes so
-    // src/ui.mjs can highlight that anchor (.anchor-target, src/styles.mjs) when the
-    // entry is clicked, without re-deriving the anchor from the rendered text.
+    // The anchor a list entry points at, re-emitted as data attributes so nothing
+    // downstream has to re-derive it from the rendered text. (The click-to-highlight
+    // gesture these fed went with the `md` anchor kind -- ADR.md entry 28; an
+    // element-level comment on a stage or a diagram already carries a numbered pin
+    // drawn on the thing it is about.)
     const kind = (c.anchor && c.anchor.kind) || 'block';
     const ref = (c.anchor && c.anchor.ref) || '';
     return `<div class="comment-item" data-anchor-kind="${escAttr(kind)}"${ref ? ` data-anchor-ref="${escAttr(ref)}"` : ''} data-block-id="${escAttr(blockId)}"><span class="comment-anchor${lost ? ' comment-lost' : ''}">#${c.n} · ${escHtml(tag)}</span>${escHtml(c.text)}</div>`;
@@ -232,23 +219,43 @@ function pageDomPinLayer(blockId) {
   return `<div class="pin-layer" data-block-id="${escAttr(blockId)}"></div>`;
 }
 
-function renderMarkdownBlock(block, board, commentsByBlock, historical) {
+/** A stage (an html iframe, a mermaid `<pre>`) and the absolutely-positioned pin
+ * layer over it, inside the `position: relative` wrapper the two need to line up.
+ * renderMermaidBlock and renderHtmlBlock write this same shape inline, each in
+ * its own section's indentation; this exists for renderContextItem, which needs
+ * the identical structure for a stage rendered as prose under a question's
+ * prompt. Left as a third spelling rather than folded into those two, because
+ * both of theirs sit inside larger template literals whose exact emitted text a
+ * handful of checks match on. */
+function stageWrap(blockId, inner) {
+  return `<div class="stage-wrap">
+    ${inner}
+    <div class="pin-layer" data-block-id="${escAttr(blockId)}"></div>
+  </div>`;
+}
+
+/** No commentButton/commentArea/pageDomPinLayer here (ADR.md entry 28, "Only the
+ * rendered kinds can be commented on"): the reviewer comments on rendered output,
+ * never on prose, so `markdown` carries neither the button nor the click-to-anchor
+ * gesture, wherever it appears — including nested in a question's context or a
+ * compare side. Same shape entry 6 already gave `question`/`compare`; an archived
+ * board carrying a stored comment on this block simply renders without it, since
+ * there is no list here to render it into. `block.anchors` and the heading/list-item
+ * `id` attributes stay (they are stored state, and the ids are what
+ * test/check-archive-ids.mjs's collision guard is about) — what is gone is the
+ * `md` COMMENT anchor kind that used to point at them. */
+function renderMarkdownBlock(block) {
   if (block.error) {
     return `
 <section class="block markdown-block" data-block-id="${escAttr(block.id)}" data-block-kind="markdown">
-  <div class="block-kicker">Markdown ${commentButton(block.id, 'block')}</div>
+  <div class="block-kicker">Markdown</div>
   <p class="resolve-error">Could not resolve: ${escHtml(block.error)}</p>
-  ${pageDomPinLayer(block.id)}
-  ${commentArea(block.id, commentsByBlock, historical)}
 </section>`;
   }
-  const withButtons = injectAnchorButtons(block.html, block.anchors, block.id);
   return `
 <section class="block markdown-block" data-block-id="${escAttr(block.id)}" data-block-kind="markdown">
-  <div class="block-kicker">Markdown ${commentButton(block.id, 'block')}</div>
-  <div class="md-content">${withButtons}</div>
-  ${pageDomPinLayer(block.id)}
-  ${commentArea(block.id, commentsByBlock, historical)}
+  <div class="block-kicker">Markdown</div>
+  <div class="md-content">${block.html}</div>
 </section>`;
 }
 
@@ -452,27 +459,141 @@ function renderWidget(block, answer, historical, board, commentsByBlock) {
   }
 }
 
+/** True when a block IS a rendered stage, or wraps one -- an `html` block
+ * itself, or a `compare` whose left or right side nests one. ADR.md entry 26:
+ * "the full-width rule keys on the presence of a rendered stage, not on the
+ * widget kind." Recurses into `compare` only -- context's other four kinds
+ * (markdown, code, mermaid) never carry a stage of their own. */
+function blockCarriesStage(block) {
+  if (!block) return false;
+  if (block.kind === 'html') return true;
+  if (block.kind === 'compare') {
+    return blockCarriesStage(block.left && block.left.block) || blockCarriesStage(block.right && block.right.block);
+  }
+  return false;
+}
+
+/** True when a question's own options or its context carry a rendered stage
+ * anywhere -- the single condition renderQuestionBlock keys both the
+ * full-width layout and the context-as-prose rendering on (ADR.md entry 26).
+ * Only `choose-between-rendered-variants` ever nests a block inside an
+ * option; every other widget's options are plain label/description pairs. */
+function questionCarriesStage(block) {
+  const inContext = (block.context || []).some(blockCarriesStage);
+  const inOptions = block.widget === 'choose-between-rendered-variants'
+    && (block.options || []).some(opt => blockCarriesStage(opt && opt.block));
+  return inContext || inOptions;
+}
+
+/** A context block's bare content, with none of `.block`'s card chrome --
+ * ADR.md entry 26, "context stacks under the prompt as plain prose with no
+ * card, no kicker": no `.block` border/background, no `.block-kicker` label.
+ * Reuses `.md-content`'s own prose/code styling for both markdown and code (a
+ * fenced fragment reads the same as one embedded in prose either way) and
+ * `.mermaid-block`'s borderless-`<pre>` rule for mermaid, so no new CSS is
+ * needed for either. `data-block-id`/`data-block-kind` ride on the wrapper
+ * (renderContextItem below), which is both a stable "which block is this" hook
+ * and the attribute src/ui.mjs's kind check reads.
+ *
+ * Entry 26 also said "no comment control", and entry 28 SUPERSEDES that half:
+ * the comment rule is drawn on kind and never on position, so an `html` stage
+ * or a `mermaid` diagram is exactly as commentable here as at the top level.
+ * That affordance is added by renderContextItem below rather than here, because
+ * it is chrome ABOUT the content rather than part of it -- and it is none of the
+ * three things entry 26 actually removed (a card, a border, a kicker), so both
+ * rules hold at once. `markdown` and `code` keep no affordance, here or
+ * anywhere. */
+function renderContextInner(block, board, commentsByBlock, historical) {
+  switch (block.kind) {
+    case 'markdown':
+      return block.error ? resolveErrorNote(block) : `<div class="md-content">${block.html}</div>`;
+    case 'code':
+      return block.error ? resolveErrorNote(block) : `<div class="md-content"><pre><code>${escHtml(String(block.text ?? ''))}</code></pre></div>`;
+    case 'mermaid':
+      return block.error ? resolveErrorNote(block) : stageWrap(block.id, `<pre class="mermaid">${escHtml(block.text)}</pre>`);
+    case 'html':
+      return block.error ? resolveErrorNote(block)
+        : stageWrap(block.id, `<iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(buildStageSrcdoc(block))}"></iframe>`);
+    case 'compare':
+      return `<div class="compare-grid">${renderContextCompareSide(block.left, board, commentsByBlock, historical)}${renderContextCompareSide(block.right, board, commentsByBlock, historical)}</div>`;
+    default:
+      return '';
+  }
+}
+
+function renderContextCompareSide(side, board, commentsByBlock, historical) {
+  const label = side && side.label ? side.label : '';
+  const body = side && side.block
+    ? renderContextItem(side.block, board, commentsByBlock, historical)
+    : '<p class="unsupported-widget">no content</p>';
+  return `<div class="compare-side">
+    <div class="compare-label">${escHtml(label)}</div>
+    ${body}
+  </div>`;
+}
+
+/** One context entry: its bare content, plus -- for the two kinds ADR.md entry
+ * 28 leaves commentable -- the same comment affordance that kind carries at the
+ * top level. The wrapper takes the kind's own `.html-block`/`.mermaid-block`
+ * class as well, because every lookup in src/ui.mjs that finds a stage's pin
+ * layer, its block id or its diagram source walks up to one of those two class
+ * names (`frame.closest('.html-block')`, `preEl.closest('.mermaid-block')`,
+ * `qsa('.mermaid-block', root)`); neither class carries any card styling of its
+ * own -- that comes from `.block`, which is exactly what a context item does not
+ * get -- so wearing it costs nothing visual and is what makes the affordance
+ * genuinely work rather than merely render.
+ *
+ * `pageDomPinLayer` rides along on those two kinds for the same reason
+ * renderMermaidBlock emits one (audit finding C4): a failed reference renders a
+ * `.resolve-error` note, which is not chrome and IS anchorable, so a click there
+ * must have a layer to draw its pin into rather than resolving to a comment with
+ * no pin anywhere on the page. */
+function renderContextItem(block, board, commentsByBlock, historical) {
+  const commentable = block.kind === 'html' || block.kind === 'mermaid';
+  const kindClass = block.kind === 'html' ? ' html-block' : block.kind === 'mermaid' ? ' mermaid-block' : '';
+  const affordance = commentable
+    ? `${commentButton(block.id)}${pageDomPinLayer(block.id)}${commentArea(block.id, commentsByBlock, historical)}`
+    : '';
+  return `<div class="context-item${kindClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${renderContextInner(block, board, commentsByBlock, historical)}${affordance}</div>`;
+}
+
 /** No commentButton/commentArea/pageDomPinLayer here (ADR "Commenting is
  * confined to content blocks", 2026-08-01): `question` is a card around a
  * widget, not content of its own -- a comment anchored to the whole card
  * names no item the agent can act on, and says strictly less than the `note`
- * field on the same card already says. The nested `context` blocks below
- * still go through renderBlock and keep their own comment button/area/
- * pin-layer untouched; only the wrapper loses the affordance, and nothing on
- * the wrapper (prompt text, note field, defer button, status line) is content
- * a page-scoped dom anchor was ever meant to target on its own, so its pin
- * layer would be permanently empty markup here too. */
+ * field on the same card already says.
+ *
+ * Context rendering forks on whether the question carries a rendered stage
+ * anywhere in its options or its own context (`questionCarriesStage`, ADR.md
+ * entry 26). A question with no stage is untouched: its context still goes
+ * through renderBlock exactly as before, in its own `.question-context` card
+ * beside `.question-main` -- the pre-existing `.question-block:not(:has(
+ * .question-context))` rule is what already collapses THAT case to one
+ * column, so a stage-free question keeps today's markup byte for byte. A
+ * question that DOES carry a stage renders its context as bare prose
+ * (renderContextItem) stacked inside `.question-main`, between the prompt and
+ * the widget, and never emits a `.question-context` card at all -- which is
+ * what lets the SAME pre-existing `:not(:has(.question-context))` rule carry
+ * the full-width layout too, with no new grid CSS of its own. */
 function renderQuestionBlock(block, board, commentsByBlock, historical) {
   const answer = board.answers[block.id];
   const statusText = `status: ${answer ? answer.status : 'unanswered'}`;
   const isDeferred = !!(answer && answer.status === 'deferred');
   const widgetHtml = renderWidget(block, answer, historical, board, commentsByBlock);
-  const contextHtml = (block.context || []).map(c => renderBlock(c, board, commentsByBlock, historical)).join('');
+  const contextItems = block.context || [];
+  const stagey = questionCarriesStage(block);
+  const proseContextHtml = stagey && contextItems.length
+    ? `<div class="question-context-prose">${contextItems.map(c => renderContextItem(c, board, commentsByBlock, historical)).join('')}</div>`
+    : '';
+  const cardContextHtml = !stagey && contextItems.length
+    ? contextItems.map(c => renderBlock(c, board, commentsByBlock, historical)).join('')
+    : '';
   return `
 <section class="block question-block" data-block-id="${escAttr(block.id)}" data-block-kind="question" data-widget="${escAttr(block.widget)}">
   <div class="question-main">
     <div class="block-kicker">Question · ${escHtml(block.widget)}</div>
     <p class="question-prompt">${escHtml(block.prompt)}</p>
+    ${proseContextHtml}
     ${widgetHtml}
     <div class="note-field">
       <label for="note-${escAttr(block.id)}">Note</label>
@@ -483,7 +604,7 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
       <span class="answer-status" data-status="${escAttr(answer ? answer.status : 'unanswered')}">${escHtml(statusText)}</span>
     </div>
   </div>
-  ${contextHtml ? `<div class="question-context">${contextHtml}</div>` : ''}
+  ${cardContextHtml ? `<div class="question-context">${cardContextHtml}</div>` : ''}
 </section>`;
 }
 
@@ -521,7 +642,7 @@ function renderMermaidBlock(block, board, commentsByBlock, historical) {
   </div>`;
   return `
 <section class="block mermaid-block" data-block-id="${escAttr(block.id)}" data-block-kind="mermaid">
-  <div class="block-kicker">Mermaid ${commentButton(block.id, 'block')} ${block.error ? '' : expandButton(block.id)}</div>
+  <div class="block-kicker">Mermaid ${commentButton(block.id)} ${block.error ? '' : expandButton(block.id)}</div>
   ${body}
   ${pageDomPinLayer(block.id)}
   ${commentArea(block.id, commentsByBlock, historical)}
@@ -536,29 +657,24 @@ function sourceLabel(source) {
   return label;
 }
 
-/** Every line of a code reference wrapped in its own `<span>`, so criterion 1's
- * "a line of a code reference" is an actual element the generic dom anchor can
- * build a step-path to -- a bare `escHtml(text)` blob had no per-line structure
- * at all. Joined back together with literal newlines (not `<br>`) so `<pre>`'s
- * whitespace still renders one visual line per source line and copy/paste still
- * yields the original text with the spans stripped. */
-function renderCodeLines(text) {
-  return String(text ?? '').split('\n').map(line => `<span class="code-line">${escHtml(line)}</span>`).join('\n');
-}
-
 /** A file plus a line range or section, resolved once at post time (see
  * src/resolve.mjs). No syntax highlighting — DESIGN.md Out of Scope calls that a
- * hand-rolled cost zero-dependency packaging doesn't buy. */
-function renderCodeBlock(block, board, commentsByBlock, historical) {
+ * hand-rolled cost zero-dependency packaging doesn't buy.
+ *
+ * No commentButton/commentArea/pageDomPinLayer, same as renderMarkdownBlock above
+ * (ADR.md entry 28). The per-line `<span class="code-line">` wrapping went with
+ * them: its only job was to give the generic dom anchor an element per source line
+ * to build a step-path to, and a code line is no longer a comment target anywhere.
+ * `<pre>` still renders one visual line per source line from the raw text, and
+ * copy/paste is now exactly the original bytes rather than the spans stripped. */
+function renderCodeBlock(block) {
   const label = sourceLabel(block.source);
   const kicker = ['Code', block.lang, label].filter(Boolean).map(escHtml).join(' · ');
-  const body = block.error ? resolveErrorNote(block) : `<pre><code>${renderCodeLines(block.text)}</code></pre>`;
+  const body = block.error ? resolveErrorNote(block) : `<pre><code>${escHtml(String(block.text ?? ''))}</code></pre>`;
   return `
 <section class="block code-block" data-block-id="${escAttr(block.id)}" data-block-kind="code">
-  <div class="block-kicker">${kicker} ${commentButton(block.id, 'block')}</div>
+  <div class="block-kicker">${kicker}</div>
   ${body}
-  ${pageDomPinLayer(block.id)}
-  ${commentArea(block.id, commentsByBlock, historical)}
 </section>`;
 }
 
@@ -1098,6 +1214,14 @@ export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>'
  * absolutely positioned sibling over the iframe that src/ui.mjs populates with
  * numbered pins for `dom` anchors, positioned from geometry the stage itself
  * reports (never written to here, since that needs a real, live DOM). */
+/** The `srcdoc` every html stage gets, whole-block or nested in a question's
+ * context (renderContextInner, below) alike: the margin reset, the mock's own
+ * markup, then the stage-side agent script -- one construction, so the two
+ * call sites can never drift apart on what a stage actually is. */
+function buildStageSrcdoc(block) {
+  return STAGE_MARGIN_RESET + block.html + stageAgentScript();
+}
+
 function renderHtmlBlock(block, board, commentsByBlock, historical) {
   // A referenced source can fail to resolve (SPEC_HTMLREF.md criteria 2-4: sliced
   // with lines/section, over the byte cap, or outside the confinement boundary) --
@@ -1106,7 +1230,7 @@ function renderHtmlBlock(block, board, commentsByBlock, historical) {
   if (block.error) {
     return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  <div class="block-kicker">HTML stage ${commentButton(block.id, 'block')}</div>
+  <div class="block-kicker">HTML stage ${commentButton(block.id)}</div>
   ${resolveErrorNote(block)}
   ${pageDomPinLayer(block.id)}
   ${commentArea(block.id, commentsByBlock, historical)}
@@ -1146,10 +1270,10 @@ function renderHtmlBlock(block, board, commentsByBlock, historical) {
   // up in the tree regardless. block.html + stageAgentScript() still land in
   // exactly the same relative order as before, immediately after the reset --
   // this only prepends, it never moves the script.
-  const srcdocContent = STAGE_MARGIN_RESET + block.html + stageAgentScript();
+  const srcdocContent = buildStageSrcdoc(block);
   return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  <div class="block-kicker">HTML stage ${commentButton(block.id, 'block')} ${expandButton(block.id, 'stage')}</div>
+  <div class="block-kicker">HTML stage ${commentButton(block.id)} ${expandButton(block.id, 'stage')}</div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(srcdocContent)}"></iframe>
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
@@ -1171,10 +1295,11 @@ function renderCompareSide(side, board, commentsByBlock, historical) {
 
 /** The side-by-side comparison stage inherited from /example, used whenever two
  * candidate designs exist. Each side is itself a content block (markdown/code/
- * mermaid/html), rendered through the same renderBlock dispatch so it keeps its own
- * id, comment area and (for markdown) anchors -- clicking INTO a side's own
- * content anchors against that nested block's own pin-layer, found first by
- * closest('[data-block-id]') in src/ui.mjs.
+ * mermaid/html), rendered through the same renderBlock dispatch, so a side holding
+ * an `html` stage or a `mermaid` diagram keeps that kind's own comment affordance
+ * here exactly as it has it anywhere else -- ADR.md entry 28 draws the rule on
+ * kind, never on position. A side holding `markdown` or `code` has none, for the
+ * same reason and just as positionally.
  *
  * No commentButton/commentArea/pageDomPinLayer on the wrapper itself (ADR
  * "Commenting is confined to content blocks", 2026-08-01): `compare` is a grid
@@ -1206,10 +1331,10 @@ function renderCompareBlock(block, board, commentsByBlock, historical) {
  * without duplicating the dispatch. */
 export function renderBlock(block, board, commentsByBlock, historical = false) {
   switch (block.kind) {
-    case 'markdown': return renderMarkdownBlock(block, board, commentsByBlock, historical);
+    case 'markdown': return renderMarkdownBlock(block);
     case 'question': return renderQuestionBlock(block, board, commentsByBlock, historical);
     case 'mermaid': return renderMermaidBlock(block, board, commentsByBlock, historical);
-    case 'code': return renderCodeBlock(block, board, commentsByBlock, historical);
+    case 'code': return renderCodeBlock(block);
     case 'html': return renderHtmlBlock(block, board, commentsByBlock, historical);
     case 'compare': return renderCompareBlock(block, board, commentsByBlock, historical);
     default: return '';
@@ -1299,7 +1424,12 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
  * posts `action:'discuss'` with whatever is filled in right now — partial answers
  * are the point — and tells the agent to stop posting boards. Both live inside the
  * one `.send-bar`, which `body.readonly` hides wholesale (src/styles.mjs), so the
- * standalone file:// archive has neither. */
+ * standalone file:// archive has neither. `#questions-left-pill` (ADR.md entry 27)
+ * is nested inside the same `.send-bar` for exactly that reason: it inherits the
+ * bar's readonly hiding for free rather than earning a second CSS rule, and it
+ * leaves the bar's own last-child position in `.board-shell` untouched. It is
+ * purely informational -- src/ui.mjs is what makes it live and click-navigable;
+ * this function only ever renders its first-paint count and label. */
 /** Is there a round waiting to be answered? Decides whether the send bar is live at
  * HYDRATE time, which nothing used to (audit 2026-07-31 D2): the buttons were rendered
  * enabled unconditionally and only ever disabled by an SSE push handler, so a finished
@@ -1309,6 +1439,22 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
 function hasOpenRound(board) {
   const latest = board.rounds[board.rounds.length - 1];
   return Boolean(latest && latest.status === 'open');
+}
+
+/** The questions-left pill's own count (DESIGN.md round-end decisions / ADR.md entry
+ * 27): how many of the OPEN round's top-level questions are still outstanding, at
+ * the moment this page is rendered. Nothing is answered yet server-side while a
+ * round is open -- answers only land in the store on submit (Decisions, "Send is
+ * never gated") -- so at render/reload time every one of the open round's questions
+ * is unanswered by construction, and this is exactly renderRoundSection's own
+ * `questionCount` for that round: the same top-level count src/ui.mjs's
+ * outstandingBlocks() walks once the client script takes over. src/ui.mjs recomputes
+ * this live as the reviewer answers; this is only ever the FIRST-PAINT value, before
+ * any client script has run -- same division of labour as initialRoundInView below. */
+function openRoundQuestionCount(board) {
+  const latest = board.rounds[board.rounds.length - 1];
+  if (!latest || latest.status !== 'open') return 0;
+  return board.blocks.filter(b => b.round === latest.n && b.kind === 'question').length;
 }
 
 export function renderBoardPage(board) {
@@ -1323,6 +1469,14 @@ export function renderBoardPage(board) {
   // takes over the moment it can measure real layout, and corrects this if the
   // page was opened scrolled elsewhere (e.g. a deep-linked anchor).
   const initialRoundInView = board.rounds[0] ? board.rounds[0].n : 1;
+  // The pill's first-paint count and label (see openRoundQuestionCount above) --
+  // 'visible' only at a nonzero count, matching the docked toggle's own first-paint
+  // assumption (no '.docked' class until an intersection is actually reported, i.e.
+  // "the rail is off screen" is the default): the pill defaults to shown whenever
+  // there is something to show, and src/ui.mjs's setupSendBarDock corrects both the
+  // instant it can measure the real rail.
+  const pillCount = openRoundQuestionCount(board);
+  const pillLabel = `${pillCount} question${pillCount === 1 ? '' : 's'} left`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1355,6 +1509,7 @@ ${faviconLink}
     ${roundsHtml}
   </div>
   <div class="send-bar">
+    <button type="button" class="questions-left-pill${pillCount > 0 ? ' visible' : ''}" id="questions-left-pill"${hasOpenRound(board) ? '' : ' disabled'}>${escHtml(pillLabel)}</button>
     <span class="send-status" id="send-status">${hasOpenRound(board) ? '' : 'This round has been sent. Waiting for the next one.'}</span>
     <button type="button" class="btn-discuss" id="discuss-btn"${hasOpenRound(board) ? '' : ' disabled'}>Discuss in chat</button>
     <button type="button" class="btn-send" id="send-btn"${hasOpenRound(board) ? '' : ' disabled'}>Send</button>

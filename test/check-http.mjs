@@ -241,6 +241,10 @@ async function main() {
         title: 'HTTP round trip',
         blocks: [
           { kind: 'markdown', text: '# Acceptance Criteria\n\n- one\n- two\n\n## Notes\n\nprose here' },
+          // ADR.md entry 28 leaves `mermaid` and `html` as the only commentable
+          // kinds, so the comments submitted below are anchored here rather than on
+          // the markdown block above.
+          { kind: 'mermaid', text: 'flowchart LR\n  one --> two' },
           {
             kind: 'question',
             prompt: 'Ship ticket 01?',
@@ -264,8 +268,9 @@ async function main() {
     assert.equal(stored.title, 'HTTP round trip');
     assert.equal(stored.blocks[0].kind, 'markdown');
     assert.ok(stored.blocks[0].anchors.some(a => a.ref === 'acceptance-criteria-li1'));
-    assert.equal(stored.blocks[1].kind, 'question');
-    assert.equal(stored.blocks[1].id, 'q1');
+    assert.equal(stored.blocks[1].kind, 'mermaid');
+    assert.equal(stored.blocks[2].kind, 'question');
+    assert.equal(stored.blocks[2].id, 'q1');
   });
 
   await check('GET /b/:id serves the page with anchors and inlined JSON', async () => {
@@ -301,8 +306,8 @@ async function main() {
         action: 'send',
         answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'ship it' }],
         comments: [
-          { blockId: 'd1', anchor: { kind: 'md', ref: 'acceptance-criteria-li2', label: 'two' }, text: 'criterion 2 comment' },
-          { blockId: 'd1', anchor: { kind: 'md', ref: 'acceptance-criteria-li9', label: 'ghost' }, text: 'stale anchor comment' },
+          { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'two' }, text: 'criterion 2 comment' },
+          { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'ghost' }, text: 'stale anchor comment' },
         ],
       }),
     });
@@ -321,11 +326,11 @@ async function main() {
     assert.equal(packet.answers[0].note, 'ship it');
 
     assert.equal(packet.comments.length, 2);
-    const resolved = packet.comments.find(c => c.anchor.ref === 'acceptance-criteria-li2');
+    const resolved = packet.comments.find(c => c.anchor.ref === 'two');
     assert.equal(resolved.resolved, true);
-    const lost = packet.comments.find(c => c.anchor.ref === 'acceptance-criteria-li9');
+    const lost = packet.comments.find(c => c.anchor.ref === 'ghost');
     assert.equal(lost.resolved, false);
-    assert.equal(lost.lost, 'acceptance-criteria-li9');
+    assert.equal(lost.lost, 'ghost');
   });
 
   await check('the store JSON reflects the submit: answers, comments, sent round', async () => {
@@ -714,7 +719,7 @@ async function main() {
       headers: writeHeaders(),
       body: JSON.stringify({
         title: 'SSE resolved comments',
-        blocks: [{ kind: 'markdown', text: '# Notes\n\n- one\n- two' }],
+        blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  one --> two' }],
       }),
     })).json();
     const sseBoardId = created.boardId;
@@ -731,8 +736,8 @@ async function main() {
         action: 'send',
         answers: [],
         comments: [
-          { blockId: md1, anchor: { kind: 'md', ref: 'notes-li1', label: 'one' }, text: 'still resolves' },
-          { blockId: md1, anchor: { kind: 'md', ref: 'notes-li9', label: 'ghost' }, text: 'never resolves' },
+          { blockId: md1, anchor: { kind: 'mermaid', ref: 'one' }, text: 'still resolves' },
+          { blockId: md1, anchor: { kind: 'mermaid', ref: 'ghost' }, text: 'never resolves' },
         ],
       }),
     });
@@ -742,13 +747,13 @@ async function main() {
     assert.ok(submittedEvent, 'expected a submitted event');
     const comments = submittedEvent.data.board.comments;
     assert.equal(comments.length, 2);
-    const resolvedOne = comments.find(c => c.anchor && c.anchor.ref === 'notes-li1');
-    const lostOne = comments.find(c => c.anchor && c.anchor.ref === 'notes-li9');
+    const resolvedOne = comments.find(c => c.anchor && c.anchor.ref === 'one');
+    const lostOne = comments.find(c => c.anchor && c.anchor.ref === 'ghost');
     assert.ok(resolvedOne, 'expected the still-resolvable comment in the pushed board.comments');
     assert.equal(resolvedOne.resolved, true, 'a resolvable comment in an SSE payload must carry resolved:true (ablation: sending the raw stored board leaves this field undefined)');
     assert.ok(lostOne);
     assert.equal(lostOne.resolved, false, 'an unresolvable comment in an SSE payload must carry resolved:false, exactly like a fresh page load would show');
-    assert.equal(lostOne.lost, 'notes-li9');
+    assert.equal(lostOne.lost, 'ghost');
     // resolveComment's output CARRIES round and createdAt rather than dropping them
     // (audit M4): without them nothing downstream -- the packet, the history rail, a
     // second tab diffing its own copy -- can tell this round's feedback from a
@@ -767,7 +772,7 @@ async function main() {
   // --- ticket 07: thread index, concurrent sessions, archive search ------------
 
   /** Pull the single `<a class="thread-item...">...</a>` element for one thread out
-   * of the index page, so an assertion about its pending count or live/settled
+   * of the index page, so an assertion about its rounds-left count or live/settled
    * class can only be satisfied by that thread's own row, not by some other
    * thread's markup or the inlined stylesheet (thread-item is also a CSS selector
    * in src/styles.mjs, so matching on the bare class name alone proves nothing). */
@@ -777,12 +782,12 @@ async function main() {
     return m ? m[0] : null;
   }
 
-  await check('the index lists a posted thread with its actual pending count, live vs settled', async () => {
+  await check('the index lists a posted thread with its actual rounds-left count, live vs settled (ADR.md entry 25)', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(),
       body: JSON.stringify({
-        title: 'Index pending count',
+        title: 'Index rounds-left count',
         cwd: projectDir('index-project'),
         blocks: [
           { kind: 'question', prompt: 'Q1?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
@@ -795,7 +800,9 @@ async function main() {
     const before = await (await fetch(`${base}/`)).text();
     const rowBefore = threadRowFor(before, idxThread);
     assert.ok(rowBefore, 'the posted thread must appear in the index');
-    assert.match(rowBefore, /data-pending="2"/, 'two unanswered questions must render as pending count 2, not a placeholder');
+    // Two question BLOCKS, but one open ROUND that asks something -- the badge
+    // counts trips back to the board, never question blocks (ADR.md entry 25).
+    assert.match(rowBefore, /data-rounds-left="1"/, 'one open round, regardless of how many questions it carries');
     assert.match(rowBefore, /data-live="true"/);
     assert.match(rowBefore, /class="thread-item live"/, 'a thread with an open round must be visually distinct (the "live" class)');
 
@@ -821,7 +828,7 @@ async function main() {
     const after = await (await fetch(`${base}/`)).text();
     const rowAfter = threadRowFor(after, idxThread);
     assert.ok(rowAfter);
-    assert.match(rowAfter, /data-pending="0"/, 'answering both questions must drop the rendered pending count to 0');
+    assert.match(rowAfter, /data-rounds-left="0"/, 'sending the only open round must drop the rendered count to 0');
     assert.match(rowAfter, /data-live="false"/);
     assert.doesNotMatch(rowAfter, /class="thread-item live"/, 'a settled thread must not carry the live class any more');
   });
@@ -863,8 +870,10 @@ async function main() {
     const rowA = threadRowFor(idxHtml, postA.thread);
     const rowB = threadRowFor(idxHtml, postB.thread);
     assert.ok(rowA && rowB, 'both same-cwd threads must be listed as separate rows');
-    assert.match(rowA, /data-pending="3"/);
-    assert.match(rowB, /data-pending="2"/);
+    // Each thread has exactly one open round -- A's carries three question blocks,
+    // B's carries two, and the count must read 1 for both regardless (ADR.md entry 25).
+    assert.match(rowA, /data-rounds-left="1"/);
+    assert.match(rowB, /data-rounds-left="1"/);
 
     // B's waiter is up before A gets answered, to prove answering A cannot unblock it.
     let bResolved = false;
@@ -897,8 +906,8 @@ async function main() {
     assert.equal(boardBOnDisk.rounds[0].status, 'open');
 
     const idxAfterA = await (await fetch(`${base}/`)).text();
-    assert.match(threadRowFor(idxAfterA, postA.thread), /data-pending="0"/);
-    assert.match(threadRowFor(idxAfterA, postB.thread), /data-pending="2"/, 'session B\'s pending count must be independent of session A\'s submit');
+    assert.match(threadRowFor(idxAfterA, postA.thread), /data-rounds-left="0"/);
+    assert.match(threadRowFor(idxAfterA, postB.thread), /data-rounds-left="1"/, 'session B\'s rounds-left count must be independent of session A\'s submit');
 
     // now answer B and confirm its own waiter (and only its own) resolves
     const idsB = boardBOnDisk.blocks.filter(b => b.kind === 'question').map(b => b.id);
@@ -1311,7 +1320,11 @@ async function main() {
           { kind: 'code', text: 'const x = 1;\nconst y = 2;', lang: 'javascript' },
           {
             kind: 'compare',
-            left: { label: 'Before', block: { kind: 'markdown', text: 'the old copy, unchanged' } },
+            // ADR.md entry 28: a compare SIDE is judged on its own kind, so a
+            // diagram here keeps the affordance. Sourced from a path that cannot
+            // resolve, because a mermaid section's `.resolve-error` note is the one
+            // element the generic page-scoped gesture can reach.
+            left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-rr.mmd' } } },
             right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Send</button></div>' } },
           },
           {
@@ -1324,9 +1337,10 @@ async function main() {
             // options, its note field) lost the comment affordance entirely.
             // Its `context` entries did not -- they render through the same
             // renderBlock dispatch as any other block, with their own id and
-            // their own comment area, so a page-scoped anchor rooted here is
-            // exactly the still-live case ticket 04 needs covered.
-            context: [{ kind: 'markdown', text: 'Context for the question, nested one level in.' }],
+            // their own comment area, so an anchor rooted here is exactly the
+            // still-live case ticket 04 needs covered. Entry 28 then decided WHICH
+            // context entries: an html stage keeps it, the prose beside it does not.
+            context: [{ kind: 'html', html: '<div class="mock"><button>Confirm</button></div>' }],
           },
         ],
       }),
@@ -1339,6 +1353,8 @@ async function main() {
     const compareLeftId = rrStored.blocks[2].left.block.id;
     const compareRightId = rrStored.blocks[2].right.block.id;
     const questionContextId = rrStored.blocks[3].context[0].id;
+    assert.equal(typeof rrStored.blocks[2].left.block.error, 'string',
+      'setup failure: the compare side\'s diagram must actually fail to resolve');
 
     /** Loads a served page through the real client script, exactly like
      * check-comment-mode.mjs's loadBoard -- a fresh document per call. */
@@ -1377,30 +1393,28 @@ async function main() {
     const doc1 = loadBoard(firstPageHtml);
     enableCommentMode(doc1);
 
-    const prose = doc1.querySelectorAll('.md-content p').find(el => el.textContent.indexOf('paragraph of prose') !== -1);
-    const listItem = doc1.querySelectorAll('.md-content li').find(el => el.textContent.trim() === 'alpha item');
-    const tableCell = doc1.querySelectorAll('.md-content td').find(el => el.textContent.trim() === '42');
-    const codeLine = doc1.querySelectorAll('.code-line').find(el => el.textContent.trim() === 'const y = 2;');
-    const compareProse = doc1.querySelectorAll('.compare-side .md-content p').find(el => el.textContent.indexOf('old copy') !== -1);
-    const questionContext = doc1.querySelectorAll('.question-context .md-content p').find(el => el.textContent.indexOf('Context for the question') !== -1);
-    assert.ok(prose && listItem && tableCell && codeLine && compareProse && questionContext, 'setup failure: could not find every fixture element on the first-rendered page');
+    // ADR.md entry 28: markdown and code carry no comment surface at all now, so
+    // the round trip is driven over the kinds that do -- a diagram in a compare
+    // side (page-scoped root) and two html stages (iframe-body root), one of them
+    // inside a question's context.
+    const compareDiagram = doc1.querySelector(`[data-block-id="${compareLeftId}"] .resolve-error`);
+    assert.ok(compareDiagram, 'setup failure: could not find every fixture element on the first-rendered page');
+    assert.equal(doc1.querySelector(`[data-block-id="${mdBlockId}"] .pin-layer`), null,
+      'setup failure: a markdown block must carry no comment surface (ADR.md entry 28)');
+    assert.equal(doc1.querySelector(`[data-block-id="${codeBlockId}"] .pin-layer`), null,
+      'setup failure: a code block must carry no comment surface (ADR.md entry 28)');
 
-    const pairs = [
-      captureAnchor(doc1, prose, mdBlockId),
-      captureAnchor(doc1, listItem, mdBlockId),
-      captureAnchor(doc1, tableCell, mdBlockId),
-      captureAnchor(doc1, codeLine, codeBlockId),
-      captureAnchor(doc1, compareProse, compareLeftId),
-      captureAnchor(doc1, questionContext, questionContextId),
-    ];
-    // The html-stage side of the compare, still element (2) of ticket 03's TWO
-    // roots (DESIGN.md / src/anchor.mjs's design comment) -- included so
-    // this same round trip also proves block.kind === 'html' resolution is
-    // unchanged by this ticket, not just the new page-scoped path.
-    const frame = doc1.querySelector('.html-stage');
-    frame.loadSrcdoc();
-    const stageButton = frame.contentDocument.querySelector('button');
-    pairs.push(captureAnchor(doc1, stageButton, compareRightId));
+    const pairs = [captureAnchor(doc1, compareDiagram, compareLeftId)];
+    // The two html stages, still element (2) of ticket 03's TWO roots (DESIGN.md /
+    // src/anchor.mjs's design comment) -- included so this same round trip also
+    // proves block.kind === 'html' resolution is unchanged, not just the
+    // page-scoped path, and that it is unchanged inside a question's context too.
+    for (const blockId of [compareRightId, questionContextId]) {
+      const frame = doc1.querySelector(`[data-block-id="${blockId}"] .html-stage`);
+      assert.ok(frame, `setup failure: no html stage rendered for block ${blockId}`);
+      frame.loadSrcdoc();
+      pairs.push(captureAnchor(doc1, frame.contentDocument.querySelector('button'), blockId));
+    }
 
     for (const p of pairs) {
       assert.equal(p.anchor.kind, 'dom');
@@ -1433,8 +1447,8 @@ async function main() {
     // that resolveComment returned true in isolation.
     const secondPageHtml = await (await fetch(`${base}/b/${rrBoardId}`)).text();
     const doc2 = loadBoard(secondPageHtml);
-    const frame2 = doc2.querySelector('.html-stage');
-    frame2.loadSrcdoc(); // the html-stage pin layer only wires for real once "loaded"
+    // the html-stage pin layers only wire for real once "loaded"
+    doc2.querySelectorAll('.html-stage').forEach(f => f.loadSrcdoc());
 
     function pinLayerFor(blockId) {
       const section = doc2.querySelector(`[data-block-id="${blockId}"]`);

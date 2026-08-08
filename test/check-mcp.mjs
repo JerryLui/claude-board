@@ -1216,14 +1216,14 @@ async function main() {
         name: 'ask',
         arguments: {
           title: 'Comment check',
-          blocks: [{ kind: 'markdown', text: '# Notes\n\nsome context' }, QUESTION],
+          blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  Start --> End' }, QUESTION],
         },
       });
       const boardId = await waitForNewBoardFile(home, knownIds);
       await submitBoard(base, boardId, {
         answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }],
         comments: [
-          { blockId: 'd1', anchor: { kind: 'md', ref: 'notes' }, text: 'this heading overstates it' },
+          { blockId: 'm1', anchor: { kind: 'mermaid', ref: 'End' }, text: 'this heading overstates it' },
           { blockId: 'q1', anchor: { kind: 'block' }, text: 'ask this differently' },
         ],
       });
@@ -1234,14 +1234,14 @@ async function main() {
       assert.ok(result.structuredContent, 'the packet must also be nested under structuredContent');
       assert.equal(result.structuredContent.board, boardId);
       assert.equal(result.structuredContent.comments.length, 2);
-      assert.equal(result.structuredContent.comments[0].blockId, 'd1');
+      assert.equal(result.structuredContent.comments[0].blockId, 'm1');
       assert.equal(result.structuredContent.comments[0].text, 'this heading overstates it');
 
       // The guaranteed channel, on its own, must name each comment's block, its
       // anchor and its words.
       const text = result.content[0].text;
-      assert.match(text, /d1/, 'the text must name the commented block');
-      assert.match(text, /md:notes/, 'the text must name the anchor');
+      assert.match(text, /m1/, 'the text must name the commented block');
+      assert.match(text, /mermaid:End/, 'the text must name the anchor');
       assert.match(text, /this heading overstates it/, 'the text must carry the comment itself');
       assert.match(text, /q1/);
       assert.match(text, /ask this differently/);
@@ -1272,7 +1272,7 @@ async function main() {
         arguments: {
           title: 'formatAnchor check',
           blocks: [
-            { kind: 'markdown', text: '# Notes\n\nsome context' },
+            { kind: 'markdown', text: '# Notes\n\nsome context' }, // renders, but is not commentable (ADR.md entry 28)
             QUESTION,
             { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
             { kind: 'mermaid', text: 'flowchart LR\n  A[Start] --> B[End]' },
@@ -1285,8 +1285,6 @@ async function main() {
         comments: [
           // block: no ref/hint at all.
           { blockId: 'q1', anchor: { kind: 'block' }, text: 'whole-block comment' },
-          // md: ref + label, always shown together (unchanged by this ticket).
-          { blockId: 'd1', anchor: { kind: 'md', ref: 'notes', label: 'Notes' }, text: 'md comment' },
           // dom: ref + hint, resolves against the html block's live markup.
           { blockId: 'h1', anchor: { kind: 'dom', ref: '1.1', hint: 'Send' }, text: 'dom comment with hint' },
           // dom: ref only, no hint — degrades to the bare ref either way.
@@ -1306,8 +1304,6 @@ async function main() {
 
       assert.match(text, /whole-block comment/);
       assert.match(text, /\bblock\b.*whole-block comment/, 'kind "block" must format as "whole block"');
-
-      assert.match(text, /md:notes \("Notes"\).*md comment/, 'md keeps its ref + label');
 
       assert.match(text, /dom:1\.1 \("Send"\).*dom comment with hint/, 'dom prefers the hint alongside its ref');
       assert.match(text, /dom:1\.1(?! \(").*dom comment without hint/, 'dom with no hint degrades to the bare ref');

@@ -83,10 +83,18 @@ function check(name, fn) {
 // --- fixture: one board whose markdown mints every dangerous heading at once ---
 
 // The markdown block is the first of its kind, so src/board.mjs mints it `d1`
-// (KIND_LETTER + ordinal) and the question `q1` -- which is what lets the
-// per-block headings below name a REAL composed id rather than a plausible
-// one. Asserted right after createBoard rather than assumed.
+// (KIND_LETTER + ordinal), the mermaid block `m1` and the question `q1` --
+// which is what lets the per-block headings below name a REAL composed id
+// rather than a plausible one. Asserted right after createBoard rather than
+// assumed.
+//
+// ADR.md entry 28: the per-block comment ids (`comment-list-<id>` and friends)
+// only exist on the two kinds that are still commentable, so the headings that
+// have to COLLIDE with one name the mermaid block's id, not the markdown block's
+// own -- the heading itself is still minted by markdown, which is the half of
+// the collision this file is about (untrusted content choosing an id).
 const MD_ID = 'd1';
+const STAGE_ID = 'm1';
 
 const board = createBoard({
   title: 'Ticket -- id-collision archive',
@@ -126,25 +134,28 @@ const board = createBoard({
         '',
         'DESIGN.md polish ticket 04 promoted the real one from a <div> to a <button>.',
         '',
-        `## Comment list ${MD_ID}`,
+        `## Comment list ${STAGE_ID}`,
         '',
-        'The queued-comment list for THIS block -- a composed id, minted by a heading.',
+        'The queued-comment list for the diagram below -- a composed id, minted by a heading.',
         '',
-        `## Comment form ${MD_ID}`,
+        `## Comment form ${STAGE_ID}`,
         '',
-        'The comment form for THIS block.',
+        'The comment form for the diagram below.',
         '',
-        `## Comment target ${MD_ID}`,
+        `## Comment target ${STAGE_ID}`,
         '',
-        'The "commenting on:" line for THIS block.',
+        'The "commenting on:" line for the diagram below.',
       ].join('\n'),
     },
+    { kind: 'mermaid', text: 'flowchart TD\n  A[Start] --> B[End]' },
     { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
   ],
 });
 
 assert.equal(board.blocks[0].id, MD_ID,
-  `setup failure: expected the markdown block to be minted as ${MD_ID}; the composed-id headings above name that id literally`);
+  `setup failure: expected the markdown block to be minted as ${MD_ID}`);
+assert.equal(board.blocks[1].id, STAGE_ID,
+  `setup failure: expected the mermaid block to be minted as ${STAGE_ID}; the composed-id headings above name that id literally`);
 
 const rendered = renderBoardPage(board);
 
@@ -193,7 +204,7 @@ function loadArchiveThemed(html) {
 const COLLIDING_IDS = [
   'board-data', 'send-btn', 'discuss-btn', 'send-status', 'theme-toggle',
   'comment-mode-toggle', 'blocks', 'round-badge',
-  `comment-list-${MD_ID}`, `comment-form-${MD_ID}`, `comment-target-${MD_ID}`,
+  `comment-list-${STAGE_ID}`, `comment-form-${STAGE_ID}`, `comment-target-${STAGE_ID}`,
 ];
 
 check('setup: the markdown headings actually collide with the real ids they used to shadow', () => {
@@ -286,12 +297,12 @@ check('a queued comment lands in the real div#comment-list-<blockId>, not in a h
   toggle.dispatchEvent(new StandInEvent('click'));
   assert.equal(toggle.classList.contains('active'), true, 'setup failure: comment mode did not turn on');
 
-  const anchorBtn = document.querySelectorAll(`.comment-btn[data-anchor-kind="md"][data-block-id="${MD_ID}"]`)[0];
-  assert.ok(anchorBtn, 'setup failure: the markdown block rendered no inline anchor buttons');
+  const anchorBtn = document.querySelectorAll(`.comment-btn[data-block-id="${STAGE_ID}"]`)[0];
+  assert.ok(anchorBtn, 'setup failure: the mermaid block rendered no comment button');
   anchorBtn.dispatchEvent(new StandInEvent('click'));
 
-  const form = document.querySelector(`form#comment-form-${MD_ID}`);
-  assert.ok(form, 'setup failure: no real form#comment-form-' + MD_ID);
+  const form = document.querySelector(`form#comment-form-${STAGE_ID}`);
+  assert.ok(form, 'setup failure: no real form#comment-form-' + STAGE_ID);
   assert.equal(form.classList.contains('open'), true, 'setup failure: the anchor button did not open the comment form');
   form.querySelector('input[type=text]').value = 'this heading is doing two jobs';
   form.dispatchEvent(new StandInEvent('submit'));
@@ -299,9 +310,9 @@ check('a queued comment lands in the real div#comment-list-<blockId>, not in a h
   const items = document.querySelectorAll('.comment-item.comment-pending');
   assert.equal(items.length, 1, `setup failure: expected exactly one queued comment, got ${items.length}`);
 
-  const realList = document.querySelectorAll(`[id="comment-list-${MD_ID}"]`).find(el => el.tagName === 'DIV');
-  const heading = document.querySelectorAll(`[id="comment-list-${MD_ID}"]`).find(el => /^H[1-6]$/.test(el.tagName));
-  assert.ok(realList, 'setup failure: no real div#comment-list-' + MD_ID);
+  const realList = document.querySelectorAll(`[id="comment-list-${STAGE_ID}"]`).find(el => el.tagName === 'DIV');
+  const heading = document.querySelectorAll(`[id="comment-list-${STAGE_ID}"]`).find(el => /^H[1-6]$/.test(el.tagName));
+  assert.ok(realList, 'setup failure: no real div#comment-list-' + STAGE_ID);
   assert.ok(heading, 'setup failure: the colliding heading is not in the live page');
 
   assert.equal(items[0].parentElement, realList,

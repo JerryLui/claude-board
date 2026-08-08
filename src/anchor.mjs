@@ -71,6 +71,16 @@
 //   examples of it, rather than the stage being the only element-level case
 //   that existed. Diagrams stay a documented third case for now.
 //
+//   AMENDED, ADR.md entry 28 ("Only the rendered kinds can be commented on",
+//   2026-08-06): "every other block kind" above is this ticket's own design,
+//   predating entry 28 and now too wide. The path-building/resolving mechanism
+//   this section describes is unchanged and still generic, but src/ui.mjs's
+//   `anchorRootFor`/`isNonAnchorableRoot` now gate it to `html` and `mermaid`
+//   before a click ever mints a ref -- a paragraph, a list item, a table cell
+//   or a line of a code reference is no longer a click target at all, in a
+//   question's `context` or a `compare` side or anywhere else. `md` anchors are
+//   deleted outright, not merely untouched (`src/board.mjs`'s `ANCHOR_KINDS`).
+//
 // HOW A HINT IS DERIVED. `extractHint` (below) is unchanged: it collapses and
 // caps an element's own text. That alone is "identity" -- criterion 6 also
 // wants "containing context" (its example: "the Send button in the after

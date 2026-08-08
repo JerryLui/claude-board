@@ -23,6 +23,7 @@ import {
   extractClaims,
   checkProse,
   checkProseFile,
+  formatFailures,
   resolveInstalledRoot,
   loadInstalledChecker,
   REPO_ROOT,
@@ -253,6 +254,40 @@ Anchor  = { kind: 'block' }
     const result = checkProse({ proseText, tools });
     assert.equal(result.ok, true);
     assert.deepEqual(result.failures, []);
+  });
+
+  // --- delegating-caller mode ---------------------------------------------------
+  // The regression this exists for: `commands/grill.md` and `commands/wayfind.md` were
+  // migrated to point at the manual instead of restating the call, and the full battery
+  // then failed them for exactly that fix.
+  const delegatingTools = [{ name: 'ask', inputSchema: { type: 'object', properties: { title: {}, blocks: {} } } }];
+  const delegatingProse = 'Questions go through the board. Read the `claude-board` skill for the call, the widgets and the packet.'.padEnd(140, ' ');
+
+  await check('checkProse: delegating prose passes without naming the tool or its arguments', () => {
+    const result = checkProse({ proseText: delegatingProse, tools: delegatingTools, delegatesTo: 'claude-board' });
+    assert.equal(result.ok, true, formatFailures(result.failures));
+  });
+
+  await check('checkProse: the same prose fails the full battery, so the mode is doing the work', () => {
+    const result = checkProse({ proseText: delegatingProse, tools: delegatingTools });
+    assert.equal(result.ok, false);
+  });
+
+  await check('checkProse: delegating prose that drops the pointer at the manual fails', () => {
+    const orphaned = 'Questions go through the board somehow. Post the round and read the answers back.'.padEnd(140, ' ');
+    const result = checkProse({ proseText: orphaned, tools: delegatingTools, delegatesTo: 'claude-board' });
+    assert.ok(result.failures.some(f => /owns the call/.test(f.name)));
+  });
+
+  await check('checkProse: delegating mode still rejects vocabulary the caller invents', () => {
+    const invented = 'Read the `claude-board` skill for the call. Attach `context: [{ kind: \'hologram\' }]` to the question.'.padEnd(140, ' ');
+    const result = checkProse({
+      proseText: invented,
+      tools: delegatingTools,
+      delegatesTo: 'claude-board',
+      protocolText: readRepoFile('PROTOCOL.md'),
+    });
+    assert.ok(result.failures.some(f => /block kind/.test(f.name)));
   });
 
   if (failures) {

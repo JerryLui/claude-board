@@ -94,11 +94,13 @@ mermaid renders client-side, so without the script it would show raw diagram sou
 
 `src/render.mjs` emits several classes that `src/styles.mjs` never rules on —
 `mode-toggle-label`, `choice-single` (JS selectors, see `src/ui.mjs`), and
-`compare-block`, `code-line`, `markdown-block` (semantic wrappers). Their visual
-styling comes from sibling classes (`.compare-side`, `.code-block`, `.md`,
+`compare-block` and `markdown-block` (semantic wrappers). Their visual
+styling comes from sibling classes (`.compare-side`, `.md`,
 `.card-choice`). `test/check-pure.mjs` enforces the *other* direction — no rule for a
 class the markup never emits — so unstyled hook classes are expected. A card audit that
-greps every emitted class against the CSS will flag these five; they are fine.
+greps every emitted class against the CSS will flag these; they are fine.
+(`code-line` used to be a fifth: ADR.md entry 28 deleted the per-line spans along
+with the comment affordance on code blocks.)
 
 ## Re-sync risks
 
@@ -109,7 +111,7 @@ greps every emitted class against the CSS will flag these five; they are fine.
   each against `ds-bundle/_ds_bundle.css` + `tokens/tokens.css`). A checker regex of
   `--[a-z0-9-]+` also matches markdown table rules (`---`) — that hit is a false positive.
 - The class table is **curated, not exhaustive** — 72 of 123. Classes omitted are internal
-  (`.e`, `.mjs`, `.cb-*`, `.has-pending`, `.zero`). Adding a genuinely new UI surface to
+  (`.e`, `.mjs`, `.cb-*`). Adding a genuinely new UI surface to
   the board means deciding whether it belongs in the table.
 - `--head-clear` and `--scrollbar-hover` are deliberately undocumented in the header:
   internal mechanics, not design vocabulary.

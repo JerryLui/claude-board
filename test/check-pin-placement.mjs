@@ -5,7 +5,10 @@
 // C4: three sections invited the click-to-anchor gesture but had no pin-layer to
 // draw into -- a compare block's own `.compare-side`/`.compare-grid` chrome, a
 // markdown block's `.resolve-error` branch, and a mermaid block's `.resolve-error`
-// branch (a mermaid section's ONLY pin-layer used to be the stage-scoped one
+// branch. Two of the three are retired rather than fixed now: ADR.md entry 6 took
+// the affordance off the compare wrapper, and entry 28 took it off `markdown`
+// entirely. What survives is the mermaid case
+// (a mermaid section's ONLY pin-layer used to be the stage-scoped one
 // nested inside `.stage-wrap`, entirely absent when the block errored). A `dom`
 // anchor rooted at any of these still resolved server-side (resolveDomAnchorInSection
 // walks the whole section), so the comment recorded as `resolved: true` with no
@@ -128,12 +131,19 @@ check('C4 (retired by ADR.md entry 6): a compare block renders no page-scoped pi
   assert.equal(document.querySelectorAll('.anchor-pin').length, 0, 'clicking a compare side\'s own chrome must draw no pin anywhere on the page');
 });
 
-check('C4, re-pointed: a block NESTED inside a compare side is still genuinely anchorable in ITS OWN pin-layer -- gating the compare wrapper did not take its child with it', () => {
+// ADR.md entry 28 draws the comment rule on KIND and never on position, so the
+// nested block this case re-points at is now a rendered one: a `mermaid` diagram
+// inside a compare side is exactly as commentable as one at the top level
+// (criterion 17). Its errored branch is used because that is the one part of a
+// mermaid section the generic page-scoped gesture can reach -- `pre.mermaid` and
+// `.stage-wrap` are chrome, and a node click is the diagram's own gesture,
+// covered end to end in test/check-mermaid-anchor.mjs.
+check('criterion 17 / C4, re-pointed: a mermaid block NESTED inside a compare side is genuinely anchorable in ITS OWN pin-layer -- the comment rule is drawn on kind, not on where the block sits', () => {
   const board = createBoard({
-    title: 'Ticket 09 -- a compare side\'s nested content block stays commentable',
+    title: 'ADR entry 28 -- a compare side\'s nested diagram stays commentable',
     blocks: [{
       kind: 'compare',
-      left: { label: 'Before', block: { kind: 'markdown', text: 'old copy' } },
+      left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-28.mmd' } } },
       right: { label: 'After', block: { kind: 'markdown', text: 'new copy' } },
     }],
   });
@@ -142,17 +152,24 @@ check('C4, re-pointed: a block NESTED inside a compare side is still genuinely a
 
   const compareSection = document.querySelector('.compare-block');
   assert.ok(compareSection, 'setup failure: no .compare-block section rendered');
-  const nestedSection = compareSection.querySelector('.markdown-block');
-  assert.ok(nestedSection, 'setup failure: no nested .markdown-block rendered inside the compare side');
+  const nestedSection = compareSection.querySelector('.mermaid-block');
+  assert.ok(nestedSection, 'setup failure: no nested .mermaid-block rendered inside the compare side');
   const nestedBlockId = nestedSection.getAttribute('data-block-id');
   assert.notEqual(nestedBlockId, board.blocks[0].id, 'setup failure: the nested block must carry its OWN id, not the compare wrapper\'s');
 
+  // The markdown side, by contrast, carries no affordance at all -- same rule,
+  // same position, opposite answer.
+  const nestedMd = compareSection.querySelector('.markdown-block');
+  assert.ok(nestedMd, 'setup failure: no nested .markdown-block rendered inside the other compare side');
+  assert.equal(directChildPinLayer(nestedMd), null, 'a markdown block nested in a compare side must carry no pin-layer (ADR.md entry 28)');
+  assert.equal(document.getElementById('comment-form-' + nestedMd.getAttribute('data-block-id')), null, 'a markdown block nested in a compare side must carry no comment form');
+
   const layer = directChildPinLayer(nestedSection);
-  assert.ok(layer, 'setup failure: the nested markdown block has no direct-child page-scoped pin-layer of its own');
+  assert.ok(layer, 'setup failure: the nested mermaid block has no direct-child page-scoped pin-layer of its own');
   assert.equal(layer.querySelectorAll('.anchor-pin').length, 0, 'setup failure: a pin already exists before anything was queued');
 
-  const content = nestedSection.querySelector('.md-content');
-  assert.ok(content, 'setup failure: no .md-content rendered inside the nested markdown block');
+  const content = nestedSection.querySelector('.resolve-error');
+  assert.ok(content, 'setup failure: no .resolve-error rendered inside the nested mermaid block');
 
   clickAndSubmit(document, content, nestedBlockId, 'a comment on the nested block itself');
 
@@ -172,37 +189,13 @@ check('C4, re-pointed: a block NESTED inside a compare side is still genuinely a
   assert.equal(directChildPinLayer(compareSection), null, 'the compare wrapper must still carry no page-scoped pin-layer of its own even once its nested content has a live pin');
 });
 
-// --- C4: a markdown block's own resolve-error branch -----------------------------
-
-check('C4: a markdown block that failed to resolve is still anchorable -- clicking its .resolve-error note draws a correctly positioned pin', () => {
-  const board = createBoard({
-    title: 'Ticket 09 -- a broken markdown reference is still commentable',
-    blocks: [{ kind: 'markdown', source: { path: 'no-such-file-09.md' } }],
-  });
-  const blockId = board.blocks[0].id;
-  assert.equal(typeof board.blocks[0].error, 'string', 'setup failure: the block must actually fail to resolve');
-  const document = loadBoard(renderBoardPage(board));
-  enableCommentMode(document);
-
-  const section = document.querySelector('.markdown-block');
-  assert.ok(section, 'setup failure: no .markdown-block section rendered');
-  const errorNote = section.querySelector('.resolve-error');
-  assert.ok(errorNote, 'setup failure: no .resolve-error note rendered');
-
-  const layer = directChildPinLayer(section);
-  assert.ok(layer, 'setup failure: an errored markdown block has no page-scoped pin-layer -- C4 is unfixed');
-
-  clickAndSubmit(document, errorNote, blockId, 'what happened to this file?');
-
-  const pins = layer.querySelectorAll('.anchor-pin');
-  assert.equal(pins.length, 1, `expected exactly one pin, got ${pins.length}`);
-  assert.equal(pins[0].classList.contains('pin-lost'), false);
-
-  const elBox = errorNote.getBoundingClientRect();
-  const sectionBox = section.getBoundingClientRect();
-  assert.equal(pins[0].style.left, (elBox.left - sectionBox.left) + 'px');
-  assert.equal(pins[0].style.top, (elBox.top - sectionBox.top) + 'px');
-});
+// --- C4: a markdown block's own resolve-error branch (retired by ADR.md 28) ----
+//
+// This slot used to hold the exact twin of the mermaid case below, for a
+// markdown block whose reference failed to resolve. ADR.md entry 28 retires it:
+// `markdown` carries no comment affordance at all now, errored or not, so there
+// is no pin-layer to draw into and nothing for a click to mint. The negative is
+// asserted in test/check-comment-mode.mjs rather than restated here.
 
 // --- C4: a mermaid block's own resolve-error branch ------------------------------
 
@@ -242,10 +235,10 @@ check('C4: a mermaid block that failed to resolve is still anchorable -- clickin
 check('U6: a lost pin\'s fallback stacked position stays put across repeated re-renders of its layer, never walking outward (ablation: dropping resetStackedOffset next to layer.innerHTML = \'\' makes this fail after the second re-render)', () => {
   const board = createBoard({
     title: 'Ticket 09 -- stacked offset must not drift',
-    blocks: [{ kind: 'markdown', text: 'stale content, about to be sent' }],
+    blocks: [{ kind: 'mermaid', text: 'flowchart TD\n  A[Stale] --> B[Gone]' }],
   });
   const staleBlockId = board.blocks[0].id;
-  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: '# H\n\n- alpha\n- beta\n- gamma' }] });
+  const round2 = addRound(board, { blocks: [{ kind: 'mermaid', text: 'flowchart TD\n  C[Open] --> D[Round]' }] });
   const openBlockId = board.blocks.find(b => b.round === round2).id;
 
   // A comment whose ref no longer resolves to anything -- server-verdict lost,
@@ -277,12 +270,17 @@ check('U6: a lost pin\'s fallback stacked position stays put across repeated re-
   // (src/ui.mjs's comment-form submit handler), the stale block's included, same
   // as a real reviewer queueing several comments, a window resize, or a follow-up
   // SSE push all would.
+  // ADR.md entry 28 left `mermaid` and `html` as the only commentable kinds, so
+  // the unrelated submissions are three whole-block comments on the open round's
+  // own diagram rather than clicks on three list items of a markdown block. A
+  // whole-block comment is deliberately additive (several may share one block),
+  // and each submission calls refreshPins(document) exactly the same way.
   const openSection = document.querySelector(`[data-block-id="${openBlockId}"]`);
-  const items = openSection.querySelectorAll('.md-content li');
-  assert.ok(items.length >= 3, 'setup failure: need at least 3 distinct click targets in the open round');
+  const openCommentBtn = openSection.querySelector('.comment-btn');
+  assert.ok(openCommentBtn, 'setup failure: the open round\'s diagram has no comment button to submit through');
 
-  for (let i = 0; i < items.length; i++) {
-    clickAndSubmit(document, items[i], openBlockId, 'comment #' + i);
+  for (let i = 0; i < 3; i++) {
+    clickAndSubmit(document, openCommentBtn, openBlockId, 'comment #' + i);
     const now = lostPinPosition();
     assert.equal(now.left, baseline.left, `after re-render #${i + 1}, the lost pin's fallback left drifted from ${baseline.left} to ${now.left} -- the stacked-offset counter was not reset with its layer`);
     assert.equal(now.top, baseline.top, `after re-render #${i + 1}, the lost pin's fallback top drifted from ${baseline.top} to ${now.top} -- the stacked-offset counter was not reset with its layer`);
