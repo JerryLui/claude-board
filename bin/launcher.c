@@ -87,12 +87,11 @@
 
 /* Generated into the build directory by install.sh: CLAUDE_BOARD_NODE and
  * CLAUDE_BOARD_DAEMON (an absolute path each — CLAUDE_BOARD_DAEMON is the path INSIDE
- * the bundle once a launcher is in use, not the clone's), plus six more used below to
+ * the bundle once a launcher is in use, not the clone's), plus five more used below to
  * build the child's environment — CLAUDE_BOARD_HOME_DIR, CLAUDE_BOARD_PATH,
- * CLAUDE_BOARD_STORE_DIR, CLAUDE_BOARD_REF_ROOTS_VALUE, CLAUDE_BOARD_SERVE_ROOTS_VALUE
- * and CLAUDE_BOARD_REPO_ROOT_VALUE. All eight are C string literals. A header rather than
- * -D so the paths survive the trip through the shell without a second layer of quoting to
- * get wrong. */
+ * CLAUDE_BOARD_STORE_DIR, CLAUDE_BOARD_REF_ROOTS_VALUE and CLAUDE_BOARD_REPO_ROOT_VALUE.
+ * All seven are C string literals. A header rather than -D so the paths survive the trip
+ * through the shell without a second layer of quoting to get wrong. */
 #include "launcher_paths.h"
 
 /* --- The child's environment, built once here rather than inherited -------------
@@ -101,9 +100,9 @@
  * is no runtime cost and no allocation for this half at all — the preprocessor pastes
  * `"NAME="` onto the header's value at compile time, the same way CLAUDE_BOARD_NODE and
  * CLAUDE_BOARD_DAEMON above are already C string literals rather than something built at
- * runtime. Changing any of these six costs a rebuild (and, since that changes the
+ * runtime. Changing any of these five costs a rebuild (and, since that changes the
  * bundle's bytes, a re-sign and a fresh TCC prompt) rather than a plist edit — which is
- * the point for five of them: they decide what the daemon may read, serve and write, so
+ * the point for four of them: they decide what the daemon may read and write, so
  * retargeting them should cost as much as retargeting CLAUDE_BOARD_NODE does.
  * CLAUDE_BOARD_REPO_ROOT is the odd one out — it decides no boundary at all, only what
  * path a locked-out reviewer is told to run — but it is baked in on the same footing
@@ -114,7 +113,6 @@ static const char *const OVERRIDE_ENV[] = {
   "PATH=" CLAUDE_BOARD_PATH,
   "CLAUDE_BOARD_HOME=" CLAUDE_BOARD_STORE_DIR,
   "CLAUDE_BOARD_REF_ROOTS=" CLAUDE_BOARD_REF_ROOTS_VALUE,
-  "CLAUDE_BOARD_SERVE_ROOTS=" CLAUDE_BOARD_SERVE_ROOTS_VALUE,
   "CLAUDE_BOARD_REPO_ROOT=" CLAUDE_BOARD_REPO_ROOT_VALUE,
 };
 /* An enum, not a `static const int` like FORWARDED_N above: this one sizes the envp

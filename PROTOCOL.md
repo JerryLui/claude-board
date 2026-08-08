@@ -101,7 +101,11 @@ board = {
 ```
 
 Answers are keyed at board level rather than nested in rounds; every block carries its own
-`round`, which is what the history rail groups by. A round's `action` (`'submitted'` |
+`round`, which is what the board's pages group by (ADR 42: a round is a page, reached with
+the pager's chevrons or by name from the pill at the bottom). `status` goes `open` → `sent` on
+submit and nothing else moves it, so a round that asks nothing — an artifact page, which is not
+sendable at all (ADR 35) — stays `open` for the life of the board, and more than one round can be
+`open` at a time. "The open round" always means the latest one (see `POST /api/board` below). A round's `action` (`'submitted'` |
 `'discuss'`) records that round's own outcome, which a later round's `addRound` cannot
 overwrite the way it resets `board.state` to `'open'`.
 
@@ -405,14 +409,26 @@ question's `context` or a `compare` side — so there was nothing to submit and 
 the instant the post succeeded rather than waiting at all. `answers` and `comments` are always
 empty on a `posted` packet. `discuss` means the reviewer chose Discuss in chat: partial answers
 are included and the agent must stop posting boards for the rest of the session. `timeout` is the
-wall-clock cap (default 2h) and carries an explicit no-response.
+wall-clock cap (default 2h) and carries an explicit no-response — an empty `answers`, and no
+comments beyond the undelivered ones described next, which are owed to a timed-out round exactly
+as they are to any other.
 
-**Scope: one packet is one round.** `answers` holds exactly the question blocks whose `round` is
-the packet's `round`, and `comments` exactly the comments left in it. Round 6 does not redeliver
-rounds 1-5: the agent would re-address settled feedback and re-report an old
-`unanswered`/`deferred` as a fresh signal, louder each round. Every entry carries its own `round`
-(and each comment its `createdAt`), so a caller that wants the thread's history reads
+**Scope: one packet is one round, with one exception.** `answers` holds exactly the question
+blocks whose `round` is the packet's `round`, and `comments` exactly the comments left in it.
+Round 6 does not redeliver rounds 1-5: the agent would re-address settled feedback and re-report
+an old `unanswered`/`deferred` as a fresh signal, louder each round. Every entry carries its own
+`round` (and each comment its `createdAt`), so a caller that wants the thread's history reads
 `board.answers` / `board.comments`. The stored board keeps everything; the packet is the round.
+
+**The exception: a comment left on a round that asked nothing** (ADR.md entry 35). A page board
+is a round with no question block, so nothing ever waits on it and nothing would otherwise carry
+its comments back — the reviewer's feedback on the artifact would sit in the store unread. Such
+a comment rides the next packet the same thread returns, once, appended to that packet's own
+`comments`; it carries its own `round`, which is how a caller tells it from the round in hand.
+Once, not once per round: the packet is committed as delivered only after the response has
+actually left, so a dropped connection re-delivers rather than loses, and a delivered comment is
+never sent again. Collecting comments from a page board therefore costs a later round that asks
+something — an agent that wants them posts one rather than polling for it.
 
 **`status` is the only thing that says whether a question was decided; `choice` is not.** A caller
 must branch on `status` and never on `choice` being non-null, because the three statuses do not
@@ -434,7 +450,6 @@ is not a question block of the round being submitted is ignored server-side rath
 ```
 GET  /?q=                           thread index, filtered to sessions matching q
 GET  /b/:boardId                    the served page
-GET  /file/<path>                   a file under CLAUDE_BOARD_SERVE_ROOTS, served as-is
 GET  /api/health                    { ok: true, version }        (open: install.sh polls it)
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
@@ -565,40 +580,27 @@ page naming the recovery command verbatim. Everything else — `/api/*`, the SSE
 shim — gets `{ error, recover }` as JSON and no markup. Neither reveals anything about the store:
 the same page is served whether or not the board exists.
 
-### `GET /file/<path>` — a file served as-is
-
-`/file/<path>` answers with the bytes of a file inside `CLAUDE_BOARD_SERVE_ROOTS`, unchanged: no
-board chrome, no block wrapping, no slicing, no byte cap. It exists for whole HTML pages carrying
-their own vendored diagram engine — a thing a board block cannot hold, since a stage is floored at
-320px and the board CSP names no `'self'` to load an engine from. A board links to one; it does not
-embed it (ADR 10).
-
-- `CLAUDE_BOARD_SERVE_ROOTS` is colon-separated absolute directories, `~` expanded, validated
-  exactly as `CLAUDE_BOARD_REF_ROOTS` is. **Absent means empty, so the route is off**;
-  `install.sh` writes the default (`~/Documents/renders`).
-- It is a **separate** allowlist from the reference roots, and the escalation is why: a referenced
-  file is escaped into a block, a served one is a live document at the daemon's own origin. One
-  shared list would have widened every existing install on a `git pull`.
-- The path resolves against each root in order, first regular file wins. A directory resolves to
-  `index.html` inside it — the daemon serves files, it never enumerates a directory.
-- Behind the read gate like every other non-open route: an authorized browser only.
-- Every refusal is the same bare 404 — traversal, an escaping symlink, a fifo, a missing file and
-  an unconfigured allowlist are indistinguishable, so the route is not an existence oracle.
-- Served responses carry their own CSP, not the board's: `script-src 'self'` but
-  `connect-src 'none'` and `form-action 'none'`, plus `nosniff`, `X-Frame-Options: DENY` and
-  `Cache-Control: no-store`. See `SECURITY.md` for what that does and does not close.
-
 ### `POST /api/board`
 
 `{ title, blocks, cwd?, thread? }` starts a new thread; `{ boardId, blocks, title? }` pushes into
 a live one. `cwd` is only meaningful on the thread-creating form. `title` is meaningful on
 **both**: on the `boardId` form it labels the round being minted or amended.
 
-Pushing into a live board **amends** the currently open round in place — a block whose incoming id
+Pushing into a live board **amends** the latest round in place — a block whose incoming id
 already exists on the board replaces it, everything else is appended to that same round — while
-the latest round is still `open`; it mints a new round only once the latest round's status is
-`sent`. Either way the response is `{ boardId, thread, round, url }`, `round` naming whichever
+that round is still `open` **and carries a question block somewhere in it**. Otherwise it mints a
+new round. Either way the response is `{ boardId, thread, round, url }`, `round` naming whichever
 round was amended or minted.
+
+The question is what makes a round amendable, because amending exists for one situation: the agent
+is still assembling a round the reviewer has not answered yet. A round that asks nothing is
+complete the moment it lands — nothing can ever answer it, so it stays `open` for good — and a
+later post is a new round beside it, not an edit of it. That is what makes "post the artifact,
+then ask about it" two rounds, and therefore two pages one flip apart.
+
+A board can consequently hold **two open rounds at once**: an artifact round nobody will ever send,
+and the question round after it. Wherever this protocol says *the open round* — the round a submit
+must name, the round an amend lands on — it means the **latest** open one.
 
 ### `POST /api/board/:id/submit`
 
@@ -683,8 +685,8 @@ count outranks the rest mark outright. `document.title` is left alone.
 
 A `round` push also raises a `Notification`, but only while the document is hidden or unfocused.
 Its `tag` is `claude-board-<boardId>-<n>`, so two unread rounds are two entries and only a genuine
-re-delivery collapses; its click calls `window.focus()` and scrolls to the open round through the
-same `jumpToOpenRound` the round badge uses. Permission is requested lazily on the first round
+re-delivery collapses; its click calls `window.focus()` and flips to the open round's page through
+the same `jumpToOpenRound` the round badge uses. Permission is requested lazily on the first round
 that would notify and on a Send click, and a denial is never re-prompted. Every part degrades
 silently: a failure anywhere leaves the round pushed and the page working, just unmarked, and all
 of it is inert in readonly mode. Shim/daemon side: reopening the tab when no client is connected
@@ -712,8 +714,9 @@ client only ever inserts or replaces that much DOM: `renderRoundSection`'s outpu
 id (no wrapper) for `mode: 'amend'`, since the round section already exists client-side.
 
 `submitted` fires on every submit, to every connected client including the one that just
-submitted, so a second tab collapses the round into its history rail without reloading. Its `html`
-is the re-rendered `<section class="round">` in sent/history form; without it a client that did not
+submitted, so a second tab sees the round go sent — and read-only, if that page is the one it is
+showing — without reloading. Its `html` is the re-rendered `<section class="round">` in sent/history
+form; without it a client that did not
 submit would show its own unsent, in-progress state as if it were what was sent. A client that
 receives no `html` must fall back to disabling the round in place.
 

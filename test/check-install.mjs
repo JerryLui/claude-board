@@ -369,7 +369,7 @@ async function spawnSourceEditDaemon() {
 }
 
 /** Spawn a real `bin/daemon.mjs` with whatever extra environment the caller passes
- * (typically CLAUDE_BOARD_REF_ROOTS/SERVE_ROOTS) and nothing else from this process.
+ * (typically CLAUDE_BOARD_REF_ROOTS) and nothing else from this process.
  * Used to prove that src/resolve.mjs actually enforces a given roots value against a
  * real running daemon and a real HTTP request -- independent of HOW that value reaches
  * the daemon at runtime. On the degraded (no-launcher) path that delivery mechanism is
@@ -817,17 +817,19 @@ async function main() {
     assert.equal(args.length, 2, 'the fallback plist runs node with the daemon script');
     assert.equal(args[1], path.join(repoRoot, 'bin', 'daemon.mjs'));
 
-    // With no launcher to bake CLAUDE_BOARD_REF_ROOTS/SERVE_ROOTS/HOME into, node reads
-    // its environment from the plist directly -- so on THIS path, unlike the launcher
-    // path asserted elsewhere in this suite, the dict must still carry them exactly as
-    // it always did. Losing them here would mean a degraded install silently serves
-    // nothing and references nothing, with no allowlist reaching the daemon at all.
+    // With no launcher to bake CLAUDE_BOARD_REF_ROOTS/HOME into, node reads its
+    // environment from the plist directly -- so on THIS path, unlike the launcher path
+    // asserted elsewhere in this suite, the dict must still carry it exactly as it always
+    // did. Losing it here would mean a degraded install silently references nothing, with
+    // no allowlist reaching the daemon at all.
     assert.equal(
       fallbackPlist.EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS,
       DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2))).join(':'),
       'the degraded plist must carry the reference roots itself -- there is no launcher to bake them into',
     );
-    assert.ok('CLAUDE_BOARD_SERVE_ROOTS' in fallbackPlist.EnvironmentVariables, 'and the serve roots too');
+    // ADR.md entry 38: `/file/` and CLAUDE_BOARD_SERVE_ROOTS are deleted outright, not
+    // merely defaulted -- so no plist, degraded or otherwise, ever carries this key again.
+    assert.ok(!('CLAUDE_BOARD_SERVE_ROOTS' in fallbackPlist.EnvironmentVariables), 'the daemon serves boards and nothing else: no serve-roots key, ever');
   });
 
   await check('RunAtLoad and KeepAlive are set', async () => {
@@ -905,21 +907,22 @@ async function main() {
   });
 
   await check('when a launcher bundle is in use, the plist carries no roots or store at all -- the launcher bakes them in instead', async () => {
-    // The reference allowlist (ADR.md entry 3) and the serve allowlist are the two
-    // knobs that move a security boundary, and CLAUDE_BOARD_HOME decides where the
-    // store lives. All three used to be written into the plist's EnvironmentVariables
-    // dict because a launchd job inherits nothing from the shell that ran install.sh --
-    // but with a launcher bundle in use, bin/launcher.c's OVERRIDE_ENV builds the
-    // child's environment itself and ignores whatever the plist says for these three
-    // (see launcher_paths.h and "the plist stops carrying what the launcher now bakes"
-    // in install.sh's step 2). Leaving the keys in the plist anyway would be a lie about
-    // what is actually in force, given anyone who can write that world-readable,
-    // user-writable file could otherwise believe rewriting it moves the boundary when it
-    // no longer does -- so install.sh omits them entirely once USE_LAUNCHER is 1, which
-    // is this suite's ordinary path (see "the launcher bundle is built, signed..." above).
+    // The reference allowlist (ADR.md entry 3) is the one knob that moves a security
+    // boundary here (the serve allowlist is gone -- ADR.md entry 38), and
+    // CLAUDE_BOARD_HOME decides where the store lives. Both used to be written into the
+    // plist's EnvironmentVariables dict because a launchd job inherits nothing from the
+    // shell that ran install.sh -- but with a launcher bundle in use, bin/launcher.c's
+    // OVERRIDE_ENV builds the child's environment itself and ignores whatever the plist
+    // says for these two (see launcher_paths.h and "the plist stops carrying what the
+    // launcher now bakes" in install.sh's step 2). Leaving the keys in the plist anyway
+    // would be a lie about what is actually in force, given anyone who can write that
+    // world-readable, user-writable file could otherwise believe rewriting it moves the
+    // boundary when it no longer does -- so install.sh omits them entirely once
+    // USE_LAUNCHER is 1, which is this suite's ordinary path (see "the launcher bundle is
+    // built, signed..." above).
     assert.ok(plist.EnvironmentVariables, 'the plist must still carry an EnvironmentVariables dict');
     assert.ok(!('CLAUDE_BOARD_REF_ROOTS' in plist.EnvironmentVariables), 'the launcher carries the reference roots now, not the plist');
-    assert.ok(!('CLAUDE_BOARD_SERVE_ROOTS' in plist.EnvironmentVariables), 'the launcher carries the serve roots now, not the plist');
+    assert.ok(!('CLAUDE_BOARD_SERVE_ROOTS' in plist.EnvironmentVariables), 'the daemon serves boards and nothing else: no serve-roots key, ever');
     assert.ok(!('CLAUDE_BOARD_HOME' in plist.EnvironmentVariables), 'the launcher carries the store now, not the plist');
 
     // What replaces "read it out of the plist": the resolved default is compiled into
@@ -931,9 +934,8 @@ async function main() {
     // against DEFAULT_REF_ROOTS rather than a second copy of the list, so the two cannot
     // drift apart silently. Three directories under ~/.claude, not that tree entire:
     // it also holds .credentials.json, settings.json, shell snapshots and
-    // every project transcript. The fourth is the render directory (2026-08-05), the
-    // same one DEFAULT_SERVE_ROOTS names -- referencing and serving stay separate
-    // grants, this adds the directory to the narrower one only.
+    // every project transcript. The fourth is the render directory (2026-08-05), the one
+    // the render skills write into.
     const launcherExec = path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
     const bakedIn = value => readFileSync(launcherExec).includes(Buffer.from(`${value}\0`, 'utf8'));
     assert.deepEqual(
@@ -1022,23 +1024,28 @@ async function main() {
     });
     assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
     assert.match(r.stdout, /carried forward from .*\(migrated/, 'the migration must be announced, not silent');
-    assert.equal(readFileSync(path.join(migrateSecretDir, 'ref_roots'), 'utf8'), preExisting, 'the pre-existing plist value must be persisted into the new record file');
+    // ADR.md entry 36: a migrated plist value is carried-forward the same as a record
+    // file's, so it gets the identical treatment -- widened by whichever current default
+    // it is missing. `preExisting` names none of DEFAULT_REF_ROOTS, so every default is
+    // appended, and the widen is announced on the same run.
+    const widenedRoots = `${preExisting}:${DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2))).join(':')}`;
+    assert.equal(readFileSync(path.join(migrateSecretDir, 'ref_roots'), 'utf8'), widenedRoots, 'the pre-existing plist value must be persisted into the new record file, widened by the current defaults it was missing');
+    assert.match(r.stdout, /widened by the current defaults/, 'the widen must be printed, not silent');
     const launcherBytes = readFileSync(path.join(migrateAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
-    assert.ok(launcherBytes.includes(Buffer.from(`${preExisting}\0`, 'utf8')), 'and actually baked into the launcher, not just recorded');
+    assert.ok(launcherBytes.includes(Buffer.from(`${widenedRoots}\0`, 'utf8')), 'and actually baked into the launcher, not just recorded');
   });
 
-  await check('an upgrade carries the recorded reference roots forward instead of silently re-widening them', async () => {
-    // SECURITY.md tells the operator to narrow this boundary with
-    // `CLAUDE_BOARD_REF_ROOTS= ./install.sh`. install.sh used to rewrite the plist
-    // unconditionally and never read the old one back, so the ordinary upgrade -- `git
-    // pull && ./install.sh` from a clean shell, the variable long since out of the
-    // environment -- restored the default and rebooted the job with it, with nothing on
-    // screen saying so. The carry-forward mechanism has since
-    // moved from the plist to a record file beside the secret (the plist no longer
-    // carries this value at all once a launcher bundle is in use), but the guarantee
-    // under test is the same one: an upgrade must not silently re-widen a narrowing.
-    // Ablation: go back to `REF_ROOTS="${CLAUDE_BOARD_REF_ROOTS-$DEFAULT_REF_ROOTS}"`
-    // and step 2 comes back holding the default.
+  await check('an upgrade widens a carried-forward record by whichever current default it is missing, and leaves everything else the operator narrowed alone', async () => {
+    // ADR.md entry 36. install.sh used to carry a narrowed record forward unconditionally
+    // and forever, which is exactly how a record written before `~/Documents/renders`
+    // joined DEFAULT_REF_ROOTS stayed short of it on every later upgrade -- every artifact
+    // a page board would show failed to resolve, on a machine that installed cleanly, with
+    // nothing on screen saying why. The fix: a carried-forward record is checked against
+    // today's defaults on every run, and any default it is missing is added back in and
+    // named on screen. Narrowing still works, but only for directories the current
+    // defaults do not name -- an operator who wants a genuinely short list now has to keep
+    // asserting it with CLAUDE_BOARD_REF_ROOTS rather than relying on the record's
+    // inertia (SECURITY.md).
     const agents = path.join(workDir, 'LaunchAgents-upgrade');
     const upgradeAppDir = path.join(workDir, 'Applications-upgrade');
     const upgradeSecretDir = path.join(workDir, 'config-upgrade', 'claude-board');
@@ -1057,39 +1064,61 @@ async function main() {
     const rootsNow = () => readFileSync(recordFile, 'utf8');
     const launcherExec = path.join(upgradeAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
     const bakedIn = value => readFileSync(launcherExec).includes(Buffer.from(`${value}\0`, 'utf8'));
+    const defaultRoots = DEFAULT_REF_ROOTS.map(r => path.join(process.env.HOME, r.slice(2)));
+    const customOnly = path.join(workDir, 'roots-custom-only');
 
-    // 1. the operator narrows, explicitly, exactly as SECURITY.md says to.
+    // 1. The operator narrows to a record that names none of today's defaults -- exactly
+    //    the shape a pre-`~/Documents/renders` record has, or any deliberately narrow one.
     const narrowed = spawnSync('bash', [installScript], {
-      env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: '' }, encoding: 'utf8',
+      env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: customOnly }, encoding: 'utf8',
     });
     assert.equal(narrowed.status, 0, `stdout:\n${narrowed.stdout}\nstderr:\n${narrowed.stderr}`);
-    assert.equal(rootsNow(), '', 'an explicitly empty value must be recorded as empty');
+    assert.equal(rootsNow(), customOnly, 'an explicit value must be recorded exactly as given');
 
-    // 2. ...and an upgrade from a clean shell leaves that decision standing.
+    // 2. ...and a plain upgrade (no env var -- the ordinary `git pull && ./install.sh`)
+    //    carries the custom directory forward AND adds back every default it is missing.
+    //    It must NOT stay narrowed to just the custom directory (criterion 13).
     const upgraded = spawnSync('bash', [installScript], { env: upgradeEnv, encoding: 'utf8' });
     assert.equal(upgraded.status, 0, `stdout:\n${upgraded.stdout}\nstderr:\n${upgraded.stderr}`);
-    assert.equal(rootsNow(), '', 'an upgrade must not restore the default over an explicit narrowing');
+    const widenedValue = `${customOnly}:${defaultRoots.join(':')}`;
+    assert.equal(rootsNow(), widenedValue, 'the custom directory must survive, and every current default must be appended');
+    assert.match(upgraded.stdout, /widened by the current defaults/, 'the widen must be printed, not silent -- the print is load-bearing (ADR.md entry 36)');
+    for (const dir of defaultRoots) {
+      assert.ok(upgraded.stdout.includes(dir), `the printed line must name what it widened, including ${dir}`);
+    }
+    assert.ok(bakedIn(widenedValue), 'the widened roots must be compiled into the rebuilt launcher, not just recorded');
 
-    // 3. ...while an explicit value still wins over the carried-forward one, or the
-    //    knob would be a one-way door -- and it must actually reach the rebuilt
-    //    launcher, not just a record file nothing then reads.
-    const widened = path.join(workDir, 'roots-upgrade');
+    // 3. ...and a SECOND plain upgrade must not widen again: the record already names
+    //    every default, so there is nothing left to add and nothing to print.
+    const reupgraded = spawnSync('bash', [installScript], { env: upgradeEnv, encoding: 'utf8' });
+    assert.equal(reupgraded.status, 0, `stdout:\n${reupgraded.stdout}\nstderr:\n${reupgraded.stderr}`);
+    assert.equal(rootsNow(), widenedValue, 'a record that already names every default must not grow further');
+    assert.doesNotMatch(reupgraded.stdout, /widened by the current defaults/, 'nothing left to widen means nothing printed');
+
+    // 4. ...while an explicit value still wins over the carried-forward one outright, with
+    //    NO widening applied to it -- an operator who just set the variable meant exactly
+    //    what they typed, empty included.
+    const explicit = path.join(workDir, 'roots-explicit-only');
     const rewidened = spawnSync('bash', [installScript], {
-      env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: widened }, encoding: 'utf8',
+      env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: explicit }, encoding: 'utf8',
     });
     assert.equal(rewidened.status, 0, `stdout:\n${rewidened.stdout}\nstderr:\n${rewidened.stderr}`);
-    assert.equal(rootsNow(), widened);
-    assert.ok(bakedIn(widened), 'the re-widened roots must be compiled into the launcher');
+    assert.equal(rootsNow(), explicit, 'an explicit value must not be widened by the defaults');
+    assert.ok(bakedIn(explicit), 'and must reach the rebuilt launcher exactly as given');
 
-    // 4. ...and whichever of the three happened, the resolved value is on screen. The
-    //    boundary moving is exactly the thing that must never be silent.
-    for (const r of [narrowed, upgraded, rewidened]) {
+    const emptied = spawnSync('bash', [installScript], {
+      env: { ...upgradeEnv, CLAUDE_BOARD_REF_ROOTS: '' }, encoding: 'utf8',
+    });
+    assert.equal(emptied.status, 0, `stdout:\n${emptied.stdout}\nstderr:\n${emptied.stderr}`);
+    assert.equal(rootsNow(), '', 'an explicitly empty value must be honoured as empty, not widened');
+
+    // 5. ...and whichever of the runs happened, the resolved value is on screen, and the
+    //    plist itself never carries this value at all, now that a launcher bundle is in
+    //    use. The boundary moving is exactly the thing that must never be silent.
+    for (const r of [narrowed, upgraded, reupgraded, rewidened, emptied]) {
       assert.match(r.stdout, /reference roots:/, 'the install summary must name the resolved roots');
     }
-    assert.match(upgraded.stdout, /carried forward from/, 'and say where the value came from');
-
-    // 5. ...and the plist itself never carries this value at all, on any of the three
-    //    runs above, now that a launcher bundle is in use.
+    assert.match(upgraded.stdout, /carried forward from/, 'and say where a carried-forward value came from');
     const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', path.join(agents, 'claude-board.plist')], { encoding: 'utf8' });
     assert.equal(asJson.status, 0, asJson.stderr);
     assert.ok(!('CLAUDE_BOARD_REF_ROOTS' in JSON.parse(asJson.stdout).EnvironmentVariables));
@@ -1178,6 +1207,188 @@ async function main() {
       );
     } finally {
       daemon.cleanup();
+    }
+  });
+
+  await check('criterion 8: posting a rendered artifact from ~/Documents/renders resolves on an install upgraded from an older one', async () => {
+    // ADR.md entry 36's actual consequence, end to end. A machine installed before
+    // `~/Documents/renders` joined DEFAULT_REF_ROOTS carries a record naming only the
+    // three `~/.claude` directories -- exactly what install.sh itself used to write. Left
+    // alone, that record would silently keep missing the render directory forever, on
+    // every future `git pull && ./install.sh`, and every artifact a page board tries to
+    // show would come back a "cannot read" error card despite the install looking clean.
+    const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-oldrecord-'));
+    try {
+      const secretDir = path.join(fakeHome, 'config', 'claude-board');
+      mkdirSync(secretDir, { recursive: true, mode: 0o700 });
+      // The pre-upgrade record: an old install's three directories, missing the render
+      // default entirely -- written directly, standing in for whatever an install run
+      // before this change actually left on disk.
+      const oldRecord = ['skills', 'commands', 'agents'].map(d => path.join(fakeHome, '.claude', d)).join(':');
+      writeFileSync(path.join(secretDir, 'ref_roots'), oldRecord);
+
+      const rendersDir = path.join(fakeHome, 'Documents', 'renders');
+      mkdirSync(rendersDir, { recursive: true });
+      const artifact = path.join(rendersDir, 'report.html');
+      writeFileSync(artifact, 'RENDERED-ARTIFACT-FROM-RENDERS-DIR\n', 'utf8');
+
+      const projectDir = path.join(fakeHome, 'project');
+      mkdirSync(projectDir, { recursive: true });
+
+      const hEnv = {
+        ...env,
+        HOME: fakeHome,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(fakeHome, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(fakeHome, 'Logs'),
+        CLAUDE_BOARD_APP_DIR: path.join(fakeHome, 'Applications'),
+        CLAUDE_BOARD_HOME: path.join(fakeHome, 'Store'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
+        STUB_CLAUDE_LOG: path.join(fakeHome, 'claude-invocations.log'),
+        STUB_CLAUDE_STATE: path.join(fakeHome, 'claude-registrations.json'),
+        STUB_LAUNCHCTL_LOG: path.join(fakeHome, 'launchctl-invocations.log'),
+        STUB_LAUNCHCTL_STATE: path.join(fakeHome, 'launchctl-state.json'),
+      };
+      delete hEnv.CLAUDE_BOARD_REF_ROOTS; // the upgrade run must carry the record forward, not take an explicit value
+
+      // The upgrade: no CLAUDE_BOARD_REF_ROOTS set, a pre-existing record on disk --
+      // exactly `git pull && ./install.sh` on a machine installed some time ago.
+      const upgraded = spawnSync('bash', [installScript], { env: hEnv, encoding: 'utf8' });
+      assert.equal(upgraded.status, 0, `stdout:\n${upgraded.stdout}\nstderr:\n${upgraded.stderr}`);
+      assert.match(upgraded.stdout, /widened by the current defaults/, 'the upgrade must announce widening the missing default');
+
+      const recordedRoots = readFileSync(path.join(secretDir, 'ref_roots'), 'utf8');
+      assert.ok(recordedRoots.split(':').includes(rendersDir), 'the widened record must include the render directory');
+
+      // And the consequence found in use: a real daemon started with exactly that
+      // widened, recorded value can now resolve a reference INTO the render directory,
+      // which the pre-upgrade record could never have allowed.
+      const daemon = await spawnDaemonWithEnv({ CLAUDE_BOARD_REF_ROOTS: recordedRoots });
+      try {
+        const posted = await fetch(`http://127.0.0.1:${daemon.port}/api/board`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-claude-board-secret': daemon.secret },
+          body: JSON.stringify({
+            title: 'artifact posted after an upgrade',
+            cwd: projectDir,
+            blocks: [{ kind: 'markdown', source: { path: artifact } }],
+          }),
+        });
+        const postedBody = await posted.text();
+        assert.equal(posted.status, 200, postedBody);
+        const { boardId } = JSON.parse(postedBody);
+
+        const page = await fetch(`http://127.0.0.1:${daemon.port}/b/${boardId}`, {
+          headers: { 'x-claude-board-secret': daemon.secret },
+        });
+        assert.equal(page.status, 200);
+        const html = await page.text();
+        assert.ok(
+          html.includes('RENDERED-ARTIFACT-FROM-RENDERS-DIR'),
+          'the artifact must resolve on an install upgraded from an older one, not only on a fresh install',
+        );
+        assert.ok(!html.includes('cannot read'), 'no unresolved-reference error card');
+      } finally {
+        daemon.cleanup();
+      }
+    } finally {
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await check('criterion 24: upgrading removes the serve-root record an older install wrote, leaving no trace of it', async () => {
+    // ADR.md entry 38: `/file/`, CLAUDE_BOARD_SERVE_ROOTS and its allowlist are deleted
+    // outright. A machine installed before this change has a `serve_roots` file sitting
+    // next to its secret that nothing will ever read again -- install.sh's job is to take
+    // it away on the very next run, the same way it already does for a BOARD_HOME record
+    // nobody chose (the `rm -f` beside the ref/board-home persistence step).
+    const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-serveroots-'));
+    try {
+      const secretDir = path.join(fakeHome, 'config', 'claude-board');
+      mkdirSync(secretDir, { recursive: true, mode: 0o700 });
+      const staleRecord = path.join(secretDir, 'serve_roots');
+      writeFileSync(staleRecord, path.join(fakeHome, 'Documents', 'renders'));
+      assert.ok(existsSync(staleRecord), 'the fixture must actually plant the stale record before the real assertion');
+
+      const hEnv = {
+        ...env,
+        HOME: fakeHome,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(fakeHome, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(fakeHome, 'Logs'),
+        CLAUDE_BOARD_APP_DIR: path.join(fakeHome, 'Applications'),
+        CLAUDE_BOARD_HOME: path.join(fakeHome, 'Store'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
+        // Isolated from the shared top-level `env`'s skillsDir on purpose: this check
+        // runs uninstall.sh, whose job includes removing the installed manual, and the
+        // suite's OWN install-copies-the-manual checks depend on that shared directory
+        // still holding it. Without this override, this check's uninstall run deletes it
+        // out from under them.
+        CLAUDE_BOARD_SKILLS_DIR: path.join(fakeHome, 'skills'),
+        STUB_CLAUDE_LOG: path.join(fakeHome, 'claude-invocations.log'),
+        STUB_CLAUDE_STATE: path.join(fakeHome, 'claude-registrations.json'),
+        STUB_LAUNCHCTL_LOG: path.join(fakeHome, 'launchctl-invocations.log'),
+        STUB_LAUNCHCTL_STATE: path.join(fakeHome, 'launchctl-state.json'),
+      };
+      delete hEnv.CLAUDE_BOARD_REF_ROOTS;
+
+      const upgraded = spawnSync('bash', [installScript], { env: hEnv, encoding: 'utf8' });
+      assert.equal(upgraded.status, 0, `stdout:\n${upgraded.stdout}\nstderr:\n${upgraded.stderr}`);
+      assert.ok(!existsSync(staleRecord), 'the upgrade must delete the stale serve-root record, not merely stop reading it');
+
+      // And uninstall, run on the same machine afterwards, must not name a file that no
+      // longer exists -- its job is only to stop claiming a record install.sh already took.
+      const uninstalled = spawnSync('bash', [uninstallScript], { env: hEnv, encoding: 'utf8' });
+      assert.equal(uninstalled.status, 0, `stdout:\n${uninstalled.stdout}\nstderr:\n${uninstalled.stderr}`);
+      assert.ok(!uninstalled.stdout.includes('serve_roots'), 'uninstall must not name a serve-roots record: there is none left of it to name');
+      assert.ok(!existsSync(staleRecord), 'and it must still not exist after uninstall');
+    } finally {
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await check('criterion 14 (fifth conjunct): uninstalling with no intervening install.sh still removes a stale serve-root record', async () => {
+    // The check above proves the record is gone once install.sh has run -- but criterion
+    // 14 says "uninstalling leaves nothing of them behind", and install.sh is not the only
+    // path to an uninstall: a machine can go straight from an old install to
+    // `git pull && ./uninstall.sh`, with no intervening `./install.sh` at all. Before this
+    // fix, uninstall.sh's "left in place on purpose" loop named only ref_roots and
+    // board_home, so a serve_roots record left by an old install was never removed and
+    // never mentioned -- silent residue uninstall.sh's own header comment claims it does
+    // not leave. Fixed by uninstall.sh's own step 2d, which removes the file outright
+    // (it is not a preserved choice: the thing it configured, /file/, no longer exists).
+    const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-uninstallonly-'));
+    try {
+      const secretDir = path.join(fakeHome, 'config', 'claude-board');
+      mkdirSync(secretDir, { recursive: true, mode: 0o700 });
+      const staleRecord = path.join(secretDir, 'serve_roots');
+      writeFileSync(staleRecord, path.join(fakeHome, 'Documents', 'renders'));
+      assert.ok(existsSync(staleRecord), 'the fixture must actually plant the stale record before the real assertion');
+
+      // Deliberately NOT running install.sh at all here -- uninstall.sh documents itself
+      // as safe to run against a machine with nothing installed, and that is exactly the
+      // shape of "an old install, never reinstalled, just uninstalled" this covers.
+      const uEnv = {
+        ...env,
+        HOME: fakeHome,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(fakeHome, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(fakeHome, 'Logs'),
+        CLAUDE_BOARD_APP_DIR: path.join(fakeHome, 'Applications'),
+        CLAUDE_BOARD_HOME: path.join(fakeHome, 'Store'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
+        CLAUDE_BOARD_SKILLS_DIR: path.join(fakeHome, 'skills'),
+        // Isolated the same way every other one-off run in this suite is: the shared
+        // top-level claudeLog/launchctlLog back the "exactly N adds/removes" counters
+        // elsewhere in this file, and this run has nothing to do with those.
+        ...quietStubs('uninstallonly'),
+      };
+      delete uEnv.CLAUDE_BOARD_REF_ROOTS;
+
+      const uninstalled = spawnSync('bash', [uninstallScript], { env: uEnv, encoding: 'utf8' });
+      assert.equal(uninstalled.status, 0, `stdout:\n${uninstalled.stdout}\nstderr:\n${uninstalled.stderr}`);
+      assert.ok(!existsSync(staleRecord), 'uninstall.sh alone, with no install.sh in between, must remove the stale serve-root record');
+      assert.doesNotMatch(uninstalled.stdout, /left in place on purpose:[\s\S]*serve_roots/, 'the record must not be listed as a preserved choice');
+      assert.match(uninstalled.stdout, /removed .*serve_roots/, 'and the removal must be announced, not silent');
+    } finally {
+      rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 

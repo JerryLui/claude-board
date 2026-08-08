@@ -22,7 +22,7 @@ you reference stays read-only.
 ask({ title, blocks })
 ```
 
-`title` names the round in the tab and the history rail. `blocks` is the ordered array the
+`title` names the round in the tab and on its page in the round pager. `blocks` is the ordered array the
 page shows. One call is one round: the first opens a tab, later calls push into the same
 board. Post a branch's questions together; only a question whose *shape* depends on an
 answer in this round waits for the next one.
@@ -61,6 +61,8 @@ default), and nowhere else. One that fails to resolve still lands and the post s
 returns 200: the block renders "Could not resolve: …" on the page, and the packet carries
 no blocks, so nothing in the return value tells you a reference broke.
 
+## Posting a rendered artifact
+
 **Write a generated stage into the render directory and reference it**, rather than
 pasting its bytes into the call: `{ kind: 'html', source: { path: '<file>.html' } }`
 against a file in `~/Documents/renders` costs one line for a byte-identical board, where
@@ -69,19 +71,24 @@ for stages small enough to read inline, and leave those readable: readability is
 reason a stage is inline at all, so a stage you would be tempted to minify belongs in a
 file you reference instead.
 
-## Pointing at a rendered file
+**A board whose blocks are one `html` block and nothing else is a page board**: that stage
+renders at viewport size instead of in the content column. Nothing at the call site says
+so — the shape of `blocks` is the whole declaration — so a stats line or a question posted
+beside the artifact silently costs it the full-size layout and puts it back in the column.
+Post the artifact alone and ask about it in a later round.
 
-Post a page you rendered to disk as a pointer, never as bytes: one `markdown` block with a
-link to `http://127.0.0.1:<port>/file/<basename>` (`<port>` is `$CLAUDE_BOARD_PORT` when
-set, else `7391`), the absolute path as plain text under it, and one line saying what it
-is. `GET /file/` serves the serve root (`~/Documents/renders` by default) back byte for
-byte, so the link opens the real page full size in its own tab; the plain path covers a
-down daemon or an overridden port.
+**An artifact is one self-contained file: every script, style, font and image inline or a
+`data:` URI.** A stage renders in an opaque-origin frame, and a frame with no origin
+resolves a relative URL to nothing, so a sibling `assets/mermaid.min.js`, a linked
+stylesheet or an `<img src="logo.png">` never loads — the page arrives with that piece
+silently missing. The renderer meets this contract before the post; nothing in the call
+can repair a file that does not.
 
-Inlining that page as an `html` block buys a worse copy for tens of thousands of tokens: a
-stage is floored at 320px and the page CSP blocks its own local JS. Leave the link for the
-reviewer to click rather than opening the file yourself. If the post fails, `open` it:
-nothing else points at it.
+**A stage sizes itself from its own content, never from the viewport.** Outside a page
+board the frame's height is derived from what the stage reports, so a page laid out in
+`vh` units reports whichever slice of itself happens to be visible and lands at the
+placeholder height rather than its own. Size from the content — a `min-height` off what it
+holds, no `100vh` anywhere — and the frame follows it.
 
 ## Question blocks
 
@@ -150,7 +157,9 @@ round of content only returns the instant it lands.
 
 A comment anchored to a block (`blockId` / `anchor`) is feedback on that block, not an
 answer; address it as its own input. One packet is one round: round 6 does not redeliver
-rounds 1 through 5.
+rounds 1 through 5. A comment left on a round that asked nothing — a page board — is the
+one exception: it rides the next packet the same thread returns, once. Collecting it costs
+a later round that asks something — post one rather than polling for it.
 
 ## When the board is unavailable
 
@@ -159,7 +168,8 @@ board is unreachable, the session is headless, or the daemon cannot open a tab. 
 message verbatim, including any recovery command it names, say which trigger fired, then
 take your own path and say plainly what it costs. Degraded, not equivalent: off the board,
 questions lose multi-select, ranking, attached context and comment anchoring, while a
-rendered artifact loses only its trip to the board.
+rendered artifact loses only its trip to the board — it is a file on disk, so `open` it and
+say where it is, because nothing else points at it.
 
 ## When not to use the board
 

@@ -30,7 +30,7 @@ import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
-import { badgeLabel } from './badge.mjs';
+import { badgeLabel, roundPageLabel, isPageRound } from './badge.mjs';
 
 /** Content-Security-Policy for every board page, both as the HTTP response
  * header src/server.mjs sends on every live request AND as the `<meta http-equiv>` renderBoardPage now
@@ -560,8 +560,18 @@ function renderContextCompareSide(side, board, commentsByBlock, historical) {
 function renderContextItem(block, board, commentsByBlock, historical) {
   const commentable = block.kind === 'html' || block.kind === 'mermaid';
   const kindClass = block.kind === 'html' ? ' html-block' : block.kind === 'mermaid' ? ' mermaid-block' : '';
+  // Mirrors what the two kinds do at top level, which this used to get wrong for
+  // one of them. `mermaid` renders inline in THIS document, so its page layer is
+  // where a `dom` anchor on the block's own chrome belongs and renderMermaidBlock
+  // emits one unconditionally. A healthy `html` stage's anchors all live inside
+  // the frame and are drawn in the layer stageWrap already emits; renderHtmlBlock
+  // therefore emits a page layer only on the error path, and this did it always --
+  // giving a context-nested stage two layers, so wirePageDomPins found the second
+  // one and drew every stage-scoped comment a SECOND time, at a fabricated
+  // position, from refs that cannot resolve outside the frame.
+  const pinLayer = block.kind === 'mermaid' || block.error ? pageDomPinLayer(block.id) : '';
   const affordance = commentable
-    ? `${commentButton(block.id)}${pageDomPinLayer(block.id)}${commentArea(block.id, commentsByBlock, historical)}`
+    ? `${commentButton(block.id)}${pinLayer}${commentArea(block.id, commentsByBlock, historical)}`
     : '';
   return `<div class="context-item${kindClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${renderContextInner(block, board, commentsByBlock, historical)}${affordance}</div>`;
 }
@@ -1141,6 +1151,124 @@ export function stageAgentScript() {
     requestAnimationFrame(function () { requestAnimationFrame(reportHeight); });
   }
 
+  // --- scroll, the one thing the parent genuinely cannot see -----------------
+  //
+  // ADR.md entry 40: on a page board the DOCUMENT does not scroll at all -- the
+  // artifact scrolls inside this frame -- and this frame is an opaque-origin
+  // browsing context, so the parent can neither read a scrollTop from it nor
+  // observe one with an IntersectionObserver of its own. That is why scroll
+  // state is a thing agent-authored markup REPORTS, over the same channel
+  // 'height'/'click'/'hover' already use, and therefore gets the same shape
+  // check on arrival as everything else on it (src/ui.mjs's listener).
+  //
+  // ONE type, both directions, which is what keeps entry 40's "one more message
+  // type" literally true: outbound this says "I am at this offset", inbound
+  // (the handler below) it says "put me at this offset" -- the back-to-top
+  // control's whole mechanism, since the parent cannot scroll this document
+  // either. 'top' is a plain number in both directions and is validated as one
+  // on both sides.
+  //
+  // A real scroll listener, deliberately: the no-scroll-handler rule (ADR.md
+  // entry 27, src/badge.mjs) is a rule about the BOARD page, where an
+  // IntersectionObserver can see everything a scroll handler could. Nothing can
+  // observe this document from outside it, so the listener lives here, in the
+  // one place that can see the fact. Deduplicated on the last reported value,
+  // so a scroll that ends where it began posts nothing; within a gesture the
+  // cadence is one message per scroll event, same as any native handler.
+  //
+  // WHICH ELEMENT SCROLLS IS NOT KNOWABLE UP FRONT, and assuming it is the
+  // document was a real defect, measured in Chrome 151 against an app-shell
+  // artifact (a fixed sidebar beside a 'height: 100vh; overflow-y: auto' pane,
+  // an ordinary shape for a page designed as a page). There the document never
+  // scrolls at all: 'window.scrollY' stays 0 while the frame visibly shows the
+  // third section, no 'scroll' event ever reaches 'window', so no report was
+  // ever sent -- the header never condensed and the back-to-top control never
+  // appeared -- and an inbound request moved nothing, because 'window.scrollTo'
+  // does not touch an inner pane. Read, write and listener all have to name the
+  // SAME element, and none of them can name it in advance.
+  //
+  // So the element identifies ITSELF, by scrolling. A capture-phase listener on
+  // 'document' sees a scroll of any element (a scroll event on an element does
+  // not bubble, but capture still walks down to it) as well as the viewport's
+  // own, and 'ev.target' IS the thing that moved. That target is remembered and
+  // is thereafter what gets read and what gets written -- correct by
+  // construction rather than by a heuristic scan for scrollable boxes.
+  //
+  // The ordering makes this airtight for the inbound direction too: back-to-top
+  // is only ever VISIBLE after a report, a report only ever follows a scroll
+  // event, and the scroll event is what sets 'scroller'. The control cannot be
+  // clicked before the scroller is known.
+  //
+  // ponytail: the most recently scrolled element wins. An artifact with two
+  // independent scrolling panes reports whichever the reviewer touched last,
+  // which is the one they are reading; the upgrade path, if a real artifact
+  // ever needs it, is to report the target's own ref alongside the offset.
+  var lastScrollTop = -1;
+  var scroller = null; // null means "this document's viewport"
+
+  function isViewportTarget(t) {
+    return !t || t === document || t === window
+      || t === document.documentElement || t === document.body;
+  }
+
+  function scrollTopNow() {
+    if (scroller) return scroller.scrollTop;
+    if (typeof window.pageYOffset === 'number') return window.pageYOffset;
+    var el = document.scrollingElement || document.documentElement || document.body;
+    return (el && typeof el.scrollTop === 'number') ? el.scrollTop : 0;
+  }
+
+  function reportScroll() {
+    var top = scrollTopNow();
+    if (top === lastScrollTop) return;
+    lastScrollTop = top;
+    post({ type: 'scroll', top: top });
+  }
+
+  function onScroll(ev) {
+    scroller = isViewportTarget(ev.target) ? null : ev.target;
+    reportScroll();
+  }
+
+  /** Put this document at 'top' -- the inbound half of the one message type.
+   * Aimed at whatever last scrolled (see above), never at the viewport by
+   * assumption. Feature-detected rather than try/caught into: a 'scrollTo' that
+   * silently does nothing never throws, so a catch block is no guard at all
+   * against the case this function exists to fix -- the catch below is only for
+   * a browser that has 'scrollTo' but rejects the options object, and
+   * 'scrollTop' is the floor under both. */
+  function scrollTo(top) {
+    var target = scroller || window;
+    if (typeof target.scrollTo === 'function') {
+      try {
+        target.scrollTo({ top: top, left: 0, behavior: 'smooth' });
+        return;
+      } catch (e) { /* older two-argument signature only; fall through */ }
+      target.scrollTo(0, top);
+      return;
+    }
+    if (scroller) scroller.scrollTop = top;
+  }
+
+  // ADR.md entry 39: the board's theme control paints this document too, so a
+  // rendered artifact needs none of its own. The parent resolves its own
+  // three-state control (light / dark / the attribute's ABSENCE, meaning
+  // System) down to a concrete 'light' or 'dark' before sending -- see
+  // src/ui.mjs's activeTheme -- so this side never queries a media it would
+  // then have to re-query on every OS flip. 'data-theme' on <html> is the same
+  // attribute src/styles.mjs keys the board's own palette off, so a template
+  // that already themes itself needs no new vocabulary; 'color-scheme' is set
+  // beside it so an artifact that knows nothing about the attribute still gets
+  // its scrollbars, form controls and canvas default from the right palette.
+  function applyTheme(theme) {
+    var root = document.documentElement;
+    if (!root) return;
+    try {
+      root.setAttribute('data-theme', theme);
+      if (root.style) root.style.colorScheme = theme;
+    } catch (e) { /* nothing to theme; the artifact keeps its own colours */ }
+  }
+
   window.addEventListener('message', function (ev) {
     // See this file's design comment above ("ORIGIN VALIDATION") for why
     // identity, not an origin string, is the correct and sufficient check on
@@ -1159,7 +1287,24 @@ export function stageAgentScript() {
       if (Array.isArray(data.sentRefs)) {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
+      // 'theme' widens this message the same way 'sentRefs' above already does
+      // (ADR.md entry 39 -- "over the channel that already carries comment
+      // mode"), rather than minting a type of its own: same tolerance, same
+      // convention. An absent or unrecognised value leaves this document's
+      // theme exactly as it was, so a stage that is never told stays on
+      // whatever its own markup chose.
+      if (data.theme === 'light' || data.theme === 'dark') applyTheme(data.theme);
       if (commentMode) ensureHoverStyle(); else clearHover();
+      return;
+    }
+    if (data.type === 'scroll') {
+      // The inbound half of the one type (see reportScroll above): the parent's
+      // back-to-top control asking this document to go somewhere, since it
+      // cannot scroll this document itself. Shape-checked before it reaches
+      // anything -- a non-finite 'top' is exactly the kind of value that would
+      // otherwise be handed to scrollTo.
+      if (typeof data.top !== 'number' || !isFinite(data.top)) return;
+      scrollTo(data.top);
       return;
     }
     if (data.type === 'locate') {
@@ -1197,6 +1342,11 @@ export function stageAgentScript() {
   if (typeof ResizeObserver === 'function') {
     new ResizeObserver(reportHeight).observe(document.body);
   }
+  // Capture phase, on 'document', is what makes this one listener see BOTH the
+  // viewport's own scroll and an inner pane's -- an element's scroll event does
+  // not bubble, so a plain 'window' listener is blind to exactly the artifact
+  // shape that broke this (see onScroll's own comment above).
+  document.addEventListener('scroll', onScroll, true);
   post({ type: 'ready' });
 })();</script>`;
 }
@@ -1228,7 +1378,24 @@ function buildStageSrcdoc(block) {
   return STAGE_MARGIN_RESET + block.html + stageAgentScript();
 }
 
-function renderHtmlBlock(block, board, commentsByBlock, historical) {
+/** `fullpage`: this stage is the whole board (ADR.md entry 33), so it renders
+ * with no kicker at all and its comment surface floats over the frame instead of
+ * sitting under it. What does NOT change is everything the stage gesture is
+ * built on: the same `.block.html-block` section carrying the same
+ * `data-block-id`, the same `.stage-wrap` > `.html-stage` + `.pin-layer`
+ * nesting, and the same `srcdoc` bytes. src/ui.mjs's message listener finds a
+ * stage's block by `frame.closest('.html-block')` and its pin layer by
+ * `section.querySelector('.pin-layer')` — markup that dropped either would kill
+ * click-to-anchor, hover and pin placement on exactly the boards this layout
+ * exists for, and would do it silently (every stage message would simply be
+ * dropped at that lookup).
+ *
+ * The kicker's two controls go rather than being hidden, since neither holds any
+ * state: the comment button mints a whole-block comment the click gesture inside
+ * the frame already covers, and the expand control opens a lens that is a copy
+ * of what already fills the viewport (ADR.md entry 43). The send bar is the
+ * opposite case and is deliberately still emitted — see renderBoardPage. */
+function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = false) {
   // A referenced source can fail to resolve (sliced
   // with lines/section, over the byte cap, or outside the confinement boundary) --
   // same block-level-error shape as renderMarkdownBlock/renderCodeBlock/
@@ -1277,6 +1444,16 @@ function renderHtmlBlock(block, board, commentsByBlock, historical) {
   // exactly the same relative order as before, immediately after the reset --
   // this only prepends, it never moves the script.
   const srcdocContent = buildStageSrcdoc(block);
+  if (fullpage) {
+    return `
+<section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
+  <div class="stage-wrap">
+    <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(srcdocContent)}"></iframe>
+    <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
+  </div>
+  <div class="page-comments">${commentArea(block.id, commentsByBlock, historical)}</div>
+</section>`;
+  }
   return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
   <div class="block-kicker">HTML stage ${commentButton(block.id)} ${expandButton(block.id, 'stage')}</div>
@@ -1334,14 +1511,20 @@ function renderCompareBlock(block, board, commentsByBlock, historical) {
  * form goes inert along with its answers rather than staying a second, live place
  * to add to an exchange that already went out. Exported so
  * src/server.mjs can render a single block's fragment for an SSE amend push
- * without duplicating the dispatch. */
-export function renderBlock(block, board, commentsByBlock, historical = false) {
+ * without duplicating the dispatch.
+ *
+ * `fullpage` (default false) is the page-board layout (ADR.md entry 33), and
+ * only `html` reads it — it is exactly "this stage IS the board", which no other
+ * kind can ever be, since a board carrying anything else is not a page board at
+ * all. Threaded rather than derived here: the shape rule is a property of the
+ * BOARD (isPageBoard, below), and a block cannot see the board it sits in. */
+export function renderBlock(block, board, commentsByBlock, historical = false, fullpage = false) {
   switch (block.kind) {
     case 'markdown': return renderMarkdownBlock(block);
     case 'question': return renderQuestionBlock(block, board, commentsByBlock, historical);
     case 'mermaid': return renderMermaidBlock(block, board, commentsByBlock, historical);
     case 'code': return renderCodeBlock(block);
-    case 'html': return renderHtmlBlock(block, board, commentsByBlock, historical);
+    case 'html': return renderHtmlBlock(block, board, commentsByBlock, historical, fullpage);
     case 'compare': return renderCompareBlock(block, board, commentsByBlock, historical);
     default: return '';
   }
@@ -1366,11 +1549,14 @@ export function groupCommentsByBlock(resolvedComments) {
  * in board order, `round-open` while it's still live and editable, `round-history`
  * once it has been sent. A sent round's answers stay fully readable (prompt,
  * choice, note all come from board.answers exactly as the open-round path reads
- * them) but every widget renders `disabled` — see renderQuestionBlock — so it
- * collapses into a history rail rather than staying a second, stale place to edit
- * the same question. "A board is a session-scoped
- * thread with rounds": "the sent round collapsed into a history rail with its
- * answers still readable." Exported so this is also what
+ * them) but every widget renders `disabled` — see renderQuestionBlock — so it is
+ * never a second, stale place to edit the same question. "A board is a
+ * session-scoped thread with rounds": a sent round stays readable and stops being
+ * editable. ADR.md entry 42 moved that from a history rail stacked under the open
+ * round to a page of its own, and the pager keeps the guarantee (src/ui.mjs's
+ * goToRound puts `sent-page` on <body> when a sent page is the one showing, which
+ * is what reaches the send bar — the one control no round-scoped mechanism can).
+ * Exported so this is also what
  * src/server.mjs renders for an SSE push of a brand-new round — the full page and a
  * live push produce byte-identical markup for the same round, which is what makes
  * a client that reconnects mid-thread indistinguishable from one that was there the
@@ -1379,13 +1565,28 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   const round = board.rounds.find(r => r.n === roundN);
   const historical = !!(round && round.status === 'sent');
   const blocksForRound = board.blocks.filter(b => b.round === roundN);
-  const blocksHtml = blocksForRound.map(b => renderBlock(b, board, commentsByBlock, historical)).join('\n');
+  // Both of these are DERIVED from the board rather than passed in, and that is
+  // load-bearing: src/server.mjs renders an SSE push through this same function,
+  // and a parameter the two callers could disagree about is exactly how the two
+  // paths stop being byte-identical (test/check-pure.mjs pins that they are).
+  //
+  // fullpage: a round whose blocks are one rendered artifact and nothing else is
+  // a page, filling the viewport (ADR.md entry 42 -- "a page-board round is one
+  // page ...; a question round is another"). Per ROUND, not per board, since a
+  // thread keeps its single board: the artifact stays a full-viewport page for
+  // good, and the question round that follows it is an ordinary round on the
+  // next page. current: the board opens on its newest round, so that is the one
+  // page rendered visible at first paint (src/styles.mjs hides the rest).
+  const fullpage = isPageRound(blocksForRound);
+  const lastRound = board.rounds[board.rounds.length - 1];
+  const current = !!lastRound && lastRound.n === roundN;
+  const blocksHtml = blocksForRound.map(b => renderBlock(b, board, commentsByBlock, historical, fullpage)).join('\n');
   // The round's own title, when it has one (src/board.mjs stores it per round). A
   // thread routinely runs several rounds across several branches, and a rail of
   // identical "Round 1/2/3" headings tells the reviewer nothing about which is which.
   // Escaped as one string with the rest of the label, so a title carrying `<` is text.
   const title = (round && round.title) || '';
-  const base = title ? `Round ${roundN} · ${title}` : `Round ${roundN}`;
+  const base = roundPageLabel(roundN, title);
   const label = historical ? `${base} · sent` : base;
   // An open round has a top (.round-label above) but used
   // to render nothing at all after its last block, so running out of scroll and
@@ -1401,11 +1602,20 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
   // reviewer answers, so it isn't one of "how many questions it held" either.
   const questionCount = blocksForRound.filter(b => b.kind === 'question').length;
   const endTag = `end of round ${roundN} · ${questionCount} question${questionCount === 1 ? '' : 's'}`;
-  const endRail = historical ? '' : `
+  const endRail = historical || fullpage ? '' : `
   <div class="round-end"><span class="line"></span><span class="tag">${escHtml(endTag)}</span><span class="line"></span></div>`;
+  // An artifact round keeps its section (data-round is how a push, an amend and
+  // the pager all find a round, and the section IS the page) and loses only its
+  // two labels: the "Round N" chip and the closing rail are chrome ABOUT a
+  // round, printed over a full-viewport artifact, and the pager at the bottom of
+  // the page already names the round for anyone who needs it -- exactly the "no
+  // card, no kicker" noise this layout exists to remove. The rail carries a
+  // second meaning too (it is what docks the send bar), which a page with
+  // nothing to send has no use for either.
+  const roundLabel = fullpage ? '' : `
+  <div class="round-label">${escHtml(label)}</div>`;
   return `
-<section class="round ${historical ? 'round-history' : 'round-open'}" data-round="${roundN}" data-round-status="${historical ? 'sent' : 'open'}">
-  <div class="round-label">${escHtml(label)}</div>
+<section class="round ${historical ? 'round-history' : 'round-open'}${current ? ' round-current' : ''}" data-round="${roundN}" data-round-status="${historical ? 'sent' : 'open'}">${roundLabel}
   ${blocksHtml}
   ${endRail}
 </section>`;
@@ -1413,8 +1623,10 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
 
 /** Render a complete, self-contained HTML page for `board`. Pure function of the
  * board JSON: same input, same output, every time. Blocks are grouped by round
- * (see renderRoundSection) rather than flattened, so a follow-up round renders
- * below the earlier ones without displacing them — "A board is
+ * (see renderRoundSection) rather than flattened, and each round is a PAGE of
+ * this board (ADR.md entry 42): every round is rendered, exactly one carries
+ * `round-current` and the stylesheet shows only that one, so a follow-up round
+ * is a page flip away rather than a scroll away — "A board is
  * a session-scoped thread with rounds". Every comment is run through
  * resolveComment exactly once here (`resolvedComments`), and that single verdict
  * feeds both the server-rendered per-block comment list AND the `#board-data`
@@ -1435,7 +1647,38 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
  * bar's readonly hiding for free rather than earning a second CSS rule, and it
  * leaves the bar's own last-child position in `.board-shell` untouched. It is
  * purely informational -- src/ui.mjs is what makes it live and click-navigable;
- * this function only ever renders its first-paint count and label. */
+ * this function only ever renders its first-paint count and label.
+ *
+ * A page board offers none of it (ADR.md entry 35: a rendered page is a thing
+ * you read, not a form you submit), and gets there the way body.readonly already
+ * does -- one stylesheet rule, `body.page-board .send-bar { display: none; }`,
+ * not by dropping the markup. The bar is the only route a queued comment has off
+ * the page: a comment left on a page board rides the next round's submit, and
+ * that round arrives over SSE into THIS document as a new page, which the
+ * reviewer flips to and sends from. Deleting the markup here would mean a live
+ * round landing on a board with nothing to send it with, and the reviewer's
+ * queued comments stranded with it. The two kicker controls are the opposite
+ * case and ARE dropped -- see renderHtmlBlock.
+ *
+ * A third rule hides it for a third reason: `body.sent-page .send-bar`. A sent
+ * round is a page you can still flip back to, and it is read-only there (ADR.md
+ * entry 42 -- the guarantee the deleted history rail used to carry). The bar's
+ * own buttons sit OUTSIDE any round section, so nothing that disables a sent
+ * round's widgets ever reaches them; src/ui.mjs's goToRound disables them too.
+ *
+ * `#back-to-top` (ADR.md entry 40) sits BESIDE the bar rather than inside it,
+ * unlike `#questions-left-pill`: it has to survive `body.readonly .send-bar {
+ * display: none }`, since an archived page board is exactly the case where the
+ * artifact is still scrolled and still has to be scrollable back. It goes just
+ * ABOVE the bar in source order rather than after it, because `.send-bar` being
+ * `.board-shell`'s own last element child is what makes the shell's zero bottom
+ * padding land the bar's lower edge on the document's (test/check-round-end.mjs
+ * pins exactly that). Costs nothing: the control is `position: fixed`, so it is
+ * out of flow and its source position decides only tab order. Emitted on every
+ * board and turned on by src/ui.mjs's `.visible` class alone, which only ever
+ * follows a scroll report from a page board's own stage — its `.back-to-top`
+ * rule (src/styles.mjs) is what explains why bottom-RIGHT rather than the pill's
+ * bottom-centre. */
 /** Is there a round waiting to be answered? Decides whether the send bar is live at
  * HYDRATE time, which nothing used to: the buttons were rendered
  * enabled unconditionally and only ever disabled by an SSE push handler, so a finished
@@ -1463,18 +1706,101 @@ function openRoundQuestionCount(board) {
   return board.blocks.filter(b => b.round === latest.n && b.kind === 'question').length;
 }
 
+/** Is this board a PAGE board — one rendered artifact filling the viewport
+ * rather than a stage sitting in a column? ADR.md entry 33: inferred from the
+ * board's own shape, never declared. A board whose blocks are exactly one `html`
+ * block and nothing else is one; anything else — a question, a second content
+ * block, a later round — is an ordinary board. Nothing enters the protocol:
+ * there is no `display` field and no new kind, and every content-only `html`
+ * board already in the store re-renders as a page board retroactively.
+ *
+ * The rule itself is `isPageRound` (src/badge.mjs), because ADR.md entry 42
+ * turned it into a question about a ROUND: board-level and round-level are the
+ * same question asked of two block lists, and a single-round board and its one
+ * round always answer identically. Re-exported here, where the checks and every
+ * renderer already look for it; the client script asks the same function again
+ * on every page flip. */
+export { isPageRound };
+
+export function isPageBoard(board) {
+  return isPageRound((board && board.blocks) || []);
+}
+
+/** The board's pages, named, at the bottom of the page (ADR.md entry 42). Three
+ * always-present controls, never two alternatives (criterion 26): the two edge
+ * chevrons step one round, the pill in the middle names every round and jumps
+ * straight to one. They are rendered here with their first-paint state already
+ * correct -- current round, disabled ends, the dot on the round still owing an
+ * answer -- so a board that opens on its newest round shows the right page with
+ * no flash and no client script; src/ui.mjs's goToRound then owns all three.
+ *
+ * The chevrons are siblings of the pill rather than children of it, because
+ * '.round-pager' carries a `transform` to centre itself and a transformed
+ * ancestor becomes the containing block for `position: fixed` descendants --
+ * chevrons nested inside would be pinned to the pill's box instead of the
+ * viewport's edges.
+ *
+ * "Owes an answer" is a round that is not yet sent AND actually asks something:
+ * the same rule the index badge counts by (ADR.md entry 25), so a page-board
+ * round -- open forever, since nothing sends it -- is never dotted as though
+ * the reviewer were holding it up. */
+function roundOwesAnswer(board, round) {
+  if (!round || round.status === 'sent') return false;
+  return board.blocks.some(b => b.round === round.n && b.kind === 'question');
+}
+
+function roundPagerMarkup(board, currentN) {
+  const rounds = board.rounds || [];
+  const pages = rounds.map(r => {
+    const classes = ['round-page'];
+    if (r.n === currentN) classes.push('round-page-current');
+    if (roundOwesAnswer(board, r)) classes.push('round-page-owed');
+    const label = roundPageLabel(r.n, r.title || '');
+    return `<button type="button" class="${classes.join(' ')}" data-round="${r.n}"${r.n === currentN ? ' aria-current="page"' : ''}>${escHtml(label)}</button>`;
+  }).join('');
+  const first = rounds.length ? rounds[0].n : 1;
+  const last = rounds.length ? rounds[rounds.length - 1].n : 1;
+  return `  <button type="button" class="round-flip round-flip-prev" id="round-prev" aria-label="Previous round" title="Previous round"${currentN <= first ? ' disabled' : ''}>‹</button>
+  <button type="button" class="round-flip round-flip-next" id="round-next" aria-label="Next round" title="Next round"${currentN >= last ? ' disabled' : ''}>›</button>
+  <nav class="round-pager" id="round-pager" aria-label="Rounds">${pages}</nav>`;
+}
+
 export function renderBoardPage(board) {
   const resolvedComments = resolveComments(board, board.comments);
   const commentsByBlock = groupCommentsByBlock(resolvedComments);
+  // The page-board layout (ADR.md entries 32, 33, 34) is carried two ways: down
+  // into the round/block markup (no round label, no kicker -- renderRoundSection
+  // decides that per round), and out onto <body> as a single class the whole
+  // stylesheet keys off. One class rather than a per-element modifier because
+  // what changes is the page's own geometry -- the shell stops being a 1120px
+  // column, the header stops pushing and starts floating, the frame becomes a
+  // constant 100vh and the document itself stops scrolling -- and because it is
+  // exactly the switch src/ui.mjs adds and drops as the reviewer flips between
+  // an artifact page and a question page (goToRound).
+  //
+  // The board opens on its NEWEST round (ADR.md entry 42) -- rounds are pages
+  // now, so "which round" is a page choice, not a scroll position: the last
+  // entry of `board.rounds` (src/board.mjs never reorders or skips a round
+  // number). Everything below that names a round reads this one value -- the
+  // badge's first-paint label, the pager's current entry and its disabled ends,
+  // and whether <body> is laid out as a page board -- so a fresh load can never
+  // paint one page and name another. src/ui.mjs's goToRound takes over from
+  // here and keeps all three in step for every later flip.
+  const initialRoundInView = board.rounds.length ? board.rounds[board.rounds.length - 1].n : 1;
   const roundsHtml = board.rounds.map(r => renderRoundSection(board, r.n, commentsByBlock)).join('\n');
-  const boardForClient = { ...board, comments: resolvedComments };
-  // The page always loads scrolled to the top, so the topmost round -- the
-  // first entry of `board.rounds`, always `1` (src/board.mjs never reorders or
-  // skips a round number) -- is the correct first-paint value for N before any
-  // client script has run. src/ui.mjs's IntersectionObserver
-  // takes over the moment it can measure real layout, and corrects this if the
-  // page was opened scrolled elsewhere (e.g. a deep-linked anchor).
-  const initialRoundInView = board.rounds[0] ? board.rounds[0].n : 1;
+  // `cwd` is dropped rather than spread: the archive (criterion 7) is a single
+  // self-contained file that IS the artifact, so it is the natural thing to
+  // attach to a ticket or hand to a colleague — and `board.cwd` is the realpath'd
+  // local project directory (src/board.mjs), i.e. the reader's username and their
+  // whole directory layout, riding along inside a document nobody reads it out
+  // of. Nothing in src/ui.mjs touches it; the index page reads `cwd` off the
+  // stored board, never off this payload.
+  const { cwd: _cwd, ...boardForClient } = { ...board, comments: resolvedComments };
+  // The page-board layout follows the PAGE on screen, not the board: a thread
+  // whose first round was an artifact and whose second asks a question is one
+  // board with one full-viewport page and one ordinary one, and flipping between
+  // them is what adds and drops this class (src/ui.mjs's goToRound).
+  const fullpage = isPageRound(board.blocks.filter(b => b.round === initialRoundInView));
   // The pill's first-paint count and label (see openRoundQuestionCount above) --
   // 'visible' only at a nonzero count, matching the docked toggle's own first-paint
   // assumption (no '.docked' class until an intersection is actually reported, i.e.
@@ -1494,7 +1820,7 @@ ${faviconLink}
 <script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>
-<body>
+<body${fullpage ? ' class="page-board"' : ''}>
 <div class="board-shell">
   <div class="readonly-banner">Read-only: opened from disk, without the daemon running.</div>
   <header class="board-head">
@@ -1514,6 +1840,8 @@ ${faviconLink}
   <div class="blocks" id="blocks">
     ${roundsHtml}
   </div>
+  <button type="button" class="back-to-top" id="back-to-top" aria-label="Back to top" title="Back to top">Back to top</button>
+${roundPagerMarkup(board, initialRoundInView)}
   <div class="send-bar">
     <button type="button" class="questions-left-pill${pillCount > 0 ? ' visible' : ''}" id="questions-left-pill"${hasOpenRound(board) ? '' : ' disabled'}>${escHtml(pillLabel)}</button>
     <span class="send-status" id="send-status">${hasOpenRound(board) ? '' : 'This round has been sent. Waiting for the next one.'}</span>

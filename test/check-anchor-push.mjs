@@ -350,8 +350,8 @@ check('a round arriving over SSE updates M in the badge immediately, with no rel
 
   es.dispatch('round', JSON.stringify(payload));
 
-  assert.equal(badge.textContent, 'round 1 of 2',
-    'M must update the instant the round push lands -- no reload, and N (this stand-in has no IntersectionObserver, so it never moves off the hydrate default) is untouched by a round arriving further down the page');
+  assert.equal(badge.textContent, 'round 2 of 2',
+    'M must update the instant the round push lands -- no reload. N moves with it now: rounds are pages (ADR.md entry 42) and this reviewer was on the newest one, so the arriving round IS the page they are on');
 });
 
 check('a round going sent over SSE (\'submitted\') leaves the badge total unchanged, but still re-renders rather than being special-cased away', () => {
@@ -360,13 +360,13 @@ check('a round going sent over SSE (\'submitted\') leaves the badge total unchan
   const pageHtml = renderBoardPage(board);
   const { document, es } = loadBoardWithEventSource(pageHtml);
   const badge = document.getElementById('round-badge');
-  assert.equal(badge.textContent, 'round 1 of 2', 'setup failure: expected the two-round board\'s initial label');
+  assert.equal(badge.textContent, 'round 2 of 2', 'setup failure: a board opens on its NEWEST round (ADR.md entry 42), so N starts at 2 here');
 
   applySubmit(board, { action: 'send', answers: [], comments: [] }, round2);
   const payload = buildSubmittedPushPayload(board, round2);
   es.dispatch('submitted', JSON.stringify(payload));
 
-  assert.equal(badge.textContent, 'round 1 of 2', 'a submit never changes board.rounds.length, so M is unchanged');
+  assert.equal(badge.textContent, 'round 2 of 2', 'a submit never changes board.rounds.length, so M is unchanged -- and the page under the reviewer does not move either, it only goes read-only');
 });
 
 // --- the code cap's once-only marker -------

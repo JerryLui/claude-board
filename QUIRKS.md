@@ -75,6 +75,17 @@ chrome). Only reachable through `src/theme.mjs`'s `matchMedia` listener, since a
 open while macOS switches at sunset. `lensRetheme` re-clones from the fresh svg and
 `test/check-mermaid-theme.mjs` fails when the call is removed.
 
+### A CSS *comment* is shipped on the index page too, and one check reads its words
+
+`src/styles.mjs` is one stylesheet, embedded whole by both `renderBoardPage` and
+`renderIndexPage`. `test/check-pure.mjs`'s index-row check asserts the rendered index page
+contains no ordinal wording — `assert.doesNotMatch(html, /\bround \d/i)` — over the WHOLE
+page, comments included. So a CSS comment reading "a control that vanishes at round 1"
+fails an index check that has nothing to do with the rule it sits above, and the failure
+names the index row, not the stylesheet (reproduced; the rule was the round pager's
+chevrons). Two consequences: prose in `src/styles.mjs` is shipped text, not a private
+note, and a check that greps a whole rendered page will read your comments.
+
 ### A backtick inside a template-literal payload ends the whole file
 
 `src/ui.mjs`'s `ui`, `src/styles.mjs`'s `styles`, `src/render.mjs`'s `stageAgentScript()`
@@ -168,13 +179,40 @@ check without a browser can go.
 `test/dom-stand-in.mjs` is a DOM, not a browser: nothing in it lays anything out, so an
 API whose whole job is reporting real layout is either absent or permanently zero.
 
-- **`IntersectionObserver` is not defined at all.** `setupRoundObserver` (`src/ui.mjs`)
-  guards on `typeof IntersectionObserver !== 'function'` and returns immediately when it
-  is missing — by design, so the stand-in does not throw, but it means the half of the
-  round badge that decides which round number to show as you scroll runs under no check
-  at all. The real defect found there (a 1px root-margin band that a smooth-scrolled
-  section can jump clean over between two consecutive samples) was caught by recreating
-  the observer in real Chrome, which is the only way this mechanism can be seen at all.
+- **`IntersectionObserver` is not defined at all.** Every construction site
+  (`setupSendBarDock`, `src/ui.mjs`) guards on `typeof IntersectionObserver !== 'function'`
+  and returns immediately when it is missing — by design, so the stand-in does not throw.
+  Anything decided *inside* such an observer therefore runs under no check at all unless a
+  check installs `StandInIntersectionObserver` and drives the callback itself.
+
+  This is why the round pager is state-driven rather than scroll-driven. The round badge
+  used to name "the round crossing the sticky header line", decided by an observer over a
+  96px band, and its real defect (a 1px band that a smooth-scrolled section jumps clean
+  over between two consecutive samples) could only be found by recreating the observer in
+  real Chrome. Rounds are pages now (ADR 42): one class, one variable, one function that
+  writes both — all of which this DOM can see, which is how `test/check-round-pager.mjs`
+  asserts what the reviewer would actually be looking at. **Prefer explicit state over
+  measured position for anything that has to be checkable here.**
+
+- **The cascade resolver cannot see an interaction pseudo-class, so a rule gated on one is
+  invisible to every check.** `resolveComputedProperty` deliberately makes any compound it
+  cannot evaluate — `:hover`, `:disabled`, `:focus`, `::-webkit-scrollbar` — never match
+  (its own comment says why: a correct answer beats a guess). The consequence is a blind
+  spot with teeth: adding `.round-flip:disabled { display: none }` hides a chevron on every
+  single-round board and at both ends of every other one, and left the WHOLE suite green
+  (verified). Nothing computes a different value, because the rule never applies here.
+
+  So an invariant of the form *"this control is never taken off the page"* cannot be
+  asserted by computing a property — it needs a **structural scan over the stylesheet's
+  rules**: parse out every rule whose selector mentions the control at all, whatever state
+  it is gated on, and assert none of them sets `display: none` / `visibility: hidden` /
+  `opacity: 0` (`test/check-round-pager.mjs`, "DISABLED is not hidden"). That is the
+  inverse of the trap two entries up and safe for the same reason it is a trap there:
+  asserting a rule EXISTS by its spelling can match a rule that selects nothing, while
+  asserting a class of rule does NOT exist cannot. Keep computing the property as well for
+  the states that DO have a class (`body.readonly`, `body.page-board`, `body.sent-page`) —
+  those the resolver evaluates properly, and a scan keyed on the control's own class name
+  would miss `body.sent-page nav { display: none }`.
 
 - **`scrollHeight` and `clientHeight` model exactly one fact.** They read `0` for a node
   that is not in a document, and otherwise whatever the fixture declared via
@@ -195,6 +233,30 @@ API whose whole job is reporting real layout is either absent or permanently zer
 
   Do not grow this into a layout model. Anything whose answer depends on real layout
   still belongs in a real browser.
+
+- **Nothing scrolls, but a `scroll` LISTENER can still be driven.** There is no
+  `scrollY`, no `scrollTop` that moves, and no gesture — so the page board's
+  condensing header (ADR 40), whose whole trigger is the artifact being scrolled
+  inside its frame, looks untestable. It is not: a check can set
+  `frame.contentWindow.pageYOffset` (or an element's `scrollTop`) by hand and
+  `frame.contentDocument.dispatchEvent({ type: 'scroll', target })`, which runs
+  `stageAgentScript`'s own listener for real and produces the real message.
+  Everything downstream — the shape check, the body class, the control, the frame's
+  height staying put — is then ordinary. `test/check-page-board.mjs` does this.
+
+  Dispatch on the DOCUMENT with an explicit `target`, not on the window: the real
+  listener is a capture-phase one on `document` (see the scroller entry below), and
+  this stand-in's `dispatchEvent` walks `parentElement` only — it has no capture
+  path and no document in the ancestor chain, so nothing propagates to a document
+  listener on its own. Driving the listener at its registration point is the honest
+  substitute; that a capture listener genuinely sees an inner element's scroll is a
+  browser fact, measured separately.
+
+  Related trap in the same file, now fixed: `StandInWindow._setSystemPrefersDark`
+  used to update each `MediaQueryList` and fire its `change` inside one loop, so a
+  listener on `(prefers-color-scheme: dark)` that read `(prefers-color-scheme: light)`
+  saw the OLD value and concluded the opposite theme. A real browser has every query
+  consistent before any listener runs. It now updates all of them, then dispatches.
 
 ### A sandboxed `srcdoc` frame's own script runs before its first layout — `load` does not help
 
@@ -228,6 +290,32 @@ throttling: a board opened into a background tab will not get an accurate stage 
 until the reviewer looks at the tab, and `src/styles.mjs`'s `.choice-variant .html-stage`
 starting height (320px, deliberately equal to the fixed floor it replaces) is what they
 see until then.
+
+### A `display:none` iframe keeps its inner scroll offset and fires no event on the way back
+
+Rounds are the board's pages and a page that is not current is `display:none`, not
+removed — so every round's iframe stays mounted and running the whole time. What
+that does to the frame's own scroll position is not guessable, and two independent
+passes stalled on it; it took a real-browser probe to settle. Measured in Chrome 152
+(Blink), against a probe mirroring `.round` / `.round-current` exactly:
+
+    1 after scrollTo(800), visible: pageYOffset=800  innerH=657 contentH=4000 events=[]
+    2 while display:none:           pageYOffset=0    innerH=657 contentH=657  events=[]
+    3 after re-show (sync):         pageYOffset=800  innerH=657 contentH=4000 events=[]
+
+Two facts, and the second is the one that bites. The offset is **restored** on
+re-show, so the reader comes back exactly where they left the artifact. And **no
+`scroll` event fires** anywhere across the whole hide/show cycle, so nothing
+re-reports it — and `reportScroll` (`src/render.mjs`) would early-return on an
+unchanged `top` even if one did. So anything the parent derived from a scroll report
+(`src/ui.mjs`'s `stage-scrolled`, the back-to-top control) has to be **derived from a
+remembered value on the way back in**, never cleared on the way out and waited on:
+the stage will not speak again. `refreshStageChrome` is that derivation, and
+`test/check-round-pager.mjs` drives a flip away and back to pin it.
+
+Gecko/WebKit untested, though Gecko has explicit scroll save/restore across frame
+reconstruction. A `visibility`-based hide would not have the problem at all; the code
+uses `display`, because the page must not reserve the hidden round's box.
 
 ### `cloneNode` in the stand-in never hands back an `IframeElement`
 
@@ -271,10 +359,53 @@ Separately, the real ordering is easy to get backwards: a `<script type="module"
 BEFORE `DOMContentLoaded` fires — so a loader that wants both real scripts to have run
 must call `themeBootScript`, then `ui`, then `finishParsing()`, in that order.
 
+### The thing that scrolls a rendered artifact is often not its document
+
+An html stage's own document is frequently *not* what scrolls. A page designed as a
+page routinely ships an app-shell layout — a fixed sidebar beside a
+`height: 100vh; overflow-y: auto` main pane — and in that shape, measured in Chrome
+151:
+
+    window.scrollY          0        <- while the frame visibly shows section three
+    #main.scrollTop         700
+    scroll events on window 0
+
+So anything that reads the viewport reports `0` forever, anything that writes
+`window.scrollTo` is a silent no-op, and a plain `window.addEventListener('scroll')`
+never fires at all — an element's scroll event does **not** bubble. All three failed
+together in `stageAgentScript`, which is how the page board's header stopped
+condensing and its back-to-top control became a button that did nothing.
+
+The fix generalises: let the element identify **itself**. A capture-phase listener
+(`document.addEventListener('scroll', fn, true)`) sees both the viewport's own scroll
+and any element's, and `ev.target` is the thing that moved; remember it, then read
+and write *that*. Correct by construction rather than by scanning for scrollable
+boxes, and the ordering is airtight — a control that only appears after a report
+cannot be clicked before the target is known.
+
+Two traps inside the fix. `try { el.scrollTo({...}) } catch` is **not** a guard
+against this class of bug: a `scrollTo` that silently does nothing never throws, so
+the catch never runs — feature-detect, and keep `scrollTop = n` as the floor.
+And quirks mode is a red herring here: a srcdoc fragment with no doctype is
+`CSS1Compat` anyway (the parser's synthetic wrapper carries one), `scrollingElement`
+is `HTML`, and read and write agree fine — the problem was never the mode.
+
 ### Driving the real page in real Chrome
 
-The check suite's DOM stand-in cannot see this class of defect, by construction. To
-drive the actual page, Chrome is scriptable over the DevTools protocol with no
+**Not every "real browser" is rendering.** A tab driven through the `claude-in-chrome`
+extension reports `document.visibilityState === 'hidden'` and `hasFocus() === false`
+permanently, and taking a screenshot does not change it. In that state Chrome runs no
+rendering updates, so `requestAnimationFrame` never fires (already noted above) **and
+neither do `scroll` events** — the offset changes, the event never dispatches — while
+`setInterval` is clamped to ~1s. Measured that way, a perfectly working page-board
+scroll looked like a total failure: no reports, no condensed header, `scrollTo` an
+apparent no-op, and a `setInterval` probe returning values a second stale. Three
+consecutive "findings" were all this. **Check `visibilityState` and whether a bare
+`requestAnimationFrame` fires before believing any measurement about scrolling,
+animation or timing.** `--headless=new` over CDP reports `visible` and does fire both,
+which is why the driver below is the one to reach for.
+
+To drive the actual page, Chrome is scriptable over the DevTools protocol with no
 dependencies at all — Node 24 has a native `WebSocket`, so `chrome
 --headless=new --remote-debugging-port=N` plus `Target.attachToTarget` /
 `Input.dispatchMouseEvent` is enough to hover, click and read back the DOM. Keep such
@@ -394,6 +525,23 @@ written that way passes before the change and fails after it, for the wrong reas
 over the parsed DOM instead — `document.querySelectorAll('.comment-item')` and read
 `textContent`. Applies to any "the page must not show X" check where X is carried in the
 board document: block text, answer choices, notes, block ids.
+
+### A fixture board holding one `html` block and nothing else is a PAGE board
+
+`isPageBoard` (`src/render.mjs`, ADR.md entry 33) infers the page-board layout from the
+board's shape, so the most natural "a board with a stage on it" fixture —
+`createBoard({ blocks: [{ kind: 'html', html: MOCK }] })` — no longer renders a stage in
+a column. It renders the artifact at viewport size with no kicker, and therefore with no
+`.comment-btn` and no `.expand-btn` at all (entry 43), and with the send bar hidden.
+
+That is what it looked like when the rule landed: eleven checks across
+`test/check-stage-lens.mjs` and `test/check-stage-isolation.mjs` failed at
+`document.querySelector('.html-block .expand-btn')` returning null — a null-dereference
+in the *setup* of checks about the lens, pointing nowhere near the layout rule that
+actually caused it. Any check about a stage's kicker, its lens, or the send bar beside it
+needs a SECOND block in the fixture (a one-line `markdown` block is enough) to stay an
+ordinary board. Same class of trap as the `check-mcp.mjs` entry below: a fixture's
+*shape*, not its content, decides which code path it exercises.
 
 ### A `check-mcp.mjs` fixture with no question block no longer blocks on `/wait`
 
@@ -600,28 +748,33 @@ enough.) `test/check-install-payload.mjs` pins this directly: it edits a throwaw
 `src/server.mjs`, runs the ALREADY-BUILT launcher and asserts the old code is what answers,
 then reinstalls and asserts the edit only takes effect after that.
 
-### The render directory is a SERVE root, not a REFERENCE root
+### A carried-forward `ref_roots` record widens itself back to today's defaults on every install
 
-`GET /file/<basename>` and block references (`{ kind: 'html', source: { path } }`) read
-from two deliberately separate allowlists, `CLAUDE_BOARD_SERVE_ROOTS` and
-`CLAUDE_BOARD_REF_ROOTS` (`src/resolve.mjs`, "Consequently the allowlist is its OWN env
-var"). `~/Documents/renders` is in both defaults today, but the roots are baked into the
-launcher at install time and carried forward across reinstalls from a record file next to
-the secret, so a machine installed before `~/Documents/renders` joined `DEFAULT_REF_ROOTS`
-still has it as a serve root only. There, referencing a rendered file silently produces
-empty option cards: `resolvePath` refuses an absolute path outside every REF root and
-resolves a relative one against the board's `cwd` only.
+`GET /file/<path>` and its separate `CLAUDE_BOARD_SERVE_ROOTS` allowlist are gone (ADR.md
+entry 38) — a rendered artifact now only ever reaches a reviewer through a block reference,
+`{ kind: 'html', source: { path } }`, resolved against `CLAUDE_BOARD_REF_ROOTS`
+(`src/resolve.mjs`). That used to have a companion trap worth knowing about even though its
+cause is gone: `~/Documents/renders` joined `DEFAULT_REF_ROOTS` after some installs already
+existed, and a carried-forward record predating it stayed short of that default forever,
+silently, on every later `git pull && ./install.sh` — referencing a rendered file produced
+an empty option card (`resolvePath` refuses an absolute path outside every root and
+resolves a relative one against the board's `cwd` only) with nothing to say why.
 
-The post still returns 200. Each block lands carrying `error: cannot read <name>: no such
-file`, which renders as a red "Could not resolve" card, and a question whose every option
-is one of those cards is unanswerable. Read the posted board's own JSON
-(`~/Library/Application Support/claude-board/boards/<id>.json`) after any round whose
-blocks carry references — the `error` field is there, and it is the only place it is.
+Fixed by ADR.md entry 36: `install.sh` now checks a carried-forward record against
+`DEFAULT_REF_ROOTS` on every run and adds back whatever current default the record is
+missing, printing the line naming what it widened. The trap this creates in its place —
+worth knowing before relying on the old behaviour — is that narrowing the allowlist with
+`CLAUDE_BOARD_REF_ROOTS= ./install.sh` is no longer a permanent choice: it survives for any
+directory the *current* defaults do not name, but the next plain upgrade re-adds every
+directory that IS a current default regardless. A genuinely narrow list has to be
+reasserted with the explicit env var on every run that might otherwise widen it.
 
-Two ways out: inline the stage as `html` by value, or write it inside the board's project
-directory. Check the launcher's real environment before assuming a root exists — the plist
-carries only `CLAUDE_BOARD_PORT`, so `strings` on the binary named in `ProgramArguments.0`
-is what actually answers it (ADR.md entry 13).
+If a reference still 404s or comes back as an empty "Could not resolve" card, read the
+posted board's own JSON (`~/Library/Application Support/claude-board/boards/<id>.json`)
+after the round that carried it — the `error: cannot read <name>: no such file` field is
+there, and it is the only place it is. Check the launcher's real environment before
+assuming a root exists — the plist carries only `CLAUDE_BOARD_PORT`, so `strings` on the
+binary named in `ProgramArguments.0` is what actually answers it (ADR.md entry 13).
 
 ---
 

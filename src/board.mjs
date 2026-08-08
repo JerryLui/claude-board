@@ -501,7 +501,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
     state: 'open',
     // `title` is stored on the round as well as on the board: every later round
     // carries its own (see addRound), and round 1's would otherwise be the only one
-    // the history rail could not label.
+    // the page label and the round pager could not name.
     rounds: [{ n: 1, postedAt: now, status: 'open', sentAt: null, title: title || '' }],
     blocks: normalized,
     answers: {},
@@ -549,7 +549,15 @@ export function addRound(board, { blocks, cwd, title }) {
  * (use `addRound` instead once the open round has been sent). */
 export function amendRound(board, { blocks, cwd, title }) {
   assertCwdNotRetargeted(cwd, board);
-  const openRound = board.rounds.find(r => r.status === 'open');
+  // The LATEST open round, not the first one. A board can hold two open rounds
+  // at once now: an artifact round is never sendable (ADR.md entry 35), so it
+  // stays `open` for good, and the question round posted after it is open too.
+  // `find` took the earliest, which is the artifact's -- so a later amend
+  // normalised its blocks into the ARTIFACT's round, appending a question to the
+  // page the reviewer is reading and never touching the round the caller meant.
+  // "The round currently being assembled" has always meant the newest one; this
+  // only stops the two readings diverging now that they can.
+  const openRound = [...board.rounds].reverse().find(r => r.status === 'open');
   if (!openRound) throw new Error('no open round to amend');
   const counters = countersFromBoard(board);
   // The id ledger decides, during normalisation and before anything is mutated,
@@ -557,8 +565,8 @@ export function amendRound(board, { blocks, cwd, title }) {
   // blocks. An id naming a block minted in a DIFFERENT round -- almost always an
   // already-sent one -- is rejected there. Silently "replacing" it would move a
   // sent answer into the open round, re-enable its (now disabled) controls, and
-  // leave the history rail for its real round rendering as if the question had
-  // never been asked. That is not an amend, it is corruption of a round that
+  // leave that block's own round -- a page the reviewer can still flip back to --
+  // rendering as if the question had never been asked. That is not an amend, it is corruption of a round that
   // already went out.
   const ids = idLedgerFromBoard(board, openRound.n);
   const normalized = (blocks || []).map(b => normalizeBlock(b, openRound.n, counters, board.cwd, ids));

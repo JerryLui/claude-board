@@ -877,10 +877,26 @@ export class StandInWindow extends EventTarget {
    * already-vended MediaQueryList and firing 'change' on the ones whose
    * `.matches` actually flips -- never on one that doesn't, so a listener
    * counting its own calls can tell "the OS changed" apart from "matchMedia
-   * was merely queried again". */
+   * was merely queried again".
+   *
+   * TWO passes, and the split is not tidiness: one OS preference change is one
+   * fact, so in a real browser EVERY MediaQueryList already reflects it by the
+   * time any 'change' listener runs. Doing it in a single pass dispatches each
+   * listener from inside the loop that is still updating the others, so a
+   * handler on '(prefers-color-scheme: dark)' that reads
+   * '(prefers-color-scheme: light)' -- exactly what src/theme.mjs's OS listener
+   * plus src/ui.mjs's activeTheme do between them -- sees the OLD value and
+   * concludes the opposite theme. Found that way: a page-board stage was told
+   * 'dark' on a flip TO light, against code that is correct in a browser. */
   _setSystemPrefersDark(next) {
     this._systemPrefersDark = !!next;
-    this._mediaQueries.forEach(mql => mql._setMatches(matchesPrefersColorScheme(mql.media, this._systemPrefersDark)));
+    const flipped = [];
+    this._mediaQueries.forEach(mql => {
+      const nextMatches = matchesPrefersColorScheme(mql.media, this._systemPrefersDark);
+      if (mql.matches !== nextMatches) flipped.push(mql);
+      mql.matches = nextMatches;
+    });
+    flipped.forEach(mql => mql.dispatchEvent({ type: 'change', matches: mql.matches, media: mql.media }));
   }
   /** `window.getComputedStyle(el).getPropertyValue('--token')` --
    * src/ui.mjs's mermaidThemeVariables reads mermaid's whole palette this way
@@ -1100,6 +1116,17 @@ export class Element extends EventTarget {
     return '<' + tag + attrs + '>' + inner + '</' + tag + '>';
   }
   appendChild(node) { node.parentElement = this; this.childNodes.push(node); return node; }
+  // src/ui.mjs's amend path inserts a newly-added top-level block BEFORE the
+  // round's closing rail rather than after it. Real semantics, including the
+  // one that matters here: a null (or unparented) reference node degrades to
+  // an append, exactly as the DOM specifies, so a round with no rail still
+  // takes the block.
+  insertBefore(node, ref) {
+    const idx = ref ? this.childNodes.indexOf(ref) : -1;
+    node.parentElement = this;
+    if (idx === -1) this.childNodes.push(node); else this.childNodes.splice(idx, 0, node);
+    return node;
+  }
   // The diagram lens clones the rendered mermaid SVG
   // into its own canvas (src/ui.mjs's lensOpen), which is what puts TWO elements
   // carrying each mermaid node id in the document at once -- the duplicate-id
@@ -1136,7 +1163,14 @@ export class Element extends EventTarget {
     if (idx === -1) return;
     nodes.forEach(node => { node.parentElement = parent; });
     parent.childNodes.splice(idx, 1, ...nodes);
-    this.parentElement = null;
+    // Only when this node is genuinely out of the tree. `el.replaceWith(el)` is
+    // a real thing a caller does -- src/ui.mjs's amend loop walks the fragment's
+    // nested blocks too, so a compare side that arrived inside its own owner is
+    // "replaced" by itself -- and a browser leaves it exactly where it is.
+    // Nulling unconditionally detached it here instead, which made every nested
+    // block in an amended fragment look like a round-level orphan to any check
+    // that walked ancestors (closest, wirePageDomPins' own walk).
+    if (!nodes.includes(this)) this.parentElement = null;
   }
   querySelector(sel) { return searchDescendants(this, sel)[0] || null; }
   querySelectorAll(sel) { return searchDescendants(this, sel); }
@@ -1629,11 +1663,13 @@ export class StandInLocalStorage {
 //
 // QUIRKS.md "The stand-in has no layout" already explains why this file never had
 // one: nothing here lays anything out, so there is no real geometry for a real
-// IntersectionObserver to intersect against, and the round badge's own
-// setupRoundObserver (src/ui.mjs) has run under no check at all for exactly that
-// reason -- it guards on `typeof IntersectionObserver !== 'function'` and returns,
-// which the stand-in's total absence of the constructor was always enough to
-// exercise.
+// IntersectionObserver to intersect against. The round badge's own
+// setupRoundObserver (src/ui.mjs) ran under no check at all for exactly that
+// reason -- it guarded on `typeof IntersectionObserver !== 'function'` and
+// returned, which the stand-in's total absence of the constructor was always
+// enough to exercise. That observer is gone now (ADR.md entry 42: rounds are
+// pages, decided by explicit state instead of measured scroll position, which is
+// precisely what this DOM CAN see -- test/check-round-pager.mjs).
 //
 // setupSendBarDock (src/ui.mjs) is the first thing in
 // this codebase that needs to DRIVE an IntersectionObserver's callback in both

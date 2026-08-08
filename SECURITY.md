@@ -73,18 +73,18 @@ the bundle's grant on its own code.
 
 **The environment the daemon runs in.** The launcher `execve`s with an environment it
 constructs itself rather than passing its own through (`bin/launcher.c`, `OVERRIDE_ENV` /
-`PASSTHROUGH_NAMES`). The five variables that decide what the daemon may read, serve and
-write — `HOME`, `PATH`, `CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS`,
-`CLAUDE_BOARD_SERVE_ROOTS` — are compiled in, alongside `CLAUDE_BOARD_NODE`,
-`CLAUDE_BOARD_DAEMON` and `CLAUDE_BOARD_REPO_ROOT`. `PATH` is baked fixed, since the
-daemon shells out to `osascript` and `open`. Only a short allowlist of timing and port
-knobs is read from the plist, none of which can change what directory the grant reaches.
-Everything else, `NODE_OPTIONS` and `CLAUDE_BOARD_SECRET_FILE` included, is never placed
-in the child's environment at all — and with `HOME` baked, `~/.config/claude-board/secret`
-is the only secret path the process can reach. The three boundary variables are therefore
-**not** written into the plist when a launcher bundle is in use, since a copy there would
-read as though rewriting the plist could still move the boundary; a customised value is
-carried across reinstalls through a record file in the 0700 directory beside the secret.
+`PASSTHROUGH_NAMES`). The four variables that decide what the daemon may read and
+write — `HOME`, `PATH`, `CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS` — are compiled in,
+alongside `CLAUDE_BOARD_NODE`, `CLAUDE_BOARD_DAEMON` and `CLAUDE_BOARD_REPO_ROOT`. `PATH`
+is baked fixed, since the daemon shells out to `osascript` and `open`. Only a short
+allowlist of timing and port knobs is read from the plist, none of which can change what
+directory the grant reaches. Everything else, `NODE_OPTIONS` and
+`CLAUDE_BOARD_SECRET_FILE` included, is never placed in the child's environment at all —
+and with `HOME` baked, `~/.config/claude-board/secret` is the only secret path the process
+can reach. The two boundary variables are therefore **not** written into the plist when a
+launcher bundle is in use, since a copy there would read as though rewriting the plist
+could still move the boundary; a customised value is carried across reinstalls through a
+record file in the 0700 directory beside the secret.
 
 **The build.** `install.sh` compiles a *staged copy* of `bin/launcher.c` with `-iquote`,
 inside the throwaway directory it generates `launcher_paths.h` into. Since a quoted
@@ -112,7 +112,7 @@ one, so pulling and reinstalling a security fix is the reader's job, not the dae
 **Known limits of that:**
 
 - **A rebuild costs the grant, on purpose.** Every value that decides what the daemon may
-  read, serve or write is an input to the bundle's own bytes, so changing any of them
+  read or write is an input to the bundle's own bytes, so changing any of them
   changes the cdhash and macOS re-prompts for Documents access on the next launch. That is
   the design working — the alternative is a boundary a rewritable plist could move without
   a rebuild — but a user meets it as friction: retargeting `CLAUDE_BOARD_REF_ROOTS`, or
@@ -140,15 +140,19 @@ nothing rather than granting a neighbouring directory nobody named.
 not the whole of it, which also holds `.credentials.json`, `settings.json`, shell
 snapshots and every project's transcripts. The fourth is the render directory the render
 skills already write into, so a page an agent just rendered can be posted by reference
-rather than pasted in by value; it is the same directory `CLAUDE_BOARD_SERVE_ROOTS`
-defaults to, and the two remain separate grants on separate variables. Every default root
-is a directory only this user writes to: a world-writable one (`/tmp`) is deliberately not
-a default, since a default reaches every install on the next upgrade and a reference root
-is read on an agent's say-so. Name it yourself if you want it. An *absent*
-`CLAUDE_BOARD_REF_ROOTS` means the project directory alone. The default lives in
-`install.sh` rather than in the daemon's code, so the boundary only ever widens during an
-install that prints the roots it resolved, and a value you narrowed once is carried
-forward rather than reset by the next upgrade.
+rather than pasted in by value. Every default root is a directory only this user writes
+to: a world-writable one (`/tmp`) is deliberately not a default, since a default reaches
+every install on the next upgrade and a reference root is read on an agent's say-so. Name
+it yourself if you want it. An *absent* `CLAUDE_BOARD_REF_ROOTS` means the project
+directory alone. The default lives in `install.sh` rather than in the daemon's code, so
+the boundary only ever widens during an install that prints the roots it resolved. A value
+you narrowed once is carried forward across an upgrade, but not frozen: any directory the
+*current* defaults name that your carried-forward record is missing is added back in on the
+next install and named on screen (`ADR.md` entry 36) — a record predating
+`~/Documents/renders` is exactly the case that forced this. Narrowing a directory the
+defaults do not name still survives indefinitely; keeping the list genuinely short now
+takes reasserting `CLAUDE_BOARD_REF_ROOTS` explicitly rather than trusting the record's
+inertia.
 
 The allowlist is wider than a project-directory-only boundary (`ADR.md` entry 3):
 resolving a reference is only ever a read, and a session that could never show you the
@@ -313,24 +317,6 @@ The same escape has a larger consequence for one kind: for `markdown`, `code` an
 diagram. For `html`, quoting it means its markup is what runs inside the sandboxed stage —
 still opaque-origin, still under the page CSP, so not a new hole, but a bigger one to fall
 into by the same route.
-
-**A document served from a serve root, beyond what its CSP holds.** `GET /file/<path>`
-(`PROTOCOL.md`, `ADR.md` entry 10) hands a file to the browser as-is, so anything under
-`CLAUDE_BOARD_SERVE_ROOTS` runs as a live page at the daemon's own origin — a strictly
-larger grant than the reference boundary, which is why it is a separate allowlist and why
-an absent value means the route is off. The session cookie is `HttpOnly` and
-`SameSite=Strict`, but same-origin is same-origin: a served page could otherwise `fetch` a
-submit and answer a question as you. Two headers close that, both load-bearing rather than
-defence in depth. `connect-src 'none'` and `form-action 'none'` make the document inert
-toward the daemon. CSP is per-realm, though, so those say nothing about a same-origin
-*board* window the page opens — which is why the response also carries
-`Cross-Origin-Opener-Policy: same-origin` (`src/server.mjs`), putting a served document in
-its own browsing-context group so the handle `window.open` returns comes back severed.
-What remains open deliberately: a served page can still trigger a **top-level navigation**
-to a daemon URL. Those reach read routes only, by GET, and land in a tab the reviewer can
-see; the header that would stop them (`navigate-to`) exists in no shipping browser. The
-practical boundary is the allowlist itself — a serve root is a directory whose contents you
-are choosing to execute.
 
 **A browser extension with host permissions on the profile holding the credential.** It can
 read boards and submit as you. `HttpOnly` stops page script, not extensions.

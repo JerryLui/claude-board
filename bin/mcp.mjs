@@ -538,7 +538,7 @@ const ASK_TOOL = {
   inputSchema: {
     type: 'object',
     properties: {
-      title: { type: 'string', description: 'Board / round title shown in the tab and history rail.' },
+      title: { type: 'string', description: 'Board / round title shown in the tab and round pager.' },
       blocks: {
         type: 'array',
         description:

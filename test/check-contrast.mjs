@@ -117,7 +117,7 @@ function assertClears(themeName, palette, textToken, surfaceToken) {
 const TEXT_SITES = [
   // `a:hover` is unscoped -- every surface prose/links can render on: an
   // ordinary block, a compare-side/question-context panel, a blockquote, and
-  // a sent round's history rail.
+  // a sent round's own page.
   ['--accent-hi', '--panel'],
   ['--accent-hi', '--panel-2'],
   ['--accent-hi', '--accent-soft'],
@@ -127,7 +127,7 @@ const TEXT_SITES = [
   ['--code-ink', '--panel-3'],
   ['--code-ink', '--panel-2'],
   // `.answer-status[data-status="answered"]` -- an answer stays visible (and
-  // its status color with it) in a sent round's history rail, not just live.
+  // its status color with it) on a sent round's own page, not just live.
   ['--good', '--panel'],
   ['--good', '--history-bg'],
   // `.unsupported-widget` (a compare side with no content: always its own

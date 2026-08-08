@@ -49,7 +49,7 @@ import {
   composeHint, parseMermaidDomId, MERMAID_NODE_SELECTOR,
   findPendingCommentForAnchor, removePendingComment,
 } from './anchor.mjs';
-import { badgeLabel } from './badge.mjs';
+import { badgeLabel, roundPageLabel, isPageRound } from './badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
 import { THEME_CHANGE_EVENT } from './theme.mjs';
 import { palettes } from './styles.mjs';
@@ -230,6 +230,16 @@ export const ui = `
   // is what proves this page renders the exact string that was checked.
   var badgeLabel = ${badgeLabel.toString()};
 
+  // The other two pure round facts from src/badge.mjs, spliced the same way: the
+  // pager names a round with the SAME function src/render.mjs printed that
+  // round's own label with, and it asks whether the page it is flipping to is a
+  // full-viewport artifact with the SAME function that decided how the server
+  // rendered it. Both are the "one implementation, embedded not copied" rule --
+  // a hand-written twin here would be free to disagree with the markup on
+  // screen, and nothing would catch it.
+  var roundPageLabel = ${roundPageLabel.toString()};
+  var isPageRound = ${isPageRound.toString()};
+
   function seedAnswers(blockIds, boardData) {
     blockIds.forEach(function (id) {
       var a = (boardData.answers || {})[id];
@@ -277,6 +287,14 @@ export const ui = `
     // id="theme-toggle" that is never a <button>.
     var themeToggleBtn = document.querySelector('button#theme-toggle');
     if (themeToggleBtn) themeToggleBtn.disabled = false;
+    // Back-to-top is the second exception, for the same reason and by the same
+    // carve-out (ADR.md entry 40): an archived page board is still a page a
+    // reader scrolls, and a control that appears the moment they do and then
+    // does nothing is worse than none. Unlike the theme control this one needs
+    // no matching CSS carve-out -- no body.readonly rule ever hid it (QUIRKS.md
+    // "Readonly is locked twice": check BOTH gates, and here only one exists).
+    var backToTopEl = document.querySelector('button#back-to-top');
+    if (backToTopEl) backToTopEl.disabled = false;
   }
 
   // Opens (and fills in) blockId's comment-form for a given anchor. Shared by the
@@ -770,6 +788,25 @@ export const ui = `
   // actually stops a hostile report, since it runs before the value ever
   // touches the frame's inline style at all.
   var STAGE_HEIGHT_CAP = 600;
+  // The floor beside that cap (ADR 41): a stage that sizes itself from the
+  // viewport rather than from its own content can report a height that
+  // measures whatever sliver of chrome happened to be visible -- a few
+  // pixels of label, nothing else -- and without a floor that report would
+  // lock the card at exactly that collapsed height forever, since a later,
+  // taller report never arrives from content that isn't reflowing. 320
+  // matches '.choice-variant .html-stage''s own starting height
+  // (src/styles.mjs) -- the same "two independent places, kept in sync by
+  // convention" shape as STAGE_HEIGHT_CAP above -- so a collapsed report
+  // renders exactly at the placeholder a report that never arrived at all
+  // would have left the card at, not below it.
+  var STAGE_HEIGHT_FLOOR = 320;
+  // How far into the artifact counts as "reading it" (ADR.md entry 40) -- the
+  // point the header condenses at and the back-to-top control appears at. One
+  // number for both, so the two can never disagree about what "scrolled" means.
+  // A few pixels rather than zero: a trackpad's inertia can leave a document
+  // resting at 1-2px, and a header that flickers on that is worse than one that
+  // waits for a real gesture.
+  var STAGE_SCROLL_CONDENSE_PX = 24;
 
   /** Post one message to 'frame''s stage agent. Wrapped in try/catch: a frame
    * mid-teardown (an amend that replaced this block) can leave 'contentWindow'
@@ -789,6 +826,59 @@ export const ui = `
       for (var k in msg) if (Object.prototype.hasOwnProperty.call(msg, k)) out[k] = msg[k];
       frame.contentWindow.postMessage(out, '*');
     } catch (e) { /* frame gone or inaccessible; nothing to tell it */ }
+  }
+
+  /** The theme actually in force right now, as a concrete 'light' or 'dark'.
+   *
+   * src/theme.mjs's control has THREE states and the third one is an ABSENT
+   * attribute meaning System, which is not a thing a stage can be told: a
+   * sandboxed srcdoc frame could run its own '(prefers-color-scheme)' query,
+   * but then it would need its own listener for OS flips AND still have to be
+   * told about an explicit override, i.e. two sources of truth for one fact.
+   * Resolving here instead leaves exactly one: this page already hears every OS
+   * flip (src/theme.mjs's own matchMedia listener fires THEME_CHANGE_EVENT while
+   * System is in force) and every click, and both end at the same broadcast
+   * below. Works offline and from file:// too -- a media query is local, so an
+   * archive opened from Finder with the network off still paints its artifact.
+   *
+   * The precedence mirrors src/styles.mjs exactly: the plain ':root' block is
+   * DARK, and light only ever wins under an explicit override or an OS that
+   * asks for it -- hence 'light only if the media says so', never
+   * '(prefers-color-scheme: dark)' with a light default. */
+  function activeTheme() {
+    var attr = document.documentElement && document.documentElement.getAttribute('data-theme');
+    if (attr === 'light' || attr === 'dark') return attr;
+    if (!window.matchMedia) return 'dark';
+    try {
+      return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    } catch (e) {
+      return 'dark';
+    }
+  }
+
+  /** Tell every wired stage the CURRENT comment mode, the CURRENT sent-refs for
+   * its own block, and the CURRENT theme (ADR.md entry 39 -- theme rides the
+   * message that already carries comment mode rather than minting a type of its
+   * own; the stage tolerates each field being absent, the widening convention
+   * 'sentRefs' set). One function so a mode change and a theme change can never
+   * send differently-shaped messages, and so a stage is never left holding a
+   * stale value of the field the other caller happened not to care about.
+   *
+   * Iterates frames still live in THIS document, filtered through isWiredStage
+   * -- a frame that was only ever the about:blank placeholder, or one an amend
+   * already replaced, is simply absent from the query and never touched. */
+  function broadcastStageMode() {
+    qsa('.html-stage', document).forEach(function (frame) {
+      if (!isWiredStage(frame)) return;
+      var section = frame.closest('.html-block');
+      var blockId = section && section.getAttribute('data-block-id');
+      postToStage(frame, {
+        type: 'mode',
+        commentMode: commentMode,
+        sentRefs: blockId ? sentDomRefsForBlock(blockId) : [],
+        theme: activeTheme(),
+      });
+    });
   }
 
   /** The '.html-stage' frame whose live 'contentWindow' is 'win', or null.
@@ -825,6 +915,12 @@ export const ui = `
     // for a SUPERSEDED request (e.g. a resize fired again before the first
     // reply arrived) is ignored rather than clobbering a layer that has since
     // moved on -- see the 'positions' branch below.
+    // Free whatever this layer was still waiting on. A reply for a superseded
+    // request is discarded below anyway, so keeping its entry buys nothing --
+    // and a stage is agent-authored input that can post 'ready' as often as it
+    // likes, each one landing here. Dropping the old entry bounds this table at
+    // one row per pin-layer instead of one per message the page ever received.
+    if (layer.__cbLocateId) delete pendingLocates[layer.__cbLocateId];
     layer.__cbLocateId = requestId;
     pendingLocates[requestId] = { layer: layer, comments: comments };
     postToStage(frame, { type: 'locate', requestId: requestId, refs: comments.map(function (c) { return c.anchor.ref; }) });
@@ -849,7 +945,10 @@ export const ui = `
     // that has just announced itself needs to know which of ITS OWN elements
     // are already off-limits before its first hover, same as it needs to know
     // whether comment mode is even on.
-    postToStage(frame, { type: 'mode', commentMode: commentMode, sentRefs: sentDomRefsForBlock(blockId) });
+    // theme travels in the same message for the same reason (ADR.md entry 39):
+    // a stage that has just announced itself has to be painted in the reader's
+    // theme before its first frame is looked at, not at the next toggle.
+    postToStage(frame, { type: 'mode', commentMode: commentMode, sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
     if (layer) requestStagePositions(frame, blockId, layer);
   }
 
@@ -931,12 +1030,17 @@ export const ui = `
    * on this channel -- a stage-posted message is agent-authored input, never
    * evidence a human acted: shape-checked ('Number.isFinite', positive -- a non-finite,
    * negative or zero report is dropped outright, same as every other
-   * malformed field on this channel) and clamped to STAGE_HEIGHT_CAP before
-   * it ever touches 'frame.style.height', so no report can grow a card
-   * without limit, push page chrome off screen, or claim more than its own
-   * box. 'frame' is already the DOM-walk-identified frame
-   * ('findStageFrame(ev.source)' in the listener below), never an id the
-   * message claims for itself.
+   * malformed field on this channel) and clamped between STAGE_HEIGHT_FLOOR
+   * and STAGE_HEIGHT_CAP before it ever touches 'frame.style.height', so no
+   * report can grow a card without limit, push page chrome off screen, or
+   * claim more than its own box -- and no report can shrink one below the
+   * placeholder either (ADR 41): a stage that sizes itself from the viewport
+   * rather than its own content can report a collapsed height (a sliver of
+   * label, nothing else) that never grows again, and without the floor that
+   * would lock the card there permanently instead of leaving it at the
+   * placeholder a late or absent report already leaves it at. 'frame' is
+   * already the DOM-walk-identified frame ('findStageFrame(ev.source)' in the
+   * listener below), never an id the message claims for itself.
    *
    * Applied only when 'frame' sits inside a '.choice-variant' card. Every
    * html stage sends this message, standalone or not (stageAgentScript has no
@@ -948,11 +1052,17 @@ export const ui = `
   function handleStageHeight(data, frame) {
     if (!Number.isFinite(data.height) || data.height <= 0) return;
     if (!frame.closest('.choice-variant')) return;
-    frame.style.height = Math.min(data.height, STAGE_HEIGHT_CAP) + 'px';
+    frame.style.height = Math.max(STAGE_HEIGHT_FLOOR, Math.min(data.height, STAGE_HEIGHT_CAP)) + 'px';
   }
 
   function handleStagePositions(data) {
-    var pending = pendingLocates[data.requestId];
+    // hasOwnProperty, not a bare lookup: 'requestId' is a string the stage
+    // chooses, and a stage naming 'toString' (or 'constructor') would otherwise
+    // walk the prototype chain, sail past the !pending guard below with a
+    // function, and throw an uncaught TypeError out of the message listener --
+    // the same shape src/anchor.mjs already guards on its own lookups.
+    var pending = Object.prototype.hasOwnProperty.call(pendingLocates, data.requestId)
+      ? pendingLocates[data.requestId] : null;
     if (!pending) return; // unknown/stale request id -- never trusted blindly
     delete pendingLocates[data.requestId];
     var layer = pending.layer;
@@ -962,6 +1072,80 @@ export const ui = `
     pending.comments.forEach(function (c) {
       var raw = Object.prototype.hasOwnProperty.call(data.positions, c.anchor.ref) ? data.positions[c.anchor.ref] : null;
       placePin(layer, c, !!c.resolved, isUsablePosition(raw) ? raw : null);
+    });
+  }
+
+  /** A page board's stage saying where it has been scrolled to (ADR.md entry
+   * 40). The gesture happens inside an opaque-origin frame this document cannot
+   * read and no IntersectionObserver here can see -- on a page board the
+   * document does not scroll at all -- so this report is the only signal there
+   * is, which is why entry 40 makes it a message and this file shape-checks it
+   * like every other one (the caller has already established 'top' is a finite
+   * number before we get here).
+   *
+   * All this does is RECORD, against the frame that sent it: the report is a
+   * fact about one stage, and which stage it came from is the whole of what
+   * makes it actionable or not. Rounds are pages in ONE document, hidden with
+   * display:none (src/styles.mjs), so EVERY round's stage is mounted, running
+   * and reporting at all times -- a stage on a page nobody has opened (and a
+   * stage is agent-authored, assumed hostile by stageAgentScript's own design
+   * comment) must not decide the chrome of the page that IS on screen. Storing
+   * per frame and deciding from the current page's own record is what makes
+   * that structural rather than a guard someone can drop: there is no path from
+   * this data to the chrome that does not go through refreshStageChrome's
+   * '.round-current' lookup.
+   *
+   * And the record is not bookkeeping. A frame keeps its inner scroll offset
+   * across a display:none flip and fires NO event on the way back (measured in
+   * Chrome 152; QUIRKS.md), so a reviewer who flips away from a half-read
+   * artifact and returns is back where they left off with nothing to re-report
+   * it -- the recorded top is the only thing refreshStageChrome can re-derive
+   * from on the return flip. */
+  function handleStageScroll(data, frame) {
+    frame.__cbStageTop = data.top;
+    refreshStageChrome();
+  }
+
+  /** ADR.md entry 40's chrome, derived from the CURRENT page's own stage rather
+   * than remembered as state: called on a report and on every flip, so the one
+   * answer is computed the same way whichever of the two moved, and a report
+   * from any other page's stage can only ever change a number nothing here reads.
+   *
+   * Still gated on the page-board layout, and that gate is load-bearing rather
+   * than defensive: stageAgentScript is the SAME script in every stage, so an
+   * ordinary board's stage reports its own internal scrolling too, and acting on
+   * that would condense a header floating over nothing and float a back-to-top
+   * control over a page that has its own scrollbar.
+   *
+   * Two classes, one condition -- 'stage-scrolled' on <body> is what condenses
+   * the header (src/styles.mjs) and '.visible' is what shows the control; both
+   * follow the same boolean so they can never disagree about whether the
+   * reviewer is reading. */
+  function refreshStageChrome() {
+    var frame = document.querySelector('.round-current .html-stage');
+    var top = frame && typeof frame.__cbStageTop === 'number' ? frame.__cbStageTop : 0;
+    var scrolled = document.body.classList.contains('page-board') && top > STAGE_SCROLL_CONDENSE_PX;
+    document.body.classList.toggle('stage-scrolled', scrolled);
+    if (backToTopBtn) backToTopBtn.classList.toggle('visible', scrolled);
+  }
+
+  // Tag-qualified, same reason as every other id-by-string lookup in this file:
+  // a heading '## Back to top' slugifies to a second id="back-to-top"
+  // (src/markdown.mjs), and only the real control is a <button>.
+  var backToTopBtn = document.querySelector('button#back-to-top');
+  if (backToTopBtn) {
+    backToTopBtn.addEventListener('click', function () {
+      // The parent cannot scroll a cross-origin frame's document, so this is a
+      // request, not an action: the same 'scroll' type the stage reports with,
+      // read the other way round ("put yourself at this offset"). Scoped to the
+      // CURRENT page: every round's stage is mounted in this one document at all
+      // times (display:none, not removed), so an unscoped broadcast would also
+      // reset the reader's position inside artifacts on pages they are not
+      // looking at -- and 'a page board has exactly one stage' stopped being a
+      // fact about the document the moment rounds became pages (ADR.md entry 42).
+      qsa('.round-current .html-stage', document).forEach(function (frame) {
+        if (isWiredStage(frame)) postToStage(frame, { type: 'scroll', top: 0 });
+      });
     });
   }
 
@@ -1006,6 +1190,16 @@ export const ui = `
       return;
     }
     if (data.type === 'height') { handleStageHeight(data, frame); return; }
+    if (data.type === 'scroll') {
+      // Shape-checked before anything reads it, exactly like every other type on
+      // this channel: a stage is agent-authored input, and 'top' is a number
+      // that decides a class -- a string, NaN or Infinity here would compare
+      // false against the threshold and silently pin the header expanded, which
+      // reads as a broken feature rather than as rejected input.
+      if (typeof data.top !== 'number' || !isFinite(data.top)) return;
+      handleStageScroll(data, frame);
+      return;
+    }
   });
 
   // mermaid: wired from renderMermaidBlocks below once mermaid has either rendered
@@ -2193,24 +2387,18 @@ export const ui = `
     // 'body.comment-mode' class to cross into (QUIRKS.md "Two stylesheets, one
     // palette"), so each stage clears its own in-progress hover locally the
     // moment it hears 'commentMode: false' (see stageAgentScript's own 'mode'
-    // handler) rather than this page reaching in to do it. Iterates frames
-    // still live in THIS document, filtered through isWiredStage (see
-    // wiredStageFrames' own comment) -- a frame
-    // that was only ever the about:blank placeholder, or one an amend already
-    // replaced, is simply absent from 'qsa('.html-stage', document)' and never
-    // touched.
-    qsa('.html-stage', document).forEach(function (frame) {
-      if (!isWiredStage(frame)) return;
-      // sentRefs travels alongside
-      // commentMode on every toggle, not just at 'ready' -- the moment mode
-      // turns on is exactly the moment the stage's hover starts mattering, so
-      // it needs the current sent-list right then, not whatever it happened
-      // to hear last. section/blockId re-derived per frame (this loop, unlike
-      // handleStageReady, does not already have one in scope).
-      var section = frame.closest('.html-block');
-      var blockId = section && section.getAttribute('data-block-id');
-      postToStage(frame, { type: 'mode', commentMode: commentMode, sentRefs: blockId ? sentDomRefsForBlock(blockId) : [] });
-    });
+    // handler) rather than this page reaching in to do it.
+    //
+    // sentRefs travels alongside commentMode on every toggle, not just at
+    // 'ready' -- the moment mode turns on is exactly the moment the stage's
+    // hover starts mattering, so it needs the current sent-list right then,
+    // rather than whatever it happened to hear last. So does the theme (ADR.md
+    // entry 39), which is why the whole broadcast is one shared function
+    // (broadcastStageMode, up in the stage-protocol section) rather than a loop
+    // here and a second, drifting one on the theme change: whichever of the two
+    // facts changed, a stage is told BOTH, and neither caller can ship a
+    // differently-shaped message.
+    broadcastStageMode();
   }
 
   if (modeToggleBtn) {
@@ -2989,7 +3177,19 @@ export const ui = `
   // signal, one handler: this file never has to know which of those two
   // triggered it, only that the active palette may have just changed under an
   // already-rendered diagram.
-  window.addEventListener('${THEME_CHANGE_EVENT}', function () { redrawMermaidForTheme(); });
+  //
+  // ADR.md entry 39 puts a second job on the same signal: an html stage is a
+  // separate document that no stylesheet of ours reaches (QUIRKS.md "Two
+  // stylesheets, one palette"), so the board's one theme control has to PUSH
+  // the new value in. Same broadcast handleStageReady and setCommentMode use,
+  // so the stage hears one shape from all three; activeTheme resolves the
+  // control's three states down to the two a stage can act on. This is what
+  // makes the artifact carry no theme control of its own: there is exactly one
+  // on the page, and it paints both documents.
+  window.addEventListener('${THEME_CHANGE_EVENT}', function () {
+    redrawMermaidForTheme();
+    broadcastStageMode();
+  });
 
   // Cheap, partial mitigation for pin drift: reposition every pin on a window
   // resize. Does not track an iframe's own internal scroll or its resize-drag
@@ -3128,186 +3328,212 @@ export const ui = `
     return n;
   }
 
-  // --- round badge: "round N of M" -----------------
+  // --- rounds are the board's pages -------------------------------------------
   //
-  // N is the topmost round crossing the sticky header line, via
-  // IntersectionObserver with a root margin matching the header -- no scroll
-  // handler (Decisions). Verified in real Chrome (not just this page's own DOM
-  // stand-in, which has no IntersectionObserver at all): a first attempt shrank
-  // the observed band to a literal 1px line at the header's bottom edge, which
-  // is exactly what the spec's wording describes -- and is real-browser-false.
-  // A programmatic scroll (this page sets 'html { scroll-behavior: smooth }',
-  // and the jump uses it) animates over several frames;
-  // IntersectionObserver only samples at rendering steps, not continuously, so
-  // a 1px band can have a .round section's edge land on either side of it
-  // between two consecutive samples without either sample ever reporting
-  // it intersecting -- confirmed by recreating the exact observer mid-scroll
-  // and watching it report every section not-intersecting even though the
-  // header line plainly passed through one of them moments before. ROUND_BAND_PX
-  // below is the fix: a band with real thickness immediately under the header,
-  // not a mathematical line -- thick enough that no realistic scroll step jumps
-  // over it, thin enough to still mean "right at the header", not "anywhere in
-  // the viewport". Since .round sections stack with no overlap, both are
-  // essentially never simultaneously in the band except for the moment the gap
-  // between two rounds passes through it, and the last entry processed in that
-  // rare batch wins (qsa/IntersectionObserver both preserve document order, so
-  // that is the LOWER section, i.e. the one the reviewer is arriving at).
+  // ADR.md entry 42: a thread keeps its single board and its rounds become that
+  // board's pages -- edge chevrons to flip, a pill at the bottom naming them and
+  // dotting the one that still owes an answer, landing on the newest. Exactly
+  // one '.round' section carries 'round-current' and the stylesheet displays
+  // only that one, so "which round am I on" is EXPLICIT STATE here, written in
+  // one place, rather than a scroll position measured against the header.
   //
-  // badgeCurrentRound is set ONLY from the observer callback -- never reset by
-  // an SSE push arriving further down the page, which must not yank the
-  // reviewer's read position back to round 1 -- only M (board.rounds.length)
-  // changes on a push; see renderBadge, and applyRoundPush/applySubmittedPush/
-  // applyResync further down, all of which call it after advancing 'board'.
+  // What this replaced, and why it could not survive: N used to be "the topmost
+  // round crossing the sticky header line", computed by an IntersectionObserver
+  // over a 96px band under the header, with a clamp for the case where a short
+  // trailing round could never reach that band at all. Every part of that
+  // apparatus assumed rounds stack down one scrolling document. A round that
+  // fills the viewport does not stack under the round before it -- there is no
+  // round before it on screen at all -- so the band has nothing to measure, and
+  // the observer is deleted rather than left running against a layout it can no
+  // longer describe.
   //
-  // Guarded on IntersectionObserver existing at all: neither this page's own
-  // check suite's DOM stand-in nor a very old browser defines it, and the badge
-  // simply keeps whatever text it was last given rather than throwing.
-  var ROUND_BAND_PX = 96;
-  var badgeCurrentRound = (board.rounds && board.rounds[0]) ? board.rounds[0].n : 1;
-  var roundObserver = null;
+  // Everything that names a round now reads currentRound: the header badge
+  // ('round N of M'), the pager's own current entry and its dot, the chevrons'
+  // disabled ends, whether <body> is laid out as a page board, whether <body> is
+  // a sent page, and whether the send bar may be used at all. refreshPager is
+  // the single place that writes them all, and goToRound is the single place
+  // that moves currentRound, so they cannot drift out of step with each other.
   var sendBarDockObserver = null;
 
-  function renderBadge() {
-    var el = document.querySelector('button#round-badge');
-    if (el) el.textContent = badgeLabel(badgeCurrentRound, (board.rounds || []).length);
+  /** The page rendered current by the server (renderBoardPage puts the board on
+   * its NEWEST round), read back off the document rather than recomputed, so
+   * hydrate never disagrees with what was painted. The board.rounds fallback is
+   * for a document with no round sections at all. */
+  var currentRound = (function () {
+    var painted = document.querySelector('.round-current');
+    var n = painted ? parseInt(painted.getAttribute('data-round'), 10) : NaN;
+    if (isFinite(n)) return n;
+    var rounds = board.rounds || [];
+    return rounds.length ? rounds[rounds.length - 1].n : 1;
+  })();
+
+  /** True while a submit is in flight, so a page flip mid-submit cannot hand the
+   * Send button back (setSendBarEnabled is otherwise driven purely by which page
+   * you are on). submitBoard owns both edges of this. */
+  var submitInFlight = false;
+
+  function roundSectionEl(n) {
+    return document.querySelector('.round[data-round="' + n + '"]');
   }
 
-  function headerHeight() {
-    var header = document.querySelector('.board-head');
-    return header ? Math.round(header.getBoundingClientRect().height) : 0;
-  }
-
-  /** (Re)build the observer against the CURRENT header height and viewport, and
-   * watch every .round section on the page. Called at hydrate and on resize --
-   * the header's own height changes at the narrow-viewport breakpoint
-   * (src/styles.mjs), and IntersectionObserver has no API to edit a live
-   * instance's rootMargin, so a resize means throwing the old one away and
-   * re-observing every section fresh. */
-  /** The last '.round' whose own top edge is at or above the header line -- i.e.
-   * the round you are actually reading, decided by position rather than by
-   * intersection. The fallback for the case the band CANNOT answer: the band is a fixed strip at [h, h + ROUND_BAND_PX] from the
-   * viewport top, but the page cannot scroll past its own end, and there is
-   * slack below the last round (the .blocks gap and the send bar -- measured
-   * as ~222px at the time of this finding, when .board-shell also carried a
-   * 128px bottom padding since removed for the flush-bottom fix; the slack is
-   * smaller now, which only shrinks the edge case this clamp exists for, it
-   * does not remove the need for it). So the LAST round has to be taller
-   * than roughly 'innerHeight - slack - (h + ROUND_BAND_PX)' -- about 414px at
-   * an 813px viewport under the old, larger slack, less now -- before it can
-   * ever reach the band at all. Measured in Chrome: a 169px round 2 tops out at y=406 at
-   * maximum scroll, never intersects, and the badge sits on 'round 1 of 2' with
-   * the reviewer bottomed out on round 2. That short trailing round is normally
-   * the freshly-pushed OPEN one, i.e. exactly the round the badge exists to name
-   * -- and it also broke the jump, since badgeCurrentRound never became the
-   * open round and the click's 'already there' guard therefore never fired.
-   *
-   * The line is roundBandBottom (below), NOT a bare 'headerHeight() +
-   * ROUND_BAND_PX', and that difference is the whole of it -- see
-   * that variable's own comment.
-   *
-   * qsa preserves document order, so the last match is the lowest qualifying
-   * section: the one the reviewer has scrolled INTO, not one scrolled past.
-   * Since '.round' sections stack without overlapping, "the last one whose top
-   * has crossed the line" IS "the one the line is currently inside", which is
-   * the Decision's own wording computed directly instead of inferred from which
-   * entries the observer happened to include in this batch. */
-  function roundAtHeaderLine() {
+  function roundEntry(n) {
     var found = null;
-    qsa('.round').forEach(function (section) {
-      if (!section.getBoundingClientRect) return;
-      if (section.getBoundingClientRect().top <= roundBandBottom) found = section;
-    });
+    (board.rounds || []).forEach(function (r) { if (r.n === n) found = r; });
     return found;
   }
 
-  function setBadgeRound(section) {
-    if (!section) return;
-    var n = parseInt(section.getAttribute('data-round'), 10);
-    if (!isFinite(n)) return;
-    badgeCurrentRound = n;
+  function blocksOfRound(n) {
+    return (board.blocks || []).filter(function (b) { return b.round === n; });
+  }
+
+  /** Does this round still owe an answer? Not sent AND actually asking something
+   * -- the same rule the index badge counts by (ADR.md entry 25), which is what
+   * keeps the dot off a page-board round: nothing ever sends one, so it is open
+   * forever and would otherwise sit there accusing the reviewer of stalling. */
+  function roundOwesAnswer(r) {
+    if (!r || r.status === 'sent') return false;
+    return (board.blocks || []).some(function (b) { return b.round === r.n && b.kind === 'question'; });
+  }
+
+  function renderBadge() {
+    var el = document.querySelector('button#round-badge');
+    if (el) el.textContent = badgeLabel(currentRound, (board.rounds || []).length);
+  }
+
+  /** Repaint every control that names a round, from currentRound and 'board'.
+   * Called on every flip AND after every push that changes what the rounds are
+   * (a new one arriving, an earlier one going sent), so the pager, the badge,
+   * the body's layout classes and the send bar are always one consistent
+   * statement about the same page.
+   *
+   * Entries are created once and updated in place, never rebuilt wholesale:
+   * rounds are only ever appended (src/board.mjs never removes one), and a
+   * rebuild would drop keyboard focus out of the control the reviewer is
+   * tabbing through.
+   *
+   * The explicit 'disabled = false' is the pager's carve-out from the read-only
+   * hydrate pass at the top of this file, which hard-disables every button on
+   * the page: an archive's rounds are pages too, and flipping between them is
+   * navigation, not editing (the same carve-out .expand-btn and #theme-toggle
+   * already have, made here rather than there because this function has to write
+   * these buttons' disabled state anyway). */
+  function refreshPager() {
+    var rounds = board.rounds || [];
+    var nav = document.querySelector('nav#round-pager');
+    if (nav) {
+      rounds.forEach(function (r) {
+        var btn = nav.querySelector('.round-page[data-round="' + r.n + '"]');
+        if (!btn) {
+          btn = document.createElement('button');
+          btn.setAttribute('type', 'button');
+          btn.setAttribute('data-round', String(r.n));
+          nav.appendChild(btn);
+        }
+        btn.className = 'round-page'
+          + (r.n === currentRound ? ' round-page-current' : '')
+          + (roundOwesAnswer(r) ? ' round-page-owed' : '');
+        btn.textContent = roundPageLabel(r.n, r.title || '');
+        if (r.n === currentRound) btn.setAttribute('aria-current', 'page');
+        else btn.removeAttribute('aria-current');
+        btn.disabled = false;
+      });
+    }
+    var rns = rounds.map(function (r) { return r.n; });
+    var first = rns.length ? rns[0] : 1;
+    var last = rns.length ? rns[rns.length - 1] : 1;
+    var prev = document.querySelector('button#round-prev');
+    var next = document.querySelector('button#round-next');
+    // Disabled at the ends, never hidden: a control that disappears at round 1
+    // is a control the reviewer has to find again at round 2.
+    if (prev) prev.disabled = currentRound <= first;
+    if (next) next.disabled = currentRound >= last;
+
+    // The layout follows the PAGE, not the board (entry 42: "a page-board round
+    // is one page, filling the viewport; a question round is another"). This is
+    // what lets one thread hold both -- the artifact keeps the full-viewport
+    // page it was rendered as, and flipping to the question round puts the
+    // ordinary column back with no reload.
+    document.body.classList.toggle('page-board', isPageRound(blocksOfRound(currentRound)));
+
+    // "A page already sent is read-only" -- the guarantee the deleted history
+    // rail carried. The stylesheet's body.sent-page rules are the visible half;
+    // the send bar is the half no round-scoped mechanism can reach, since its
+    // buttons live outside every round section (the same gap that once let a
+    // double click submit an already-sent round twice -- see setSendBarEnabled).
+    var entry = roundEntry(currentRound);
+    document.body.classList.toggle('sent-page', !!entry && entry.status === 'sent');
+    var open = openRoundNumber();
+    if (!submitInFlight) setSendBarEnabled(open !== null && currentRound === open);
+
     renderBadge();
   }
 
-  /** How far below the viewport's top the "header line" actually sits, in px.
-   * Normally 'headerHeight() + ROUND_BAND_PX' -- but CLAMPED DOWNWARD so the
-   * last round can always reach it.
+  /** Flip to round 'n'. The one writer of currentRound.
    *
-   * The defect: the band was a fixed strip at [h, h + 96] and the page cannot
-   * scroll past its own end. Below the last round sits slack (the .blocks gap
-   * and the send bar; .board-shell no longer adds a bottom padding term to it,
-   * since the flush-bottom fix), so a trailing round has to be roughly
-   * 'innerHeight - slack - (h + 96)' tall -- before it can
-   * EVER enter that strip. A shorter one never does, and that is normally the
-   * freshly-pushed OPEN round, i.e. exactly the round the badge exists to name.
-   * Measured in Chrome at innerHeight 913, h 81: a 432px round 2 bottoms out
-   * with its top at y=243 against a line at y=177 and the badge reads
-   * 'round 1 of 2' with the reviewer looking at round 2. The jump fell over
-   * with it, since badgeCurrentRound never became the open round and the click's
-   * "already there" guard therefore never fired.
+   * Refuses a round with no section on the page rather than blanking the board:
+   * a client that missed a push has a 'board' naming a round its DOM has never
+   * held, and the resync (below) is what repairs that.
    *
-   * A fallback keyed on "nothing is intersecting" does NOT fix this, and it is
-   * worth recording why: a tall round 1 SPANS the strip the whole way down and
-   * never stops intersecting, so no such callback ever arrives. The line itself
-   * has to move. Clamping it to where the last round's top ends up at maximum
-   * scroll leaves every ordinary page untouched (a tall last round puts that
-   * value far above the line, so the max() keeps the line where it was) and only
-   * ever reaches down for the case that is otherwise unreachable. */
-  var roundBandBottom = ROUND_BAND_PX;
-
-  function measureRoundBand() {
-    var h = headerHeight();
-    var viewport = window.innerHeight || 0;
-    var line = h + ROUND_BAND_PX;
-    var sections = qsa('.round');
-    var last = sections.length ? sections[sections.length - 1] : null;
-    if (last && last.getBoundingClientRect) {
-      var doc = document.documentElement || {};
-      // What is still scrollable from wherever we are right now. 'last.top' is
-      // relative to the CURRENT scroll, so subtracting this gives its top at
-      // maximum scroll regardless of where the reviewer happens to be.
-      var remaining = Math.max((doc.scrollHeight || 0) - viewport - (window.scrollY || 0), 0);
-      // '+ ROUND_BAND_PX' is not padding, it is what makes the observer FIRE.
-      // Clamping the line to exactly where the last round's top comes to rest
-      // leaves the section grazing the band's edge with zero intersection AREA,
-      // and a zero-area overlap is not an intersection -- no callback, no
-      // recompute, and the badge stays wrong for the same reason it was wrong
-      // before, one measurement further along. Measured in Chrome: with the
-      // line at exactly 243 and round 2 resting at 243, nothing fired at all.
-      // Giving the band its ordinary thickness below that resting point means
-      // the section crosses the line while there is still scroll left, so the
-      // crossing is a real event. Costs nothing on any page where the clamp
-      // does not apply, since the max() keeps the ordinary line there.
-      line = Math.max(line, Math.ceil(last.getBoundingClientRect().top - remaining) + ROUND_BAND_PX);
-    }
-    roundBandBottom = Math.min(line, Math.max(viewport - 1, 1));
-    return h;
+   * The pins are recomputed because a hidden page is a page with no layout: a
+   * stage inside display:none reports a zero-sized box, so a pin drawn while it
+   * was hidden is drawn in the wrong place. Same call the resize handler and
+   * every push already make, for the same reason.
+   *
+   * scrollIntoView rather than a bare scroll-to-top: an ordinary round can be
+   * taller than the viewport, so arriving at a new page still scrolled halfway
+   * down the last one is the one thing that would make a flip feel broken.
+   * '.round' carries scroll-margin-top: var(--head-clear), so the arriving page
+   * clears the sticky header. Guarded on the method existing at all
+   * (test/dom-stand-in.mjs records the call rather than performing it). */
+  function goToRound(n, scroll) {
+    var section = roundSectionEl(n);
+    if (!section) return;
+    currentRound = n;
+    qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
+    refreshPager();
+    // ADR.md entry 40's chrome belongs to the page that earned it, so it is
+    // re-derived here from whatever the page flipped TO last reported -- after
+    // refreshPager, which is what puts (or takes) 'page-board' on <body>.
+    //
+    // Derived, never cleared, and that is the whole fix for the return flip: an
+    // arriving page whose stage was left scrolled halfway down comes back at that
+    // same offset (a display:none frame keeps its inner scroll and fires no event
+    // on re-show -- QUIRKS.md), so a clear-on-flip left the reviewer mid-artifact
+    // with an expanded header over the top of it and no way back up until they
+    // happened to scroll again. Reading the record instead makes the flip in and
+    // the flip out the same computation.
+    //
+    // Derived here on the flip and NOT in refreshPager: that function is a
+    // repaint, called on hydrate and on an SSE catch-up as well as from here, and
+    // an earlier version that cleared there wiped the condensed header out from
+    // under a reviewer who was still scrolled into the artifact and had not
+    // flipped anywhere.
+    refreshStageChrome();
+    updateQuestionsLeftPill();
+    refreshPins(document);
+    if (scroll !== false && section.scrollIntoView) section.scrollIntoView({ block: 'start' });
   }
 
-  function setupRoundObserver() {
-    if (typeof IntersectionObserver !== 'function') return;
-    if (roundObserver) roundObserver.disconnect();
-    var h = measureRoundBand();
-    var bottom = Math.max((window.innerHeight || 0) - roundBandBottom, 0);
-    roundObserver = new IntersectionObserver(function () {
-      // The observer is the TRIGGER, never the answer: which entries a batch
-      // happens to contain depends on which sections changed state, and the
-      // section that should win may not have changed at all (a tall round 1
-      // stays intersecting while a short round 2 arrives beneath it). The
-      // answer is recomputed positionally instead -- still no scroll handler,
-      // which is what the Decision actually asks for.
-      setBadgeRound(roundAtHeaderLine());
-    }, { rootMargin: '-' + h + 'px 0px -' + bottom + 'px 0px', threshold: 0 });
-    qsa('.round').forEach(function (section) { roundObserver.observe(section); });
+  /** One step either way, clamped at both ends. Shared by the chevrons and the
+   * arrow keys, so a step means the same thing however it was asked for. */
+  function stepRound(delta) {
+    var rns = (board.rounds || []).map(function (r) { return r.n; });
+    var i = rns.indexOf(currentRound);
+    if (i === -1) return;
+    var target = rns[i + delta];
+    if (target == null) return;
+    goToRound(target);
   }
 
   /** The send bar drops its blur scrim and docks flush
    * the instant the round's own end (.round-end -- at most one on the page, see
    * renderRoundSection's own comment) scrolls into view, and floats over content
-   * the rest of the time. An IntersectionObserver on the rail itself, same
-   * discipline as setupRoundObserver just above and for the same reason (no
-   * scroll handler) -- default root/rootMargin/threshold are exactly what "on
-   * screen" means here, unlike the round badge's line, which has to dodge the
-   * sticky header and therefore cannot use the plain viewport.
+   * the rest of the time. An IntersectionObserver on the rail itself, and now
+   * the only one on the page: the round badge's own band observer went with the
+   * layout it measured (see "rounds are the board's pages" above). This one is
+   * untouched by that, because it asks about the round you are ON, which is
+   * exactly the round a page shows -- no scroll handler, and the default
+   * root/rootMargin/threshold are already what "on screen" means here.
    *
    * Guarded twice, belt and suspenders (QUIRKS.md "Readonly is locked twice"):
    * '.send-bar' is already 'display: none' under body.readonly,
@@ -3317,7 +3543,7 @@ export const ui = `
    * have it should still show a working, permanently-floating send bar rather
    * than throw.
    *
-   * Re-run wherever setupRoundObserver already is: the set of '.round-end'
+   * Re-run wherever the round set changes: the set of '.round-end'
    * elements on the page changes exactly when the set of '.round' sections
    * does -- a round arriving over SSE adds one, a round collapsing into history
    * (markRoundHistory) removes one. No '.round-end' at all (every round sent,
@@ -3346,30 +3572,56 @@ export const ui = `
     sendBarDockObserver.observe(rail);
   }
 
-  setupRoundObserver();
   setupSendBarDock();
-  window.addEventListener('resize', function () { setupRoundObserver(); });
+  // The page is already painted on the right round (renderBoardPage), so this
+  // only brings the CONTROLS up to it -- no flip, no scroll. It is also what
+  // re-enables the pager in a read-only archive, after the blanket disable pass
+  // at the top of this file (see refreshPager's own comment).
+  refreshPager();
 
-  /** Scroll to the round that still needs an answer. Inert exactly when that is
-   * already where you are -- "at the open round there is nothing to take you to"
-   * (Decisions) -- and inert when nothing is open at all (every round already
-   * sent, nothing left to jump to).
+  // The three round controls, all wired to the same two functions. The pill is
+  // delegated at the <nav> rather than per entry, so an entry created later by
+  // refreshPager (a round arriving over SSE) is live the moment it exists,
+  // with no second wiring pass and no chance of a double-registered listener.
+  var roundPrevBtn = document.querySelector('button#round-prev');
+  var roundNextBtn = document.querySelector('button#round-next');
+  if (roundPrevBtn) roundPrevBtn.addEventListener('click', function () { stepRound(-1); });
+  if (roundNextBtn) roundNextBtn.addEventListener('click', function () { stepRound(1); });
+  var roundPagerNav = document.querySelector('nav#round-pager');
+  if (roundPagerNav) {
+    roundPagerNav.addEventListener('click', function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest('.round-page') : null;
+      if (!btn) return;
+      var n = parseInt(btn.getAttribute('data-round'), 10);
+      if (isFinite(n)) goToRound(n);
+    });
+  }
+
+  /** Go to the round that still needs an answer -- now a page flip, not a
+   * scroll (ADR.md entry 42). Inert exactly when that page is already the one
+   * showing, and inert when nothing is open at all (every round already sent,
+   * nothing left to go to).
    *
    * Shared by the round badge, the
    * notification's click handler, and arrival from the index (below), all of
    * which want the same destination for the same reason: each is the reviewer
    * saying "take me to the thing that needs an answer". One implementation, so
-   * they can never drift into disagreeing about where that is. */
+   * they can never drift into disagreeing about where that is -- and it routes
+   * through goToRound, so it cannot drift from the pager either. */
   function jumpToOpenRound() {
     var target = openRoundNumber();
-    if (target == null || target === badgeCurrentRound) return;
-    var section = document.querySelector('.round[data-round="' + target + '"]');
-    if (section && section.scrollIntoView) section.scrollIntoView({ block: 'start' });
+    if (target == null || target === currentRound) return;
+    goToRound(target);
   }
 
   var roundBadgeBtn = document.querySelector('button#round-badge');
   if (roundBadgeBtn) {
-    // Jumps to the round that still needs an answer.
+    // The badge keeps the click it has always had -- "take me to the round that
+    // still needs an answer" -- but it is no longer a second way to navigate:
+    // it defers to the pager's own goToRound, so the badge, the chevrons and
+    // the pill are three doors onto one mechanism rather than two notions of
+    // where a round lives. The spec's decision is that the header gains no new
+    // contents and the pager owns round navigation; this is both.
     roundBadgeBtn.addEventListener('click', jumpToOpenRound);
   }
 
@@ -3380,9 +3632,9 @@ export const ui = `
   // markdown blocks are snapshotted from arbitrary files and their headings mint
   // ids on this very page (test/check-archive-ids.mjs), so no id this page emits
   // for its own structure is safe to navigate by. Inert when nothing is open, and
-  // inert when the open round IS the first one (jumpToOpenRound's own guard,
-  // badgeCurrentRound still being the first round at hydrate) -- which is the top
-  // of the page the browser already put us at. Read defensively: location is
+  // inert when the open round is ALREADY the page showing (jumpToOpenRound's own
+  // guard) -- which since a board opens on its newest round is now the ordinary
+  // case, the open round usually being the newest. Read defensively: location is
   // whatever scope the script runs in supplies, and a hash-less stand-in
   // (test/dom-stand-in.mjs) must not throw here.
   //
@@ -3412,9 +3664,31 @@ export const ui = `
    * inside the round it collapses) never reaches them -- that is precisely how a
    * plain double-click used to submit an already-sent round a second time,
    * duplicating its comments and their pin numbers. Never re-enables anything in
-   * readonly mode, where every control is hard-disabled at hydrate. */
+   * readonly mode, where every control is hard-disabled at hydrate.
+   *
+   * And never on a PAGE-BOARD page (ADR.md entry 35: a rendered page is a thing
+   * you read, not a form you submit). The stylesheet hides the whole bar there
+   * ('body.page-board .send-bar'), which is why the markup keeps it at all -- a
+   * comment queued on the artifact rides the next round's submit, and that round
+   * is a page next door, not a reload -- but hiding a control is not disabling
+   * one, and the two mechanisms are exactly as independent here as QUIRKS.md
+   * ("Readonly is locked twice") records them being for body.readonly. Left to
+   * CSS alone, the document-level Cmd/Ctrl+Enter handler (which gates on this
+   * button's own 'disabled' and nothing else) reached a hidden but perfectly
+   * live Send: one chord closed the artifact's round and flushed every queued
+   * comment into a submit no agent was waiting on. Fixed HERE rather than in
+   * that handler because "a page board is not sendable" is a property of the
+   * page, so every route to Send -- the chord, a forced press on the hidden
+   * button, a future control that calls submitBoard -- has to meet it, not just
+   * the one route the defect was found through.
+   *
+   * Narrow on purpose: it is the PAGE that refuses, not the board. A thread
+   * whose first round is an artifact and whose second asks something has one
+   * page of each (entry 42), and refreshPager calls this on every flip, so
+   * flipping to the question page hands Send straight back. */
   function setSendBarEnabled(on) {
     if (readonly) return;
+    if (on && isPageRound(blocksOfRound(currentRound))) on = false;
     if (sendBtn) sendBtn.disabled = !on;
     if (discussBtn) discussBtn.disabled = !on;
   }
@@ -3422,11 +3696,26 @@ export const ui = `
   /** One submit path, one fetch, parameterised by action ('send' | 'discuss') --
    * never two divergent copies of the body-building code. Both buttons go
    * disabled for the duration and STAY disabled once the round has gone out; only
-   * a genuine failure (or a new round arriving over SSE) re-enables them. */
+   * a genuine failure (or a new round arriving over SSE) re-enables them.
+   *
+   * The page-board refusal is repeated here, one line, rather than trusted to
+   * the disabled button setSendBarEnabled leaves behind: this is the only
+   * function that posts, so a route that reaches it without going through the
+   * button's state at all -- a forced press on a disabled control, a future
+   * caller, a push path that re-enables the bar before refreshPager corrects it
+   * -- still cannot send an artifact's round. Both gates stay independently
+   * checked (test/check-page-board.mjs asserts the button IS disabled as well as
+   * that nothing posts), so neither can quietly carry the other. */
   function submitBoard(action) {
     if (readonly) return;
+    if (isPageRound(blocksOfRound(currentRound))) return;
     var answers = collectAnswers();
     setSendBarEnabled(false);
+    // Held until the response lands, so that flipping to another page and back
+    // mid-flight cannot hand the button back (refreshPager enables the bar
+    // purely from which page you are on, and would otherwise re-arm a submit
+    // that is already in the air).
+    submitInFlight = true;
     if (sendStatus) sendStatus.textContent = action === 'discuss' ? 'Handing over to chat...' : 'Sending...';
     fetch('/api/board/' + boardId + '/submit', {
       method: 'POST',
@@ -3441,6 +3730,7 @@ export const ui = `
       if (!r.ok) throw new Error('submit failed: ' + r.status);
       return r.json();
     }).then(function (result) {
+      submitInFlight = false;
       if (result && result.alreadySent) {
         // A 409 stored NOTHING (src/board.mjs refuses the submit outright), so
         // every queued comment is still unsent -- and the queue used to be
@@ -3478,6 +3768,7 @@ export const ui = `
       }
       // Deliberately NOT re-enabled here: the round is out.
     }).catch(function (err) {
+      submitInFlight = false;
       if (sendStatus) sendStatus.textContent = 'Error: ' + err.message;
       setSendBarEnabled(true);   // nothing went out -- the reviewer must be able to retry
     });
@@ -3638,6 +3929,34 @@ export const ui = `
   }
 
   document.addEventListener('keydown', function (ev) {
+    // Flip a page with the arrow keys -- the chevrons' keyboard twin (ADR.md
+    // entry 42). Nothing else on this page handles an arrow key, so this
+    // collides with nothing; what it DOES need is the guard nothing here has
+    // needed before, since every other document-level key this file handles is
+    // either Escape or modified. An unmodified ArrowLeft in a textarea is the
+    // caret moving, not a page flip, so a key landing in a field is left alone
+    // -- read off the target's own tag rather than a selector, so no DOM
+    // stand-in's selector engine is in the path of a correctness guard.
+    // Modified arrows are the platform's (browser back/forward, word-wise
+    // motion, extend-selection) and are never intercepted.
+    if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
+      if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
+      var focused = ev.target;
+      var tag = focused && focused.tagName ? String(focused.tagName).toUpperCase() : '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (focused && focused.isContentEditable) return;
+      // An open lens is a modal reading of ONE block, and a flip underneath it
+      // swaps the page that block belongs to while the reviewer is still looking
+      // at it. showModal() does not stop a key bubbling to the document -- this
+      // file already relies on that for the lens's own Escape handler ("a press
+      // with focus anywhere in the parent document counts"), and showModal puts
+      // focus on the lens's close <button>, which sails straight through the tag
+      // guard above. Refuse rather than close: the arrow key is the reviewer
+      // reading, not the reviewer leaving, and no flip path closes a lens.
+      if ((lens && lens.open) || (stageLens && stageLens.open)) return;
+      stepRound(ev.key === 'ArrowLeft' ? -1 : 1);
+      return;
+    }
     if (ev.key === 'Escape') {
       if (sendArmed) disarmSend();
       return; // not swallowed -- Escape has no other job on this page yet, but nothing here owns it either
@@ -3949,6 +4268,19 @@ export const ui = `
   // two elements sharing one id the moment the replacement rendered its own.
   function applyRoundPush(data) {
     lensClose();
+    // The stage lens needs the same treatment for the same reason, and was
+    // never given it: it holds a pick control bound to a card this push is
+    // about to replace, so a press on it would record a choice against markup
+    // nobody can see any more -- possibly naming an option this very amend
+    // removed. stageLensTeardown's own comment already claims a closed lens
+    // holds no such reference; this is what makes the claim true on a push.
+    stageLensClose();
+    // Whatever the send guard armed against is no longer what the reviewer is
+    // looking at: an amend can add the very question the count was warning
+    // about. Leaving it armed lets the button keep saying "1 question
+    // unanswered" beside a pill that now reads two, and a press then sends
+    // with no guard at all -- the two controls ADR 27 says can never disagree.
+    disarmSend();
     var patch = computeBoardPatch(board, data.board);
     // Advance the closure's board to the post-push state now, BEFORE any DOM
     // work below: wireRoot (via wireHtmlStage/wireMermaidBlock) reads
@@ -3975,6 +4307,35 @@ export const ui = `
     // DOM involved.
     seedAnswers(patch.addedBlockIds.concat(patch.changedBlockIds), data.board);
 
+    // Nothing has to un-page anything here any more: a round is a page of its
+    // own (ADR.md entry 42), so the artifact keeps the full-viewport page it was
+    // rendered as and the arriving round is simply another page beside it. The
+    // page-board class, entry 40's condensed chrome and the sent-page lock all
+    // follow whichever page is current, and refreshPager (called by goToRound
+    // below) is the one place that writes them.
+    //
+    // The send bar was only ever CSS-hidden on a page board, never dropped (see
+    // renderBoardPage), so a comment the reviewer queued on the artifact rides
+    // this new round's submit exactly as ADR.md entry 35 describes, instead of
+    // being stranded on a page with no way out.
+    //
+    // Which page the reviewer should be left on once this push has landed,
+    // decided BEFORE the DOM changes (ADR.md entry 42). A round arriving is
+    // what the reviewer at the front of the board is waiting for, so they are
+    // carried to it; a reviewer who has deliberately flipped back to an earlier
+    // page is not yanked off it -- the tab mark and the pager's own dot are how
+    // they learn a new one exists. "At the front" is "on what was, until this
+    // push, the newest page", which covers the ordinary case exactly: the board
+    // opened on its newest round, and the round this push is about to send is
+    // that same one. Read off the DOM rather than off 'board', which was
+    // advanced to the post-push state above: the pages on screen are what "the
+    // reviewer is at the front" is a statement about.
+    var pagesBefore = qsa('.round');
+    var newestBefore = pagesBefore.length
+      ? parseInt(pagesBefore[pagesBefore.length - 1].getAttribute('data-round'), 10)
+      : null;
+    var followTheRound = data.mode === 'new-round' && currentRound === newestBefore;
+
     if (data.mode === 'new-round') {
       // Tag-qualified, same reason as every other id-by-string lookup in
       // this file -- '## Blocks' slugifies to the same collision shape.
@@ -3995,14 +4356,12 @@ export const ui = `
         // inserted, never the whole #blocks container, so an already-rendered
         // diagram from an earlier round is never re-scanned.
         nodes.forEach(function (node) { if (node.querySelectorAll) renderMermaidBlocks(node); });
-        // The round this push just inserted has to be watchable
-        // too, or scrolling into it would never update N. Rebuilt wholesale
-        // rather than observing the one new section: the band's own lower edge
-        // is clamped against how far the page can still scroll (see
-        // measureRoundBand), and inserting a round changes
-        // exactly that. A push that only added an observation would leave the
-        // band measured against the PREVIOUS document height, which is the same
-        // staleness in a new place.
+        // The section arrives carrying 'round-current' whenever it is the
+        // board's newest round -- renderRoundSection derives that from the same
+        // board both sides hold, which is what keeps a pushed fragment
+        // byte-identical to the one a reload would render. Whether the reviewer
+        // is actually MOVED to it is this client's call, not the server's, and
+        // the goToRound below makes exactly one section current either way.
       }
     } else if (data.mode === 'amend') {
       var roundSection = document.querySelector('.round[data-round="' + data.round + '"]');
@@ -4014,10 +4373,24 @@ export const ui = `
         // they were never inside this detached fragment.
         wireRoot(frag);
         var blockEls = qsa('.block', frag);
+        // An amend legitimately adds top-level blocks to the open round, so a
+        // block with nowhere to land is inserted -- but only when the pushed
+        // board actually carries it at the TOP level. A nested block (a compare
+        // side, a question's context) has no place of its own in a round: its
+        // markup belongs inside its owner's, so appending it here would leave
+        // the owner on screen still showing the withdrawn content with an orphan
+        // copy below it. Dropping it is the safe half of that trade -- the block
+        // is still in 'board', so the next resync re-renders its owner properly.
+        // Before the rail, not after it: .round-end closes an open round, and a
+        // block appended past it renders outside the round it belongs to.
+        var rail = roundSection.querySelector('.round-end');
         blockEls.forEach(function (blockEl) {
           var id = blockEl.getAttribute('data-block-id');
           var existing = findBlockEl(roundSection, id);
-          if (existing) { existing.replaceWith(blockEl); } else { roundSection.appendChild(blockEl); }
+          if (existing) { existing.replaceWith(blockEl); return; }
+          var topLevel = (data.board.blocks || []).some(function (b) { return b.id === id; });
+          if (!topLevel) return;
+          if (rail) { roundSection.insertBefore(blockEl, rail); } else { roundSection.appendChild(blockEl); }
         });
         blockEls.forEach(function (blockEl) { renderMermaidBlocks(blockEl); });
       }
@@ -4037,13 +4410,6 @@ export const ui = `
     // 'resize' handler and submitBoard().then already do.
     refreshPins(document);
 
-    // Rebuilt for BOTH modes, not just 'new-round': an amend replaces block
-    // markup and therefore changes the document's height, which the band's own
-    // lower edge is measured against (measureRoundBand). It
-    // also re-observes whatever sections now exist, which is what makes a
-    // freshly-inserted round watchable at all.
-    setupRoundObserver();
-
     patch.roundsNowSent.forEach(markRoundHistory);
     // Re-observe AFTER markRoundHistory: a round this push just collapsed into
     // history had its .round-end stripped above, and the round this push just
@@ -4058,20 +4424,27 @@ export const ui = `
     // change what outstandingBlocks() sees.
     updateQuestionsLeftPill();
 
-    // A round arriving over SSE used to leave the badge reading
-    // whatever the page happened to render at load, stale until reload -- the
-    // badge was written server-side and this push never touched it. board was
-    // already reassigned above, so board.rounds.length (M) is current here.
-    renderBadge();
+    // The pages this push changed: a fresh one exists, an earlier one has gone
+    // sent, and both the pager's entries and the badge's M are stale until this
+    // runs. goToRound when the reviewer was at the front (see followTheRound
+    // above) -- which also lands the page-board/sent-page layout classes and the
+    // send bar on the round that just arrived; refreshPager alone otherwise, so
+    // a reviewer reading an earlier page keeps it and only sees the new entry
+    // appear, dotted, in the pill. Either way exactly one section is current,
+    // whatever 'round-current' the pushed markup happened to carry.
+    // Either way this goes through goToRound, and that is not a tidiness
+    // preference: the arriving section carries the server's own 'round-current'
+    // whenever it is the newest round, so a branch that only refreshed the
+    // controls would leave TWO sections current and two pages on screen at once.
+    // Restating the page (no scroll) is what takes the class back off it.
+    if (followTheRound) goToRound(data.round);
+    else goToRound(currentRound, false);
 
     // The round is in the DOM; now mark the TAB, since this push is the whole
     // reason the tab was not reopened and focus not stolen ("Open
     // once, then badge and notify"). Last, and after every early-return above, so
     // a push that failed to render is never counted as one waiting to be read.
     markPendingRound(data.round);
-    // A round that is not yet sent is a round this page may submit -- this is what
-    // brings the send bar back after a previous round was collapsed into history.
-    setSendBarEnabled(openRoundNumber() !== null);
     // Rider fix, unrelated to the timer: submitBoard's "Sent."/"Handed over to
     // chat." (or the 409 "Already sent." text) belongs to the round that just
     // went out, not the one that just arrived -- left alone, it would sit next
@@ -4081,6 +4454,8 @@ export const ui = `
 
   function applySubmittedPush(data) {
     lensClose(); // see applyRoundPush above
+    stageLensClose();
+    disarmSend();
     var section = document.querySelector('.round[data-round="' + data.round + '"]');
     var replacedIds = section ? qsa('.block', section).map(function (el) { return el.getAttribute('data-block-id'); }) : [];
     // Advance board before any DOM work -- same reasoning as applyRoundPush
@@ -4112,17 +4487,15 @@ export const ui = `
       // sent, which is exactly why the fragment path above is preferred.
       markRoundHistory(data.round);
     }
-    // The exact mirror of what applyRoundPush already does for
-    // its own inserted section: the round section this push
-    // replaced was the one the observer was watching, and it is GONE -- an
-    // IntersectionObserver holds no claim on the element that took its place.
-    // Without re-observing, scrolling through the just-submitted round stopped
-    // moving N at all, so the badge sat on whatever number it last saw and read
-    // "round 1 of 3" halfway down round 3, which is the very lie this
-    // exists to end. Looked up fresh from the live document rather than reusing
-    // the local 'replacement', for the same reason applyRoundPush does: only the
-    // document knows what actually landed.
-    setupRoundObserver();
+    // The section this push replaced may have been the page on screen, and the
+    // replacement is a DIFFERENT element carrying whatever 'round-current' the
+    // server's own render decided (renderRoundSection marks the newest round).
+    // Re-asserting the reviewer's page over it is what keeps the document
+    // showing what it showed a moment ago -- and re-runs the sent-page lock, so
+    // a reviewer sitting on the round that just went out has it turn read-only
+    // under them rather than staying an editable copy of a sent answer. Not a
+    // flip, so no scroll: this is the same page, restated.
+    goToRound(currentRound, false);
     // Same reasoning as applyRoundPush's own call: the just-submitted round's
     // .round-end is gone (its replacement markup is historical, never carries
     // one -- and the markRoundHistory fallback branch above strips it too), so
@@ -4137,11 +4510,6 @@ export const ui = `
     // a detached node, so any page-scoped pin it drew is positioned wrong now
     // that the section is actually attached. Recompute once, here, after attach.
     refreshPins(document);
-    // M does not change on a submit, but the badge is re-rendered anyway for
-    // the same reason applyRoundPush does: board was just reassigned, and
-    // "never goes stale" is simplest to guarantee by never special-casing
-    // which pushes are allowed to skip it.
-    renderBadge();
     // The round is now sent: nothing in it is worth preserving as "in progress"
     // any more, however this client happened to have it filled in. Both sources
     // are used deliberately -- board.blocks is the TOP level only, so a question
@@ -4150,8 +4518,12 @@ export const ui = `
     var roundBlockIds = (data.board.blocks || []).filter(function (b) { return b.round === data.round; }).map(function (b) { return b.id; });
     clearFieldState(roundBlockIds.concat(replacedIds));
     // Sent means sent: the send bar stays disabled until a new round arrives, so
-    // a second click (or a second tab) can never re-submit a round that went out.
-    setSendBarEnabled(openRoundNumber() !== null);
+    // a second click (or a second tab) can never re-submit a round that went
+    // out. goToRound above has already said exactly this (the bar is live only
+    // on the open round's own page); this is the same call kept explicit,
+    // because "a sent round is never submittable twice" is not a fact that
+    // should depend on the pager's internals.
+    setSendBarEnabled(openRoundNumber() !== null && currentRound === openRoundNumber());
   }
 
   // --- resync: catch up on whatever landed while this client was not listening --
@@ -4179,10 +4551,43 @@ export const ui = `
     var patch = computeBoardPatch(board, fresh);
     if (!patch.addedBlockIds.length && !patch.changedBlockIds.length && !patch.roundsNowSent.length) return;
     lensClose(); // see applyRoundPush above -- after the no-op early return, not before
+    stageLensClose();
 
     var roundOf = {};
     (fresh.blocks || []).forEach(function (b) { roundOf[b.id] = b.round; });
-    var touchedIds = patch.addedBlockIds.concat(patch.changedBlockIds);
+
+    // computeBoardPatch reports the FLATTENED tree (a compare side, a question's
+    // context, a variant option -- see src/patch.mjs's "NESTED BLOCKS COUNT"),
+    // but the round renders top-level blocks only: a nested block's markup lives
+    // INSIDE its owner's, and the live path never sends it on its own
+    // (src/server.mjs's buildRoundPushPayload is handed amendRound's top-level
+    // ids). Mapping each touched id back to the top-level block that carries it
+    // is what keeps the catch-up path saying the same thing the live one does.
+    // Without it, an amended compare side came back as its own fragment: the
+    // amend below could not find it in the round, appended it at round level,
+    // and left the comparison on screen still showing the withdrawn content.
+    // It also fixes the case where the ONLY change is nested -- roundOf has no
+    // entry for a nested id, so no round was collected and the whole resync
+    // fell through to the status-only branch, advancing 'board' without ever
+    // re-rendering what changed.
+    var ownerOf = {};
+    (function walkOwners(blocks, owner) {
+      (blocks || []).forEach(function (b) {
+        if (!b || typeof b !== 'object') return;
+        var top = owner || b.id;
+        ownerOf[b.id] = top;
+        if (b.context) walkOwners(b.context, top);
+        if (b.left && b.left.block) walkOwners([b.left.block], top);
+        if (b.right && b.right.block) walkOwners([b.right.block], top);
+        if (b.options) walkOwners(b.options.map(function (o) { return o.block; }).filter(Boolean), top);
+      });
+    })(fresh.blocks, null);
+
+    var touchedIds = [];
+    patch.addedBlockIds.concat(patch.changedBlockIds).forEach(function (id) {
+      var top = ownerOf[id] || id;
+      if (touchedIds.indexOf(top) === -1) touchedIds.push(top);
+    });
     var rounds = [];
     touchedIds.forEach(function (id) {
       var n = roundOf[id];
@@ -4196,8 +4601,11 @@ export const ui = `
       board = fresh;
       clearFieldState(patch.changedBlockIds);
       patch.roundsNowSent.forEach(markRoundHistory);
-      renderBadge();
-      setSendBarEnabled(openRoundNumber() !== null);
+      // The pager states everything this branch changed -- the badge, the dot
+      // on a round that no longer owes an answer, and the send bar, which a
+      // round going sent while this client was away must take away even though
+      // the reviewer never left the page it was on.
+      refreshPager();
       refreshPins(document);
       return;
     }

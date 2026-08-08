@@ -22,7 +22,11 @@
 // directions -- proving the toggle actually flips the bar's class, not just that
 // a listener got registered. A companion check drives the same page with NO
 // IntersectionObserver defined at all, proving the guard around its absence
-// (QUIRKS.md's own pattern for setupRoundObserver) holds for this observer too.
+// (QUIRKS.md "The stand-in has no layout") holds for this observer too. Since
+// ADR.md entry 42 turned rounds into pages, setupSendBarDock's is the ONLY
+// IntersectionObserver this page can construct -- the round badge's own band
+// observer went with the scrolling layout it measured -- which is why the
+// observer-count assertions below read 1 and 0 rather than 2 and 1.
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
@@ -99,14 +103,13 @@ function loadBoardWithEventSource(html) {
 }
 
 /** loadBoard, plus a captured, stubbed IntersectionObserver in place before the
- * script runs (src/ui.mjs constructs one synchronously, both for the round
- * badge's own setupRoundObserver and for setupSendBarDock, guarded only by
- * `typeof IntersectionObserver !== 'function'` -- the stub has to already be the
- * global by the time either call happens). Returns every constructed instance,
- * since setupRoundObserver's own (watching every .round section) and
- * setupSendBarDock's (watching the single .round-end rail) are both built at
- * hydrate -- a caller finds the one it wants by which target it is actually
- * observing, never by assuming a construction order. */
+ * script runs (setupSendBarDock constructs one synchronously at hydrate, guarded
+ * only by `typeof IntersectionObserver !== 'function'` -- the stub has to already
+ * be the global by the time that call happens). Returns every constructed
+ * instance, and a caller finds the one it wants by which target it is actually
+ * observing, never by index: the count is 1 today (rounds became pages, so the
+ * round badge no longer runs one), and a check that assumed a position would go
+ * quietly wrong the day a second one is added back. */
 function loadBoardWithIntersectionObserver(html, protocol) {
   const originalIO = globalThis.IntersectionObserver;
   const constructed = [];
@@ -123,9 +126,9 @@ function loadBoardWithIntersectionObserver(html, protocol) {
 }
 
 /** The observer among `observers` that is watching `target` -- never the first
- * or the last, since which of setupRoundObserver's and setupSendBarDock's two
- * observers runs first is an implementation detail this file has no business
- * depending on. */
+ * or the last, since how many observers a hydrate happens to construct, and in
+ * what order, is an implementation detail this file has no business depending
+ * on (it was two before rounds became pages; it is one now). */
 function observerWatching(observers, target) {
   return observers.find(o => o.targets.indexOf(target) !== -1) || null;
 }
@@ -240,9 +243,11 @@ check('with no open round at all (every round sent), there is no rail to observe
   const sendBar = document.querySelector('.send-bar');
   assert.equal(document.querySelector('.round-end'), null, 'setup failure: a fully-sent board must render no .round-end anywhere');
   assert.equal(sendBar.classList.contains('docked'), false);
-  // Only the round badge's own observer (watching .round sections) exists --
-  // setupSendBarDock's "no rail" branch returns before ever constructing one.
-  assert.equal(observers.length, 1, 'setupSendBarDock must not construct an IntersectionObserver when there is no rail to watch');
+  // No observer at all is constructed: setupSendBarDock's "no rail" branch
+  // returns before ever building one, and since rounds became pages (ADR.md
+  // entry 42) the round badge no longer runs one either -- this is now the only
+  // IntersectionObserver the page can construct.
+  assert.equal(observers.length, 0, 'setupSendBarDock must not construct an IntersectionObserver when there is no rail to watch');
 });
 
 check('guarded for absence -- with no IntersectionObserver defined at all, the page still hydrates and the bar simply stays floating', () => {
@@ -348,7 +353,7 @@ check('the docking observer never runs in a read-only archive -- belt and suspen
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: expected file:// to produce a readonly document');
   const rail = document.querySelector('.round-end');
   assert.equal(observerWatching(observers, rail), null, 'setupSendBarDock must bail out under readonly -- no observer should ever be attached to the rail in an archive');
-  assert.equal(observers.length, 1, 'only the round badge\'s own observer should exist under readonly -- setupSendBarDock must return before constructing one at all');
+  assert.equal(observers.length, 0, 'no observer at all should exist under readonly -- setupSendBarDock must return before constructing one, and the round badge stopped running one when rounds became pages');
 });
 
 // =====================================================================================
@@ -531,8 +536,8 @@ check('the pill and the send bar\'s dock are driven by the SAME observer instanc
   assert.ok(rail, 'setup failure: no .round-end rendered for the open round');
   const dockObserver = observerWatching(observers, rail);
   assert.ok(dockObserver, 'setup failure: no observer is watching the rail');
-  assert.equal(observers.length, 2,
-    'expected exactly two observers on this page: the round badge\'s own (every .round section), and setupSendBarDock\'s single shared one -- never a second, pill-only observer');
+  assert.equal(observers.length, 1,
+    'expected exactly one observer on this page: setupSendBarDock\'s single shared one -- never a second, pill-only observer (the round badge\'s own band observer went with the scrolling layout it measured, ADR.md entry 42)');
 
   assert.equal(pill.classList.contains('visible'), true, 'setup failure: the pill must start visible -- two outstanding questions, rail not yet reported on screen');
 

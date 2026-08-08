@@ -13,7 +13,7 @@
 | 7 | An `html` block may name a file, but only a whole one | 2026-08-04 | accepted |
 | 8 | The daemon owns the pomodoro clock | 2026-08-04 | accepted |
 | 9 | No menu bar item — the bundle's signature is load-bearing | 2026-08-04 | accepted |
-| 10 | The daemon serves a rendered file, it does not render one | 2026-08-04 | accepted |
+| 10 | The daemon serves a rendered file, it does not render one | 2026-08-04 | **superseded by 38** |
 | 11 | The repo ships one caller-facing file: the manual | 2026-08-04 | accepted; weakens 5 |
 | 12 | The mark is amber | 2026-08-04 | accepted; **inversion half superseded by 30** |
 | 13 | The daemon's environment is baked into the launcher, not the plist | 2026-08-04 | accepted |
@@ -35,6 +35,22 @@
 | 29 | `Cmd+Enter` sends a finished round on arrival | 2026-08-06 | accepted (see *Smaller decisions*) |
 | 30 | The tab mark stays amber; a numeral replaces the inverted tile | 2026-08-06 | accepted; supersedes 12 |
 | 31 | The rest tile's colour gets its own token | 2026-08-06 | accepted (see *Smaller decisions*) |
+| 32 | A rendered page reaches the board as a snapshotted stage, not a framed served file | 2026-08-07 | accepted |
+| 33 | Fullpage is inferred from the board's shape, not declared by the caller | 2026-08-07 | accepted |
+| 34 | A page board's stage fills the viewport rather than growing to its content | 2026-08-07 | accepted (see *Smaller decisions*) |
+| 35 | An undelivered comment rides the thread's next packet | 2026-08-07 | accepted |
+| 36 | An upgrade widens a carried-forward root record back to the current defaults | 2026-08-07 | accepted |
+| 37 | The renderer templates pin the mermaid CDN fallback and keep the vendored copy | 2026-08-07 | accepted (see *Smaller decisions*) |
+| 38 | `/file/` is deleted; the board is the only way to see a rendered page | 2026-08-07 | accepted; supersedes 10 |
+| 39 | The board pushes its theme into the stage | 2026-08-07 | accepted (see *Smaller decisions*) |
+| 40 | The page board header condenses into a centred pill on reading, and overlays the artifact rather than pushing it | 2026-08-07 | accepted |
+| 41 | A reported stage height is floored at the placeholder, not only capped | 2026-08-07 | accepted (see *Smaller decisions*) |
+| 42 | Rounds are the board's pages, flipped left and right | 2026-08-07 | accepted |
+| 43 | A page board carries no expand control | 2026-08-07 | accepted (see *Smaller decisions*) |
+
+Entries 32-43 come from the page-board grill and are built, with one part-exception: 37 lives in
+the renderer skills under `~/.claude/skills`, outside this repo, so only its board-side half (the
+CSP pin) is here. `SPEC_PAGEBOARD.md` carries the per-criterion implementation state.
 
 ## Smaller decisions
 
@@ -52,6 +68,11 @@ in a line rather than argued at length.
 | 27 | A grey pill above the send bar names the unanswered count and jumps to the first; it does not touch the guard. | 2026-08-06 | accepted |
 | 29 | Arriving at Send with nothing outstanding submits; otherwise the click guard arms. `armSend` is deleted, leaving one armed state. | 2026-08-06 | accepted |
 | 31 | The rest tile mints `--mark-rest-tile` instead of reading `--scrollbar-hover`, so a scrollbar restyle cannot move the tab mark. | 2026-08-06 | accepted |
+| 34 | A page board's stage is a constant `100vh` box scrolling internally, not auto-grown to content height, because the rendered templates use `position: sticky` and their own full-viewport `<dialog>`. | 2026-08-07 | accepted |
+| 37 | The renderer templates pin the mermaid CDN fallback to the version the board CSP names and keep the vendored `assets/` copy, which still answers when a page is opened from Finder. | 2026-08-07 | accepted |
+| 39 | The board pushes its theme into the stage over the channel that already carries comment mode, and the renderer templates drop their own corner toggle. | 2026-08-07 | accepted |
+| 41 | `handleStageHeight` gains a floor at the 320px placeholder beside its 600px cap, so a stage that sizes itself from the viewport cannot lock its card at the collapsed height it reports. | 2026-08-07 | accepted |
+| 43 | A page board's stage carries no expand control, because the lens it opens is a copy of what already fills the viewport; the control is unchanged everywhere else. | 2026-08-07 | accepted |
 
 ## 1. Theme selection is client-side only — 2026-07-30
 **Status:** accepted
@@ -86,7 +107,7 @@ in a line rather than argued at length.
 **Context:** a menu bar countdown looks nearly free in an always-on tool that already ships a macOS app bundle. **Decision:** no `NSStatusItem` and no AppKit in `bin/launcher.c`; the pomodoro surfaces are a native notification at each boundary and a widget on the index page. **Consequences:** the always-visible glance is what is given up, in exchange for never rebuilding the ad-hoc signature gratuitously and costing the reader the TCC Documents grant this repo's own location depends on; a second dedicated bundle, not AppKit in the launcher, is the shape to revisit.
 
 ## 10. The daemon serves a rendered file, it does not render one — 2026-08-04
-**Status:** accepted
+**Status:** superseded by 38
 **Context:** a posted absolute path is not clickable — markdown allows only `http(s)` and `mailto`, and no browser navigates from `http://127.0.0.1` to `file://`. **Decision:** `GET /file/<path>` streams bytes from `CLAUDE_BOARD_SERVE_ROOTS` — its own allowlist, not the reference roots — with no wrapping, slicing, capping or directory listing. **Consequences:** the served response sets `connect-src 'none'` and `form-action 'none'` because it is same-origin with `/api/board` under a `SameSite=Strict` cookie, and every refusal collapses to a bare 404, so a dropped root looks exactly like a typo.
 
 ## 11. The repo ships one caller-facing file: the manual — 2026-08-04
@@ -141,3 +162,30 @@ in a line rather than argued at length.
 **Status:** accepted, supersedes 12
 **Context:** entry 12 bought a value flip by spending the one thing a favicon can't spend and still read as this product: pending swapped the page's amber tile for a dark one carrying an amber pip, so the tab stopped looking like claude-board at exactly the moment it mattered, and a reviewer owing three answers saw the same undifferentiated pip as one owing one. **Decision:** pending keeps the page's own amber tile — same fill, same `rx 9` corner — and draws a bold ink numeral onto it with canvas `fillText`, not another SVG data URI: SVG favicons resolve fonts inconsistently, and a dropped family there would silently render a blank amber tile that reads as idle, the worst failure this mark could have. Sizes step 22px/18px/17px for one digit, two digits and the `9+` overflow (now capped at 99, not 9), optical steps rather than a linear scale so the digit survives the 16px downsample. **Consequences:** the tile is one constant object in every state, so ink mass — not tile colour — is the whole signal; a canvas or font failure degrades to whatever mark the tab already had (never a blank amber square) by returning null and leaving `setFaviconBadge` with nothing to swap in. The inverted tile and its pip are deleted outright, not left unused — `test/check-pure.mjs`'s three prior checks on the countless mark are rewritten against this contract rather than dropped.
 
+## 32. A rendered page reaches the board as a snapshotted stage, not as a framed served file — 2026-08-07
+**Status:** accepted
+**Context:** `/visualize`, `/explain`, `/gamify` and the nightly digest all post a *link* to a 45-80 KB page instead of showing it, and a fifth to a quarter of each of those skills' prose exists only to justify that. Framing `/file/` looks like the fix, since a served document keeps its own CSP and its own vendored engine. **Decision:** the page is the existing `html` stage unboxed — bytes snapshotted at post time into the same opaque-origin `srcdoc` frame, laid out at viewport size. `/file/` is not framed — it answers with `X-Frame-Options: DENY` and `frame-ancestors 'none'`, and entry 38 then deletes it outright. **Consequences:** click-to-anchor and the self-contained offline archive both survive, and framing an agent-authored document at the daemon's own origin is never on the table — a same-origin frame could script the board page and answer its own questions, which is strictly worse than today's link, where COOP severs the opener. The cost is that a relative subresource is unreachable from an opaque origin, so the artifact's `assets/mermaid.min.js` never loads in a stage and its CDN fallback must name the version the board CSP names; and 45-80 KB of markup lands in the board store per artifact, on disk, the block itself still being a one-line path ref (entry 7).
+
+## 33. Fullpage is inferred from the board's shape, not declared by the caller — 2026-08-07
+**Status:** accepted
+**Context:** a `display: 'page'` field or a second block kind would make it explicit, at the cost of protocol surface every caller has to remember. Entry 26 already chose to infer full-width layout from "this question carries a stage" rather than add a flag, and that inference has held. **Decision:** a board whose blocks are one `html` block and nothing else renders as a page board — the board header, then the stage at viewport height. Anything else, a question or a second content block included, renders exactly as a board does today. **Consequences:** nothing is added to the protocol and every existing content-only `html` board re-renders as a page board, retroactively; in exchange the rule is invisible at the call site, so a caller that posts a stats line beside its artifact silently loses fullpage — which is why the renderer skills drop the stats line rather than keeping it.
+
+## 35. An undelivered comment rides the thread's next packet — 2026-08-07
+**Status:** accepted
+**Context:** a page board asks nothing, so `ask` returns the instant it lands and the session is gone before the reviewer has read the artifact. Keeping click-to-anchor on it (round 1) would otherwise mint a gesture whose output nobody ever collects, and a page board is not sendable — a rendered page is a thing you read, not a form you submit. **Decision:** a comment left on a board that returned no packet is held as undelivered and travels in the next packet the same thread returns, once. "One packet is one round" keeps holding for answers and gains this single exception for comments. **Consequences:** collecting a comment costs a round that asks something, so an agent told to look at the comments has to post one rather than poll; and a thread whose session ends before the reviewer comments strands it, which is the case the index badge cannot show either.
+
+## 36. An upgrade widens a carried-forward root record back to the current defaults — 2026-08-07
+**Status:** accepted
+**Context:** `install.sh` carries an existing `ref_roots` record forward in preference to its own defaults, so that an operator who deliberately narrowed the allowlist keeps it across a `git pull`. The consequence found in use: `~/Documents/renders` has been a default reference root for some time and this machine's record predates it, so every artifact a page board would show fails to resolve while the identical path serves fine over `/file/`. **Decision:** an upgrade adds any directory the current defaults name that the carried-forward record is missing, and prints the line naming what it widened. **Consequences:** a read allowlist grows without being asked, which is exactly what the carry-forward existed to prevent — so the print is load-bearing, not decoration, and an operator who wants the narrow list must now set `CLAUDE_BOARD_REF_ROOTS` explicitly rather than relying on the record's inertia.
+
+## 38. `/file/` is deleted; the board is the only way to see a rendered page — 2026-08-07
+**Status:** accepted, supersedes 10
+**Context:** entry 10 built the route for one reason: markdown cannot link to `file://`, so a board had no clickable way to show a page it could not embed. A page board embeds it, so the reason is gone — and leaving the route standing means two ways to look at the same artifact, which is the prose this whole change exists to delete. **Decision:** `handleServeFile`, `SERVE_CSP`, `SERVE_TYPES`, the `CLAUDE_BOARD_SERVE_ROOTS` allowlist and its install step and record file all go. The daemon serves boards and nothing else. **Consequences:** every already-archived board's link 404s, accepted on the grounds that a spent board is spent; the daemon stops holding a second allowlist and stops being able to hand any file at its own origin to a browser, which removes the whole escalation entry 10's `connect-src 'none'` was written to contain; and a page board must now render everything the route could, which puts a real ceiling on what an artifact may be — one self-contained file, since an opaque origin resolves no relative URL.
+
+## 40. The page board header condenses into a centred pill on reading, and overlays the artifact rather than pushing it — 2026-08-07
+**Status:** accepted
+**Context:** the header has to be minimizable, and the treatments that put a control on it (a collapse chevron, an edge rail) spend a click and a piece of chrome on a state the reader's own scrolling already announces. A header that leaves entirely was chosen first and then reversed: it takes the board's identity and its comment-mode state off screen at exactly the moment the reader is deepest in agent-authored content. **Decision:** scrolling into the artifact condenses the header into a single pill, centred at the top and floating over the page; scrolling back up expands it. The pill keeps the comment-mode toggle, so the mode is switched on and off mid-read rather than being suspended by the scroll. At the bottom a back-to-top pill appears, in the questions-left pill's shape. Everything here is positioned *over* the frame, which stays a constant viewport height throughout. **Consequences:** the frame never resizes, so condensing the header can never reflow a long document mid-read — the reason an overlay beats a header that pushes; the condensed pill has to hold a real control rather than a label, so it is never purely decorative chrome; and the parent cannot see the frame's scroll position, so the stage agent gains one more message type beside `height` and `click`, making scroll state a thing agent-authored markup reports and therefore shape-checked like every other message on that channel.
+
+## 42. Rounds are the board's pages, flipped left and right — 2026-08-07
+**Status:** accepted
+**Context:** rounds stack vertically down one board, which a round that fills the viewport breaks outright. Giving each artifact its own board was tried first and rejected: it multiplies a thread's boards in the index, and it makes one `ask` call mean "a round here" or "a whole new board" depending on what the caller happened to include. **Decision:** a thread keeps its single board and rounds become its pages — edge chevrons to flip, a pill at the bottom naming the rounds and dotting one that still owes an answer, landing on the newest. A page-board round is one page, filling the viewport; a question round is another, carrying the send bar. **Consequences:** the history rail is deleted, its job absorbed by the earlier pages, and with it goes the guarantee it was built for — that a sent round is not a second place to edit — which the pager must now carry itself by keeping a sent page read-only. Two rounds are no longer visible at once, so a question that referred to the round above it has to carry what it refers to.

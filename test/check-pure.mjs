@@ -17,10 +17,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, renderRefusalPage, CSP } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
-import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, openServed, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
+import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
 // Both used only by the reference-boundary checks. The descriptor
 // discipline inside resolveRef is asserted by swapping the file out BETWEEN the check
 // and the read, which means patching the fs namespace src/resolve.mjs imports from --
@@ -43,7 +43,7 @@ import {
   parseMermaidDomId, mermaidRefResolves, resolveMermaidAnchor, MERMAID_NODE_SELECTOR,
   findPendingCommentForAnchor, removePendingComment,
 } from '../src/anchor.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -1680,6 +1680,231 @@ check('renderBoardPage is a pure function that inlines its own board JSON', () =
   assert.ok(html1.includes('id="send-btn"'));
 });
 
+// --- the page board: inferred from the board's shape, laid out at viewport size ---
+//
+// ADR.md entries 32/33/34/43. The rule is a pure function of the board JSON and
+// the layout is pure markup plus the stylesheet, so both are asserted here, on
+// renderBoardPage's own output -- the cheap seam. The gesture, the sandbox and
+// the live transition need a document and the real client script, and are in
+// test/check-page-board.mjs; the archive is in test/check-archive.mjs.
+//
+// Computed values below come from test/dom-stand-in.mjs's resolveComputedProperty
+// -- the real cascade over the real stylesheet, against an element in its real
+// place in the rendered document -- rather than from matching a rule's spelling.
+// QUIRKS.md ("Asserting a rule by its text is itself a trap") is why: a rule can
+// be spelled perfectly and select nothing, and every one of these rules is an
+// override of a value the ordinary board already sets, so which one wins IS the
+// property under test.
+
+const PAGE_ARTIFACT = '<style>.doc{font:14px system-ui}</style><div class="doc"><h1>Quarterly</h1><p>body</p></div>';
+
+function pageBoard(html = PAGE_ARTIFACT) {
+  return createBoard({ title: 'Rendered artifact', blocks: [{ kind: 'html', html }] });
+}
+
+/** The rendered page as a live document, plus the pieces every page-board check
+ * below reads off it. */
+function renderedPage(board) {
+  const document = parseHTML(renderBoardPage(board));
+  return {
+    document,
+    body: document.body,
+    shell: document.querySelector('.board-shell'),
+    head: document.querySelector('.board-head'),
+    section: document.querySelector('.html-block'),
+    frame: document.querySelector('.html-stage'),
+    sendBar: document.querySelector('.send-bar'),
+  };
+}
+
+/** Every property that could paint a card around the artifact, and the values
+ * that mean "no card". Asserting the SHORTHANDS alone (`background`, `border`,
+ * `padding`, `box-shadow`) was the version this replaces, and it was blind by
+ * construction: the CSS cascade resolves shorthand and longhand independently
+ * here, so a later rule re-adding the card as `background-color` / `border-left`
+ * / `padding-left` restores a visibly boxed artifact while every shorthand still
+ * computes to the page-board override. This asks the question the criterion
+ * actually asks -- "is anything painting a box around this?" -- of each property
+ * that could answer yes, rather than of the four spellings the fix happened to
+ * use. An unset property ('') is fine: nothing means nothing. */
+const NO_CARD_PROPERTIES = [
+  'background', 'background-color', 'background-image',
+  'border', 'border-width', 'border-style',
+  'border-top', 'border-right', 'border-bottom', 'border-left',
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'border-radius', 'border-top-left-radius', 'border-top-right-radius',
+  'border-bottom-left-radius', 'border-bottom-right-radius',
+  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'box-shadow',
+];
+const NO_CARD_VALUES = new Set(['', 'none', '0', '0px', 'transparent', 'initial', 'unset']);
+
+function assertNoCard(el) {
+  for (const prop of NO_CARD_PROPERTIES) {
+    const value = resolveComputedProperty(styles, el, true, prop).trim();
+    assert.ok(NO_CARD_VALUES.has(value),
+      `a page board draws no card around the artifact, but '${prop}' computes to '${value}' on the block section`);
+  }
+}
+
+check('isPageBoard: exactly one html block and nothing else -- a question, a second content block or a failed reference is an ordinary board (ADR.md entry 33)', () => {
+  assert.equal(isPageBoard(pageBoard()), true, 'one html block and nothing else is a page board');
+  assert.equal(isPageBoard(createBoard({
+    title: 'artifact + question',
+    blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+  })), false, 'a post carrying a question is an ordinary board');
+  assert.equal(isPageBoard(createBoard({
+    title: 'artifact + a stats line',
+    blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'markdown', text: '12 charts, 3 sections' }],
+  })), false, 'any second block is an ordinary board -- which is why the renderer skills drop the stats line');
+  assert.equal(isPageBoard(createBoard({
+    title: 'two artifacts',
+    blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'html', html: PAGE_ARTIFACT }],
+  })), false, 'two stages are two blocks, not one page');
+  assert.equal(isPageBoard(createBoard({ title: 'no stage', blocks: [{ kind: 'markdown', text: 'hello' }] })), false);
+  // A second round makes a second block, so a board only stays a page board for
+  // as long as it holds nothing else -- the same rule, not a second one.
+  const grown = pageBoard();
+  applySubmit(grown, { action: 'send', answers: [], comments: [] }, 1);
+  addRound(grown, { blocks: [{ kind: 'question', prompt: 'Any comments?', widget: 'text' }] });
+  assert.equal(isPageBoard(grown), false, 'a round that asks something turns a page board back into an ordinary board');
+});
+
+check('isPageBoard: a failed reference is never a page board -- there is no stage to fill the viewport with, only an error card', () => {
+  const board = pageBoard();
+  // The shape src/board.mjs's normalizeBlock leaves behind when a reference does
+  // not resolve (the html is gone, an error rides in its place) -- spliced in by
+  // hand because amendRound will not mint one (QUIRKS.md "A block's id is
+  // kind-locked").
+  board.blocks[0] = { ...board.blocks[0], html: '', error: 'cannot read dash.html: no such file' };
+  assert.equal(isPageBoard(board), false);
+  const html = renderBoardPage(board);
+  assert.ok(!html.includes('<body class="page-board">'), 'a board whose only block failed to resolve must render as an ordinary board');
+  assert.ok(html.includes('resolve-error'), 'setup failure: the error card is what such a block renders');
+});
+
+check('criterion 1: a page board renders the stage edge to edge -- no card, no kicker, no 1120px column, and the header floats over the frame', () => {
+  const { document, body, shell, head, section, frame } = renderedPage(pageBoard());
+  assert.equal(body.className, 'page-board', 'the layout is one class on <body>, which is what the whole stylesheet keys off');
+
+  // no column
+  assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), 'none', 'the shell must stop being a 1120px column');
+  assert.equal(resolveComputedProperty(styles, shell, true, 'padding'), '0', 'and must carry no side gutter, or the frame is not edge to edge');
+
+  // no card: the block's panel, border, radius, padding and hover lift all go
+  assertNoCard(section);
+
+  // no kicker, and nothing else printed over the artifact
+  assert.equal(document.querySelectorAll('.block-kicker').length, 0, 'a page board renders no kicker at all');
+  assert.equal(document.querySelectorAll('.round-label').length, 0, 'nor the "Round 1" chip over a full-viewport artifact');
+  assert.equal(document.querySelectorAll('.round-end').length, 0, 'nor the closing rail');
+
+  // the header floats OVER the frame rather than pushing it: a sticky header is
+  // in flow, so it would push a 100vh frame down by its own height and leave the
+  // artifact's last band below a fold nothing can scroll to (ADR.md entry 40).
+  assert.equal(resolveComputedProperty(styles, head, true, 'position'), 'fixed');
+  assert.ok(head, 'the header itself stays -- entry 40 changes its position, never its contents');
+  assert.ok(document.getElementById('comment-mode-toggle'), 'including the comment-mode toggle');
+  assert.ok(document.getElementById('theme-toggle'), 'and the theme control');
+  assert.ok(document.getElementById('round-badge'), 'and the round badge');
+
+  // the frame is still a frame: same section, same nesting, same sandbox
+  assert.equal(section.getAttribute('data-block-kind'), 'html');
+  assert.equal(frame.parentElement.className, 'stage-wrap');
+  assert.ok(frame.parentElement.querySelector('.pin-layer'), 'the pin layer must still sit over the frame');
+});
+
+check('criterion 2: the page board stage is a constant 100vh that scrolls internally, and the page itself does not scroll', () => {
+  const { body, frame } = renderedPage(pageBoard());
+  assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '100vh', 'the frame is a constant viewport height (ADR.md entry 34), not a box grown to content');
+  assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '0', 'the 320px floor is lifted, so the frame is exactly 100vh and nothing else');
+  assert.equal(resolveComputedProperty(styles, frame, true, 'resize'), 'none', 'a frame the reviewer can drag taller is a frame whose height changes while it is read');
+  assert.equal(resolveComputedProperty(styles, body, true, 'overflow'), 'hidden', 'the board page itself never scrolls -- the artifact scrolls inside its own frame');
+  assert.equal(frame.getAttribute('style'), null, 'and nothing is server-rendered into an inline height');
+});
+
+check('criterion 3 (markup half): a page board neither strips nor rewrites the artifact -- same srcdoc bytes, same sandbox, reset still leading', () => {
+  const board = pageBoard();
+  const { frame } = renderedPage(board);
+  const srcdoc = frame.getAttribute('srcdoc');
+  assert.equal(srcdoc, STAGE_MARGIN_RESET + board.blocks[0].html + stageAgentScript(),
+    'the page board must snapshot exactly the bytes an ordinary stage does -- nothing about this layout touches block.html');
+  assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0,
+    'the reset must stay LEADING, or it stops hoisting out of body and every dom-anchor ref index shifts by one (renderHtmlBlock\'s own comment)');
+  assert.equal(frame.getAttribute('sandbox'), 'allow-scripts',
+    'the artifact\'s own scripts run inside it -- and never with allow-same-origin');
+});
+
+check('criterion 6: a post carrying a question, or any second block, renders exactly as a board does today -- column, card, kicker, lens control and send bar', () => {
+  const withQuestion = createBoard({
+    title: 'artifact + question',
+    blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+  });
+  const { document, body, shell, head, frame, sendBar } = renderedPage(withQuestion);
+  assert.equal(body.className, '', 'an ordinary board carries no page-board class');
+  assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), '1120px', 'the artifact is back in the column');
+  assert.equal(resolveComputedProperty(styles, head, true, 'position'), 'sticky');
+  assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '', 'and the stage is back at its ordinary size');
+  assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '320px');
+  assert.ok(document.querySelector('.html-block .block-kicker'), 'the kicker is back');
+  assert.ok(document.querySelector('.html-block .expand-btn'), 'and its lens is one click away');
+  assert.ok(document.querySelector('.round-label'), 'and the round renders as an ordinary round');
+  assert.notEqual(resolveComputedProperty(styles, sendBar, true, 'display'), 'none', 'and the send bar is live, since there is now something to answer');
+
+  // Byte-for-byte identical to what the same board rendered before this feature
+  // existed: the ordinary path is not merely "still works", it is untouched.
+  const secondBlock = createBoard({ title: 'artifact + note', blocks: [{ kind: 'html', html: PAGE_ARTIFACT }, { kind: 'markdown', text: 'a stats line' }] });
+  const ordinary = renderBoardPage(secondBlock);
+  assert.ok(ordinary.includes('<body>'), 'a two-block board opens <body> with no class at all');
+  assert.ok(ordinary.includes('<div class="block-kicker">HTML stage '), 'and renders the stage in its usual card');
+});
+
+check('criterion 11: a page board offers no way to send -- no Send, no Discuss, no unanswered count', () => {
+  const { document, sendBar } = renderedPage(pageBoard());
+  assert.equal(resolveComputedProperty(styles, sendBar, true, 'display'), 'none',
+    'the send bar is hidden the same way body.readonly hides it -- one rule, the whole bar, buttons and pill together');
+  // The pill is nested inside the bar (ADR.md entry 27) so it inherits that, and
+  // is separately at zero: a page board asks nothing, so there is no count.
+  const pill = document.getElementById('questions-left-pill');
+  assert.equal(pill.classList.contains('visible'), false, 'the unanswered count is never shown on a board that asks nothing');
+  assert.equal(pill.textContent, '0 questions left');
+  assert.equal(document.querySelectorAll('.round-open .question-block').length, 0, 'and there is nothing on the page to answer');
+});
+
+check('criterion 25: a page board carries no expand control, and every other stage still carries one', () => {
+  const { document } = renderedPage(pageBoard());
+  assert.equal(document.querySelectorAll('.expand-btn').length, 0,
+    'ADR.md entry 43: the lens a page board would open is a copy of what already fills the viewport');
+  assert.equal(document.querySelectorAll('.comment-btn').length, 0,
+    'and the kicker\'s comment button goes with it -- the click gesture inside the frame is the affordance here');
+
+  // every other stage that has one is unchanged: standalone in a column, and a
+  // variant option. (A question's context renders as prose with no kicker at
+  // all -- ADR.md entry 26, unrelated to this and untouched by it.)
+  const ordinary = parseHTML(renderBoardPage(createBoard({
+    title: 'every other stage',
+    blocks: [
+      { kind: 'html', html: PAGE_ARTIFACT },
+      {
+        kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+        options: [{ label: 'A', block: { kind: 'html', html: PAGE_ARTIFACT } }],
+        context: [{ kind: 'html', html: PAGE_ARTIFACT }],
+      },
+    ],
+  })));
+  assert.equal(ordinary.querySelectorAll('.expand-btn').length, 2,
+    'the standalone stage and the variant option each keep their own expand control');
+});
+
+check('a page board is still a pure function of its board JSON, and still inlines it', () => {
+  const board = pageBoard();
+  const a = renderBoardPage(board);
+  const b = renderBoardPage(JSON.parse(JSON.stringify(board)));
+  assert.equal(a, b);
+  assert.ok(a.includes('id="board-data"'));
+  assert.ok(a.includes(JSON.stringify(board.id)));
+});
+
 // A temp CLAUDE_BOARD_HOME sanity guard: this check touches no disk at all, but
 // assert the convention still holds for anything added here later.
 check('this check never touches the real store', () => {
@@ -1999,10 +2224,13 @@ check('the rank widget renders options in the stored order when there is a prior
   assert.deepEqual(order, ['C', 'A', 'B']);
 });
 
-// --- the history rail ---------------------------------------------------
+// --- a sent round, on its own page ---------------------------------------
 //
-// The decision "A board is a session-scoped thread with rounds": "the
-// sent round collapsed into a history rail with its answers still readable."
+// The decision "A board is a session-scoped thread with rounds": a sent round
+// stays fully readable and is never a second place to edit the same answer.
+// ADR.md entry 42 moved it off the history rail and onto its own page -- what
+// is asserted here is the half that did not change: the markup a sent round
+// renders, and the disabled state that markup carries.
 
 check('a sent round renders as history with its prompt, choice and note still readable; a still-open round renders live', () => {
   const board = createBoard({
@@ -2022,8 +2250,10 @@ check('a sent round renders as history with its prompt, choice and note still re
   // while leaving the label text would pass a bare `.includes('Yes')` check)
   assert.ok(/class="card-choice choice-single selected"[^>]*data-choice="Yes"/.test(markup));
 
-  assert.ok(/<section class="round round-open" data-round="2" data-round-status="open">/.test(markup));
-  assert.ok(markup.includes('Round 2 question'), 'the still-open round must render live below the history');
+  // The newest round also carries 'round-current': it is the page the board
+  // opens on (ADR.md entry 42), and the stylesheet displays only that one.
+  assert.ok(/<section class="round round-open round-current" data-round="2" data-round-status="open">/.test(markup));
+  assert.ok(markup.includes('Round 2 question'), 'the still-open round must render live on the page the board opens on');
 });
 
 check('interactive controls inside a history round are rendered disabled, so a later Send can never silently rewrite a sent answer', () => {
@@ -2036,7 +2266,7 @@ check('interactive controls inside a history round are rendered disabled, so a l
   addRound(board, { blocks: [{ kind: 'markdown', text: '# more' }] });
 
   const html = renderBoardPage(board);
-  const historySection = /<section class="round round-history"[\s\S]*?<section class="round round-open"/.exec(html)[0];
+  const historySection = /<section class="round round-history"[\s\S]*?<section class="round round-open/.exec(html)[0];
   // Ablation: rendering the round-1 widgets without `historical` (i.e. always
   // passing `false`) leaves this identical to the open-round markup and fails here.
   assert.ok(historySection.includes('disabled'), 'a sent round\'s answer controls must be disabled in the markup');
@@ -2064,7 +2294,7 @@ check('a history round\'s comment form is disabled too, on every CONTENT block k
   addRound(board, { blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  C --> D' }] });
 
   const html = renderBoardPage(board);
-  const historySection = /<section class="round round-history"[\s\S]*?<section class="round round-open"/.exec(html)[0];
+  const historySection = /<section class="round round-history"[\s\S]*?<section class="round round-open/.exec(html)[0];
   const commentForms = [...historySection.matchAll(/<form class="comment-form"[\s\S]*?<\/form>/g)];
   assert.equal(commentForms.length, 2, 'both blocks in the sent round must carry a comment form');
   for (const [form] of commentForms) {
@@ -2073,7 +2303,7 @@ check('a history round\'s comment form is disabled too, on every CONTENT block k
   }
 
   // and the still-open round's comment forms stay fully live
-  const openSection = html.slice(html.indexOf('<section class="round round-open"'));
+  const openSection = html.slice(html.indexOf('<section class="round round-open'));
   assert.ok(/<input type="text" placeholder="Add a comment">/.test(openSection));
   assert.ok(!/placeholder="Add a comment" disabled/.test(openSection));
 });
@@ -2481,13 +2711,23 @@ check('the parent tells a stage its sentRefs at both the moments that matter: wh
   assert.ok(readyBody, 'handleStageReady not found');
   assert.match(readyBody, /sentRefs:\s*sentDomRefsForBlock\(blockId\)/, "handleStageReady's postToStage must carry sentRefs");
 
-  // setCommentMode: broadcast to every wired stage on every toggle, not just
-  // at ready time -- turning mode ON is exactly the moment the stage's hover
-  // starts mattering.
+  // The broadcast to every wired stage, which happens on every mode toggle and
+  // not just at ready time -- turning mode ON is exactly the moment the stage's
+  // hover starts mattering. It lives in broadcastStageMode rather than inline in
+  // setCommentMode because a THEME change (ADR.md entry 39) sends the identical
+  // message, and two copies of it could ship different shapes; asserted here
+  // through both hops, so neither the payload nor the delegation can be dropped
+  // without failing.
+  const broadcastBody = namedFunctionBody(ui, 'broadcastStageMode');
+  assert.ok(broadcastBody, 'broadcastStageMode not found');
+  assert.match(broadcastBody, /sentRefs:\s*blockId \? sentDomRefsForBlock\(blockId\) : \[\]/,
+    'the broadcast to every wired stage must carry that stage\'s own sentRefs');
+  assert.match(broadcastBody, /theme:\s*activeTheme\(\)/,
+    'and the theme it must now paint itself in (ADR.md entry 39)');
   const setModeBody = namedFunctionBody(ui, 'setCommentMode');
   assert.ok(setModeBody, 'setCommentMode not found');
-  assert.match(setModeBody, /sentRefs:\s*blockId \? sentDomRefsForBlock\(blockId\) : \[\]/,
-    'setCommentMode\'s broadcast to every wired stage must also carry that stage\'s own sentRefs');
+  assert.match(setModeBody, /broadcastStageMode\(\)/,
+    'setCommentMode must still reach every wired stage, now through that one shared broadcast');
 
   // sentDomRefsForBlock itself: only 'dom'-kind anchors on the named block --
   // an html-stage's own anchors are always 'dom' (handleStageClick mints
@@ -3276,7 +3516,7 @@ check('H4: two blocks in one post cannot claim the same id', () => {
 check('H4: addRound refuses an id that already exists on the board -- a Send racing an amend cannot destroy round 1\'s answer', () => {
   // Ablation: remove `idLedgerFromBoard` from addRound (pass emptyIdLedger()) and the
   // second q1 is appended into round 2, board.answers['q1'] is overwritten by the new
-  // block's answer, and round 1's history rail renders a question with no answer.
+  // block's answer, and round 1's page renders a question with no answer.
   const board = createBoard({
     title: 't',
     blocks: [{ kind: 'question', prompt: 'Round one?', widget: 'single', options: [{ label: 'Yes' }] }],
@@ -4544,7 +4784,7 @@ function withCapturedRAF(fn) {
   }
 }
 
-check('choose-between-rendered-variants: a variant option\'s stage grows to the height it reports, clamped at the cap -- never past it, and never before its own rendering opportunity (ablation 1: change handleStageHeight\'s Math.min(data.height, STAGE_HEIGHT_CAP) to just data.height and the "taller than the cap" assertion fails; ablation 2: change reportHeightAfterLayout\'s body back to a bare reportHeight() call and the "not yet applied" assertion fails)', () => {
+check('choose-between-rendered-variants: a variant option\'s stage grows to the height it reports, floored at the 320px placeholder and capped at 600px -- never below the floor, never past the cap, and never before its own rendering opportunity (ablation 1: change handleStageHeight\'s Math.min(data.height, STAGE_HEIGHT_CAP) to just data.height and the "taller than the cap" assertion fails; ablation 2: drop the Math.max(STAGE_HEIGHT_FLOOR, ...) wrapper and the "collapsed report floors" assertion fails; ablation 3: change reportHeightAfterLayout\'s body back to a bare reportHeight() call and the "not yet applied" assertion fails)', () => {
   const board = createBoard({
     title: 'variants',
     blocks: [{
@@ -4556,7 +4796,7 @@ check('choose-between-rendered-variants: a variant option\'s stage grows to the 
         // top-level <body> in a mock's own html is honoured as given by
         // parseHTML, so the declared attribute lands on the same node
         // stageAgentScript's reportHeight() reads (document.body.scrollHeight).
-        { label: 'Short', block: { kind: 'html', html: '<body data-standin-scroll-height="180"><p>short mock</p></body>' } },
+        { label: 'Collapsed', block: { kind: 'html', html: '<body data-standin-scroll-height="180"><p>collapsed mock</p></body>' } },
         { label: 'Tall', block: { kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' } },
       ],
     }],
@@ -4579,8 +4819,12 @@ check('choose-between-rendered-variants: a variant option\'s stage grows to the 
     drain(); // a real browser: waits for the actual rendering opportunity, then runs the queued (nested) rAF callbacks
   });
 
-  assert.equal(frames[0].style.height, '180px',
-    'a mock shorter than the cap must grow to the height it actually reports, not sit at a fixed floor');
+  // ADR 41: a stage that measures itself from the viewport can report a
+  // collapsed height (here, 180 -- shorter than the 320px placeholder) that
+  // never grows again. Before the floor, this locked the card at 180px
+  // forever; now it renders at the placeholder instead.
+  assert.equal(frames[0].style.height, '320px',
+    'a mock that reports a collapsed height (below the 320px placeholder) must floor there, never lock the card at the collapsed height it actually reported');
   assert.equal(frames[1].style.height, '600px',
     'a mock taller than the cap must be clipped there, not at its full reported height (4000px)');
 });
@@ -5761,10 +6005,17 @@ check('a landed submit leaves the send bar disabled; only a failure re-enables i
 check('the submitted push disables the send bar, and a new round brings it back', () => {
   const submitted = namedFunctionBody(ui, 'applySubmittedPush');
   const roundPush = namedFunctionBody(ui, 'applyRoundPush');
-  assert.match(submitted, /setSendBarEnabled\(openRoundNumber\(\) !== null\)/,
+  // Rounds became pages (ADR.md entry 42), so "may this page send" gained a
+  // second half: the open round must exist AND be the page on screen. Both
+  // halves are asserted, since dropping either is a way back to a live Send on
+  // a round that is already out.
+  assert.match(submitted, /setSendBarEnabled\(openRoundNumber\(\) !== null && currentRound === openRoundNumber\(\)\)/,
     'a submitted push must lock the send bar -- markRoundHistory cannot reach it, it is outside the round');
-  assert.match(roundPush, /setSendBarEnabled\(openRoundNumber\(\) !== null\)/,
-    'a new round must bring the send bar back');
+  assert.match(roundPush, /if \(followTheRound\) goToRound\(data\.round\);/,
+    'a new round must bring the send bar back, which it does by making that round the page (goToRound -> refreshPager -> setSendBarEnabled)');
+  assert.match(namedFunctionBody(ui, 'refreshPager'),
+    /if \(!submitInFlight\) setSendBarEnabled\(open !== null && currentRound === open\)/,
+    'and the one place that decides it reads both halves');
   const open = namedFunctionBody(ui, 'openRoundNumber');
   assert.match(open, /r\.status !== 'sent'/, 'the open round is the one not yet sent');
   // Never re-enable anything in a read-only page, where everything is hard-disabled.
@@ -6086,7 +6337,7 @@ check('a round that asks nothing contributes nothing to the count, and the badge
   const pointer = createBoard({
     title: 'An html block that names a file',
     cwd: dir,
-    blocks: [{ kind: 'markdown', text: 'http://127.0.0.1:7391/file/doc.html' }],
+    blocks: [{ kind: 'markdown', text: 'see ~/Documents/renders/doc.html' }],
   });
   assert.equal(pointer.rounds[0].status, 'open', 'the round really is open -- nothing submitted it');
   const [pointerThread] = buildThreadIndex([pointer]);
@@ -7782,66 +8033,41 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
   });
 });
 
-check('openServed confines a served file to its roots, and refuses everything else alike', () => {
-  // The serve route hands whole documents to a browser at the daemon's own origin, so
-  // its boundary gets the same treatment resolvePath's does -- and every refusal has to
-  // be the SAME refusal, or the route is an existence oracle for the disk.
-  const root = realpathSync(mkdtempSync(path.join(fixturesDir, 'serve-root-')));
-  const outside = realpathSync(mkdtempSync(path.join(fixturesDir, 'serve-outside-')));
-  writeFileSync(path.join(root, 'doc.html'), '<h1>ok</h1>');
-  writeFileSync(path.join(outside, 'secret.txt'), 'not yours');
-  mkdirSync(path.join(root, 'sub'));
-  writeFileSync(path.join(root, 'sub', 'index.html'), '<h1>listing</h1>');
-
-  const read = rel => {
-    const r = openServed(rel, [root]);
-    if (r.error) return r;
-    const text = readFileSync(r.fd, 'utf8');
-    fs.closeSync(r.fd);
-    return text;
-  };
-
-  assert.equal(read('doc.html'), '<h1>ok</h1>');
-  // A directory resolves to the index.html inside it -- the folder listing a generator
-  // already wrote. The daemon never enumerates a directory itself.
-  assert.equal(read('sub'), '<h1>listing</h1>');
-
-  // Traversal, an absolute path, and a symlink aimed out of the root are all refused,
-  // and all refused IDENTICALLY -- no errno, no "exists but", nothing to probe with.
-  symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'escape.txt'));
-  const refusals = [
-    '../' + path.basename(outside) + '/secret.txt',
-    path.join(outside, 'secret.txt'),
-    'escape.txt',
-    'nope.html',
-    'sub',                                  // asserted separately below with no index
-    '',
-  ].map(rel => openServed(rel, [root]).error);
-  assert.deepEqual(new Set(refusals.filter(Boolean)), new Set(['not found']));
-
-  // An unconfigured allowlist serves nothing at all: absent means empty, the same
-  // answer resolveRefRoots gives, so the route is off until someone opts in.
-  assert.equal(openServed('doc.html', []).error, 'not found');
-  assert.equal(openServed('doc.html', resolveRefRoots(undefined)).error, 'not found');
-
-  // A fifo would wedge the daemon's single thread on open, and a directory with no
-  // index.html is a 404 rather than a listing.
-  mkdirSync(path.join(root, 'bare'));
-  assert.equal(openServed('bare', [root]).error, 'not found');
-});
-
 check('a markdown link opens in a new tab and drops its opener', () => {
   // A board is a thing the reviewer is in the middle of: a same-tab navigation throws
   // away unsubmitted answers and half-typed comments with no warning. The `noopener`
   // half is the security one -- the opened document must not hold a window handle back
   // into a page that is authorized against the daemon.
-  const html = mdToHtml('see [the render](http://127.0.0.1:7391/file/doc.html)');
-  assert.match(html, /<a href="http:\/\/127\.0\.0\.1:7391\/file\/doc\.html" target="_blank" rel="noopener noreferrer">the render<\/a>/);
+  const html = mdToHtml('see [the render](https://example.com/doc.html)');
+  assert.match(html, /<a href="https:\/\/example\.com\/doc\.html" target="_blank" rel="noopener noreferrer">the render<\/a>/);
   // A refused scheme still collapses to `#`, and still carries the same attributes --
   // the neutralised link must not become the one that navigates the board away.
   const bad = mdToHtml('[x](javascript:alert(1))');
   assert.match(bad, /<a href="#" target="_blank" rel="noopener noreferrer">/);
   assert.ok(!bad.includes('javascript:'));
+});
+
+check('the mermaid CDN is pinned to one exact version everywhere, because the CSP match is a prefix', () => {
+  // `script-src ... https://cdn.jsdelivr.net/npm/mermaid@11.16.1/` is a prefix match, so
+  // it allows that version and refuses every other spelling -- including the unpinned
+  // `mermaid@11` that resolves to the same bytes today. Three parties have to agree on
+  // the string: this policy, the board's own loader in src/ui.mjs, and the renderer
+  // templates, whose CDN fallback is the ONLY engine that can load inside a stage (an
+  // opaque origin resolves the vendored `assets/mermaid.min.js` to nothing -- ADR.md
+  // entries 32 and 37). Those templates live in ~/.claude/skills and are unreachable
+  // from this repo, so what is pinned here is the fact they were pinned against: the
+  // version this policy names, and that it names exactly one. Widen or bump it and the
+  // check goes red at the commit, rather than the diagrams going blank on the next
+  // board nobody thought to look at.
+  const pins = [...CSP.matchAll(/cdn\.jsdelivr\.net\/npm\/(mermaid@[^/\s;]*)/g)].map(m => m[1]);
+  assert.ok(pins.length >= 2, `the CSP must name the mermaid CDN in both script-src and font-src, found ${pins.length}`);
+  assert.deepEqual([...new Set(pins)], ['mermaid@11.16.1'],
+    `the CSP must name exactly one exact mermaid version; a floating major (mermaid@11) is refused by its own prefix match. Got: ${pins.join(', ')}`);
+
+  const ui = readFileSync(path.join(repoRoot, 'src/ui.mjs'), 'utf8');
+  const uiPins = [...ui.matchAll(/cdn\.jsdelivr\.net\/npm\/(mermaid@[^/\s'"`]*)/g)].map(m => m[1]);
+  assert.deepEqual([...new Set(uiPins)], ['mermaid@11.16.1'],
+    `the board's own mermaid loader must import the version its CSP allows. Got: ${uiPins.join(', ') || 'no jsdelivr import at all'}`);
 });
 
 if (asyncFailures) failures += asyncFailures;

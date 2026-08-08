@@ -497,7 +497,7 @@ check('A stage cannot pick its own option -- a "select"-shaped message from a li
     'a stage must never be able to select its own option -- the agent would be handing itself the answer to its own question');
 });
 
-check('A forged "height" message from a live, correctly-addressed stage is clamped at the cap, never applied as reported, and a malformed one is silently ignored', () => {
+check('A forged "height" message from a live, correctly-addressed stage is clamped between the floor and the cap, never applied as reported outside that range, and a malformed one is silently ignored', () => {
   const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
   const document = loadBoard(renderBoardPage(board));
   const frame = document.querySelector('.html-stage');
@@ -549,11 +549,20 @@ check('A forged "height" message from a live, correctly-addressed stage is clamp
     assert.equal(frame.style.height, '600px', `a malformed height report must be ignored, not applied: ${JSON.stringify(fields)}`);
   }
 
-  // Sanity: a genuine, well-formed report still applies right after a batch
-  // of hostile ones was correctly ignored -- the validation is a filter, not
-  // a latch that got stuck rejecting everything once it saw something hostile.
-  forgeHeight({ height: 210 });
-  assert.equal(frame.style.height, '210px', 'a genuine height report must still apply after a batch of hostile ones was ignored');
+  // ADR 41: a stage that sizes itself from the viewport rather than its own
+  // content can report a collapsed height that never grows again -- a
+  // sliver of label, nothing else. Unfloored, that report would lock the
+  // card there permanently. Ablation: drop handleStageHeight's
+  // Math.max(STAGE_HEIGHT_FLOOR, ...) wrapper and this fails.
+  forgeHeight({ height: 40 });
+  assert.equal(frame.style.height, '320px', 'a collapsed height report must floor at the 320px placeholder, never lock the card at the collapsed height it actually reported');
+
+  // Sanity: a genuine, well-formed report between the floor and the cap
+  // still applies right after a batch of hostile ones (and a collapsed one)
+  // was correctly clamped -- the validation is a range filter, not a latch
+  // that got stuck at either edge once it saw something outside it.
+  forgeHeight({ height: 450 });
+  assert.equal(frame.style.height, '450px', 'a genuine height report between the floor and the cap must still apply after other reports were clamped');
 });
 
 // Merge guard, not a criterion: `main` grew a document-level Cmd+Enter board
@@ -655,9 +664,15 @@ check('The existing element-level comment-anchor gesture into an html option\'s 
 //    lens; these are the adversarial ones.
 // =================================================================================
 
-/** Render a one-stage board, run the client script, and open the lens on it. */
+/** Render a one-stage board, run the client script, and open the lens on it.
+ * The trailing markdown block keeps this an ORDINARY board: one html block and
+ * nothing else is a page board (src/render.mjs's isPageBoard, ADR.md entry 33),
+ * and a page board carries no expand control to open the lens with (entry 43). */
 function openLensOn(mockHtml) {
-  const board = createBoard({ title: 'isolation: the stage lens', blocks: [{ kind: 'html', html: mockHtml }] });
+  const board = createBoard({
+    title: 'isolation: the stage lens',
+    blocks: [{ kind: 'html', html: mockHtml }, { kind: 'markdown', text: 'not a page board' }],
+  });
   const document = loadBoard(renderBoardPage(board));
   const inline = document.querySelector('.html-stage');
   document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
@@ -685,7 +700,9 @@ check('S1: with no sandbox attribute to copy, the lens refuses to open at all ra
   // a visibly broken control, which is the direction to fail in.
   const board = createBoard({
     title: 'isolation: the lens fails closed',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    // Two blocks, so this is an ordinary board with an expand control -- see
+    // openLensOn above.
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const document = loadBoard(renderBoardPage(board));
   document.querySelector('.html-stage').removeAttribute('sandbox');
@@ -1071,7 +1088,12 @@ check('A compare side\'s html stage carries the same reset -- renderCompareSide/
 });
 
 check('The stage lens opens on the exact same srcdoc, reset included -- it is a copy of the live attribute, never a second render', () => {
-  const board = createBoard({ title: 'gutter: the lens', blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
+  // Two blocks: an ordinary board, so the stage has an expand control at all
+  // (see openLensOn above).
+  const board = createBoard({
+    title: 'gutter: the lens',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
+  });
   const document = loadBoard(renderBoardPage(board));
   const inline = document.querySelector('.html-stage');
   document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));

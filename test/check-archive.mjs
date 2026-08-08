@@ -811,6 +811,108 @@ check('archive: reopening the SAME file in a fresh document, sharing the storage
   } finally { second.restore(); }
 });
 
+// =================================================================================
+// 5. Criterion 7: a PAGE board archived to disk opens from Finder with the
+//    network off and shows the same artifact, not an empty frame.
+//
+//    Its own file, its own bytes, written and read back the same way the board
+//    above is -- a page board is a different rendering of the same page
+//    (src/render.mjs's isPageBoard, ADR.md entry 33), and the thing that could
+//    fail here is specific to it: the artifact's markup is snapshotted INTO the
+//    page at post time (entry 32), so if any of it ever became a reference to
+//    something outside the file, this is where an offline reader would get a
+//    blank 100vh frame instead of a page.
+// =================================================================================
+
+const pageArtifact = '<style>.doc{font:14px system-ui}</style>'
+  + '<div class="doc"><h1>ARCHIVED_ARTIFACT_MARKER</h1><p id="out">unrun</p></div>'
+  + '<script>document.getElementById("out").textContent = "the artifact\'s own script ran";</script>';
+// Bound to a real project directory, like every board a reviewer actually
+// archives: `cwd` is the one field on a board that names something about the
+// machine rather than about the work, and the check below is what keeps it out
+// of a file meant to be handed to someone else.
+const pageBoardDoc = createBoard({ title: 'Archived artifact', cwd: archiveDir, blocks: [{ kind: 'html', html: pageArtifact }] });
+const pageArchivePath = path.join(archiveDir, `${pageBoardDoc.id}.html`);
+writeFileSync(pageArchivePath, renderBoardPage(pageBoardDoc), 'utf8');
+const pageFileContents = readFileSync(pageArchivePath, 'utf8');
+
+function loadPageArchive() {
+  const originalFetch = globalThis.fetch;
+  const originalES = globalThis.EventSource;
+  let fetchCalled = false;
+  let esConstructed = false;
+  globalThis.fetch = () => { fetchCalled = true; return Promise.reject(new Error('the archive must never call fetch')); };
+  class SpyEventSource {
+    constructor() { esConstructed = true; }
+  }
+  globalThis.EventSource = SpyEventSource;
+  const document = loadBoard(pageFileContents, 'file:');
+  return {
+    document,
+    restore() { globalThis.fetch = originalFetch; globalThis.EventSource = originalES; },
+    fetchCalled: () => fetchCalled,
+    esConstructed: () => esConstructed,
+  };
+}
+
+check('criterion 7: a page board archived to disk opens from Finder as a page board, with the artifact in the frame rather than an empty one', () => {
+  const { document, restore, fetchCalled, esConstructed } = loadPageArchive();
+  try {
+    assert.equal(document.body.classList.contains('page-board'), true,
+      'the archived page board must still lay out as one -- the class is in the bytes, not applied by anything the daemon does');
+    assert.equal(document.body.classList.contains('readonly'), true, 'and opening from file:// must still make it read-only');
+
+    const frame = document.querySelector('.html-stage');
+    assert.ok(frame, 'the frame itself must be in the archived bytes');
+    const srcdoc = frame.getAttribute('srcdoc');
+    // Read off the FRAME's own attribute, never off the raw bytes: the whole
+    // board is inlined as JSON in #board-data too, so `fileContents.includes(...)`
+    // is true whether or not the stage ever carried the artifact (QUIRKS.md: "A
+    // rendered page contains every comment's text twice").
+    assert.ok(srcdoc.includes('ARCHIVED_ARTIFACT_MARKER'),
+      'the artifact\'s own markup must be inside the frame\'s srcdoc -- an archive that framed a path would open blank with the network off');
+    assert.equal(srcdoc.indexOf(STAGE_MARGIN_RESET), 0, 'with the same leading reset a live page renders');
+    assert.equal(frame.getAttribute('sandbox'), 'allow-scripts');
+
+    // And the artifact is live, not a picture: its own script runs from the
+    // bytes on disk, with nothing listening anywhere.
+    frame.loadSrcdoc();
+    assert.equal(frame.contentDocument.getElementById('out').textContent, 'the artifact\'s own script ran');
+
+    assert.equal(fetchCalled(), false, 'the archived page board must never reach the network');
+    assert.equal(esConstructed(), false, 'and must open no event stream');
+  } finally { restore(); }
+});
+
+check('criterion 7: the archived page board carries no local project path -- the file is the artifact, so it is the thing that gets sent to someone else', () => {
+  // The whole board is inlined as JSON in #board-data (that is what makes the
+  // archive standalone), and a bare spread of the board put `cwd` -- the
+  // realpath'd project directory, i.e. the reader's username and their whole
+  // directory layout -- into every archived file. Nothing renders it and
+  // nothing reads it back, so it is pure exhaust, and criterion 7 is exactly
+  // what makes it matter: the archive is now a single self-contained file that
+  // IS the artifact, and therefore the natural thing to attach to a ticket.
+  assert.ok(pageBoardDoc.cwd, 'setup failure: the fixture board must actually be bound to a project directory, or this check proves nothing');
+
+  const el = parseHTML(pageFileContents).getElementById('board-data');
+  assert.ok(el, 'setup failure: no #board-data payload in the archived bytes');
+  const data = JSON.parse(el.textContent);
+  assert.equal(data.id, pageBoardDoc.id, 'setup failure: #board-data must be this board');
+  assert.equal('cwd' in data, false, 'the inlined board must not carry the local project path at all -- not null, absent');
+
+  // And on the bytes as well as on the parsed payload: safeJson escapes, so a
+  // path could ride along in a spelling the JSON parse above normalises away.
+  assert.ok(!pageFileContents.includes(pageBoardDoc.cwd),
+    'the archived file must not contain the project directory anywhere in its bytes');
+});
+
+check('criterion 7: the archived page board\'s bytes carry no external script or stylesheet reference either', () => {
+  assert.ok(!/<link[^>]+rel=["']stylesheet["']/.test(pageFileContents));
+  assert.ok(!/<script[^>]+\bsrc=/.test(pageFileContents),
+    'an artifact that pulled in a script by src would be a page board that opens empty from Finder');
+  assert.ok(pageFileContents.includes('<style>'));
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

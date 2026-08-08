@@ -37,6 +37,12 @@
 # correct. It is removed BY EXACT NAME, never the directory and never a glob —
 # `boards/` and `pages/`, the actual review history, are untouched. See step 2b.
 #
+# It also removes $SECRET_DIR/serve_roots if a machine still has one — a record the
+# `/file/` route used to carry forward, now that the route and its allowlist are gone
+# (ADR.md entry 38). Unlike ref_roots/board_home below, this is not a choice worth
+# keeping: the thing it configured no longer exists, so it is taken back outright
+# rather than named in the "left in place on purpose" summary. See step 2d.
+#
 # Three things are left ON PURPOSE and named by path in the summary this script
 # prints at the end: the store (the user's review history), the local secret, and
 # the logs. Deleting any of those silently would be a worse bug than leaving too
@@ -178,6 +184,22 @@ else
   echo "==> no board manual at $SKILL_FILE"
 fi
 
+# --- 2d. a stale serve-root record, if an older install left one ---------------
+# ADR.md entry 38: `/file/` and its allowlist are gone, so `$SECRET_DIR/serve_roots`
+# is not an install-time CHOICE worth preserving the way ref_roots and board_home
+# below are -- the thing it configured no longer exists, so keeping it around serves
+# nobody. install.sh already deletes it on its own next run (next to the
+# ref_roots/board_home persistence step), but a machine that goes straight from an
+# old install to `git pull && ./uninstall.sh`, with no intervening `./install.sh`,
+# would otherwise keep the file forever with nothing on screen naming it -- residue,
+# not a preserved choice, so this script takes it back outright rather than listing
+# it in the "left in place on purpose" summary below.
+SERVE_ROOTS_RECORD_FILE="$SECRET_DIR/serve_roots"
+if [ -f "$SERVE_ROOTS_RECORD_FILE" ]; then
+  rm -f "$SERVE_ROOTS_RECORD_FILE"
+  echo "==> removed $SERVE_ROOTS_RECORD_FILE (a leftover from before /file/ was deleted -- ADR.md entry 38)"
+fi
+
 # --- 3. report what is deliberately left behind --------------------------------
 # The whole point of this section: an uninstall that silently destroyed a review
 # archive would be a far worse bug than one that leaves too much. Name every path
@@ -189,13 +211,16 @@ echo "left in place on purpose:"
 echo "  store (your review history):  $STORE_DIR"
 echo "  local secret:                 $SECRET_FILE"
 echo "  logs:                         $LOG_DIR"
-# The three carry-forward records, kept for the same reason the secret is: they are your
+# The two carry-forward records, kept for the same reason the secret is: they are your
 # configuration, not the bundle's. install.sh writes them so a reinstall keeps the roots
 # and store you chose, now that the launcher bakes those in and the plist no longer
 # carries them to be read back. The launcher stamp above IS removed, because it describes
 # a bundle that no longer exists; these describe choices that outlive it. Named
 # individually rather than as "$SECRET_DIR/*" so nobody hand-deletes the secret with them.
-for record in "$SECRET_DIR/ref_roots" "$SECRET_DIR/serve_roots" "$SECRET_DIR/board_home"; do
+# (`serve_roots` isn't named here: `/file/` and its allowlist are gone — ADR.md entry 38
+# — and step 2d above removes any record an older install left, so there is nothing left
+# for this summary to name.)
+for record in "$SECRET_DIR/ref_roots" "$SECRET_DIR/board_home"; do
   if [ -f "$record" ]; then
     echo "  install-time choice:          $record"
   fi

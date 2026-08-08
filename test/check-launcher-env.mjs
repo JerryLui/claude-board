@@ -103,10 +103,9 @@ writeFileSync(markerScript, [
 const compiledHome = path.join(workDir, 'compiled-home');
 const compiledStore = path.join(workDir, 'compiled-home', 'Library', 'Application Support', 'claude-board');
 const compiledRefRoots = path.join(workDir, 'compiled-home', '.claude', 'skills');
-const compiledServeRoots = path.join(workDir, 'compiled-home', 'Documents', 'renders');
 const compiledPath = '/usr/bin:/bin:/usr/sbin:/sbin';
 // Not a security boundary (see bin/launcher.c's OVERRIDE_ENV comment) but baked in on the
-// same footing as the other five: src/handoff.mjs's recoveryCommand() needs the real
+// same footing as the other four: src/handoff.mjs's recoveryCommand() needs the real
 // clone path once CLAUDE_BOARD_DAEMON points inside the bundle instead.
 const compiledRepoRoot = path.join(workDir, 'compiled-repo');
 
@@ -128,7 +127,6 @@ writeFileSync(headerPath, [
   `#define CLAUDE_BOARD_PATH "${cEscape(compiledPath)}"`,
   `#define CLAUDE_BOARD_STORE_DIR "${cEscape(compiledStore)}"`,
   `#define CLAUDE_BOARD_REF_ROOTS_VALUE "${cEscape(compiledRefRoots)}"`,
-  `#define CLAUDE_BOARD_SERVE_ROOTS_VALUE "${cEscape(compiledServeRoots)}"`,
   `#define CLAUDE_BOARD_REPO_ROOT_VALUE "${cEscape(compiledRepoRoot)}"`,
   '',
 ].join('\n'));
@@ -166,6 +164,10 @@ async function main() {
     NODE_OPTIONS: `--require ${junkMarkerPath}`,
     CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'poison-secret'),
     CLAUDE_BOARD_REF_ROOTS: '/',
+    // ADR.md entry 38: `/file/` and its allowlist are gone, so this name is neither an
+    // override nor a passthrough any more -- set here anyway, to prove a parent that
+    // still carries it (an operator's old shell export, a stale plist) cannot make it
+    // reach the daemon.
     CLAUDE_BOARD_SERVE_ROOTS: '/',
     CLAUDE_BOARD_HOME: '/tmp/poison-store',
     // A real, existing dylib -- not a nonexistent path. dyld reads DYLD_INSERT_LIBRARIES
@@ -210,7 +212,7 @@ async function main() {
   await check('acceptance criterion: the daemon receives only the explicitly named set of variables -- everything else is absent', async () => {
     const expectedNames = [
       'HOME', 'PATH',
-      'CLAUDE_BOARD_HOME', 'CLAUDE_BOARD_REF_ROOTS', 'CLAUDE_BOARD_SERVE_ROOTS',
+      'CLAUDE_BOARD_HOME', 'CLAUDE_BOARD_REF_ROOTS',
       'CLAUDE_BOARD_REPO_ROOT',
       'CLAUDE_BOARD_PORT', 'CLAUDE_BOARD_SHUTDOWN_MS', 'CLAUDE_BOARD_SSE_HEARTBEAT_MS',
       'CLAUDE_BOARD_TIMEOUT_MS', 'CLAUDE_BOARD_HANDOFF_TTL_MS', 'TMPDIR',
@@ -224,7 +226,10 @@ async function main() {
 
     // Named absences, called out individually rather than only through the set
     // comparison above, so a failure here says exactly which poison got through.
-    for (const poisoned of ['CLAUDE_BOARD_SECRET_FILE', 'DYLD_INSERT_LIBRARIES', 'NODE_PATH', 'A_TOTALLY_UNRELATED_JUNK_VARIABLE']) {
+    // CLAUDE_BOARD_SERVE_ROOTS is named here rather than among the overrides below: it is
+    // gone from the daemon's environment altogether (ADR.md entry 38), so a parent that
+    // still sets it (poisoned above, deliberately) must never see it reach the child.
+    for (const poisoned of ['CLAUDE_BOARD_SECRET_FILE', 'CLAUDE_BOARD_SERVE_ROOTS', 'DYLD_INSERT_LIBRARIES', 'NODE_PATH', 'A_TOTALLY_UNRELATED_JUNK_VARIABLE']) {
       assert.ok(!(poisoned in childEnv), `${poisoned} must be absent from the daemon's environment`);
     }
   });
@@ -234,7 +239,6 @@ async function main() {
     assert.equal(childEnv.PATH, compiledPath, 'PATH must be the compiled-in fixed literal');
     assert.equal(childEnv.CLAUDE_BOARD_HOME, compiledStore, 'CLAUDE_BOARD_HOME must be the compiled-in store, not the poisoned "/tmp/poison-store"');
     assert.equal(childEnv.CLAUDE_BOARD_REF_ROOTS, compiledRefRoots, 'CLAUDE_BOARD_REF_ROOTS must be the compiled-in value, not the poisoned "/"');
-    assert.equal(childEnv.CLAUDE_BOARD_SERVE_ROOTS, compiledServeRoots, 'CLAUDE_BOARD_SERVE_ROOTS must be the compiled-in value, not the poisoned "/"');
     assert.equal(childEnv.CLAUDE_BOARD_REPO_ROOT, compiledRepoRoot, 'CLAUDE_BOARD_REPO_ROOT must be the compiled-in clone path -- src/handoff.mjs recoveryCommand() needs it once CLAUDE_BOARD_DAEMON points inside the bundle');
   });
 

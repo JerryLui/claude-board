@@ -344,8 +344,7 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
      115.4px, and a hardcoded 88 then parks the target 27px BEHIND the header it
      was supposed to clear. One token, overridden in that same media query, so
      the two can never disagree again. Every scroll-margin-top on the page reads
-     it (.round for the round badge's jump, and a resync jumping a round
-     section to the top of the viewport). */
+     it (.round, whose top the pager scrolls to on every page flip). */
   --head-clear: 88px;
 }
 
@@ -494,28 +493,50 @@ body.readonly .send-bar { display: none; }
 body.readonly .round-end { display: none; }
 body.readonly input, body.readonly textarea, body.readonly button.card-choice { pointer-events: none; opacity: 0.7; }
 
+/* A page already sent is read-only (ADR.md entry 42) -- the guarantee the
+   deleted history rail carried, now carried by the pager: flipping back to a
+   sent round puts this class on <body> (src/ui.mjs's goToRound), flipping off it
+   takes it away. This is the THIRD lock on a sent round, not a replacement for
+   either of the two that already exist (the server renders its widgets
+   disabled, and markRoundHistory disables them live) -- it is the one that
+   reaches what neither of those can: the send bar, whose buttons live OUTSIDE
+   every round section and would otherwise still submit the open round from a
+   page that is not it. Same two-rule idiom body.readonly uses just above, for
+   the same reason (QUIRKS.md "Readonly is locked twice"). */
+body.sent-page .send-bar { display: none; }
+body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice { pointer-events: none; opacity: 0.7; }
+
 .blocks { display: flex; flex-direction: column; gap: var(--space-6); }
 
-/* a round is a session-scoped batch: open rounds render live, a sent round
-   collapses into a history rail -- still fully readable, never a second place to
-   edit the same answer (see PROTOCOL.md "Board document") */
-/* scroll-margin-top clears the sticky .board-head when the round badge
-   or a resync jumps a round section to the top of the
-   viewport. */
-.round { display: flex; flex-direction: column; gap: var(--space-4); scroll-margin-top: var(--head-clear); }
+/* a round is a session-scoped batch, and a PAGE of this board (ADR.md entry 42):
+   every round is rendered, exactly one carries .round-current, and only that one
+   is displayed. The history rail this replaced stacked a sent round above the
+   open one -- which a round that fills the viewport cannot do -- so the earlier
+   pages absorb its job and .round-pager (below) is how you reach them.
+
+   display:none rather than an off-screen position: nothing here is measured
+   while it is hidden (the pins and the round badge are recomputed on every flip,
+   src/ui.mjs's goToRound), and a hidden page must not add scroll height to the
+   page that IS showing.
+
+   scroll-margin-top clears the sticky .board-head when a flip scrolls the
+   arriving page's top back under it. */
+.round { display: none; flex-direction: column; gap: var(--space-4); scroll-margin-top: var(--head-clear); }
+.round.round-current { display: flex; }
 .round-label {
   align-self: flex-start;
   font-size: 10.5px; font-weight: 600; letter-spacing: 0.11em; text-transform: uppercase;
   color: var(--ink-2); background: var(--panel-2);
   border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 4px 12px;
 }
-/* a sent round steps back a layer instead of just fading: same readability, no
-   competition with the round that is actually asking for an answer */
-.round-history { position: relative; padding-left: var(--space-4); border-left: 2px solid var(--hairline-2); }
+/* a sent page reads as settled rather than live -- the surface half of "a page
+   already sent is read-only" (entry 42), alongside body.sent-page below. What
+   went with the rail is its GEOMETRY (the indent, the left border, the gap that
+   separated two stacked rounds); two rounds are never on screen together now, so
+   there is nothing left to separate or step back from. */
 .round-history .round-label { color: var(--muted); background: transparent; }
 .round-history .block { background: var(--history-bg); box-shadow: none; }
 .round-history .md-content, .round-history .question-prompt { opacity: 0.86; }
-.round + .round { padding-top: var(--space-5); }
 /* the round's own bottom -- a divider with a tag
    naming the round and its question count, so reaching it is a visible event
    rather than the absence of one (the round's top already has .round-label;
@@ -1071,6 +1092,50 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .questions-left-pill.visible { display: inline-flex; align-items: center; }
 .questions-left-pill:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
+
+/* --- the round pager: the board's pages, always both controls (ADR.md entry 42,
+   criterion 26) ---------------------------------------------------------------
+
+   Two positions, per the spec's decision: the pill sits bottom-centre and the
+   chevrons at the two edges. Both are position: fixed and both are siblings in
+   the markup rather than pill-wraps-chevrons -- the pill's own centring
+   transform would otherwise make it the containing block for anything fixed
+   inside it, pinning the chevrons to the pill instead of the viewport.
+
+   Never hidden, on any page: the pager is how a page board's reader reaches the
+   question round and how a question round's reader gets back to the artifact, so
+   unlike the send bar it survives body.page-board, body.sent-page and
+   body.readonly (an archive's rounds are pages too). Above the send bar's own
+   z-index, since on an ordinary round it sits in the bar's otherwise empty
+   left/centre -- the bar's contents are right-aligned. */
+.round-pager { position: fixed; z-index: 40; left: 50%; bottom: var(--space-4); transform: translateX(-50%);
+  display: flex; align-items: center; gap: 2px; max-width: min(560px, calc(100vw - 2 * var(--space-6)));
+  overflow-x: auto; background: var(--panel-2); border: 1px solid var(--hairline);
+  border-radius: var(--r-pill); padding: 4px; box-shadow: var(--shadow-2); }
+.round-page { background: none; border: none; border-radius: var(--r-pill); padding: 5px 12px;
+  font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer;
+  white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+  transition: color var(--dur) var(--ease); }
+.round-page:hover { color: var(--ink); }
+.round-page-current { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
+/* the dot on the round that still owes an answer -- the mark's amber, the hue
+   this board already spends on "waiting on you" (ADR.md entry 12). */
+.round-page-owed::after { content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px;
+  border-radius: 50%; background: var(--accent); vertical-align: middle; }
+.round-flip { position: fixed; z-index: 40; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 64px; display: flex; align-items: center; justify-content: center;
+  background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--hairline);
+  font: inherit; font-size: 20px; line-height: 1; cursor: pointer; box-shadow: var(--shadow-2);
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+.round-flip:hover:not(:disabled) { color: var(--ink); border-color: var(--hairline-2); }
+/* the ends of the board are dead ends, shown rather than hidden: a control that
+   vanishes at the first page is one the reviewer has to find again on the next.
+   (No digit after the word "round" anywhere in this stylesheet -- the index page
+   embeds it, and test/check-pure.mjs reads the whole page when it checks that a
+   row's round segment is a count and never an ordinal.) */
+.round-flip:disabled { opacity: 0.25; cursor: default; }
+.round-flip-prev { left: 0; border-left: none; border-radius: 0 var(--r-md) var(--r-md) 0; }
+.round-flip-next { right: 0; border-right: none; border-radius: var(--r-md) 0 0 var(--r-md); }
 .btn-send { background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; border-radius: var(--r-md);
   padding: 11px 24px; font: inherit; font-size: 13.5px; font-weight: 650; box-shadow: var(--shadow-2);
   transition: filter var(--dur) var(--ease), transform var(--dur) var(--ease); }
@@ -1312,6 +1377,132 @@ body.comment-mode .blocks { cursor: crosshair; }
 .rounds-left-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
   border-radius: var(--r-pill); padding: 4px 12px; }
+
+/* --- the page board: one rendered artifact, filling the viewport -------------
+   A board whose blocks are one html block and nothing else (src/render.mjs's
+   isPageBoard -- ADR.md entry 33, inferred from the board's shape, never
+   declared) renders the artifact edge to edge instead of in a porthole. Nothing
+   here is a new component: every rule below overrides a value the ordinary board
+   already sets, on one class src/render.mjs puts on <body> and src/ui.mjs takes
+   off again the moment a live round makes this an ordinary board.
+
+   Two geometry decisions carry the whole layout:
+
+   - the header FLOATS (position: fixed) rather than sticking. A sticky header is
+     in flow, so it would push a 100vh frame down by its own height and put the
+     artifact's last 80px below the fold with nothing able to scroll to it. Fixed
+     takes it out of flow, so the frame starts at the top of the viewport and the
+     document's height is exactly the frame's (ADR.md entry 40, whose condensing
+     behaviour lands on top of this).
+   - the frame is a CONSTANT 100vh and scrolls its own content; the page itself
+     does not scroll at all (ADR.md entry 34). Not min-height, not a height
+     grown from what the artifact reports: the rendered templates use
+     position: sticky and their own full-viewport <dialog>, and both of those
+     mean something only against a viewport-sized box. 'resize: none' drops the
+     drag handle for the same reason -- a frame the reviewer can resize is a
+     frame whose height changes while it is read.
+
+   The comment surface is what has to move (.page-comments, emitted only by the
+   page-board branch of renderHtmlBlock): a form under a 100vh frame is a form
+   below the fold on a page that cannot scroll, so it floats over the artifact
+   instead, bottom centre. Its panel only appears when it holds something -- the
+   form is display: none until a click inside the stage opens it, and a page
+   board's comment list is empty until a later round's submit -- so an empty
+   surround is never painted over the artifact. */
+body.page-board { overflow: hidden; }
+body.page-board .board-shell { max-width: none; padding: 0; }
+body.page-board .board-head { position: fixed; top: 0; left: 0; right: 0;
+  margin-bottom: 0; padding: var(--space-3) var(--space-5); }
+body.page-board .blocks { gap: 0; }
+body.page-board .round { gap: 0; }
+/* no card: the artifact is the surface, so the block's panel, hairline, radius,
+   padding and hover lift all go (the hover selector is repeated rather than
+   trusted to inherit -- '.round-open .block:hover' outranks a plain
+   'body.page-board .block'). */
+body.page-board .block, body.page-board .block:hover {
+  background: none; border: none; border-radius: 0; padding: 0; box-shadow: none; }
+body.page-board .html-stage { height: 100vh; min-height: 0; border: none; border-radius: 0; resize: none; }
+/* ADR.md entry 35: a page board is not sendable. Same idiom, same guarantee as
+   'body.readonly .send-bar' above -- the bar stays in the markup because a round
+   arriving over SSE turns this board into an ordinary one in place (src/ui.mjs's
+   applyRoundPush drops the class), and a queued comment needs it to leave on. */
+body.page-board .send-bar { display: none; }
+/* the archive's banner is in flow above the header, which would push the frame
+   off the bottom of a viewport that cannot scroll -- floated into the corner the
+   comment panel and the header both leave free. */
+body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom: var(--space-5);
+  z-index: 30; margin-bottom: 0; max-width: 320px; }
+/* raised clear of the round pager, which owns the bottom-centre strip on every
+   page (ADR.md entry 42): 44px is the pager's own height plus its gap. */
+.page-comments { position: fixed; z-index: 30; left: 50%; bottom: calc(var(--space-5) + 44px);
+  transform: translateX(-50%); width: min(640px, calc(100vw - 2 * var(--space-6)));
+  display: flex; flex-direction: column; }
+.page-comments:has(.comment-form.open), .page-comments:has(.comment-item) {
+  background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2); padding: var(--space-2) var(--space-4) var(--space-4); }
+
+/* --- chrome that gets out of the way (ADR.md entry 40) -----------------------
+   Reading the artifact condenses the header into a single pill, centred at the
+   top and floating over the page; scrolling back up expands it again. The
+   trigger is 'stage-scrolled', a second class src/ui.mjs puts on <body> when a
+   page board's stage reports that it has been scrolled -- the parent cannot see
+   inside an opaque-origin frame, so the fact is reported over the stage channel
+   (src/render.mjs's stageAgentScript) rather than observed here.
+
+   Everything condensing does is a change of BOX, never of flow: the header is
+   already 'position: fixed' above, so the frame under it stays a constant 100vh
+   through the whole cycle and a long artifact can never reflow mid-read. That
+   is the entire reason entry 40 chose an overlay over a header that pushes.
+
+   What condenses is the header's IDENTITY TEXT, not its controls. The title and
+   the thread/id line go; the mark, the comment-mode toggle, the theme control
+   and the round badge stay, so the pill is never decorative -- entry 40's
+   "the pill keeps the comment-mode toggle, so the mode is switched mid-read
+   rather than being suspended by the scroll". Hiding those two elements rather
+   than moving any control means there is still exactly ONE #comment-mode-toggle
+   in the document, condensed or not: a second copy could disagree with the
+   first about .active/aria-pressed, and src/ui.mjs's setCommentMode writes to
+   one element by design.
+
+   No transition: 'left: 0; right: 0' to 'left: 50%; right: auto' has no
+   interpolable midpoint, so an animation here would be a fiction. The state
+   change is a scroll away in either direction, which is its own feedback.
+
+   --head-clear (see :root) is untouched on purpose. It is a scroll-margin for
+   anchor jumps down a scrolling DOCUMENT, and a page board's document does not
+   scroll at all ('body.page-board { overflow: hidden }' above) -- the artifact
+   scrolls inside the frame. Nothing on a page board reads the token, so the
+   header's height changing here cannot make it wrong. */
+body.page-board.stage-scrolled .board-head {
+  left: 50%; right: auto; top: var(--space-3); transform: translateX(-50%);
+  gap: var(--space-3); padding: var(--space-2) var(--space-3);
+  background: var(--panel); border: 1px solid var(--hairline);
+  border-radius: var(--r-pill); box-shadow: var(--shadow-2);
+}
+body.page-board.stage-scrolled .board-head h1,
+body.page-board.stage-scrolled .board-head .meta { display: none; }
+
+/* the back-to-top control (ADR.md entry 40), in the questions-left pill's own
+   shape -- one visual object for "a pill floating at the bottom of the board",
+   deliberately not a second treatment. Two differences it has to have: it is
+   'position: fixed' rather than absolute inside .send-bar (the bar is
+   display:none on a page board AND in an archive, and this control has to
+   outlive both), and it sits bottom-RIGHT, because bottom-CENTRE belongs to the
+   round pager and two controls stacked on one point is a collision, not a
+   layout.
+
+   Hidden by default and turned on by '.visible' alone, the same single-decider
+   idiom as .questions-left-pill -- and for the same reason (QUIRKS.md: the
+   'hidden' attribute does nothing against our own stylesheet's display). */
+.back-to-top { display: none; position: fixed; z-index: 30;
+  right: var(--space-5); bottom: var(--space-5);
+  background: var(--panel-2); color: var(--ink-2);
+  border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 7px 16px;
+  font: inherit; font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-2);
+  cursor: pointer; white-space: nowrap;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.back-to-top.visible { display: inline-flex; align-items: center; }
+.back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a
    phone-width window without a horizontal scrollbar or a two-column squeeze --- */

@@ -118,6 +118,60 @@ check('PROTOCOL.md does not promise the wider "anything rendered" commenting rul
   assert.doesNotMatch(protocol, /regardless of kind/i);
 });
 
+// --- what an artifact must be -----------------------------------------------------
+// The two rules the manual is the single home for: `/visualize`, `/explain` and `/gamify`
+// cite it rather than restating them, so a rule that drifts out of this file is a rule
+// that exists nowhere. Both are mechanism, not taste — a stage renders in an opaque-origin
+// frame and an opaque origin resolves no relative URL (ADR.md entry 32), and outside a page
+// board the frame's height is whatever the stage reports (entries 33, 41). The third entry
+// is the shape rule those two hang off: it is invisible at the call site, so a caller that
+// posts a second block loses the layout with nothing to tell it so.
+const ARTIFACT_RULES = {
+  'an artifact is one self-contained file': [
+    /self-contained/i, /`data:`/, /opaque-origin/i, /relative URL/i,
+  ],
+  'a stage is sized from its own content': [
+    /sizes itself from its own content, never from the viewport/i,
+    /the frame's height is derived from what the stage reports/i,
+  ],
+  'one `html` block and nothing else is a page board': [
+    /page board/i, /one `html` block and nothing else/i,
+  ],
+};
+const statesRule = (text, patterns) => patterns.every(p => p.test(norm(text)));
+for (const [rule, patterns] of Object.entries(ARTIFACT_RULES)) {
+  check(`the manual states that ${rule}`, () => {
+    for (const p of patterns) assert.match(norm(prose), p, `manual is missing: ${p}`);
+  });
+}
+check('the manual states the fallback a rendered artifact takes when the board is down', () => {
+  // `/visualize`, `/explain` and `/gamify` used to each carry their own version of this,
+  // and each one was really a note about the deleted `/file/` link. They now cite the
+  // manual instead, which makes this sentence the only place the fallback exists: an
+  // artifact survives the board being down because it is already a file, so the agent
+  // opens it and says where. Lose the sentence and three skills fall silent at exactly
+  // the moment the reviewer has nothing else to look at.
+  assert.match(norm(prose), /it is a file on disk, so `open` it and say where it is/i);
+  assert.match(norm(prose), /nothing else points at it/i);
+});
+check('the fallback check fails on prose that lost the open-it-and-say-where rule', () => {
+  // Normalized first: the sentence wraps across two source lines, so the drift has to be
+  // applied to the same whitespace-normalized text the check above matches against.
+  assert.doesNotMatch(norm(prose).replace(/`open` it and say where it is/g, ''),
+    /it is a file on disk, so `open` it and say where it is/i);
+});
+check('the manual points at no served file, now that the route is gone', () => {
+  // ADR.md entry 38 deleted `GET /file/`; the drift this guards against is the manual's
+  // pointer section outliving the route it documented, so reinstating one line of that
+  // section must trip the check.
+  assert.doesNotMatch(prose, /\/file\//, 'the manual still documents the deleted /file/ route');
+  const reverted = prose.replace(
+    '## Posting a rendered artifact',
+    '## Pointing at a rendered file\n\nlink to `http://127.0.0.1:<port>/file/<basename>`\n\n## Posting a rendered artifact',
+  );
+  assert.match(reverted, /\/file\//, 'the section being reverted no longer exists in the manual');
+});
+
 // --- the other direction --------------------------------------------------------
 // A check that only ever passes is worth nothing (test/check-prose-check.mjs's own
 // rule, applied here). The absence checks above are the ones at risk of being vacuous —
@@ -144,6 +198,18 @@ check('the trap checks fail on prose that lost the status-not-choice rule', () =
 check('the commenting-rule check fails on prose that lost the narrowed rule', () => {
   const text = norm(prose).replace(COMMENTABLE_RULE, '');
   assert.ok(!text.includes(COMMENTABLE_RULE), 'removing the rule did not fail the rule check');
+});
+check('the artifact-rule checks fail on prose that lost the self-contained rule', () => {
+  assert.ok(!statesRule(drifted(/self-contained/g), ARTIFACT_RULES['an artifact is one self-contained file']),
+    'dropping the self-contained rule from the manual did not fail its check');
+});
+check('the artifact-rule checks fail on prose that lost the sizing rule', () => {
+  assert.ok(!statesRule(drifted(/never from the viewport/g), ARTIFACT_RULES['a stage is sized from its own content']),
+    'dropping the sizing rule from the manual did not fail its check');
+});
+check('the artifact-rule checks fail on prose that lost the page-board shape rule', () => {
+  assert.ok(!statesRule(drifted(/one `html` block and nothing else/g), ARTIFACT_RULES['one `html` block and nothing else is a page board']),
+    'dropping the page-board shape rule from the manual did not fail its check');
 });
 check('the commenting-rule absence check fails if the manual regains the old claim', () => {
   // The exact sentence SKILL.md carried before this pass:

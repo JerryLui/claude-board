@@ -28,9 +28,9 @@
 #      always already is, so the two fight rather than compose; see QUIRKS.md
 #      "WatchPaths does not restart the daemon".)
 #      The dict carries CLAUDE_BOARD_PORT and, on the DEGRADED (no-launcher) path only,
-#      CLAUDE_BOARD_REF_ROOTS/SERVE_ROOTS/HOME too: a launchd job inherits nothing from
+#      CLAUDE_BOARD_REF_ROOTS/HOME too: a launchd job inherits nothing from
 #      your shell, so any knob the daemon reads from the environment has to be written
-#      here or it may as well not exist. With a launcher bundle in use, those three are
+#      here or it may as well not exist. With a launcher bundle in use, those two are
 #      baked into the bundle instead (step 1b, bin/launcher.c) and deliberately left out
 #      of this dict — see "the plist stops carrying what the launcher now bakes" at step
 #      2, and SECURITY.md "Known limits of that..." / "Fixed 2026-08-04: the environment
@@ -103,12 +103,14 @@ SKILL_DEST_DIR="$SKILLS_DIR/claude-board"
 # Needed before the roots/store resolution just below, which now carries a previous
 # choice forward by reading it back from here rather than from the plist -- see that
 # resolution's comments and "Carry-forward across reinstalls" further down. The
-# directory itself is created (0700) in step 0; these three are just its filenames,
-# alongside the secret and the launcher build stamp it already holds.
+# directory itself is created (0700) in step 0; these are just its filenames, alongside
+# the secret and the launcher build stamp it already holds.
 SECRET_DIR="$(dirname "$SECRET_FILE")"
 REF_ROOTS_RECORD_FILE="$SECRET_DIR/ref_roots"
-SERVE_ROOTS_RECORD_FILE="$SECRET_DIR/serve_roots"
 BOARD_HOME_RECORD_FILE="$SECRET_DIR/board_home"
+# `/file/` and its allowlist are gone (ADR.md entry 38); this is only the old record's
+# filename, kept so the cleanup below can name and delete whatever an older install left.
+SERVE_ROOTS_RECORD_FILE="$SECRET_DIR/serve_roots"
 
 # The launcher's compiled-in PATH (bin/launcher.c, launcher_paths.h below): the daemon
 # shells out to `osascript` and `open`, and an inherited PATH would hand a TCC-granted
@@ -163,11 +165,9 @@ BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
 # of it is settings.json, .credentials.json, shell snapshots and
 # every project's transcripts, none of which a board has a reason to quote.
 # `CLAUDE_BOARD_REF_ROOTS=$HOME/.claude ./install.sh` still installs the whole tree for
-# anyone who wants it. The fourth entry is the render directory (2026-08-05), the same
-# one DEFAULT_SERVE_ROOTS names below: an agent that just rendered a stage needs a place
-# to reference it FROM, or it inlines the bytes into the post instead. Referencing and
-# serving remain separate grants on separate variables -- this adds the directory to the
-# narrower one only. Keep all four in step with DEFAULT_REF_ROOTS in src/resolve.mjs;
+# anyone who wants it. The fourth entry is the render directory (2026-08-05): an agent
+# that just rendered a stage needs a place to reference it FROM, or it inlines the bytes
+# into the post instead. Keep all four in step with DEFAULT_REF_ROOTS in src/resolve.mjs;
 # test/check-install.mjs asserts they match.
 #
 # This is also the ONLY place the default exists: src/resolve.mjs reads an
@@ -186,12 +186,19 @@ BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
 # says (originally the plist; now $REF_ROOTS_RECORD_FILE, next to the secret — see
 # "Carry-forward across reinstalls" below and the resolution just under this comment),
 # and only a machine with neither at all gets the default. The resolved value is printed
-# either way, so it is never a silent choice. The consequence worth naming: a machine
-# that still says `~/.claude` from before the narrowing keeps it until someone says
-# otherwise. That is the safe direction of the two — an upgrade may not widen what an
-# operator narrowed, and it may not narrow what they widened either, because both are
-# their call and not this script's.
+# either way, so it is never a silent choice.
+#
+# Carrying forward is not freezing, though (ADR.md entry 36). A carried-forward record
+# is checked against today's DEFAULT_REF_ROOTS below, and any directory the defaults name
+# that the record is missing is added back in and the addition is printed by name — the
+# consequence found in use: `~/Documents/renders` has been a default for a while, and a
+# record written before it joined stayed short of it forever, on every reinstall, with no
+# way for a `git pull` to fix it. Narrowing still survives, but only for directories the
+# current defaults do NOT name; the ones they do are re-added regardless of what an
+# operator once removed. Wanting a genuinely narrow list now takes an explicit
+# `CLAUDE_BOARD_REF_ROOTS=...` rather than relying on the record's inertia.
 DEFAULT_REF_ROOTS="$HOME/.claude/skills:$HOME/.claude/commands:$HOME/.claude/agents:$HOME/Documents/renders"
+REF_ROOTS_CARRIED=0
 if [ -n "${CLAUDE_BOARD_REF_ROOTS+set}" ]; then
   REF_ROOTS="$CLAUDE_BOARD_REF_ROOTS"
   REF_ROOTS_FROM="CLAUDE_BOARD_REF_ROOTS"
@@ -203,48 +210,55 @@ elif [ -f "$REF_ROOTS_RECORD_FILE" ]; then
   # instead of the plist.
   REF_ROOTS="$(cat "$REF_ROOTS_RECORD_FILE")"
   REF_ROOTS_FROM="carried forward from $REF_ROOTS_RECORD_FILE"
+  REF_ROOTS_CARRIED=1
 elif REF_ROOTS="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS raw -o - "$PLIST_PATH" 2>/dev/null)"; then
   # One-time migration fallback, for a plist from before the record file existed -- back
   # when the plist itself was the only carry-forward mechanism there was. Exit 0 means
-  # the key was there, empty string included -- which is exactly the value that must
-  # survive an upgrade, since it is the one that narrows. Written into the record file
-  # below, so this branch fires at most once per machine.
+  # the key was there, empty string included -- an empty carried value is a real value
+  # to migrate, not a missing one. It does NOT survive as-is: REF_ROOTS_CARRIED=1 sends
+  # it through the widening loop below like any other carried record (ADR.md entry 36),
+  # so an empty one comes out holding today's defaults, named on screen. Only the
+  # explicit-env branch above pins a narrow list. Written into the record file below, so
+  # this branch fires at most once per machine.
   REF_ROOTS_FROM="carried forward from $PLIST_PATH (migrated to $REF_ROOTS_RECORD_FILE)"
+  REF_ROOTS_CARRIED=1
 else
   REF_ROOTS="$DEFAULT_REF_ROOTS"
   REF_ROOTS_FROM="default"
 fi
 
-# CLAUDE_BOARD_SERVE_ROOTS: where `GET /file/<path>` may read from. Resolved with the
-# same precedence as the reference roots above, and for the same reasons — an explicit
-# variable wins (empty included), otherwise the installed plist is carried forward, and
-# only a machine with no plist gets the default. src/resolve.mjs reads an absent value as
-# an empty allowlist, i.e. the route is off, so the default lives here and nowhere else.
-#
-# It is a SEPARATE variable from the reference roots, deliberately, and the difference is
-# a real escalation rather than bookkeeping: a referenced file is escaped into a board
-# block, while a served file is a live document at the daemon's own origin. Sharing one
-# list would have turned every existing install's reference roots into serve roots on the
-# next `git pull`, which is precisely the silent widening the paragraph above refuses.
-#
-# The default is the one directory the render skills write into. A machine without it
-# installs fine and serves nothing: src/resolve.mjs drops a root that does not exist,
-# rather than failing the install or widening to its parent.
-DEFAULT_SERVE_ROOTS="$HOME/Documents/renders"
-if [ -n "${CLAUDE_BOARD_SERVE_ROOTS+set}" ]; then
-  SERVE_ROOTS="$CLAUDE_BOARD_SERVE_ROOTS"
-  SERVE_ROOTS_FROM="CLAUDE_BOARD_SERVE_ROOTS"
-elif [ -f "$SERVE_ROOTS_RECORD_FILE" ]; then
-  # Same carry-forward replacement as CLAUDE_BOARD_REF_ROOTS above, and for the same
-  # reason: the plist stops carrying this once a launcher bundle is in use.
-  SERVE_ROOTS="$(cat "$SERVE_ROOTS_RECORD_FILE")"
-  SERVE_ROOTS_FROM="carried forward from $SERVE_ROOTS_RECORD_FILE"
-elif SERVE_ROOTS="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_SERVE_ROOTS raw -o - "$PLIST_PATH" 2>/dev/null)"; then
-  # One-time migration fallback -- see the identical branch on CLAUDE_BOARD_REF_ROOTS.
-  SERVE_ROOTS_FROM="carried forward from $PLIST_PATH (migrated to $SERVE_ROOTS_RECORD_FILE)"
-else
-  SERVE_ROOTS="$DEFAULT_SERVE_ROOTS"
-  SERVE_ROOTS_FROM="default"
+# ADR.md entry 36: a carried-forward record does not get to permanently miss a default
+# the way an operator's deliberate narrowing does. Walk today's defaults and add back
+# whichever ones the carried-forward value is missing; REF_ROOTS_WIDENED collects exactly
+# what got added, so the print block below can name it -- the print is load-bearing, not
+# decoration, since a read allowlist growing with nothing on screen is the failure this
+# whole mechanism exists to prevent. Explicit-env and default-value roots skip this: an
+# operator who just set the variable meant exactly what they typed, and the default
+# already names everything there is to add.
+REF_ROOTS_WIDENED=""
+if [ "$REF_ROOTS_CARRIED" -eq 1 ]; then
+  OLD_IFS="$IFS"
+  IFS=:
+  for default_dir in $DEFAULT_REF_ROOTS; do
+    IFS="$OLD_IFS"
+    case ":$REF_ROOTS:" in
+      *":$default_dir:"*) ;;
+      *)
+        if [ -z "$REF_ROOTS" ]; then
+          REF_ROOTS="$default_dir"
+        else
+          REF_ROOTS="$REF_ROOTS:$default_dir"
+        fi
+        if [ -z "$REF_ROOTS_WIDENED" ]; then
+          REF_ROOTS_WIDENED="$default_dir"
+        else
+          REF_ROOTS_WIDENED="$REF_ROOTS_WIDENED:$default_dir"
+        fi
+        ;;
+    esac
+    IFS=:
+  done
+  IFS="$OLD_IFS"
 fi
 
 # CLAUDE_BOARD_HOME, resolved the same way and for the same reason. It is
@@ -298,12 +312,12 @@ else
   echo "    reference roots: none (a reference resolves inside the board project directory only)"
 fi
 echo "                     [$REF_ROOTS_FROM]"
-if [ -n "$SERVE_ROOTS" ]; then
-  echo "    serve roots:     $SERVE_ROOTS"
-else
-  echo "    serve roots:     none (/file serves nothing)"
+# ADR.md entry 36: the widen is silent otherwise, and a read allowlist growing without
+# being asked is exactly what the carry-forward existed to prevent -- so this line is
+# printed whenever REF_ROOTS_WIDENED is non-empty, never folded into the line above.
+if [ -n "$REF_ROOTS_WIDENED" ]; then
+  echo "                     widened by the current defaults: $REF_ROOTS_WIDENED"
 fi
-echo "                     [$SERVE_ROOTS_FROM]"
 # Printed for the same reason the roots are: the store is where the reviewer's answers
 # end up, and an operator who redirected it should be able to see that it took.
 if [ -n "$BOARD_HOME_FROM" ]; then
@@ -400,12 +414,15 @@ fi
 # one, so an install that never mentions CLAUDE_BOARD_HOME keeps resolving the daemon's
 # own default rather than freezing today's default in as a future explicit choice.
 printf '%s' "$REF_ROOTS" > "$REF_ROOTS_RECORD_FILE"
-printf '%s' "$SERVE_ROOTS" > "$SERVE_ROOTS_RECORD_FILE"
 if [ -n "$BOARD_HOME_FROM" ]; then
   printf '%s' "$BOARD_HOME" > "$BOARD_HOME_RECORD_FILE"
 else
   rm -f "$BOARD_HOME_RECORD_FILE"
 fi
+# ADR.md entry 38: `/file/` and its allowlist are gone, so there is nothing left to carry
+# this record forward for. An install that predates the deletion left one behind; this
+# removes it on the very next run rather than leaving a stale file nothing reads again.
+rm -f "$SERVE_ROOTS_RECORD_FILE"
 
 # --- content hashing helpers -------------------------------------------------
 # Used below by the launcher bundle step to decide whether it needs rebuilding.
@@ -632,8 +649,8 @@ else
  * compiled in rather than read from argv. CLAUDE_BOARD_DAEMON here is the path INSIDE
  * the bundle (Contents/Resources/bin/daemon.mjs) now that install.sh stages the daemon's
  * own code there — see "the launcher app bundle" above — not the clone's bin/daemon.mjs.
- * The six below them are the environment that exec gets — HOME, PATH, the three
- * CLAUDE_BOARD_* variables that decide what the daemon may read, serve and write, and
+ * The five below them are the environment that exec gets — HOME, PATH, the two
+ * CLAUDE_BOARD_* variables that decide what the daemon may read and write, and
  * CLAUDE_BOARD_REPO_ROOT, which decides none of those but is baked in for the identical
  * reason: it is what src/handoff.mjs's recoveryCommand() prints as the path to
  * bin/authorize.mjs, and that file is the clone's, not the bundle's (authorize.mjs is
@@ -648,7 +665,6 @@ else
 #define CLAUDE_BOARD_PATH "$(c_escape "$LAUNCHER_CHILD_PATH")"
 #define CLAUDE_BOARD_STORE_DIR "$(c_escape "$EFFECTIVE_BOARD_HOME")"
 #define CLAUDE_BOARD_REF_ROOTS_VALUE "$(c_escape "$REF_ROOTS")"
-#define CLAUDE_BOARD_SERVE_ROOTS_VALUE "$(c_escape "$SERVE_ROOTS")"
 #define CLAUDE_BOARD_REPO_ROOT_VALUE "$(c_escape "$REPO_DIR")"
 HEADER
 
@@ -854,25 +870,22 @@ else
 		<string>${DAEMON_PATH_X}</string>"
 fi
 
-# CLAUDE_BOARD_REF_ROOTS, CLAUDE_BOARD_SERVE_ROOTS and CLAUDE_BOARD_HOME: written into
-# this dict only on the DEGRADED path. When a launcher bundle is in use it bakes all
-# three into itself instead (step 1b above, bin/launcher.c's OVERRIDE_ENV) and ignores
-# whatever this dict says for them — so leaving them here too would be a second copy of
-# a decision the plist no longer makes, and one that reads as though rewriting the plist
-# could still move the boundary when it cannot. Without a launcher, node runs directly
-# and reads its environment from here because there is nowhere else for it to come from,
-# so the degraded plist carries exactly what it always did: every value below is
-# unconditional in that branch, same as before this change, because src/resolve.mjs
-# reads an absent key as no allowlist at all rather than as "ask the launcher".
+# CLAUDE_BOARD_REF_ROOTS and CLAUDE_BOARD_HOME: written into this dict only on the
+# DEGRADED path. When a launcher bundle is in use it bakes both into itself instead
+# (step 1b above, bin/launcher.c's OVERRIDE_ENV) and ignores whatever this dict says for
+# them — so leaving them here too would be a second copy of a decision the plist no
+# longer makes, and one that reads as though rewriting the plist could still move the
+# boundary when it cannot. Without a launcher, node runs directly and reads its
+# environment from here because there is nowhere else for it to come from, so the
+# degraded plist carries exactly what it always did: every value below is unconditional
+# in that branch, same as before this change, because src/resolve.mjs reads an absent key
+# as no allowlist at all rather than as "ask the launcher".
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   EXTRA_ENV_XML=""
 else
   REF_ROOTS_X="$(xml_escape "$REF_ROOTS")"
-  SERVE_ROOTS_X="$(xml_escape "$SERVE_ROOTS")"
   EXTRA_ENV_XML="		<key>CLAUDE_BOARD_REF_ROOTS</key>
 		<string>${REF_ROOTS_X}</string>
-		<key>CLAUDE_BOARD_SERVE_ROOTS</key>
-		<string>${SERVE_ROOTS_X}</string>
 "
   # Emitted only when the operator actually chose a store root, so a degraded install
   # that never mentions CLAUDE_BOARD_HOME produces a byte-identical dict to before and

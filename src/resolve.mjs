@@ -84,17 +84,14 @@ export const MAX_REF_BYTES = 512 * 1024;
  * board has a reason to quote. Anyone who wants the whole tree can still say so:
  * `CLAUDE_BOARD_REF_ROOTS=~/.claude` does precisely what it says.
  *
- * The fourth is the render directory, added 2026-08-05, and it is the same directory
- * `DEFAULT_SERVE_ROOTS` already names: the one the render skills write into. Without it
- * an agent that has just rendered a stage has no place to reference it FROM, so it
- * inlines the bytes into the post instead: measured at ~7KB per variant option against
- * one line for a ref, for a byte-identical board. Note what this does NOT do: referencing
- * and serving stay separate grants on separate variables (see `openServed`), and this
- * only adds the directory to the narrower of the two. A world-writable shared directory
- * (`/tmp` was the proposal this replaced) was rejected for a default: every install would
- * inherit it on the next `git pull`, and a reference root is a place the daemon reads on
- * an agent's say-so, so it should be one only this user can write to. Anyone who wants
- * `/tmp` anyway can name it: `CLAUDE_BOARD_REF_ROOTS=...:/tmp`. */
+ * The fourth is the render directory, added 2026-08-05: the one the render skills write
+ * into. Without it an agent that has just rendered a stage has no place to reference it
+ * FROM, so it inlines the bytes into the post instead: measured at ~7KB per variant
+ * option against one line for a ref, for a byte-identical board. A world-writable shared
+ * directory (`/tmp` was the proposal this replaced) was rejected for a default: every
+ * install would inherit it on the next `git pull`, and a reference root is a place the
+ * daemon reads on an agent's say-so, so it should be one only this user can write to.
+ * Anyone who wants `/tmp` anyway can name it: `CLAUDE_BOARD_REF_ROOTS=...:/tmp`. */
 export const DEFAULT_REF_ROOTS = Object.freeze([
   '~/.claude/skills',
   '~/.claude/commands',
@@ -592,98 +589,6 @@ export function resolveRef(ref, { cwd, roots } = {}) {
   if (sliced.error) return { error: sliced.error };
 
   return { text: sliced.text, sha: sha256(sliced.text) };
-}
-
-/** Open a file for the daemon to serve back verbatim, confined to `roots`.
- *
- * This is `resolveRef`'s sibling for a DIFFERENT job, and the difference is the whole
- * reason it is a separate function rather than a flag. `resolveRef` reads bytes to put
- * INSIDE a board — confined to the board's `cwd`, capped, sliceable, and rendered under
- * the board's own CSP. This one hands back a descriptor whose bytes leave untouched, so
- * a rendered document opens at full size in its own tab instead of inside a 320px stage.
- * Nothing here slices, caps or transcodes: "as-is" is the feature.
- *
- * Consequently the allowlist is its OWN env var (`CLAUDE_BOARD_SERVE_ROOTS`), never
- * `CLAUDE_BOARD_REF_ROOTS`, and absent still means empty — i.e. serving is off until
- * someone names a directory on purpose. Serving is a strictly larger grant than
- * referencing: a referenced HTML file is escaped into a board block, while a served one
- * is a live document at the daemon's own origin, which is the escalation src/server.mjs's
- * `frame-ancestors` comment already worries about. Sharing one allowlist would have
- * widened every existing install's reference roots into serve roots on a `git pull`,
- * which is exactly the silent-widening failure `resolveRefRoots` refuses to commit.
- *
- * `relPath` is the already-percent-decoded path from the URL, resolved against each root
- * in order; the first root that yields a regular file wins. A collision between two roots
- * is therefore decided by their order in the env var and nothing else (ponytail: no
- * disambiguation, since the expected configuration is one directory. The upgrade path, if
- * a second root ever earns its keep, is a root name as the URL's first segment).
- *
- * A directory resolves to `index.html` inside it, so the folder listing a generator
- * already writes is what `/file/` answers with. There is no generated listing here: the
- * daemon serves files, it does not enumerate them.
- *
- * Every refusal is the SAME refusal — `{ error }` with no detail, which the caller turns
- * into a bare 404. Traversal, a symlink aimed out of a root, a fifo, a missing file and a
- * root nobody configured are indistinguishable from outside, for the same reason: a
- * route that answers differently for "not there" and "there but refused" is an
- * existence oracle for the whole disk, and this one is reachable by any page the browser
- * has already been authorized to load.
- *
- * Returns `{ fd, size }` — the CALLER owns that descriptor and must close it. */
-export function openServed(relPath, roots) {
-  const refused = { error: 'not found' };
-  if (!Array.isArray(roots) || roots.length === 0) return refused;
-  if (typeof relPath !== 'string' || relPath.includes('\0')) return refused;
-
-  // Lexical rejection before any syscall. `path.join` would happily collapse `../` into
-  // an escape, and while the realpath containment check below catches that anyway, a
-  // path that SPELLS an escape is never a legitimate request -- refusing it here means
-  // the containment check is a backstop rather than the only line.
-  const segments = relPath.split('/').filter(Boolean);
-  if (segments.some(s => s === '..' || s === '.')) return refused;
-  if (path.isAbsolute(relPath)) return refused;
-
-  for (const root of roots) {
-    let real;
-    try {
-      real = realpathSync(path.join(root, ...segments));
-    } catch {
-      continue; // dangling, unreadable, a loop -- all one answer, and try the next root
-    }
-    if (real !== root && !contains(root, real)) continue; // symlink aimed out of the root
-
-    let target = real;
-    try {
-      if (statSync(real).isDirectory()) {
-        target = realpathSync(path.join(real, 'index.html'));
-        if (!contains(root, target)) continue;
-      }
-    } catch {
-      continue; // a directory with no index.html is not a listing, it is a 404
-    }
-
-    // From here it is resolveRef's discipline exactly: one descriptor, opened with
-    // symlinks refused (so an ELOOP means the tree moved between the realpath above and
-    // this line), and every guard interrogating that descriptor rather than the name.
-    let fd;
-    try {
-      fd = openSync(target, REF_OPEN_FLAGS);
-    } catch {
-      continue;
-    }
-    try {
-      const st = fstatSync(fd);
-      if (!st.isFile()) {
-        closeSync(fd);
-        continue; // a fifo would wedge the daemon's only thread; a device would eat it
-      }
-      return { fd, size: st.size, path: target };
-    } catch {
-      try { closeSync(fd); } catch { /* already gone */ }
-      continue;
-    }
-  }
-  return refused;
 }
 
 // Best-effort file-extension -> language guess for a resolved code block's `lang`

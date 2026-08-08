@@ -119,8 +119,10 @@ claude-board:ask(title, blocks[])
 A tab opens on the first call. Answer what you want, leave the rest unanswered —
 unanswered comes back explicitly marked, never defaulted — add a note beside any answer,
 click **comment mode** and click any element of an HTML stage or a diagram to attach a
-comment to it, then **Send**. Follow-up rounds push into the same tab, with the previous
-round collapsed into a history rail and its answers still readable.
+comment to it, then **Send**. Follow-up rounds push into the same tab as new pages: the
+chevrons at the edges flip between rounds (so do the left and right arrow keys) and the
+pill at the bottom names them and jumps to one, with every earlier round still readable
+and no longer editable.
 
 Two other ways out, beside Send: **Discuss in chat** returns immediately with whatever
 is filled in and tells the agent to stop posting boards, and a wall-clock cap (default

@@ -42,20 +42,24 @@
 // crash; ./install.sh restarts it to take an update).
 
 import http from 'node:http';
-import { createReadStream, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { readBoard, writeBoard, writePage, boardHome, listBoards, searchBoards } from './store.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments } from './board.mjs';
+import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments, questionBlocks } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
+// The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
+// imported rather than restated so the push path and the page path can never
+// disagree about what a page round is -- see buildRoundPushPayload below.
+import { isPageRound } from './badge.mjs';
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
-import { openServed, resolveRefRoots } from './resolve.mjs';
+import { resolveRefRoots } from './resolve.mjs';
 
 // Declared in src/handoff.mjs (which this module imports, so it cannot import back) and
 // re-exported here, where every caller has always looked for it.
@@ -414,113 +418,6 @@ function sendText(res, status, text) {
   res.end(text);
 }
 
-// `/file/` serves bytes the daemon did not author, so it gets its own policy rather than
-// the board `CSP` above. Three clauses are load-bearing and the rest is habit:
-//
-//   script-src 'self'   a rendered document loads its own vendored engine (the whole
-//                       complaint that started this: the board CSP names no 'self', so a
-//                       document embedded in a stage lost its diagrams to a CDN fallback)
-//   connect-src 'none'  and this is the one that matters. The session cookie is
-//                       HttpOnly and SameSite=Strict, so a served document cannot READ
-//                       it -- but it is same-origin with /api/board, and a plain
-//                       `fetch('/api/board/<id>/submit', {credentials:'same-origin'})`
-//                       would carry that cookie and answer a question as the reviewer.
-//                       'none' is what makes a served file inert toward the daemon.
-//   form-action 'none'  the same escalation, spelled as a <form> instead of a fetch.
-//
-// What this deliberately does NOT stop: a top-level navigation from a served page to a
-// daemon URL. Those are GETs against read routes, they land in a visible tab rather than
-// in script, and blocking them would need `navigate-to`, which no shipping browser has.
-const SERVE_CSP = [
-  "default-src 'none'",
-  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data:",
-  "media-src 'self'",
-  "connect-src 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-  "base-uri 'none'",
-].join('; ');
-
-// Enough types for a rendered document and the assets one carries. An unknown extension
-// is served as a download rather than guessed at: `nosniff` is on every response, so an
-// octet-stream is inert in a way a mis-guessed `text/html` would not be.
-const SERVE_TYPES = {
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-  '.txt': 'text/plain; charset=utf-8',
-  '.md': 'text/plain; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.avif': 'image/avif',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-};
-
-/** The serve allowlist, read per request for the same reason `resolveRefRoots` is:
- * a handful of syscalls, and a user who edits the env var sees the effect without a
- * fresh daemon. Absent means empty, which means `/file/` is a 404 for everything. */
-function serveRoots() {
-  return resolveRefRoots(process.env.CLAUDE_BOARD_SERVE_ROOTS);
-}
-
-/** `GET /file/<path>` — a file from a serve root, byte for byte.
- *
- * Behind the read gate like every other non-open route, so only a browser holding the
- * session cookie gets here. Streamed from the descriptor `openServed` already opened and
- * fstat'd, never re-opened by name: the file that passed the guards is the file that is
- * sent. There is no byte cap, unlike a reference — the point of this route is a whole
- * document plus a multi-megabyte diagram engine, and nothing is buffered to reach it. */
-function handleServeFile(req, res, relPath) {
-  const opened = openServed(relPath, serveRoots());
-  if (opened.error) return sendText(res, 404, 'not found');
-
-  const stream = createReadStream('', { fd: opened.fd, autoClose: true });
-  stream.on('error', () => {
-    // Mid-stream failure: the head is already out, so there is no status left to send
-    // and the honest move is a truncated body rather than a lie about its length.
-    res.destroy();
-  });
-  res.writeHead(200, {
-    'content-type': SERVE_TYPES[path.extname(opened.path).toLowerCase()] || 'application/octet-stream',
-    'content-length': String(opened.size),
-    'content-security-policy': SERVE_CSP,
-    'x-content-type-options': 'nosniff',
-    'x-frame-options': 'DENY',
-    'referrer-policy': 'no-referrer',
-    // CSP is per-REALM, so connect-src 'none' below only binds fetches this document
-    // makes -- it says nothing about a same-origin window it opens. A served document is
-    // same-origin with the board pages, so `window.open('/b/<id>')` used to hand it a
-    // live WindowProxy whose realm carries connect-src 'self' AND 'unsafe-inline': the
-    // opened board could be scripted directly, read, and submitted as the reviewer.
-    // Board pages send no COOP, so a `same-origin` header here puts this document in its
-    // own browsing-context group and the opener handle comes back severed.
-    'cross-origin-opener-policy': 'same-origin',
-    // These are local files a generator rewrites in place under a stable name; a
-    // reviewer reloading after a re-render must not get yesterday's document.
-    'cache-control': 'no-store',
-  });
-  // pipe() does not destroy the source when the destination goes away, and autoClose
-  // only fires on the stream's OWN end/error -- so every aborted download leaked a
-  // descriptor. This daemon runs for days under KeepAlive, and at the fd ceiling every
-  // route fails (openSync, readFileSync, atomicWrite) WITHOUT the process exiting, so
-  // KeepAlive never restarts it. Measured: 300 aborts, 300 leaked descriptors.
-  res.on('close', () => stream.destroy());
-  stream.pipe(res);
-}
-
 function boardUrl(req, id) {
   return `http://${req.headers.host}/b/${id}`;
 }
@@ -581,15 +478,35 @@ function resolveBoardComments(board) {
  * 'new-round' (a fresh round section, rendered via renderRoundSection so a later
  * full reload is byte-identical to what the push already inserted) or 'amend' (the
  * round is unchanged, only specific blocks inside it were added or replaced, so the
- * fragment is just those blocks via renderBlock, with no round wrapper). */
-function buildRoundPushPayload(board, round, mode, blockIds) {
+ * fragment is just those blocks via renderBlock, with no round wrapper).
+ *
+ * Both modes derive `fullpage` from the round's own shape rather than being told
+ * it, and the amend branch has to do so explicitly because it renders blocks
+ * without a round wrapper: renderRoundSection derives it for the 'new-round'
+ * branch (src/render.mjs), and passing nothing here meant `false` -- so an
+ * amended page-board block came back as an ORDINARY stage while a reload of the
+ * same board still rendered it as a page. That is the one thing this function's
+ * own contract forbids: the push and a later full reload must be byte-identical
+ * for the same board. Live, the difference is visible damage rather than a
+ * cosmetic drift -- the fragment resurrects a kicker and an expand control over
+ * a 100vh frame (criteria 1 and 25) and drops `.page-comments`, which drops the
+ * comment form below the fold of a page that cannot scroll (criterion 5) --
+ * and applyRoundPush replaces the block outright, so nothing repairs it short of
+ * a reload.
+ *
+ * Exported for test/check-page-board.mjs, which builds the payload for a
+ * page-board round directly and compares it against what renderRoundSection
+ * renders for the same round. Nothing else calls it; the daemon's own call site
+ * is one line, below. */
+export function buildRoundPushPayload(board, round, mode, blockIds) {
   const { commentsByBlock, boardForClient } = resolveBoardComments(board);
+  const fullpage = isPageRound(board.blocks.filter(b => b.round === round));
   const html = mode === 'new-round'
     ? renderRoundSection(board, round, commentsByBlock)
     : blockIds
       .map(id => {
         const block = board.blocks.find(b => b.id === id);
-        return block ? renderBlock(block, board, commentsByBlock, false) : '';
+        return block ? renderBlock(block, board, commentsByBlock, false, fullpage) : '';
       })
       .join('\n');
   return { round, mode, blockIds, html, board: boardForClient };
@@ -651,7 +568,34 @@ async function handlePostBoard(req, res, home, sse) {
         });
       }
       const latestRound = board.rounds[board.rounds.length - 1];
-      if (latestRound && latestRound.status === 'open') {
+      // A round that ASKS SOMETHING is the only kind of open round a later post
+      // may amend. The amend rule exists for one situation -- "the agent is
+      // still assembling the round the reviewer has not answered yet" -- and a
+      // round carrying no question block is not in that situation: nothing can
+      // ever answer it, so it is complete the moment it lands, and it stays
+      // `open` for good (ADR.md entry 35 makes a page board unsendable, and
+      // `applySubmit` is the only writer of `sent`).
+      //
+      // Without this the two facts multiplied: post an artifact, then ask about
+      // it, and the question was folded INTO the artifact's own round instead of
+      // opening the page beside it. The artifact stopped being a page round
+      // (isPageRound, src/badge.mjs) and dropped out of its 100vh layout back
+      // into the 320px porthole this whole feature exists to delete, while
+      // "an artifact and the questions about it are one flip apart" became
+      // unreachable through the shipped tool -- the ONE flow the manual
+      // prescribes. Nested questions count too (questionBlocks walks context,
+      // compare sides and variant options, and normalizeBlock stamps the same
+      // `round` on every one), so a round whose only question sits inside a
+      // compare is still amendable.
+      //
+      // The consequence, and it is a real one: two rounds can now be open at the
+      // same time -- an artifact round that will never be sent, and the question
+      // round after it. Everything that asks "which round is open" therefore
+      // has to mean the LATEST open one, which is what `amendRound`
+      // (src/board.mjs) and `handleSubmit` below were changed to say.
+      const latestAsksSomething = !!latestRound
+        && questionBlocks(board).some(q => q.round === latestRound.n);
+      if (latestRound && latestRound.status === 'open' && latestAsksSomething) {
         // The open round hasn't been sent yet: amend it in place rather than
         // minting round N+1.
         //
@@ -801,6 +745,94 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
   res.end();
 }
 
+/** ADR 35: a comment left on a board that returned no packet is held as undelivered
+ * and rides the next packet the same thread returns, once. "No packet" is not a flag,
+ * it is a SHAPE: it happens exactly when a round carries no question block anywhere in
+ * it -- the same `hasQuestionBlock` shape the shim's `ask()` checks before ever calling
+ * `/wait` at all (PROTOCOL.md "Packet", bin/mcp.mjs `hasQuestionBlock`). A round with a
+ * question block always gets its own `/wait` call, and its comments are handed back by
+ * `buildPacket`'s ordinary round-scoped filter every time that round's packet is read
+ * -- draining them again here on a LATER round would redeliver settled feedback, which
+ * is exactly what "one packet is one round" (round 6 must not redeliver rounds 1-5,
+ * same doc) already forbids for everything but this one exception. So a comment is only
+ * ever a DRAIN candidate when its own round has no question block; `delivered` is not
+ * what decides that, it only guarantees such a comment is handed back exactly once
+ * across repeat waits on the thread, including a second wait on a round that already
+ * drained it.
+ *
+ * Walks every board of `thread`, not just `board`: a thread's rounds can span more
+ * than one board (`boundCwdForThread` above does the same walk for the same reason),
+ * and a carried-forward comment can live on any of them. Each pending comment is
+ * resolved against its OWN board -- `blockId` and `n` numbering are per-board
+ * (PROTOCOL.md "Identifiers") -- never smuggled into `board`'s. `round`'s own comments
+ * are excluded here regardless (even on the rare shape where the round being waited on
+ * itself carries no question): `buildPacket`'s normal round-scoped filter already hands
+ * those back in the same packet, and including them here too would duplicate them in
+ * one response.
+ *
+ * Marking a comment delivered is split from computing which ones are: this function
+ * only reads and resolves, and returns a `commit` closure that does the actual
+ * `delivered = true` flip and `writeBoard` -- untouched until the CALLER decides the
+ * packet is safely gone (see `buildPacketWithUndelivered` and `handleWait`, which
+ * commit only on the response's own `finish` event). Marking eagerly here, before the
+ * packet is known to have left the daemon, was the first cut's bug: a request that
+ * aborts, or a daemon that restarts, between the write and the response flushing left
+ * the comment marked collected and gone forever -- worse than the redelivery bug this
+ * predicate already fixes once, since noise beats data loss and ADR 35 exists
+ * precisely so a comment produces something somebody reads. */
+function drainUndeliveredComments(thread, board, round, home) {
+  // ponytail: this reads and parses every board in the store on every `/wait` that
+  // resolves, to find the few in this thread. The ceiling is the store's total size,
+  // not the thread's -- `boundCwdForThread` above pays the same cost and its own
+  // comment justifies keeping it off the hot path, which this is closer to. It is
+  // fine while a store holds hundreds of boards and a wait is once per round; the
+  // upgrade path, when it stops being fine, is a thread -> board-id index beside the
+  // boards rather than a smarter walk.
+  const boards = listBoards(home)
+    .filter(b => b && b.thread === thread)
+    // Reuse the already-loaded board for its own entry rather than the copy
+    // listBoards just re-read from disk -- same file, but writing back `board` keeps
+    // this in step with the packet already built from it.
+    .map(b => (b.id === board.id ? board : b))
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  const comments = [];
+  const pendingByBoard = [];
+  for (const b of boards) {
+    const questionRounds = new Set(questionBlocks(b).map(q => q.round));
+    const pending = (b.comments || []).filter(c =>
+      c.delivered !== true
+      && !questionRounds.has(c.round)
+      && (b.id !== board.id || c.round !== round));
+    if (!pending.length) continue;
+    comments.push(...resolveComments(b, pending));
+    pendingByBoard.push({ board: b, pending });
+  }
+  const commit = () => {
+    for (const { board: b, pending } of pendingByBoard) {
+      for (const c of pending) c.delivered = true;
+      writeBoard(b, home);
+    }
+  };
+  return { comments, commit };
+}
+
+/** `buildPacket` plus whatever undelivered comments the thread is owed (ADR 35) --
+ * every place a packet leaves the server through `/wait` goes through this instead of
+ * `buildPacket` directly, timeout included: a timed-out round still returns a packet,
+ * and a comment held from an earlier round is just as owed to it as to a normal one.
+ *
+ * Returns `{ packet, commit }`, not a bare packet: see `drainUndeliveredComments` for
+ * why persisting the delivered marks is deliberately not this function's job. Exported
+ * for the checks, same reason `activeWaitCount` is -- proving the marks stay
+ * unpersisted until `commit()` runs needs a seam that does not depend on winning a
+ * real socket-abort race. */
+export function buildPacketWithUndelivered(board, round, url, home) {
+  const packet = buildPacket(board, round, url);
+  const { comments: drained, commit } = drainUndeliveredComments(board.thread, board, round, home);
+  if (drained.length) packet.comments = packet.comments.concat(drained);
+  return { packet, commit };
+}
+
 async function handleWait(req, res, id, url, home) {
   const roundParam = url.searchParams.get('round');
   const round = roundParam ? parseInt(roundParam, 10) : 1;
@@ -823,9 +855,20 @@ async function handleWait(req, res, id, url, home) {
     // The wall-clock cap is an explicit no-response, not an error: same `timeout`
     // status PROTOCOL.md "Packet" already defines, carrying whatever partial answers
     // the store holds.
-    return sendJson(res, 200, { ...buildPacket(result.board, round, boardUrl(req, id)), status: 'timeout' });
+    const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
+    // Committed only once the response has actually left this process (see
+    // drainUndeliveredComments): if the socket died in the window between
+    // waitForRound resolving and here -- the exact race `isAborted()` above cannot
+    // always catch, since a close event and a timer callback land in different libuv
+    // phases -- `res.end()` below either never reaches 'finish' or errors out, and
+    // this listener simply never fires, leaving the comment undelivered for the next
+    // wait to pick up rather than losing it.
+    res.once('finish', commit);
+    return sendJson(res, 200, { ...packet, status: 'timeout' });
   }
-  return sendJson(res, 200, buildPacket(result.board, round, boardUrl(req, id)));
+  const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
+  res.once('finish', commit);
+  return sendJson(res, 200, packet);
 }
 
 async function handleSubmit(req, res, id, home, sse) {
@@ -849,7 +892,17 @@ async function handleSubmit(req, res, id, home, sse) {
   // is refused with 409 and changes nothing — which is also what makes a client retry
   // safe, rather than duplicating every comment (and its pin number, PROTOCOL.md
   // "Identifiers") and re-applying every answer.
-  const openRound = board.rounds.find(r => r.status === 'open');
+  //
+  // The LATEST open round, not the first one. A board can now hold two open
+  // rounds at once -- an artifact round is never sendable (ADR.md entry 35) and
+  // so stays open for good, while the question round posted after it is open
+  // too (see handlePostBoard's amend rule above). `find` took the first, which
+  // is the artifact's, so the page's own Send -- which names the latest, exactly
+  // as src/ui.mjs's openRoundNumber computes it -- was answered 409 "round 2 is
+  // not the open round (1)" and the reviewer could never submit the question at
+  // all. The 409 guard itself is unchanged: it still refuses any round but the
+  // one this board is actually waiting on.
+  const openRound = [...board.rounds].reverse().find(r => r.status === 'open');
   const openN = openRound ? openRound.n : null;
   const claimed = body.round;
   if (!Number.isInteger(claimed)) {
@@ -894,13 +947,14 @@ async function handleSubmit(req, res, id, home, sse) {
   writeBoard(board, home);
   writePage(board.id, pageHtml, home);
   // Every connected client -- including the one that just submitted, which is
-  // subscribed to its own board like any other -- collapses this round into the
-  // history rail on the same signal, so a second tab never has to reload to see
+  // subscribed to its own board like any other -- turns this round sent (and
+  // read-only, if it is the page that client is showing -- ADR.md entry 42) on
+  // the same signal, so a second tab never has to reload to see
   // it. `html` is the round re-rendered from the now-authoritative board (the
   // actual answers/notes/choices that were sent), not a hint to disable whatever
   // happened to already be on screen in some OTHER tab -- a second tab's own
   // unsent, unrelated selections were never what got sent, and freezing them into
-  // the history rail as if they were would show every reviewer a different,
+  // the sent round as if they were would show every reviewer a different,
   // wrong "what was answered". A round that just became sent carries no more
   // in-progress state worth preserving, so replacing its markup outright here is
   // correct, not merely convenient.
@@ -1198,24 +1252,6 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
         return handleGetPage(req, res, parts[1], home);
-      }
-
-      if (req.method === 'GET' && parts[0] === 'file') {
-        // `url.pathname` is still percent-encoded, so it is decoded HERE, once, and the
-        // result is handed over as an ordinary relative path. Decoding can reintroduce
-        // separators (`%2F`) and dot segments (`%2e%2e`), which is precisely why
-        // `openServed` splits and re-validates what it is given rather than trusting a
-        // caller to have done it: an encoded traversal arrives as the literal `..`
-        // segment it always was and is refused there. Decoding once, before any of that,
-        // is what keeps it from being a second thing to get right. A malformed escape
-        // throws, and is a 404 like every other refusal on this route.
-        let relPath;
-        try {
-          relPath = parts.slice(1).map(decodeURIComponent).join('/');
-        } catch {
-          return sendText(res, 404, 'not found');
-        }
-        return handleServeFile(req, res, relPath);
       }
 
       if (parts[0] === 'api' && parts[1] === 'board' && parts.length === 4) {

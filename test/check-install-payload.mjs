@@ -156,7 +156,6 @@ const installEnv = {
   STUB_LAUNCHCTL_LOG: launchctlLog,
 };
 delete installEnv.CLAUDE_BOARD_REF_ROOTS;
-delete installEnv.CLAUDE_BOARD_SERVE_ROOTS;
 delete installEnv.CLAUDE_BOARD_HOME;
 
 function runInstall() {

@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
-import { startServer, activeWaitCount } from '../src/server.mjs';
+import { startServer, activeWaitCount, buildPacketWithUndelivered } from '../src/server.mjs';
 import { readBoard, searchBoards } from '../src/store.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
@@ -23,6 +23,7 @@ import { readBoard, searchBoards } from '../src/store.mjs';
 import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { renderBoardPage } from '../src/render.mjs';
+import { isPageRound } from '../src/badge.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
 
@@ -525,10 +526,22 @@ async function main() {
   });
 
   await check('POST /api/board pushed while the round is still open amends that round in place instead of minting a new one, and streams only the changed block', async () => {
+    // The question block is what makes this round AMENDABLE at all: a round that
+    // asks nothing is complete the moment it lands and a later post opens a new
+    // round beside it instead (PROTOCOL.md "POST /api/board", and the two-ask
+    // check further down). "The agent is still assembling this round" is the
+    // situation the amend rule exists for, and it is the situation this fixture
+    // now actually describes.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(),
-      body: JSON.stringify({ title: 'Amend target', blocks: [{ kind: 'markdown', text: '# Original\n\noriginal text' }] }),
+      body: JSON.stringify({
+        title: 'Amend target',
+        blocks: [
+          { kind: 'markdown', text: '# Original\n\noriginal text' },
+          { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+        ],
+      }),
     })).json();
     const amendBoardId = created.boardId;
     const originalBlockId = readBoard(amendBoardId, home).blocks[0].id;
@@ -548,7 +561,7 @@ async function main() {
 
     const stored = readBoard(amendBoardId, home);
     assert.equal(stored.rounds.length, 1, 'no new round is created by an amend');
-    assert.equal(stored.blocks.length, 1, 'the amend replaces the block in place rather than appending a duplicate');
+    assert.equal(stored.blocks.length, 2, 'the amend replaces the block in place rather than appending a duplicate (the round\'s own question is the other one)');
     assert.ok(stored.blocks[0].text.includes('replaced text'));
 
     await new Promise(resolve => setTimeout(resolve, 200));
@@ -570,7 +583,7 @@ async function main() {
     // not just the currently open round's, so an "amend" naming a sent round's
     // block id would move that block into the open round -- silently re-opening
     // an already-answered, already-disabled question for edit, and leaving its
-    // real round's history rail rendering as if it had never been asked.
+    // real round's page rendering as if it had never been asked.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(),
@@ -664,7 +677,12 @@ async function main() {
     // "Yes"/"go" state from, and would be left showing whatever -- if anything --
     // was already in its own DOM.)
     assert.equal(typeof submittedEvent.data.html, 'string');
-    assert.ok(submittedEvent.data.html.includes('class="round round-history" data-round="1" data-round-status="sent"'));
+    // 'round-current' rides along here because this board's only round is also
+    // its newest (ADR.md entry 42: a board opens on its newest page, and
+    // renderRoundSection derives that from the board, so a pushed fragment and a
+    // fresh load say the same thing). The client re-asserts its own page on
+    // arrival, so the class in the payload is a statement, not an instruction.
+    assert.ok(submittedEvent.data.html.includes('class="round round-history round-current" data-round="1" data-round-status="sent"'));
     assert.ok(/class="card-choice choice-single selected"[^>]*data-choice="Yes"/.test(submittedEvent.data.html));
     assert.ok(submittedEvent.data.html.includes('go')); // the note that was actually sent
     assert.ok(submittedEvent.data.html.includes('disabled'), 'the re-rendered history fragment must carry disabled controls, same as a fresh page load');
@@ -754,7 +772,7 @@ async function main() {
     assert.equal(lostOne.resolved, false, 'an unresolvable comment in an SSE payload must carry resolved:false, exactly like a fresh page load would show');
     assert.equal(lostOne.lost, 'ghost');
     // resolveComment's output CARRIES round and createdAt rather than dropping them:
-    // without them nothing downstream -- the packet, the history rail, a
+    // without them nothing downstream -- the packet, an earlier page, a
     // second tab diffing its own copy -- can tell this round's feedback from a
     // settled earlier round's.
     assert.equal(resolvedOne.round, 1);
@@ -2762,6 +2780,421 @@ async function main() {
     assert.equal(activeWaitCount(), before, 'no submit ever landed on this round -- the only way out was the client leaving');
   });
 
+  await check('the flow the manual prescribes: post an artifact, then ask about it, and the question is a SECOND round beside it -- the artifact keeps its own page, and that page is still a page board', async () => {
+    // The exact two calls bin/mcp.mjs makes: the first has no boardId, the
+    // second carries the session's boardId and nothing else new. Nothing here
+    // submits anything in between, because nothing can -- an artifact round asks
+    // nothing, so `ask` returns the instant it lands (the check above) and the
+    // board's own send bar refuses to send it (ADR.md entry 35).
+    //
+    // What this pins is the amend rule: "the latest round is open, so amend it"
+    // was written for an agent still assembling a round the reviewer has not
+    // answered. An artifact round is open forever, so that rule swallowed every
+    // later ask -- the question landed INSIDE the artifact's round, the artifact
+    // stopped being a page round, and "one flip apart" (SPEC_PAGEBOARD.md) was
+    // unreachable through the shipped tool. There is no client involved in this
+    // at all: it is the daemon's own routing.
+    const artifact = '<!doctype html><html><body><h1>TWO_ASK_ARTIFACT</h1></body></html>';
+    const first = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Rendered dashboard', blocks: [{ kind: 'html', html: artifact }] }),
+    })).json();
+    assert.equal(first.round, 1);
+
+    const second = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        boardId: first.boardId,
+        title: 'Anything to change?',
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+      }),
+    })).json();
+    assert.equal(second.round, 2, 'the question must open a round of its own -- a round nobody can answer is not a round to amend');
+
+    const stored = readBoard(first.boardId, home);
+    assert.equal(stored.rounds.length, 2, 'two rounds, so two pages');
+    assert.deepEqual(stored.blocks.filter(b => b.round === 1).map(b => b.kind), ['html'],
+      'round 1 must still hold the artifact and nothing else -- that is what keeps it a page');
+    assert.deepEqual(stored.blocks.filter(b => b.round === 2).map(b => b.kind), ['question']);
+    assert.equal(isPageRound(stored.blocks.filter(b => b.round === 1)), true,
+      'the artifact round is still a page round after the question lands beside it');
+    assert.equal(isPageRound(stored.blocks.filter(b => b.round === 2)), false);
+
+    // A third post now amends -- round 2 asks something, so it IS the round the
+    // agent is still assembling. It must land on round 2 and leave the artifact's
+    // round alone: with two rounds open at once, "the open round" taken as the
+    // FIRST one would normalise these blocks into round 1, appending a question
+    // to the page the reviewer is reading and never touching the round the
+    // caller meant.
+    const third = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        boardId: first.boardId,
+        title: 'Anything to change?',
+        blocks: [{ kind: 'markdown', text: 'one more thing to weigh' }],
+      }),
+    })).json();
+    assert.equal(third.round, 2, 'an amend must land on the LATEST open round, not the artifact round still open behind it');
+    const afterThird = readBoard(first.boardId, home);
+    assert.equal(afterThird.rounds.length, 2, 'and must not mint a third round');
+    assert.deepEqual(afterThird.blocks.filter(b => b.round === 1).map(b => b.kind), ['html'],
+      'the artifact\'s own round is untouched by an amend of the round after it');
+    assert.equal(isPageRound(afterThird.blocks.filter(b => b.round === 1)), true,
+      'so it is still a page -- an amend that landed here would have knocked it out of its own layout');
+    assert.deepEqual(afterThird.blocks.filter(b => b.round === 2).map(b => b.kind), ['question', 'markdown']);
+
+    // And the page agrees: round 1 renders as a page (no kicker, no expand
+    // control, its comment surface floating over the frame), round 2 as an
+    // ordinary round in the column.
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${first.boardId}`)).text());
+    const r1 = markup.indexOf('data-round="1"');
+    const r2 = markup.indexOf('data-round="2"');
+    assert.ok(r1 !== -1 && r2 > r1, 'setup failure: the page must render both round sections, in order');
+    const page1 = markup.slice(r1, r2);
+    const page2 = markup.slice(r2);
+    assert.ok(page1.includes('TWO_ASK_ARTIFACT'), 'setup failure: the artifact is not in round 1\'s markup');
+    assert.ok(!page1.includes('block-kicker'), 'the artifact\'s page carries no kicker');
+    assert.ok(!page1.includes('expand-btn'), 'and no expand control (ADR.md entry 43)');
+    assert.ok(page1.includes('page-comments'), 'and its comment surface floats over the frame');
+    assert.ok(page2.includes('question-block'), 'round 2 renders as an ordinary question round on its own page');
+
+    // The reviewer can actually answer that second round. Two rounds are open at
+    // once here -- the artifact's, which nothing will ever send, and the
+    // question's -- so "the open round" has to mean the LATEST one on every
+    // route: the page's Send names round 2 (src/ui.mjs's openRoundNumber), and a
+    // server that answered "the open round is 1" would 409 it forever.
+    const q = stored.blocks.find(b => b.kind === 'question').id;
+    // Abortable: a server that answered "the open round is 1" refuses this
+    // submit with a 409, and the wait below would then hang for its full two
+    // hours -- a check that fails by never finishing names nothing. The abort
+    // turns that into the assertion immediately under it.
+    const ac = new AbortController();
+    const waitPromise = fetch(`${base}/api/board/${first.boardId}/wait?round=2`, { signal: ac.signal })
+      .then(r => r.json())
+      .catch(() => null);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submitRes = await fetch(`${base}/api/board/${first.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    if (submitRes.status !== 200) ac.abort();
+    assert.equal(submitRes.status, 200, 'the question round must be submittable while the artifact round is still open');
+    const packet = await waitPromise;
+    assert.ok(packet, 'setup failure: the wait never returned a packet');
+    assert.equal(packet.status, 'submitted');
+    assert.equal(packet.round, 2);
+    assert.equal(packet.answers[0].choice, 'Yes');
+    assert.equal(readBoard(first.boardId, home).rounds[0].status, 'open',
+      'and the artifact\'s own round stays open -- it is read, not answered, and comment mode has to keep working on it (ADR.md entry 35)');
+  });
+
+  await check('ADR 35: a comment left on a round with no question rides the next packet the same thread returns, resolved against its OWN board, and comes back only once', async () => {
+    // Round 1: a page board, same shape as the artifact-only check above -- no
+    // question block, so a real caller's ask() would never call /wait at all
+    // (bin/mcp.mjs). This check submits it anyway (today's send bar still lets a
+    // content-only round be sent) to model the comment landing in the store with
+    // nobody ever polling for its packet -- exactly the case ADR 35 exists for.
+    const html = '<!doctype html><html><body><h1>UNDELIVERED_MARKER page</h1></body></html>';
+    const posted1 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Page board', blocks: [{ kind: 'html', html }] }),
+    })).json();
+    const board1 = posted1.boardId;
+    const thread = posted1.thread;
+    const h1 = readBoard(board1, home).blocks[0].id;
+
+    const submit1 = await fetch(`${base}/api/board/${board1}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'UNDELIVERED_COMMENT' }],
+      }),
+    });
+    assert.equal(submit1.status, 200);
+    assert.equal(readBoard(board1, home).comments[0].delivered, undefined, 'not delivered yet -- nothing has asked for a packet');
+
+    // Round 2: a SECOND board in the SAME thread (the traps this ticket calls out --
+    // a carried-forward comment belongs to a different board than the one answering),
+    // carrying a real question so /wait actually resolves.
+    const posted2 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Follow-up question',
+        thread,
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    const board2 = posted2.boardId;
+    assert.notEqual(board2, board1, 'this check is only proving something if the comment and the collecting round are on different boards');
+    const q = readBoard(board2, home).blocks[0].id;
+
+    const waitPromise = fetch(`${base}/api/board/${board2}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submit2 = await fetch(`${base}/api/board/${board2}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    assert.equal(submit2.status, 200);
+
+    const packet = await waitPromise;
+    assert.equal(packet.comments.length, 1, 'the undelivered comment must ride this packet -- it carries none of its own');
+    const carried = packet.comments[0];
+    assert.equal(carried.text, 'UNDELIVERED_COMMENT');
+    assert.equal(carried.blockId, h1, 'resolved against the block on ITS OWN board, not board2');
+    assert.equal(carried.blockKind, 'html');
+    assert.equal(carried.round, 1, 'the comment still carries the round it was actually left in, not the collecting round');
+    assert.equal(carried.resolved, true);
+    assert.equal(carried.lost, undefined);
+
+    assert.equal(readBoard(board1, home).comments[0].delivered, true, 'the mark persists on the board the comment actually lives on');
+
+    // A second round on the SAME thread must not see it again.
+    const posted3 = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: board2, blocks: [{ kind: 'question', prompt: 'Also this?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    });
+    assert.equal(posted3.status, 200);
+    assert.equal((await posted3.json()).round, 2);
+    const q2 = readBoard(board2, home).blocks.find(b => b.round === 2).id;
+
+    const waitPromise2 = fetch(`${base}/api/board/${board2}/wait?round=2`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${board2}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q2, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet2 = await waitPromise2;
+    assert.equal(packet2.comments.length, 0, 'a comment already collected must not come back a second time');
+  });
+
+  await check('ADR 35: re-issuing the IDENTICAL /wait URL on an already-answered round returns the same packet, and drains nothing a second time', async () => {
+    // Non-redelivery had only ever been proven by moving on -- a later round, or a
+    // later board. This is the case that does not move on: the exact same URL,
+    // asked again. It is not hypothetical. bin/mcp.mjs's reattach exists for a
+    // daemon that restarted mid-wait ("a crash under KeepAlive, a kickstart from
+    // the revive command, an install taking an update") and its recovery IS to
+    // re-issue this request, so "comes back once" has to survive the retry that
+    // the deferred-commit fix was itself built for.
+    const html = '<!doctype html><html><body><h1>REISSUE_MARKER page</h1></body></html>';
+    const artifact = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Re-issue page board', blocks: [{ kind: 'html', html }] }),
+    })).json();
+    const artifactBlock = readBoard(artifact.boardId, home).blocks[0].id;
+    await fetch(`${base}/api/board/${artifact.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: artifactBlock, anchor: { kind: 'block' }, text: 'REISSUE_DRAINED' }],
+      }),
+    });
+
+    // A question round in the same thread, with a comment of its OWN: the packet
+    // therefore carries one comment that belongs to the round (a plain read, which
+    // MUST repeat) and one that was drained into it (which must not).
+    const asking = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Re-issue question',
+        thread: artifact.thread,
+        blocks: [
+          { kind: 'markdown', text: 'something to comment on' },
+          { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] },
+        ],
+      }),
+    })).json();
+    const asked = readBoard(asking.boardId, home);
+    const md = asked.blocks.find(b => b.kind === 'markdown').id;
+    const q = asked.blocks.find(b => b.kind === 'question').id;
+
+    const waitUrl = `${base}/api/board/${asking.boardId}/wait?round=1`;
+    const firstWait = fetch(waitUrl).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${asking.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }],
+        comments: [{ blockId: md, anchor: { kind: 'block' }, text: 'REISSUE_OWN' }],
+      }),
+    });
+    const first = await firstWait;
+    assert.deepEqual(first.comments.map(c => c.text).sort(), ['REISSUE_DRAINED', 'REISSUE_OWN'],
+      'setup: the first packet carries this round\'s own comment and the drained one');
+
+    // The identical URL, asked again. The round is already sent, so this resolves
+    // straight away rather than blocking.
+    const second = await (await fetch(waitUrl)).json();
+    assert.equal(second.status, 'submitted', 'a wait on an already-sent round answers immediately, it does not block or 409');
+    assert.equal(second.round, 1);
+    assert.deepEqual(second.answers.map(a => [a.status, a.choice]), first.answers.map(a => [a.status, a.choice]),
+      'the answers are a read of the stored round, so they repeat verbatim');
+    assert.deepEqual(second.comments.map(c => c.text), ['REISSUE_OWN'],
+      'the round\'s own comment repeats -- it is a read -- but the drained one must NOT come back: "once" means once across retries of the same request, not once per distinct round');
+    assert.equal(readBoard(artifact.boardId, home).comments[0].delivered, true,
+      'and it stays marked delivered on the board it lives on');
+
+    // A third time, to prove the second was not simply the last one the store had
+    // not caught up with yet.
+    const third = await (await fetch(waitUrl)).json();
+    assert.deepEqual(third.comments.map(c => c.text), ['REISSUE_OWN'], 'and again on a third identical request');
+  });
+
+  await check('ADR 35 does not redeliver a comment that a normal, question-carrying round already handed back -- the ordinary "round 6 does not redeliver rounds 1-5" case', async () => {
+    // No page board involved: an ordinary two-round board where round 1 both carries a
+    // question AND gets waited on directly, the everyday shape. Its comment is
+    // delivered by buildPacket's own round-scoped filter, not by the drain -- the
+    // drain must therefore never see it as a candidate at all, on round 2 or any round
+    // after.
+    const posted1 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Ordinary two-round board',
+        blocks: [
+          { kind: 'mermaid', text: 'flowchart LR\n  one --> two' },
+          { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] },
+        ],
+      }),
+    })).json();
+    const boardId = posted1.boardId;
+    const stored1 = readBoard(boardId, home);
+    const m1 = stored1.blocks.find(b => b.kind === 'mermaid').id;
+    const q1 = stored1.blocks.find(b => b.kind === 'question').id;
+
+    const wait1 = fetch(`${base}/api/board/${boardId}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [{ id: q1, status: 'answered', choice: 'Yes', note: '' }],
+        comments: [{ blockId: m1, anchor: { kind: 'block' }, text: 'hello' }],
+      }),
+    });
+    const packet1 = await wait1;
+    assert.equal(packet1.comments.length, 1, 'round 1\'s own comment must come back in round 1\'s own packet');
+    assert.equal(packet1.comments[0].text, 'hello');
+
+    // Round 2, same board, carries no new comment.
+    const posted2 = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId, blocks: [{ kind: 'question', prompt: 'Also this?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    });
+    assert.equal((await posted2.json()).round, 2);
+    const q2 = readBoard(boardId, home).blocks.find(b => b.round === 2).id;
+
+    const wait2 = fetch(`${base}/api/board/${boardId}/wait?round=2`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q2, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet2 = await wait2;
+    // (Ablation: this is exactly what the first cut of drainUndeliveredComments got
+    // wrong -- its predicate was "not yet marked delivered", and nothing on the normal
+    // round-scoped delivery path ever marked one, so round 1's "hello" reappeared here.)
+    assert.equal(packet2.comments.length, 0, 'a comment already delivered by its own round\'s ordinary packet must not be redelivered on a later round');
+  });
+
+  await check('a drained comment is not marked delivered until the packet is known to have left -- commit is deferred, not eager (audit finding 4)', async () => {
+    // The audit reproduced this over a real socket by destroying the client mid-wait at
+    // swept millisecond offsets -- 5 permanent losses in 130 trials, because the old
+    // code flipped `delivered` and wrote it as part of COMPUTING the packet, before the
+    // response had gone anywhere. A loopback request in this process flushes far too
+    // fast to reliably land a check inside that same few-millisecond window, so this
+    // drives the seam directly: `buildPacketWithUndelivered` is exported for exactly
+    // this (like `activeWaitCount`), returning `{ packet, commit }` rather than a bare
+    // packet so the two moments -- "the packet is computed" and "the mark is persisted"
+    // -- are independently observable without racing anything.
+    const html = '<!doctype html><html><body><h1>DEFERRED_MARKER page</h1></body></html>';
+    const posted1 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Deferred-commit page board', blocks: [{ kind: 'html', html }] }),
+    })).json();
+    const board1 = posted1.boardId;
+    const thread = posted1.thread;
+    const h1 = readBoard(board1, home).blocks[0].id;
+    await fetch(`${base}/api/board/${board1}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'DEFERRED_COMMENT' }],
+      }),
+    });
+
+    const posted2 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Collecting round',
+        thread,
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    const board2 = readBoard(posted2.boardId, home);
+
+    // First build: the comment is in the packet, but the response has not "left" --
+    // nothing has been written yet. This is the exact assertion finding 4 falsifies
+    // against the eager version.
+    const first = buildPacketWithUndelivered(board2, 1, 'http://test.invalid/', home);
+    assert.equal(first.packet.comments.length, 1, 'the packet must carry the undelivered comment');
+    assert.equal(first.packet.comments[0].text, 'DEFERRED_COMMENT');
+    assert.equal(
+      readBoard(board1, home).comments[0].delivered, undefined,
+      'building the packet must not itself persist the mark -- the response has not gone anywhere yet',
+    );
+
+    // Simulate the response never reaching the client: this build's `commit` is simply
+    // never called (an aborted connection or a daemon restart before res.on('finish')
+    // fires). A second, independent build -- standing in for a LATER wait -- must still
+    // find the comment: nothing was lost by computing a packet that never shipped.
+    const second = buildPacketWithUndelivered(board2, 1, 'http://test.invalid/', home);
+    assert.equal(second.packet.comments.length, 1, 'an uncommitted drain must not have consumed the comment -- it is still there for the next attempt');
+    assert.equal(
+      readBoard(board1, home).comments[0].delivered, undefined,
+      'still nothing on disk -- two computed packets, zero commits, zero writes',
+    );
+
+    // Now simulate the response that DOES make it out: commit runs, after the fact,
+    // the way `handleWait` wires it to `res.once('finish', commit)`.
+    second.commit();
+    assert.equal(readBoard(board1, home).comments[0].delivered, true, 'commit is what persists the mark, and only commit');
+
+    // A later build (standing in for a later round's wait) must not redeliver it --
+    // same "comes back once" guarantee as the check above, now proven at the seam that
+    // actually decides it.
+    const third = buildPacketWithUndelivered(board2, 1, 'http://test.invalid/', home);
+    assert.equal(third.packet.comments.length, 0, 'once committed, the comment is truly gone from future packets');
+  });
+
   await check('map-context question round trip (/wayfind\'s shape): post one question whose context references a map section by its heading SLUG, render it, answer it, and prove the referenced content actually resolved -- not merely that the post returned 200', async () => {
     // The trap this migration already got bitten by once:
     // `section` is the heading's SLUG, never its text. Get it wrong and the block is
@@ -3184,57 +3617,28 @@ async function main() {
     assert.equal('sound' in reread.settings, false, 'the retired sound key must never reappear');
   });
 
-  await check('GET /file serves a whole document as-is, only from a configured root', () => {
-    // The route exists so a rendered document opens at full size in its own tab instead
-    // of inside a 320px stage under a CSP that blocks its own diagram engine. What it
-    // must NOT become is a way to read the disk, or a way for that document to act as
-    // the reviewer against the daemon it shares an origin with.
-    const serveDir = path.join(home, 'serve-fixtures');
+  await check('GET /file no longer exists: the daemon serves boards and nothing else', () => {
+    // ADR.md entry 38: `/file/`, its allowlist and CLAUDE_BOARD_SERVE_ROOTS are deleted
+    // outright, not merely defaulted to empty. A page board embeds a rendered document as
+    // a snapshotted stage now, so the reason the route existed (markdown cannot link to
+    // file://) is gone, and leaving it standing would be a second way to reach the same
+    // artifact plus a second allowlist to keep straight. This has to 404 the same
+    // way any unrecognized path does -- not a "route recognized, nothing configured"
+    // response -- and it has to do that even when CLAUDE_BOARD_SERVE_ROOTS is still set,
+    // proving the daemon does not read that variable at all any more (a leftover from an
+    // install predating this change must not silently reopen the route).
+    const serveDir = path.join(home, 'serve-fixtures-gone');
     mkdirSync(serveDir, { recursive: true });
-    const doc = '<!doctype html><h1>render</h1><script src="assets/engine.js"></script>';
-    writeFileSync(path.join(serveDir, 'doc.html'), doc);
-    mkdirSync(path.join(serveDir, 'assets'), { recursive: true });
-    writeFileSync(path.join(serveDir, 'assets', 'engine.js'), 'export const x = 1;\n');
+    writeFileSync(path.join(serveDir, 'doc.html'), '<!doctype html><h1>render</h1>');
 
     return (async () => {
-      // Unconfigured is off: absent means an empty allowlist, so the route 404s before
-      // it is opted into, exactly as an absent CLAUDE_BOARD_REF_ROOTS grants nothing.
-      delete process.env.CLAUDE_BOARD_SERVE_ROOTS;
-      assert.equal((await fetch(`${base}/file/doc.html`)).status, 404, 'serving is off until a root is named');
-
       process.env.CLAUDE_BOARD_SERVE_ROOTS = serveDir;
       try {
         const r = await fetch(`${base}/file/doc.html`);
-        assert.equal(r.status, 200);
-        assert.equal(await r.text(), doc, 'bytes come back untouched -- no board chrome, no rewriting');
-        assert.match(r.headers.get('content-type'), /^text\/html/);
+        assert.equal(r.status, 404, '/file/ must 404 even with CLAUDE_BOARD_SERVE_ROOTS pointed at a real file');
 
-        // The three clauses that make a served document inert toward the daemon. The
-        // session cookie is HttpOnly, but it is also SAME-ORIGIN with /api/board, so
-        // without connect-src a served file could fetch a submit as the reviewer.
-        const csp = r.headers.get('content-security-policy');
-        assert.match(csp, /connect-src 'none'/, 'a served document must not be able to call the API');
-        assert.match(csp, /form-action 'none'/, 'nor post a form at it');
-        assert.match(csp, /script-src [^;]*'self'/, "but it must still load its own vendored engine");
-        assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
-        assert.equal(r.headers.get('cache-control'), 'no-store', 're-rendered documents reuse their name');
-
-        // A sibling asset resolves relatively, which is the point of serving the folder
-        // rather than the one file -- and is what the board CSP could never allow.
-        const asset = await fetch(`${base}/file/assets/engine.js`);
-        assert.equal(asset.status, 200);
-        assert.match(asset.headers.get('content-type'), /javascript/);
-
-        // Traversal, encoded traversal and an absolute path are all the same 404 as a
-        // simple miss: nothing here distinguishes "refused" from "not there".
-        for (const bad of ['../secret', '..%2Fsecret', '%2e%2e/secret', '/etc/passwd', 'nope.html']) {
-          assert.equal((await fetch(`${base}/file/${bad}`)).status, 404, `${bad} must be refused indistinguishably`);
-        }
-
-        // And it is behind the read gate like every other non-open route: a caller
-        // holding no credential gets the refusal, not the document.
-        const bare = await rawFetch(`${base}/file/doc.html`);
-        assert.notEqual(bare.status, 200, 'the serve route is not an open route');
+        const bogus = await fetch(`${base}/some-other-unrecognized-path`);
+        assert.equal(r.status, bogus.status, '/file/ gets no special-cased handling: it is just an unrecognized path');
       } finally {
         delete process.env.CLAUDE_BOARD_SERVE_ROOTS;
       }
