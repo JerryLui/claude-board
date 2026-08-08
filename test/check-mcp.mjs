@@ -1554,6 +1554,37 @@ async function main() {
     );
   });
 
+  // test/run.mjs runs checks concurrently, so it reads each one's output through a pipe
+  // and replays it in one piece rather than letting four checks interleave their lines
+  // into an unattributable transcript. A silent hole in that path would cost the suite
+  // its entire failure diagnosis while every check still passed, which is exactly the
+  // kind of green nothing this file exists to refuse.
+  await check('runCheck({ capture: true }) returns the check\'s output instead of dropping it', async () => {
+    const dir = tempHome('runner-capture');
+    const noisy = path.join(dir, 'noisy-check.mjs');
+    // The last line is written immediately before exit: that is the byte 'exit' loses and
+    // 'close' waits for, and on a real failing check it is the line naming the failure.
+    writeFileSync(noisy, [
+      "process.stdout.write('ok - to stdout\\n');",
+      "process.stderr.write('diagnostic - to stderr\\n');",
+      "process.stdout.write('the-last-line-before-exit\\n');",
+    ].join('\n'));
+
+    const result = await withTimeout(runCheck(noisy, 8000, { capture: true }), 12_000, 'a capturing run must still finish');
+    assert.equal(result.code, 0);
+    assert.match(result.output, /ok - to stdout/, 'stdout must survive the pipe');
+    // Deliberately not the word "FAILED": the non-capture assertion below streams this
+    // fixture straight to the terminal, and a suite transcript should not contain a
+    // failure word that belongs to no failure.
+    assert.match(result.output, /diagnostic - to stderr/, 'stderr must too — it carries the assertion message');
+    assert.match(result.output, /the-last-line-before-exit/, 'output written just before exit must not be lost to the exit/close race');
+
+    // ...and the default is still live streaming, so running one check alone is unchanged.
+    const streamed = await withTimeout(runCheck(noisy, 8000), 12_000, 'an inheriting run must still finish');
+    assert.equal(streamed.code, 0);
+    assert.equal(streamed.output, '', 'without capture nothing is buffered; the check owns the terminal');
+  });
+
   await check('an absent CLAUDE_CODE_ENTRYPOINT is refused (fails closed)', async () => {
     const before = countBoardFiles(home);
     const noEntrypointClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined });

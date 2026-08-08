@@ -1439,6 +1439,10 @@ async function main() {
       env: {
         ...env,
         CLAUDE_BOARD_PORT: String(deadPort),
+        // Without this the run pays install.sh's full TCC-dialog budget -- 480 tries,
+        // two minutes -- waiting for a port nothing will ever bind. What is under test
+        // is that the gate fails at all, not how patient it is with a human.
+        CLAUDE_BOARD_HEALTH_TRIES: '4',
         CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(workDir, 'LaunchAgents-nohealth'),
         CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-nohealth'),
         STUB_CLAUDE_STATE: path.join(workDir, 'claude-registrations-nohealth.json'),

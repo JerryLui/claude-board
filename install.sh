@@ -71,6 +71,7 @@
 #   CLAUDE_BOARD_CC                  default: cc
 #   CLAUDE_BOARD_CODESIGN            default: codesign
 #   CLAUDE_BOARD_SKILLS_DIR          default: ~/.claude/skills
+#   CLAUDE_BOARD_HEALTH_TRIES        default: 20, or 480 on the TCC-dialog path below
 #
 # macOS only, zero dependencies: bash + coreutils + launchctl/plutil, nothing
 # this OS doesn't already ship — with one soft dependency, the `cc` from the
@@ -1004,6 +1005,10 @@ if [ "$LAUNCHER_IS_NEW" -eq 1 ] && [ "$REPO_IN_PROTECTED_DIR" -eq 1 ]; then
   echo "    find $LABEL, and turn the folder on there."
   echo
 fi
+# Test seam. The budget above is a person's (two minutes to notice a TCC dialog and
+# click it); the check that proves a dead port fails the install has nobody to wait for,
+# and this clone living under ~/Documents made it pay the full two minutes every run.
+HEALTH_TRIES="${CLAUDE_BOARD_HEALTH_TRIES:-$HEALTH_TRIES}"
 
 echo "==> waiting for $HEALTH_URL"
 HEALTHY=0

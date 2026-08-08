@@ -831,6 +831,24 @@ there, and it is the only place it is. Check the launcher's real environment bef
 assuming a root exists — the plist carries only `CLAUDE_BOARD_PORT`, so `strings` on the
 binary named in `ProgramArguments.0` is what actually answers it (ADR.md entry 13).
 
+### Where the clone lives silently sets the installer's health budget, and the checks pay it
+
+`install.sh` waits for `/api/health` 20 times at 0.25s — unless the launcher was built by
+this run *and* the clone sits under `~/Documents`, `~/Desktop` or `~/Downloads`, in which
+case the budget becomes 480 tries. That is deliberate: a freshly built launcher has no TCC
+grant yet, so reading `bin/daemon.mjs` out of a protected directory raises a dialog against
+the launchd job, and two minutes is a person's budget to notice it and click Allow.
+
+Nothing about that is visible from the check suite, and a clone in `~/Documents` is the
+normal case. `test/check-install.mjs`'s health-gate check points the installer at a port
+nothing will ever bind, so it waited out the whole 480 tries — 133s of a 177s file, against
+`test/run.mjs`'s 180s per-check ceiling, i.e. a suite one slow machine away from a spurious
+timeout, for a wait no human was ever going to answer. `CLAUDE_BOARD_HEALTH_TRIES` overrides
+the resolved count (the check sets it to 4); it is applied after both branches of the
+conditional, so neither real-world default moves. If a check that shells out to `install.sh`
+is inexplicably slow, this is the first thing to measure — and note it will NOT reproduce
+for anyone whose clone lives outside those three directories.
+
 ---
 
 ## macOS notifications and sound
