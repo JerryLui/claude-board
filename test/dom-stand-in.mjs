@@ -926,6 +926,30 @@ export class StandInWindow extends EventTarget {
   }
 }
 
+/** An element's inline `style`: a plain object for ordinary properties, plus the
+ * three methods a custom property needs. Real CSSStyleDeclaration stores custom
+ * properties in their own namespace reachable only through these -- `el.style['--x']`
+ * does NOT round-trip in a browser -- so they get their own map here rather than
+ * being written onto the object as keys. A test asserting on `--stage-p` therefore
+ * has to call `getPropertyValue`, exactly as it would against a real DOM, and
+ * cannot accidentally pass by reading a key a browser would never have set.
+ *
+ * Values are coerced to strings, the one CSSOM behaviour src/ui.mjs's callers can
+ * observe (they write numbers via `toFixed`, so this is already a string, but a
+ * caller that writes a raw number must not read one back). */
+function makeStyle() {
+  const custom = new Map();
+  return {
+    setProperty(prop, value) { custom.set(prop, String(value)); },
+    getPropertyValue(prop) { return custom.has(prop) ? custom.get(prop) : ''; },
+    removeProperty(prop) {
+      const had = custom.has(prop) ? custom.get(prop) : '';
+      custom.delete(prop);
+      return had;
+    },
+  };
+}
+
 export class Element extends EventTarget {
   constructor(tagName) {
     super();
@@ -935,16 +959,19 @@ export class Element extends EventTarget {
     this.childNodes = [];
     this.parentElement = null;
     this.value = '';
-    this._style = {};
+    this._style = makeStyle();
     // Back `scrollIntoView` below -- a count plus the most recent options
     // object, not a simulation. See that method's own comment for why.
     this.scrollIntoViewCallCount = 0;
     this.scrollIntoViewLastOptions = null;
   }
   // Real CSSStyleDeclaration coerces every assigned value to a string and ignores
-  // unrecognised properties; this stand-in only needs property assignment
-  // (`pin.style.left = n + 'px'`, as src/ui.mjs's placePin does) to work without
-  // throwing, so a plain object is enough -- nothing here reads computed style.
+  // unrecognised properties; this stand-in needs plain property assignment
+  // (`pin.style.left = n + 'px'`, as src/ui.mjs's placePin does) plus the custom
+  // property trio, which is how src/ui.mjs writes the page-board condense
+  // progress (`--stage-p`). Nothing here reads COMPUTED style -- there is no box
+  // model to compute one from -- so src/ui.mjs feature-detects getComputedStyle
+  // and skips the one measurement that would need it.
   get style() { return this._style; }
   get children() { return this.childNodes.filter(n => n.nodeType === 1); }
   // Lowercase tagName, read by parseNodes' stack machinery (autoCloseFor/

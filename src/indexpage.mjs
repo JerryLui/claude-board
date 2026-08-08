@@ -14,7 +14,7 @@
 import path from 'node:path';
 import { styles, faviconLink, restFaviconHref, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
-import { questionBlocks } from './board.mjs';
+import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
 // clock are owned by other tickets and stay untouched here (this file consumes
 // the API, it does not extend it). Reused rather than reimplemented in
@@ -45,27 +45,34 @@ export function folderName(cwd) {
  * which sorts above every ISO timestamp. */
 const stamp = b => (typeof b?.updatedAt === 'string' ? b.updatedAt : '');
 
-/** A board's rounds that are still open **and still ask something** — a trip back
- * to the board the reviewer genuinely owes (ADR.md entry 25, "Rounds
- * left"). This is the one predicate both the index badge's count and `isLiveBoard`
- * below read, so the two can never disagree: a round carrying no question block
- * has no gesture that could ever clear it (`POST /api/board/:id/submit` is the
- * only thing that marks a round `sent`, and a reviewer submits by answering), so a
- * skill that renders a document and posts a pointer to it — `/explain`,
- * `/visualize`, `/gamify` — asks nothing by design and must count as settled, not
- * as a permanent false alarm.
+/** A board's rounds that are still open **and still awaited** — a trip back to the
+ * board the reviewer genuinely owes (ADR.md entry 25, "Rounds left"; CONTEXT.md
+ * "Awaited"/"Rounds left"). This is the one predicate both the index badge's count
+ * and `isLiveBoard` below read, so the two can never disagree: a round nobody is
+ * listening on has no gesture that could ever clear it (`POST
+ * /api/board/:id/submit` is the only thing that marks a round `sent`, and a
+ * reviewer submits by answering or, on an awaited page board, by sending
+ * comments), so a skill that renders a document and posts a pointer to it —
+ * `/explain`, `/visualize`, `/gamify` — without `wait` asks nothing and hears
+ * nothing back by design, and must count as settled, not as a permanent false
+ * alarm. A page board posted WITH `wait: true` (ADR.md entry 45) is exactly the
+ * opposite of that: the call is genuinely blocked on it, so it counts too.
  *
- * questionBlocks, not a top-level walk of board.blocks (inherited from the
- * predecessor this replaces). Questions nest inside a compare side, another
- * question's `context`, and an option's block; the top-level-only version missed
- * a board whose only question was nested. Every other traversal (findBlock,
- * countersFromBoard, the packet, the patch) already recurses. */
-function openAskingRounds(board) {
-  const roundsThatAsk = new Set(questionBlocks(board).map(b => b.round));
-  return (board.rounds || []).filter(r => r.status === 'open' && roundsThatAsk.has(r.n));
+ * `roundIsAwaited` (src/badge.mjs), not a bare `r.awaited` read: a round minted
+ * before ADR.md entry 45 landed carries neither `awaited` nor `awaitDeadline` at
+ * all (`undefined`, not `false`), and that helper is what falls back to the OLD
+ * shape-based inference (a question block anywhere in the round, nested included
+ * — a compare side, another question's `context`, an option's block) for exactly
+ * those legacy rounds, so a board already on disk keeps counting toward the badge
+ * and the tab mark exactly as it always did rather than silently dropping out the
+ * moment this shipped. Shared with src/server.mjs's drainUndeliveredComments and
+ * src/ui.mjs's markPendingRound (the tab mark and the arrival notification) —
+ * one definition of "awaited", not three that could drift. */
+function openAwaitedRounds(board) {
+  return (board.rounds || []).filter(r => r.status === 'open' && roundIsAwaited(board, r));
 }
 
-/** A board is "live and waiting" while `openAskingRounds` finds at least one round —
+/** A board is "live and waiting" while `openAwaitedRounds` finds at least one round —
  * derived from that same predicate, never a second test of its own, so this and the
  * index badge's count are structurally incapable of disagreeing.
  *
@@ -74,7 +81,7 @@ function openAskingRounds(board) {
  * regardless of whether anyone looked, so the honest signal is the question, not the
  * visit. */
 function isLiveBoard(board) {
-  return openAskingRounds(board).length > 0;
+  return openAwaitedRounds(board).length > 0;
 }
 
 /** How many rounds one board doc has reached. */
@@ -107,7 +114,7 @@ export function buildThreadIndex(boards) {
     // Summed across every board doc in the thread (unlike `rounds` below): a
     // reader's trip count is a fact about the whole thread, not about whichever
     // board doc the row happens to link to.
-    const roundsLeft = group.reduce((sum, b) => sum + openAskingRounds(b).length, 0);
+    const roundsLeft = group.reduce((sum, b) => sum + openAwaitedRounds(b).length, 0);
     const cwd = (group.find(b => b.cwd) || {}).cwd || null;
     const updatedAt = group.reduce((max, b) => (stamp(b) > max ? stamp(b) : max), '');
     // NOT summed across the group, unlike `roundsLeft` above: the row links to
@@ -156,7 +163,7 @@ function formatDate(iso) {
 function threadRow(t) {
   const liveCls = t.live ? ' live' : '';
   // Absent entirely at zero, never a zero-reading badge: `roundsLeft` and
-  // `live` are both derived from `openAskingRounds` (src/indexpage.mjs), so this
+  // `live` are both derived from `openAwaitedRounds` (src/indexpage.mjs), so this
   // element and the pulsing `.live-dot` above it can never disagree about whether
   // the row owes the reader anything.
   const badge = t.roundsLeft > 0

@@ -42,9 +42,21 @@ function check(name, fn) {
 // html stage, nothing else, so the only thing the DOM stand-in has to model is the
 // one seam this ticket is about (see test/dom-stand-in.mjs's file comment for what
 // it does and deliberately does not implement).
+// A trailing markdown block, deliberately: a LONE `html` block is a page round
+// (ADR.md entry 33) whose comment gesture SPEC_AWAITED.md ticket 03 (ADR.md
+// entry 46) gates on being *awaited* -- this file is about the click-to-anchor
+// gesture itself, not about awaited-ness or page-board layout, so it stays an
+// ORDINARY board (isPageRound false), where that gate never applies and
+// comment mode keeps its ordinary off-by-default start (AC 5 only forces it
+// on for a page round). ADR.md entry 28 makes an `html` block's own click
+// gesture identical on an ordinary board and a page board, so this changes
+// nothing about what is under test here.
 const board = createBoard({
   title: 'Ticket 01 -- the dead click',
-  blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+  blocks: [
+    { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+    { kind: 'markdown', text: 'not a page board' },
+  ],
 });
 const blockId = board.blocks[0].id;
 const pageHtml = renderBoardPage(board);
@@ -150,9 +162,15 @@ check('clicking an element inside a hand-mocked html stage opens that block\'s c
 // resolveDomAnchor) accepts exactly that ref -- if either side hoisted and the
 // other didn't, this would fail even though each side's own unit checks (this
 // file's fixture-free ones, test/check-pure.mjs's) could still pass alone.
+// Same reasoning as `board` above: a trailing markdown block keeps this an
+// ordinary board, out of page-board layout and its awaited-gated comment
+// surface entirely.
 const styledBoard = createBoard({
   title: 'Ticket 08 -- a mock that styles itself',
-  blocks: [{ kind: 'html', html: '<style>.mock{font:14px system-ui}</style><div class="mock"><button>Send</button></div>' }],
+  blocks: [
+    { kind: 'html', html: '<style>.mock{font:14px system-ui}</style><div class="mock"><button>Send</button></div>' },
+    { kind: 'markdown', text: 'not a page board' },
+  ],
 });
 const styledBlockId = styledBoard.blocks[0].id;
 const styledPageHtml = renderBoardPage(styledBoard);

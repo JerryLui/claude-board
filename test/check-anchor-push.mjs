@@ -134,8 +134,19 @@ check('a brand-new round pushed over SSE (mode: new-round) is genuinely anchorab
   enableCommentMode(document);
   assert.equal(document.querySelectorAll('.html-stage').length, 0, 'setup failure: round 1 must carry no html stage of its own');
 
-  const round2 = addRound(board, { blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
-  const round2BlockId = board.blocks.find(b => b.round === round2).id;
+  // A trailing markdown block keeps round 2 an ORDINARY round (isPageRound
+  // false): a lone `html` block is a page round (ADR.md entry 33) whose
+  // comment gesture SPEC_AWAITED.md ticket 03 (ADR.md entry 46) gates on
+  // being *awaited*, and this file is about SSE push anchoring, not
+  // awaited-ness -- test/check-click.mjs's own identical fix has the fuller
+  // reasoning. `.find()` below still finds the html block: it is first.
+  const round2 = addRound(board, {
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
+  });
+  const round2BlockId = board.blocks.find(b => b.round === round2 && b.kind === 'html').id;
   const payload = buildRoundPushPayload(board, round2, 'new-round', [round2BlockId]);
 
   es.dispatch('round', JSON.stringify(payload));
@@ -195,8 +206,20 @@ check('a block amended into the still-open round over SSE (mode: amend) is genui
 
 check('a round that just went sent, pushed over SSE (\'submitted\'), still shows an existing comment\'s pin on its (now historical) html stage (ablation: deleting applySubmittedPush\'s wireRoot(replacement) call)', () => {
   const board = freshBoard();
-  const round2 = addRound(board, { blocks: [{ kind: 'html', html: '<div class="mock"><button>Ship it</button></div>' }] });
-  const round2BlockId = board.blocks.find(b => b.round === round2).id;
+  // A trailing markdown block, same reasoning as this file's other two
+  // fixtures above: round 2 stays an ORDINARY round, not a page round whose
+  // comment gesture SPEC_AWAITED.md ticket 03 gates on being *awaited* -- and
+  // here it matters doubly, since round 2 IS the round in view when `mintDoc`
+  // below hydrates: a page round that were also awaited would hydrate with
+  // comment mode already ON (AC 5), and the very next line's enableCommentMode
+  // would then click it straight back OFF.
+  const round2 = addRound(board, {
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Ship it</button></div>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
+  });
+  const round2BlockId = board.blocks.find(b => b.round === round2 && b.kind === 'html').id;
 
   // Mint the comment through a REAL client session first, exactly like
   // test/check-archive.mjs's own mint-then-submit pattern -- so the anchor fed

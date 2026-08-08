@@ -72,7 +72,7 @@ function enableCommentMode(document) {
 check('S1: the html-stage iframe never carries allow-same-origin -- sandbox is scoped to allow-scripts only', () => {
   const board = createBoard({
     title: 'isolation: sandbox attribute',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const pageHtml = renderBoardPage(board);
   const m = /<iframe class="html-stage" sandbox="([^"]*)"/.exec(pageHtml);
@@ -113,7 +113,7 @@ check('S1: a <script> inside a mock cannot reach the parent document, even thoug
           if (window.top && window.top.document) window.__report.hasParentDocument = true;
         } catch (e) { window.__report.topThrew = true; }
       </script>`,
-    }],
+    }, { kind: 'markdown', text: 'not a page board' }],
   });
   const pageHtml = renderBoardPage(board);
   const document = loadBoard(pageHtml);
@@ -157,7 +157,7 @@ check('S1: a <script> inside a mock cannot reach the parent document, even thoug
 check('S1: the parent ignores a message whose origin is not the opaque "null" an unprivileged srcdoc frame actually has', () => {
   const board = createBoard({
     title: 'isolation: origin check',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const document = loadBoard(renderBoardPage(board));
   enableCommentMode(document);
@@ -182,7 +182,7 @@ check('S1: the parent ignores a message whose origin is not the opaque "null" an
 check('S1: the parent ignores a message whose source is not a live, currently-mounted html-stage frame', () => {
   const board = createBoard({
     title: 'isolation: source identity check',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const document = loadBoard(renderBoardPage(board));
   enableCommentMode(document);
@@ -205,7 +205,7 @@ check('S1: the parent ignores a message whose source is not a live, currently-mo
 check('S1: the parent ignores malformed and hostile messages that DO carry a correct origin and a real stage as source', () => {
   const board = createBoard({
     title: 'isolation: shape validation',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const document = loadBoard(renderBoardPage(board));
   enableCommentMode(document);
@@ -263,7 +263,7 @@ check('S1: the parent ignores malformed and hostile messages that DO carry a cor
 function sentStageBoard() {
   const board = createBoard({
     title: 'isolation: sentRefs',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   return { board, blockId: board.blocks[0].id };
 }
@@ -320,7 +320,7 @@ check('(stage half): the parent sends a stage the sent REF, never the hint -- or
 check('S5: a stage-supplied ref may MINT a comment but may never select an existing one to overwrite -- an agent must not be able to make the reviewer\'s next remark replace their feedback on its own block', () => {
   const board = createBoard({
     title: 'isolation: a forged click must not pick an edit target',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const blockId = board.blocks[0].id;
   const document = loadBoard(renderBoardPage(board));
@@ -360,7 +360,7 @@ check('S5: a stage-supplied ref may MINT a comment but may never select an exist
 check('S5: a stage message never clobbers a draft the reviewer is part-way through typing', () => {
   const board = createBoard({
     title: 'isolation: a forged click must not interrupt composition',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>other</p></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const blockId = board.blocks[0].id;
   const document = loadBoard(renderBoardPage(board));
@@ -392,7 +392,7 @@ check('S5: a stage message never clobbers a draft the reviewer is part-way throu
 check('S2: renderBoardPage emits a <meta http-equiv="Content-Security-Policy"> carrying the exact same policy the live daemon sends as a header', () => {
   const board = createBoard({
     title: 'isolation: meta CSP',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const pageHtml = renderBoardPage(board);
   const m = /<meta http-equiv="Content-Security-Policy" content="([^"]*)">/.exec(pageHtml);
@@ -989,7 +989,7 @@ check('(adversarial): a forged pick-shaped message from the INLINE stage records
 check('Every html-stage srcdoc opens with the exact margin/padding reset renderHtmlBlock exports as STAGE_MARGIN_RESET, immediately before the mock\'s own markup', () => {
   const board = createBoard({
     title: 'gutter: reset is present and leads',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const document = loadBoard(renderBoardPage(board));
   const srcdoc = document.querySelector('.html-stage').getAttribute('srcdoc');

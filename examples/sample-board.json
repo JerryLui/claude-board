@@ -12,7 +12,9 @@
       "postedAt": "2026-07-14T09:12:00.000Z",
       "status": "open",
       "sentAt": null,
-      "title": "feature/kitchen-routing-v2"
+      "title": "feature/kitchen-routing-v2",
+      "awaited": false,
+      "awaitDeadline": null
     },
     {
       "n": 2,
@@ -20,6 +22,8 @@
       "status": "sent",
       "sentAt": "2026-07-15T10:31:00.000Z",
       "title": "Routing walkthrough",
+      "awaited": true,
+      "awaitDeadline": "2026-07-15T10:45:00.000Z",
       "action": "submitted"
     }
   ],

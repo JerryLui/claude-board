@@ -410,6 +410,14 @@ export function buildSampleBoard() {
   board.rounds[0].postedAt = '2026-07-14T09:12:00.000Z';
   board.rounds[1].postedAt = '2026-07-15T10:05:00.000Z';
   board.rounds[1].sentAt = '2026-07-15T10:31:00.000Z';
+  // round 2 is awaited (it carries a question), so mintAwait stamped its own
+  // awaitDeadline from the REAL Date.now() at generation time -- pin it to the
+  // pinned postedAt above plus the 40-minute default (src/board.mjs
+  // DEFAULT_AWAIT_TIMEOUT_MS) so this file stays deterministic like every other
+  // timestamp here. Round 1 needs no such line: it is a page board round posted
+  // without `wait`, so it is never awaited and its awaitDeadline is already the
+  // fixed literal `null`.
+  board.rounds[1].awaitDeadline = '2026-07-15T10:45:00.000Z';
   for (const c of board.comments) c.createdAt = '2026-07-15T10:31:00.000Z';
 
   return board;

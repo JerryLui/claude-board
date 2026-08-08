@@ -148,9 +148,19 @@ function enableCommentMode(document) {
  * checks below need to inspect the stage BEFORE and AFTER toggling comment mode,
  * which a shared, already-loaded document could leak between check() calls. */
 function loadSoloStageBoard() {
+  // A trailing markdown block keeps this an ORDINARY board (isPageRound
+  // false): a lone `html` block is a page round (ADR.md entry 33) whose
+  // comment gesture SPEC_AWAITED.md ticket 03 gates on being *awaited* (ADR.md
+  // entry 46) -- and this file's own "comment mode off" checks specifically
+  // need the gesture to be gateable by the TOGGLE alone, which an awaited page
+  // round's AC 5 ("opens with comment mode on") would fight with. Staying
+  // ordinary sidesteps both.
   const soloBoard = createBoard({
     title: 'Ticket 03 -- comment mode gates the stage too',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
   });
   const soloBlockId = soloBoard.blocks[0].id;
   const soloHtml = renderBoardPage(soloBoard);
@@ -500,9 +510,13 @@ check('the hint for a clicked element reads "<identity> in <context>": a "Send" 
 });
 
 check('the plain html-stage hint is unchanged outside a compare (no context to add)', () => {
+  // A trailing markdown block, same reasoning as loadSoloStageBoard above.
   const soloBoard = createBoard({
     title: 'Ticket 03 -- plain stage, no compare',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
   });
   const soloBlockId = soloBoard.blocks[0].id;
   const soloHtml = renderBoardPage(soloBoard);

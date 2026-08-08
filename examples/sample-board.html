@@ -310,7 +310,8 @@
      115.4px, and a hardcoded 88 then parks the target 27px BEHIND the header it
      was supposed to clear. One token, overridden in that same media query, so
      the two can never disagree again. Every scroll-margin-top on the page reads
-     it (.round, whose top the pager scrolls to on every page flip). */
+     it: .round, whose top the pager scrolls to on every page flip, and
+     .question-block, whose top the questions-left pill scrolls to. */
   --head-clear: 88px;
 }
 
@@ -420,6 +421,21 @@ body.readonly .back-to-index { display: none; }
 .board-head .round-badge:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
+/* AC 6, AC 8, AC 11: the page board's own pill/meta slot (ADR.md entry 49,
+   "the pill may hold a label alone"). Sits in '.board-head-actions', which
+   entry 40's condensing rule never touches (only 'h1'/'.meta' hide there), so
+   ONE element renders in both the expanded header and the condensed pill with
+   no second copy and no extra selector -- exactly AC 6's "in both the expanded
+   header and the condensed pill". A muted figure, never a chip: entry 49
+   corrects entry 40's assumption that this slot needed a real control, and a
+   label alone is what the countdown and 'read-only' both are. Hidden on every
+   board that is not laid out as a page board -- src/render.mjs renders it on
+   every board (test/check-pure.mjs's emitter scan needs the class to appear
+   somewhere), but only a page board has anywhere for it to mean anything. */
+.round-meta { display: none; flex: none; font: inherit; color: var(--muted); font-size: 11.5px;
+  font-weight: 550; letter-spacing: 0.02em; white-space: nowrap; }
+body.page-board .round-meta { display: inline; }
+
 /* the comment-mode toggle: visible chrome, not a held modifier -- this IS
    discoverability. Off by default, so the page behaves exactly as before until
    the reviewer turns it on (true by construction). */
@@ -429,7 +445,13 @@ body.readonly .back-to-index { display: none; }
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .mode-toggle:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .mode-toggle.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-body.readonly .mode-toggle { display: none; }
+/* ADR.md entry 46: a page board nobody is listening to is uncommentable, so the
+   control that turns commenting on is not on offer there either. Two classes
+   rather than one because they are two different facts -- an archive is read-only
+   whatever it holds, while 'page-uncommentable' is about this page's round in
+   particular (src/render.mjs sets it at first paint, src/ui.mjs's
+   refreshAwaitDisplay keeps it true against the clock). */
+body.readonly .mode-toggle, body.page-uncommentable .mode-toggle { display: none; }
 
 /* the theme control (src/theme.mjs): reuses .mode-toggle's chrome above rather
    than duplicating it, plus this icon-only modifier -- no visible label, so
@@ -512,7 +534,7 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .round-end .line { flex: 1; height: 1px; background: var(--hairline-2); }
 .round-end .tag {
   font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--muted); border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 3px var(--space-3);
+  color: var(--muted); padding: 0 var(--space-2);
 }
 
 .block {
@@ -556,7 +578,11 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .md-content tr:last-child td { border-bottom: none; }
 .md-content hr { border: none; border-top: 1px solid var(--hairline); margin: 1.4em 0; }
 
-.question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+/* scroll-margin-top clears the sticky .board-head when the questions-left pill
+   scrolls a block's own top on screen (src/ui.mjs's goToQuestion), the same
+   reason .round carries it for a page flip -- see --head-clear in :root. */
+.question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start;
+  scroll-margin-top: var(--head-clear); }
 /* ADR.md entry 26: a question carrying a rendered stage (anywhere in its
    options or its context, src/render.mjs's questionCarriesStage) never emits
    a '.question-context' card at all -- its context renders as prose inside
@@ -1062,15 +1088,24 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .questions-left-pill.visible { display: inline-flex; align-items: center; }
 .questions-left-pill:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
+/* AC 11 (second half): the ordinary board's own half of the waiting signal --
+   the page-board pill's '.round-meta' above is the other half of the same
+   rule. A muted, always-visible figure beside the send bar's own status text,
+   never a second colour: the open round's countdown is informational, not a
+   state the reviewer needs to act on. Hidden by default, the same
+   single-decider idiom '.questions-left-pill'/'.back-to-top' already use --
+   src/ui.mjs turns it on only while the open round is genuinely awaited. */
+.round-countdown { display: none; color: var(--muted); font-size: 12.5px; align-self: center; white-space: nowrap; }
+.round-countdown.visible { display: inline; }
 
 /* --- the round pager: the board's pages, always both controls (ADR.md entry 42,
    criterion 26) ---------------------------------------------------------------
 
    Two positions, per the spec's decision: the pill sits bottom-centre and the
    chevrons at the two edges. Both are position: fixed and both are siblings in
-   the markup rather than pill-wraps-chevrons -- the pill's own centring
+   the markup rather than dock-wraps-chevrons -- the dock's own centring
    transform would otherwise make it the containing block for anything fixed
-   inside it, pinning the chevrons to the pill instead of the viewport.
+   inside it, pinning the chevrons to the dock instead of the viewport.
 
    Never hidden, on any page: the pager is how a page board's reader reaches the
    question round and how a question round's reader gets back to the artifact, so
@@ -1078,13 +1113,44 @@ body.comment-mode .blocks { cursor: crosshair; }
    body.readonly (an archive's rounds are pages too). Above the send bar's own
    z-index, since on an ordinary round it sits in the bar's otherwise empty
    left/centre -- the bar's contents are right-aligned. */
-.round-pager { position: fixed; z-index: 40; left: 50%; bottom: var(--space-4); transform: translateX(-50%);
-  display: flex; align-items: center; gap: 2px; max-width: min(560px, calc(100vw - 2 * var(--space-6)));
+/* The dock is the fixed, centred box, not the pill inside it: the caption sits
+   above the numerals and shares their centre line, and stacking both in one
+   fixed column is what holds that with no measured offset between them.
+
+   Its real rendered height also drives '--round-pager-dock-h' (see
+   '.page-comments' below, ticket 02 SPEC_AWAITED.md): setupPagerDockHeightTracking
+   (src/ui.mjs) measures this box with a ResizeObserver and writes that
+   custom property, so a panel that has to clear the dock reads its actual
+   height off the browser's own layout -- whatever that ends up being, one
+   row, two rows, or a third row nobody has drawn yet -- instead of a number
+   someone typed once and nobody re-measured.
+
+   CSS anchor positioning ('anchor-name'/'anchor()') was tried here first and
+   reverted: it requires the anchor to precede the positioned element in tree
+   order, which '.page-comments' does not (it is nested inside the page
+   board's own '.block.html-block', rendered well before this dock in
+   src/render.mjs), and moving it earlier in the DOM ran into a second,
+   separate containing-block problem on top of that -- confirmed wrong in a
+   real Chrome (getComputedStyle().bottom computed to 'auto', not the
+   anchored value), which this repo's DOM stand-in cannot see at all
+   (QUIRKS.md, "The stand-in has no layout") and did not catch. */
+.round-pager-dock { position: fixed; z-index: 40; left: 50%; bottom: var(--space-4); transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  max-width: min(560px, calc(100vw - 2 * var(--space-6))); }
+/* The one place the pager still spends a title: the round the reviewer is
+   actually on, named in full. Ellipsed rather than wrapped, so an agent-supplied
+   title of any length costs one line and never reflows the dock. */
+.round-pager-caption { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11.5px; font-weight: 600; color: var(--muted); pointer-events: none; }
+.round-pager { display: flex; align-items: center; gap: 2px; max-width: 100%;
   overflow-x: auto; background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-pill); padding: 4px; box-shadow: var(--shadow-2); }
-.round-page { background: none; border: none; border-radius: var(--r-pill); padding: 5px 12px;
+/* "Rounds" said once, over the row, instead of on every entry. */
+.round-pager-lede { flex: none; padding: 5px 10px 5px 12px; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.round-page { background: none; border: none; border-radius: var(--r-pill); padding: 5px 11px;
   font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer;
-  white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+  min-width: 30px; text-align: center; white-space: nowrap;
   transition: color var(--dur) var(--ease); }
 .round-page:hover { color: var(--ink); }
 .round-page-current { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
@@ -1402,22 +1468,123 @@ body.page-board .send-bar { display: none; }
    comment panel and the header both leave free. */
 body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom: var(--space-5);
   z-index: 30; margin-bottom: 0; max-width: 320px; }
-/* raised clear of the round pager, which owns the bottom-centre strip on every
-   page (ADR.md entry 42): 44px is the pager's own height plus its gap. */
-.page-comments { position: fixed; z-index: 30; left: 50%; bottom: calc(var(--space-5) + 44px);
+/* Raised clear of the round pager, which owns the bottom-centre strip on every
+   page (ADR.md entry 42). Ticket 03 (SPEC_AWAITED.md) puts a send control
+   inside this panel at every comment count, so it can no longer be sized by
+   a number picked to fit today's content -- '2379f12' already broke exactly
+   that once, when the pager grew a caption row above its pill and this
+   panel's hardcoded '44px' (sized for the old single-row pill) started
+   sitting under it instead of above it.
+
+   '--round-pager-dock-h' is not a second copy of a number: it is written by
+   setupPagerDockHeightTracking (src/ui.mjs), a ResizeObserver on the real
+   '.round-pager-dock' element, so this 'bottom' tracks whatever that box's
+   ACTUAL rendered height is -- at any viewport height, at every comment
+   count, and through any future change to the dock's own shape -- with no
+   value here to fall out of step. The var()'s own fallback (84px) is a
+   deliberately generous floor for the window before that observer's first
+   callback lands (a real Chrome does not guarantee that callback is
+   synchronous with layout -- see setupPagerDockHeightTracking's own comment)
+   and for a browser without ResizeObserver at all -- wrong by construction
+   (it cannot know the dock's real height either) but wrong on the safe
+   side, clear of even a three-line dock.
+
+   Confirmed 2026-08-07 against a real Chrome (127.0.0.1, examples/sample-board.html,
+   not this repo's DOM stand-in, which cannot see any of this -- QUIRKS.md,
+   "The stand-in has no layout"): with the dock actually measured at
+   63.4px tall, '--round-pager-dock-h' resolved to '63.40625px' and this
+   'bottom' computed to '91.4062px' -- exactly var(--space-4) [16px] +
+   that measurement + var(--space-3) [12px], not the fallback. With the
+   panel given real content (0, 4, then 20 queued comments, the last one
+   911px tall and overflowing off the TOP of the viewport) its measured
+   rect bottom stayed exactly 12px above the dock's measured rect top in
+   every case, because the panel grows upward, away from the dock -- the
+   clearance is a property of the DOCK's height alone, not the panel's. */
+/* SPEC_AWAITED.md ticket 03: the panel used to grow upward with NO ceiling --
+   fine while it only ever held the compose form and a short list, wrong the
+   moment ticket 03 put a send control inside it (AC 4) that has to stay
+   reachable at every comment count. Measured against the merged branch on a
+   357px-tall viewport before this change: at 12 comments the panel's own TOP
+   edge sat at -338px, at 30 comments -1130px -- reachable at zero comments and
+   unreachable everywhere past a handful. 'max-height' below puts a ceiling on
+   the panel itself, tied to the SAME '--round-pager-dock-h' the 'bottom' value
+   already reads (no second number to keep in sync): whatever the dock's real
+   height is, the panel's own height is capped at "the rest of the viewport,
+   minus this panel's own bottom offset, minus 72px of headroom for the
+   condensed header pill (ADR.md entry 40) plus its own gap" -- so the panel's
+   top edge can never rise above that fixed distance from the viewport's top,
+   at ANY comment count. '.comment-list-wrap' is what actually absorbs the
+   overflow: 'flex: 1 1 auto; min-height: 0' lets it shrink below its content's
+   natural height and scroll internally, while the hint, the compose form and
+   '.page-send-bar' below it stay 'flex: none' -- their own natural size,
+   never scrolled, always the last thing on screen no matter how long the list
+   above them grows. 'overflow: hidden' on the panel itself is a backstop, not
+   the mechanism: the inner scroll is what is meant to absorb every case, this
+   only guards against a measurement this comment did not anticipate. */
+.page-comments { position: fixed; z-index: 30; left: 50%;
+  bottom: calc(var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3));
+  max-height: calc(100vh - (var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3)) - 72px);
   transform: translateX(-50%); width: min(640px, calc(100vw - 2 * var(--space-6)));
-  display: flex; flex-direction: column; }
-.page-comments:has(.comment-form.open), .page-comments:has(.comment-item) {
+  display: flex; flex-direction: column; overflow: hidden; }
+.page-comments:has(.comment-form.open), .page-comments:has(.comment-item), .page-comments:has(.page-send-bar) {
   background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
   box-shadow: var(--shadow-2); padding: var(--space-2) var(--space-4) var(--space-4); }
+/* The scrollable half: only the LIST of already-left comments grows without
+   bound and scrolls internally once it outgrows the panel's own max-height
+   above -- the hint, the compose form and the send control are none of them
+   inside this box, so they never scroll out of reach regardless of how many
+   comments are queued. */
+.comment-list-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* ADR.md entry 48: the click-to-comment gesture's own hint, back in exactly
+   one place -- the awaited page board's empty comment panel, because comment
+   mode already starts ON there (src/ui.mjs), so the mode toggle itself is no
+   longer what reveals the gesture the way it is everywhere else. */
+.page-comment-hint { flex: none; font-size: 11.5px; font-style: italic; color: var(--muted); margin: 0 0 var(--space-2); }
+/* AC 4: one send control at every comment count, Discuss beside it -- the same
+   '.btn-send'/'.btn-discuss' chrome the ordinary send bar uses, just inside
+   this panel instead. 'flex: none' keeps it out of '.comment-list-wrap''s own
+   scroll region (see this file's own comment on '.page-comments' above). */
+.page-send-bar { flex: none; display: flex; align-items: center; justify-content: flex-end;
+  gap: var(--space-3); padding-top: var(--space-2); }
+/* AC 12: a wait that dies mid-read reverts the page to read-only WITHOUT
+   throwing away anything already on screen -- src/ui.mjs adds this class the
+   moment it learns the round's deadline has passed (a periodic client-side
+   check, and an immediate nudge over the 'awaitExpired' SSE event) and removes
+   none of the panel's existing '.comment-item' entries when it does. Locked
+   twice, same discipline QUIRKS.md's "Readonly is locked twice" already
+   documents for body.readonly: this hides the compose surface, and src/ui.mjs
+   additionally disables the same elements' 'disabled' attribute, since a CSS
+   rule alone leaves a control that looks gone but is not. */
+.page-comments.expired .comment-form,
+.page-comments.expired .page-comment-hint { display: none; }
+/* The send bar itself STAYS, holding one frozen control that names where the
+   comments went (badge.mjs's PAGE_SEND_EXPIRED_LABEL). Everything that could
+   still start something goes: Discuss opens a second route to an agent that is
+   no longer there. The button is disabled in the same sweep that adds this
+   class, so this rule is presentation for a control that is already inert --
+   not the lock itself. */
+.page-comments.expired .page-discuss-btn { display: none; }
+.page-comments.expired .page-send-btn { opacity: 1; cursor: default; font-style: italic;
+  background: transparent; border-color: var(--border); color: var(--muted); }
 
 /* --- chrome that gets out of the way (ADR.md entry 40) -----------------------
    Reading the artifact condenses the header into a single pill, centred at the
-   top and floating over the page; scrolling back up expands it again. The
-   trigger is 'stage-scrolled', a second class src/ui.mjs puts on <body> when a
-   page board's stage reports that it has been scrolled -- the parent cannot see
-   inside an opaque-origin frame, so the fact is reported over the stage channel
-   (src/render.mjs's stageAgentScript) rather than observed here.
+   top and floating over the page; scrolling back up expands it again.
+
+   The condense has NO THRESHOLD. It is driven continuously by '--stage-p', a
+   0-to-1 progress src/ui.mjs writes on <body> from the scroll offset a page
+   board's stage reports -- the parent cannot see inside an opaque-origin frame,
+   so the offset arrives over the stage channel (src/render.mjs's
+   stageAgentScript) rather than being observed here. Every rule below is a
+   'calc()' on that one number, so the pill forms and un-forms under the
+   reader's own finger and there is no snap point to sit on. The threshold this
+   replaced (one boolean flipped at 24px) made a reader parked on the boundary
+   flap the whole header on and off, which is the failure a dead zone would only
+   have narrowed rather than removed.
+
+   'stage-scrolled' survives as a plain "is it off zero" flag, since the
+   back-to-top control still needs a discrete 'display' switch (below) and a
+   'display' cannot be interpolated at all.
 
    Everything condensing does is a change of BOX, never of flow: the header is
    already 'position: fixed' above, so the frame under it stays a constant 100vh
@@ -1428,29 +1595,87 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    the thread/id line go; the mark, the comment-mode toggle, the theme control
    and the round badge stay, so the pill is never decorative -- entry 40's
    "the pill keeps the comment-mode toggle, so the mode is switched mid-read
-   rather than being suspended by the scroll". Hiding those two elements rather
-   than moving any control means there is still exactly ONE #comment-mode-toggle
-   in the document, condensed or not: a second copy could disagree with the
-   first about .active/aria-pressed, and src/ui.mjs's setCommentMode writes to
-   one element by design.
+   rather than being suspended by the scroll". Collapsing those two elements
+   rather than moving any control means there is still exactly ONE
+   #comment-mode-toggle in the document, condensed or not: a second copy could
+   disagree with the first about .active/aria-pressed, and src/ui.mjs's
+   setCommentMode writes to one element by design.
 
-   No transition: 'left: 0; right: 0' to 'left: 50%; right: auto' has no
-   interpolable midpoint, so an animation here would be a fiction. The state
-   change is a scroll away in either direction, which is its own feedback.
+   How the box moves without interpolating an intrinsic width. The header stays
+   full-bleed at every progress and the pill is drawn by a ::before behind it,
+   inset from both edges by a percentage of the header's OWN width -- so
+   'inset-inline: calc(50% - var(--pill-half))' at p=1 is a centred band exactly
+   one pill wide. The content converges on that same band through a matching
+   'padding-inline', so chrome and controls arrive together. Percentages and
+   plain lengths interpolate everywhere; 'width: 100vw' to 'width: fit-content'
+   does not, which is what made an animation here look impossible before.
+
+   --pill-half is measured once by src/ui.mjs (half the width of the controls
+   that survive the condense) rather than hardcoded, because the round badge's
+   label and the read-only slot both change width at runtime.
 
    --head-clear (see :root) is untouched on purpose. It is a scroll-margin for
    anchor jumps down a scrolling DOCUMENT, and a page board's document does not
    scroll at all ('body.page-board { overflow: hidden }' above) -- the artifact
    scrolls inside the frame. Nothing on a page board reads the token, so the
    header's height changing here cannot make it wrong. */
-body.page-board.stage-scrolled .board-head {
-  left: 50%; right: auto; top: var(--space-3); transform: translateX(-50%);
-  gap: var(--space-3); padding: var(--space-2) var(--space-3);
+/* Both defaults live on <body> rather than on the header, because <body> is
+   where src/ui.mjs writes them and because .back-to-top (further down, a
+   sibling of the header) reads --stage-p too: declared on the header, it would
+   shadow the written value there and be invisible everywhere else. */
+body.page-board { --stage-p: 0; --pill-half: 120px; }
+body.page-board .board-head {
+  /* two terms: the header's own edge padding easing from --space-5 to the
+     pill's tighter --space-3, plus the inset that walks the content into the
+     centred band. --pill-half is measured to match this exact arithmetic
+     (src/ui.mjs measurePillHalf), so the controls land with --space-3 of air
+     inside the band and no more. */
+  padding-inline: calc(var(--space-5) + var(--stage-p) * (var(--space-3) - var(--space-5))
+    + var(--stage-p) * (50% - var(--pill-half)));
+  padding-block: calc(var(--space-3) + var(--stage-p) * (var(--space-2) - var(--space-3)));
+  margin-top: calc(var(--stage-p) * var(--space-3));
+  gap: calc(var(--space-4) + var(--stage-p) * (var(--space-3) - var(--space-4)));
+  /* the expanded wash and the pill chrome are two layers, faded past each other.
+     A gradient does not interpolate into a flat panel colour, and a
+     'border-bottom' does not interpolate into a full pill border, so neither
+     tries to: each lives on its own pseudo-element at its own opacity. */
+  background: none; border-bottom: none;
+  /* the blur belongs to the wash, not to the header's own box: left here it
+     would frost a full-viewport band across the top of the artifact while the
+     visible chrome is a 240px pill */
+  backdrop-filter: none;
+}
+body.page-board .board-head::before,
+body.page-board .board-head::after {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+}
+/* the pill: a centred band that grows out of the full-bleed header */
+body.page-board .board-head::before {
+  inset-block: 0; inset-inline: calc(var(--stage-p) * (50% - var(--pill-half)));
   background: var(--panel); border: 1px solid var(--hairline);
   border-radius: var(--r-pill); box-shadow: var(--shadow-2);
+  opacity: var(--stage-p);
 }
-body.page-board.stage-scrolled .board-head h1,
-body.page-board.stage-scrolled .board-head .meta { display: none; }
+/* the expanded header's own wash, leaving as the pill arrives */
+body.page-board .board-head::after {
+  inset: 0;
+  background: linear-gradient(to bottom, var(--bg) 62%, var(--bg-fade-0));
+  border-bottom: 1px solid var(--hairline);
+  backdrop-filter: blur(10px);
+  opacity: calc(1 - var(--stage-p));
+}
+/* the identity text collapses horizontally, which is what lets the header's
+   content reach the pill's width without anything being clipped mid-word. Ink
+   leaves faster than the box does (the 1.8 multiplier): text at 10% opacity
+   squeezed into 30px reads as a rendering fault, where an empty box reads as a
+   box. */
+body.page-board .board-head-ident {
+  min-width: 0; overflow: hidden;
+  max-width: calc((1 - var(--stage-p)) * 60vw);
+  opacity: calc(1 - var(--stage-p) * 1.8);
+}
+body.page-board .board-head h1,
+body.page-board .board-head .meta { white-space: nowrap; }
 
 /* the back-to-top control (ADR.md entry 40), in the questions-left pill's own
    shape -- one visual object for "a pill floating at the bottom of the board",
@@ -1463,7 +1688,15 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
 
    Hidden by default and turned on by '.visible' alone, the same single-decider
    idiom as .questions-left-pill -- and for the same reason (QUIRKS.md: the
-   'hidden' attribute does nothing against our own stylesheet's display). */
+   'hidden' attribute does nothing against our own stylesheet's display).
+
+   '.visible' is the only part of this control that is still a boolean, and it
+   has to be: 'display' has no interpolable midpoint, so something must flip it.
+   It flips the instant the artifact leaves zero, and the control is at zero
+   opacity there -- the FADE is driven by '--stage-p' like the header pill, over
+   the last 40% of the ramp, so the two arrive as one gesture with the
+   back-to-top trailing. Ordering it that way is deliberate: the reader is told
+   "you are reading" first and offered the way back second. */
 .back-to-top { display: none; position: fixed; z-index: 30;
   right: var(--space-5); bottom: var(--space-5);
   background: var(--panel-2); color: var(--ink-2);
@@ -1472,6 +1705,9 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
   cursor: pointer; white-space: nowrap;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .back-to-top.visible { display: inline-flex; align-items: center; }
+body.page-board .back-to-top.visible {
+  opacity: clamp(0, (var(--stage-p) - 0.6) * 2.5, 1);
+  transform: translateY(calc((1 - var(--stage-p)) * var(--space-2))); }
 .back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a
@@ -1501,7 +1737,7 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
   <header class="board-head">
     <div class="board-head-title">
       <a class="back-to-index" href="/" aria-label="All threads" title="All threads"><svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#e5b04d"/><rect x="7" y="6.6" width="18" height="4.6" rx="2.3" fill="#0a1020" opacity=".34"/><rect x="7" y="13.4" width="11" height="4.6" rx="2.3" fill="#0a1020" opacity=".34"/><rect x="7" y="20" width="18" height="5.4" rx="2.7" fill="#0a1020"/></svg></a>
-      <div>
+      <div class="board-head-ident">
         <h1>feature/kitchen-routing-v2</h1>
         <div class="meta">th_01234567 · b_00112233445566778899aabbccddeeff</div>
       </div>
@@ -1510,6 +1746,7 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
       <button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg><span class="mode-toggle-label">Comment mode: off</span></button>
       <button type="button" id="theme-toggle" class="mode-toggle mode-toggle-icon" aria-label="Theme: System" title="Theme: System"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>
       <button type="button" class="round-badge" id="round-badge">round 2 of 2</button>
+      <span class="round-meta" id="round-meta" title="No agent is listening on this page -- commenting is off.">read-only</span>
     </div>
   </header>
   <div class="blocks" id="blocks">
@@ -1990,13 +2227,7 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
 })();&lt;/script&gt;"></iframe>
     <div class="pin-layer" data-block-id="h1"></div>
   </div>
-  <div class="page-comments">
-    <div class="comment-target" id="comment-target-h1">commenting on: whole block</div>
-    <form class="comment-form" id="comment-form-h1" data-block-id="h1" data-anchor-kind="block">
-      <input type="text" placeholder="Add a comment">
-      <button type="submit">Add</button>
-    </form>
-    <div class="comment-list" id="comment-list-h1"><div class="comment-item" data-anchor-kind="dom" data-anchor-ref="1.2.1.3.1" data-block-id="h1"><span class="comment-anchor">#2 · Confirm</span>Consider making this button say 'Confirm order' for clarity.</div></div></div>
+  <div class="page-comments"><div class="comment-list" id="comment-list-h1"><div class="comment-item" data-anchor-kind="dom" data-anchor-ref="1.2.1.3.1" data-block-id="h1"><span class="comment-anchor">#2 · Confirm</span>Consider making this button say 'Confirm order' for clarity.</div></div></div>
 </section>
   
 </section>
@@ -3948,15 +4179,19 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
   <button type="button" class="back-to-top" id="back-to-top" aria-label="Back to top" title="Back to top">Back to top</button>
   <button type="button" class="round-flip round-flip-prev" id="round-prev" aria-label="Previous round" title="Previous round">‹</button>
   <button type="button" class="round-flip round-flip-next" id="round-next" aria-label="Next round" title="Next round" disabled>›</button>
-  <nav class="round-pager" id="round-pager" aria-label="Rounds"><button type="button" class="round-page" data-round="1">Round 1 · feature/kitchen-routing-v2</button><button type="button" class="round-page round-page-current" data-round="2" aria-current="page">Round 2 · Routing walkthrough</button></nav>
+  <div class="round-pager-dock">
+    <div class="round-pager-caption" id="round-pager-caption">Round 2 · Routing walkthrough</div>
+    <nav class="round-pager" id="round-pager" aria-label="Rounds"><span class="round-pager-lede" aria-hidden="true">Rounds</span><button type="button" class="round-page" data-round="1" title="Round 1 · feature/kitchen-routing-v2" aria-label="Round 1 · feature/kitchen-routing-v2">1</button><button type="button" class="round-page round-page-current" data-round="2" title="Round 2 · Routing walkthrough" aria-label="Round 2 · Routing walkthrough" aria-current="page">2</button></nav>
+  </div>
   <div class="send-bar">
     <button type="button" class="questions-left-pill" id="questions-left-pill" disabled>0 questions left</button>
+    <span class="round-countdown" id="round-countdown" title=""></span>
     <span class="send-status" id="send-status">This round has been sent. Waiting for the next one.</span>
     <button type="button" class="btn-discuss" id="discuss-btn" disabled>Discuss in chat</button>
     <button type="button" class="btn-send" id="send-btn" disabled>Send</button>
   </div>
 </div>
-<script id="board-data" type="application/json">{"id":"b_00112233445566778899aabbccddeeff","thread":"th_01234567","title":"feature/kitchen-routing-v2","createdAt":"2026-07-14T09:12:00.000Z","updatedAt":"2026-07-15T10:31:00.000Z","state":"submitted","rounds":[{"n":1,"postedAt":"2026-07-14T09:12:00.000Z","status":"open","sentAt":null,"title":"feature/kitchen-routing-v2"},{"n":2,"postedAt":"2026-07-15T10:05:00.000Z","status":"sent","sentAt":"2026-07-15T10:31:00.000Z","title":"Routing walkthrough","action":"submitted"}],"blocks":[{"round":1,"id":"h1","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 104px 24px 32px; font-family: system-ui, sans-serif; background: #111827; }\n  .kd-board { max-width: 900px; margin: 0 auto; }\n  .kd-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; color: #f9fafb; }\n  .kd-head h1 { font-size: 20px; margin: 0; font-weight: 700; }\n  .kd-head .clock { font-size: 13px; opacity: .75; font-variant-numeric: tabular-nums; }\n  .kd-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }\n  .ticket { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.25); overflow: hidden; border: 1px solid #e2e2e2; }\n  .ticket-head { background: #1f2937; color: #fff; padding: 14px 18px; display: flex; justify-content: space-between; align-items: baseline; }\n  .ticket-head .num { font-size: 18px; font-weight: 700; }\n  .ticket-head .table { font-size: 13px; opacity: .8; }\n  .ticket-body { padding: 14px 18px; }\n  .item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #e5e5e5; font-size: 14px; color: #111; }\n  .item:last-child { border-bottom: none; }\n  .chip { display: inline-block; margin: 10px 0 4px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }\n  .chip.prep { background: #fef3c7; color: #92400e; }\n  .chip.ready { background: #dcfce7; color: #166534; }\n  .chip.rush { background: #fee2e2; color: #991b1b; }\n  .chip.served { background: #e5e7eb; color: #374151; }\n  .actions { padding: 12px 18px 18px; }\n  button { width: 100%; padding: 10px 0; border: none; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }\n  button:disabled { background: #9ca3af; cursor: default; }\n\u003c/style>\n\u003cdiv class=\"kd-board\">\n  \u003cdiv class=\"kd-head\">\u003ch1>Kitchen Display — Dinner Rush\u003c/h1>\u003cspan class=\"clock\">6:42 PM · 4 open tickets\u003c/span>\u003c/div>\n  \u003cdiv class=\"kd-grid\">\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#482\u003c/span>\u003cspan class=\"table\">Table 6\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Grilled salmon\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Caesar salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Sparkling water\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n        \u003cspan class=\"chip prep\">In prep\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Confirm\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#481\u003c/span>\u003cspan class=\"table\">Table 9\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Seared tuna\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Miso soup\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip rush\">Rush\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Confirm\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#483\u003c/span>\u003cspan class=\"table\">Table 2\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Roast chicken\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>House salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip ready\">Ready for pickup\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Mark served\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#479\u003c/span>\u003cspan class=\"table\">Table 11\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Margherita pizza\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip served\">Served\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton disabled>Served\u003c/button>\u003c/div>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>","sha":"71edcc41ce8a43542eacac6126ad45acc74550ec80799fc1d621a677c827f4ef"},{"round":2,"id":"d1","kind":"markdown","source":null,"text":"# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |","sha":"12510393283ad4f55b89f4570319cbe7e4cc9495555d177f84660edffb0c4df6","html":"\u003ch1 id=\"order-routing-redesign\">Order-routing redesign\u003c/h1>\u003cp>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\u003c/p>\u003cul>\u003cli id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket\u003c/li>\u003cli id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house\u003c/li>\u003cli id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically\u003c/li>\u003c/ul>\u003ctable>\u003ctr>\u003cth>Station\u003c/th>\u003cth>Avg. ticket time (today)\u003c/th>\u003cth>Avg. ticket time (proposed)\u003c/th>\u003c/tr>\u003ctr>\u003ctd>Grill\u003c/td>\u003ctd>46s\u003c/td>\u003ctd>33s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Salad\u003c/td>\u003ctd>28s\u003c/td>\u003ctd>24s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Expo\u003c/td>\u003ctd>19s\u003c/td>\u003ctd>15s\u003c/td>\u003c/tr>\u003c/table>","anchors":[{"kind":"md","ref":"order-routing-redesign","label":"Order-routing redesign"},{"kind":"md","ref":"order-routing-redesign-li1","label":"Fewer manual status updates per ticket"},{"kind":"md","ref":"order-routing-redesign-li2","label":"A single \"Ready for pickup\" state visible to front-of-house"},{"kind":"md","ref":"order-routing-redesign-li3","label":"Rush tickets float to the top automatically"}]},{"round":2,"id":"m1","kind":"mermaid","source":null,"text":"flowchart LR\n  Placed[Order placed] --> Prepping[In prep] --> Ready[Ready for pickup] --> Served[Served]","sha":"0730e47488c90846e75d0577056f696c04cc7c4c4e64ad7a16ddc98d6ddba561"},{"round":2,"id":"c1","kind":"code","source":null,"text":"function priorityScore(ticket) {\n  const waitMs = Date.now() - ticket.placedAt;\n  const rushBonus = ticket.rush ? 500 : 0;\n  return waitMs + rushBonus;\n}","sha":"6e558853c35e89523f1588343da1ee9b1238bcb0df3d25b321582daa452fb690","lang":"javascript"},{"round":2,"id":"x1","kind":"compare","left":{"label":"Before","block":{"round":2,"id":"h2","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; background: #f3f4f6; }\n  .ticket { max-width: 300px; margin: 0 auto; background: #fff; border: 1px solid #d1d5db; padding: 10px 12px; font-size: 12px; line-height: 1.5; color: #374151; }\n  .ticket p { margin: 2px 0; }\n  .head { font-size: 12px; font-weight: 600; margin-bottom: 6px; color: #111; }\n  button { margin-top: 8px; padding: 6px 10px; font-size: 12px; background: #e5e7eb; border: 1px solid #9ca3af; border-radius: 4px; color: #111; cursor: pointer; }\n\u003c/style>\n\u003cdiv class=\"ticket\">\n  \u003cdiv class=\"head\">Order #482 — Table 6 — Placed 6:42 PM — Status: Awaiting confirmation\u003c/div>\n  \u003cp>1x Grilled salmon\u003c/p>\n  \u003cp>1x Caesar salad\u003c/p>\n  \u003cp>2x Sparkling water\u003c/p>\n  \u003cp>Estimated prep time: 12 minutes\u003c/p>\n  \u003cbutton>Confirm order now, please\u003c/button>\n\u003c/div>","sha":"d2f4bf94fc4f9fb3efc463751e1b1558f6c726ee18d6c6cb32ce16e89d5afe7e"}},"right":{"label":"After","block":{"round":2,"id":"h3","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .ticket { max-width: 260px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); overflow: hidden; border: 1px solid #e2e2e2; }\n  .head { background: #1f2937; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; }\n  .body { padding: 10px 14px; font-size: 13px; color: #111; }\n  .item { display: flex; justify-content: space-between; padding: 4px 0; }\n  button { width: 100%; padding: 9px 0; border: none; background: #2563eb; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }\n\u003c/style>\n\u003cdiv class=\"ticket\">\n  \u003cdiv class=\"head\">\u003cspan>#482\u003c/span>\u003cspan>Table 6\u003c/span>\u003c/div>\n  \u003cdiv class=\"body\">\n    \u003cdiv class=\"item\">\u003cspan>Grilled salmon\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n    \u003cdiv class=\"item\">\u003cspan>Caesar salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n    \u003cdiv class=\"item\">\u003cspan>Sparkling water\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n  \u003c/div>\n  \u003cbutton>Confirm\u003c/button>\n\u003c/div>","sha":"22d5a3e98bc92a5b3b0c9b31e3d273cdc5e44418a219e1c6e2c2e3c1d67d359c"}}},{"round":2,"id":"q1","kind":"question","prompt":"Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?","context":[{"round":2,"id":"d2","kind":"markdown","source":null,"text":"Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).","sha":"05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892","html":"\u003cp>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).\u003c/p>","anchors":[]}],"widget":"single","options":[{"label":"Yes, ship it","description":"","preview":null},{"label":"Close, one tweak needed","description":"","preview":null},{"label":"No, rework it","description":"","preview":null}]},{"round":2,"id":"q2","kind":"question","prompt":"Which stations need their ticket displays updated to match the round 1 mockup?","context":[],"widget":"multi","options":[{"label":"Grill","description":"","preview":null},{"label":"Salad","description":"","preview":null},{"label":"Expo","description":"","preview":null},{"label":"Bar","description":"","preview":null}]},{"round":2,"id":"q3","kind":"question","prompt":"Anything else the kitchen team should flag before we ship?","context":[],"widget":"text","options":[]},{"round":2,"id":"q4","kind":"question","prompt":"Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.","context":[],"widget":"rank","options":[{"label":"High-contrast","description":"","preview":null},{"label":"Pastel","description":"","preview":null},{"label":"Monochrome","description":"","preview":null}]},{"round":2,"id":"q5","kind":"question","prompt":"Which ticket-card layout reads faster at a glance?","context":[],"widget":"choose-between-rendered-variants","options":[{"label":"Layout A","description":"Compact, single line","block":{"round":2,"id":"h4","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #fff; border: 1px solid #e2e2e2; border-radius: 8px; max-width: 340px; margin: 0 auto; font-size: 14px; color: #111; }\n  .row b { font-weight: 700; }\n  .dot { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; }\n\u003c/style>\n\u003cdiv class=\"row\">\u003cb>#482\u003c/b>\u003cspan class=\"dot\">\u003c/span>\u003cspan>Table 6\u003c/span>\u003cspan class=\"dot\">\u003c/span>\u003cspan>3 items\u003c/span>\u003c/div>","sha":"f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822"}},{"label":"Layout B","description":"Spacious, three lines","block":{"round":2,"id":"h5","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .card { max-width: 340px; margin: 0 auto; padding: 18px; background: #fff; border: 1px solid #e2e2e2; border-radius: 10px; }\n  .line { padding: 6px 0; font-size: 15px; color: #111; border-bottom: 1px solid #f0f0f0; }\n  .line:last-child { border-bottom: none; }\n  .line.title { font-size: 18px; font-weight: 700; }\n\u003c/style>\n\u003cdiv class=\"card\">\n  \u003cdiv class=\"line title\">Order #482\u003c/div>\n  \u003cdiv class=\"line\">Table 6\u003c/div>\n  \u003cdiv class=\"line\">3 items\u003c/div>\n\u003c/div>","sha":"ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c"}}]}],"answers":{"q1":{"id":"q1","status":"answered","choice":"Close, one tweak needed","note":"Add a Recall step from Ready back to Prepping for remakes."},"q2":{"id":"q2","status":"answered","choice":["Grill","Expo"],"note":"Bar can wait until next sprint."},"q3":{"id":"q3","status":"answered","choice":"Make sure the Recall state also resets the rush-bonus timer, or repeat rush tickets will always sort to the top.","note":""},"q4":{"id":"q4","status":"answered","choice":["High-contrast","Monochrome","Pastel"],"note":"Pastel washes out completely under the heat-lamp lighting."},"q5":{"id":"q5","status":"answered","choice":"Layout A","note":""}},"comments":[{"n":1,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"block"},"text":"This matches the walkthrough from Tuesday's stand-up. Nice work.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":2,"blockId":"h1","blockKind":"html","anchor":{"kind":"dom","ref":"1.2.1.3.1","hint":"Confirm"},"text":"Consider making this button say 'Confirm order' for clarity.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":3,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"mermaid","ref":"Ready"},"text":"Should Ready also branch to a Recall state if an item comes back?","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true}]}</script>
+<script id="board-data" type="application/json">{"id":"b_00112233445566778899aabbccddeeff","thread":"th_01234567","title":"feature/kitchen-routing-v2","createdAt":"2026-07-14T09:12:00.000Z","updatedAt":"2026-07-15T10:31:00.000Z","state":"submitted","rounds":[{"n":1,"postedAt":"2026-07-14T09:12:00.000Z","status":"open","sentAt":null,"title":"feature/kitchen-routing-v2","awaited":false,"awaitDeadline":null},{"n":2,"postedAt":"2026-07-15T10:05:00.000Z","status":"sent","sentAt":"2026-07-15T10:31:00.000Z","title":"Routing walkthrough","awaited":true,"awaitDeadline":"2026-07-15T10:45:00.000Z","action":"submitted"}],"blocks":[{"round":1,"id":"h1","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 104px 24px 32px; font-family: system-ui, sans-serif; background: #111827; }\n  .kd-board { max-width: 900px; margin: 0 auto; }\n  .kd-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; color: #f9fafb; }\n  .kd-head h1 { font-size: 20px; margin: 0; font-weight: 700; }\n  .kd-head .clock { font-size: 13px; opacity: .75; font-variant-numeric: tabular-nums; }\n  .kd-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }\n  .ticket { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.25); overflow: hidden; border: 1px solid #e2e2e2; }\n  .ticket-head { background: #1f2937; color: #fff; padding: 14px 18px; display: flex; justify-content: space-between; align-items: baseline; }\n  .ticket-head .num { font-size: 18px; font-weight: 700; }\n  .ticket-head .table { font-size: 13px; opacity: .8; }\n  .ticket-body { padding: 14px 18px; }\n  .item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #e5e5e5; font-size: 14px; color: #111; }\n  .item:last-child { border-bottom: none; }\n  .chip { display: inline-block; margin: 10px 0 4px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }\n  .chip.prep { background: #fef3c7; color: #92400e; }\n  .chip.ready { background: #dcfce7; color: #166534; }\n  .chip.rush { background: #fee2e2; color: #991b1b; }\n  .chip.served { background: #e5e7eb; color: #374151; }\n  .actions { padding: 12px 18px 18px; }\n  button { width: 100%; padding: 10px 0; border: none; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }\n  button:disabled { background: #9ca3af; cursor: default; }\n\u003c/style>\n\u003cdiv class=\"kd-board\">\n  \u003cdiv class=\"kd-head\">\u003ch1>Kitchen Display — Dinner Rush\u003c/h1>\u003cspan class=\"clock\">6:42 PM · 4 open tickets\u003c/span>\u003c/div>\n  \u003cdiv class=\"kd-grid\">\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#482\u003c/span>\u003cspan class=\"table\">Table 6\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Grilled salmon\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Caesar salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Sparkling water\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n        \u003cspan class=\"chip prep\">In prep\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Confirm\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#481\u003c/span>\u003cspan class=\"table\">Table 9\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Seared tuna\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Miso soup\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip rush\">Rush\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Confirm\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#483\u003c/span>\u003cspan class=\"table\">Table 2\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Roast chicken\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>House salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip ready\">Ready for pickup\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Mark served\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#479\u003c/span>\u003cspan class=\"table\">Table 11\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Margherita pizza\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip served\">Served\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton disabled>Served\u003c/button>\u003c/div>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>","sha":"71edcc41ce8a43542eacac6126ad45acc74550ec80799fc1d621a677c827f4ef"},{"round":2,"id":"d1","kind":"markdown","source":null,"text":"# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |","sha":"12510393283ad4f55b89f4570319cbe7e4cc9495555d177f84660edffb0c4df6","html":"\u003ch1 id=\"order-routing-redesign\">Order-routing redesign\u003c/h1>\u003cp>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\u003c/p>\u003cul>\u003cli id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket\u003c/li>\u003cli id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house\u003c/li>\u003cli id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically\u003c/li>\u003c/ul>\u003ctable>\u003ctr>\u003cth>Station\u003c/th>\u003cth>Avg. ticket time (today)\u003c/th>\u003cth>Avg. ticket time (proposed)\u003c/th>\u003c/tr>\u003ctr>\u003ctd>Grill\u003c/td>\u003ctd>46s\u003c/td>\u003ctd>33s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Salad\u003c/td>\u003ctd>28s\u003c/td>\u003ctd>24s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Expo\u003c/td>\u003ctd>19s\u003c/td>\u003ctd>15s\u003c/td>\u003c/tr>\u003c/table>","anchors":[{"kind":"md","ref":"order-routing-redesign","label":"Order-routing redesign"},{"kind":"md","ref":"order-routing-redesign-li1","label":"Fewer manual status updates per ticket"},{"kind":"md","ref":"order-routing-redesign-li2","label":"A single \"Ready for pickup\" state visible to front-of-house"},{"kind":"md","ref":"order-routing-redesign-li3","label":"Rush tickets float to the top automatically"}]},{"round":2,"id":"m1","kind":"mermaid","source":null,"text":"flowchart LR\n  Placed[Order placed] --> Prepping[In prep] --> Ready[Ready for pickup] --> Served[Served]","sha":"0730e47488c90846e75d0577056f696c04cc7c4c4e64ad7a16ddc98d6ddba561"},{"round":2,"id":"c1","kind":"code","source":null,"text":"function priorityScore(ticket) {\n  const waitMs = Date.now() - ticket.placedAt;\n  const rushBonus = ticket.rush ? 500 : 0;\n  return waitMs + rushBonus;\n}","sha":"6e558853c35e89523f1588343da1ee9b1238bcb0df3d25b321582daa452fb690","lang":"javascript"},{"round":2,"id":"x1","kind":"compare","left":{"label":"Before","block":{"round":2,"id":"h2","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; background: #f3f4f6; }\n  .ticket { max-width: 300px; margin: 0 auto; background: #fff; border: 1px solid #d1d5db; padding: 10px 12px; font-size: 12px; line-height: 1.5; color: #374151; }\n  .ticket p { margin: 2px 0; }\n  .head { font-size: 12px; font-weight: 600; margin-bottom: 6px; color: #111; }\n  button { margin-top: 8px; padding: 6px 10px; font-size: 12px; background: #e5e7eb; border: 1px solid #9ca3af; border-radius: 4px; color: #111; cursor: pointer; }\n\u003c/style>\n\u003cdiv class=\"ticket\">\n  \u003cdiv class=\"head\">Order #482 — Table 6 — Placed 6:42 PM — Status: Awaiting confirmation\u003c/div>\n  \u003cp>1x Grilled salmon\u003c/p>\n  \u003cp>1x Caesar salad\u003c/p>\n  \u003cp>2x Sparkling water\u003c/p>\n  \u003cp>Estimated prep time: 12 minutes\u003c/p>\n  \u003cbutton>Confirm order now, please\u003c/button>\n\u003c/div>","sha":"d2f4bf94fc4f9fb3efc463751e1b1558f6c726ee18d6c6cb32ce16e89d5afe7e"}},"right":{"label":"After","block":{"round":2,"id":"h3","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .ticket { max-width: 260px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); overflow: hidden; border: 1px solid #e2e2e2; }\n  .head { background: #1f2937; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; }\n  .body { padding: 10px 14px; font-size: 13px; color: #111; }\n  .item { display: flex; justify-content: space-between; padding: 4px 0; }\n  button { width: 100%; padding: 9px 0; border: none; background: #2563eb; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }\n\u003c/style>\n\u003cdiv class=\"ticket\">\n  \u003cdiv class=\"head\">\u003cspan>#482\u003c/span>\u003cspan>Table 6\u003c/span>\u003c/div>\n  \u003cdiv class=\"body\">\n    \u003cdiv class=\"item\">\u003cspan>Grilled salmon\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n    \u003cdiv class=\"item\">\u003cspan>Caesar salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n    \u003cdiv class=\"item\">\u003cspan>Sparkling water\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n  \u003c/div>\n  \u003cbutton>Confirm\u003c/button>\n\u003c/div>","sha":"22d5a3e98bc92a5b3b0c9b31e3d273cdc5e44418a219e1c6e2c2e3c1d67d359c"}}},{"round":2,"id":"q1","kind":"question","prompt":"Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?","context":[{"round":2,"id":"d2","kind":"markdown","source":null,"text":"Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).","sha":"05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892","html":"\u003cp>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).\u003c/p>","anchors":[]}],"widget":"single","options":[{"label":"Yes, ship it","description":"","preview":null},{"label":"Close, one tweak needed","description":"","preview":null},{"label":"No, rework it","description":"","preview":null}]},{"round":2,"id":"q2","kind":"question","prompt":"Which stations need their ticket displays updated to match the round 1 mockup?","context":[],"widget":"multi","options":[{"label":"Grill","description":"","preview":null},{"label":"Salad","description":"","preview":null},{"label":"Expo","description":"","preview":null},{"label":"Bar","description":"","preview":null}]},{"round":2,"id":"q3","kind":"question","prompt":"Anything else the kitchen team should flag before we ship?","context":[],"widget":"text","options":[]},{"round":2,"id":"q4","kind":"question","prompt":"Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.","context":[],"widget":"rank","options":[{"label":"High-contrast","description":"","preview":null},{"label":"Pastel","description":"","preview":null},{"label":"Monochrome","description":"","preview":null}]},{"round":2,"id":"q5","kind":"question","prompt":"Which ticket-card layout reads faster at a glance?","context":[],"widget":"choose-between-rendered-variants","options":[{"label":"Layout A","description":"Compact, single line","block":{"round":2,"id":"h4","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #fff; border: 1px solid #e2e2e2; border-radius: 8px; max-width: 340px; margin: 0 auto; font-size: 14px; color: #111; }\n  .row b { font-weight: 700; }\n  .dot { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; }\n\u003c/style>\n\u003cdiv class=\"row\">\u003cb>#482\u003c/b>\u003cspan class=\"dot\">\u003c/span>\u003cspan>Table 6\u003c/span>\u003cspan class=\"dot\">\u003c/span>\u003cspan>3 items\u003c/span>\u003c/div>","sha":"f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822"}},{"label":"Layout B","description":"Spacious, three lines","block":{"round":2,"id":"h5","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .card { max-width: 340px; margin: 0 auto; padding: 18px; background: #fff; border: 1px solid #e2e2e2; border-radius: 10px; }\n  .line { padding: 6px 0; font-size: 15px; color: #111; border-bottom: 1px solid #f0f0f0; }\n  .line:last-child { border-bottom: none; }\n  .line.title { font-size: 18px; font-weight: 700; }\n\u003c/style>\n\u003cdiv class=\"card\">\n  \u003cdiv class=\"line title\">Order #482\u003c/div>\n  \u003cdiv class=\"line\">Table 6\u003c/div>\n  \u003cdiv class=\"line\">3 items\u003c/div>\n\u003c/div>","sha":"ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c"}}]}],"answers":{"q1":{"id":"q1","status":"answered","choice":"Close, one tweak needed","note":"Add a Recall step from Ready back to Prepping for remakes."},"q2":{"id":"q2","status":"answered","choice":["Grill","Expo"],"note":"Bar can wait until next sprint."},"q3":{"id":"q3","status":"answered","choice":"Make sure the Recall state also resets the rush-bonus timer, or repeat rush tickets will always sort to the top.","note":""},"q4":{"id":"q4","status":"answered","choice":["High-contrast","Monochrome","Pastel"],"note":"Pastel washes out completely under the heat-lamp lighting."},"q5":{"id":"q5","status":"answered","choice":"Layout A","note":""}},"comments":[{"n":1,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"block"},"text":"This matches the walkthrough from Tuesday's stand-up. Nice work.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":2,"blockId":"h1","blockKind":"html","anchor":{"kind":"dom","ref":"1.2.1.3.1","hint":"Confirm"},"text":"Consider making this button say 'Confirm order' for clarity.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":3,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"mermaid","ref":"Ready"},"text":"Should Ready also branch to a Recall state if an item comes back?","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true}]}</script>
 <script type="module">
 (function () {
   // Tag/type-qualified, not a bare getElementById: board content is markdown
@@ -4233,11 +4468,82 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
   // rendered it. Both are the "one implementation, embedded not copied" rule --
   // a hand-written twin here would be free to disagree with the markup on
   // screen, and nothing would catch it.
+  var roundNumberLabel = function roundNumberLabel(n) {
+  return 'Round ' + n;
+};
   var roundPageLabel = function roundPageLabel(n, title) {
-  return title ? 'Round ' + n + ' · ' + title : 'Round ' + n;
+  return title ? roundNumberLabel(n) + ' · ' + title : roundNumberLabel(n);
 };
   var isPageRound = function isPageRound(blocks) {
   return blocks.length === 1 && blocks[0].kind === 'html' && !blocks[0].error;
+};
+
+  // Same technique a third time: whether a round is *awaited* (CONTEXT.md
+  // "Awaited") is what markPendingRound below gates the tab mark and the
+  // notification on (AC 9/AC 10, SPEC_AWAITED.md ticket 04) -- the exact same
+  // predicate src/indexpage.mjs's badge count and src/server.mjs's
+  // drainUndeliveredComments read, spliced in rather than hand-copied so a legacy
+  // round (minted before ADR.md entry 45, carrying neither an awaited flag nor an
+  // awaitDeadline at all) falls back to the identical shape-based inference on
+  // every side instead of three that could quietly disagree. questionBlocks is
+  // roundIsAwaited's own dependency (its legacy fallback), spliced for the same
+  // reason, not because anything else here calls it directly.
+  var questionBlocks = function questionBlocks(board) {
+  const out = [];
+  const visit = b => {
+    if (!b) return;
+    if (b.kind === 'question') {
+      out.push(b);
+      (b.context || []).forEach(visit);
+      // choose-between-rendered-variants: an option's own block can
+      // itself be a nested question (the same generality context/compare
+      // already allow), so its answer has to reach applySubmit's answerable
+      // set and buildPacket the same way a context/compare-nested question's
+      // does.
+      (b.options || []).forEach(o => visit(o.block));
+    }
+    if (b.kind === 'compare') {
+      visit(b.left?.block);
+      visit(b.right?.block);
+    }
+  };
+  for (const b of board.blocks) visit(b);
+  return out;
+};
+  var roundIsAwaited = function roundIsAwaited(board, r) {
+  if (!r) return false;
+  if (typeof r.awaited === 'boolean') return r.awaited;
+  return questionBlocks(board).some(q => q.round === r.n);
+};
+
+  // The waiting signal (SPEC_AWAITED.md ticket 03), spliced the same way and in
+  // dependency order (each one calls only a name already assigned above it --
+  // 'var' hoisting makes the DECLARATION order irrelevant, but the ASSIGNMENT
+  // still has to run top to bottom before any of these is ever CALLED, which it
+  // does, since every line here runs synchronously at IIFE start). Real
+  // functions, not a hand-written twin: badge.mjs's own header comment is what
+  // explains why only THIS file may ever call roundIsCurrentlyAwaited/
+  // roundCountdownText/pageBoardPillMeta with a real clock -- src/render.mjs
+  // never does, so a rendered page stays a pure function of its board JSON.
+  var ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
+  var PILL_READONLY_TITLE = "No agent is listening on this page -- commenting is off.";
+  var PAGE_SEND_EXPIRED_LABEL = "Goes out with the next round";
+  var PAGE_SEND_EXPIRED_TITLE = "This round ended. Comments left here are stored and reach the next agent that asks.";
+  var roundIsAwaitedOpen = function roundIsAwaitedOpen(round) {
+  return !!round && round.status === 'open' && round.awaited === true;
+};
+  var roundIsCurrentlyAwaited = function roundIsCurrentlyAwaited(round, nowMs) {
+  return roundIsAwaitedOpen(round) && !!round.awaitDeadline && Date.parse(round.awaitDeadline) > nowMs;
+};
+  var roundCountdownText = function roundCountdownText(round, nowMs) {
+  if (!roundIsCurrentlyAwaited(round, nowMs)) return null;
+  const minutes = Math.ceil((Date.parse(round.awaitDeadline) - nowMs) / 60000);
+  return minutes + 'm left';
+};
+  var pageBoardPillMeta = function pageBoardPillMeta(round, nowMs) {
+  const countdown = roundCountdownText(round, nowMs);
+  if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
+  return { text: 'read-only', title: PILL_READONLY_TITLE };
 };
 
   function seedAnswers(blockIds, boardData) {
@@ -4803,13 +5109,17 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
   // renders exactly at the placeholder a report that never arrived at all
   // would have left the card at, not below it.
   var STAGE_HEIGHT_FLOOR = 320;
-  // How far into the artifact counts as "reading it" (ADR.md entry 40) -- the
-  // point the header condenses at and the back-to-top control appears at. One
-  // number for both, so the two can never disagree about what "scrolled" means.
-  // A few pixels rather than zero: a trackpad's inertia can leave a document
-  // resting at 1-2px, and a header that flickers on that is worse than one that
-  // waits for a real gesture.
-  var STAGE_SCROLL_CONDENSE_PX = 24;
+  // How far into the artifact counts as fully "reading it" (ADR.md entry 40) --
+  // the offset at which the header has finished condensing and the back-to-top
+  // control has finished appearing. A RAMP, not a threshold: the condense is a
+  // 0-to-1 progress across this distance (refreshStageChrome, below), so there
+  // is no boundary for a reader to rest on and flicker. That flicker is exactly
+  // what the old 24px threshold did, and why a wider dead zone was not the fix:
+  // a dead zone moves the boundary, it does not remove it.
+  //
+  // 140px is a bit over one scroll notch, so an accidental nudge barely stains
+  // the header while a deliberate read completes it.
+  var STAGE_SCROLL_CONDENSE_PX = 140;
 
   /** Post one message to 'frame''s stage agent. Wrapped in try/catch: a frame
    * mid-teardown (an amend that replaced this block) can leave 'contentWindow'
@@ -4870,6 +5180,28 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
    * Iterates frames still live in THIS document, filtered through isWiredStage
    * -- a frame that was only ever the about:blank placeholder, or one an amend
    * already replaced, is simply absent from the query and never touched. */
+  /** SPEC_AWAITED.md ticket 03, AC 8/AC 12: is the click-to-anchor gesture even
+   * on offer for 'section' (a '.html-block')? 'true' for every stage that is
+   * NOT a page board's own -- ADR.md entry 28's rule stays kind-based
+   * everywhere else, unchanged by this ticket -- and for a page board's stage
+   * only while its own round is genuinely awaited right now (status open,
+   * 'awaited === true', and short of its deadline: 'roundIsCurrentlyAwaited',
+   * the one function on this whole page that reads the wall clock for this
+   * purpose). 'false' covers a page board that was never awaited at all (AC
+   * 8), one whose round has since been sent, and one whose wait died while
+   * this very tab sat open (AC 12) -- three different histories, one gate,
+   * since all three mean the same thing to a reviewer holding the mouse:
+   * nobody is listening any more. Read straight off 'board.rounds' rather
+   * than off any DOM state, so it can never disagree with what
+   * renderPageCommentPanel (src/render.mjs) or refreshAwaitDisplay (below)
+   * decided about the very same round. */
+  function pageRoundCommentsAllowed(section) {
+    var roundSection = section && section.closest('.round');
+    var n = roundSection ? parseInt(roundSection.getAttribute('data-round'), 10) : NaN;
+    if (!isFinite(n)) return true;
+    if (!isPageRound(blocksOfRound(n))) return true;
+    return roundIsCurrentlyAwaited(roundEntry(n), Date.now());
+  }
   function broadcastStageMode() {
     qsa('.html-stage', document).forEach(function (frame) {
       if (!isWiredStage(frame)) return;
@@ -4877,7 +5209,7 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
       var blockId = section && section.getAttribute('data-block-id');
       postToStage(frame, {
         type: 'mode',
-        commentMode: commentMode,
+        commentMode: commentMode && pageRoundCommentsAllowed(section),
         sentRefs: blockId ? sentDomRefsForBlock(blockId) : [],
         theme: activeTheme(),
       });
@@ -4951,12 +5283,26 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     // theme travels in the same message for the same reason (ADR.md entry 39):
     // a stage that has just announced itself has to be painted in the reader's
     // theme before its first frame is looked at, not at the next toggle.
-    postToStage(frame, { type: 'mode', commentMode: commentMode, sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
+    //
+    // SPEC_AWAITED.md ticket 03, AC 8: gated exactly like broadcastStageMode
+    // (pageRoundCommentsAllowed, above) -- a stage that announces itself for
+    // the FIRST time is otherwise the one path that never went through that
+    // function at all, and would hand a non-awaited (or since-expired) page
+    // round's stage 'commentMode: true' straight from the global toggle with
+    // no gate in the way.
+    postToStage(frame, { type: 'mode', commentMode: commentMode && pageRoundCommentsAllowed(section), sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
     if (layer) requestStagePositions(frame, blockId, layer);
   }
 
   function handleStageClick(data, section, blockId) {
     if (readonly || !commentMode) return;
+    // SPEC_AWAITED.md ticket 03, AC 8/AC 12: broadcastStageMode already tells a
+    // gated stage 'commentMode: false', which stops the hover/click gesture at
+    // its source -- this is the second, independent gate (QUIRKS.md "Readonly
+    // is locked twice"), for a click message that beat that broadcast across
+    // the postMessage round trip, or one from a stage this tab never told at
+    // all (a resync that skipped straight to an already-expired round).
+    if (!pageRoundCommentsAllowed(section)) return;
     if (typeof data.ref !== 'string' || !data.ref) return;
     var anchor = { kind: 'dom', ref: data.ref };
     // An element inside this stage
@@ -5120,17 +5466,87 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
    * that would condense a header floating over nothing and float a back-to-top
    * control over a page that has its own scrollbar.
    *
-   * Two classes, one condition -- 'stage-scrolled' on <body> is what condenses
-   * the header (src/styles.mjs) and '.visible' is what shows the control; both
-   * follow the same boolean so they can never disagree about whether the
-   * reviewer is reading. */
+   * One number, three consumers -- '--stage-p' on <body> is the 0-to-1 condense
+   * progress the stylesheet does all of its arithmetic on, 'stage-scrolled' is
+   * that same progress asked "off zero?", and '.visible' flips the back-to-top
+   * control's 'display'. All three are derived here from the one offset, so
+   * they cannot disagree about how far into the artifact the reviewer is.
+   *
+   * The two booleans survive the move to a continuous progress only because
+   * 'display' has no interpolable midpoint and something has to flip it; every
+   * part of the look is on '--stage-p'. They flip at the first pixel rather
+   * than at a threshold, and the control is fully transparent there
+   * (src/styles.mjs), so nothing appears until the fade actually starts. */
   function refreshStageChrome() {
     var frame = document.querySelector('.round-current .html-stage');
     var top = frame && typeof frame.__cbStageTop === 'number' ? frame.__cbStageTop : 0;
-    var scrolled = document.body.classList.contains('page-board') && top > STAGE_SCROLL_CONDENSE_PX;
-    document.body.classList.toggle('stage-scrolled', scrolled);
-    if (backToTopBtn) backToTopBtn.classList.toggle('visible', scrolled);
+    var pageBoard = document.body.classList.contains('page-board');
+    var p = pageBoard ? Math.min(1, Math.max(0, top / STAGE_SCROLL_CONDENSE_PX)) : 0;
+    // Three decimals, not the raw float: the value lands in a style attribute
+    // that the comment/anchor code reads back, and '0.6100000000000001' is a
+    // diff nobody wants to see. Below a thousandth is under a tenth of a pixel
+    // of pill travel.
+    document.body.style.setProperty('--stage-p', p.toFixed(3));
+    document.body.classList.toggle('stage-scrolled', p > 0);
+    if (backToTopBtn) backToTopBtn.classList.toggle('visible', p > 0);
   }
+
+  /** The pill's own half-width, handed to the stylesheet so its centred band is
+   * exactly as wide as the controls that survive the condense. Measured rather
+   * than hardcoded because two of those controls resize at runtime: the round
+   * badge relabels on a flip ('Round 3 of 5' is not 'Round 12 of 40') and the
+   * read-only slot (ADR.md entry 46) appears and goes.
+   *
+   * Read off the two survivors' own widths, never off the header's -- the
+   * header is full-bleed at every progress by design, so its width says
+   * nothing about the pill's. Includes the flex gap between them and the
+   * pill's inner padding, since the band has to hold all of it.
+   *
+   * ponytail: a ResizeObserver on the actions row, rather than a re-measure
+   * wired into every place a label can change. It costs one observer and
+   * cannot be forgotten by the next control someone adds to the header. */
+  function measurePillHalf() {
+    var head = document.querySelector('header.board-head');
+    // '.back-to-index', not a child combinator on '.board-head-title': the
+    // test DOM stand-in supports only the selector subset this file uses, and
+    // '>' is not in it (test/dom-stand-in.mjs).
+    var brand = head && head.querySelector('.back-to-index');
+    var actions = head && head.querySelector('.board-head-actions');
+    if (!brand || !actions) return;
+    // Layout measurement is the one thing the test DOM stand-in cannot fake
+    // (it has no getComputedStyle and no box model), and faking it would prove
+    // nothing anyway. Skipping leaves the stylesheet's --pill-half default,
+    // which is a slightly-off pill rather than a broken one -- so this is the
+    // same graceful floor as the ResizeObserver detection at the call site.
+    if (typeof getComputedStyle !== 'function') return;
+    // The gap is read at whatever progress the header is at, which is correct:
+    // it is the same interpolated value the controls are actually sitting on.
+    // The inner padding is the TOKEN, not a computed padding -- the header's
+    // own padding-inline already carries the centring inset at p>0, so reading
+    // it back would fold the answer into its own input.
+    var gap = parseFloat(getComputedStyle(head).columnGap) || 0;
+    var pad = parseFloat(getComputedStyle(document.body).getPropertyValue('--space-3')) || 0;
+    var half = (brand.offsetWidth + gap + actions.offsetWidth) / 2 + pad;
+    document.body.style.setProperty('--pill-half', half.toFixed(1) + 'px');
+  }
+
+  // Measure once now, and again whenever the controls that make up the pill
+  // change size (the round badge relabels on a flip; the read-only slot comes
+  // and goes). The initial call is explicit rather than left to the observer's
+  // own first delivery -- measured in Chrome 152, observing an element that is
+  // already laid out and never resized again delivers NOTHING, so an
+  // observe-only wiring left --pill-half unset for the whole session and the
+  // pill sat at the stylesheet's rough default.
+  //
+  // Feature-detected, and harmless without: --pill-half has a default in
+  // src/styles.mjs, so the floor is a slightly-off pill rather than a broken
+  // one.
+  (function () {
+    var actions = document.querySelector('header.board-head .board-head-actions');
+    if (!actions) return;
+    measurePillHalf();
+    if (typeof ResizeObserver === 'function') new ResizeObserver(measurePillHalf).observe(actions);
+  }());
 
   // Tag-qualified, same reason as every other id-by-string lookup in this file:
   // a heading '## Back to top' slugifies to a second id="back-to-top"
@@ -6252,8 +6668,37 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
    * reintroducing that by remembering one and forgetting the other; it is
    * document-wide regardless of 'root' on purpose, since provisional numbering
    * spans the whole board (refreshPendingCommentItems' own comment). */
+  /** SPEC_AWAITED.md ticket 03 (AC 4, AC 5): keeps every page round's own send
+   * control and hint honest as pendingComments changes -- called from
+   * refreshPins (queue/edit/delete, a submit landing, a resize -- see that
+   * function's own comment for why this belongs beside
+   * refreshPendingCommentItems rather than at each call site individually),
+   * document-wide for the identical reason: a comment queued while looking at
+   * ONE page must never leave some OTHER page's already-rendered label and
+   * hint stale for when the reviewer flips back to it. 'commentsWithPending'
+   * is the exact same count 'renderPageCommentPanel' (src/render.mjs) reads
+   * at first paint, from a different source (board.comments vs board.comments
+   * PLUS the live queue) -- the two can disagree the instant a comment is
+   * queued, which is precisely why this exists. */
+  function updatePageSendControls() {
+    qsa('.page-send-bar', document).forEach(function (bar) {
+      var n = parseInt(bar.getAttribute('data-round'), 10);
+      if (!isFinite(n)) return;
+      var blocks = blocksOfRound(n);
+      if (!blocks.length) return;
+      var blockId = blocks[0].id;
+      var count = commentsWithPending().filter(function (c) { return c.blockId === blockId; }).length;
+      var sendBtn4 = bar.querySelector('.page-send-btn');
+      if (sendBtn4) sendBtn4.textContent = count === 0 ? 'Nothing to add' : ('Send ' + count + ' comment' + (count === 1 ? '' : 's'));
+      var panel = bar.closest('.page-comments');
+      var hint = panel && panel.querySelector('.page-comment-hint');
+      if (hint) hint.style.display = count === 0 ? '' : 'none';
+    });
+  }
+
   function refreshPins(root) {
     refreshPendingCommentItems();
+    updatePageSendControls();
     qsa('.html-stage', root).forEach(function (frame) {
       if (!isWiredStage(frame)) return;
       var section = frame.closest('.html-block');
@@ -7345,8 +7790,9 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
   // --- rounds are the board's pages -------------------------------------------
   //
   // ADR.md entry 42: a thread keeps its single board and its rounds become that
-  // board's pages -- edge chevrons to flip, a pill at the bottom naming them and
-  // dotting the one that still owes an answer, landing on the newest. Exactly
+  // board's pages -- edge chevrons to flip, a pill at the bottom numbering them
+  // (full name on hover) and dotting the one that still owes an answer, landing
+  // on the newest. Exactly
   // one '.round' section carries 'round-current' and the stylesheet displays
   // only that one, so "which round am I on" is EXPLICIT STATE here, written in
   // one place, rather than a scroll position measured against the header.
@@ -7414,6 +7860,88 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     if (el) el.textContent = badgeLabel(currentRound, (board.rounds || []).length);
   }
 
+  /** SPEC_AWAITED.md ticket 03 (AC 6, AC 8, AC 11, AC 12): repaint every place a
+   * round's countdown or read-only state shows, from 'board.rounds' and this
+   * reader's own clock -- '#round-meta' (the page board's own pill/meta slot,
+   * for whichever round is CURRENT) and '#round-countdown' (the ordinary send
+   * bar's, for whichever round is OPEN, page board or not). Called from
+   * refreshPager (every flip and every push), from a periodic tick (so a round
+   * left open on screen counts down and can revert on its own, with nobody
+   * touching anything), and the instant an 'awaitExpired' SSE push says a
+   * round's wait just died (below) -- never later than a real signal saying it
+   * happened, which is what AC 12 asks for.
+   *
+   * Also the one place that ever CORRECTS the render-time decision
+   * 'renderPageCommentPanel' (src/render.mjs) made about whether a page round's
+   * compose/send surface is live: that function reads only 'roundIsAwaitedOpen'
+   * (no clock, so the page stays a pure function of its JSON at render time --
+   * see badge.mjs's own header comment), so an open, awaited round whose
+   * deadline has ALREADY passed at the moment this runs still rendered the live
+   * surface. '.expired' is what downgrades it here, client-side, the moment
+   * 'roundIsCurrentlyAwaited' stops agreeing with 'roundIsAwaitedOpen' for the
+   * same round -- one-directional by construction (a deadline never
+   * un-expires), and it never touches anything already in '.comment-list'
+   * ("comments already left stay on screen", AC 12). Locked twice, same
+   * discipline as 'body.readonly' (QUIRKS.md): the class hides the surface in
+   * CSS, and the disabled sweep just below stops a control that only LOOKS
+   * gone from still working. */
+  function refreshAwaitDisplay() {
+    var now = Date.now();
+    // ADR.md entry 46's half that outlives the first paint (src/render.mjs's own
+    // 'pageUncommentable' is the render-time half): the comment-mode toggle has
+    // to go on a page board that was never awaited AND on one whose wait dies
+    // while the reviewer is reading it -- so this asks the clock, which is why it
+    // lives here rather than in refreshPager (which calls this on every flip
+    // anyway, so the class is correct on both routes).
+    document.body.classList.toggle('page-uncommentable',
+      isPageRound(blocksOfRound(currentRound))
+      && !roundIsCurrentlyAwaited(roundEntry(currentRound), now));
+    var meta = document.querySelector('span#round-meta');
+    if (meta) {
+      var m = pageBoardPillMeta(roundEntry(currentRound), now);
+      meta.textContent = m.text;
+      meta.title = m.title;
+    }
+    var cd = document.querySelector('span#round-countdown');
+    if (cd) {
+      var text = roundCountdownText(roundEntry(openRoundNumber()), now);
+      cd.textContent = text || '';
+      cd.title = text ? ROUND_COUNTDOWN_TITLE : '';
+      cd.classList.toggle('visible', !!text);
+    }
+    qsa('.page-comments', document).forEach(function (panel) {
+      if (panel.classList.contains('expired')) return;
+      var section = panel.closest('.round');
+      var n = section ? parseInt(section.getAttribute('data-round'), 10) : NaN;
+      if (!isFinite(n)) return;
+      var round = roundEntry(n);
+      if (roundIsAwaitedOpen(round) && !roundIsCurrentlyAwaited(round, now)) {
+        // Last exit before the freeze. 'pendingComments' lives ONLY in this tab's
+        // memory (see its declaration) and the Send control is the only thing that
+        // ever moves it to the board, so freezing the control with the queue still
+        // in it is the one way a reviewer's typed comments get silently destroyed:
+        // they sit on screen looking saved until the tab is reloaded. Flushed
+        // first, frozen second -- the payload is captured synchronously inside
+        // submitPageRound, so the disable sweep below cannot race it.
+        flushPendingOnExpiry(n);
+        panel.classList.add('expired');
+        qsa('input, button', panel).forEach(function (el) { el.disabled = true; });
+        // Frozen, but not mute: the control stays on screen saying where the
+        // comments went (badge.mjs's own comment on this label). Set after the
+        // disable sweep so it cannot be re-enabled by it.
+        var expiredSend = panel.querySelector('.page-send-btn');
+        if (expiredSend) {
+          expiredSend.textContent = PAGE_SEND_EXPIRED_LABEL;
+          expiredSend.title = PAGE_SEND_EXPIRED_TITLE;
+        }
+      }
+    });
+    // A page round that just expired must stop offering its click-to-anchor
+    // gesture too, even mid-hover -- broadcastStageMode re-tells every wired
+    // stage its current allowance the same way any other mode change does.
+    broadcastStageMode();
+  }
+
   /** Repaint every control that names a round, from currentRound and 'board'.
    * Called on every flip AND after every push that changes what the rounds are
    * (a new one arriving, an earlier one going sent), so the pager, the badge,
@@ -7446,11 +7974,27 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
         btn.className = 'round-page'
           + (r.n === currentRound ? ' round-page-current' : '')
           + (roundOwesAnswer(r) ? ' round-page-owed' : '');
-        btn.textContent = roundPageLabel(r.n, r.title || '');
+        // Numeral on the face, full name as the accessible name and the hover
+        // title -- the same split roundPagerMarkup renders at first paint (see
+        // roundNumberLabel).
+        var full = roundPageLabel(r.n, r.title || '');
+        btn.textContent = String(r.n);
+        btn.setAttribute('title', full);
+        btn.setAttribute('aria-label', full);
         if (r.n === currentRound) btn.setAttribute('aria-current', 'page');
         else btn.removeAttribute('aria-current');
         btn.disabled = false;
       });
+    }
+    // The caption names the round the reviewer is on, so it is rewritten on
+    // every flip -- the one place the pager still spends a title.
+    // Tag-qualified like every other id lookup in this file -- '## Round pager
+    // caption' is exactly as mintable as '## Board data'.
+    var caption = document.querySelector('div#round-pager-caption');
+    if (caption) {
+      var cur = null;
+      rounds.forEach(function (r) { if (r.n === currentRound) cur = r; });
+      caption.textContent = roundPageLabel(currentRound, (cur && cur.title) || '');
     }
     var rns = rounds.map(function (r) { return r.n; });
     var first = rns.length ? rns[0] : 1;
@@ -7480,6 +8024,7 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     if (!submitInFlight) setSendBarEnabled(open !== null && currentRound === open);
 
     renderBadge();
+    refreshAwaitDisplay();
   }
 
   /** Flip to round 'n'. The one writer of currentRound.
@@ -7586,12 +8131,84 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     sendBarDockObserver.observe(rail);
   }
 
+  /** Ticket 02 (SPEC_AWAITED.md): '.page-comments' (a page board's floating
+   * comment panel) has to clear '.round-pager-dock' -- the round pager's
+   * fixed, bottom-centre box -- and cannot do that with a number typed into
+   * the stylesheet, because the dock's own height changes with its own
+   * content ('2379f12' grew it from one row to two and broke exactly that
+   * kind of number) and ticket 03 is about to make the PANEL taller too.
+   *
+   * CSS anchor positioning ('anchor()') was tried first and reverted: it
+   * requires the anchor to precede the positioned element in DOM order,
+   * which the dock does not (it renders after '.blocks', and
+   * '.page-comments' is nested inside a block within '.blocks'), and it hit
+   * a second, separate containing-block failure even after that was worked
+   * around -- confirmed wrong in a real browser (computed 'bottom: auto'),
+   * a class of failure this repo's DOM stand-in cannot see at all
+   * (QUIRKS.md, "The stand-in has no layout": no ResizeObserver either,
+   * hence the guard below).
+   *
+   * A ResizeObserver on the dock is the mechanism that survives that: it
+   * measures the dock's REAL box, independent of where either element sits
+   * in the tree, and writes it to '--round-pager-dock-h' (src/styles.mjs's
+   * '.page-comments'), which recomputes its 'bottom' every time the
+   * property changes -- CSS custom properties are live, so no second call
+   * is needed to push the new value into layout. Observed, not measured
+   * once at load: a future change to the dock's own font size, padding or
+   * row count updates this with it, with nothing to remember to keep in
+   * step. */
+  function setupPagerDockHeightTracking() {
+    var dock = document.querySelector('.round-pager-dock');
+    if (!dock) return;
+    if (typeof ResizeObserver !== 'function') return;
+    var ro = new ResizeObserver(function (entries) {
+      var entry = entries[0];
+      var h = entry && entry.contentRect ? entry.contentRect.height : dock.getBoundingClientRect().height;
+      document.documentElement.style.setProperty('--round-pager-dock-h', h + 'px');
+    });
+    ro.observe(dock);
+  }
+
   setupSendBarDock();
+  setupPagerDockHeightTracking();
   // The page is already painted on the right round (renderBoardPage), so this
   // only brings the CONTROLS up to it -- no flip, no scroll. It is also what
   // re-enables the pager in a read-only archive, after the blanket disable pass
-  // at the top of this file (see refreshPager's own comment).
+  // at the top of this file (see refreshPager's own comment), and (via
+  // refreshAwaitDisplay) fills in the real countdown figure this page's own
+  // first paint deliberately left for the client to compute (badge.mjs's
+  // header comment on why -- no 'Date.now()' at render time).
   refreshPager();
+  // AC 5: an awaited page round opens with comment mode ON, so the reviewer
+  // never has to find the toggle first -- the ADR 48 hint inside the empty
+  // panel (renderPageCommentPanel, src/render.mjs) is what teaches the
+  // click-to-comment gesture instead, since the toggle itself is no longer
+  // what reveals it here. 'roundIsCurrentlyAwaited', not merely
+  // 'roundIsAwaitedOpen': an already-expired round has nothing to teach the
+  // gesture FOR (AC 12 turns it read-only before the reviewer can act on it
+  // either way), so this only ever fires for a round that genuinely still has
+  // time on the clock. Once only, here at hydrate -- flipping to a DIFFERENT
+  // awaited page round later does not re-force the toggle, so a reviewer who
+  // deliberately turned it off keeps it off (ADR.md entry 40's own "the mode
+  // is switched mid-read, not suspended by the scroll" already makes this the
+  // reviewer's own control from here on).
+  if (isPageRound(blocksOfRound(currentRound)) && roundIsCurrentlyAwaited(roundEntry(currentRound), Date.now())) {
+    setCommentMode(true);
+  }
+  // SPEC_AWAITED.md ticket 03 (AC 6, AC 11, AC 12): a round left open on screen
+  // has to count down and can revert to read-only entirely on its own, with
+  // nobody touching anything -- the periodic half of refreshAwaitDisplay,
+  // beside the flip-triggered call in refreshPager and the 'awaitExpired' SSE
+  // nudge below. Skipped in a read-only archive: there is no live board for
+  // any of this to change. 'unref'd, same discipline as
+  // src/pomodoro.mjs's own timer and src/server.mjs's SSE heartbeat -- a
+  // lingering interval must never be the reason an in-process check's node
+  // process fails to exit on its own (a real browser has no 'unref', so the
+  // guard is a no-op there and the interval just runs).
+  if (!readonly) {
+    var awaitTickTimer = setInterval(refreshAwaitDisplay, 20000);
+    if (awaitTickTimer && typeof awaitTickTimer.unref === 'function') awaitTickTimer.unref();
+  }
 
   // The three round controls, all wired to the same two functions. The pill is
   // delegated at the <nav> rather than per entry, so an entry created later by
@@ -7841,6 +8458,122 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     });
   }
 
+  /** SPEC_AWAITED.md ticket 03 (AC 4): the awaited page's own Send/Discuss --
+   * submitBoard's analogue for a page round, deliberately never sharing that
+   * function's path. submitBoard refuses outright on a page round (ADR.md
+   * entry 35: "a page board is not sendable" through the ordinary send bar)
+   * and always names openRoundNumber(), the LATEST unsent round -- wrong for
+   * an awaited page round that is not the latest, exactly the gap ticket 01
+   * left for this one: "the browser's own Send control ... still assumes a
+   * single submittable round ... 03 is free to give an awaited page round's
+   * Send control its own correct round number rather than whatever the
+   * single latest-open number is". 'roundN' is read off the button's own
+   * 'data-round' (baked in at render time by renderPageCommentPanel,
+   * src/render.mjs), never derived from which page happens to be current.
+   *
+   * Comments are filtered to THIS round's own block before posting:
+   * 'pendingComments' is one flat, board-wide queue, and bundling every
+   * pending comment into every submit -- what submitBoard itself still does,
+   * unchanged and out of this ticket's scope -- would misfile a comment left
+   * on a DIFFERENT open round under this one's number the moment two rounds
+   * are genuinely open at once (ticket 01's "a board can hold two open rounds
+   * at once"). A page round carries exactly one block, so "this round's own
+   * comments" and "this block's own comments" are the same set -- whatever is
+   * left over stays queued, exactly the AC 12 promise ("comments already left
+   * stay on screen and ride the thread's next packet") for a comment on some
+   * OTHER round that has not gone out yet either. */
+  /** The queue's last chance to leave the tab, called on the transition into
+   * '.expired' and nowhere else. A no-op unless this round actually holds
+   * queued comments, so an expiring page nobody wrote on stays a pure display
+   * change and posts nothing. The submit itself is the ordinary one: it stores
+   * the comments and closes the round, and because the round is no longer
+   * awaited by then, 'drainUndeliveredComments' (src/server.mjs) is what carries
+   * them to the next agent that asks -- AC 12's "ride the thread's next packet",
+   * now that a lapsed round stops swallowing its own comments.
+   *
+   * ponytail: this needs the tab to be open at the deadline. Comments typed into
+   * a tab that is closed (or a laptop asleep) before it passes were never
+   * anywhere but that tab's memory and are gone either way -- this does not make
+   * that worse, and the upgrade path, if it ever bites, is the same flush on
+   * 'beforeunload'/'visibilitychange' rather than a durable client-side queue. */
+  function flushPendingOnExpiry(roundN) {
+    var blocks = blocksOfRound(roundN);
+    if (!isPageRound(blocks)) return;
+    var id = blocks[0].id;
+    if (!pendingComments.some(function (c) { return c.blockId === id; })) return;
+    submitPageRound(roundN, 'send');
+  }
+
+  function submitPageRound(roundN, action) {
+    if (readonly) return;
+    var round = roundEntry(roundN);
+    if (!round || round.status !== 'open') return;
+    var blocks = blocksOfRound(roundN);
+    if (!isPageRound(blocks)) return;
+    var blockId = blocks[0].id;
+    var mine = pendingComments.filter(function (c) { return c.blockId === blockId; });
+    var section = roundSectionEl(roundN);
+    var pageSendBtn = section && section.querySelector('.page-send-btn');
+    var pageDiscussBtn = section && section.querySelector('.page-discuss-btn');
+    // Disabled the instant the click lands, before the round trip even starts
+    // -- the same reason submitBoard's own setSendBarEnabled(false) runs
+    // before its fetch, so a double click (or a click during a slow network)
+    // can never fire this twice.
+    if (pageSendBtn) pageSendBtn.disabled = true;
+    if (pageDiscussBtn) pageDiscussBtn.disabled = true;
+    fetch('/api/board/' + boardId + '/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine }),
+    }).then(function (r) {
+      // 409: already sent, by another tab or a double click that beat the
+      // disable above -- not an error, and the live 'submitted' push (already
+      // on its way, or this thread's next resync) is what settles the
+      // surface, exactly submitBoard's own reasoning for the identical case.
+      if (r.status === 409) return { alreadySent: true };
+      if (!r.ok) throw new Error('submit failed: ' + r.status);
+      return r.json();
+    }).then(function (result) {
+      if (result && result.alreadySent) return;
+      // Only THIS block's comments are cleared -- see this function's own
+      // header comment for why the queue is not simply emptied wholesale.
+      pendingComments = pendingComments.filter(function (c) { return c.blockId !== blockId; });
+      refreshPins(document);
+      clearPendingMark();
+    }).catch(function () {
+      // Nothing went out -- hand the controls back so the reviewer can retry,
+      // the same recovery submitBoard's own catch performs. Except on a panel
+      // that has since frozen (the flush-on-expiry path above): there the round
+      // is over, retrying is not on offer, and re-enabling would leave a control
+      // that CSS has already hidden still live to a keyboard -- exactly the
+      // "locked twice" rule QUIRKS.md states for every other read-only surface.
+      var frozen = section && section.querySelector('.page-comments.expired');
+      if (frozen) return;
+      if (pageSendBtn) pageSendBtn.disabled = false;
+      if (pageDiscussBtn) pageDiscussBtn.disabled = false;
+    });
+  }
+
+  // Delegated at the document, the same idiom the round pager's own nav uses
+  // (and for the same reason): a page round's send control can arrive well
+  // after hydrate (a fresh awaited page round pushed over SSE), and delegation
+  // means it is live the instant it exists, with no second wiring pass and no
+  // chance of a double-registered listener.
+  document.addEventListener('click', function (ev) {
+    if (readonly || !ev.target || !ev.target.closest) return;
+    var sendBtn3 = ev.target.closest('.page-send-btn');
+    if (sendBtn3) {
+      var n1 = parseInt(sendBtn3.getAttribute('data-round'), 10);
+      if (isFinite(n1)) submitPageRound(n1, 'send');
+      return;
+    }
+    var discussBtn3 = ev.target.closest('.page-discuss-btn');
+    if (discussBtn3) {
+      var n2 = parseInt(discussBtn3.getAttribute('data-round'), 10);
+      if (isFinite(n2)) submitPageRound(n2, 'discuss');
+    }
+  });
+
   // --- Cmd+Enter board traversal, and the Send guard --------------------------
   //
   // A single document-level keydown listener is the whole keyboard path through
@@ -7924,21 +8657,45 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
   }
 
+  /** Put a question block's own TOP on screen and move focus there -- the
+   * pill's landing, deliberately not focusNoteField. A note field sits at the
+   * END of its question, so focusing it scrolls the reviewer PAST the very
+   * question they asked to be taken to: a block with a long context column puts
+   * that field most of a screen below the question's first line, and the pill
+   * then reads as "jump to the comment box". The block's own top is the thing
+   * the reviewer was promised, and .question-block's scroll-margin-top clears
+   * the sticky header so 'start' does not park it behind the chrome.
+   *
+   * tabindex is set here rather than in the rendered markup because this is the
+   * only path that focuses a block: '-1' keeps it out of the Tab order while
+   * making it a legal script-focus target (the ordinary skip-link shape), so
+   * keyboard and screen-reader users continue from the question instead of from
+   * the pill they left. focus takes preventScroll so the browser's own
+   * bring-focus-on-screen cannot undo the alignment scrollIntoView just asked
+   * for -- both guarded the same way focusNoteField's scrollIntoView is, so a
+   * DOM stand-in missing either method still runs this without throwing. */
+  function goToQuestion(block) {
+    if (!block) return;
+    block.setAttribute('tabindex', '-1');
+    if (block.scrollIntoView) block.scrollIntoView({ block: 'start' });
+    if (block.focus) block.focus({ preventScroll: true });
+  }
+
   /** ADR.md entry 27: "the pill's click target is
    * the send guard's target, not a second notion of 'next question'" -- the exact
-   * same outstandingBlocks()[0] armSendGuard flags, reached the same way the
-   * Cmd+Enter traversal already lands on a question (focusNoteField), rather than
-   * armSendGuard's own scroll-and-ring: the pill leaves the guard alone entirely
-   * (never touches sendArmed, the 'warn' class or send-status), it only moves the
-   * reviewer there. Gated on commentMode like every other action-taking control
-   * wireRoot wires -- see the single/multi/defer handlers above -- so a click
-   * meant to anchor a comment can never also be read as "go answer this". */
+   * same outstandingBlocks()[0] armSendGuard flags, but landed on the way
+   * goToQuestion above describes rather than armSendGuard's own scroll-and-ring:
+   * the pill leaves the guard alone entirely (never touches sendArmed, the
+   * 'warn' class or send-status), it only moves the reviewer there. Gated on
+   * commentMode like every other action-taking control wireRoot wires -- see the
+   * single/multi/defer handlers above -- so a click meant to anchor a comment can
+   * never also be read as "go answer this". */
   if (questionsLeftPill) {
     questionsLeftPill.addEventListener('click', function () {
       if (readonly || commentMode) return;
       var outstanding = outstandingBlocks();
       if (!outstanding.length) return;
-      focusNoteField(outstanding[0]);
+      goToQuestion(outstanding[0]);
     });
   }
 
@@ -8178,8 +8935,22 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     } catch (e) { /* degrade silently -- marking the tab must never block a push */ }
   }
 
+  /** The tab mark (AC 9) and the notification (AC 10) gate on the SAME thing --
+   * whether round n is awaited, i.e. whether the ask() call that posted it is
+   * still genuinely blocked on it (CONTEXT.md "Awaited"). A fire-and-forget
+   * artifact round (no wait) is not: nobody is listening for a submit that will
+   * never come, so marking it pending or notifying about it would both be the
+   * same lie in two different UI surfaces. Gated here, once, rather than in
+   * notifyRound alone, precisely so the favicon badge and the notification can
+   * never disagree about which rounds count -- the exact drift AC 9/AC 10
+   * together forbid. 'board' is read directly off the closure rather than
+   * passed in: applyRoundPush (this function's only caller) has already
+   * reassigned it to the post-push board by the time this runs, so n's own
+   * round record -- awaited flag included -- is right there. */
   function markPendingRound(n) {
     if (readonly) return;
+    var r = (board.rounds || []).filter(function (x) { return x.n === n; })[0];
+    if (!roundIsAwaited(board, r)) return;
     pendingRounds++;
     setFaviconBadge(pendingRounds);
     notifyRound(n);
@@ -8680,6 +9451,14 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
     es.addEventListener('submitted', function (ev) {
       try { applySubmittedPush(JSON.parse(ev.data)); } catch (e) { /* ignore */ }
     });
+    // AC 12: "when a wait dies while the page is open, the page is told over
+    // SSE". src/server.mjs's handleWait broadcasts this the instant its own
+    // /wait call times out, which is genuinely earlier than the periodic tick
+    // above would otherwise catch it. No payload is needed -- every fact this
+    // repaints (board.rounds' own status/awaited/awaitDeadline, and this
+    // reader's own clock) is already known locally; the event exists purely as
+    // a wake-up nudge, so a malformed or absent 'data' still repaints.
+    es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); });
   }
 })();
 </script>

@@ -9,6 +9,7 @@ SPEC_*.md
 TICKETS_*.md
 DESIGN.md
 CONTEXT.md
+TODO.md
 findings/
 
 # design-sync: private tooling plus everything `extract-css.mjs` regenerates.

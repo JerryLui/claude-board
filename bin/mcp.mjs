@@ -42,7 +42,26 @@ import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 
 const PORT = Number(process.env.CLAUDE_BOARD_PORT) || 7391;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
-const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 2 * 60 * 60 * 1000; // 2h default
+const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000; // 40m default (ADR.md entry 47)
+// The shim outlives the daemon's own identical cap by this much, and only this
+// much. Both processes read the same CLAUDE_BOARD_TIMEOUT_MS and default to the
+// same 40m, so before this margin existed the shim's deadline -- computed at
+// blockingWait entry, while the daemon's starts after connect and parse -- always
+// fired first by the request latency. The shim aborted, the daemon saw a dead
+// client and returned early, and its entire timeout branch was unreachable in
+// every shipped install: no `awaitExpired` broadcast, no timeout packet, and the
+// round it had just given up on never got closed. Five seconds is far longer than
+// loopback latency and invisible against a 40 minute cap; the cap the reviewer and
+// the agent are both told about stays TIMEOUT_MS, which is the daemon's.
+//
+// Proportional rather than a flat five seconds, because the checks drive the same
+// cap down to a few hundred milliseconds to exercise this path in under a second: a
+// fixed margin would be the entire runtime there. 5% of the cap, capped at the 5s a
+// 40 minute wait wants, and floored at 250ms -- the floor is not about request
+// latency but about the daemon's own resolution: `waitForRound` (src/server.mjs)
+// polls the store every 120ms, so it can only notice its deadline at the next tick
+// after it, and a margin under that lets the shim win again on a short cap.
+const WAIT_GRACE_MS = Math.min(5_000, Math.max(250, Math.round(TIMEOUT_MS * 0.05)));
 const PROGRESS_MS = Number(process.env.CLAUDE_BOARD_PROGRESS_MS) || 20_000; // ~20s cadence
 const POST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
 const NO_OPEN = process.env.CLAUDE_BOARD_NO_OPEN === '1';
@@ -530,8 +549,9 @@ const ASK_TOOL = {
   name: 'ask',
   description:
     'Post a board (questions plus artifact context) to the local claude-board daemon. ' +
-    'Blocks until the reviewer submits when the round carries any question block; a round ' +
-    'of content blocks only returns as soon as the post succeeds, nothing to wait for. Opens ' +
+    'Blocks until the reviewer submits when the round carries any question block, or when ' +
+    'it is a page board (one html block) posted with wait: true; every other round returns ' +
+    'as soon as the post succeeds, nothing to wait for. The default wait is 40 minutes. Opens ' +
     'a browser tab on the first board of this session; later rounds push into the same tab. ' +
     'Returns a packet naming each question\'s status, choice and note, and every comment ' +
     'with its anchor.',
@@ -545,6 +565,14 @@ const ASK_TOOL = {
           'Content and question blocks in display order. Questions carry their prompt by ' +
           'value; content blocks carry a source ref (or raw text/html for the html/mermaid kinds).',
         items: { type: 'object' },
+      },
+      wait: {
+        type: 'boolean',
+        description:
+          'Block on this round even though it carries no question, so the reviewer\'s comments ' +
+          'on it come back in this same call\'s packet instead of riding a later round. Only has ' +
+          'an effect when blocks is exactly one html block (a page board); default false. A ' +
+          'question round blocks regardless of this flag.',
       },
     },
     required: ['title', 'blocks'],
@@ -639,7 +667,7 @@ function packetResult(text, packet) {
  * breaks "one thread per MCP shim process".
  * The promise is cleared in `finally`, so a failed first post leaves the session
  * clean for the next call to retry rather than wedging the thread forever. */
-async function postThisRound(session, title, blocks) {
+async function postThisRound(session, title, blocks, wait) {
   if (session.creatingThread) {
     // Someone else is minting the thread. Wait it out — if it succeeded we push a
     // round into its board, if it failed we fall through and try to create it.
@@ -650,7 +678,7 @@ async function postThisRound(session, title, blocks) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, cwd: process.cwd(), thread: session.thread ?? null },
+        { title, blocks, wait: Boolean(wait), cwd: process.cwd(), thread: session.thread ?? null },
         { timeoutMs: POST_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -676,14 +704,17 @@ async function postThisRound(session, title, blocks) {
   // call whose response was lost re-sends the same blocks, so the same id, and the daemon
   // recognises it as the request it already applied instead of appending a second copy of
   // every question. A genuinely new round differs in its blocks and
-  // so gets a different id. Scoped to the board so two boards cannot collide.
+  // so gets a different id. Scoped to the board so two boards cannot collide. `wait` is
+  // folded in too: it changes what round.awaited ends up as (src/board.mjs `mintAwait`),
+  // so a call that only flips `wait` between two otherwise-identical posts is a
+  // different request, not a retry of the first.
   const requestId = createHash('sha256')
-    .update(JSON.stringify([session.boardId, title, blocks]))
+    .update(JSON.stringify([session.boardId, title, blocks, Boolean(wait)]))
     .digest('hex')
     .slice(0, 32);
   const posted = await httpJson(
     'POST', `${BASE_URL}/api/board`,
-    { boardId: session.boardId, blocks, title, requestId },
+    { boardId: session.boardId, blocks, title, wait: Boolean(wait), requestId },
     { timeoutMs: POST_TIMEOUT_MS }
   );
   return { posted, isFirstBoard: false };
@@ -696,10 +727,8 @@ async function postThisRound(session, title, blocks) {
  * walk on the normalized board — a block is minted in exactly the shape it arrives, so
  * checking the raw input finds the same set an already-posted board would.
  *
- * This is the entire "does this call have anything to wait for" decision:
- * a round with a question anywhere in it blocks until submit; a round with none returns
- * as soon as the post lands. One call, one shape — no mode flag, no separate
- * "no-questions" guard, just this. */
+ * A round carrying a question always blocks (CONTEXT.md "Awaited"); see `wait` below
+ * for the second, declared route in — a page board posted with `wait: true`. */
 function hasQuestionBlock(blocks) {
   const found = b => {
     if (!b || typeof b !== 'object') return false;
@@ -709,6 +738,31 @@ function hasQuestionBlock(blocks) {
     return false;
   };
   return Array.isArray(blocks) && blocks.some(found);
+}
+
+/** Whether raw `blocks` is shaped like a page board — one `html` block and nothing
+ * else (ADR.md entry 33, src/badge.mjs `isPageRound`) — checked here against the RAW,
+ * pre-resolution input the same way `hasQuestionBlock` is: this call cannot yet know
+ * whether an `html` block's `source` will fail to resolve (that only happens
+ * server-side, in src/board.mjs `normalizeBlock`), so this is deliberately a looser
+ * check than the authoritative one `mintAwait` runs against the normalized board. The
+ * gap only matters when a `source` ref is broken AND `wait: true` was passed on it: the
+ * shim still blocks (this returns true), the daemon still marks the round not-awaited
+ * (its `html` block carries `error`), and the call rides out to the 40-minute timeout
+ * rather than either side silently disagreeing about which comments are ever read. */
+function isPageRoundShape(blocks) {
+  return Array.isArray(blocks) && blocks.length === 1 && blocks[0] && typeof blocks[0] === 'object' && blocks[0].kind === 'html';
+}
+
+/** Whether THIS call has anything to wait for — the entire "does `ask` block" decision.
+ * Two routes in, matching CONTEXT.md's "Awaited" glossary entry exactly: a round
+ * carrying a question always does, and a page board (one `html` block, nothing else)
+ * does when the caller declared `wait: true` (ADR.md entry 45). Every other shape —
+ * content-only, more than one block, no question — returns as soon as the post lands,
+ * `wait: true` or not: the glossary names only these two routes in, and this does not
+ * invent a third. */
+function isAwaited(blocks, wait) {
+  return hasQuestionBlock(blocks) || (Boolean(wait) && isPageRoundShape(blocks));
 }
 
 /** `session` carries the in-memory, per-shim-process state a live thread needs:
@@ -728,13 +782,14 @@ async function askTool(args, session, { sendProgress, cancelled }) {
 
   const title = args && args.title;
   const blocks = args && args.blocks;
+  const wait = args && args.wait;
   if (typeof title !== 'string' || !title) throw new ToolError('ask requires a non-empty string "title"');
   if (!Array.isArray(blocks)) throw new ToolError('ask requires a "blocks" array');
 
   let posted;
   let isFirstBoard;
   try {
-    ({ posted, isFirstBoard } = await postThisRound(session, title, blocks));
+    ({ posted, isFirstBoard } = await postThisRound(session, title, blocks, wait));
   } catch (err) {
     throw toolErrorFor(err, session.url);
   }
@@ -747,15 +802,24 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   if (isFirstBoard) await openAuthorizedTab(posted.boardId, url);
   else await reopenIfNoClient(posted, url);
 
-  // A round with no question block anywhere in it has nothing a human
+  // A round with nothing awaited on it (see `isAwaited` above) has nothing a human
   // needs to submit, so there is nothing left to wait for — return the instant the
   // post lands. Opening the tab above stays best-effort either way: the shim spawns
   // the opener detached and never learns whether a tab actually appeared (see
   // openBoardTab), so "the tab opened" was never a state this could return on; "the
   // post succeeded" is. This is also why it is checked against the round just posted
   // rather than against `posted` (the daemon's response carries no block list back).
-  if (!hasQuestionBlock(blocks)) {
-    const text = `Board posted; no response needed (no question blocks in this round).\nBoard: ${url}`;
+  //
+  // The daemon's own verdict wins when it gives one. `isAwaited` below reads the RAW
+  // blocks and cannot know whether an `html` block's `source` resolved -- so on a
+  // page board with a broken reference the two sides disagreed: the daemon minted the
+  // round not-awaited (its block carries `error`) and never built a packet, while this
+  // side blocked out the full cap on a round nothing would ever answer. `awaited` on
+  // the post response is that same `mintAwait` result, so the shim can simply agree
+  // with it. Optional by design: a daemon from before this field existed returns
+  // `undefined` and the local shape check below is what decides, exactly as it did.
+  if (posted.awaited === false || !isAwaited(blocks, wait)) {
+    const text = `Board posted; no response needed (nothing awaited in this round).\nBoard: ${url}`;
     return packetResult(text, {
       board: posted.boardId,
       thread: posted.thread,
@@ -773,7 +837,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     waited = await blockingWait({
       boardId: posted.boardId,
       round: posted.round,
-      timeoutMs: TIMEOUT_MS,
+      timeoutMs: TIMEOUT_MS + WAIT_GRACE_MS,
       progressMs: PROGRESS_MS,
       onProgress: elapsedMs => sendProgress(elapsedMs, TIMEOUT_MS, url),
       cancelled,

@@ -30,7 +30,7 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `src/styles.mjs` | page CSS, exported as a string |
 | `src/theme.mjs` | client-side theme selection: storage key, `THEME_CHANGE_EVENT`, the pre-paint boot script, the control's markup |
 | `src/patch.mjs` | pure board-JSON diff (added/changed block ids, rounds now sent), imported by the checks AND spliced verbatim into `src/ui.mjs` via `computeBoardPatch.toString()` |
-| `src/badge.mjs` | the round badge's label, pure |
+| `src/badge.mjs` | pure, DOM-free facts about a round: the badge's label, `isPageRound`/`questionBlocks`, and the whole *Awaited* predicate family (`roundIsAwaited`, `closeLapsedAwaitedRounds`, the countdown and pill text). Imported by the store, the server and the index AND spliced verbatim into `src/ui.mjs`, so both sides answer "is anyone listening" from one definition |
 | `src/lens.mjs` | the diagram lens's view math, pure |
 | `src/prose-check.mjs` | the prose-vs-shim checker (below). Ships from `src/` so a caller outside this repo can import it |
 | `src/cues.mjs` | the cue vocabulary: the closed set of legal cue values, enumerated live from BOTH sound directories (`/System/Library/Sounds` and `~/Library/Sounds`, ADR 23) plus `"None"`, memoised on a 5-second TTL |
@@ -93,7 +93,8 @@ board = {
   cwd,                              // project directory of the session that owns the thread
   createdAt, updatedAt,             // ISO 8601
   state,                            // 'open' | 'submitted' | 'discuss' | 'timeout'
-  rounds: [ { n, postedAt, status, sentAt, title, action? } ],  // status: 'open' | 'sent'
+  rounds: [ { n, postedAt, status, sentAt, title, action?, awaited, awaitDeadline } ],
+                                     // status: 'open' | 'sent'
   blocks: [ Block ],                // every block of every round, in display order
   answers: { [questionBlockId]: Answer },
   comments: [ Comment ],
@@ -114,6 +115,42 @@ a non-empty one on every call. `createBoard` seeds round 1's from the board titl
 takes the post's (falling back to the board title), and `amendRound` may refine the open round's
 but never blanks it. `src/render.mjs` renders it in the round heading: `Round 2 · fix/some-branch`,
 plus ` · sent` once the round is out.
+
+**Round `awaited` / `awaitDeadline`** (ADR 45, 47; CONTEXT.md "Awaited"). `awaited` is a
+boolean, always present on a round minted by `createBoard` or `addRound`: `true` when the
+round carries a question block anywhere in it (top-level, or nested in a question's
+`context` or a `compare` side), or when it is a page board — one `html` block and nothing
+else (ADR 33) — posted with `wait: true` (`POST /api/board`, below). It is the one property
+behind three surfaces: it is what makes a round sendable at all beyond ADR 35's carve-out,
+what the index's "N rounds left" badge and the tab mark count, and what gates the SSE
+arrival notification. `awaitDeadline` is `null` when `awaited` is `false`, otherwise the ISO
+8601 instant `postedAt` plus the wait timeout in effect when the round was minted (default
+40 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
+below) — stamped at mint time and never recomputed by an amend of the same round.
+
+**`awaited` comes back off when the deadline passes** (ADR 50). `closeLapsedAwaitedRounds`
+(`src/badge.mjs`) is the only writer that clears it, and `readBoard` (`src/store.mjs`) — the
+choke point every reader of a stored board goes through — applies it on every read, so a round
+whose wait has died reads back `awaited: false` without any surface needing a clock of its own.
+`awaitDeadline` is deliberately left in place as the record of when the wait died; `status`
+is not touched either, so a lapsed round is `{ status: 'open', awaited: false }` and the
+deadline is what distinguishes it from a round that was never awaited at all. The flip is
+persisted opportunistically (the daemon's own `/wait` timeout branch writes it; otherwise it
+rides the board's next write), so a reader may see it before disk does — never the reverse.
+`amendRound` never touches either field: a round is only ever amendable while it already
+carries a question (see `POST /api/board` below), which means it was already `awaited: true`
+the moment it was minted. **A round persisted before this pair of fields existed carries
+neither key at all** (`undefined`, not `false`) — `roundIsAwaited(board, round)`
+(`src/badge.mjs`) is the one shared predicate every reader of `awaited` uses instead of a bare
+field read, precisely for this case: it reads `r.awaited` directly when it is a real boolean,
+and for exactly a legacy round falls back to the old shape-based inference (a question block
+anywhere in the round) that decided the same question before this pair of fields existed. The
+undelivered-comment drain path (`src/server.mjs` `drainUndeliveredComments`), the index badge
+and tab mark (`src/indexpage.mjs` `openAwaitedRounds`), and the SSE arrival notification
+(`src/ui.mjs` `markPendingRound`, spliced from the same `src/badge.mjs` source) all read it —
+one definition, so a board already on disk keeps its exact prior behaviour on every one of
+these surfaces rather than any single one of them reading a legacy round as suddenly
+unawaited.
 
 ### Blocks
 
@@ -312,9 +349,9 @@ except for `cwd`.
   "rounds": [
     { "n": 1, "postedAt": "2026-08-06T20:16:35.032Z", "status": "sent",
       "sentAt": "2026-08-06T20:16:35.034Z", "title": "fix/session-timeout",
-      "action": "submitted" },
+      "action": "submitted", "awaited": true, "awaitDeadline": "2026-08-06T20:56:35.032Z" },
     { "n": 2, "postedAt": "2026-08-06T20:16:35.034Z", "status": "open",
-      "sentAt": null, "title": "fix/session-timeout" }
+      "sentAt": null, "title": "fix/session-timeout", "awaited": false, "awaitDeadline": null }
   ],
   "blocks": [
     {
@@ -404,12 +441,14 @@ except for `cwd`.
 }
 ```
 
-`posted` means the round carried no question block anywhere in it — top-level, or nested in a
-question's `context` or a `compare` side — so there was nothing to submit and the shim returned
-the instant the post succeeded rather than waiting at all. `answers` and `comments` are always
-empty on a `posted` packet. `discuss` means the reviewer chose Discuss in chat: partial answers
+`posted` means the round was not *awaited* (`round.awaited`, CONTEXT.md "Awaited"): it carried
+no question block anywhere in it — top-level, or nested in a question's `context` or a `compare`
+side — and it was not a page board (one `html` block, nothing else) posted with `wait: true`
+(ADR.md entry 45) — so there was nothing to submit and the shim returned the instant the post
+succeeded rather than waiting at all. `answers` and `comments` are always empty on a `posted`
+packet. `discuss` means the reviewer chose Discuss in chat: partial answers
 are included and the agent must stop posting boards for the rest of the session. `timeout` is the
-wall-clock cap (default 2h) and carries an explicit no-response — an empty `answers`, and no
+wall-clock cap (default 40m, ADR.md entry 47) and carries an explicit no-response — an empty `answers`, and no
 comments beyond the undelivered ones described next, which are owed to a timed-out round exactly
 as they are to any other.
 
@@ -420,15 +459,17 @@ an old `unanswered`/`deferred` as a fresh signal, louder each round. Every entry
 `round` (and each comment its `createdAt`), so a caller that wants the thread's history reads
 `board.answers` / `board.comments`. The stored board keeps everything; the packet is the round.
 
-**The exception: a comment left on a round that asked nothing** (ADR.md entry 35). A page board
-is a round with no question block, so nothing ever waits on it and nothing would otherwise carry
-its comments back — the reviewer's feedback on the artifact would sit in the store unread. Such
-a comment rides the next packet the same thread returns, once, appended to that packet's own
-`comments`; it carries its own `round`, which is how a caller tells it from the round in hand.
-Once, not once per round: the packet is committed as delivered only after the response has
-actually left, so a dropped connection re-delivers rather than loses, and a delivered comment is
-never sent again. Collecting comments from a page board therefore costs a later round that asks
-something — an agent that wants them posts one rather than polling for it.
+**The exception: a comment left on a round that is not *awaited*** (ADR.md entry 35, narrowed by
+entry 45). A page board posted without `wait: true` is a round nothing ever waits on, so nothing
+would otherwise carry its comments back — the reviewer's feedback on the artifact would sit in the
+store unread. Such a comment rides the next packet the same thread returns, once, appended to that
+packet's own `comments`; it carries its own `round`, which is how a caller tells it from the round
+in hand. Once, not once per round: the packet is committed as delivered only after the response
+has actually left, so a dropped connection re-delivers rather than loses, and a delivered comment
+is never sent again. Collecting comments from a page board therefore costs either `wait: true` on
+it, so it gets its own `/wait` call and its own `submitted` packet with `comments` populated
+directly (an empty array there is a normal outcome, not this exception), or a later round that
+asks something — an agent that wants them one way or the other rather than polling for it.
 
 **`status` is the only thing that says whether a question was decided; `choice` is not.** A caller
 must branch on `status` and never on `choice` being non-null, because the three statuses do not
@@ -454,7 +495,7 @@ GET  /api/health                    { ok: true, version }        (open: install.
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread
-                                    -> { boardId, thread, round, url }
+                                    -> { boardId, thread, round, url, clients, awaited }
 GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet
 GET  /api/board/:id/events          SSE: round pushes, state changes
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
@@ -582,15 +623,31 @@ the same page is served whether or not the board exists.
 
 ### `POST /api/board`
 
-`{ title, blocks, cwd?, thread? }` starts a new thread; `{ boardId, blocks, title? }` pushes into
-a live one. `cwd` is only meaningful on the thread-creating form. `title` is meaningful on
-**both**: on the `boardId` form it labels the round being minted or amended.
+`{ title, blocks, cwd?, thread?, wait? }` starts a new thread; `{ boardId, blocks, title?, wait? }`
+pushes into a live one. `cwd` is only meaningful on the thread-creating form. `title` is meaningful
+on **both**: on the `boardId` form it labels the round being minted or amended. `wait` (boolean,
+default `false`) is meaningful only on whichever call actually MINTS the round being posted — an
+amend never mints one, so `wait` on an amending post is inert (the round it would apply to was
+already stamped `awaited` when it was first minted, per the paragraph above naming
+`awaited`/`awaitDeadline`). It sets `round.awaited` together with the question-block check
+already run on the same blocks: see "Round `awaited` / `awaitDeadline`" above.
 
 Pushing into a live board **amends** the latest round in place — a block whose incoming id
 already exists on the board replaces it, everything else is appended to that same round — while
 that round is still `open` **and carries a question block somewhere in it**. Otherwise it mints a
-new round. Either way the response is `{ boardId, thread, round, url }`, `round` naming whichever
-round was amended or minted.
+new round. Either way the response is `{ boardId, thread, round, url, clients, awaited }`, `round`
+naming whichever round was amended or minted and `awaited` carrying that round's own minted
+`awaited` flag. The flag is on the response because the poster cannot always compute it: the shim
+checks the raw blocks it sent and has no way to know that an `html` block's `source` failed to
+resolve, which is exactly the case where the daemon mints the round *not* awaited. A caller
+deciding whether to wait should prefer this field and fall back to its own shape check only when
+it is absent (a daemon older than this field).
+
+A **retry** carrying a `requestId` this board has already applied is answered from what that id
+already did (`deduped: true`) while the round it guarded is still `open` **and its wait has not
+lapsed**. A round whose `awaitDeadline` has passed can never hand a caller a packet again, so it is
+never the answer to a retry: the post falls through and mints the next round, against a live
+deadline.
 
 The question is what makes a round amendable, because amending exists for one situation: the agent
 is still assembling a round the reviewer has not answered yet. A round that asks nothing is
@@ -637,7 +694,7 @@ The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`
 
 ### `GET /api/board/:id/wait?round=N`
 
-A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 2h): when it fires
+A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 40m, ADR.md entry 47): when it fires
 the call returns 200 with a packet whose `status` is `timeout`, carrying whatever partial answers
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
@@ -700,12 +757,14 @@ never ends on its own. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive
 timers and proxies — invisible to `EventSource`'s message events, so they never surface as a stray
 event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only.
 
-Two named events, both carrying the full board JSON (the same shape a served page inlines) so a
-client can diff against its own last-known copy, plus enough to apply the push without a reload:
+Three named events. The first two carry the full board JSON (the same shape a served page inlines)
+so a client can diff against its own last-known copy, plus enough to apply the push without a
+reload:
 
 ```js
-event: round      data: { round, mode: 'new-round' | 'amend', blockIds, html, board }
-event: submitted  data: { round, board, html }
+event: round         data: { round, mode: 'new-round' | 'amend', blockIds, html, board }
+event: submitted     data: { round, board, html }
+event: awaitExpired  data: { round }
 ```
 
 `html` is a pre-rendered fragment covering exactly `blockIds` — never the whole page — so the
@@ -719,6 +778,14 @@ showing — without reloading. Its `html` is the re-rendered `<section class="ro
 form; without it a client that did not
 submit would show its own unsent, in-progress state as if it were what was sent. A client that
 receives no `html` must fall back to disabling the round in place.
+
+`awaitExpired` is the one event that carries no board: it fires from `GET /api/board/:id/wait`'s
+own timeout branch, at the moment that wall clock gives up, and is a wake-up nudge rather than a
+second copy of anything. Everything a tab needs to decide "read-only now" is already in
+`board.rounds` and its own clock (`roundIsCurrentlyAwaited`, `src/badge.mjs`), and the daemon has
+by then cleared the round's `awaited` flag and persisted it, so a client that refetches instead of
+recomputing sees the same answer. A client that misses it is not stranded — the page re-checks its
+own deadline on a ~20s tick regardless, which is what an archive and a sleeping laptop rely on.
 
 The client subscribes only when NOT running read-only from `file:` — the standalone archive stays
 network-free.
@@ -735,17 +802,21 @@ round; a dedicated JSON route would be leaner and can be added later without cha
 
 ## MCP surface
 
-One tool, `ask`, on the stdio shim. Arguments mirror the board document: `{ title, blocks }`,
+One tool, `ask`, on the stdio shim. Arguments mirror the board document: `{ title, blocks, wait? }`,
 where question blocks carry their questions by value and content blocks carry a `source` ref. It
 posts a board and opens the tab on the thread's first board.
 
-Whether it then waits is derived from the round just posted, not from a mode flag: a round
+Whether it then waits is derived from the round just posted, not purely from `wait`: a round
 carrying a question block anywhere in it (top-level, or nested in a question's `context` or a
-`compare` side) blocks on `/api/board/:id/wait`, emitting `notifications/progress` throughout so
-the idle timer never fires; a round of content blocks only returns the instant the post succeeds,
-packet `status: 'posted'`. The return condition is the post succeeding, never the tab opening:
-`open` is spawned detached and this process never learns whether a tab appeared. Opening stays
-best-effort and its failure stays non-fatal.
+`compare` side) always blocks on `/api/board/:id/wait`, emitting `notifications/progress`
+throughout so the idle timer never fires. A round with no question blocks on `/api/board/:id/wait`
+too, but only when it is a page board — one `html` block and nothing else — AND the call carried
+`wait: true` (ADR.md entry 45, CONTEXT.md "Awaited"); every other content-only shape returns the
+instant the post succeeds regardless of `wait`, packet `status: 'posted'`. `wait` defaults to
+`false`, and the wall-clock cap either route blocks on is the same 40 minutes (ADR.md entry 47).
+The return condition is the post succeeding, never the tab opening: `open` is spawned detached and
+this process never learns whether a tab appeared. Opening stays best-effort and its failure stays
+non-fatal.
 
 Failure is loud and writes nothing, on three triggers: an unreachable daemon (returns the revive
 command), a non-interactive session, or a session on which nothing can open a tab at all — an SSH
@@ -762,7 +833,8 @@ connected to that board at all. It never reopens a tab the reviewer already has 
 Additive to `CLAUDE_BOARD_HOME` / `CLAUDE_BOARD_PORT` above.
 
 ```
-CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 2h (7_200_000)
+CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 40m (2_400_000,
+                               ADR.md entry 47) -- shared by the daemon's own /wait cap
 CLAUDE_BOARD_PROGRESS_MS      notifications/progress cadence, default 20_000 (20s)
 CLAUDE_BOARD_POST_TIMEOUT_MS  timeout on POST /api/board only, default 10_000; never applied
                                to the /wait call, which must survive the full wall-clock cap

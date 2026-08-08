@@ -35,7 +35,12 @@ import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
 import { TOMATO_ICON, REST_ICON } from '../src/pomodoro-widget.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
-import { badgeLabel } from '../src/badge.mjs';
+import {
+  badgeLabel,
+  roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
+  closeLapsedAwaitedRounds, roundWaitLapsed,
+  PILL_READONLY_TITLE, ROUND_COUNTDOWN_TITLE,
+} from '../src/badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from '../src/lens.mjs';
 import {
   extractHint, stepsToPath, pathToSteps, resolveSteps, buildSteps, composeHint,
@@ -575,6 +580,122 @@ check('badgeLabel: the post-push shape -- M grows, N (the round still in view) d
   // pass the 1-of-1 case above and fail here.
   assert.equal(badgeLabel(1, 2), 'round 1 of 2');
   assert.equal(badgeLabel(2, 2), 'round 2 of 2');
+});
+
+// SPEC_AWAITED.md ticket 03 -- the waiting signal, src/badge.mjs's own two-
+// function split (render-time, no clock, vs. client-time, wall-clock aware).
+// See that file's header comment for why the split exists at all.
+
+check('roundIsAwaitedOpen: true only for an OPEN round minted awaited === true, never merely truthy', () => {
+  assert.equal(roundIsAwaitedOpen({ status: 'open', awaited: true }), true);
+  assert.equal(roundIsAwaitedOpen({ status: 'open', awaited: false }), false);
+  assert.equal(roundIsAwaitedOpen({ status: 'sent', awaited: true }), false, 'a sent round is never this, whatever awaitDeadline still says');
+  assert.equal(roundIsAwaitedOpen({ status: 'open', awaited: 1 }), false, 'truthy but not === true (a legacy shape, or a bug) must not pass');
+  assert.equal(roundIsAwaitedOpen({ status: 'open' }), false, 'a legacy round with no awaited key at all (undefined) is not awaited');
+  assert.equal(roundIsAwaitedOpen(null), false, 'a missing round record is not awaited, not a throw');
+});
+
+check('roundIsCurrentlyAwaited: roundIsAwaitedOpen AND short of the deadline -- the one place a wall clock enters this file', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z');
+  const openRound = { status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:10:00.000Z' };
+  assert.equal(roundIsCurrentlyAwaited(openRound, now), true, '10 minutes still to go');
+  assert.equal(roundIsCurrentlyAwaited(openRound, now + 10 * 60_000 + 1), false, 'one millisecond past the deadline: no longer awaited');
+  assert.equal(roundIsCurrentlyAwaited({ status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:10:00.000Z' }, now), false,
+    'sent survives its deadline unchanged (ticket 01\'s own contract) and must still read as not-awaited');
+  assert.equal(roundIsCurrentlyAwaited({ status: 'open', awaited: true, awaitDeadline: null }, now), false, 'no deadline at all: never awaited');
+});
+
+check('closeLapsedAwaitedRounds: the flag that mintAwait stamps is unstamped the moment its own deadline passes', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z');
+  const board = {
+    rounds: [
+      { n: 1, status: 'open', awaited: true, awaitDeadline: '2026-08-07T11:59:59.000Z' }, // lapsed
+      { n: 2, status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:10:00.000Z' }, // still running
+      { n: 3, status: 'sent', awaited: true, awaitDeadline: '2026-08-07T11:00:00.000Z' }, // already closed by a send
+      { n: 4, status: 'open' },                                                           // legacy: no keys at all
+      { n: 5, status: 'open', awaited: false, awaitDeadline: null },                      // never awaited
+    ],
+  };
+  assert.equal(closeLapsedAwaitedRounds(board, now), 1, 'exactly the one lapsed round is closed');
+  assert.equal(board.rounds[0].awaited, false);
+  assert.equal(board.rounds[0].awaitDeadline, '2026-08-07T11:59:59.000Z',
+    'the deadline STAYS -- it is the record of when the wait died, and what the dedupe reads');
+  assert.equal(board.rounds[0].status, 'open', 'only the flag moves; nothing here sends or archives a round');
+  assert.equal(board.rounds[1].awaited, true, 'a wait still inside its deadline is untouched');
+  assert.equal(board.rounds[3].awaited, undefined, 'a legacy round has no flag to unstamp and must not grow one');
+  assert.equal(closeLapsedAwaitedRounds(board, now), 0, 'idempotent: a second sweep finds nothing left to close');
+  assert.equal(closeLapsedAwaitedRounds({}, now), 0, 'a board with no rounds array is 0, not a throw');
+});
+
+check('roundWaitLapsed: true for the whole rest of a round\'s life once its deadline passes, swept or not', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z');
+  assert.equal(roundWaitLapsed({ awaited: true, awaitDeadline: '2026-08-07T12:10:00.000Z' }, now), false);
+  assert.equal(roundWaitLapsed({ awaited: true, awaitDeadline: '2026-08-07T11:59:59.000Z' }, now), true);
+  assert.equal(roundWaitLapsed({ awaited: false, awaitDeadline: '2026-08-07T11:59:59.000Z' }, now), true,
+    'already swept: still lapsed, which is what stops the dedupe resuming it');
+  assert.equal(roundWaitLapsed({ status: 'open' }, now), false, 'no deadline at all: nothing has lapsed');
+  assert.equal(roundWaitLapsed(null, now), false);
+});
+
+check('roundCountdownText: "Nm left", always rounded UP, never printed once the round stops being currently awaited', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z');
+  assert.equal(roundCountdownText({ status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' }, now), '38m left');
+  // 37 minutes and 1 second left must still round UP to 38, not truncate to 37 --
+  // a reviewer watching the figure tick down must never see it undercount the
+  // time actually remaining.
+  assert.equal(roundCountdownText({ status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:37:01.000Z' }, now), '38m left');
+  assert.equal(roundCountdownText({ status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' }, now), null);
+  assert.equal(roundCountdownText({ status: 'open', awaited: false, awaitDeadline: '2026-08-07T12:38:00.000Z' }, now), null);
+  assert.equal(roundCountdownText(null, now), null);
+});
+
+check('pageBoardPillMeta: the countdown text/title while awaited, "read-only" and its own title the moment it is not', () => {
+  const now = Date.parse('2026-08-07T12:00:00.000Z');
+  const awaited = { status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
+  assert.deepEqual(pageBoardPillMeta(awaited, now), { text: '38m left', title: ROUND_COUNTDOWN_TITLE });
+  for (const closed of [
+    { status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' },
+    { status: 'open', awaited: false, awaitDeadline: null },
+    null,
+  ]) {
+    assert.deepEqual(pageBoardPillMeta(closed, now), { text: 'read-only', title: PILL_READONLY_TITLE });
+  }
+});
+
+check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) are executable and behave identically to the imported ones', () => {
+  // Spliced in dependency order (roundIsAwaitedOpen, then roundIsCurrentlyAwaited,
+  // then roundCountdownText, then pageBoardPillMeta), each calling only a name
+  // already assigned above it -- src/ui.mjs's own comment on the splice explains
+  // why that is safe regardless of *when* any of them is later called. Rehydrated
+  // together, in the same order, so this proves the actual dependency chain works
+  // standalone, not just that each function parses in isolation.
+  const rehydrated = new Function(`
+    var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
+    var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
+    var roundIsAwaitedOpen = ${roundIsAwaitedOpen.toString()};
+    var roundIsCurrentlyAwaited = ${roundIsCurrentlyAwaited.toString()};
+    var roundCountdownText = ${roundCountdownText.toString()};
+    var pageBoardPillMeta = ${pageBoardPillMeta.toString()};
+    return { roundIsAwaitedOpen: roundIsAwaitedOpen, roundIsCurrentlyAwaited: roundIsCurrentlyAwaited, roundCountdownText: roundCountdownText, pageBoardPillMeta: pageBoardPillMeta };
+  `)();
+  const now = Date.parse('2026-08-07T12:00:00.000Z');
+  const round = { status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
+  assert.equal(rehydrated.roundIsAwaitedOpen(round), roundIsAwaitedOpen(round));
+  assert.equal(rehydrated.roundIsCurrentlyAwaited(round, now), roundIsCurrentlyAwaited(round, now));
+  assert.equal(rehydrated.roundCountdownText(round, now), roundCountdownText(round, now));
+  assert.deepEqual(rehydrated.pageBoardPillMeta(round, now), pageBoardPillMeta(round, now));
+});
+
+check('ui.mjs embeds the literal source of every waiting-signal function, not a hand-copied reimplementation', () => {
+  for (const fn of [roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta]) {
+    assert.ok(ui.includes(fn.toString()), `client script must contain ${fn.name}'s exact source`);
+  }
+});
+
+check('src/render.mjs never calls Date.now() -- the waiting signal it renders must stay a pure function of the board JSON (see badge.mjs\'s own header comment on the split)', () => {
+  const renderSource = readFileSync(fileURLToPath(new URL('../src/render.mjs', import.meta.url)), 'utf8');
+  assert.ok(!renderSource.includes('Date.now'),
+    'src/render.mjs must never read the wall clock: examples/sample-board.html and test/check-sample-board.mjs pin exact bytes, which a render-time Date.now() would make non-reproducible');
 });
 
 // The diagram lens's view math, the
@@ -1785,7 +1906,11 @@ check('isPageBoard: a failed reference is never a page board -- there is no stag
 
 check('criterion 1: a page board renders the stage edge to edge -- no card, no kicker, no 1120px column, and the header floats over the frame', () => {
   const { document, body, shell, head, section, frame } = renderedPage(pageBoard());
-  assert.equal(body.className, 'page-board', 'the layout is one class on <body>, which is what the whole stylesheet keys off');
+  // The LAYOUT is still one class, which is what the whole stylesheet keys off.
+  // 'page-uncommentable' rides alongside it on this fixture and is orthogonal to
+  // layout -- it is ADR 46's "a page nobody is listening to is uncommentable",
+  // asserted on its own below.
+  assert.ok(body.classList.contains('page-board'), 'the layout is one class on <body>, which is what the whole stylesheet keys off');
 
   // no column
   assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), 'none', 'the shell must stop being a 1120px column');
@@ -3114,17 +3239,23 @@ function namedFunctionBody(src, name) {
 
 check('mode detection is synchronous, from the document\'s own protocol -- never a network probe to the daemon', () => {
   assert.ok(/var readonly\s*=\s*\(location\.protocol === 'file:'\)/.test(ui));
-  // Exactly two fetches, both accounted for: the submit, and the resync that
-  // catches this client up on anything broadcast while it was disconnected. Any
-  // third one is a network call nobody has justified -- in particular, mode
+  // Exactly three fetches, all accounted for: the ordinary send bar's submit,
+  // the resync that catches this client up on anything broadcast while it was
+  // disconnected, and (SPEC_AWAITED.md ticket 03) submitPageRound's own submit
+  // -- a second POST to the same route, since an awaited page round's Send
+  // control names its OWN round rather than sharing submitBoard's
+  // openRoundNumber()-targeted path (ticket 01's own note left for this one).
+  // Any fourth is a network call nobody has justified -- in particular, mode
   // detection must never become a probe to the daemon.
   const fetchCalls = [...ui.matchAll(/fetch\(([^)]*)/g)].map(m => m[1]);
-  assert.equal(fetchCalls.length, 2, `expected exactly the submit and resync fetches, found ${fetchCalls.length}`);
-  assert.ok(fetchCalls.some(c => c.includes('/submit')), 'one fetch must be the submit');
-  assert.ok(fetchCalls.some(c => c.includes("'/b/'")), 'the other must be the resync read of the board');
-  // Both live behind a readonly guard: the standalone file:// archive is
+  assert.equal(fetchCalls.length, 3, `expected exactly the two submit fetches and the resync, found ${fetchCalls.length}`);
+  const submitCalls = fetchCalls.filter(c => c.includes('/submit'));
+  assert.equal(submitCalls.length, 2, 'both submitBoard and submitPageRound must post to /submit');
+  assert.ok(fetchCalls.some(c => c.includes("'/b/'")), 'one fetch must be the resync read of the board');
+  // All three live behind a readonly guard: the standalone file:// archive is
   // network-free, period.
   assert.match(namedFunctionBody(ui, 'resync'), /if \(readonly\) return;/);
+  assert.match(namedFunctionBody(ui, 'submitPageRound'), /^\s*if \(readonly\) return;/);
 });
 
 check('every ui.mjs listener that mutates answer/comment state or submits guards on readonly', () => {
@@ -5476,13 +5607,19 @@ check('the send bar carries Discuss in chat beside Send, in the rendered markup'
 });
 
 check('Discuss posts the same body as Send through one shared submit path, differing only in action', () => {
-  // One fetch, one body-building path: a second, hand-copied fetch is how Discuss
-  // would quietly come to collect less than Send does (it returns
-  // "whatever is filled in" -- partial answers are the point).
-  const submitFetches = [...ui.matchAll(/fetch\([^)]*\/submit/g)];
-  assert.equal(submitFetches.length, 1, 'both actions must share one submit fetch, not carry two divergent copies');
+  // One fetch, one body-building path WITHIN submitBoard itself: a second,
+  // hand-copied fetch in there is how Discuss would quietly come to collect
+  // less than Send does (it returns "whatever is filled in" -- partial
+  // answers are the point). Scoped to submitBoard's own body, not the whole
+  // file -- SPEC_AWAITED.md ticket 03 added a SECOND, independent /submit
+  // fetch inside submitPageRound (the awaited page round's own Send/Discuss,
+  // which never shares this path -- see that function's own header comment
+  // for why), and that one is no more a "divergent copy" of this one than
+  // resync's own fetch is.
   const submitBody = namedFunctionBody(ui, 'submitBoard');
   assert.ok(submitBody, 'expected a shared submitBoard(action)');
+  const submitFetches = [...submitBody.matchAll(/fetch\([^)]*\/submit/g)];
+  assert.equal(submitFetches.length, 1, 'both actions must share one submit fetch, not carry two divergent copies');
   assert.match(submitBody, /action:\s*action/, 'the posted body must carry the caller-chosen action verbatim');
   assert.match(submitBody, /comments:\s*pendingComments/, 'Discuss must carry the queued comments too');
   assert.match(submitBody, /collectAnswers\(\)/, 'Discuss must read the same answer surface Send does');
@@ -5691,6 +5828,94 @@ check('an SSE round push marks the tab: favicon mark and a notification, no titl
   assert.match(mark, /notifyRound\(/);
   assert.ok(!/setTitleBadge/.test(mark), 'marking a round pending must no longer touch the title');
   assert.match(mark, /if \(readonly\) return;/, 'marking must be inert in readonly mode');
+  // AC 9/AC 10 (SPEC_AWAITED.md ticket 04): the tab mark and the notification
+  // must agree on the same definition of "this one wants you" -- gated here,
+  // in markPendingRound, rather than in notifyRound alone, so a round nobody is
+  // waiting on (a fire-and-forget artifact posted without wait: true) neither
+  // marks the favicon nor fires a Notification. The shared predicate, not a
+  // bespoke re-check: reads roundIsAwaited off the SAME board this function's
+  // caller already advanced to the post-push state (applyRoundPush's own
+  // comment on why 'board' is reassigned before markPendingRound runs).
+  assert.match(mark, /roundIsAwaited\(/, 'the gate must read the shared roundIsAwaited predicate (src/badge.mjs), not reinvent one');
+});
+
+check('markPendingRound: an awaited round marks the tab and notifies; a non-awaited one (including a legacy-shaped round with no awaited key) does neither', () => {
+  // Same ablation-through-a-real-scope technique as the favicon checks below
+  // (drawFavicon/setFaviconBadge run through new Function against a stand-in) --
+  // the extracted markPendingRound/roundIsAwaited/questionBlocks bodies are the
+  // EXACT client-embedded code (src/ui.mjs's .toString() splice), not a
+  // hand-written restatement of the gate.
+  const markBody = namedFunctionBody(ui, 'markPendingRound');
+  const awaitedBody = namedFunctionBody(ui, 'roundIsAwaited');
+  const questionBody = namedFunctionBody(ui, 'questionBlocks');
+  assert.ok(markBody && awaitedBody && questionBody, 'expected markPendingRound, roundIsAwaited and questionBlocks in src/ui.mjs');
+
+  function run(board, n) {
+    const calls = { setFaviconBadge: [], notifyRound: [] };
+    const scope = new Function(
+      'board', 'n', 'calls',
+      `var readonly = false; var pendingRounds = 0;
+       function setFaviconBadge(p) { calls.setFaviconBadge.push(p); }
+       function notifyRound(nn) { calls.notifyRound.push(nn); }
+       function questionBlocks(b) {${questionBody}}
+       function roundIsAwaited(b, r) {${awaitedBody}}
+       function markPendingRound(n) {${markBody}}
+       markPendingRound(n);
+       return pendingRounds;`,
+    );
+    const pendingRounds = scope(board, n, calls);
+    return { pendingRounds, calls };
+  }
+  // setFaviconBadge is stubbed rather than spliced in real: this check is about
+  // WHETHER markPendingRound reaches the favicon/notification calls at all, not
+  // about drawFavicon's own drawing, which the checks above already cover
+  // directly.
+
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'mark-pending');
+  mkdirSync(dir, { recursive: true });
+
+  // A fresh question round: awaited is stamped true at mint time.
+  const asking = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
+  let r = run(asking, 1);
+  assert.equal(r.pendingRounds, 1, 'an awaited question round must mark the tab');
+  assert.deepEqual(r.calls.notifyRound, [1], 'and must notify');
+
+  // A fresh page round posted WITHOUT wait: true -- awaited is stamped false.
+  const plainPage = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'html', html: '<p>hi</p>' }] });
+  assert.equal(plainPage.rounds[0].awaited, false, 'setup sanity: a page round without wait must mint awaited: false');
+  r = run(plainPage, 1);
+  assert.equal(r.pendingRounds, 0, 'a fire-and-forget artifact round must not mark the tab');
+  assert.deepEqual(r.calls.notifyRound, [], 'and must not notify -- nothing is waiting for a submit that will never come');
+
+  // A fresh page round posted WITH wait: true -- awaited is stamped true.
+  const awaitedPage = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'html', html: '<p>hi</p>' }], wait: true });
+  assert.equal(awaitedPage.rounds[0].awaited, true, 'setup sanity: wait: true must mint awaited: true');
+  r = run(awaitedPage, 1);
+  assert.equal(r.pendingRounds, 1, 'an awaited page round must mark the tab');
+  assert.deepEqual(r.calls.notifyRound, [1], 'and must notify');
+
+  // Legacy shape: a round record with NO awaited key at all (undefined, not
+  // false) -- the exact shape a board persisted before ADR.md entry 45 carries.
+  // A question block still present must fall back to the OLD shape-based
+  // inference and still mark/notify, or an amend arriving live on an old open
+  // question round would silently stop marking the tab it always used to.
+  const legacyAsking = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
+  delete legacyAsking.rounds[0].awaited;
+  delete legacyAsking.rounds[0].awaitDeadline;
+  assert.ok(!('awaited' in legacyAsking.rounds[0]), 'setup sanity: the key must be genuinely absent, not merely undefined-valued');
+  r = run(legacyAsking, 1);
+  assert.equal(r.pendingRounds, 1, 'a legacy round with a question block must still mark the tab');
+  assert.deepEqual(r.calls.notifyRound, [1], 'and still notify -- this is the exact regression the shared roundIsAwaited fallback exists to prevent');
+
+  // Legacy shape, page round: no awaited key AND no question block -- the old
+  // inference reads this as not-awaited too, so it must stay silent, the same
+  // as the fresh plainPage case above.
+  const legacyPage = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'html', html: '<p>hi</p>' }] });
+  delete legacyPage.rounds[0].awaited;
+  delete legacyPage.rounds[0].awaitDeadline;
+  r = run(legacyPage, 1);
+  assert.equal(r.pendingRounds, 0, 'a legacy page round with no question block must not mark the tab');
+  assert.deepEqual(r.calls.notifyRound, [], 'and must not notify');
 });
 
 check('the favicon mark draws the page\'s own amber tile with a bold ink numeral -- no inverted tile anywhere', () => {
@@ -6374,6 +6599,58 @@ check('a round that asks nothing contributes nothing to the count, and the badge
   const [closedThread] = buildThreadIndex([closed]);
   assert.equal(closedThread.live, false, 'a closing summary must not re-arm the dot on a finished thread');
   assert.equal(closedThread.roundsLeft, 0, 'the wrap-up round asks nothing, so it must not re-arm the badge either');
+});
+
+check('AC 9 (SPEC_AWAITED.md ticket 04): an awaited page board (posted with wait: true) counts toward the badge and the live dot; the identical shape posted without wait counts toward neither', () => {
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'awaited-page-round');
+  mkdirSync(dir, { recursive: true });
+  const html = '<div class="mock"><button>Send</button></div>';
+
+  const awaitedPage = createBoard({ title: 'awaited page', cwd: dir, blocks: [{ kind: 'html', html }], wait: true });
+  assert.equal(awaitedPage.rounds[0].awaited, true, 'setup sanity: wait: true must mint awaited: true');
+  const [awaitedThread] = buildThreadIndex([awaitedPage]);
+  assert.equal(awaitedThread.live, true, 'an open awaited page round is a trip the reviewer still owes -- ADR.md entry 45');
+  assert.equal(awaitedThread.roundsLeft, 1);
+  const awaitedItem = extractThreadItem(renderIndexPage({ threads: [awaitedThread] }), awaitedPage.id);
+  assert.match(awaitedItem, /live-dot/);
+  assert.match(awaitedItem, /1 round left/);
+
+  const plainPage = createBoard({ title: 'plain page', cwd: dir, blocks: [{ kind: 'html', html }] });
+  assert.equal(plainPage.rounds[0].awaited, false, 'setup sanity: no wait must mint awaited: false');
+  const [plainThread] = buildThreadIndex([plainPage]);
+  assert.equal(plainThread.live, false, 'a fire-and-forget page board (no wait) asks nothing and hears nothing back');
+  assert.equal(plainThread.roundsLeft, 0);
+  const plainItem = extractThreadItem(renderIndexPage({ threads: [plainThread] }), plainPage.id);
+  assert.doesNotMatch(plainItem, /live-dot/);
+  assert.doesNotMatch(plainItem, /rounds-left-badge/);
+});
+
+check('AC 9: a legacy round with no `awaited` key at all still counts when it carries a question (the pre-ticket-01 shape), and still does not when it carries neither a question nor an explicit wait', () => {
+  // The trap this ticket names explicitly: a board persisted before ADR.md entry
+  // 45 landed carries NEITHER `awaited` NOR `awaitDeadline` on any of its round
+  // records -- `undefined`, not `false`. openAwaitedRounds (src/indexpage.mjs)
+  // must read such a board through roundIsAwaited's (src/badge.mjs) legacy
+  // fallback -- the OLD shape-based inference -- rather than a bare `r.awaited`
+  // read, or every one of a legacy board's open question rounds would silently
+  // stop counting toward the badge and the tab mark the moment this ticket
+  // shipped, invisible to any check written only against freshly-minted boards.
+  const dir = path.join(fixturesDir, 'indexpage-fixtures', 'legacy-round-shape');
+  mkdirSync(dir, { recursive: true });
+
+  const legacyAsking = createBoard({ title: 'legacy asking', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
+  delete legacyAsking.rounds[0].awaited;
+  delete legacyAsking.rounds[0].awaitDeadline;
+  assert.ok(!('awaited' in legacyAsking.rounds[0]), 'setup sanity: the key must be genuinely absent, not merely undefined-valued');
+  const [legacyAskingThread] = buildThreadIndex([legacyAsking]);
+  assert.equal(legacyAskingThread.live, true, 'a legacy round carrying a question block must still count -- the regression this ticket must not introduce');
+  assert.equal(legacyAskingThread.roundsLeft, 1);
+
+  const legacyPage = createBoard({ title: 'legacy page', cwd: dir, blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }] });
+  delete legacyPage.rounds[0].awaited;
+  delete legacyPage.rounds[0].awaitDeadline;
+  const [legacyPageThread] = buildThreadIndex([legacyPage]);
+  assert.equal(legacyPageThread.live, false, 'a legacy page round with no question block reads not-awaited under the same old inference, so it must not count either');
+  assert.equal(legacyPageThread.roundsLeft, 0);
 });
 
 check('an index row headlines the board title; the project is shown as a folder basename only, full path on a title attribute', () => {

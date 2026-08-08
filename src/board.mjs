@@ -11,6 +11,14 @@ import { resolveAtRoot, sectionRootFrom, resolveMermaidAnchorAtRoot, htmlBodyRoo
 // resolveComment's own comment below for why resolving a page-scoped `dom` anchor
 // needs to re-render the block it names.
 import { renderBlock } from './render.mjs';
+// badge.mjs is pure and imports nothing, so this edge is safe in both directions
+// (render.mjs and ui.mjs also import it -- see its own header comment).
+// `questionBlocks` itself moved to badge.mjs (ticket 04 of SPEC_AWAITED.md, so
+// its "question block anywhere in the round" walk could be shared by
+// roundIsAwaited's legacy fallback there too) and is re-exported below so every
+// existing `from './board.mjs'` import keeps working unchanged.
+import { isPageRound, questionBlocks } from './badge.mjs';
+export { questionBlocks };
 
 // Kind letter for block id minting (`q1`, `d3`, `m2`, ...): kind letter + ordinal
 // within the board, stable once minted. `m` is reserved for mermaid per PROTOCOL's
@@ -481,16 +489,52 @@ function assertCwdNotRetargeted(cwd, board) {
   }
 }
 
-/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread }`.
+/** 40 minutes (ADR.md entry 47): the default a round's `awaitDeadline` is stamped
+ * `awaitTimeoutMs` amount of time past `postedAt` with, when a caller (test or
+ * otherwise) mints a round through this module without naming its own. The real
+ * daemon path never relies on this default landing correctly on its own --
+ * src/server.mjs's `handlePostBoard` always passes the env-resolved
+ * `waitTimeoutMs()` explicitly, so `CLAUDE_BOARD_TIMEOUT_MS` governs both the
+ * deadline stamped here and the wall-clock cap `/wait` actually enforces (one
+ * clock, one env var). Exported so a check can assert the two stay equal rather
+ * than drifting the way `TIMEOUT_MS` (bin/mcp.mjs) and the old
+ * `DEFAULT_WAIT_TIMEOUT_MS` (src/server.mjs) already once did at 2h apiece. */
+export const DEFAULT_AWAIT_TIMEOUT_MS = 2_400_000;
+
+/** Whether a round being minted is *awaited* (CONTEXT.md), and the absolute instant
+ * its wait dies if it is: `{ awaited, awaitDeadline }`. Two ways in, matching the
+ * glossary exactly -- a round carrying a question always is (ADR.md entry 42's
+ * question rounds always blocked, unchanged here), and a page board (one `html`
+ * block, ADR.md entry 33) is only when the caller declared `wait: true` on this
+ * call (ADR.md entry 45). Every other shape -- content-only, more than one block,
+ * no question -- stays exactly what it is today: posted and never waited on,
+ * `wait: true` or not, because CONTEXT.md's Awaited entry names only these two
+ * routes in and this ticket does not invent a third.
+ *
+ * `blocks` here is THIS round's own normalized blocks only (never the whole
+ * board's), which is what both callers below already have in hand and what makes
+ * `isPageRound` and `questionBlocks({ blocks })` correct without a `round` filter. */
+function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
+  const awaited = questionBlocks({ blocks }).some(q => q.round === round)
+    || (Boolean(wait) && isPageRound(blocks));
+  return {
+    awaited,
+    awaitDeadline: awaited ? new Date(Date.parse(postedAt) + awaitTimeoutMs).toISOString() : null,
+  };
+}
+
+/** Create a new board (round 1) from posted args: `{ title, blocks, cwd, thread, wait }`.
  * `threadCwd` (additive) is the project directory already bound to `thread`, when the
  * caller is starting a second board in a thread that exists; the request may agree with
- * it but never change it. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null }) {
+ * it but never change it. `wait` is round 1's own declared-awaited flag (ADR.md entry
+ * 45); see `mintAwait` above for the two ways a round becomes awaited. */
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
   const ids = emptyIdLedger();
   const normalized = (blocks || []).map(b => normalizeBlock(b, 1, counters, boundCwd, ids));
+  const { awaited, awaitDeadline } = mintAwait(normalized, 1, wait, now, awaitTimeoutMs);
   return {
     id: mintBoardId(),
     thread: thread || mintThreadId(),
@@ -502,7 +546,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
     // `title` is stored on the round as well as on the board: every later round
     // carries its own (see addRound), and round 1's would otherwise be the only one
     // the page label and the round pager could not name.
-    rounds: [{ n: 1, postedAt: now, status: 'open', sentAt: null, title: title || '' }],
+    rounds: [{ n: 1, postedAt: now, status: 'open', sentAt: null, title: title || '', awaited, awaitDeadline }],
     blocks: normalized,
     answers: {},
     comments: [],
@@ -518,7 +562,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
  * a Send racing an amend, and appending a second block under that id would silently
  * destroy the original round's answer (`board.answers` is keyed by id) and its
  * history-rail entry. Nothing on the board is mutated before the throw. */
-export function addRound(board, { blocks, cwd, title }) {
+export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS }) {
   assertCwdNotRetargeted(cwd, board);
   const now = new Date().toISOString();
   const n = board.rounds.length + 1;
@@ -526,13 +570,14 @@ export function addRound(board, { blocks, cwd, title }) {
   const ids = idLedgerFromBoard(board, null);
   ids.openRound = n;
   const normalized = (blocks || []).map(b => normalizeBlock(b, n, counters, board.cwd, ids));
+  const { awaited, awaitDeadline } = mintAwait(normalized, n, wait, now, awaitTimeoutMs);
   // Per-round title, stored rather than dropped. `ask` requires a non-empty title on
   // every call and commands/grill.md tells the agent to make it the branch name, so a
   // thread that ran five rounds across five branches used to render five identical
   // "Round N" headings with the FIRST round's title as the only label on the page.
   // Falls back to the board title so a caller that omits it still gets a labelled
   // round rather than a bare number.
-  board.rounds.push({ n, postedAt: now, status: 'open', sentAt: null, title: title || board.title || '' });
+  board.rounds.push({ n, postedAt: now, status: 'open', sentAt: null, title: title || board.title || '', awaited, awaitDeadline });
   board.blocks.push(...normalized);
   board.state = 'open';
   board.updatedAt = now;
@@ -625,39 +670,8 @@ export function findBlock(board, blockId) {
   return null;
 }
 
-/** Every question block on the board, in display order, INCLUDING those nested in a
- * question's `context` array or a compare block's sides.
- *
- * `findBlock` above already recurses through exactly these nestings, and
- * src/render.mjs renders a nested question as a fully live widget that src/ui.mjs
- * collects on Send — but the packet and the unanswered synthesis used to walk
- * top-level `board.blocks` only. The reviewer answered the question, the
- * answer was persisted to `board.answers`, and the agent was never told: for a tool
- * whose whole job is carrying answers back, a silently dropped answer is the worst
- * thing it can do. One traversal, used by everything that asks "which questions are
- * on this board". */
-export function questionBlocks(board) {
-  const out = [];
-  const visit = b => {
-    if (!b) return;
-    if (b.kind === 'question') {
-      out.push(b);
-      (b.context || []).forEach(visit);
-      // choose-between-rendered-variants: an option's own block can
-      // itself be a nested question (the same generality context/compare
-      // already allow), so its answer has to reach applySubmit's answerable
-      // set and buildPacket the same way a context/compare-nested question's
-      // does.
-      (b.options || []).forEach(o => visit(o.block));
-    }
-    if (b.kind === 'compare') {
-      visit(b.left?.block);
-      visit(b.right?.block);
-    }
-  };
-  for (const b of board.blocks) visit(b);
-  return out;
-}
+// questionBlocks moved to src/badge.mjs (re-exported above) -- see that file's
+// own comment on why.
 
 // Every shape a stored `anchor` is allowed to take (PROTOCOL.md "Answers,
 // comments, anchors"). Anything else degrades to a whole-block comment rather
@@ -767,8 +781,16 @@ export function applySubmit(board, { action, answers, comments }, round) {
   // rest on, and it has to be able to distinguish "the reviewer left this blank"
   // from "this round was never submitted"; buildPacket's own fallback cannot, since
   // it invents the same shape for a board that was never sent at all.
+  // Scoped to the round being submitted, like `answerable` above. Board-wide, this
+  // loop backfilled `unanswered` entries for questions belonging to a round that is
+  // still OPEN -- reachable now that two rounds can be open at once (ADR.md entry 45)
+  // and a submit may name either. Harmless at every reader traced (the later real
+  // submit overwrites cleanly, and `rounds[n].status` keeps the distinction this
+  // loop's own comment is about), but "the reviewer left this blank" is a statement
+  // about a round that has been sent, and writing it for a round nobody has answered
+  // yet is a claim the board has no business making.
   for (const b of allQuestions) {
-    if (!board.answers[b.id]) {
+    if (answerable.has(b.id) && !board.answers[b.id]) {
       board.answers[b.id] = { id: b.id, status: 'unanswered', choice: null, note: '' };
     }
   }

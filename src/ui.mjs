@@ -49,7 +49,13 @@ import {
   composeHint, parseMermaidDomId, MERMAID_NODE_SELECTOR,
   findPendingCommentForAnchor, removePendingComment,
 } from './anchor.mjs';
-import { badgeLabel, roundPageLabel, isPageRound } from './badge.mjs';
+import {
+  badgeLabel, roundPageLabel, roundNumberLabel, isPageRound,
+  questionBlocks, roundIsAwaited,
+  roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
+  ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE,
+  PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE,
+} from './badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
 import { THEME_CHANGE_EVENT } from './theme.mjs';
 import { palettes } from './styles.mjs';
@@ -237,8 +243,40 @@ export const ui = `
   // rendered it. Both are the "one implementation, embedded not copied" rule --
   // a hand-written twin here would be free to disagree with the markup on
   // screen, and nothing would catch it.
+  var roundNumberLabel = ${roundNumberLabel.toString()};
   var roundPageLabel = ${roundPageLabel.toString()};
   var isPageRound = ${isPageRound.toString()};
+
+  // Same technique a third time: whether a round is *awaited* (CONTEXT.md
+  // "Awaited") is what markPendingRound below gates the tab mark and the
+  // notification on (AC 9/AC 10, SPEC_AWAITED.md ticket 04) -- the exact same
+  // predicate src/indexpage.mjs's badge count and src/server.mjs's
+  // drainUndeliveredComments read, spliced in rather than hand-copied so a legacy
+  // round (minted before ADR.md entry 45, carrying neither an awaited flag nor an
+  // awaitDeadline at all) falls back to the identical shape-based inference on
+  // every side instead of three that could quietly disagree. questionBlocks is
+  // roundIsAwaited's own dependency (its legacy fallback), spliced for the same
+  // reason, not because anything else here calls it directly.
+  var questionBlocks = ${questionBlocks.toString()};
+  var roundIsAwaited = ${roundIsAwaited.toString()};
+
+  // The waiting signal (SPEC_AWAITED.md ticket 03), spliced the same way and in
+  // dependency order (each one calls only a name already assigned above it --
+  // 'var' hoisting makes the DECLARATION order irrelevant, but the ASSIGNMENT
+  // still has to run top to bottom before any of these is ever CALLED, which it
+  // does, since every line here runs synchronously at IIFE start). Real
+  // functions, not a hand-written twin: badge.mjs's own header comment is what
+  // explains why only THIS file may ever call roundIsCurrentlyAwaited/
+  // roundCountdownText/pageBoardPillMeta with a real clock -- src/render.mjs
+  // never does, so a rendered page stays a pure function of its board JSON.
+  var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
+  var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
+  var PAGE_SEND_EXPIRED_LABEL = ${JSON.stringify(PAGE_SEND_EXPIRED_LABEL)};
+  var PAGE_SEND_EXPIRED_TITLE = ${JSON.stringify(PAGE_SEND_EXPIRED_TITLE)};
+  var roundIsAwaitedOpen = ${roundIsAwaitedOpen.toString()};
+  var roundIsCurrentlyAwaited = ${roundIsCurrentlyAwaited.toString()};
+  var roundCountdownText = ${roundCountdownText.toString()};
+  var pageBoardPillMeta = ${pageBoardPillMeta.toString()};
 
   function seedAnswers(blockIds, boardData) {
     blockIds.forEach(function (id) {
@@ -800,13 +838,17 @@ export const ui = `
   // renders exactly at the placeholder a report that never arrived at all
   // would have left the card at, not below it.
   var STAGE_HEIGHT_FLOOR = 320;
-  // How far into the artifact counts as "reading it" (ADR.md entry 40) -- the
-  // point the header condenses at and the back-to-top control appears at. One
-  // number for both, so the two can never disagree about what "scrolled" means.
-  // A few pixels rather than zero: a trackpad's inertia can leave a document
-  // resting at 1-2px, and a header that flickers on that is worse than one that
-  // waits for a real gesture.
-  var STAGE_SCROLL_CONDENSE_PX = 24;
+  // How far into the artifact counts as fully "reading it" (ADR.md entry 40) --
+  // the offset at which the header has finished condensing and the back-to-top
+  // control has finished appearing. A RAMP, not a threshold: the condense is a
+  // 0-to-1 progress across this distance (refreshStageChrome, below), so there
+  // is no boundary for a reader to rest on and flicker. That flicker is exactly
+  // what the old 24px threshold did, and why a wider dead zone was not the fix:
+  // a dead zone moves the boundary, it does not remove it.
+  //
+  // 140px is a bit over one scroll notch, so an accidental nudge barely stains
+  // the header while a deliberate read completes it.
+  var STAGE_SCROLL_CONDENSE_PX = 140;
 
   /** Post one message to 'frame''s stage agent. Wrapped in try/catch: a frame
    * mid-teardown (an amend that replaced this block) can leave 'contentWindow'
@@ -867,6 +909,28 @@ export const ui = `
    * Iterates frames still live in THIS document, filtered through isWiredStage
    * -- a frame that was only ever the about:blank placeholder, or one an amend
    * already replaced, is simply absent from the query and never touched. */
+  /** SPEC_AWAITED.md ticket 03, AC 8/AC 12: is the click-to-anchor gesture even
+   * on offer for 'section' (a '.html-block')? 'true' for every stage that is
+   * NOT a page board's own -- ADR.md entry 28's rule stays kind-based
+   * everywhere else, unchanged by this ticket -- and for a page board's stage
+   * only while its own round is genuinely awaited right now (status open,
+   * 'awaited === true', and short of its deadline: 'roundIsCurrentlyAwaited',
+   * the one function on this whole page that reads the wall clock for this
+   * purpose). 'false' covers a page board that was never awaited at all (AC
+   * 8), one whose round has since been sent, and one whose wait died while
+   * this very tab sat open (AC 12) -- three different histories, one gate,
+   * since all three mean the same thing to a reviewer holding the mouse:
+   * nobody is listening any more. Read straight off 'board.rounds' rather
+   * than off any DOM state, so it can never disagree with what
+   * renderPageCommentPanel (src/render.mjs) or refreshAwaitDisplay (below)
+   * decided about the very same round. */
+  function pageRoundCommentsAllowed(section) {
+    var roundSection = section && section.closest('.round');
+    var n = roundSection ? parseInt(roundSection.getAttribute('data-round'), 10) : NaN;
+    if (!isFinite(n)) return true;
+    if (!isPageRound(blocksOfRound(n))) return true;
+    return roundIsCurrentlyAwaited(roundEntry(n), Date.now());
+  }
   function broadcastStageMode() {
     qsa('.html-stage', document).forEach(function (frame) {
       if (!isWiredStage(frame)) return;
@@ -874,7 +938,7 @@ export const ui = `
       var blockId = section && section.getAttribute('data-block-id');
       postToStage(frame, {
         type: 'mode',
-        commentMode: commentMode,
+        commentMode: commentMode && pageRoundCommentsAllowed(section),
         sentRefs: blockId ? sentDomRefsForBlock(blockId) : [],
         theme: activeTheme(),
       });
@@ -948,12 +1012,26 @@ export const ui = `
     // theme travels in the same message for the same reason (ADR.md entry 39):
     // a stage that has just announced itself has to be painted in the reader's
     // theme before its first frame is looked at, not at the next toggle.
-    postToStage(frame, { type: 'mode', commentMode: commentMode, sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
+    //
+    // SPEC_AWAITED.md ticket 03, AC 8: gated exactly like broadcastStageMode
+    // (pageRoundCommentsAllowed, above) -- a stage that announces itself for
+    // the FIRST time is otherwise the one path that never went through that
+    // function at all, and would hand a non-awaited (or since-expired) page
+    // round's stage 'commentMode: true' straight from the global toggle with
+    // no gate in the way.
+    postToStage(frame, { type: 'mode', commentMode: commentMode && pageRoundCommentsAllowed(section), sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
     if (layer) requestStagePositions(frame, blockId, layer);
   }
 
   function handleStageClick(data, section, blockId) {
     if (readonly || !commentMode) return;
+    // SPEC_AWAITED.md ticket 03, AC 8/AC 12: broadcastStageMode already tells a
+    // gated stage 'commentMode: false', which stops the hover/click gesture at
+    // its source -- this is the second, independent gate (QUIRKS.md "Readonly
+    // is locked twice"), for a click message that beat that broadcast across
+    // the postMessage round trip, or one from a stage this tab never told at
+    // all (a resync that skipped straight to an already-expired round).
+    if (!pageRoundCommentsAllowed(section)) return;
     if (typeof data.ref !== 'string' || !data.ref) return;
     var anchor = { kind: 'dom', ref: data.ref };
     // An element inside this stage
@@ -1117,17 +1195,87 @@ export const ui = `
    * that would condense a header floating over nothing and float a back-to-top
    * control over a page that has its own scrollbar.
    *
-   * Two classes, one condition -- 'stage-scrolled' on <body> is what condenses
-   * the header (src/styles.mjs) and '.visible' is what shows the control; both
-   * follow the same boolean so they can never disagree about whether the
-   * reviewer is reading. */
+   * One number, three consumers -- '--stage-p' on <body> is the 0-to-1 condense
+   * progress the stylesheet does all of its arithmetic on, 'stage-scrolled' is
+   * that same progress asked "off zero?", and '.visible' flips the back-to-top
+   * control's 'display'. All three are derived here from the one offset, so
+   * they cannot disagree about how far into the artifact the reviewer is.
+   *
+   * The two booleans survive the move to a continuous progress only because
+   * 'display' has no interpolable midpoint and something has to flip it; every
+   * part of the look is on '--stage-p'. They flip at the first pixel rather
+   * than at a threshold, and the control is fully transparent there
+   * (src/styles.mjs), so nothing appears until the fade actually starts. */
   function refreshStageChrome() {
     var frame = document.querySelector('.round-current .html-stage');
     var top = frame && typeof frame.__cbStageTop === 'number' ? frame.__cbStageTop : 0;
-    var scrolled = document.body.classList.contains('page-board') && top > STAGE_SCROLL_CONDENSE_PX;
-    document.body.classList.toggle('stage-scrolled', scrolled);
-    if (backToTopBtn) backToTopBtn.classList.toggle('visible', scrolled);
+    var pageBoard = document.body.classList.contains('page-board');
+    var p = pageBoard ? Math.min(1, Math.max(0, top / STAGE_SCROLL_CONDENSE_PX)) : 0;
+    // Three decimals, not the raw float: the value lands in a style attribute
+    // that the comment/anchor code reads back, and '0.6100000000000001' is a
+    // diff nobody wants to see. Below a thousandth is under a tenth of a pixel
+    // of pill travel.
+    document.body.style.setProperty('--stage-p', p.toFixed(3));
+    document.body.classList.toggle('stage-scrolled', p > 0);
+    if (backToTopBtn) backToTopBtn.classList.toggle('visible', p > 0);
   }
+
+  /** The pill's own half-width, handed to the stylesheet so its centred band is
+   * exactly as wide as the controls that survive the condense. Measured rather
+   * than hardcoded because two of those controls resize at runtime: the round
+   * badge relabels on a flip ('Round 3 of 5' is not 'Round 12 of 40') and the
+   * read-only slot (ADR.md entry 46) appears and goes.
+   *
+   * Read off the two survivors' own widths, never off the header's -- the
+   * header is full-bleed at every progress by design, so its width says
+   * nothing about the pill's. Includes the flex gap between them and the
+   * pill's inner padding, since the band has to hold all of it.
+   *
+   * ponytail: a ResizeObserver on the actions row, rather than a re-measure
+   * wired into every place a label can change. It costs one observer and
+   * cannot be forgotten by the next control someone adds to the header. */
+  function measurePillHalf() {
+    var head = document.querySelector('header.board-head');
+    // '.back-to-index', not a child combinator on '.board-head-title': the
+    // test DOM stand-in supports only the selector subset this file uses, and
+    // '>' is not in it (test/dom-stand-in.mjs).
+    var brand = head && head.querySelector('.back-to-index');
+    var actions = head && head.querySelector('.board-head-actions');
+    if (!brand || !actions) return;
+    // Layout measurement is the one thing the test DOM stand-in cannot fake
+    // (it has no getComputedStyle and no box model), and faking it would prove
+    // nothing anyway. Skipping leaves the stylesheet's --pill-half default,
+    // which is a slightly-off pill rather than a broken one -- so this is the
+    // same graceful floor as the ResizeObserver detection at the call site.
+    if (typeof getComputedStyle !== 'function') return;
+    // The gap is read at whatever progress the header is at, which is correct:
+    // it is the same interpolated value the controls are actually sitting on.
+    // The inner padding is the TOKEN, not a computed padding -- the header's
+    // own padding-inline already carries the centring inset at p>0, so reading
+    // it back would fold the answer into its own input.
+    var gap = parseFloat(getComputedStyle(head).columnGap) || 0;
+    var pad = parseFloat(getComputedStyle(document.body).getPropertyValue('--space-3')) || 0;
+    var half = (brand.offsetWidth + gap + actions.offsetWidth) / 2 + pad;
+    document.body.style.setProperty('--pill-half', half.toFixed(1) + 'px');
+  }
+
+  // Measure once now, and again whenever the controls that make up the pill
+  // change size (the round badge relabels on a flip; the read-only slot comes
+  // and goes). The initial call is explicit rather than left to the observer's
+  // own first delivery -- measured in Chrome 152, observing an element that is
+  // already laid out and never resized again delivers NOTHING, so an
+  // observe-only wiring left --pill-half unset for the whole session and the
+  // pill sat at the stylesheet's rough default.
+  //
+  // Feature-detected, and harmless without: --pill-half has a default in
+  // src/styles.mjs, so the floor is a slightly-off pill rather than a broken
+  // one.
+  (function () {
+    var actions = document.querySelector('header.board-head .board-head-actions');
+    if (!actions) return;
+    measurePillHalf();
+    if (typeof ResizeObserver === 'function') new ResizeObserver(measurePillHalf).observe(actions);
+  }());
 
   // Tag-qualified, same reason as every other id-by-string lookup in this file:
   // a heading '## Back to top' slugifies to a second id="back-to-top"
@@ -2238,8 +2386,37 @@ export const ui = `
    * reintroducing that by remembering one and forgetting the other; it is
    * document-wide regardless of 'root' on purpose, since provisional numbering
    * spans the whole board (refreshPendingCommentItems' own comment). */
+  /** SPEC_AWAITED.md ticket 03 (AC 4, AC 5): keeps every page round's own send
+   * control and hint honest as pendingComments changes -- called from
+   * refreshPins (queue/edit/delete, a submit landing, a resize -- see that
+   * function's own comment for why this belongs beside
+   * refreshPendingCommentItems rather than at each call site individually),
+   * document-wide for the identical reason: a comment queued while looking at
+   * ONE page must never leave some OTHER page's already-rendered label and
+   * hint stale for when the reviewer flips back to it. 'commentsWithPending'
+   * is the exact same count 'renderPageCommentPanel' (src/render.mjs) reads
+   * at first paint, from a different source (board.comments vs board.comments
+   * PLUS the live queue) -- the two can disagree the instant a comment is
+   * queued, which is precisely why this exists. */
+  function updatePageSendControls() {
+    qsa('.page-send-bar', document).forEach(function (bar) {
+      var n = parseInt(bar.getAttribute('data-round'), 10);
+      if (!isFinite(n)) return;
+      var blocks = blocksOfRound(n);
+      if (!blocks.length) return;
+      var blockId = blocks[0].id;
+      var count = commentsWithPending().filter(function (c) { return c.blockId === blockId; }).length;
+      var sendBtn4 = bar.querySelector('.page-send-btn');
+      if (sendBtn4) sendBtn4.textContent = count === 0 ? 'Nothing to add' : ('Send ' + count + ' comment' + (count === 1 ? '' : 's'));
+      var panel = bar.closest('.page-comments');
+      var hint = panel && panel.querySelector('.page-comment-hint');
+      if (hint) hint.style.display = count === 0 ? '' : 'none';
+    });
+  }
+
   function refreshPins(root) {
     refreshPendingCommentItems();
+    updatePageSendControls();
     qsa('.html-stage', root).forEach(function (frame) {
       if (!isWiredStage(frame)) return;
       var section = frame.closest('.html-block');
@@ -3331,8 +3508,9 @@ export const ui = `
   // --- rounds are the board's pages -------------------------------------------
   //
   // ADR.md entry 42: a thread keeps its single board and its rounds become that
-  // board's pages -- edge chevrons to flip, a pill at the bottom naming them and
-  // dotting the one that still owes an answer, landing on the newest. Exactly
+  // board's pages -- edge chevrons to flip, a pill at the bottom numbering them
+  // (full name on hover) and dotting the one that still owes an answer, landing
+  // on the newest. Exactly
   // one '.round' section carries 'round-current' and the stylesheet displays
   // only that one, so "which round am I on" is EXPLICIT STATE here, written in
   // one place, rather than a scroll position measured against the header.
@@ -3400,6 +3578,88 @@ export const ui = `
     if (el) el.textContent = badgeLabel(currentRound, (board.rounds || []).length);
   }
 
+  /** SPEC_AWAITED.md ticket 03 (AC 6, AC 8, AC 11, AC 12): repaint every place a
+   * round's countdown or read-only state shows, from 'board.rounds' and this
+   * reader's own clock -- '#round-meta' (the page board's own pill/meta slot,
+   * for whichever round is CURRENT) and '#round-countdown' (the ordinary send
+   * bar's, for whichever round is OPEN, page board or not). Called from
+   * refreshPager (every flip and every push), from a periodic tick (so a round
+   * left open on screen counts down and can revert on its own, with nobody
+   * touching anything), and the instant an 'awaitExpired' SSE push says a
+   * round's wait just died (below) -- never later than a real signal saying it
+   * happened, which is what AC 12 asks for.
+   *
+   * Also the one place that ever CORRECTS the render-time decision
+   * 'renderPageCommentPanel' (src/render.mjs) made about whether a page round's
+   * compose/send surface is live: that function reads only 'roundIsAwaitedOpen'
+   * (no clock, so the page stays a pure function of its JSON at render time --
+   * see badge.mjs's own header comment), so an open, awaited round whose
+   * deadline has ALREADY passed at the moment this runs still rendered the live
+   * surface. '.expired' is what downgrades it here, client-side, the moment
+   * 'roundIsCurrentlyAwaited' stops agreeing with 'roundIsAwaitedOpen' for the
+   * same round -- one-directional by construction (a deadline never
+   * un-expires), and it never touches anything already in '.comment-list'
+   * ("comments already left stay on screen", AC 12). Locked twice, same
+   * discipline as 'body.readonly' (QUIRKS.md): the class hides the surface in
+   * CSS, and the disabled sweep just below stops a control that only LOOKS
+   * gone from still working. */
+  function refreshAwaitDisplay() {
+    var now = Date.now();
+    // ADR.md entry 46's half that outlives the first paint (src/render.mjs's own
+    // 'pageUncommentable' is the render-time half): the comment-mode toggle has
+    // to go on a page board that was never awaited AND on one whose wait dies
+    // while the reviewer is reading it -- so this asks the clock, which is why it
+    // lives here rather than in refreshPager (which calls this on every flip
+    // anyway, so the class is correct on both routes).
+    document.body.classList.toggle('page-uncommentable',
+      isPageRound(blocksOfRound(currentRound))
+      && !roundIsCurrentlyAwaited(roundEntry(currentRound), now));
+    var meta = document.querySelector('span#round-meta');
+    if (meta) {
+      var m = pageBoardPillMeta(roundEntry(currentRound), now);
+      meta.textContent = m.text;
+      meta.title = m.title;
+    }
+    var cd = document.querySelector('span#round-countdown');
+    if (cd) {
+      var text = roundCountdownText(roundEntry(openRoundNumber()), now);
+      cd.textContent = text || '';
+      cd.title = text ? ROUND_COUNTDOWN_TITLE : '';
+      cd.classList.toggle('visible', !!text);
+    }
+    qsa('.page-comments', document).forEach(function (panel) {
+      if (panel.classList.contains('expired')) return;
+      var section = panel.closest('.round');
+      var n = section ? parseInt(section.getAttribute('data-round'), 10) : NaN;
+      if (!isFinite(n)) return;
+      var round = roundEntry(n);
+      if (roundIsAwaitedOpen(round) && !roundIsCurrentlyAwaited(round, now)) {
+        // Last exit before the freeze. 'pendingComments' lives ONLY in this tab's
+        // memory (see its declaration) and the Send control is the only thing that
+        // ever moves it to the board, so freezing the control with the queue still
+        // in it is the one way a reviewer's typed comments get silently destroyed:
+        // they sit on screen looking saved until the tab is reloaded. Flushed
+        // first, frozen second -- the payload is captured synchronously inside
+        // submitPageRound, so the disable sweep below cannot race it.
+        flushPendingOnExpiry(n);
+        panel.classList.add('expired');
+        qsa('input, button', panel).forEach(function (el) { el.disabled = true; });
+        // Frozen, but not mute: the control stays on screen saying where the
+        // comments went (badge.mjs's own comment on this label). Set after the
+        // disable sweep so it cannot be re-enabled by it.
+        var expiredSend = panel.querySelector('.page-send-btn');
+        if (expiredSend) {
+          expiredSend.textContent = PAGE_SEND_EXPIRED_LABEL;
+          expiredSend.title = PAGE_SEND_EXPIRED_TITLE;
+        }
+      }
+    });
+    // A page round that just expired must stop offering its click-to-anchor
+    // gesture too, even mid-hover -- broadcastStageMode re-tells every wired
+    // stage its current allowance the same way any other mode change does.
+    broadcastStageMode();
+  }
+
   /** Repaint every control that names a round, from currentRound and 'board'.
    * Called on every flip AND after every push that changes what the rounds are
    * (a new one arriving, an earlier one going sent), so the pager, the badge,
@@ -3432,11 +3692,27 @@ export const ui = `
         btn.className = 'round-page'
           + (r.n === currentRound ? ' round-page-current' : '')
           + (roundOwesAnswer(r) ? ' round-page-owed' : '');
-        btn.textContent = roundPageLabel(r.n, r.title || '');
+        // Numeral on the face, full name as the accessible name and the hover
+        // title -- the same split roundPagerMarkup renders at first paint (see
+        // roundNumberLabel).
+        var full = roundPageLabel(r.n, r.title || '');
+        btn.textContent = String(r.n);
+        btn.setAttribute('title', full);
+        btn.setAttribute('aria-label', full);
         if (r.n === currentRound) btn.setAttribute('aria-current', 'page');
         else btn.removeAttribute('aria-current');
         btn.disabled = false;
       });
+    }
+    // The caption names the round the reviewer is on, so it is rewritten on
+    // every flip -- the one place the pager still spends a title.
+    // Tag-qualified like every other id lookup in this file -- '## Round pager
+    // caption' is exactly as mintable as '## Board data'.
+    var caption = document.querySelector('div#round-pager-caption');
+    if (caption) {
+      var cur = null;
+      rounds.forEach(function (r) { if (r.n === currentRound) cur = r; });
+      caption.textContent = roundPageLabel(currentRound, (cur && cur.title) || '');
     }
     var rns = rounds.map(function (r) { return r.n; });
     var first = rns.length ? rns[0] : 1;
@@ -3466,6 +3742,7 @@ export const ui = `
     if (!submitInFlight) setSendBarEnabled(open !== null && currentRound === open);
 
     renderBadge();
+    refreshAwaitDisplay();
   }
 
   /** Flip to round 'n'. The one writer of currentRound.
@@ -3572,12 +3849,84 @@ export const ui = `
     sendBarDockObserver.observe(rail);
   }
 
+  /** Ticket 02 (SPEC_AWAITED.md): '.page-comments' (a page board's floating
+   * comment panel) has to clear '.round-pager-dock' -- the round pager's
+   * fixed, bottom-centre box -- and cannot do that with a number typed into
+   * the stylesheet, because the dock's own height changes with its own
+   * content ('2379f12' grew it from one row to two and broke exactly that
+   * kind of number) and ticket 03 is about to make the PANEL taller too.
+   *
+   * CSS anchor positioning ('anchor()') was tried first and reverted: it
+   * requires the anchor to precede the positioned element in DOM order,
+   * which the dock does not (it renders after '.blocks', and
+   * '.page-comments' is nested inside a block within '.blocks'), and it hit
+   * a second, separate containing-block failure even after that was worked
+   * around -- confirmed wrong in a real browser (computed 'bottom: auto'),
+   * a class of failure this repo's DOM stand-in cannot see at all
+   * (QUIRKS.md, "The stand-in has no layout": no ResizeObserver either,
+   * hence the guard below).
+   *
+   * A ResizeObserver on the dock is the mechanism that survives that: it
+   * measures the dock's REAL box, independent of where either element sits
+   * in the tree, and writes it to '--round-pager-dock-h' (src/styles.mjs's
+   * '.page-comments'), which recomputes its 'bottom' every time the
+   * property changes -- CSS custom properties are live, so no second call
+   * is needed to push the new value into layout. Observed, not measured
+   * once at load: a future change to the dock's own font size, padding or
+   * row count updates this with it, with nothing to remember to keep in
+   * step. */
+  function setupPagerDockHeightTracking() {
+    var dock = document.querySelector('.round-pager-dock');
+    if (!dock) return;
+    if (typeof ResizeObserver !== 'function') return;
+    var ro = new ResizeObserver(function (entries) {
+      var entry = entries[0];
+      var h = entry && entry.contentRect ? entry.contentRect.height : dock.getBoundingClientRect().height;
+      document.documentElement.style.setProperty('--round-pager-dock-h', h + 'px');
+    });
+    ro.observe(dock);
+  }
+
   setupSendBarDock();
+  setupPagerDockHeightTracking();
   // The page is already painted on the right round (renderBoardPage), so this
   // only brings the CONTROLS up to it -- no flip, no scroll. It is also what
   // re-enables the pager in a read-only archive, after the blanket disable pass
-  // at the top of this file (see refreshPager's own comment).
+  // at the top of this file (see refreshPager's own comment), and (via
+  // refreshAwaitDisplay) fills in the real countdown figure this page's own
+  // first paint deliberately left for the client to compute (badge.mjs's
+  // header comment on why -- no 'Date.now()' at render time).
   refreshPager();
+  // AC 5: an awaited page round opens with comment mode ON, so the reviewer
+  // never has to find the toggle first -- the ADR 48 hint inside the empty
+  // panel (renderPageCommentPanel, src/render.mjs) is what teaches the
+  // click-to-comment gesture instead, since the toggle itself is no longer
+  // what reveals it here. 'roundIsCurrentlyAwaited', not merely
+  // 'roundIsAwaitedOpen': an already-expired round has nothing to teach the
+  // gesture FOR (AC 12 turns it read-only before the reviewer can act on it
+  // either way), so this only ever fires for a round that genuinely still has
+  // time on the clock. Once only, here at hydrate -- flipping to a DIFFERENT
+  // awaited page round later does not re-force the toggle, so a reviewer who
+  // deliberately turned it off keeps it off (ADR.md entry 40's own "the mode
+  // is switched mid-read, not suspended by the scroll" already makes this the
+  // reviewer's own control from here on).
+  if (isPageRound(blocksOfRound(currentRound)) && roundIsCurrentlyAwaited(roundEntry(currentRound), Date.now())) {
+    setCommentMode(true);
+  }
+  // SPEC_AWAITED.md ticket 03 (AC 6, AC 11, AC 12): a round left open on screen
+  // has to count down and can revert to read-only entirely on its own, with
+  // nobody touching anything -- the periodic half of refreshAwaitDisplay,
+  // beside the flip-triggered call in refreshPager and the 'awaitExpired' SSE
+  // nudge below. Skipped in a read-only archive: there is no live board for
+  // any of this to change. 'unref'd, same discipline as
+  // src/pomodoro.mjs's own timer and src/server.mjs's SSE heartbeat -- a
+  // lingering interval must never be the reason an in-process check's node
+  // process fails to exit on its own (a real browser has no 'unref', so the
+  // guard is a no-op there and the interval just runs).
+  if (!readonly) {
+    var awaitTickTimer = setInterval(refreshAwaitDisplay, 20000);
+    if (awaitTickTimer && typeof awaitTickTimer.unref === 'function') awaitTickTimer.unref();
+  }
 
   // The three round controls, all wired to the same two functions. The pill is
   // delegated at the <nav> rather than per entry, so an entry created later by
@@ -3827,6 +4176,122 @@ export const ui = `
     });
   }
 
+  /** SPEC_AWAITED.md ticket 03 (AC 4): the awaited page's own Send/Discuss --
+   * submitBoard's analogue for a page round, deliberately never sharing that
+   * function's path. submitBoard refuses outright on a page round (ADR.md
+   * entry 35: "a page board is not sendable" through the ordinary send bar)
+   * and always names openRoundNumber(), the LATEST unsent round -- wrong for
+   * an awaited page round that is not the latest, exactly the gap ticket 01
+   * left for this one: "the browser's own Send control ... still assumes a
+   * single submittable round ... 03 is free to give an awaited page round's
+   * Send control its own correct round number rather than whatever the
+   * single latest-open number is". 'roundN' is read off the button's own
+   * 'data-round' (baked in at render time by renderPageCommentPanel,
+   * src/render.mjs), never derived from which page happens to be current.
+   *
+   * Comments are filtered to THIS round's own block before posting:
+   * 'pendingComments' is one flat, board-wide queue, and bundling every
+   * pending comment into every submit -- what submitBoard itself still does,
+   * unchanged and out of this ticket's scope -- would misfile a comment left
+   * on a DIFFERENT open round under this one's number the moment two rounds
+   * are genuinely open at once (ticket 01's "a board can hold two open rounds
+   * at once"). A page round carries exactly one block, so "this round's own
+   * comments" and "this block's own comments" are the same set -- whatever is
+   * left over stays queued, exactly the AC 12 promise ("comments already left
+   * stay on screen and ride the thread's next packet") for a comment on some
+   * OTHER round that has not gone out yet either. */
+  /** The queue's last chance to leave the tab, called on the transition into
+   * '.expired' and nowhere else. A no-op unless this round actually holds
+   * queued comments, so an expiring page nobody wrote on stays a pure display
+   * change and posts nothing. The submit itself is the ordinary one: it stores
+   * the comments and closes the round, and because the round is no longer
+   * awaited by then, 'drainUndeliveredComments' (src/server.mjs) is what carries
+   * them to the next agent that asks -- AC 12's "ride the thread's next packet",
+   * now that a lapsed round stops swallowing its own comments.
+   *
+   * ponytail: this needs the tab to be open at the deadline. Comments typed into
+   * a tab that is closed (or a laptop asleep) before it passes were never
+   * anywhere but that tab's memory and are gone either way -- this does not make
+   * that worse, and the upgrade path, if it ever bites, is the same flush on
+   * 'beforeunload'/'visibilitychange' rather than a durable client-side queue. */
+  function flushPendingOnExpiry(roundN) {
+    var blocks = blocksOfRound(roundN);
+    if (!isPageRound(blocks)) return;
+    var id = blocks[0].id;
+    if (!pendingComments.some(function (c) { return c.blockId === id; })) return;
+    submitPageRound(roundN, 'send');
+  }
+
+  function submitPageRound(roundN, action) {
+    if (readonly) return;
+    var round = roundEntry(roundN);
+    if (!round || round.status !== 'open') return;
+    var blocks = blocksOfRound(roundN);
+    if (!isPageRound(blocks)) return;
+    var blockId = blocks[0].id;
+    var mine = pendingComments.filter(function (c) { return c.blockId === blockId; });
+    var section = roundSectionEl(roundN);
+    var pageSendBtn = section && section.querySelector('.page-send-btn');
+    var pageDiscussBtn = section && section.querySelector('.page-discuss-btn');
+    // Disabled the instant the click lands, before the round trip even starts
+    // -- the same reason submitBoard's own setSendBarEnabled(false) runs
+    // before its fetch, so a double click (or a click during a slow network)
+    // can never fire this twice.
+    if (pageSendBtn) pageSendBtn.disabled = true;
+    if (pageDiscussBtn) pageDiscussBtn.disabled = true;
+    fetch('/api/board/' + boardId + '/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: action, round: roundN, answers: [], comments: mine }),
+    }).then(function (r) {
+      // 409: already sent, by another tab or a double click that beat the
+      // disable above -- not an error, and the live 'submitted' push (already
+      // on its way, or this thread's next resync) is what settles the
+      // surface, exactly submitBoard's own reasoning for the identical case.
+      if (r.status === 409) return { alreadySent: true };
+      if (!r.ok) throw new Error('submit failed: ' + r.status);
+      return r.json();
+    }).then(function (result) {
+      if (result && result.alreadySent) return;
+      // Only THIS block's comments are cleared -- see this function's own
+      // header comment for why the queue is not simply emptied wholesale.
+      pendingComments = pendingComments.filter(function (c) { return c.blockId !== blockId; });
+      refreshPins(document);
+      clearPendingMark();
+    }).catch(function () {
+      // Nothing went out -- hand the controls back so the reviewer can retry,
+      // the same recovery submitBoard's own catch performs. Except on a panel
+      // that has since frozen (the flush-on-expiry path above): there the round
+      // is over, retrying is not on offer, and re-enabling would leave a control
+      // that CSS has already hidden still live to a keyboard -- exactly the
+      // "locked twice" rule QUIRKS.md states for every other read-only surface.
+      var frozen = section && section.querySelector('.page-comments.expired');
+      if (frozen) return;
+      if (pageSendBtn) pageSendBtn.disabled = false;
+      if (pageDiscussBtn) pageDiscussBtn.disabled = false;
+    });
+  }
+
+  // Delegated at the document, the same idiom the round pager's own nav uses
+  // (and for the same reason): a page round's send control can arrive well
+  // after hydrate (a fresh awaited page round pushed over SSE), and delegation
+  // means it is live the instant it exists, with no second wiring pass and no
+  // chance of a double-registered listener.
+  document.addEventListener('click', function (ev) {
+    if (readonly || !ev.target || !ev.target.closest) return;
+    var sendBtn3 = ev.target.closest('.page-send-btn');
+    if (sendBtn3) {
+      var n1 = parseInt(sendBtn3.getAttribute('data-round'), 10);
+      if (isFinite(n1)) submitPageRound(n1, 'send');
+      return;
+    }
+    var discussBtn3 = ev.target.closest('.page-discuss-btn');
+    if (discussBtn3) {
+      var n2 = parseInt(discussBtn3.getAttribute('data-round'), 10);
+      if (isFinite(n2)) submitPageRound(n2, 'discuss');
+    }
+  });
+
   // --- Cmd+Enter board traversal, and the Send guard --------------------------
   //
   // A single document-level keydown listener is the whole keyboard path through
@@ -3910,21 +4375,45 @@ export const ui = `
     if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
   }
 
+  /** Put a question block's own TOP on screen and move focus there -- the
+   * pill's landing, deliberately not focusNoteField. A note field sits at the
+   * END of its question, so focusing it scrolls the reviewer PAST the very
+   * question they asked to be taken to: a block with a long context column puts
+   * that field most of a screen below the question's first line, and the pill
+   * then reads as "jump to the comment box". The block's own top is the thing
+   * the reviewer was promised, and .question-block's scroll-margin-top clears
+   * the sticky header so 'start' does not park it behind the chrome.
+   *
+   * tabindex is set here rather than in the rendered markup because this is the
+   * only path that focuses a block: '-1' keeps it out of the Tab order while
+   * making it a legal script-focus target (the ordinary skip-link shape), so
+   * keyboard and screen-reader users continue from the question instead of from
+   * the pill they left. focus takes preventScroll so the browser's own
+   * bring-focus-on-screen cannot undo the alignment scrollIntoView just asked
+   * for -- both guarded the same way focusNoteField's scrollIntoView is, so a
+   * DOM stand-in missing either method still runs this without throwing. */
+  function goToQuestion(block) {
+    if (!block) return;
+    block.setAttribute('tabindex', '-1');
+    if (block.scrollIntoView) block.scrollIntoView({ block: 'start' });
+    if (block.focus) block.focus({ preventScroll: true });
+  }
+
   /** ADR.md entry 27: "the pill's click target is
    * the send guard's target, not a second notion of 'next question'" -- the exact
-   * same outstandingBlocks()[0] armSendGuard flags, reached the same way the
-   * Cmd+Enter traversal already lands on a question (focusNoteField), rather than
-   * armSendGuard's own scroll-and-ring: the pill leaves the guard alone entirely
-   * (never touches sendArmed, the 'warn' class or send-status), it only moves the
-   * reviewer there. Gated on commentMode like every other action-taking control
-   * wireRoot wires -- see the single/multi/defer handlers above -- so a click
-   * meant to anchor a comment can never also be read as "go answer this". */
+   * same outstandingBlocks()[0] armSendGuard flags, but landed on the way
+   * goToQuestion above describes rather than armSendGuard's own scroll-and-ring:
+   * the pill leaves the guard alone entirely (never touches sendArmed, the
+   * 'warn' class or send-status), it only moves the reviewer there. Gated on
+   * commentMode like every other action-taking control wireRoot wires -- see the
+   * single/multi/defer handlers above -- so a click meant to anchor a comment can
+   * never also be read as "go answer this". */
   if (questionsLeftPill) {
     questionsLeftPill.addEventListener('click', function () {
       if (readonly || commentMode) return;
       var outstanding = outstandingBlocks();
       if (!outstanding.length) return;
-      focusNoteField(outstanding[0]);
+      goToQuestion(outstanding[0]);
     });
   }
 
@@ -4164,8 +4653,22 @@ export const ui = `
     } catch (e) { /* degrade silently -- marking the tab must never block a push */ }
   }
 
+  /** The tab mark (AC 9) and the notification (AC 10) gate on the SAME thing --
+   * whether round n is awaited, i.e. whether the ask() call that posted it is
+   * still genuinely blocked on it (CONTEXT.md "Awaited"). A fire-and-forget
+   * artifact round (no wait) is not: nobody is listening for a submit that will
+   * never come, so marking it pending or notifying about it would both be the
+   * same lie in two different UI surfaces. Gated here, once, rather than in
+   * notifyRound alone, precisely so the favicon badge and the notification can
+   * never disagree about which rounds count -- the exact drift AC 9/AC 10
+   * together forbid. 'board' is read directly off the closure rather than
+   * passed in: applyRoundPush (this function's only caller) has already
+   * reassigned it to the post-push board by the time this runs, so n's own
+   * round record -- awaited flag included -- is right there. */
   function markPendingRound(n) {
     if (readonly) return;
+    var r = (board.rounds || []).filter(function (x) { return x.n === n; })[0];
+    if (!roundIsAwaited(board, r)) return;
     pendingRounds++;
     setFaviconBadge(pendingRounds);
     notifyRound(n);
@@ -4666,6 +5169,14 @@ export const ui = `
     es.addEventListener('submitted', function (ev) {
       try { applySubmittedPush(JSON.parse(ev.data)); } catch (e) { /* ignore */ }
     });
+    // AC 12: "when a wait dies while the page is open, the page is told over
+    // SSE". src/server.mjs's handleWait broadcasts this the instant its own
+    // /wait call times out, which is genuinely earlier than the periodic tick
+    // above would otherwise catch it. No payload is needed -- every fact this
+    // repaints (board.rounds' own status/awaited/awaitDeadline, and this
+    // reader's own clock) is already known locally; the event exists purely as
+    // a wake-up nudge, so a malformed or absent 'data' still repaints.
+    es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); });
   }
 })();
 `;

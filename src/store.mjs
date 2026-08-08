@@ -9,6 +9,7 @@
 
 import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { closeLapsedAwaitedRounds } from './badge.mjs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -102,7 +103,15 @@ function atomicWrite(targetPath, contents) {
 export function readBoard(id, home = boardHome()) {
   try {
     const raw = readFileSync(boardPath(id, home), 'utf8');
-    return JSON.parse(raw);
+    const board = JSON.parse(raw);
+    // Every reader of a stored board comes through here (listBoards below reads
+    // its entries with this function too), which is why the one fact a stored
+    // board cannot know about itself is applied here rather than at each of the
+    // five surfaces that would otherwise each need its own clock: a round whose
+    // wait has already died stops being awaited. See closeLapsedAwaitedRounds
+    // (src/badge.mjs) for why the flag moves and the deadline stays.
+    closeLapsedAwaitedRounds(board);
+    return board;
   } catch (err) {
     if (err.code === 'ENOENT') return null;
     throw err;

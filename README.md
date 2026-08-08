@@ -132,7 +132,7 @@ the agent to put its questions on the board is enough. Any command, skill or ses
 also call the tool directly:
 
 ```
-claude-board:ask(title, blocks[])
+claude-board:ask(title, blocks[], wait?)
 ```
 
 A tab opens on the first call. Answer what you want, leave the rest unanswered —
@@ -145,8 +145,15 @@ and no longer editable.
 
 Two other ways out, beside Send: **Discuss in chat** returns immediately with whatever
 is filled in and tells the agent to stop posting boards, and a wall-clock cap (default
-two hours) returns an explicit no-response. Closing the tab is deliberately *not* a
+40 minutes) returns an explicit no-response. Closing the tab is deliberately *not* a
 cancel — the board stays live and its URL reopens it.
+
+A rendered artifact posted on its own is a page nobody is asked to answer, so the call
+returns the moment it lands. Pass `wait: true` to hold the call open instead: the page
+gains a send control, and the comments left on it come back in that same call. If the cap
+runs out first, the page says so and freezes — anything typed and not yet sent is filed to
+the board on the way, and reaches whichever agent asks next rather than being lost with the
+round.
 
 `http://127.0.0.1:7391/` lists every thread with its rounds-left count, and filters that
 list by title, project folder or thread id. Searching *inside* archived boards (what was

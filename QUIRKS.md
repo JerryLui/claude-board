@@ -137,6 +137,25 @@ gate.
 
 ## The DOM stand-in's ceilings, and what needs a real browser
 
+### `ResizeObserver` does not necessarily deliver an initial observation
+
+The spec has `observe()` queue a first record, and nearly every write-up says so, so
+"observe it and let the first delivery be the initial measurement" reads like the tidy
+version. Measured in Chrome 152 against `.board-head-actions`, an element already laid
+out at page load and never resized again: the callback fired **zero** times. The pill's
+`--pill-half` (ADR entry 40's amended condense) was therefore never written for the
+whole session, and the header sat at the stylesheet's rough default with nothing on the
+console to say why.
+
+Call the measurement yourself, then observe for later changes. The explicit call costs
+one line; relying on the initial delivery costs a silent wrong value on first paint,
+which is exactly the state a reader spends most of their time in.
+
+The stand-in cannot catch this class at all: it has no box model and no
+`getComputedStyle`, so any layout measurement is browser-only by construction. Anything
+in `src/ui.mjs` that measures is written to feature-detect and return early, which is
+what keeps the checks green while leaving the real answer to a real browser.
+
 ### Real mermaid node ids are prefixed, and `^=` will not see them
 
 Mermaid 11 (the CDN version the page pins) namespaces every flowchart node id with
@@ -410,7 +429,19 @@ dependencies at all — Node 24 has a native `WebSocket`, so `chrome
 --headless=new --remote-debugging-port=N` plus `Target.attachToTarget` /
 `Input.dispatchMouseEvent` is enough to hover, click and read back the DOM. Keep such
 a driver OUT of the repo (it is not part of the zero-dependency check suite); a
-throwaway under `/tmp` is the right home. Things that cost time:
+throwaway under `/tmp` is the right home.
+
+One exception, and the test it has to pass to earn the name: `examples/screenshot.mjs`,
+which regenerates the two committed sample-board screenshots. A debug driver is written
+to answer one question and is worthless the moment it is answered — that is what makes
+`/tmp` its home. This one is the only way to reproduce a *committed artifact* after a
+design change, so deleting it would leave the README's images unregenerable and rotting
+within two design changes, which is the failure the sample board exists to avoid. A
+driver earns a place in the repo only on those terms: it regenerates something committed,
+it runs by hand and never from the check suite, and it stays zero-dependency. Anything
+you are writing to see what the page does today still belongs in `/tmp`.
+
+Things that cost time:
 
 - Measure element coordinates in a *separate* eval from the `scrollIntoView` that
   precedes it, with a settle delay between. Measuring across a scroll gives stale
@@ -434,6 +465,36 @@ throwaway under `/tmp` is the right home. Things that cost time:
   5ms after navigation to confirm the window is wide enough before trusting a "0
   corrupt" result; widening each diagram (more nodes, so dagre's layout actually costs
   milliseconds) is more reliable than guessing at a smaller click interval.
+
+### The `claude-in-chrome` extension's own coordinate system, and its window resize
+
+Driving a page through the `claude-in-chrome` MCP tools (`computer`/`find`/
+`javascript_tool`) rather than a raw CDP driver has two traps of its own,
+found verifying SPEC_AWAITED.md ticket 03's send-control reachability at a
+short viewport.
+
+`resize_window` called on an already-navigated tab changes `outerWidth`/
+`outerHeight` but leaves `window.innerWidth`/`innerHeight` (the CSS viewport
+the page's own layout uses) untouched — resize BEFORE navigating instead, on
+a freshly created tab; `innerWidth`/`innerHeight` then do reflect the request
+(not always exactly — treat the resulting size as approximate, read it back
+with `javascript_tool` rather than trusting the requested numbers).
+
+`computer`'s `left_click` with a `coordinate: [x, y]` did not reliably land on
+the intended element in this session, in either the raw CSS-pixel coordinate
+space or the screenshot's own (larger, DPR-scaled) pixel space — clicks that
+should have hit a specific button produced no DOM effect and no network
+request at all, silently, with nothing to say the click missed. `find` (which
+returns a `ref_N` against the real accessibility tree) plus `computer`'s own
+`ref` parameter clicked the intended element correctly every time, confirmed
+by a genuine resulting `fetch` showing up in `read_network_requests` — prefer
+`find` + `ref` over raw coordinates for anything where "the click either did
+something or didn't" matters, and treat a coordinate click that doesn't
+error but also doesn't change anything as a probe that missed, not as proof
+of a dead control. `find` does not reach inside a cross-origin sandboxed
+`srcdoc` iframe (an html stage's own content, `allow-scripts` only) — nothing
+in that accessibility tree is reachable, by the same isolation
+`test/check-stage-isolation.mjs` exists to prove.
 
 ### A harness that imports `src/` serves the code as it was at startup
 
@@ -1039,3 +1100,18 @@ directory — so `realpathSync(a) === realpathSync(b)` is false for two names of
 directory, routinely, on a stock Mac. `src/resolve.mjs` compares `dev`+`ino` instead
 (`isHomeOrAbove`), and keeps the string test only as a fast path. If you are writing any
 "is this the same directory" test on this OS, assume the string answer is wrong.
+
+### Two processes racing the same timeout: the daemon loses by its own poll interval
+
+The shim and the daemon both read `CLAUDE_BOARD_TIMEOUT_MS` and default to the same 40
+minutes, and only the daemon's side of that race does anything: its timeout branch is
+what broadcasts `awaitExpired`, closes the lapsed round and returns the timeout packet.
+The shim wins that race by default twice over. Its deadline starts at `blockingWait`
+entry while the daemon's starts after connect and parse, and `waitForRound`
+(`src/server.mjs`) polls the store every 120ms, so the daemon can only notice its own
+deadline at the next tick after it. A margin sized for request latency is therefore not
+enough: `WAIT_GRACE_MS` (`bin/mcp.mjs`) is floored at 250ms for the poll interval, not
+for the network. If you shorten the poll interval or add a second waiter, that floor is
+the thing to re-check — and the symptom of getting it wrong is silent, since both sides
+report `status: 'timeout'` either way. The check that catches it runs a daemon and a
+shim on one shared cap and asserts the ROUND was closed on disk.

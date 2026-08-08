@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
-import { startServer, activeWaitCount, buildPacketWithUndelivered } from '../src/server.mjs';
+import { startServer, activeWaitCount, buildPacketWithUndelivered, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
+import { DEFAULT_AWAIT_TIMEOUT_MS } from '../src/board.mjs';
 import { readBoard, searchBoards } from '../src/store.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
@@ -2892,12 +2893,20 @@ async function main() {
       'and the artifact\'s own round stays open -- it is read, not answered, and comment mode has to keep working on it (ADR.md entry 35)');
   });
 
-  await check('ADR 35: a comment left on a round with no question rides the next packet the same thread returns, resolved against its OWN board, and comes back only once', async () => {
-    // Round 1: a page board, same shape as the artifact-only check above -- no
-    // question block, so a real caller's ask() would never call /wait at all
-    // (bin/mcp.mjs). This check submits it anyway (today's send bar still lets a
-    // content-only round be sent) to model the comment landing in the store with
-    // nobody ever polling for its packet -- exactly the case ADR 35 exists for.
+  await check('ADR 35: a comment left on a round that is NOT AWAITED rides the next packet the same thread returns, resolved against its OWN board, and comes back only once', async () => {
+    // Round 1: a page board posted WITHOUT `wait: true` -- same shape as the
+    // artifact-only check above -- so `round.awaited` is `false` (SPEC_AWAITED.md
+    // ticket 01: `drainUndeliveredComments` now keys on that flag, not on "no
+    // question block", but an unawaited page board is exactly the shape that still
+    // makes it false either way). A real caller's ask() would never call /wait at
+    // all (bin/mcp.mjs). This check submits it anyway, to model the comment landing
+    // in the store with nobody ever polling for its packet -- exactly the case ADR
+    // 35 exists for.
+    //
+    // That the submit SUCCEEDS is deliberate: ADR.md entry 44 keeps "a page board is
+    // never sent" in the browser and leaves the daemon accepting any open round. This
+    // check is the one entry 44 names as having to change with it, if that is ever
+    // revisited.
     const html = '<!doctype html><html><body><h1>UNDELIVERED_MARKER page</h1></body></html>';
     const posted1 = await (await fetch(`${base}/api/board`, {
       method: 'POST',
@@ -2907,6 +2916,8 @@ async function main() {
     const board1 = posted1.boardId;
     const thread = posted1.thread;
     const h1 = readBoard(board1, home).blocks[0].id;
+    assert.equal(readBoard(board1, home).rounds[0].awaited, false, 'posted without wait: true, so this round is not awaited');
+    assert.equal(readBoard(board1, home).rounds[0].awaitDeadline, null);
 
     const submit1 = await fetch(`${base}/api/board/${board1}/submit`, {
       method: 'POST',
@@ -2977,6 +2988,325 @@ async function main() {
     });
     const packet2 = await waitPromise2;
     assert.equal(packet2.comments.length, 0, 'a comment already collected must not come back a second time');
+  });
+
+  // --- SPEC_AWAITED.md ticket 01: AC 1-3 and AC 11 (first half) -------------------
+  // `wait: true` on a page board round (ADR.md entry 45): the round is minted
+  // `awaited`, its own submit carries its own comments back in ITS OWN packet
+  // (never through the ADR 35 undelivered path), and the default clock is 40
+  // minutes. Driven at the HTTP layer (no shim) the way the rest of this file
+  // proves the daemon's own contract.
+
+  await check('AC 1/2/11: a page board posted with wait: true is minted awaited, with a 40-minute deadline off its own postedAt', async () => {
+    const html = '<!doctype html><html><body><h1>AWAITED_HTTP_MARKER</h1></body></html>';
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
+    })).json();
+    const round = readBoard(posted.boardId, home).rounds[0];
+    assert.equal(round.awaited, true, 'wait: true on a page board round must mint it awaited');
+    assert.ok(round.awaitDeadline, 'an awaited round must carry a deadline');
+    const deadlineMs = Date.parse(round.awaitDeadline) - Date.parse(round.postedAt);
+    assert.equal(deadlineMs, DEFAULT_WAIT_TIMEOUT_MS, 'the default deadline is exactly the wall-clock cap /wait itself enforces');
+    assert.equal(DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_AWAIT_TIMEOUT_MS, 'one clock: the two defaults (src/server.mjs, src/board.mjs) must agree');
+    assert.equal(DEFAULT_WAIT_TIMEOUT_MS, 40 * 60 * 1000, 'ADR.md entry 47: 40 minutes, not the old 2h default');
+  });
+
+  await check('wait: true is refused on every shape that is not a page board -- the flag is declared, but it is not a way to make any round awaited', async () => {
+    // ADR.md entry 45 gives ONE shape a second way in. Every fixture in this file
+    // posts the clean single-html-block case, so the negative side -- the shapes
+    // where `wait` must have no effect at all -- was never pinned, and a mintAwait
+    // that quietly honoured it anywhere would have gone unnoticed.
+    const html = '<!doctype html><html><body><h1>NOT_A_PAGE_BOARD</h1></body></html>';
+    const shapes = [
+      ['two blocks, so not a page board', [{ kind: 'html', html }, { kind: 'markdown', text: 'beside it' }]],
+      ['content only, no html block at all', [{ kind: 'markdown', text: 'just prose' }]],
+      ['one html block whose reference cannot resolve', [{ kind: 'html', source: 'no-such-file.html' }]],
+    ];
+    for (const [what, blocks] of shapes) {
+      const posted = await (await fetch(`${base}/api/board`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ title: `wait on ${what}`, blocks, wait: true }),
+      })).json();
+      const round = readBoard(posted.boardId, home).rounds[0];
+      assert.equal(round.awaited, false, `wait: true must not make a round awaited -- ${what}`);
+      assert.equal(round.awaitDeadline, null, `and no deadline is stamped -- ${what}`);
+    }
+  });
+
+  await check('AC 1/2: wait: true makes /wait actually block on a page board round, and its own submit resolves it with status submitted and its own comments -- an empty comments array included', async () => {
+    const html = '<!doctype html><html><body><h1>AWAITED_BLOCKS</h1></body></html>';
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
+    })).json();
+    const h1 = readBoard(posted.boardId, home).blocks[0].id;
+
+    // Proves the wait is really blocking, not resolving instantly the way a
+    // non-awaited page board's /wait would if a caller mistakenly polled it:
+    // race the wait against a short timer BEFORE submitting anything.
+    const ac = new AbortController();
+    const early = await Promise.race([
+      fetch(`${base}/api/board/${posted.boardId}/wait?round=1`, { signal: ac.signal }).then(() => 'resolved'),
+      new Promise(resolve => setTimeout(() => resolve('pending'), 300)),
+    ]);
+    assert.equal(early, 'pending', 'the wait must still be open with nothing submitted yet');
+
+    const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submitRes = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'AWAITED_OWN_COMMENT' }],
+      }),
+    });
+    assert.equal(submitRes.status, 200);
+    ac.abort();
+
+    const packet = await waitPromise;
+    assert.equal(packet.status, 'submitted');
+    assert.equal(packet.round, 1);
+    assert.deepEqual(packet.answers, [], 'a page board round asks nothing');
+    assert.equal(packet.comments.length, 1, 'this round\'s own comment comes back in its own packet, not through the undelivered path');
+    assert.equal(packet.comments[0].text, 'AWAITED_OWN_COMMENT');
+    assert.equal(packet.comments[0].round, 1);
+
+    // A second such round, sent with NOTHING left on it: an empty array is the
+    // normal outcome, not an error (AC 2's own wording).
+    const posted2 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: posted.boardId, title: 'Nothing to add', blocks: [{ kind: 'html', html }], wait: true }),
+    })).json();
+    assert.equal(posted2.round, 2, 'a page board round is never amended (ADR.md entry 35), so this must mint round 2');
+    const waitPromise2 = fetch(`${base}/api/board/${posted.boardId}/wait?round=2`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submitRes2 = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 2, action: 'send', answers: [], comments: [] }),
+    });
+    assert.equal(submitRes2.status, 200);
+    const packet2 = await waitPromise2;
+    assert.equal(packet2.status, 'submitted');
+    assert.deepEqual(packet2.comments, [], 'zero comments is a valid, ordinary outcome');
+  });
+
+  await check('AC 3: comments delivered in an awaited page round\'s own packet are never redelivered through the ADR 35 undelivered path on a later round', async () => {
+    const html = '<!doctype html><html><body><h1>AWAITED_NO_REDELIVER</h1></body></html>';
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
+    })).json();
+    const h1 = readBoard(posted.boardId, home).blocks[0].id;
+
+    const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'NO_REDELIVER_COMMENT' }],
+      }),
+    });
+    const packet1 = await waitPromise;
+    assert.equal(packet1.comments.length, 1, 'setup: the comment must have come back in round 1\'s own packet');
+
+    // A later round on the SAME thread (a real question, so /wait actually
+    // resolves) must not see it again -- the exact "ablation" ADR 35's
+    // drainUndeliveredComments guards against, now keyed on `awaited` rather
+    // than on the round's block shape.
+    const posted2 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        boardId: posted.boardId,
+        title: 'Follow-up question',
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    const q = readBoard(posted.boardId, home).blocks.find(b => b.round === 2).id;
+    const waitPromise2 = fetch(`${base}/api/board/${posted.boardId}/wait?round=2`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet2 = await waitPromise2;
+    assert.equal(packet2.comments.length, 0, 'the comment already delivered in round 1\'s own packet must not ride round 2\'s too');
+  });
+
+  await check('an awaited page round still receives its own submit even after a second round opens beside it (concurrent asks can post one before the first is answered)', async () => {
+    // SPEC_AWAITED.md ticket 01 names this scenario explicitly: handleSubmit used
+    // to target only the LATEST open round, which is exactly right while a board
+    // holds one round anyone can submit -- but an awaited page round (round 1) can
+    // now be posted, still open and unsubmitted, while a SECOND ask() call (the
+    // shim explicitly supports concurrent calls) posts a question round beside it.
+    // Round 1 must still be submittable; the old "must be the single latest open
+    // round" gate 409'd it forever, leaving the first call's /wait to time out
+    // with the reviewer's answer sitting right there in the request it refused.
+    const html = '<!doctype html><html><body><h1>TWO_OPEN_AWAITED</h1></body></html>';
+    const posted1 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
+    })).json();
+    const h1 = readBoard(posted1.boardId, home).blocks[0].id;
+
+    const posted2 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        boardId: posted1.boardId,
+        title: 'A second, concurrent round',
+        blocks: [{ kind: 'question', prompt: 'Also this?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    assert.equal(posted2.round, 2, 'setup: round 1 (a page board) is never amendable, so this must mint round 2');
+    assert.deepEqual(
+      readBoard(posted1.boardId, home).rounds.filter(r => r.status === 'open').map(r => r.n),
+      [1, 2],
+      'setup: both rounds must be open at once'
+    );
+
+    const submitRound1 = await fetch(`${base}/api/board/${posted1.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'STILL_SUBMITTABLE' }],
+      }),
+    });
+    assert.equal(submitRound1.status, 200, 'round 1 must still be submittable while round 2 is open beside it');
+    assert.equal(readBoard(posted1.boardId, home).rounds[0].status, 'sent');
+    assert.equal(readBoard(posted1.boardId, home).rounds[1].status, 'open', 'round 2 must be untouched by round 1\'s submit');
+
+    // Round 2 is still independently submittable afterward -- the fix must not
+    // have traded "round 1 unreachable" for "round 2 unreachable".
+    const q2 = readBoard(posted1.boardId, home).blocks.find(b => b.round === 2).id;
+    const submitRound2 = await fetch(`${base}/api/board/${posted1.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 2, action: 'send', answers: [{ id: q2, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    assert.equal(submitRound2.status, 200);
+  });
+
+  // --- a wait that DIED, rather than one that was answered ---------------------
+  //
+  // `mintAwait` stamps `awaited: true` when a round is born; these three prove the
+  // other half exists -- that the flag comes back off the moment the round's own
+  // deadline passes, and that every surface keyed on it follows. Set up by writing
+  // a lapsed deadline straight to the store (writeBoard does not sweep; readBoard
+  // does), because the alternative is a check that waits out a real 40 minutes.
+
+  await check('a wait that died stops being awaited on the next read, deadline intact, and its comments become drain candidates again', async () => {
+    const html = '<!doctype html><html><body><h1>LAPSED_DRAIN</h1></body></html>';
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Awaited page board', blocks: [{ kind: 'html', html }], wait: true }),
+    })).json();
+    const stored = readBoard(posted.boardId, home);
+    const h1 = stored.blocks[0].id;
+    assert.equal(stored.rounds[0].awaited, true, 'setup: minted awaited');
+
+    // A comment left while the wait was still alive, submitted with no /wait
+    // connected -- the exact shape that used to reach nobody, ever: the round
+    // stayed awaited forever, and the drain skips an awaited round on the grounds
+    // that its own packet carries its comments. No packet was ever built.
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'STRANDED_BY_A_DEAD_WAIT' }],
+      }),
+    });
+
+    // Kill the wait: rewind the deadline past now, straight to disk.
+    const raw = JSON.parse(readFileSync(path.join(home, 'boards', `${posted.boardId}.json`), 'utf8'));
+    raw.rounds[0].awaited = true; // the submit closed the round; re-open the awaited state to isolate the deadline
+    raw.rounds[0].status = 'open';
+    raw.rounds[0].awaitDeadline = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(path.join(home, 'boards', `${posted.boardId}.json`), JSON.stringify(raw, null, 2));
+
+    const swept = readBoard(posted.boardId, home);
+    assert.equal(swept.rounds[0].awaited, false, 'a round whose deadline has passed reads back not awaited');
+    assert.equal(swept.rounds[0].awaitDeadline, raw.rounds[0].awaitDeadline, 'the deadline itself survives as the record of when the wait died');
+
+    // A later round on the same thread now carries the stranded comment (ADR 35,
+    // AC 12), which is only reachable because round 1 stopped being awaited.
+    const posted2 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        boardId: posted.boardId,
+        title: 'The round after the dead one',
+        blocks: [{ kind: 'question', prompt: 'Carry on?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=${posted2.round}`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const q = readBoard(posted.boardId, home).blocks.find(b => b.round === posted2.round).id;
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: posted2.round, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet = await waitPromise;
+    assert.deepEqual(
+      packet.comments.map(c => c.text),
+      ['STRANDED_BY_A_DEAD_WAIT'],
+      'the comment stranded by the dead wait rides the thread\'s next packet exactly once'
+    );
+  });
+
+  await check('the requestId dedupe refuses a round whose wait has already died, and mints a fresh one with a live deadline instead', async () => {
+    // The livelock this closes: the same artifact re-posted after a timeout was
+    // answered as a retry ON THE DEAD ROUND, so the caller's fresh /wait ran
+    // against a deadline already in the past while the reviewer faced a read-only
+    // panel -- and the timeout text telling the agent to post a fresh round landed
+    // straight back here.
+    const html = '<!doctype html><html><body><h1>DEDUPE_LAPSED</h1></body></html>';
+    const body = JSON.stringify({ title: 'Same artifact, twice', blocks: [{ kind: 'html', html }], wait: true, requestId: 'lapsed-dedupe-1' });
+    const first = await (await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body })).json();
+
+    // Identical re-post while the wait is still alive: still a retry, unchanged.
+    const retry = await (await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...JSON.parse(body), boardId: first.boardId }),
+    })).json();
+    assert.equal(retry.deduped, true, 'a live round still answers its own retry -- that guard is what stops a double-posted round');
+
+    const boardFile = path.join(home, 'boards', `${first.boardId}.json`);
+    const raw = JSON.parse(readFileSync(boardFile, 'utf8'));
+    raw.rounds[0].awaitDeadline = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(boardFile, JSON.stringify(raw, null, 2));
+
+    const afterDeath = await (await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...JSON.parse(body), boardId: first.boardId }),
+    })).json();
+    assert.ok(!afterDeath.deduped, 'a lapsed round can never hand an agent anything again, so it is never the answer to a retry');
+    assert.equal(afterDeath.round, 2, 'the post falls through and mints the next round');
+    const round2 = readBoard(first.boardId, home).rounds[1];
+    assert.equal(round2.awaited, true, 'and the fresh round is awaited');
+    assert.ok(Date.parse(round2.awaitDeadline) > Date.now(), 'against a deadline that is actually in the future -- the whole point');
   });
 
   await check('ADR 35: re-issuing the IDENTICAL /wait URL on an already-answered round returns the same packet, and drains nothing a second time', async () => {

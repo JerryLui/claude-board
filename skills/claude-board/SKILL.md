@@ -16,16 +16,25 @@ you reference stays read-only.
 
 ## The call
 
-`mcp__claude-board__ask` takes exactly two arguments:
+`mcp__claude-board__ask` takes three arguments, one of them optional:
 
 ```js
-ask({ title, blocks })
+ask({ title, blocks, wait })
 ```
 
 `title` names the round in the tab and on its page in the round pager. `blocks` is the ordered array the
 page shows. One call is one round: the first opens a tab, later calls push into the same
 board. Post a branch's questions together; only a question whose *shape* depends on an
 answer in this round waits for the next one.
+
+`wait` (boolean, default `false`) blocks a page board round — the single-stage shape
+described below — the same way a question round always blocks: the call returns only once
+the reviewer submits, chooses Discuss, or the wall clock runs out, and whatever comments
+they left on it come back in this call's own packet instead of riding a later round that
+asks something. Every round blocks for at most 40 minutes by default, `wait: true` or
+not. `wait` has no effect outside a page board round — a round carrying a question
+blocks regardless of it, and any other content-only shape still posts and returns at
+once.
 
 ## Content blocks, by reference
 
@@ -44,7 +53,10 @@ board snapshots the file at post time.
 **A commentable block carries the comment control and the click-to-anchor gesture.**
 Only the rendered kinds are — `mermaid` and `html` — and they are wherever
 they appear, including inside a question's `context` and inside a `compare` side. `markdown`
-and `code` are not, anywhere. The rule is drawn on kind, never on position.
+and `code` are not, anywhere. The rule is drawn on kind, never on position — with one
+exception: a page board (the single-stage shape described below) is commentable only when
+posted with `wait: true`. Without it, the page is read-only — no comment control, no
+click-to-anchor gesture, whatever kind its one block is.
 
 **`section` is the heading's slug, not its text**: lowercase, spaces to hyphens, so
 `## Open questions` is `section: 'open-questions'`. Get it wrong and the block resolves to
@@ -57,15 +69,17 @@ you paraphrased.
 
 A reference resolves inside the board's project directory or a configured reference root
 (`~/.claude/skills`, `~/.claude/commands`, `~/.claude/agents`, `~/Documents/renders` by
-default), and nowhere else. One that fails to resolve still lands and the post still
-returns 200: the block renders "Could not resolve: …" on the page, and the packet carries
-no blocks, so nothing in the return value tells you a reference broke.
+default), and nowhere else. **A relative path names a file in the project directory**; a
+file in a reference root is reached by its absolute path,
+`/Users/you/Documents/renders/stage.html`. One that fails to resolve still lands and the post still returns 200:
+the block renders "Could not resolve: …" on the page, and the packet carries no blocks, so
+nothing in the return value tells you a reference broke.
 
 ## Posting a rendered artifact
 
 **Write a generated stage into the render directory and reference it**, rather than
-pasting its bytes into the call: `{ kind: 'html', source: { path: '<file>.html' } }`
-against a file in `~/Documents/renders` costs one line for a byte-identical board, where
+pasting its bytes into the call: `{ kind: 'html', source: { path: '/Users/you/Documents/renders/<file>.html' } }`
+costs one line for a byte-identical board, where
 the same stage inlined as `html` runs to several KB per option. Keep `html` by value only
 for stages small enough to read inline, and leave those readable: readability is the only
 reason a stage is inline at all, so a stage you would be tempted to minify belongs in a
@@ -90,6 +104,12 @@ board the frame's height is derived from what the stage reports, so a page laid 
 placeholder height rather than its own. Size from the content — a `min-height` off what it
 holds, no `100vh` anywhere — and the frame follows it.
 
+**A page-board artifact leaves its top ~96px clear** — a top padding on its own body. The
+board's header floats over the artifact rather than above it, so an artifact opening with
+its own title bar loses the title and the reader sees a headless page. Nothing inside the
+frame can measure the band: an opaque-origin frame cannot read the page around it. Clear
+it rather than detect it — over-clearing reads as spacing, under-clearing loses content.
+
 ## Question blocks
 
 A question carries its `prompt` by value, a `widget`, and its own `context` array:
@@ -99,7 +119,7 @@ A question carries its `prompt` by value, a `widget`, and its own `context` arra
   kind: 'question',
   prompt: 'Which timeout does the wait route need?',
   widget: 'single',
-  options: [{ label: '2h (Recommended)', description: 'matches the wall-clock cap' }, { label: '30m' }],
+  options: [{ label: '40m (Recommended)', description: 'matches the wall-clock cap' }, { label: '2h' }],
   context: [{ kind: 'code', source: { path: 'src/server.mjs', lines: [40, 72] } }]
 }
 ```
@@ -142,7 +162,10 @@ round of content only returns the instant it lands.
 - **`discuss`**: the reviewer chose Discuss in chat. Post no more boards this session and
   pick the remaining branches up in chat, using the partial answers.
 - **`timeout`**: an explicit no-response, not a hang. Say so, then either wait for the
-  reviewer to reopen `url` or move on in chat. Never silently retry the round.
+  reviewer to reopen `url` or move on in chat. Never silently retry the round. A round that
+  times out is over: re-posting the identical board opens a **new** round rather than
+  resuming it, and anything the reviewer had typed on the old one arrives as an ordinary
+  comment on your next packet.
 - **`error`**: posted, but the wait did not complete, so nothing was answered and nothing
   about intent can be inferred. Report the message verbatim, name `url`, and stop rather
   than re-posting into a board that may already hold the round.
@@ -157,9 +180,14 @@ round of content only returns the instant it lands.
 
 A comment anchored to a block (`blockId` / `anchor`) is feedback on that block, not an
 answer; address it as its own input. One packet is one round: round 6 does not redeliver
-rounds 1 through 5. A comment left on a round that asked nothing — a page board — is the
-one exception: it rides the next packet the same thread returns, once. Collecting it costs
-a later round that asks something — post one rather than polling for it.
+rounds 1 through 5. A page board posted with `wait: true` gets its own comments back the
+normal way, in its own packet, `status: 'submitted'` — an empty `comments` array there is
+a real outcome, not an error. A page board posted *without* `wait` is the one exception to
+"one packet is one round": nothing ever waits on it, so a comment left there rides the
+next packet the same thread returns, once. Collecting comments from a page board therefore
+costs either `wait: true` on it, or a later round that asks something. A `wait: true` page
+board whose wait times out falls back to exactly that behaviour: its comments were not
+delivered in its own packet, so they ride the next one.
 
 ## When the board is unavailable
 

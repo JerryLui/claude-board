@@ -31,9 +31,17 @@ function check(name, fn) {
   }
 }
 
+// A trailing markdown block keeps this an ORDINARY board (isPageRound false):
+// a lone `html` block is a page round (ADR.md entry 33) whose comment gesture
+// SPEC_AWAITED.md ticket 03 (ADR.md entry 46) gates on being *awaited*, and
+// this file is about pin placement, not awaited-ness -- see test/check-click.mjs's
+// own identical fix for the fuller reasoning.
 const board = createBoard({
   title: 'the pin actually lands',
-  blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }],
+  blocks: [
+    { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+    { kind: 'markdown', text: 'not a page board' },
+  ],
 });
 const blockId = board.blocks[0].id;
 const pageHtml = renderBoardPage(board);
@@ -111,9 +119,14 @@ check('clicking an element, then submitting the opened comment form, draws a num
 });
 
 check('two different elements inside the same stage get two different, independently correct pin positions -- not the same fallback offset, not each other\'s box', () => {
+  // Same reasoning as `board` above: a trailing markdown block keeps this out
+  // of page-board layout.
   const twoElBoard = createBoard({
     title: 'two elements, two distinguishable pin positions',
-    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button><p>a caption</p></div>' }],
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Send</button><p>a caption</p></div>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
   });
   const twoElBlockId = twoElBoard.blocks[0].id;
   const twoElHtml = renderBoardPage(twoElBoard);

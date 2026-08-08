@@ -55,7 +55,7 @@ import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
-import { isPageRound } from './badge.mjs';
+import { isPageRound, roundIsAwaited, roundWaitLapsed, closeLapsedAwaitedRounds } from './badge.mjs';
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
@@ -128,8 +128,13 @@ const PKG_VERSION = readPkgVersion();
 
 /** Wall-clock ceiling on a single /wait call, the server-side twin of the shim's
  * CLAUDE_BOARD_TIMEOUT_MS (PROTOCOL.md "MCP shim environment"): a waiter nobody ever
- * answers gets an explicit `timeout` packet instead of polling the store forever. */
-export const DEFAULT_WAIT_TIMEOUT_MS = 7_200_000;
+ * answers gets an explicit `timeout` packet instead of polling the store forever.
+ * 40 minutes (ADR.md entry 47), for every round -- awaited page board and question
+ * round alike, one clock and one env var rather than a rule per round shape. Must
+ * equal src/board.mjs's `DEFAULT_AWAIT_TIMEOUT_MS`, which is what `handlePostBoard`
+ * below stamps a round's `awaitDeadline` with; the two used to be `bin/mcp.mjs`'s
+ * TIMEOUT_MS and this constant, independently hardcoded at 2h apiece. */
+export const DEFAULT_WAIT_TIMEOUT_MS = 2_400_000;
 
 function waitTimeoutMs() {
   const v = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS);
@@ -556,8 +561,19 @@ async function handlePostBoard(req, res, home, sse) {
       // PREVIOUS round's answer in milliseconds: the agent was handed a decision the
       // reviewer never made. The lost-response retry this defends against always
       // targets a still-open round, so gating on that costs nothing.
+      //
+      // "Still open" is not enough on its own once a page board can be awaited
+      // (ADR.md entry 45): a re-posted identical artifact resumed the round it
+      // matched, the caller's fresh `/wait` then ran against a deadline that had
+      // already lapsed, and the reviewer faced a read-only panel for the whole
+      // cap while the agent got nothing -- and the timeout text telling the agent
+      // to post a fresh round landed straight back in this dedupe. A lapsed round
+      // can never hand an agent anything again, so it is never the answer to a
+      // retry; the post falls through and mints round N+1 with a live deadline,
+      // which is what the timeout text promised.
       const guarded = board.rounds[board.rounds.length - 1];
-      if (body.requestId && board.lastRequestId === body.requestId && guarded && guarded.status === 'open') {
+      if (body.requestId && board.lastRequestId === body.requestId && guarded && guarded.status === 'open'
+        && !roundWaitLapsed(guarded)) {
         return sendJson(res, 200, {
           boardId: board.id,
           thread: board.thread,
@@ -615,7 +631,14 @@ async function handlePostBoard(req, res, home, sse) {
         touchedBlockIds = result.blockIds;
         pushMode = 'amend';
       } else {
-        round = addRound(board, { blocks: body.blocks, title: body.title, cwd: body.cwd });
+        // `wait` (ADR.md entry 45): declared, never inferred from these blocks' shape
+        // alone -- `addRound` (src/board.mjs) is what turns it into `awaited` +
+        // `awaitDeadline` on the round it mints, the same two ways in CONTEXT.md's
+        // Awaited entry names (a question anywhere in the round, or `wait: true` on
+        // a page board). `awaitTimeoutMs` is this process's own env-resolved cap, so
+        // the deadline stamped on the round and the wall clock `/wait` enforces below
+        // are the same 40 minutes, not two constants that can drift.
+        round = addRound(board, { blocks: body.blocks, title: body.title, cwd: body.cwd, wait: Boolean(body.wait), awaitTimeoutMs: waitTimeoutMs() });
         touchedBlockIds = board.blocks.filter(b => b.round === round).map(b => b.id);
         pushMode = 'new-round';
       }
@@ -631,6 +654,8 @@ async function handlePostBoard(req, res, home, sse) {
         cwd: body.cwd ?? null,
         thread: body.thread ?? null,
         threadCwd: body.thread ? boundCwdForThread(body.thread, home) : null,
+        wait: Boolean(body.wait),
+        awaitTimeoutMs: waitTimeoutMs(),
       });
       round = 1;
     }
@@ -667,6 +692,13 @@ async function handlePostBoard(req, res, home, sse) {
     round,
     url: boardUrl(req, board.id),
     clients: sse.clientCount(board.id),
+    // The minted round's own awaited-ness, straight from `mintAwait` (src/board.mjs),
+    // so the caller does not have to re-derive it from the blocks it sent. It cannot:
+    // the shim checks the RAW blocks and has no way to know that an `html` block's
+    // `source` failed to resolve, which is the one case where the two answers differ
+    // -- and where the shim used to block out the whole cap on a round this daemon
+    // had already decided nobody would ever answer (bin/mcp.mjs `isPageRoundShape`).
+    awaited: roundIsAwaited(board, board.rounds.find(r => r.n === round)),
   });
 }
 
@@ -745,20 +777,24 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
   res.end();
 }
 
-/** ADR 35: a comment left on a board that returned no packet is held as undelivered
- * and rides the next packet the same thread returns, once. "No packet" is not a flag,
- * it is a SHAPE: it happens exactly when a round carries no question block anywhere in
- * it -- the same `hasQuestionBlock` shape the shim's `ask()` checks before ever calling
- * `/wait` at all (PROTOCOL.md "Packet", bin/mcp.mjs `hasQuestionBlock`). A round with a
- * question block always gets its own `/wait` call, and its comments are handed back by
- * `buildPacket`'s ordinary round-scoped filter every time that round's packet is read
- * -- draining them again here on a LATER round would redeliver settled feedback, which
- * is exactly what "one packet is one round" (round 6 must not redeliver rounds 1-5,
- * same doc) already forbids for everything but this one exception. So a comment is only
- * ever a DRAIN candidate when its own round has no question block; `delivered` is not
- * what decides that, it only guarantees such a comment is handed back exactly once
- * across repeat waits on the thread, including a second wait on a round that already
- * drained it.
+/** ADR 35: a comment left on a round that returned no packet is held as undelivered
+ * and rides the next packet the same thread returns, once. "No packet" used to be a
+ * SHAPE, not a flag -- it happened exactly when a round carried no question block
+ * anywhere in it, the same `hasQuestionBlock` shape the shim's `ask()` checked before
+ * ever calling `/wait` at all. ADR.md entry 45 gave a page board a second way to get
+ * its own `/wait` call and its own packet -- `wait: true` -- without changing its
+ * shape at all, which is exactly the shape this predicate used to key on; left alone,
+ * an awaited page round's comments came back once in its own packet (`buildPacket`'s
+ * ordinary round-scoped filter, same as any question round) and then a SECOND time
+ * here, because this function still thought "no question block" meant "nobody is
+ * listening." `roundIsAwaited` (src/badge.mjs -- shared with the index badge/tab
+ * mark and the arrival notification, see its own comment for the legacy-board
+ * fallback) is what "nobody is listening" actually means now, for both routes in: a
+ * round carrying a question always is, and a page board is only when the call said
+ * `wait` (CONTEXT.md "Awaited"). So a comment is only ever a DRAIN candidate when
+ * its own round is NOT awaited; `delivered` is not what decides that, it only
+ * guarantees such a comment is handed back exactly once across repeat waits on the
+ * thread, including a second wait on a round that already drained it.
  *
  * Walks every board of `thread`, not just `board`: a thread's rounds can span more
  * than one board (`boundCwdForThread` above does the same walk for the same reason),
@@ -766,7 +802,7 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
  * resolved against its OWN board -- `blockId` and `n` numbering are per-board
  * (PROTOCOL.md "Identifiers") -- never smuggled into `board`'s. `round`'s own comments
  * are excluded here regardless (even on the rare shape where the round being waited on
- * itself carries no question): `buildPacket`'s normal round-scoped filter already hands
+ * is itself not awaited): `buildPacket`'s normal round-scoped filter already hands
  * those back in the same packet, and including them here too would duplicate them in
  * one response.
  *
@@ -798,10 +834,10 @@ function drainUndeliveredComments(thread, board, round, home) {
   const comments = [];
   const pendingByBoard = [];
   for (const b of boards) {
-    const questionRounds = new Set(questionBlocks(b).map(q => q.round));
+    const awaitedRounds = new Set((b.rounds || []).filter(r => roundIsAwaited(b, r)).map(r => r.n));
     const pending = (b.comments || []).filter(c =>
       c.delivered !== true
-      && !questionRounds.has(c.round)
+      && !awaitedRounds.has(c.round)
       && (b.id !== board.id || c.round !== round));
     if (!pending.length) continue;
     comments.push(...resolveComments(b, pending));
@@ -833,7 +869,7 @@ export function buildPacketWithUndelivered(board, round, url, home) {
   return { packet, commit };
 }
 
-async function handleWait(req, res, id, url, home) {
+async function handleWait(req, res, id, url, home, sse) {
   const roundParam = url.searchParams.get('round');
   const round = roundParam ? parseInt(roundParam, 10) : 1;
   const initial = readBoard(id, home);
@@ -855,6 +891,35 @@ async function handleWait(req, res, id, url, home) {
     // The wall-clock cap is an explicit no-response, not an error: same `timeout`
     // status PROTOCOL.md "Packet" already defines, carrying whatever partial answers
     // the store holds.
+    //
+    // SPEC_AWAITED.md ticket 03, AC 12: "when a wait dies while the page is
+    // open, the page is told over SSE". This IS the moment a wait dies -- the
+    // wall clock this same call has been enforcing the whole time just fired
+    // -- so the board's own open tab(s) are nudged to repaint right now rather
+    // than only ever noticing on their own next periodic check (src/ui.mjs's
+    // refreshAwaitDisplay). No payload beyond the round number: everything a
+    // tab needs to decide "read-only now" is already in `board.rounds` and its
+    // own clock (badge.mjs's roundIsCurrentlyAwaited, the same predicate this
+    // very call enforced server-side), so the event is a wake-up nudge, not a
+    // second copy of the packet. Broadcast unconditionally rather than only for
+    // a round this daemon confirms was genuinely awaited: a `/wait` on a round
+    // nobody is counting down is a no-op nudge on the client (nothing there
+    // reads a countdown for a round that was never showing one), and gating it
+    // here would mean re-deriving the same predicate a second time for no
+    // observable gain.
+    // Record that the wait died, durably. Correctness does not depend on this write:
+    // `readBoard` (src/store.mjs) sweeps the same flag on every read, so every reader
+    // is already right, and a lapsed round stays honest even when no daemon was
+    // connected to notice. What this adds is disk agreeing with them -- the board
+    // JSON is the archive, and it is read by things that never go through this
+    // process. The sweep has therefore ALREADY run on `result.board` (that is where
+    // it came from), so this persists rather than re-deriving; gating the write on
+    // "did anything change" would mean it never ran at all. Ordered ahead of the
+    // broadcast so a tab that refetches on the nudge cannot read a board still
+    // claiming to be awaited. See closeLapsedAwaitedRounds (src/badge.mjs).
+    closeLapsedAwaitedRounds(result.board);
+    writeBoard(result.board, home);
+    sse.broadcast(id, 'awaitExpired', { round });
     const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
     // Committed only once the response has actually left this process (see
     // drainUndeliveredComments): if the socket died in the window between
@@ -883,26 +948,30 @@ async function handleSubmit(req, res, id, home, sse) {
   // A round is answered exactly once, and the submitter must name which round it is
   // answering. Applying a body to "whichever round the server currently thinks is open"
   // rewrote history two ways: after a round was sent it landed on that sent round
-  // (rewriting answers, notes, comments and even `sentAt`, forever), and while a NEWER
-  // round was open it took a stale client's round-1 answers and marked round 2 sent with
-  // everything else unanswered. A stale client is the normal case, not an attack: a
-  // laptop waking from sleep with no SSE replay, a second tab, or a plain double-click
-  // on Send. The board is meant to be the durable record of what was decided
-  // so a submit that does not name the currently-open round
-  // is refused with 409 and changes nothing — which is also what makes a client retry
-  // safe, rather than duplicating every comment (and its pin number, PROTOCOL.md
-  // "Identifiers") and re-applying every answer.
+  // (rewriting answers, notes, comments and even `sentAt`, forever), and while a stale
+  // client held an OLDER round's page it could still overwrite what a newer round had
+  // already recorded. A stale client is the normal case, not an attack: a laptop waking
+  // from sleep with no SSE replay, a second tab, or a plain double-click on Send. The
+  // board is meant to be the durable record of what was decided, so a submit naming a
+  // round that is not currently `open` is refused with 409 and changes nothing — which
+  // is also what makes a client retry safe, rather than duplicating every comment (and
+  // its pin number, PROTOCOL.md "Identifiers") and re-applying every answer.
   //
-  // The LATEST open round, not the first one. A board can now hold two open
-  // rounds at once -- an artifact round is never sendable (ADR.md entry 35) and
-  // so stays open for good, while the question round posted after it is open
-  // too (see handlePostBoard's amend rule above). `find` took the first, which
-  // is the artifact's, so the page's own Send -- which names the latest, exactly
-  // as src/ui.mjs's openRoundNumber computes it -- was answered 409 "round 2 is
-  // not the open round (1)" and the reviewer could never submit the question at
-  // all. The 409 guard itself is unchanged: it still refuses any round but the
-  // one this board is actually waiting on.
-  const openRound = [...board.rounds].reverse().find(r => r.status === 'open');
+  // A board can now hold MORE than one open round at once, and more than one of
+  // them can be genuinely awaited -- an artifact round (never sendable, ADR.md
+  // entry 35, unless it is itself awaited per ADR.md entry 45) and the question
+  // round posted after it (see handlePostBoard's amend rule above). This used to
+  // gate on "names the LATEST open round", which broke the exact case entry 45
+  // adds: an awaited page round whose /wait a caller is still blocked on stops
+  // being submittable the moment a second round opens beside it, and the shim's
+  // wait then hangs to the wall clock instead of ever seeing the submit. So the
+  // check is now per-round -- does `claimed` name a round that is CURRENTLY
+  // `open` -- not "is it the single most-recent open round". `openN` (the latest
+  // open round, or null) is kept only for the two places that still need a single
+  // number to report: the already-submitted short-circuit below, and the 409
+  // body's resync hint when `claimed` names something else.
+  const openRounds = board.rounds.filter(r => r.status === 'open');
+  const openRound = openRounds.length ? openRounds[openRounds.length - 1] : null;
   const openN = openRound ? openRound.n : null;
   const claimed = body.round;
   if (!Number.isInteger(claimed)) {
@@ -917,16 +986,17 @@ async function handleSubmit(req, res, id, home, sse) {
     }
     return sendJson(res, 400, { error: 'submit requires an integer "round" naming the round being answered', board: board.id, round: openN });
   }
-  if (openN === null || claimed !== openN) {
+  const claimedRound = openRounds.find(r => r.n === claimed);
+  if (!claimedRound) {
     return sendJson(res, 409, {
       error: openN === null
         ? `round ${claimed} is not open: this board has already been submitted`
-        : `round ${claimed} is not the open round (${openN}) — reload the board to see what has changed`,
+        : `round ${claimed} is not open — reload the board to see what has changed`,
       board: board.id,
       round: openN,
     });
   }
-  const round = openN;
+  const round = claimed;
   try {
     applySubmit(board, { action: body.action, answers: body.answers, comments: body.comments }, round);
   } catch (err) {
@@ -1258,7 +1328,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         const boardId = parts[2];
         const action = parts[3];
         if (req.method === 'GET' && action === 'wait') {
-          return await handleWait(req, res, boardId, url, home);
+          return await handleWait(req, res, boardId, url, home, sse);
         }
         if (req.method === 'GET' && action === 'events') {
           return handleEvents(req, res, boardId, home, sse);

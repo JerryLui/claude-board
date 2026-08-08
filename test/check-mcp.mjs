@@ -215,10 +215,10 @@ function tempHome(tag) {
 /** Start bin/daemon.mjs as a real child process (not startServer in-process): the
  * restart and shutdown checks are about process lifecycle, which an in-process
  * server cannot exercise. Resolves once the daemon says it is listening. */
-function startDaemonProcess(port, daemonHome) {
+function startDaemonProcess(port, daemonHome, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [daemonBin], {
-      env: { ...process.env, CLAUDE_BOARD_HOME: daemonHome, CLAUDE_BOARD_PORT: String(port) },
+      env: { ...process.env, CLAUDE_BOARD_HOME: daemonHome, CLAUDE_BOARD_PORT: String(port), ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     spawnedDaemons.add(child);
@@ -629,9 +629,190 @@ async function main() {
       assert.deepEqual(result.answers, []);
       assert.deepEqual(result.comments, []);
       assert.ok(result.url && result.url.includes(boardId), 'the board URL must still be reported');
-      assert.match(result.content[0].text, /no question/i);
+      assert.match(result.content[0].text, /nothing awaited/i);
     } finally {
       contentClient.close();
+    }
+  });
+
+  await check('wait: true on a page board whose html reference cannot resolve returns at once -- the daemon\'s own verdict, not the shim\'s guess at it', async () => {
+    // The two sides used to disagree about exactly this shape. `isPageRoundShape`
+    // (bin/mcp.mjs) reads the RAW blocks and cannot know that a `source` failed to
+    // resolve; `mintAwait` (src/board.mjs) reads the normalized ones and marks the
+    // round not-awaited, so no packet would ever be built -- and the call sat out
+    // the full wall-clock cap on a round nothing could answer. The post response
+    // now carries the minted round's own `awaited`, and the shim agrees with it.
+    const knownIds = listBoardIds(home);
+    const brokenClient = spawnShim(baseEnv);
+    try {
+      const start = Date.now();
+      const res = await withTimeout(brokenClient.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'Page board with a broken reference',
+          blocks: [{ kind: 'html', source: 'definitely-not-here.html' }],
+          wait: true,
+        },
+      }), 5000, 'a round the daemon minted not-awaited must return promptly, not block for the wall clock');
+      const elapsed = Date.now() - start;
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      assert.ok(elapsed < 3000, `must return as soon as the post lands, took ${elapsed}ms`);
+      assert.equal(res.result.status, 'posted', 'nothing is awaited on it, so the packet says posted');
+      assert.match(res.result.content[0].text, /nothing awaited/i);
+      const round = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).rounds[0];
+      assert.equal(round.awaited, false, 'setup: the daemon really did mint it not-awaited');
+    } finally {
+      brokenClient.close();
+    }
+  });
+
+  // --- SPEC_AWAITED.md AC 1-3: `wait: true` on a page board blocks and returns the
+  // round's own comments, not through the ADR 35 undelivered path -----------------
+
+  await check('wait: true on a page board (one html block) blocks until the reviewer submits, and the packet carries that round\'s own comments', async () => {
+    const knownIds = listBoardIds(home);
+    const awaitedClient = spawnShim(baseEnv);
+    try {
+      const start = Date.now();
+      const callPromise = awaitedClient.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'Awaited page board',
+          blocks: [{ kind: 'html', html: '<div>AWAITED_ARTIFACT</div>' }],
+          wait: true,
+        },
+      });
+
+      const boardId = await waitForNewBoardFile(home, knownIds, 5000);
+      // Still blocked at 1s in: the unmodified shim would have already returned
+      // (a page board with no question posts and returns at once), so this is
+      // what proves `wait: true` actually reached the blocking path rather than
+      // being silently ignored.
+      const stillPending = await Promise.race([callPromise.then(() => 'resolved'), sleep(1000).then(() => 'pending')]);
+      assert.equal(stillPending, 'pending', 'wait: true must keep the call blocked on a page board round');
+
+      const h1 = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).blocks[0].id;
+      const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({
+          round: 1,
+          action: 'send',
+          answers: [],
+          comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'AWAITED_COMMENT' }],
+        }),
+      });
+      assert.equal(submitRes.status, 200);
+
+      const res = await withTimeout(callPromise, 5000, 'the call must resolve promptly once the round is submitted');
+      const elapsed = Date.now() - start;
+      assert.ok(elapsed < 5000, `must resolve once submitted, not ride out the wall clock, took ${elapsed}ms`);
+
+      const result = res.result;
+      assert.equal(result.isError, false);
+      assert.equal(result.status, 'submitted');
+      assert.equal(result.board, boardId);
+      assert.equal(result.round, 1);
+      assert.deepEqual(result.answers, [], 'a page board round asks nothing, so there is nothing to answer');
+      assert.equal(result.comments.length, 1, 'this round\'s own comment must come back in this same packet');
+      assert.equal(result.comments[0].text, 'AWAITED_COMMENT');
+      assert.equal(result.comments[0].round, 1);
+    } finally {
+      awaitedClient.close();
+    }
+  });
+
+  await check('wait: true on a page board sent with no comments returns an empty comments array -- a valid outcome, not an error', async () => {
+    const knownIds = listBoardIds(home);
+    const awaitedClient = spawnShim(baseEnv);
+    try {
+      const callPromise = awaitedClient.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'Awaited page board, nothing to add',
+          blocks: [{ kind: 'html', html: '<div>AWAITED_EMPTY</div>' }],
+          wait: true,
+        },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds, 5000);
+      await sleep(150);
+      const submitRes = await fetch(`${base}/api/board/${boardId}/submit`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+      });
+      assert.equal(submitRes.status, 200);
+
+      const res = await withTimeout(callPromise, 5000, 'the call must resolve once submitted');
+      const result = res.result;
+      assert.equal(result.isError, false, 'zero comments must not be reported as an error');
+      assert.equal(result.status, 'submitted');
+      assert.deepEqual(result.comments, []);
+    } finally {
+      awaitedClient.close();
+    }
+  });
+
+  await check('wait: true on a page board honours the wall-clock timeout, same as a question round', async () => {
+    const timeoutClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_TIMEOUT_MS: '150', CLAUDE_BOARD_PROGRESS_MS: '40' });
+    const start = Date.now();
+    const res = await timeoutClient.request('tools/call', {
+      name: 'ask',
+      arguments: {
+        title: 'Awaited page board, never answered',
+        blocks: [{ kind: 'html', html: '<div>AWAITED_TIMEOUT</div>' }],
+        wait: true,
+      },
+    });
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 5000, `timeout must return promptly, took ${elapsed}ms`);
+    const result = res.result;
+    assert.equal(result.isError, false);
+    assert.equal(result.status, 'timeout');
+    assert.match(result.content[0].text, /no response/i);
+    assert.ok(result.url, 'timeout result must still carry the board URL to recover the tab');
+
+    timeoutClient.close();
+  });
+
+  await check('when both processes share one cap -- what a shipped install has -- the DAEMON times out first and records that the wait died', async () => {
+    // The shim and the daemon read the same CLAUDE_BOARD_TIMEOUT_MS and default to
+    // the same 40 minutes; install.sh writes it to neither. The shim's deadline
+    // starts at blockingWait entry and the daemon's only after connect and parse, so
+    // the shim always won by the request latency, aborted, and the daemon returned
+    // early on a dead client -- leaving its entire timeout branch (the expiry
+    // broadcast, the round closure, the timeout packet's own drain) unreachable in
+    // every shipped configuration. The check above deliberately runs a 150ms shim
+    // against a 40-minute daemon, which is the one arrangement where the shim SHOULD
+    // win; this is the shipped one, and the closed round on disk is the proof.
+    const dhome = tempHome('shared-cap');
+    const dport = await freePort();
+    const daemon = await startDaemonProcess(dport, dhome, { CLAUDE_BOARD_TIMEOUT_MS: '400' });
+    const sharedClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_HOME: dhome,
+      CLAUDE_BOARD_PORT: String(dport),
+      CLAUDE_BOARD_TIMEOUT_MS: '400',
+      CLAUDE_BOARD_PROGRESS_MS: '100',
+    });
+    try {
+      const res2 = await withTimeout(sharedClient.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'One cap, both processes',
+          blocks: [{ kind: 'html', html: '<div>SHARED_CAP</div>' }],
+          wait: true,
+        },
+      }), 8000, 'the call must still end at the cap');
+      assert.equal(res2.result.status, 'timeout');
+      const round = JSON.parse(readFileSync(path.join(dhome, 'boards', `${res2.result.board}.json`), 'utf8')).rounds[0];
+      assert.equal(round.awaited, false, 'the daemon that gave up must have recorded that the wait died');
+      assert.ok(round.awaitDeadline, 'and left the deadline behind as the record of when');
+      assert.equal(round.status, 'open', 'recording a dead wait is not sending or archiving the round');
+    } finally {
+      sharedClient.close();
+      try { daemon.kill('SIGKILL'); } catch { /* already gone */ }
     }
   });
 

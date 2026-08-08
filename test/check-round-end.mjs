@@ -190,10 +190,11 @@ check('out of scope: the round badge\'s own label is untouched -- this spec is a
 // markup, so its wording is what actually matters here.
 // =====================================================================================
 
-check('the .round-end rail\'s CSS uses real design tokens (spacing/hairline/pill), not hand-picked pixel values', () => {
+check('the .round-end rail\'s CSS uses real design tokens (spacing/hairline), not hand-picked pixel values', () => {
   assert.match(styles, /\.round-end\s*\{[^}]*display:\s*flex[^}]*\}/, 'expected a .round-end rule laying the rail out as a row');
   assert.match(styles, /\.round-end \.line\s*\{[^}]*background:\s*var\(--hairline-2\)[^}]*\}/, 'expected the divider lines to use --hairline-2, the same token .round-history already uses');
-  assert.match(styles, /\.round-end \.tag\s*\{[^}]*border-radius:\s*var\(--r-pill\)[^}]*\}/, 'expected the tag to be a pill, using --r-pill like .round-label already does');
+  assert.match(styles, /\.round-end \.tag\s*\{[^}]*padding:\s*0 var\(--space-2\)[^}]*\}/, 'expected the tag to be bare text between the two lines, spaced with --space-2');
+  assert.doesNotMatch(styles, /\.round-end \.tag\s*\{[^}]*border[^}]*\}/, 'the tag wears the rail\'s own lines, so a second outline around the words is chrome the rail already draws');
 });
 
 // =====================================================================================
@@ -473,7 +474,7 @@ check('the count lowers with no reload as questions are answered, and a deferred
 // (outstandingBlocks()[0]), never a second notion of "next question" -- and the
 // button's own visible text is its accessible name. ==========================
 
-check('clicking the pill focuses the FIRST still-outstanding question\'s note field -- the exact block armSendGuard would flag, not merely any outstanding one', () => {
+check('clicking the pill lands on the FIRST still-outstanding question\'s own TOP -- the exact block armSendGuard would flag, not merely any outstanding one, and not its note field a screen further down', () => {
   const board = createBoard({ title: 'Pill - click target', blocks: [Q1, Q2, Q3] });
   const html = renderBoardPage(board);
   const document = loadBoard(html);
@@ -483,10 +484,16 @@ check('clicking the pill focuses the FIRST still-outstanding question\'s note fi
 
   pill.dispatchEvent(new StandInEvent('click'));
 
-  const expectedNote = blocks[1].querySelector('[data-note-for]');
-  assert.equal(document.activeElement, expectedNote,
-    'the pill\'s click must move focus to the first still-outstanding question\'s note field');
-  assert.equal(expectedNote.scrollIntoViewCallCount >= 1, true, 'the target question\'s note field must be scrolled into view (focusNoteField\'s own contract)');
+  const target = blocks[1];
+  assert.equal(target.scrollIntoViewCallCount >= 1, true, 'the target question BLOCK must be scrolled into view');
+  assert.deepEqual(target.scrollIntoViewLastOptions, { block: 'start' },
+    'the block must be aligned to its own top -- \'center\' or a note field would put the question\'s first line off screen');
+  assert.equal(target.querySelector('[data-note-for]').scrollIntoViewCallCount, 0,
+    'the note field sits at the END of a question; scrolling it is exactly what this landing replaced');
+  assert.equal(document.activeElement, target,
+    'focus must move to the block itself, so keyboard and screen-reader users continue from the question rather than from the pill');
+  assert.equal(target.getAttribute('tabindex'), '-1',
+    'the block must be a legal script-focus target without joining the Tab order');
 });
 
 check('the pill is a native <button> in the ordinary tab order -- no custom role or tabindex substituting for it', () => {
@@ -622,6 +629,39 @@ check('the pill never appears in a read-only (file://) archive -- structurally p
   const activeBefore = document.activeElement;
   assert.doesNotThrow(() => pill.dispatchEvent(new StandInEvent('click')));
   assert.equal(document.activeElement, activeBefore, 'a click in a read-only archive must never move focus anywhere -- the pill\'s own readonly guard must hold, belt-and-suspenders alongside the disabled attribute (QUIRKS.md: a stand-in dispatchEvent does not model native click-suppression on a disabled element, so the guard is what actually earns this)');
+});
+
+// === SPEC_AWAITED.md ticket 03: a sent awaited page round is read-only like
+// any other sent round (this file's own Testing note in the spec). ==========
+
+check('an awaited page round that has been sent renders its comment surface exactly like any other sent round -- disabled, not dropped, and the pill reads "read-only"', () => {
+  const board = createBoard({ title: 'Sent page round', blocks: [{ kind: 'html', html: '<div class="mock"></div>' }], wait: true });
+  applySubmit(board, { action: 'send', answers: [], comments: [{ blockId: board.blocks[0].id, anchor: { kind: 'block' }, text: 'looks good' }] }, 1);
+  const html = renderBoardPage(board);
+  const document = loadBoard(html);
+
+  const roundSection = document.querySelector('.round[data-round="1"]');
+  assert.ok(roundSection, 'setup failure: no round 1 section rendered');
+  assert.equal(roundSection.classList.contains('round-history'), true, 'a sent round renders as history, exactly like any other');
+
+  const form = document.querySelector('.comment-form');
+  assert.ok(form, 'the compose form must still be rendered -- read-only, not removed, matching every other sent block\'s comment form');
+  assert.equal(form.querySelector('input[type=text]').disabled, true);
+  assert.equal(form.querySelector('button[type=submit]').disabled, true);
+
+  const sendBtn = document.querySelector('.page-send-btn');
+  const discussBtn = document.querySelector('.page-discuss-btn');
+  assert.ok(sendBtn && discussBtn, 'the send control must still be rendered on a sent page round too, disabled rather than gone');
+  assert.equal(sendBtn.disabled, true);
+  assert.equal(discussBtn.disabled, true);
+  assert.equal(sendBtn.textContent, 'Send 1 comment', 'the label still names what WAS sent');
+
+  const item = document.querySelector('.comment-item');
+  assert.ok(item, 'the sent comment must still be visible in the list');
+  assert.match(item.textContent, /looks good/);
+
+  const meta = document.querySelector('span#round-meta');
+  assert.equal(meta.textContent, 'read-only', 'a sent round\'s pill falls back exactly like a never-awaited one\'s (AC 8, AC 11)');
 });
 
 if (failures) {

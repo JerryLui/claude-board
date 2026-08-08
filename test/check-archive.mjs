@@ -459,7 +459,11 @@ check('archive: the diagram\'s (mermaid) comment renders resolved, by its node i
 
 check('archive: the claim -- the comment-mode toggle is both CSS-hidden and hard-disabled in readonly -- verified, not trusted', () => {
   // The CSS side, read directly rather than assumed.
-  assert.match(styles, /body\.readonly \.mode-toggle \{[^}]*display: none/, 'expected a body.readonly rule hiding .mode-toggle');
+  // The selector shares its rule with body.page-uncommentable (ADR 46's own
+  // hiding of the same control on a page nobody is listening to), so match the
+  // readonly selector wherever it sits in that list rather than pinning it as the
+  // whole prelude.
+  assert.match(styles, /body\.readonly \.mode-toggle[^{]*\{[^}]*display: none/, 'expected a body.readonly rule hiding .mode-toggle');
 
   // The behavioural side: the SAME toggle element the live page renders, run
   // through the real script with location.protocol at 'file:'.

@@ -344,7 +344,8 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
      115.4px, and a hardcoded 88 then parks the target 27px BEHIND the header it
      was supposed to clear. One token, overridden in that same media query, so
      the two can never disagree again. Every scroll-margin-top on the page reads
-     it (.round, whose top the pager scrolls to on every page flip). */
+     it: .round, whose top the pager scrolls to on every page flip, and
+     .question-block, whose top the questions-left pill scrolls to. */
   --head-clear: 88px;
 }
 
@@ -454,6 +455,21 @@ body.readonly .back-to-index { display: none; }
 .board-head .round-badge:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
+/* AC 6, AC 8, AC 11: the page board's own pill/meta slot (ADR.md entry 49,
+   "the pill may hold a label alone"). Sits in '.board-head-actions', which
+   entry 40's condensing rule never touches (only 'h1'/'.meta' hide there), so
+   ONE element renders in both the expanded header and the condensed pill with
+   no second copy and no extra selector -- exactly AC 6's "in both the expanded
+   header and the condensed pill". A muted figure, never a chip: entry 49
+   corrects entry 40's assumption that this slot needed a real control, and a
+   label alone is what the countdown and 'read-only' both are. Hidden on every
+   board that is not laid out as a page board -- src/render.mjs renders it on
+   every board (test/check-pure.mjs's emitter scan needs the class to appear
+   somewhere), but only a page board has anywhere for it to mean anything. */
+.round-meta { display: none; flex: none; font: inherit; color: var(--muted); font-size: 11.5px;
+  font-weight: 550; letter-spacing: 0.02em; white-space: nowrap; }
+body.page-board .round-meta { display: inline; }
+
 /* the comment-mode toggle: visible chrome, not a held modifier -- this IS
    discoverability. Off by default, so the page behaves exactly as before until
    the reviewer turns it on (true by construction). */
@@ -463,7 +479,13 @@ body.readonly .back-to-index { display: none; }
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .mode-toggle:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .mode-toggle.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-body.readonly .mode-toggle { display: none; }
+/* ADR.md entry 46: a page board nobody is listening to is uncommentable, so the
+   control that turns commenting on is not on offer there either. Two classes
+   rather than one because they are two different facts -- an archive is read-only
+   whatever it holds, while 'page-uncommentable' is about this page's round in
+   particular (src/render.mjs sets it at first paint, src/ui.mjs's
+   refreshAwaitDisplay keeps it true against the clock). */
+body.readonly .mode-toggle, body.page-uncommentable .mode-toggle { display: none; }
 
 /* the theme control (src/theme.mjs): reuses .mode-toggle's chrome above rather
    than duplicating it, plus this icon-only modifier -- no visible label, so
@@ -546,7 +568,7 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .round-end .line { flex: 1; height: 1px; background: var(--hairline-2); }
 .round-end .tag {
   font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--muted); border: 1px solid var(--hairline); border-radius: var(--r-pill); padding: 3px var(--space-3);
+  color: var(--muted); padding: 0 var(--space-2);
 }
 
 .block {
@@ -590,7 +612,11 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .md-content tr:last-child td { border-bottom: none; }
 .md-content hr { border: none; border-top: 1px solid var(--hairline); margin: 1.4em 0; }
 
-.question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+/* scroll-margin-top clears the sticky .board-head when the questions-left pill
+   scrolls a block's own top on screen (src/ui.mjs's goToQuestion), the same
+   reason .round carries it for a page flip -- see --head-clear in :root. */
+.question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start;
+  scroll-margin-top: var(--head-clear); }
 /* ADR.md entry 26: a question carrying a rendered stage (anywhere in its
    options or its context, src/render.mjs's questionCarriesStage) never emits
    a '.question-context' card at all -- its context renders as prose inside
@@ -1092,15 +1118,24 @@ body.comment-mode .blocks { cursor: crosshair; }
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .questions-left-pill.visible { display: inline-flex; align-items: center; }
 .questions-left-pill:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
+/* AC 11 (second half): the ordinary board's own half of the waiting signal --
+   the page-board pill's '.round-meta' above is the other half of the same
+   rule. A muted, always-visible figure beside the send bar's own status text,
+   never a second colour: the open round's countdown is informational, not a
+   state the reviewer needs to act on. Hidden by default, the same
+   single-decider idiom '.questions-left-pill'/'.back-to-top' already use --
+   src/ui.mjs turns it on only while the open round is genuinely awaited. */
+.round-countdown { display: none; color: var(--muted); font-size: 12.5px; align-self: center; white-space: nowrap; }
+.round-countdown.visible { display: inline; }
 
 /* --- the round pager: the board's pages, always both controls (ADR.md entry 42,
    criterion 26) ---------------------------------------------------------------
 
    Two positions, per the spec's decision: the pill sits bottom-centre and the
    chevrons at the two edges. Both are position: fixed and both are siblings in
-   the markup rather than pill-wraps-chevrons -- the pill's own centring
+   the markup rather than dock-wraps-chevrons -- the dock's own centring
    transform would otherwise make it the containing block for anything fixed
-   inside it, pinning the chevrons to the pill instead of the viewport.
+   inside it, pinning the chevrons to the dock instead of the viewport.
 
    Never hidden, on any page: the pager is how a page board's reader reaches the
    question round and how a question round's reader gets back to the artifact, so
@@ -1108,13 +1143,44 @@ body.comment-mode .blocks { cursor: crosshair; }
    body.readonly (an archive's rounds are pages too). Above the send bar's own
    z-index, since on an ordinary round it sits in the bar's otherwise empty
    left/centre -- the bar's contents are right-aligned. */
-.round-pager { position: fixed; z-index: 40; left: 50%; bottom: var(--space-4); transform: translateX(-50%);
-  display: flex; align-items: center; gap: 2px; max-width: min(560px, calc(100vw - 2 * var(--space-6)));
+/* The dock is the fixed, centred box, not the pill inside it: the caption sits
+   above the numerals and shares their centre line, and stacking both in one
+   fixed column is what holds that with no measured offset between them.
+
+   Its real rendered height also drives '--round-pager-dock-h' (see
+   '.page-comments' below, ticket 02 SPEC_AWAITED.md): setupPagerDockHeightTracking
+   (src/ui.mjs) measures this box with a ResizeObserver and writes that
+   custom property, so a panel that has to clear the dock reads its actual
+   height off the browser's own layout -- whatever that ends up being, one
+   row, two rows, or a third row nobody has drawn yet -- instead of a number
+   someone typed once and nobody re-measured.
+
+   CSS anchor positioning ('anchor-name'/'anchor()') was tried here first and
+   reverted: it requires the anchor to precede the positioned element in tree
+   order, which '.page-comments' does not (it is nested inside the page
+   board's own '.block.html-block', rendered well before this dock in
+   src/render.mjs), and moving it earlier in the DOM ran into a second,
+   separate containing-block problem on top of that -- confirmed wrong in a
+   real Chrome (getComputedStyle().bottom computed to 'auto', not the
+   anchored value), which this repo's DOM stand-in cannot see at all
+   (QUIRKS.md, "The stand-in has no layout") and did not catch. */
+.round-pager-dock { position: fixed; z-index: 40; left: 50%; bottom: var(--space-4); transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  max-width: min(560px, calc(100vw - 2 * var(--space-6))); }
+/* The one place the pager still spends a title: the round the reviewer is
+   actually on, named in full. Ellipsed rather than wrapped, so an agent-supplied
+   title of any length costs one line and never reflows the dock. */
+.round-pager-caption { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11.5px; font-weight: 600; color: var(--muted); pointer-events: none; }
+.round-pager { display: flex; align-items: center; gap: 2px; max-width: 100%;
   overflow-x: auto; background: var(--panel-2); border: 1px solid var(--hairline);
   border-radius: var(--r-pill); padding: 4px; box-shadow: var(--shadow-2); }
-.round-page { background: none; border: none; border-radius: var(--r-pill); padding: 5px 12px;
+/* "Rounds" said once, over the row, instead of on every entry. */
+.round-pager-lede { flex: none; padding: 5px 10px 5px 12px; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.round-page { background: none; border: none; border-radius: var(--r-pill); padding: 5px 11px;
   font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer;
-  white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+  min-width: 30px; text-align: center; white-space: nowrap;
   transition: color var(--dur) var(--ease); }
 .round-page:hover { color: var(--ink); }
 .round-page-current { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
@@ -1432,22 +1498,123 @@ body.page-board .send-bar { display: none; }
    comment panel and the header both leave free. */
 body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom: var(--space-5);
   z-index: 30; margin-bottom: 0; max-width: 320px; }
-/* raised clear of the round pager, which owns the bottom-centre strip on every
-   page (ADR.md entry 42): 44px is the pager's own height plus its gap. */
-.page-comments { position: fixed; z-index: 30; left: 50%; bottom: calc(var(--space-5) + 44px);
+/* Raised clear of the round pager, which owns the bottom-centre strip on every
+   page (ADR.md entry 42). Ticket 03 (SPEC_AWAITED.md) puts a send control
+   inside this panel at every comment count, so it can no longer be sized by
+   a number picked to fit today's content -- '2379f12' already broke exactly
+   that once, when the pager grew a caption row above its pill and this
+   panel's hardcoded '44px' (sized for the old single-row pill) started
+   sitting under it instead of above it.
+
+   '--round-pager-dock-h' is not a second copy of a number: it is written by
+   setupPagerDockHeightTracking (src/ui.mjs), a ResizeObserver on the real
+   '.round-pager-dock' element, so this 'bottom' tracks whatever that box's
+   ACTUAL rendered height is -- at any viewport height, at every comment
+   count, and through any future change to the dock's own shape -- with no
+   value here to fall out of step. The var()'s own fallback (84px) is a
+   deliberately generous floor for the window before that observer's first
+   callback lands (a real Chrome does not guarantee that callback is
+   synchronous with layout -- see setupPagerDockHeightTracking's own comment)
+   and for a browser without ResizeObserver at all -- wrong by construction
+   (it cannot know the dock's real height either) but wrong on the safe
+   side, clear of even a three-line dock.
+
+   Confirmed 2026-08-07 against a real Chrome (127.0.0.1, examples/sample-board.html,
+   not this repo's DOM stand-in, which cannot see any of this -- QUIRKS.md,
+   "The stand-in has no layout"): with the dock actually measured at
+   63.4px tall, '--round-pager-dock-h' resolved to '63.40625px' and this
+   'bottom' computed to '91.4062px' -- exactly var(--space-4) [16px] +
+   that measurement + var(--space-3) [12px], not the fallback. With the
+   panel given real content (0, 4, then 20 queued comments, the last one
+   911px tall and overflowing off the TOP of the viewport) its measured
+   rect bottom stayed exactly 12px above the dock's measured rect top in
+   every case, because the panel grows upward, away from the dock -- the
+   clearance is a property of the DOCK's height alone, not the panel's. */
+/* SPEC_AWAITED.md ticket 03: the panel used to grow upward with NO ceiling --
+   fine while it only ever held the compose form and a short list, wrong the
+   moment ticket 03 put a send control inside it (AC 4) that has to stay
+   reachable at every comment count. Measured against the merged branch on a
+   357px-tall viewport before this change: at 12 comments the panel's own TOP
+   edge sat at -338px, at 30 comments -1130px -- reachable at zero comments and
+   unreachable everywhere past a handful. 'max-height' below puts a ceiling on
+   the panel itself, tied to the SAME '--round-pager-dock-h' the 'bottom' value
+   already reads (no second number to keep in sync): whatever the dock's real
+   height is, the panel's own height is capped at "the rest of the viewport,
+   minus this panel's own bottom offset, minus 72px of headroom for the
+   condensed header pill (ADR.md entry 40) plus its own gap" -- so the panel's
+   top edge can never rise above that fixed distance from the viewport's top,
+   at ANY comment count. '.comment-list-wrap' is what actually absorbs the
+   overflow: 'flex: 1 1 auto; min-height: 0' lets it shrink below its content's
+   natural height and scroll internally, while the hint, the compose form and
+   '.page-send-bar' below it stay 'flex: none' -- their own natural size,
+   never scrolled, always the last thing on screen no matter how long the list
+   above them grows. 'overflow: hidden' on the panel itself is a backstop, not
+   the mechanism: the inner scroll is what is meant to absorb every case, this
+   only guards against a measurement this comment did not anticipate. */
+.page-comments { position: fixed; z-index: 30; left: 50%;
+  bottom: calc(var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3));
+  max-height: calc(100vh - (var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3)) - 72px);
   transform: translateX(-50%); width: min(640px, calc(100vw - 2 * var(--space-6)));
-  display: flex; flex-direction: column; }
-.page-comments:has(.comment-form.open), .page-comments:has(.comment-item) {
+  display: flex; flex-direction: column; overflow: hidden; }
+.page-comments:has(.comment-form.open), .page-comments:has(.comment-item), .page-comments:has(.page-send-bar) {
   background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--r-lg);
   box-shadow: var(--shadow-2); padding: var(--space-2) var(--space-4) var(--space-4); }
+/* The scrollable half: only the LIST of already-left comments grows without
+   bound and scrolls internally once it outgrows the panel's own max-height
+   above -- the hint, the compose form and the send control are none of them
+   inside this box, so they never scroll out of reach regardless of how many
+   comments are queued. */
+.comment-list-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* ADR.md entry 48: the click-to-comment gesture's own hint, back in exactly
+   one place -- the awaited page board's empty comment panel, because comment
+   mode already starts ON there (src/ui.mjs), so the mode toggle itself is no
+   longer what reveals the gesture the way it is everywhere else. */
+.page-comment-hint { flex: none; font-size: 11.5px; font-style: italic; color: var(--muted); margin: 0 0 var(--space-2); }
+/* AC 4: one send control at every comment count, Discuss beside it -- the same
+   '.btn-send'/'.btn-discuss' chrome the ordinary send bar uses, just inside
+   this panel instead. 'flex: none' keeps it out of '.comment-list-wrap''s own
+   scroll region (see this file's own comment on '.page-comments' above). */
+.page-send-bar { flex: none; display: flex; align-items: center; justify-content: flex-end;
+  gap: var(--space-3); padding-top: var(--space-2); }
+/* AC 12: a wait that dies mid-read reverts the page to read-only WITHOUT
+   throwing away anything already on screen -- src/ui.mjs adds this class the
+   moment it learns the round's deadline has passed (a periodic client-side
+   check, and an immediate nudge over the 'awaitExpired' SSE event) and removes
+   none of the panel's existing '.comment-item' entries when it does. Locked
+   twice, same discipline QUIRKS.md's "Readonly is locked twice" already
+   documents for body.readonly: this hides the compose surface, and src/ui.mjs
+   additionally disables the same elements' 'disabled' attribute, since a CSS
+   rule alone leaves a control that looks gone but is not. */
+.page-comments.expired .comment-form,
+.page-comments.expired .page-comment-hint { display: none; }
+/* The send bar itself STAYS, holding one frozen control that names where the
+   comments went (badge.mjs's PAGE_SEND_EXPIRED_LABEL). Everything that could
+   still start something goes: Discuss opens a second route to an agent that is
+   no longer there. The button is disabled in the same sweep that adds this
+   class, so this rule is presentation for a control that is already inert --
+   not the lock itself. */
+.page-comments.expired .page-discuss-btn { display: none; }
+.page-comments.expired .page-send-btn { opacity: 1; cursor: default; font-style: italic;
+  background: transparent; border-color: var(--border); color: var(--muted); }
 
 /* --- chrome that gets out of the way (ADR.md entry 40) -----------------------
    Reading the artifact condenses the header into a single pill, centred at the
-   top and floating over the page; scrolling back up expands it again. The
-   trigger is 'stage-scrolled', a second class src/ui.mjs puts on <body> when a
-   page board's stage reports that it has been scrolled -- the parent cannot see
-   inside an opaque-origin frame, so the fact is reported over the stage channel
-   (src/render.mjs's stageAgentScript) rather than observed here.
+   top and floating over the page; scrolling back up expands it again.
+
+   The condense has NO THRESHOLD. It is driven continuously by '--stage-p', a
+   0-to-1 progress src/ui.mjs writes on <body> from the scroll offset a page
+   board's stage reports -- the parent cannot see inside an opaque-origin frame,
+   so the offset arrives over the stage channel (src/render.mjs's
+   stageAgentScript) rather than being observed here. Every rule below is a
+   'calc()' on that one number, so the pill forms and un-forms under the
+   reader's own finger and there is no snap point to sit on. The threshold this
+   replaced (one boolean flipped at 24px) made a reader parked on the boundary
+   flap the whole header on and off, which is the failure a dead zone would only
+   have narrowed rather than removed.
+
+   'stage-scrolled' survives as a plain "is it off zero" flag, since the
+   back-to-top control still needs a discrete 'display' switch (below) and a
+   'display' cannot be interpolated at all.
 
    Everything condensing does is a change of BOX, never of flow: the header is
    already 'position: fixed' above, so the frame under it stays a constant 100vh
@@ -1458,29 +1625,87 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    the thread/id line go; the mark, the comment-mode toggle, the theme control
    and the round badge stay, so the pill is never decorative -- entry 40's
    "the pill keeps the comment-mode toggle, so the mode is switched mid-read
-   rather than being suspended by the scroll". Hiding those two elements rather
-   than moving any control means there is still exactly ONE #comment-mode-toggle
-   in the document, condensed or not: a second copy could disagree with the
-   first about .active/aria-pressed, and src/ui.mjs's setCommentMode writes to
-   one element by design.
+   rather than being suspended by the scroll". Collapsing those two elements
+   rather than moving any control means there is still exactly ONE
+   #comment-mode-toggle in the document, condensed or not: a second copy could
+   disagree with the first about .active/aria-pressed, and src/ui.mjs's
+   setCommentMode writes to one element by design.
 
-   No transition: 'left: 0; right: 0' to 'left: 50%; right: auto' has no
-   interpolable midpoint, so an animation here would be a fiction. The state
-   change is a scroll away in either direction, which is its own feedback.
+   How the box moves without interpolating an intrinsic width. The header stays
+   full-bleed at every progress and the pill is drawn by a ::before behind it,
+   inset from both edges by a percentage of the header's OWN width -- so
+   'inset-inline: calc(50% - var(--pill-half))' at p=1 is a centred band exactly
+   one pill wide. The content converges on that same band through a matching
+   'padding-inline', so chrome and controls arrive together. Percentages and
+   plain lengths interpolate everywhere; 'width: 100vw' to 'width: fit-content'
+   does not, which is what made an animation here look impossible before.
+
+   --pill-half is measured once by src/ui.mjs (half the width of the controls
+   that survive the condense) rather than hardcoded, because the round badge's
+   label and the read-only slot both change width at runtime.
 
    --head-clear (see :root) is untouched on purpose. It is a scroll-margin for
    anchor jumps down a scrolling DOCUMENT, and a page board's document does not
    scroll at all ('body.page-board { overflow: hidden }' above) -- the artifact
    scrolls inside the frame. Nothing on a page board reads the token, so the
    header's height changing here cannot make it wrong. */
-body.page-board.stage-scrolled .board-head {
-  left: 50%; right: auto; top: var(--space-3); transform: translateX(-50%);
-  gap: var(--space-3); padding: var(--space-2) var(--space-3);
+/* Both defaults live on <body> rather than on the header, because <body> is
+   where src/ui.mjs writes them and because .back-to-top (further down, a
+   sibling of the header) reads --stage-p too: declared on the header, it would
+   shadow the written value there and be invisible everywhere else. */
+body.page-board { --stage-p: 0; --pill-half: 120px; }
+body.page-board .board-head {
+  /* two terms: the header's own edge padding easing from --space-5 to the
+     pill's tighter --space-3, plus the inset that walks the content into the
+     centred band. --pill-half is measured to match this exact arithmetic
+     (src/ui.mjs measurePillHalf), so the controls land with --space-3 of air
+     inside the band and no more. */
+  padding-inline: calc(var(--space-5) + var(--stage-p) * (var(--space-3) - var(--space-5))
+    + var(--stage-p) * (50% - var(--pill-half)));
+  padding-block: calc(var(--space-3) + var(--stage-p) * (var(--space-2) - var(--space-3)));
+  margin-top: calc(var(--stage-p) * var(--space-3));
+  gap: calc(var(--space-4) + var(--stage-p) * (var(--space-3) - var(--space-4)));
+  /* the expanded wash and the pill chrome are two layers, faded past each other.
+     A gradient does not interpolate into a flat panel colour, and a
+     'border-bottom' does not interpolate into a full pill border, so neither
+     tries to: each lives on its own pseudo-element at its own opacity. */
+  background: none; border-bottom: none;
+  /* the blur belongs to the wash, not to the header's own box: left here it
+     would frost a full-viewport band across the top of the artifact while the
+     visible chrome is a 240px pill */
+  backdrop-filter: none;
+}
+body.page-board .board-head::before,
+body.page-board .board-head::after {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+}
+/* the pill: a centred band that grows out of the full-bleed header */
+body.page-board .board-head::before {
+  inset-block: 0; inset-inline: calc(var(--stage-p) * (50% - var(--pill-half)));
   background: var(--panel); border: 1px solid var(--hairline);
   border-radius: var(--r-pill); box-shadow: var(--shadow-2);
+  opacity: var(--stage-p);
 }
-body.page-board.stage-scrolled .board-head h1,
-body.page-board.stage-scrolled .board-head .meta { display: none; }
+/* the expanded header's own wash, leaving as the pill arrives */
+body.page-board .board-head::after {
+  inset: 0;
+  background: linear-gradient(to bottom, var(--bg) 62%, var(--bg-fade-0));
+  border-bottom: 1px solid var(--hairline);
+  backdrop-filter: blur(10px);
+  opacity: calc(1 - var(--stage-p));
+}
+/* the identity text collapses horizontally, which is what lets the header's
+   content reach the pill's width without anything being clipped mid-word. Ink
+   leaves faster than the box does (the 1.8 multiplier): text at 10% opacity
+   squeezed into 30px reads as a rendering fault, where an empty box reads as a
+   box. */
+body.page-board .board-head-ident {
+  min-width: 0; overflow: hidden;
+  max-width: calc((1 - var(--stage-p)) * 60vw);
+  opacity: calc(1 - var(--stage-p) * 1.8);
+}
+body.page-board .board-head h1,
+body.page-board .board-head .meta { white-space: nowrap; }
 
 /* the back-to-top control (ADR.md entry 40), in the questions-left pill's own
    shape -- one visual object for "a pill floating at the bottom of the board",
@@ -1493,7 +1718,15 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
 
    Hidden by default and turned on by '.visible' alone, the same single-decider
    idiom as .questions-left-pill -- and for the same reason (QUIRKS.md: the
-   'hidden' attribute does nothing against our own stylesheet's display). */
+   'hidden' attribute does nothing against our own stylesheet's display).
+
+   '.visible' is the only part of this control that is still a boolean, and it
+   has to be: 'display' has no interpolable midpoint, so something must flip it.
+   It flips the instant the artifact leaves zero, and the control is at zero
+   opacity there -- the FADE is driven by '--stage-p' like the header pill, over
+   the last 40% of the ramp, so the two arrive as one gesture with the
+   back-to-top trailing. Ordering it that way is deliberate: the reader is told
+   "you are reading" first and offered the way back second. */
 .back-to-top { display: none; position: fixed; z-index: 30;
   right: var(--space-5); bottom: var(--space-5);
   background: var(--panel-2); color: var(--ink-2);
@@ -1502,6 +1735,9 @@ body.page-board.stage-scrolled .board-head .meta { display: none; }
   cursor: pointer; white-space: nowrap;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .back-to-top.visible { display: inline-flex; align-items: center; }
+body.page-board .back-to-top.visible {
+  opacity: clamp(0, (var(--stage-p) - 0.6) * 2.5, 1);
+  transform: translateY(calc((1 - var(--stage-p)) * var(--space-2))); }
 .back-to-top:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 
 /* --- responsive: the board is a laptop surface first, but it has to survive a

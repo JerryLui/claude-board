@@ -30,7 +30,7 @@
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
-import { roundPageLabel } from '../src/badge.mjs';
+import { roundPageLabel, roundNumberLabel } from '../src/badge.mjs';
 import { styles } from '../src/styles.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
@@ -210,13 +210,19 @@ check('criterion 19: the chevrons flip one round at a time, and the page, the ba
   assert.deepEqual(page3.scrollIntoViewLastOptions, { block: 'start' });
 });
 
-check('criterion 19: the pill names every round -- with the round\'s own name, the same string its page label carries -- and jumps straight to one', () => {
+check('criterion 19: the pill numbers every round on its face, names each one to a screen reader and a hover, captions the one the reviewer is on, and jumps straight to one', () => {
   const board = threeRounds();
   const document = loadBoard(renderBoardPage(board));
+  const named = board.rounds.map(r => roundPageLabel(r.n, r.title || ''));
 
-  assert.deepEqual(pagerLabels(document), board.rounds.map(r => roundPageLabel(r.n, r.title || '')),
-    'the pill names the rounds, and names them with the shared helper src/render.mjs prints each round\'s own label with');
-  assert.ok(pagerLabels(document)[1].includes('Second thoughts'), 'a round\'s title is part of its name -- "Round 2" alone tells the reviewer nothing about which is which');
+  assert.deepEqual(pagerLabels(document), board.rounds.map(r => String(r.n)),
+    'the entries print the bare numeral: an agent-supplied title of any length turns the pager into a row of ellipsed stubs, and the clipping eats the owed dot with it');
+  assert.deepEqual([...document.querySelectorAll('.round-page')].map(b => b.getAttribute('aria-label')), named,
+    'a numeral is not a name -- every entry carries its full label as its accessible name, since that face says nothing to a screen reader');
+  assert.deepEqual([...document.querySelectorAll('.round-page')].map(b => b.getAttribute('title')), named,
+    'and as its hover title, the same shared helper src/render.mjs prints each round\'s own label with');
+  assert.equal(document.querySelector('div#round-pager-caption').textContent, named[2],
+    'the caption names the round on screen -- the board opens on its newest');
 
   // A jump is not a step: round 3 to round 1 in one click.
   click(document.querySelector('.round-page[data-round="1"]'));
@@ -734,25 +740,91 @@ check('criterion 26: the pager survives the read-only archive\'s blanket disable
   assert.equal(document.getElementById('round-badge').textContent, 'round 1 of 3');
 });
 
-check('criterion 26: the two controls are two positions -- the pill bottom-centre, the chevrons at the left and right edges', () => {
+check('criterion 26: the two controls are two positions -- the dock bottom-centre, the chevrons at the left and right edges', () => {
   const document = parseHTML(renderBoardPage(threeRounds()));
-  const pager = document.querySelector('.round-pager');
+  const dock = document.querySelector('.round-pager-dock');
   const prev = document.querySelector('.round-flip-prev');
   const next = document.querySelector('.round-flip-next');
 
-  assert.equal(resolveComputedProperty(styles, pager, true, 'position'), 'fixed');
-  assert.equal(resolveComputedProperty(styles, pager, true, 'left'), '50%');
-  assert.equal(resolveComputedProperty(styles, pager, true, 'transform'), 'translateX(-50%)', 'centred on the bottom edge');
+  assert.equal(resolveComputedProperty(styles, dock, true, 'position'), 'fixed');
+  assert.equal(resolveComputedProperty(styles, dock, true, 'left'), '50%');
+  assert.equal(resolveComputedProperty(styles, dock, true, 'transform'), 'translateX(-50%)', 'centred on the bottom edge');
   assert.equal(resolveComputedProperty(styles, prev, true, 'position'), 'fixed');
   assert.equal(resolveComputedProperty(styles, prev, true, 'left'), '0');
   assert.equal(resolveComputedProperty(styles, next, true, 'right'), '0');
 
-  // The chevrons are SIBLINGS of the pill, not children of it: the pill's own
+  // The caption and the pill are ONE fixed box, so they share a centre line with
+  // no offset measured between them, and the pill is not separately fixed.
+  assert.equal(document.querySelector('.round-pager').closest('.round-pager-dock'), dock);
+  assert.equal(document.querySelector('div#round-pager-caption').closest('.round-pager-dock'), dock);
+
+  // The chevrons are SIBLINGS of the dock, not children of it: the dock's own
   // centring transform would otherwise become their containing block and pin
-  // them to the pill instead of the viewport -- a real-browser-only failure
+  // them to the dock instead of the viewport -- a real-browser-only failure
   // this DOM can only guard structurally.
-  assert.equal(prev.closest('.round-pager'), null, 'a chevron must never be nested inside the transformed pill');
-  assert.equal(next.closest('.round-pager'), null);
+  assert.equal(prev.closest('.round-pager-dock'), null, 'a chevron must never be nested inside the transformed dock');
+  assert.equal(next.closest('.round-pager-dock'), null);
+});
+
+check('AC 7 (SPEC_AWAITED.md ticket 02): the page board\'s comment panel clears the round pager by reading its REAL measured height, not a guessed number -- SOURCE ONLY, see note below', () => {
+  // 2379f12 turned the dock into a two-row box (a caption line above the
+  // pill), and .page-comments went on clearing a hardcoded '44px' sized for
+  // the old one-row pill -- so the panel started sitting under the dock
+  // instead of above it, on every page board, at every comment count.
+  //
+  // A CSS-only fix (anchor-name/anchor()) was tried first and reverted: a
+  // real Chrome computed .page-comments's 'bottom' to 'auto', not the
+  // anchored value, because the anchor must precede the positioned element
+  // in DOM order and .round-pager-dock does not (see src/styles.mjs's own
+  // comment on .round-pager-dock for the full account) -- a failure this
+  // stand-in's check for the earlier version of this check could not see,
+  // because it only ever asserted the CSS SOURCE referenced an anchor, never
+  // that a browser resolved it. Recorded here so the same mistake is not
+  // repeated: a check that can only read source text cannot certify a
+  // mechanism whose whole behaviour lives in the layout engine.
+  //
+  // The fix instead measures the dock with a ResizeObserver
+  // (setupPagerDockHeightTracking, src/ui.mjs) and writes its real height to
+  // '--round-pager-dock-h', which .page-comments's 'bottom' reads
+  // (src/styles.mjs) -- independent of DOM order or nesting, since a
+  // ResizeObserver measures the element's actual box wherever it sits.
+  //
+  // WHAT THIS CHECK CAN PROVE, and no more: that the CSS declares 'bottom' in
+  // terms of '--round-pager-dock-h' rather than a bare pixel literal, and
+  // that the client script text actually defines and CALLS a ResizeObserver
+  // that observes '.round-pager-dock' and writes exactly that property (not
+  // merely that such a function exists somewhere unused -- QUIRKS.md, "A
+  // client script that parses is not a client script that is on the page").
+  // test/dom-stand-in.mjs has no ResizeObserver and no layout engine at all
+  // (QUIRKS.md, "The stand-in has no layout"), so nothing here runs the
+  // observer or reads a real pixel gap -- that half was verified by hand
+  // against a real Chrome (see this file's own header comment on what no
+  // check here can prove, and the ticket's Log in TICKETS_AWAITED.md for the
+  // actual numbers measured).
+  const board = createBoard({ title: 'Rendered artifact', blocks: [{ kind: 'html', html: '<p>hello</p>' }] });
+  const document = parseHTML(renderBoardPage(board));
+  const dock = document.querySelector('.round-pager-dock');
+  const panel = document.querySelector('.page-comments');
+  assert.ok(dock, 'setup failure: expected a round pager dock');
+  assert.ok(panel, 'setup failure: expected a page board to render .page-comments');
+
+  const bottom = resolveComputedProperty(styles, panel, true, 'bottom');
+  assert.ok(bottom.includes('var(--round-pager-dock-h'),
+    'the panel\'s bottom must read the dock\'s MEASURED height custom property, not a fixed offset');
+  assert.doesNotMatch(bottom, /^\s*calc\(var\(--space-5\) \+ \d+px\)\s*$/,
+    'the exact bug this ticket fixes: a bare pixel height sized for today\'s dock, quietly wrong the next time the dock\'s own shape changes');
+
+  // The client script must actually run the measurement, not just define it
+  // (the trap QUIRKS.md's indexScript entry names): setupPagerDockHeightTracking
+  // has to both exist and be CALLED against .round-pager-dock, observed by a
+  // real ResizeObserver, writing the exact property the CSS above reads.
+  assert.match(ui, /function setupPagerDockHeightTracking\s*\(\s*\)\s*\{[\s\S]*?\}/,
+    'the tracking function must be defined in the real client script');
+  const fnBody = ui.match(/function setupPagerDockHeightTracking\s*\(\s*\)\s*\{([\s\S]*?)\n  \}/)[1];
+  assert.match(fnBody, /querySelector\(['"]\.round-pager-dock['"]\)/, 'it must measure the real dock element');
+  assert.match(fnBody, /new ResizeObserver\(/, 'it must be a live observer, not a one-shot read at load');
+  assert.match(fnBody, /setProperty\(['"]--round-pager-dock-h['"]/, 'and it must write the exact property .page-comments reads');
+  assert.match(ui, /setupPagerDockHeightTracking\(\);/, 'the function must actually be CALLED on the page, not merely defined and left unused');
 });
 
 if (failures) {

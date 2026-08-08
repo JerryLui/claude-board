@@ -30,7 +30,10 @@ import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
-import { badgeLabel, roundPageLabel, isPageRound } from './badge.mjs';
+import {
+  badgeLabel, roundPageLabel, isPageRound,
+  roundIsAwaitedOpen, PILL_READONLY_TITLE,
+} from './badge.mjs';
 
 /** Content-Security-Policy for every board page, both as the HTTP response
  * header src/server.mjs sends on every live request AND as the `<meta http-equiv>` renderBoardPage now
@@ -180,9 +183,13 @@ function anchorTag(c, lost) {
  * renderQuestionBlock's doc comment for why: a sent round's whole surface,
  * comments included, renders inert rather than staying a second place to add to
  * an exchange that already went out. */
-function commentArea(blockId, commentsByBlock, historical) {
+/** The `<div class="comment-item">` list, shared by `commentArea` below and the
+ * page board's own panel (`renderPageCommentPanel`): one rendering of a block's
+ * stored comments, so the two surfaces can never disagree about how a comment's
+ * anchor tag or lost/resolved styling is drawn. */
+function commentItemsHtml(blockId, commentsByBlock) {
   const comments = commentsByBlock.get(blockId) || [];
-  const items = comments.map(c => {
+  return comments.map(c => {
     const lost = !c.resolved;
     const tag = anchorTag(c, lost);
     // The anchor a list entry points at, re-emitted as data attributes so nothing
@@ -194,6 +201,15 @@ function commentArea(blockId, commentsByBlock, historical) {
     const ref = (c.anchor && c.anchor.ref) || '';
     return `<div class="comment-item" data-anchor-kind="${escAttr(kind)}"${ref ? ` data-anchor-ref="${escAttr(ref)}"` : ''} data-block-id="${escAttr(blockId)}"><span class="comment-anchor${lost ? ' comment-lost' : ''}">#${c.n} · ${escHtml(tag)}</span>${escHtml(c.text)}</div>`;
   }).join('');
+}
+
+/** `historical` disables the comment form itself (not the existing comment list,
+ * which stays visible either way) once the block's round has been sent — see
+ * renderQuestionBlock's doc comment for why: a sent round's whole surface,
+ * comments included, renders inert rather than staying a second place to add to
+ * an exchange that already went out. */
+function commentArea(blockId, commentsByBlock, historical) {
+  const items = commentItemsHtml(blockId, commentsByBlock);
   return `
     <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
@@ -1378,6 +1394,71 @@ function buildStageSrcdoc(block) {
   return STAGE_MARGIN_RESET + block.html + stageAgentScript();
 }
 
+/** The awaited page's own send control (SPEC_AWAITED.md ticket 03; ADR.md
+ * entries 45, 46, 48, 49). `.page-comments` (renderHtmlBlock's fullpage branch,
+ * below) carries an entirely different surface depending on whether `round` is
+ * *awaited* right now (CONTEXT.md), computed by `roundIsCurrentlyAwaited`
+ * (src/badge.mjs) against `nowMs` -- the SAME predicate the header pill reads,
+ * so the two can never disagree about whether this page can be commented on:
+ *
+ *   - never awaited at all, sent, timed out, or expired mid-wait (AC 8, AC 11's
+ *     fallback, AC 12): no compose form, no hint, no send control -- only
+ *     whatever comments are already on record for this block, rendered exactly
+ *     as `commentArea` renders them for any other block. The `comment-list` div
+ *     is still emitted even empty: a comment queued CLIENT-SIDE the instant
+ *     before a wait died has nowhere else to keep rendering ("comments already
+ *     left stay on screen", AC 12), and src/ui.mjs's refreshPins looks this id
+ *     up by the same convention every block's list uses.
+ *   - open and awaited, short of its deadline: the live surface -- the ADR 48
+ *     hint line while the list is empty (teaching the click-to-comment gesture,
+ *     since comment mode already starts ON here and the toggle itself is no
+ *     longer what reveals the gesture), the compose form, the list, and the
+ *     send control labelled for exactly what it will send ("Nothing to add" at
+ *     zero, "Send N comments" above it, AC 4) with Discuss beside it.
+ *   - sent: the same live markup as the open case, `historical` true -- the
+ *     identical treatment `commentArea` already gives every other block's form
+ *     once its round has gone out ("read-only like any other sent round", this
+ *     ticket's own Testing section), rather than a third shape to keep in sync.
+ *
+ * `round` can in principle be missing (a block whose round record vanished);
+ * treated as closed rather than thrown on, the same defensive default AC 8's
+ * "never awaited" gets from `roundIsAwaitedOpen`'s own `!!round` guard.
+ *
+ * `open` here means `roundIsAwaitedOpen` (src/badge.mjs) alone -- status and
+ * `awaited`, nothing else -- deliberately NOT `roundIsCurrentlyAwaited`'s
+ * stricter "and the deadline hasn't passed yet": that third fact needs a wall
+ * clock, and this function has to stay a pure one of the board JSON (see
+ * badge.mjs's own header comment on the split). An open, awaited round whose
+ * deadline already lapsed therefore still renders the LIVE surface here; the
+ * live downgrade to the closed one the instant that becomes true happens
+ * entirely in src/ui.mjs, before the reader can act on the stale form (AC 12). */
+function renderPageCommentPanel(block, round, commentsByBlock) {
+  const blockId = block.id;
+  const sent = !!round && round.status === 'sent';
+  const open = roundIsAwaitedOpen(round);
+  if (!sent && !open) {
+    return `<div class="comment-list" id="comment-list-${escAttr(blockId)}">${commentItemsHtml(blockId, commentsByBlock)}</div>`;
+  }
+  const historical = sent;
+  const count = (commentsByBlock.get(blockId) || []).length;
+  const label = count === 0 ? 'Nothing to add' : `Send ${count} comment${count === 1 ? '' : 's'}`;
+  const hint = (open && count === 0)
+    ? `<p class="page-comment-hint" id="page-comment-hint-${escAttr(blockId)}">Click anywhere on the page to leave a comment.</p>`
+    : '';
+  return `
+    ${hint}
+    <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
+    <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
+      <input type="text" placeholder="Add a comment"${historical ? ' disabled' : ''}>
+      <button type="submit"${historical ? ' disabled' : ''}>Add</button>
+    </form>
+    <div class="comment-list-wrap"><div class="comment-list" id="comment-list-${escAttr(blockId)}">${commentItemsHtml(blockId, commentsByBlock)}</div></div>
+    <div class="page-send-bar" data-round="${round.n}">
+      <button type="button" class="btn-discuss page-discuss-btn" data-round="${round.n}"${historical ? ' disabled' : ''}>Discuss in chat</button>
+      <button type="button" class="btn-send page-send-btn" data-round="${round.n}"${historical ? ' disabled' : ''}>${escHtml(label)}</button>
+    </div>`;
+}
+
 /** `fullpage`: this stage is the whole board (ADR.md entry 33), so it renders
  * with no kicker at all and its comment surface floats over the frame instead of
  * sitting under it. What does NOT change is everything the stage gesture is
@@ -1445,13 +1526,14 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   // this only prepends, it never moves the script.
   const srcdocContent = buildStageSrcdoc(block);
   if (fullpage) {
+    const round = board.rounds.find(r => r.n === block.round);
     return `
 <section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(srcdocContent)}"></iframe>
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
   </div>
-  <div class="page-comments">${commentArea(block.id, commentsByBlock, historical)}</div>
+  <div class="page-comments">${renderPageCommentPanel(block, round, commentsByBlock)}</div>
 </section>`;
   }
   return `
@@ -1649,16 +1731,22 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
  * purely informational -- src/ui.mjs is what makes it live and click-navigable;
  * this function only ever renders its first-paint count and label.
  *
- * A page board offers none of it (ADR.md entry 35: a rendered page is a thing
- * you read, not a form you submit), and gets there the way body.readonly already
- * does -- one stylesheet rule, `body.page-board .send-bar { display: none; }`,
- * not by dropping the markup. The bar is the only route a queued comment has off
- * the page: a comment left on a page board rides the next round's submit, and
- * that round arrives over SSE into THIS document as a new page, which the
- * reviewer flips to and sends from. Deleting the markup here would mean a live
- * round landing on a board with nothing to send it with, and the reviewer's
- * queued comments stranded with it. The two kicker controls are the opposite
- * case and ARE dropped -- see renderHtmlBlock.
+ * A page board offers none of THIS bar (ADR.md entry 44: "a page board is
+ * never sent" through the ordinary send bar stays a browser rule, unchanged by
+ * SPEC_AWAITED.md), and gets there the way body.readonly already does -- one
+ * stylesheet rule, `body.page-board .send-bar { display: none; }`, not by
+ * dropping the markup. For a board that never becomes awaited, or whose one
+ * page round is not the newest, this bar is still the only route a queued
+ * comment has off the page: a comment left there rides the next round's
+ * submit, and that round arrives over SSE into THIS document as a new page,
+ * which the reviewer flips to and sends from. Deleting the markup here would
+ * mean a live round landing on a board with nothing to send it with, and the
+ * reviewer's queued comments stranded with it. An AWAITED page round
+ * (SPEC_AWAITED.md ticket 03) gains its own, second send control instead --
+ * `.page-send-bar`, inside `.page-comments` itself (renderPageCommentPanel,
+ * below), which posts to its OWN round rather than "the latest unsent one"
+ * this bar always means. The two kickers' controls are a third, different
+ * case and ARE dropped outright on a page round -- see renderHtmlBlock.
  *
  * A third rule hides it for a third reason: `body.sent-page .send-bar`. A sent
  * round is a page you can still flip back to, and it is read-only there (ADR.md
@@ -1755,14 +1843,28 @@ function roundPagerMarkup(board, currentN) {
     const classes = ['round-page'];
     if (r.n === currentN) classes.push('round-page-current');
     if (roundOwesAnswer(board, r)) classes.push('round-page-owed');
-    const label = roundPageLabel(r.n, r.title || '');
-    return `<button type="button" class="${classes.join(' ')}" data-round="${r.n}"${r.n === currentN ? ' aria-current="page"' : ''}>${escHtml(label)}</button>`;
+    // Bare numeral on the face; the round's full NAME is its accessible name and
+    // its hover title, so neither a screen reader nor a mouse loses what the
+    // caption below only ever says about the current round. See roundNumberLabel
+    // (src/badge.mjs) for why a name stopped being printed on the face at all.
+    const full = roundPageLabel(r.n, r.title || '');
+    return `<button type="button" class="${classes.join(' ')}" data-round="${r.n}" title="${escAttr(full)}" aria-label="${escAttr(full)}"${r.n === currentN ? ' aria-current="page"' : ''}>${r.n}</button>`;
   }).join('');
   const first = rounds.length ? rounds[0].n : 1;
   const last = rounds.length ? rounds[rounds.length - 1].n : 1;
+  const current = rounds.find(r => r.n === currentN);
+  // The dock, not the pill, is the fixed and centred box: the caption has to sit
+  // above the numerals and share their centre line, and stacking them inside one
+  // fixed column is what keeps that true with no measured offset between them.
+  // The chevrons stay OUTSIDE it for the reason they were already outside the
+  // pill -- a transformed ancestor becomes the containing block for a fixed
+  // descendant, which would pin them to this box instead of the viewport.
   return `  <button type="button" class="round-flip round-flip-prev" id="round-prev" aria-label="Previous round" title="Previous round"${currentN <= first ? ' disabled' : ''}>‹</button>
   <button type="button" class="round-flip round-flip-next" id="round-next" aria-label="Next round" title="Next round"${currentN >= last ? ' disabled' : ''}>›</button>
-  <nav class="round-pager" id="round-pager" aria-label="Rounds">${pages}</nav>`;
+  <div class="round-pager-dock">
+    <div class="round-pager-caption" id="round-pager-caption">${escHtml(roundPageLabel(currentN, (current && current.title) || ''))}</div>
+    <nav class="round-pager" id="round-pager" aria-label="Rounds"><span class="round-pager-lede" aria-hidden="true">Rounds</span>${pages}</nav>
+  </div>`;
 }
 
 export function renderBoardPage(board) {
@@ -1809,6 +1911,32 @@ export function renderBoardPage(board) {
   // instant it can measure the real rail.
   const pillCount = openRoundQuestionCount(board);
   const pillLabel = `${pillCount} question${pillCount === 1 ? '' : 's'} left`;
+  // The waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 46, 47, 49):
+  // `#round-meta` (the page board's own header pill slot) and `#round-countdown`
+  // (the ordinary send bar's) are both first-painted from `roundIsAwaitedOpen`
+  // alone -- deterministic, no clock -- and left EMPTY when the round in
+  // question is open and awaited, exactly the split badge.mjs's own header
+  // comment lays out (and src/pomodoro-widget.mjs's precedent for the identical
+  // problem): the actual "38m left" figure is a wall-clock fact only
+  // src/ui.mjs may compute, filled in at hydrate before the reader can act. The
+  // deterministic (never-awaited/sent/timed-out) case needs no such deferral --
+  // `read-only` is not a function of the clock at all -- so it renders directly
+  // here, the same string ui.mjs's own pageBoardPillMeta falls back to.
+  const initialRound = board.rounds.find(r => r.n === initialRoundInView);
+  const initialRoundOpenAwaited = roundIsAwaitedOpen(initialRound);
+  const roundMetaText = initialRoundOpenAwaited ? '' : 'read-only';
+  const roundMetaTitle = initialRoundOpenAwaited ? '' : PILL_READONLY_TITLE;
+  const latestRoundOpenAwaited = roundIsAwaitedOpen(board.rounds[board.rounds.length - 1]);
+  // ADR.md entry 46: a page nobody is listening to is uncommentable whatever kind
+  // its one block is (CONTEXT.md "Commentable"). The entry names three things such
+  // a page must not have, and the comment-mode toggle was the one still shipping:
+  // the only rule hiding it was `body.readonly`, which a LIVE non-awaited page
+  // board never carries, so the header still offered "Comment mode: off", still
+  // flipped to "on", and still put a crosshair cursor over an artifact where every
+  // click is swallowed. Deterministic here (`roundIsAwaitedOpen`, no clock, same
+  // split as the pill above); src/ui.mjs's refreshPager keeps it true afterwards,
+  // including the round that expires under the reviewer.
+  const pageUncommentable = fullpage && !initialRoundOpenAwaited;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1820,13 +1948,13 @@ ${faviconLink}
 <script>${themeBootScript}</script>
 <style>${styles}</style>
 </head>
-<body${fullpage ? ' class="page-board"' : ''}>
+<body${fullpage ? ` class="page-board${pageUncommentable ? ' page-uncommentable' : ''}"` : ''}>
 <div class="board-shell">
   <div class="readonly-banner">Read-only: opened from disk, without the daemon running.</div>
   <header class="board-head">
     <div class="board-head-title">
       <a class="back-to-index" href="/" aria-label="All threads" title="All threads">${markSvg(30)}</a>
-      <div>
+      <div class="board-head-ident">
         <h1>${escHtml(board.title || 'Untitled board')}</h1>
         <div class="meta">${escHtml(board.thread)} · ${escHtml(board.id)}</div>
       </div>
@@ -1835,6 +1963,7 @@ ${faviconLink}
       ${commentModeToggle()}
       ${themeToggle()}
       <button type="button" class="round-badge" id="round-badge">${escHtml(badgeLabel(initialRoundInView, board.rounds.length))}</button>
+      <span class="round-meta" id="round-meta" title="${escAttr(roundMetaTitle)}">${escHtml(roundMetaText)}</span>
     </div>
   </header>
   <div class="blocks" id="blocks">
@@ -1844,6 +1973,7 @@ ${faviconLink}
 ${roundPagerMarkup(board, initialRoundInView)}
   <div class="send-bar">
     <button type="button" class="questions-left-pill${pillCount > 0 ? ' visible' : ''}" id="questions-left-pill"${hasOpenRound(board) ? '' : ' disabled'}>${escHtml(pillLabel)}</button>
+    <span class="round-countdown${latestRoundOpenAwaited ? ' visible' : ''}" id="round-countdown" title=""></span>
     <span class="send-status" id="send-status">${hasOpenRound(board) ? '' : 'This round has been sent. Waiting for the next one.'}</span>
     <button type="button" class="btn-discuss" id="discuss-btn"${hasOpenRound(board) ? '' : ' disabled'}>Discuss in chat</button>
     <button type="button" class="btn-send" id="send-btn"${hasOpenRound(board) ? '' : ' disabled'}>Send</button>

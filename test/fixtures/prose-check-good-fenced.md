@@ -23,6 +23,7 @@ The title was already chosen in an earlier step. Post through the local claude-b
 ask({
   title,                                     // the plain-words title chosen earlier
   blocks: [{ kind: 'html', html: '<the finished file, verbatim>' }],
+  wait: false,                               // this call never blocks
 })
 ```
 

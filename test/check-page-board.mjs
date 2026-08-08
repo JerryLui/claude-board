@@ -37,6 +37,7 @@ import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../sr
 import { buildRoundPushPayload } from '../src/server.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
+import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE } from '../src/badge.mjs';
 import { themeBootScript } from '../src/theme.mjs';
 import { parseHTML, StandInEvent, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
 
@@ -65,8 +66,22 @@ const ARTIFACT = '<style>.doc{font:14px system-ui}</style>'
   + '});'
   + '</script>';
 
+// `wait: true` (SPEC_AWAITED.md ticket 03): every existing check in this file
+// predates *awaited* and exercises the page board's commenting/click-to-anchor
+// surface, which ADR.md entry 46 now gates on the round actually being
+// awaited -- so the default fixture here has to declare it, or every one of
+// those checks would be proving something about a page nobody is waiting on.
+// The non-awaited case (AC 8: no comment control at all) gets its own
+// dedicated fixture and checks further down, rather than becoming this
+// function's second, silently-different mode.
 function pageBoard(html = ARTIFACT) {
-  return createBoard({ title: 'Rendered artifact', blocks: [{ kind: 'html', html }] });
+  return createBoard({ title: 'Rendered artifact', blocks: [{ kind: 'html', html }], wait: true });
+}
+
+// AC 8: the same shape, deliberately posted WITHOUT `wait: true` -- a page
+// board nobody is waiting on.
+function nonAwaitedPageBoard(html = ARTIFACT) {
+  return createBoard({ title: 'Rendered artifact, unawaited', blocks: [{ kind: 'html', html }] });
 }
 
 function loadBoard(pageHtml, protocol = 'http:') {
@@ -114,10 +129,14 @@ function withFetchCapture(fn) {
   return calls;
 }
 
+// Idempotent (SPEC_AWAITED.md ticket 03, AC 5): an awaited page board now
+// hydrates with comment mode already ON, so a bare unconditional click here
+// would toggle it straight back OFF on exactly the fixture this file's checks
+// mostly use. Only clicks when it still needs to.
 function enableCommentMode(document) {
   const toggle = document.getElementById('comment-mode-toggle');
   assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
-  toggle.dispatchEvent(new StandInEvent('click'));
+  if (!toggle.classList.contains('active')) toggle.dispatchEvent(new StandInEvent('click'));
   assert.equal(toggle.classList.contains('active'), true, 'setup failure: the toggle did not turn comment mode on');
 }
 
@@ -182,32 +201,63 @@ function stageReports(document) {
 // it, and the frame's height never moves through any of it.
 // =================================================================================
 
+const progress = (document) => document.body.style.getPropertyValue('--stage-p');
+
 check('criterion 16: a scroll report condenses the header into a centred floating pill, and scrolling back up expands it again', () => {
   const { document, frame } = openPageBoard();
   const head = document.querySelector('.board-head');
-  const h1 = document.querySelector('.board-head h1');
-  const meta = document.querySelector('.board-head .meta');
+  const ident = document.querySelector('.board-head-ident');
 
   assert.equal(condensed(document), false, 'setup: an unscrolled artifact leaves the header expanded');
   assert.equal(computed(head, 'left'), '0', 'setup: expanded, the header spans the viewport');
-  assert.equal(computed(h1, 'display'), '', 'setup: expanded, the board\'s title is on screen');
 
   reportScroll(frame, 800);
   assert.equal(condensed(document), true);
-  // Computed through the real cascade over the real stylesheet, not by matching
-  // a rule's spelling (QUIRKS.md) -- every rule here is an override of one the
-  // page-board layout already set, so which one wins IS the property under test.
-  assert.equal(computed(head, 'left'), '50%', 'condensed, the header is centred');
-  assert.equal(computed(head, 'transform'), 'translateX(-50%)', 'and genuinely centred on its own width, not merely offset');
-  assert.equal(computed(head, 'right'), 'auto', 'it must stop spanning the viewport, or "pill" is only a border-radius');
-  assert.equal(computed(head, 'border-radius'), 'var(--r-pill)');
-  assert.equal(computed(h1, 'display'), 'none', 'the board\'s title condenses away');
-  assert.equal(computed(meta, 'display'), 'none', 'and so does the thread/id line');
+  assert.equal(progress(document), '1.000', 'well past the ramp, the condense is complete');
+
+  // The header spans the viewport at EVERY progress and the pill is a centred
+  // band drawn behind it (a ::before inset by a percentage of the header's own
+  // width). That is what makes the condense animatable at all: 'left: 0' to
+  // 'left: 50%' has no interpolable midpoint, an inset percentage does. So
+  // "centred" is now a fact about the chrome, not about the header's box, and
+  // asserting the old 'left: 50%' here would be asserting the bug.
+  assert.equal(computed(head, 'left'), '0', 'the header itself never moves -- only the chrome inside it converges');
+  assert.match(computed(head, 'padding-inline'), /--stage-p/, 'the controls walk into the band on the same progress');
+  assert.equal(computed(head, 'background'), 'none', 'the expanded wash moves to its own layer so it can fade');
+  assert.match(computed(ident, 'max-width'), /--stage-p/, 'the identity text collapses on the progress rather than being switched off');
+  assert.notEqual(computed(ident, 'display'), 'none', 'and collapses by width, not by display -- a display flip is what cannot be animated');
 
   reportScroll(frame, 0);
   assert.equal(condensed(document), false, 'scrolling back to the top expands it again');
-  assert.equal(computed(head, 'left'), '0');
-  assert.equal(computed(h1, 'display'), '', 'the title comes back -- condensing is a state, not a deletion');
+  assert.equal(progress(document), '0.000', 'and the progress genuinely returns to zero, not merely below a threshold');
+});
+
+check('criterion 16: the condense is a ramp with no threshold -- the pill forms continuously under the reader\'s own scroll', () => {
+  const { document, frame } = openPageBoard();
+
+  // The whole point of the ramp: a reader resting mid-gesture sits at a real
+  // intermediate value rather than on a boundary that flips the entire header
+  // on and off. The old 24px threshold is exactly what this must never become,
+  // so the assertion is STRICTLY between, not merely "not zero".
+  reportScroll(frame, 70);
+  const mid = Number(progress(document));
+  assert.ok(mid > 0 && mid < 1, `a half-scrolled artifact is half condensed, got ${mid}`);
+  assert.equal(condensed(document), true, 'and it counts as reading from the first pixel');
+
+  // Monotonic, and every step lands somewhere different: a ramp that quantised
+  // to a few steps would still flicker, just at more places.
+  const seen = [35, 70, 105, 140].map((top) => {
+    reportScroll(frame, top);
+    return Number(progress(document));
+  });
+  assert.deepEqual(seen, [...seen].sort((a, b) => a - b), 'progress only ever increases with the scroll offset');
+  assert.equal(new Set(seen).size, seen.length, 'and each offset maps to its own value');
+  assert.equal(seen[seen.length - 1], 1, 'the ramp completes exactly at the condense distance');
+
+  // Past the end it saturates rather than overshooting: an opacity of 6 or a
+  // padding past 50% would invert the pill on a long artifact.
+  reportScroll(frame, 100000);
+  assert.equal(progress(document), '1.000', 'a long artifact cannot push the progress past 1');
 });
 
 check('criterion 16: the frame is untouched across a whole condense/expand cycle -- it floats OVER the frame, which stays a constant 100vh', () => {
@@ -383,22 +433,29 @@ check('criterion 17: comment mode can be switched on AND off while condensed, wi
   reportScroll(frame, 800);
   const toggle = document.querySelector('button#comment-mode-toggle');
 
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), true, 'mid-read, the toggle turns comment mode on');
-  assert.equal(toggle.getAttribute('aria-pressed'), 'true');
-  assert.equal(document.body.classList.contains('comment-mode'), true);
-  assert.equal(condensed(document), true, 'and switching mode does not un-condense the header');
+  // SPEC_AWAITED.md ticket 03, AC 5: this awaited page board hydrates with
+  // comment mode already ON -- that is itself the starting state under test
+  // here, not something this check has to switch on first.
+  assert.equal(toggle.classList.contains('active'), true, 'setup: an awaited page board opens with comment mode on (AC 5)');
+  assert.equal(condensed(document), true, 'setup: the header is condensed');
 
-  // The gesture the mode exists for still works from the condensed pill: a
-  // click inside the artifact anchors a comment.
+  // The gesture the mode exists for works from the condensed pill straight
+  // away: a click inside the artifact anchors a comment, with no toggle press
+  // needed first.
   frame.contentDocument.getElementById('theme').dispatchEvent(new StandInEvent('click'));
   assert.equal(document.querySelector('.comment-form').classList.contains('open'), true,
-    'the mode switched from the pill is a real mode, not just a lit-up button');
+    'the mode that opened the page on is a real mode, not just a lit-up button');
 
   toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), false, 'and off again, still without scrolling back');
+  assert.equal(toggle.classList.contains('active'), false, 'mid-read, the toggle turns comment mode off, still without scrolling back');
   assert.equal(toggle.getAttribute('aria-pressed'), 'false');
-  assert.deepEqual(heard, [true, false],
+  assert.equal(document.body.classList.contains('comment-mode'), false);
+  assert.equal(condensed(document), true, 'and switching mode does not un-condense the header');
+
+  toggle.dispatchEvent(new StandInEvent('click'));
+  assert.equal(toggle.classList.contains('active'), true, 'and back on again, still without scrolling back');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(heard, [false, true],
     'the stage hears both transitions -- its own hover/click gesture lives in a document no body class of ours reaches');
 });
 
@@ -614,18 +671,20 @@ check('criterion 15: theme rides the message that already carries comment mode, 
     if (ev.data && ev.data.cb === 'cb-stage' && ev.data.type === 'mode') heard.push(ev.data);
   });
 
-  // A theme change with comment mode OFF, then a mode change with a theme
-  // already chosen: whichever fact moved, the stage is told BOTH, so it can
-  // never be left holding a stale value of the one the caller did not care
-  // about (ADR.md entry 39: one channel, one message shape).
+  // A theme change with comment mode ON (SPEC_AWAITED.md ticket 03, AC 5:
+  // this awaited page board hydrates that way already), then a mode change
+  // with a theme already chosen: whichever fact moved, the stage is told
+  // BOTH, so it can never be left holding a stale value of the one the
+  // caller did not care about (ADR.md entry 39: one channel, one message
+  // shape).
   document.querySelector('button#theme-toggle').dispatchEvent(new StandInEvent('click'));
   document.querySelector('button#comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
 
   assert.equal(heard.length, 2, 'both changes go over the mode message, not a second message type');
   assert.deepEqual(heard.map(m => [m.commentMode, m.theme, Array.isArray(m.sentRefs)]),
-    [[false, 'light', true], [true, 'light', true]],
+    [[true, 'light', true], [false, 'light', true]],
     'a theme change carries the current mode, and a mode change carries the current theme');
-  assert.equal(stageTheme(frame).attr, 'light', 'and turning comment mode on did not repaint the artifact back to the default');
+  assert.equal(stageTheme(frame).attr, 'light', 'and turning comment mode off did not repaint the artifact back to the default');
 });
 
 // =================================================================================
@@ -898,6 +957,337 @@ check('the seam for ticket 05: a round arriving over SSE ends the page-board lay
     'and the send bar must be live again -- it was only ever CSS-hidden, never dropped, precisely so a queued comment has a way out');
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1,
     'the comment queued on the artifact must still be queued -- it rides this round\'s submit (ADR.md entry 35), so nothing here may throw it away');
+});
+
+// =================================================================================
+// SPEC_AWAITED.md ticket 03: the page board's two states.
+// =================================================================================
+//
+// Everything above this line predates *awaited* (ADR.md entries 45-49) and now
+// runs against an AWAITED page board by default (pageBoard()'s own header
+// comment says why). What follows is what ticket 03 itself adds: the send
+// control inside the comment panel (AC 4), the click-to-comment hint (AC 5),
+// the header pill's countdown/read-only slot (AC 6, AC 8, AC 11), and the
+// live SSE-driven revert when a wait dies (AC 12).
+
+/** Click `el` (comment mode already on), fill the opened form with `text`, and
+ * submit it -- the same three-step gesture test/check-click-pin.mjs already
+ * drives, factored out here because this section queues several comments in a
+ * row. */
+function queueComment(document, el, blockId, text) {
+  el.dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + blockId);
+  assert.ok(form && form.classList.contains('open'), 'setup failure: the click did not open the comment form');
+  form.querySelector('input[type=text]').value = text;
+  form.dispatchEvent(new StandInEvent('submit'));
+}
+
+const pageSendBtn = document => document.querySelector('.page-send-btn');
+const pageDiscussBtn = document => document.querySelector('.page-discuss-btn');
+const pageCommentHint = document => document.querySelector('.page-comment-hint');
+const roundMeta = document => document.querySelector('span#round-meta');
+
+// =================================================================================
+// AC 4: one send control at every comment count, labelled for what it sends,
+// Discuss beside it.
+// =================================================================================
+
+check('AC 4: an awaited page board carries exactly one send control, labelled "Nothing to add" at zero comments, with Discuss beside it', () => {
+  const { document } = openPageBoard();
+  const sendBtn = pageSendBtn(document);
+  const discussBtn = pageDiscussBtn(document);
+  assert.equal(document.querySelectorAll('.page-send-btn').length, 1, 'exactly one send control, not zero and not two');
+  assert.ok(sendBtn, 'setup failure: no .page-send-btn rendered on an open, awaited page round');
+  assert.ok(discussBtn, 'Discuss must sit beside it');
+  assert.equal(sendBtn.textContent, 'Nothing to add', 'zero comments: the control names what it will send, which is nothing');
+  assert.equal(sendBtn.disabled, false, 'still a real, clickable control -- "nothing to add" is a label, not a disabled state');
+  assert.equal(sendBtn.getAttribute('data-round'), '1', 'the control names its OWN round, not "whichever is latest"');
+  assert.equal(discussBtn.getAttribute('data-round'), '1');
+});
+
+check('AC 4: the label counts up as comments are queued, singular at one, plural above it, and stays the one control throughout', () => {
+  const { document, frame, blockId } = openPageBoard();
+  enableCommentMode(document);
+  const button = frame.contentDocument.getElementById('theme');
+
+  queueComment(document, button, blockId, 'first remark');
+  assert.equal(document.querySelectorAll('.page-send-btn').length, 1, 'still exactly one control after the first comment');
+  assert.equal(pageSendBtn(document).textContent, 'Send 1 comment', 'singular at exactly one');
+
+  // Reopen the same element to queue a second, independent remark -- the same
+  // "several separate remarks share one block anchor" shape commentButton's own
+  // comment (src/render.mjs) describes for a whole-block comment.
+  queueComment(document, button, blockId, 'second remark');
+  assert.equal(document.querySelectorAll('.page-send-btn').length, 1, 'still exactly one control after a second comment');
+  assert.equal(pageSendBtn(document).textContent, 'Send 2 comments', 'plural above one');
+});
+
+// =================================================================================
+// AC 5: opens with comment mode on, and the empty panel teaches the gesture.
+// =================================================================================
+
+check('AC 5: an awaited page board opens with comment mode already on, and its empty panel carries a hint line teaching the click-to-comment gesture', () => {
+  const { document } = openPageBoard();
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.equal(toggle.classList.contains('active'), true, 'comment mode must already be on at hydrate, with no click needed');
+  assert.equal(document.body.classList.contains('comment-mode'), true);
+  const hint = pageCommentHint(document);
+  assert.ok(hint, 'the empty panel must carry a hint element');
+  assert.match(hint.textContent, /click/i, 'the hint must teach the click-to-comment gesture in words');
+  assert.notEqual(hint.style.display, 'none', 'and it must actually be visible, not merely present in the markup');
+});
+
+check('AC 5: the hint disappears once a comment is queued, and would come back if the queue emptied out again', () => {
+  const { document, frame, blockId } = openPageBoard();
+  assert.notEqual(pageCommentHint(document).style.display, 'none', 'setup: the hint starts visible');
+  const button = frame.contentDocument.getElementById('theme');
+  queueComment(document, button, blockId, 'a remark');
+  assert.equal(pageCommentHint(document).style.display, 'none', 'the hint must step aside once there is something to show instead');
+
+  // Delete the just-queued comment back to zero -- updatePageSendControls
+  // (src/ui.mjs) runs off the same refreshPins call a delete goes through.
+  const del = document.querySelector('.comment-item.comment-pending .comment-delete');
+  assert.ok(del, 'setup failure: the queued comment has no delete control');
+  del.dispatchEvent(new StandInEvent('click'));
+  assert.equal(pageSendBtn(document).textContent, 'Nothing to add', 'setup: back to zero comments');
+  assert.notEqual(pageCommentHint(document).style.display, 'none', 'and the hint returns once the panel is empty again');
+});
+
+// =================================================================================
+// AC 6: the header pill carries the round's countdown, explained on hover, in
+// both the expanded header and the condensed pill.
+// =================================================================================
+
+check('AC 6: the header pill carries the round\'s countdown as a muted figure, with a hover title explaining it, in both the expanded header and the condensed pill', () => {
+  const board = createBoard({
+    title: 'countdown',
+    blocks: [{ kind: 'html', html: ARTIFACT }],
+    wait: true,
+    awaitTimeoutMs: 38 * 60_000,
+  });
+  const { document, frame } = openPageBoard(board);
+  const meta = roundMeta(document);
+  assert.ok(meta, 'setup failure: no #round-meta rendered');
+  assert.match(meta.textContent, /^(37|38)m left$/, `expected a minutes-left figure close to 38, got ${JSON.stringify(meta.textContent)}`);
+  assert.ok(meta.title && meta.title.length > 0, 'the figure must carry an explanatory hover title');
+  assert.notEqual(meta.title, meta.textContent, 'the title must EXPLAIN the figure, not just repeat it');
+
+  // Expanded: computed through the real cascade, same idiom every other
+  // criterion-16 check in this file already uses.
+  assert.notEqual(computed(meta, 'display'), 'none', 'the pill slot must be visible while the header is expanded');
+
+  reportScroll(frame, 800);
+  assert.equal(condensed(document), true, 'setup: the header is condensed');
+  assert.notEqual(computed(meta, 'display'), 'none', 'and still visible once the header condenses into the pill -- AC 6\'s "in both" states');
+  assert.equal(meta.textContent, roundMeta(document).textContent, 'condensing must not have touched the pill\'s own text -- it is the same element, not a second copy');
+});
+
+// =================================================================================
+// AC 8: a non-awaited page offers no comment control and no click-to-anchor
+// gesture at all, and the pill slot reads "read-only".
+// =================================================================================
+
+check('AC 8: a page board nobody is waiting on offers no comment control at all, and the pill\'s slot reads "read-only"', () => {
+  const board = nonAwaitedPageBoard();
+  assert.equal(board.rounds[0].awaited, false, 'setup: posted without wait: true');
+  const document = loadBoard(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+
+  assert.equal(document.querySelector('.comment-form'), null, 'no compose form anywhere for this block');
+  assert.equal(document.querySelector('.page-send-bar'), null, 'no send control');
+  assert.equal(document.querySelector('.page-comment-hint'), null, 'no hint -- there is nothing to teach the gesture for');
+  // The comment-list div itself may still render (empty) -- see
+  // renderPageCommentPanel's own comment on why -- but it must carry nothing.
+  assert.equal(document.querySelectorAll('.comment-item').length, 0);
+
+  const meta = roundMeta(document);
+  assert.ok(meta, 'setup failure: no #round-meta rendered');
+  assert.equal(meta.textContent, 'read-only');
+  assert.ok(meta.title && meta.title.length > 0, 'the fallback text still carries an explanatory title');
+
+  // The click-to-anchor gesture itself. The toggle is hidden here now (ADR 46,
+  // asserted on its own below) but hiding is structural, not omission -- the
+  // element is still in the markup, so this drives it directly: even forced on,
+  // it must not make the stage anchorable. Belt and braces, the same "locked
+  // twice" discipline QUIRKS.md states for every other read-only surface.
+  const toggle = document.getElementById('comment-mode-toggle');
+  toggle.dispatchEvent(new StandInEvent('click'));
+  assert.equal(toggle.classList.contains('active'), true, 'setup: comment mode is on');
+  frame.contentDocument.getElementById('theme').dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.querySelectorAll('.comment-form.open').length, 0, 'no form may open anywhere -- there is no comment control to open one');
+});
+
+// =================================================================================
+// AC 11 (second half): every open awaited round shows the time left, on a page
+// board and on an ordinary board alike; a sent/timed-out/archived round shows
+// none, and a page board's pill falls back to read-only.
+// =================================================================================
+
+check('AC 11: an ordinary board\'s open, awaited round shows the countdown beside the send bar; once sent, it shows none', () => {
+  const board = createBoard({
+    title: 'ordinary board countdown',
+    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+  });
+  assert.equal(board.rounds[0].awaited, true, 'setup: a question round is awaited by construction (ticket 01)');
+  const document = loadBoard(renderBoardPage(board));
+  const cd = document.querySelector('span#round-countdown');
+  assert.ok(cd, 'setup failure: no #round-countdown rendered');
+  assert.equal(cd.classList.contains('visible'), true, 'an open, awaited round\'s countdown must be visible');
+  assert.match(cd.textContent, /^\d+m left$/, `expected a minutes-left figure, got ${JSON.stringify(cd.textContent)}`);
+
+  // Sent: no countdown at all, on the same board, same element.
+  applySubmit(board, { action: 'send', answers: [{ id: board.blocks[0].id, status: 'answered', choice: 'Yes', note: '' }], comments: [] }, 1);
+  const sentDocument = loadBoard(renderBoardPage(board));
+  const sentCd = sentDocument.querySelector('span#round-countdown');
+  assert.ok(sentCd, 'setup failure: no #round-countdown rendered on the sent board');
+  assert.equal(sentCd.classList.contains('visible'), false, 'a sent round must show no countdown');
+  assert.equal(sentCd.textContent, '', 'and the figure itself must be empty, not stale');
+});
+
+check('AC 11: a page board\'s pill falls back to "read-only" once its round is sent, exactly like AC 8\'s never-awaited case', () => {
+  const board = pageBoard();
+  const document = loadBoard(renderBoardPage(board));
+  assert.equal(roundMeta(document).textContent.endsWith('m left'), true, 'setup: open and awaited, so a countdown shows');
+
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  const sentDocument = loadBoard(renderBoardPage(board));
+  assert.equal(roundMeta(sentDocument).textContent, 'read-only', 'a sent round\'s pill falls back exactly like a never-awaited one\'s');
+});
+
+// =================================================================================
+// AC 12: when a wait dies while the page is open, the page is told over SSE --
+// it reverts to read-only, and comments already left stay on screen.
+// =================================================================================
+
+check('AC 12: an "awaitExpired" SSE push reverts the page to read-only, leaving comments already queued on screen', () => {
+  const board = pageBoard();
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  const blockId = board.blocks[0].id;
+
+  // Comment mode is already on (AC 5); queue one comment before the wait dies.
+  const button = frame.contentDocument.getElementById('theme');
+  queueComment(document, button, blockId, 'left before the wait died');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1, 'setup: one comment queued');
+  assert.equal(pageSendBtn(document).disabled, false, 'setup: the send control is still live');
+  assert.equal(roundMeta(document).textContent.endsWith('m left'), true, 'setup: still showing a countdown');
+
+  // src/ui.mjs recomputes "is this round currently awaited" from board.rounds'
+  // own awaitDeadline against Date.now() -- refreshAwaitDisplay never mutates
+  // board state itself (badge.mjs's own header comment on the split). So
+  // reproducing "the wait actually died" here means moving the clock, not
+  // just firing the event: a real server only ever broadcasts this once its
+  // OWN wall clock has genuinely crossed the deadline. Patched globally and
+  // restored in `finally` -- this file's own DOM stand-in has no fake timer
+  // seam to reach for instead.
+  const realNow = Date.now;
+  let flushCalls;
+  try {
+    Date.now = () => realNow() + 41 * 60_000; // one minute past the 40-minute default
+    // The queue's last exit before the freeze (src/ui.mjs's flushPendingOnExpiry).
+    // Captured rather than allowed to hit the real global fetch: what is being
+    // asserted is that the comment LEFT the tab, and the tab's own memory is the
+    // only place it existed.
+    flushCalls = withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })));
+    assert.equal(flushCalls.length, 1, 'the queued comment must be flushed to the board on the way into the freeze, not frozen with it');
+    assert.match(flushCalls[0].url, /\/submit$/);
+    assert.equal(flushCalls[0].body.round, 1);
+    assert.deepEqual(flushCalls[0].body.comments.map(c => c.text), ['left before the wait died'],
+      'the flush carries exactly the comment that was still only in page memory');
+
+    assert.equal(roundMeta(document).textContent, 'read-only', 'the pill must fall back the instant the push lands');
+    const panel = document.querySelector('.page-comments');
+    assert.equal(panel.classList.contains('expired'), true, 'the panel must be marked expired');
+    assert.equal(pageSendBtn(document).disabled, true, 'the send control must be genuinely disabled, not merely hidden (QUIRKS.md "Readonly is locked twice")');
+    assert.equal(pageDiscussBtn(document).disabled, true);
+    assert.equal(document.querySelector('.comment-form').querySelector('input[type=text]').disabled, true);
+
+    // The comment left before the wait died is still on screen -- AC 12's own
+    // words. It is on its way to the board by now (the flush above) rather than
+    // stranded in page memory, and the drain is what carries it to the next agent
+    // that asks (drainUndeliveredComments, src/server.mjs, now that a lapsed round
+    // stops swallowing its own comments); either way nothing is removed from the
+    // panel by the freeze itself.
+    assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1,
+      'a comment already left must stay on screen -- AC 12\'s own words');
+    assert.equal(document.querySelector('.comment-item.comment-pending').textContent.includes('left before the wait died'), true);
+
+    // The click-to-anchor gesture itself must also be gone, not merely the
+    // panel's own controls: broadcastStageMode re-tells the stage its mode the
+    // moment refreshAwaitDisplay runs (src/ui.mjs).
+    frame.contentDocument.getElementById('theme').dispatchEvent(new StandInEvent('click'));
+    assert.equal(document.querySelectorAll('.comment-form.open').length, 0, 'no click may open the form once the round has reverted to read-only');
+  } finally {
+    Date.now = realNow;
+  }
+
+  // And the reversion is STICKY even once the clock is back to "normal": one-
+  // directional by construction (a deadline never un-expires,
+  // refreshAwaitDisplay's own header comment) -- a real repaint (another
+  // 'awaitExpired' nudge, exactly as a second, redundant broadcast would be)
+  // must not un-mark the panel just because Date.now() no longer looks
+  // expired from here.
+  es.dispatch('awaitExpired', JSON.stringify({ round: 1 }));
+  assert.equal(document.querySelector('.page-comments').classList.contains('expired'), true,
+    'the expired panel must stay expired -- a deadline crossing is one-directional');
+
+  // Frozen, but not mute. The control that can no longer be pressed is where the
+  // reviewer finds out their comments were not lost with the round.
+  const frozen = pageSendBtn(document);
+  assert.equal(frozen.textContent, PAGE_SEND_EXPIRED_LABEL, 'the frozen send control names where the comments went');
+  assert.equal(frozen.title, PAGE_SEND_EXPIRED_TITLE);
+  assert.equal(frozen.disabled, true, 'saying so is not the same as being pressable');
+});
+
+check('AC 12: a page round that expires with an EMPTY queue posts nothing at all -- the freeze is a display change, not a submit', () => {
+  const board = pageBoard();
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  document.querySelector('.html-stage').loadSrcdoc();
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 41 * 60_000;
+    const calls = withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })));
+    assert.deepEqual(calls, [], 'nothing was queued, so nothing may be sent -- a page nobody wrote on must not close its own round');
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(document.querySelector('.page-comments').classList.contains('expired'), true, 'and it still freezes');
+});
+
+check('AC 8/ADR 46: the comment-mode toggle is gone on a page board nobody is listening to, both at first paint and the moment a wait dies', () => {
+  // The third of ADR 46's three things such a page must not have -- the branch
+  // used to ship two: the only rule hiding the toggle was body.readonly, which a
+  // LIVE non-awaited page board never carries, so the header still offered
+  // "Comment mode: off" and still flipped it on over an artifact where every
+  // click is swallowed.
+  const never = createBoard({ title: 'not awaited', blocks: [{ kind: 'html', html: '<!doctype html><html><body><h1>NO_TOGGLE</h1></body></html>' }] });
+  assert.equal(never.rounds[0].awaited, false, 'setup: posted without wait: true');
+  const neverDoc = loadBoard(renderBoardPage(never));
+  assert.equal(neverDoc.body.classList.contains('page-uncommentable'), true,
+    'a page board nobody is listening to carries the class that hides the toggle');
+  // Computed, not matched against the stylesheet source: a CSS-source assertion is
+  // exactly how this branch once certified a mechanism that resolved to `auto` in a
+  // real browser (QUIRKS.md). This asks what the rule actually resolves to on the
+  // element, with the class in place.
+  assert.equal(computed(neverDoc.getElementById('comment-mode-toggle'), 'display'), 'none',
+    'and it really is hidden -- the rule must win against .mode-toggle\'s own inline-flex');
+
+  // An awaited page board keeps the toggle while the wait is alive, and loses it
+  // the moment the wait dies under the reviewer -- the clock-driven half.
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(pageBoard()));
+  document.querySelector('.html-stage').loadSrcdoc();
+  assert.equal(document.body.classList.contains('page-uncommentable'), false, 'setup: still awaited, so the toggle stays');
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 41 * 60_000;
+    withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })));
+    assert.equal(document.body.classList.contains('page-uncommentable'), true,
+      'the wait died, so the control that turns commenting on goes with it');
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 if (failures) {
