@@ -209,7 +209,8 @@ bash uninstall.sh
 ```
 
 Removes the launchd job, its plist, the MCP registration, the launcher bundle in
-`~/Applications`, and the manual it copied into `~/.claude/skills/`. It names what it
+`~/Applications` along with its LaunchServices record, and the manual it copied into
+`~/.claude/skills/`. It names what it
 deliberately leaves: the store (your review history), the local secret, the logs. Safe
 to run twice, and on a machine that never had the service installed.
 

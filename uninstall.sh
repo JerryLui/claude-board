@@ -4,8 +4,8 @@
 #
 #   1. the launchd job (bootout) and its plist in ~/Library/LaunchAgents,
 #   2. the MCP registration (`claude mcp remove --scope user`),
-#   3. ~/Applications/claude-board.app, the launcher bundle, and the stamp that
-#      records what it was built from,
+#   3. ~/Applications/claude-board.app, the launcher bundle, the stamp that records
+#      what it was built from, and the bundle's LaunchServices record,
 #   4. ~/.claude/skills/claude-board/SKILL.md, the manual install.sh step 6 copied
 #      there out of this clone.
 #
@@ -127,9 +127,36 @@ fi
 # without `tccutil reset` blowing away that whole privacy category for every app on the
 # machine. It is inert once the bundle is gone — a grant naming an application that no
 # longer exists grants nothing — so it is named in the summary rather than chased.
+#
+# The LaunchServices record IS this script's to remove, by the same authorship rule: step
+# 1b of install.sh creates it. A record left behind names a bundle id that is still real
+# and a path that is not, and macOS resolving anything to it raises "claude-board.app is
+# damaged and can't be opened" long after the uninstall (QUIRKS.md, "`lsregister` records
+# are permanent"). Skipped for a temp root because install.sh skips REGISTERING one there,
+# so there is nothing to withdraw; that list is duplicated from install.sh and
+# test/check-install.mjs fails if the two drift.
+#
+# AFTER the rm, and inside its success branch, which is the opposite of the obvious order.
+# `lsregister -u` works fine on a path that no longer exists, so nothing is lost by
+# waiting — while withdrawing FIRST has two failure modes. This script runs under `set -e`,
+# so an rm that fails (a `uchg` flag, a read-only mount) would abort having already
+# withdrawn: a bundle still on disk, still runnable, and permanently unable to post a
+# notification. And in the window between the two, the bundle is still there for any
+# LaunchServices rescan to re-register, restoring exactly the record being removed. Dying
+# after the rm instead leaves a stale record, which is no worse than never having run.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [ -d "$APP_PATH" ]; then
   rm -rf "$APP_PATH"
   echo "==> removed $APP_PATH"
+  case "$APP_PATH" in
+    /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;;
+    *)
+      if [ -x "$LSREGISTER" ]; then
+        "$LSREGISTER" -u "$APP_PATH" >/dev/null 2>&1 || true
+        echo "==> withdrew its LaunchServices record"
+      fi
+      ;;
+  esac
 else
   echo "==> no launcher bundle at $APP_PATH"
 fi

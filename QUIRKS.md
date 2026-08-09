@@ -675,7 +675,7 @@ board document: block text, answer choices, notes, block ids.
 board's shape, so the most natural "a board with a stage on it" fixture —
 `createBoard({ blocks: [{ kind: 'html', html: MOCK }] })` — no longer renders a stage in
 a column. It renders the artifact at viewport size with no kicker, and therefore with no
-`.comment-btn` and no `.expand-btn` at all (entry 43), and with the send bar hidden.
+`.comment-btn` and no `.expand-btn` at all, and with the send bar hidden.
 
 That is what it looked like when the rule landed: eleven checks across
 `test/check-stage-lens.mjs` and `test/check-stage-isolation.mjs` failed at
@@ -992,6 +992,34 @@ by bundle id and picks whichever record it likes, so the symptom is macOS raisin
 *"claude-board.app is damaged and can't be opened"* over and over while the real install is
 fine and the board is up and serving. `install.sh` now skips registration for a bundle
 staged under `/tmp` or `/var/folders`, and `test/check-install.mjs` asserts it.
+`uninstall.sh` now withdraws the record after removing the bundle — after, because under
+`set -e` an rm that fails would otherwise abort with the record already gone, leaving a
+runnable bundle that can never notify, and because the gap between a withdrawal and a
+still-present bundle is a window for a rescan to re-register it. A second check in the same
+file pins that order and asserts the two scripts' temp-root skip lists have not drifted.
+
+**`lsregister -f` is not the only way a record appears, and the dialog has a second, more
+direct cause.** Exec'ing a binary from inside a `.app` makes macOS evaluate that bundle: no
+`lsregister` call is involved, the bundle is registered anyway and forever, the process is
+SIGKILLed if the binary is not validly signed, and *"X.app is damaged and can't be opened"*
+goes on screen right then — Notification Center never enters into it. So a test that merely
+builds a bundle-shaped path in a temp dir and runs something out of it raises that dialog
+under the real install's name on every run. `test/check-stranded.mjs` did exactly this, to
+get an executable path longer than `MAXCOMLEN` for the `ps -o etime=,comm=` assertion; it
+now uses a plain deep directory. Two things to know if you touch that setup:
+
+- The dialog names the BUNDLE, so it is indistinguishable from a problem with the real
+  install. The tell is that it appears while a check suite is running and the board is fine.
+- `/bin/sleep` and friends are platform binaries whose signature is only valid on the SIP
+  volume: a copy is SIGKILLed on exec no matter where it lands. The bundle shape had been
+  masking that, since Gatekeeper's path is a different one. Copy `process.execPath` instead
+  when a check needs a throwaway long-lived executable.
+- `test/check-notify.mjs` cannot take that way out: `importFromFakeBundle` stages a real
+  `<name>.app` because `notifyBoundary` spawning the bundle executable is the behaviour
+  under test, and one of those is named `claude-board.app` exactly. It withdraws every
+  bundle it staged before deleting its temp dir. **A new check that stages a bundle owes
+  the same teardown** — measured with `lsregister -dump | grep -c 'claude-board.*\.app'`
+  before and after the file runs, which is the only way any of this is visible.
 
 Cleaning up after this, on macOS 26:
 

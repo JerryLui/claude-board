@@ -9,7 +9,7 @@
 // real interpreter.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -461,6 +461,21 @@ process.exit(0);
     assert.deepEqual(offenders, [], 'no tracked file may carry an audio extension');
   });
 
+  // Withdraw every fake bundle this file staged before the directory goes. `notifyBoundary`
+  // has to SPAWN the bundle executable for these checks to prove anything, and exec'ing out
+  // of a `.app` is itself a permanent LaunchServices registration -- no `lsregister -f`
+  // anywhere, and `install.sh`'s temp-root guard cannot help, because install.sh never ran.
+  // Left alone these accumulate one dead record per suite run under the real install's own
+  // bundle name, which is macOS raising "claude-board.app is damaged and can't be opened"
+  // on a machine whose install is fine (QUIRKS.md, "`lsregister` records are permanent").
+  // Best-effort and never fatal: a machine where lsregister has moved just keeps the
+  // records, which is where this started, not a worse place.
+  const lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
+  if (existsSync(lsregister)) {
+    for (const staged of readdirSync(workDir).filter(n => n.endsWith('.app'))) {
+      spawnSync(lsregister, ['-u', path.join(workDir, staged)], { timeout: 10_000 });
+    }
+  }
   rmSync(workDir, { recursive: true, force: true });
 
   if (failures) {

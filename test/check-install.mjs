@@ -587,6 +587,45 @@ async function main() {
     );
   });
 
+  await check('uninstall.sh withdraws the LaunchServices record, and skips the same temp roots', async () => {
+    // The other end of the same trap. A bundle removed from disk with its record left
+    // behind is a live bundle id pointing at nothing, which is the "damaged" dialog
+    // arriving weeks after an uninstall. Asserted on the SOURCE rather than behaviourally:
+    // this suite only ever uninstalls from a temp root, where by the check above nothing
+    // was registered, so there is no record here whose disappearance could be observed.
+    // Comment lines are stripped first: this file's header prose quotes both literals
+    // while explaining them, so a match anywhere in the source would pass with the call
+    // itself deleted.
+    const code = src => src.split('\n').filter(l => !l.trimStart().startsWith('#')).join('\n');
+    const uninstallCode = code(readFileSync(uninstallScript, 'utf8'));
+    const withdraw = uninstallCode.indexOf('"$LSREGISTER" -u "$APP_PATH"');
+    const remove = uninstallCode.indexOf('rm -rf "$APP_PATH"');
+    assert.ok(withdraw !== -1, 'uninstall.sh must withdraw the record it is deleting the bundle for');
+    assert.ok(remove !== -1, 'setup sanity: the rm this is ordered against must still be here');
+    assert.ok(
+      withdraw > remove,
+      'and AFTER the rm: under `set -e` an rm that fails would otherwise abort with the record '
+      + 'already gone, leaving a runnable bundle that can never notify (see uninstall.sh step 1b)',
+    );
+    // The skip list is duplicated across the two scripts by necessity (neither sources the
+    // other), so drift is the failure mode: a root install.sh refuses to register but
+    // uninstall.sh happily unregisters is harmless, the reverse is the bug above returning.
+    //
+    // `[^)]*` rather than `.*`: greedy would swallow an arm body containing a paren. And
+    // each side is asserted to have MATCHED before they are compared -- `?.[0]` yields
+    // undefined on a miss, so an equality alone passes vacuously the moment either line is
+    // reformatted, which is precisely when this check is supposed to fire.
+    const roots = src => src.match(/^\s*(\/tmp\/\*\|[^)]*)\)/m)?.[1];
+    const uninstallRoots = roots(readFileSync(uninstallScript, 'utf8'));
+    const installRoots = roots(readFileSync(installScript, 'utf8'));
+    assert.ok(uninstallRoots, 'uninstall.sh must still carry a temp-root skip list this can read');
+    assert.ok(installRoots, 'install.sh must still carry a temp-root skip list this can read');
+    assert.equal(
+      uninstallRoots, installRoots,
+      'the temp-root skip lists in install.sh and uninstall.sh have drifted apart',
+    );
+  });
+
   await check('the bundle carries a byte-identical copy of bin/daemon.mjs and src/, staged before signing', async () => {
     // The payload half of the hole this task closes: bin/daemon.mjs and everything under
     // src/ used to live only in the clone, outside the signature and outside the rebuild

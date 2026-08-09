@@ -1048,11 +1048,34 @@ async function layerOne() {
     // path was inert for the one case it exists for. Asserted against a path of that
     // length rather than against this process's own, which on a short-path install would
     // pass either way and prove nothing.
-    const longExec = path.join(workDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
+    // Two things about this setup are load-bearing, and both were wrong before.
+    //
+    // The path is NOT shaped `claude-board.app/Contents/MacOS/claude-board`, which is what
+    // it used to be. Exec'ing an unsigned binary from inside a bundle makes macOS evaluate
+    // that bundle: it SIGKILLs the process, registers the bundle with LaunchServices
+    // permanently, and puts "claude-board.app is damaged and can't be opened" on screen --
+    // under the real install's name, from a suite run, with the real install perfectly
+    // fine (QUIRKS.md, "`lsregister` records are permanent"). Only the LENGTH matters
+    // here, so this mirrors the real APP_EXEC's depth with no bundle anywhere in it.
+    //
+    // And the copied binary is NODE, not `/bin/sleep`. `/bin/sleep` is a platform binary
+    // whose signature is only valid on the SIP volume, so a copy of it is SIGKILLed on
+    // exec wherever it lands -- the bundle shape was what had been suppressing that, by
+    // sending it down Gatekeeper's path instead. `process.execPath` is ordinary signed
+    // code that survives being copied, and is the one binary certain to exist here.
+    // ponytail: that copy is ~120MB per run of this file, against ~150KB before. The
+    // ceiling is one temp-dir write on a suite that already boots daemons; if it ever
+    // matters, compile a two-line C sleeper at check time instead.
+    const longExec = path.join(workDir, 'launcher-exec-path-over-maxcomlen', 'claude-board');
     mkdirSync(path.dirname(longExec), { recursive: true });
-    copyFileSync('/bin/sleep', longExec);
+    copyFileSync(process.execPath, longExec);
     assert.ok(longExec.length > 16, 'setup sanity: the path has to exceed MAXCOMLEN to prove anything');
-    const sleeper = spawn(longExec, ['5'], { stdio: 'ignore' });
+    assert.ok(!longExec.includes('.app/'), 'and must NOT be bundle-shaped: exec\'ing out of one raises the damaged dialog');
+    const sleeper = spawn(longExec, ['-e', 'setTimeout(() => {}, 5000)'], { stdio: 'ignore' });
+    // A spawn that fails (noexec TMPDIR, a truncated copy) emits 'error' asynchronously,
+    // and an unhandled one on a ChildProcess throws out of the event loop rather than into
+    // the try below -- taking the whole file down instead of failing this one check.
+    sleeper.on('error', () => {});
     try {
       await new Promise(r => setTimeout(r, 300));
       const both = await execFileAsync('ps', ['-o', 'etime=,comm=', '-p', String(sleeper.pid)]);
