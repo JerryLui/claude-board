@@ -7,12 +7,12 @@
 | 1 | Theme selection is client-side only | 2026-07-30 | accepted |
 | 2 | Comments are deletable only before Send | 2026-07-30 | accepted (see *Smaller decisions*) |
 | 3 | References resolve inside a configured allowlist, not only `cwd` | 2026-07-30 | accepted |
-| 4 | Every command falls back off the board, `/grill` included | 2026-07-31 | accepted |
+| 4 | Every command falls back off the board, `/grill` included | 2026-07-31 | accepted; **narrowed by 55** |
 | 5 | This repo ships the protocol, not its callers | 2026-07-31 | accepted; weakened by 11 |
 | 6 | Commenting is confined to content blocks | 2026-08-01 | accepted; **narrowed by 28** |
 | 7 | An `html` block may name a file, but only a whole one | 2026-08-04 | accepted |
 | 8 | The daemon owns the pomodoro clock | 2026-08-04 | accepted |
-| 9 | No menu bar item — the bundle's signature is load-bearing | 2026-08-04 | accepted |
+| 9 | No menu bar item — the bundle's signature is load-bearing | 2026-08-04 | accepted; **narrowed by 57** |
 | 10 | The daemon serves a rendered file, it does not render one | 2026-08-04 | **superseded by 38** |
 | 11 | The repo ships one caller-facing file: the manual | 2026-08-04 | accepted; weakens 5 |
 | 12 | The mark is amber | 2026-08-04 | accepted; **inversion half superseded by 30** |
@@ -22,7 +22,7 @@
 | 16 | The index search box filters sessions; it does not search inside them | 2026-08-04 | accepted (see *Smaller decisions*) |
 | 17 | The pomodoro switch may start a timer, so the cookie may call `ensure` | 2026-08-04 | accepted (see *Smaller decisions*) |
 | 18 | The boundary cue is played, not attached to the notification | 2026-08-05 | **superseded by 20** |
-| 19 | The pomodoro notification is posted by the bundle, not by osascript | 2026-08-05 | accepted |
+| 19 | The pomodoro notification is posted by the bundle, not by osascript | 2026-08-05 | accepted; **narrowed by 56** |
 | 20 | The cue is a bare name, so macOS owns the cue | 2026-08-05 | accepted; supersedes 18 |
 | 21 | The per-stage comment hint is deleted | 2026-08-05 | accepted (see *Smaller decisions*); **narrowed by 48** |
 | 22 | The stage lens may record a pick | 2026-08-05 | accepted |
@@ -105,7 +105,7 @@ in a line rather than argued at length.
 **Context:** confining every reference to the board's `cwd` meant a session could never render the skill or command file it was discussing. **Decision:** references resolve under `cwd` or `CLAUDE_BOARD_REF_ROOTS`, defaulted in `install.sh` so that running the installer is the consent event. **Consequences:** widens the corpus reachable by anyone holding the session cookie, and a hard link into a root stays undefended by design (SECURITY.md).
 
 ## 4. Every command falls back off the board, `/grill` included — 2026-07-31
-**Status:** accepted
+**Status:** accepted; narrowed by 55
 **Context:** the shim refused a non-interactive session by design, which made every migrated command unusable headless. **Decision:** every command carries a non-board path and announces taking it, on three triggers — the daemon is unreachable, the session is headless, or no tab opens. **Consequences:** a broken board can go unnoticed behind a degraded path that keeps working, and `/grill` alone loses its artifact.
 
 ## 5. This repo ships the protocol, not its callers — 2026-07-31
@@ -125,7 +125,7 @@ in a line rather than argued at length.
 **Context:** entry 1 put preferences in the browser and that held for every setting since, but a timer you lose by closing a tab is not a timer. **Decision:** the daemon persists the interval's absolute deadline, the cycle counter and the durations; the browser only renders a countdown from that deadline. **Consequences:** entry 1's principle now needs its boundary stated — a theme is a per-reader preference, a pomodoro is one fact about the human.
 
 ## 9. No menu bar item — the bundle's signature is load-bearing — 2026-08-04
-**Status:** accepted
+**Status:** accepted; narrowed by 57
 **Context:** a menu bar countdown looks nearly free in an always-on tool that already ships a macOS app bundle. **Decision:** no `NSStatusItem` and no AppKit in `bin/launcher.c`; the pomodoro surfaces are a boundary notification and an index widget. **Consequences:** the always-visible glance is given up rather than re-sign gratuitously and risk the TCC Documents grant; a second dedicated bundle is the shape to revisit.
 
 ## 10. The daemon serves a rendered file, it does not render one — 2026-08-04
@@ -157,7 +157,7 @@ in a line rather than argued at length.
 **Context:** `UNNotificationSound soundNamed:` resolves against the bundle's own Resources, so a per-phase cue would have collapsed to one generic sound on the bundled install. **Decision:** the daemon plays the cue itself with `afplay /System/Library/Sounds/<Name>.aiff` and posts every notification silent on both paths.
 
 ## 19. The pomodoro notification is posted by the bundle, not by osascript — 2026-08-05
-**Status:** accepted
+**Status:** accepted; narrowed by 56
 **Context:** a notification's name, icon and System Settings row all come from the posting process's bundle, so `osascript` gave the pomodoro Script Editor's identity. **Decision:** `bin/notify.m` compiles into the launcher, which gains a `--notify <phase>` mode; `osascript` stays only for the bundle-less install. **Consequences:** the reader can set Alerts on claude-board's own row, paid for with a launcher that reads argv and one more permission prompt at install time.
 
 ## 20. The cue is a bare name, so macOS owns the cue — 2026-08-05
@@ -246,15 +246,16 @@ in a line rather than argued at length.
 
 ## 56. The launcher may compose a notification body, behind a filter — 2026-08-09
 **Status:** accepted; narrows 19
-**Context:** entry 19's launcher takes argv only to select a row of a compiled-in table, deliberately, because it holds the reader's Documents grant and the plist that spawns it is user-writable; a banner that cannot name which project wants you is close to useless once more than one session runs. **Decision:** the launcher gains one format slot, filled only by an argument passing a strict name pattern in C, the same shape `is_safe_cue_name` already applies to a cue; an argument that fails the pattern selects the unnamed sentence instead of being rejected. **Consequences:** "no byte of argv reaches the screen" is given up and replaced by "no byte reaches the screen unfiltered", so the pattern is now load-bearing and belongs with the cue filter in review; a project name outside it degrades silently rather than failing loudly.
+**Context:** entry 19's launcher lets argv select a row of a compiled-in table and name a sound, but never supply a word that is shown, deliberately, because it holds the reader's Documents grant and the plist that spawns it is user-writable; a banner that cannot name which project wants you is close to useless once more than one session runs. **Decision:** the launcher gains one format slot, filled only by an argument passing a strict name pattern in C, the same shape `is_safe_cue_name` already applies to a cue; an argument that fails the pattern selects the unnamed sentence instead of being rejected. **Consequences:** "no byte of argv reaches the screen" is given up and replaced by "no byte reaches the screen unfiltered", so the pattern is now load-bearing and belongs with the cue filter in review; a project name outside it degrades silently rather than failing loudly.
 
 ## 57. The banner opens the board it names — 2026-08-09
 **Status:** accepted; narrows 9
-**Context:** a banner that cannot be clicked can only say "go look", leaving the reviewer to find a board the banner is forbidden from linking; the posting binary must be the bundle's own executable, so no separate helper can serve the click. **Decision:** the notify mode registers an action category and a delegate and stays alive to serve one click, opening a URL that must match a board URL pattern checked in C; it exits when the board gains a watcher, when the round stops being awaited, or at the wait's deadline, whichever comes first. **Consequences:** a second short-lived process now exists per stranded round rather than per boundary, so it must handle the signals the fire-and-exit mode never installed, and the clone install keeps a banner it cannot click.
+**Context:** a banner that cannot be clicked can only say "go look", leaving the reviewer to find a board the banner is forbidden from linking; the posting binary must be the bundle's own executable, so no separate helper can serve the click. **Decision:** the notify mode registers an action category and a delegate and stays alive to serve one click, opening a plain board URL that must match a board URL pattern checked in C, and letting the browser's own long-lived session authorize it rather than carrying a credential in argv; the daemon owns it and kills it when the reviewer returns or the round is answered, with the round's deadline as the child's own backstop, because a lapsing wait fires no event a child could wait for. **Consequences:** a second process now exists per stranded board rather than per boundary and lives for minutes rather than seconds, so it must handle the signals the fire-and-exit mode never installed; a browser that has never opened a board lands on the existing refusal page; and the clone install keeps a banner it cannot click.
 
 ## 58. One notifier for a round, and it is the daemon's — 2026-08-09
 **Status:** accepted; widens 55
-**Context:** entry 55 gave the daemon a banner for a round nobody has a tab on, which left two implementations of one idea: the page notifying when its own tab is hidden, the daemon notifying when there is no tab, split on an accident of where the code can run rather than on anything a reviewer would recognise. The browser half also carries a permission grant that is per origin and per Chrome profile, so `localhost`, `127.0.0.1` and `board.localhost` are three separate answers and a denied prompt is unrecoverable in place. **Decision:** `notifyRound` and its permission request are deleted; the daemon raises every round notification, and the board tab reports whether it is Attended so the daemon can tell "you are looking at this" from "a tab exists". The favicon numeral stays, being a mark rather than a notification, and the title names the kind of thing that happened, `Board` beside the existing `Pomodoro`, with the body carrying the detail. **Consequences:** one notification identity, one on/off control and one System Settings row for the whole product, paid for with a new report from page to daemon, with the opened URL having to name the round so a click still lands where the deleted notification landed, and with the title becoming a per-row value rather than the single constant both sides compile in today.
+**Context:** entry 55 gave the daemon a banner for a round nobody has a tab on, which left two implementations of one idea: the page notifying when its own tab is hidden, the daemon notifying when there is no tab, split on an accident of where the code can run rather than on anything a reviewer would recognise. The browser half also carries a permission grant that is per origin and per Chrome profile, so `localhost`, `127.0.0.1` and `board.localhost` are three separate answers and a denied prompt is unrecoverable in place. **Decision:** `notifyRound` and its permission request are deleted; the daemon raises every round notification, and the board tab reports whether it is Attended so the daemon can tell "you are looking at this" from "a tab exists". The favicon numeral stays, being a mark rather than a notification, and the title names the kind of thing that happened, `Board` beside the existing `Pomodoro`, with the body carrying the detail. **Consequences:** one notification identity, one on/off control and one System Settings row for the whole product, paid for with a new report from page to daemon, with the opened URL having to name the round so a click still lands where the deleted notification landed, and with the title becoming a per-row value rather than the constant each path compiles in separately today.
+
 ## 59. The board clears its own chrome band, the artifact does not — 2026-08-09
 **Status:** accepted; narrows 40
 **Context:** entry 40's floating header made every artifact responsible for ~96px of top padding, a number stated only as prose in `skills/claude-board/SKILL.md` against a header whose real height moves with the title's wrap and the viewport's width — so an artifact that padded nothing lost its own opening, silently, and nothing warned anyone. **Decision:** the parent reports its chrome band to the stage over the existing `stageAgentScript` channel and the stage tops its own `body` padding up to it, top and bottom, padding only and never a background. **Consequences:** the ~96px paragraph is deleted rather than corrected, an artifact that already pads keeps its own larger value, and the parent owes a fresh report on resize as well as at first paint.
