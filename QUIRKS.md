@@ -10,6 +10,7 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 - [Shell, C and the filesystem](#shell-c-and-the-filesystem)
 - [Worktrees, the shared checkout, and two files with the same tail](#worktrees-the-shared-checkout-and-two-files-with-the-same-tail)
 - [Vendoring a CJS-shaped npm package under `"type": "module"`](#vendoring-a-cjs-shaped-npm-package-under-type-module)
+- [Shapes the page-board stage is pinned to](#shapes-the-page-board-stage-is-pinned-to)
 
 ---
 
@@ -1418,3 +1419,28 @@ just ones with their own timeout flag. Background-and-poll (`run_in_background`
 + waiting) works too but costs a full round trip per attempt; `perl -e 'alarm
 N; exec @ARGV' node ...` gets a bounded answer synchronously, which is what
 bisecting "how many reps until this blows up" actually wants.
+
+---
+
+## Shapes the page-board stage is pinned to
+
+Three constraints that look arbitrary at the call site. Each was settled deliberately; none
+is load-bearing enough for `.agents/adr/`, and all three break silently if changed.
+
+### The stage is a constant `100vh` box, not a box that grows to its content
+
+The rendered templates use `position: sticky` and their own full-viewport `<dialog>`, neither of
+which survives a frame sized to its content. So a page board's stage is a constant `100vh` box
+that scrolls internally. Sizing it to the document breaks the artifact's own chrome, not the board's.
+
+### `handleStageHeight` has a floor as well as a cap
+
+The floor is the 320px placeholder, beside the existing 600px cap. Without it a stage that sizes
+itself from the viewport reports its collapsed height on first paint and locks its card there.
+
+### The mermaid CDN fallback is pinned to the version the board CSP names
+
+The renderer templates pin it, and keep the vendored `assets/` copy — that copy is what answers
+when a page is opened from Finder rather than through a board. Bumping one without the other
+gives a page that renders in exactly one of the two places. The templates live in the renderer
+skills under `~/.claude/skills`, outside this repo; only the CSP pin is here.

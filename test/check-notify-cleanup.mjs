@@ -102,10 +102,11 @@ check('criterion 21: the browser notification API appears nowhere in shipped cod
 });
 
 // Criterion 25 (SPEC_STRANDED.md): "No document describes a browser notification, its
-// permission grant, or a tab that reopens itself as current behaviour." ADR.md is
-// explicitly exempt -- it is the record of why they went, so it is SUPPOSED to still
-// name them -- and is excluded from DOC_FILES below rather than merely left unwalked,
-// so a rename of this list can never silently start scanning it.
+// permission grant, or a tab that reopens itself as current behaviour." The decision
+// record is explicitly exempt -- it is the record of why they went, so it is SUPPOSED to
+// still name them. Its entries live in `.agents/adr/`, which nothing below walks, and its
+// index `ADR.md` is excluded from DOC_FILES rather than merely left unwalked, so a rename
+// of this list can never silently start scanning either.
 //
 // This is deliberately narrower than a prose sweep for words like "notification" or
 // "permission" on their own: both remain completely legitimate throughout these docs for

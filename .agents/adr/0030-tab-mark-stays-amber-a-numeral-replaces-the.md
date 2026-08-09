@@ -1,0 +1,5 @@
+# 30. The tab mark stays amber; a numeral replaces the inverted tile
+
+2026-08-06
+
+**Context:** a favicon gets no CSS and no useful `prefers-color-scheme`, and `--accent`'s two theme values sit too far apart for one tile to serve both tab strips, so the mark takes `DARK['--warning']` — the one hue this palette carries at nearly the same value in either theme. Inverting that tile to signal pending then made the tab stop looking like claude-board at exactly the moment it mattered, and showed a reviewer owing three answers the same pip as one owing one. **Decision:** pending keeps the page's own amber tile and draws a bold ink numeral onto it with canvas `fillText`, stepping 22/18/17px for one digit, two digits and the `9+` overflow. **Consequences:** ink mass rather than tile colour is the whole signal, and a canvas or font failure returns null, so the tab keeps the mark it already had; the brand permanently shares a hue with a state colour, so a `--warning` retune moves it silently, and the explicit `DARK` naming must survive since light's `#805300` renders as mud. Why not an SVG data URI: DESIGN.md.
