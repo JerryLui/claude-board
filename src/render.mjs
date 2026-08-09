@@ -30,6 +30,7 @@ import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
+import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import {
   roundPageLabel, isPageRound,
   roundIsAwaitedOpen, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE,
@@ -701,29 +702,537 @@ function sourceLabel(source) {
   if (!source) return '';
   let label = source.path;
   if (source.section) label += `#${source.section}`;
-  if (source.lines) label += `:${source.lines[0]}-${source.lines[1]}`;
+  // Integers only, same trust boundary as gutterStart's (see its comment): `source`
+  // is the caller's bytes verbatim, and a ref carrying BOTH a section and a `lines`
+  // never had the range validated by src/resolve.mjs -- nor applied. Escaping alone
+  // kept this inert but left the kicker claiming a line range that was never sliced.
+  if (source.lines && Number.isInteger(source.lines[0]) && Number.isInteger(source.lines[1])) {
+    label += `:${source.lines[0]}-${source.lines[1]}`;
+  }
   return label;
 }
 
+// --- syntax highlighting (SPEC_RENDERING.md ticket 02, ADR.md entries 62-63) ------
+//
+// Runs server-side at POST time (renderCodeBlock is called from board.mjs's render
+// path exactly like every other block), so the served page carries only the emitted
+// `tok-*` spans, never the Prism engine itself, and highlighting emits classes and
+// NEVER an inline colour -- that is the whole trick that lets the theme toggle
+// re-colour an already-rendered block, archived boards included, for free (AC 6):
+// the class names are fixed, and it is the stylesheet's `.tok-keyword { color:
+// var(--code-keyword) }` that changes meaning when `data-theme` flips, not anything
+// this module writes per block.
+//
+// Prism's own token vocabulary is much larger than the six-hue palette ADR 63
+// commits to (keyword, string, function, number, comment, base) -- `boolean`,
+// `builtin`, `regex`, `class-name`, `tag`, `property`, `operator`, `punctuation`
+// and a few dozen more all come out of the vendored grammars. TOKEN_CLASS below is
+// the one place that collapses Prism's types onto our five *coloured* classes
+// (anything absent from this table falls through with no class at all, and
+// inherits `.code-block pre code`'s own `--code-base` -- the sixth hue, the
+// default/plain colour, needs no class of its own for exactly that reason).
+// Naming the classes here, as plain string literals, is also what satisfies
+// test/check-pure.mjs's orphan-class scan honestly (QUIRKS.md "the stylesheet and
+// the markup are checked against each other"): that scan only reads six files for
+// "a class the stylesheet rules on is a class something emits", and none of them is
+// a vendored grammar file, so a class minted only inside src/vendor/prism/ could
+// never satisfy it truthfully.
+const TOKEN_CLASS = {
+  keyword: 'tok-keyword', builtin: 'tok-keyword', boolean: 'tok-keyword', important: 'tok-keyword',
+  string: 'tok-string', char: 'tok-string', 'template-string': 'tok-string', 'attr-value': 'tok-string', regex: 'tok-string',
+  function: 'tok-function', 'function-variable': 'tok-function', method: 'tok-function',
+  number: 'tok-number',
+  comment: 'tok-comment', prolog: 'tok-comment', doctype: 'tok-comment', cdata: 'tok-comment',
+  // SPEC_RENDERING.md ticket 05, ADR.md entry 64: the vendored 'diff' grammar's own
+  // token vocabulary (coord/deleted-sign/inserted-sign/unchanged/line/prefix, see
+  // src/vendor/prism/components/prism-diff.cjs) shares NONE of the names above --
+  // that is what makes "a diff row never carries a six-hue tok-* class" true by
+  // construction rather than by convention: nothing here maps a diff token onto
+  // tok-keyword/tok-string/tok-function/tok-number/tok-comment, so flattenTokens
+  // below can never produce one for diff text. 'coord' (a '---'/'+++' file header or
+  // an '@@ ... @@' hunk header) is the one diff token type given a class at all --
+  // 'diff-meta', never a 'tok-' name, styled `color: var(--muted); font-style:
+  // italic` (src/styles.mjs) -- ADR 64's "comments go --muted italic" read onto a
+  // diff's own structural lines, which are the closest thing a diff has to a
+  // comment: present, but not a line either file actually contains.
+  coord: 'diff-meta',
+};
+
+/** A Prism token's own `type` is only half of how a grammar names its colour: the
+ * other half is `alias`, which upstream's own CSS themes treat exactly like a type
+ * (Prism emits `class="token <type> <alias...>"` and every theme rule matches on
+ * either). Both have to be consulted, or a grammar that names its colours entirely
+ * through aliases highlights nothing at all.
+ *
+ * `markdown` is that grammar, and was the measured symptom: NOT ONE of its own
+ * top-level type names (`title`, `bold`, `italic`, `list`, `url`, `code-snippet`,
+ * `blockquote`) appears in TOKEN_CLASS, while `title` carries `alias: 'important'`
+ * and `code-snippet` carries `alias: ['code', 'keyword']` -- both of which do. So a
+ * `lang: 'markdown'` block emitted zero `tok-*` spans and was indistinguishable from
+ * the no-grammar fallback, against AC 1's promise for any lang with a vendored
+ * grammar (AC 2 required markdown to have one).
+ *
+ * `alias` is a string OR an array of strings, both forms present in the vendored
+ * source -- hence the normalising loop rather than a single lookup. `type` still
+ * wins when it is itself in the table: an alias is the grammar's secondary name for
+ * a token, and the primary one is the more specific answer where both exist.
+ *
+ * This deliberately cannot resurrect a six-hue class on a diff row (ADR 64): the
+ * diff grammar's aliases are `deleted`/`inserted`/`unchanged`/`diff`/`bold`, none of
+ * which is in TOKEN_CLASS either, so "a diff row never carries a tok-* class" stays
+ * true by construction across this widening. */
+function tokenClass(t) {
+  const own = TOKEN_CLASS[t.type];
+  if (own) return own;
+  const aliases = Array.isArray(t.alias) ? t.alias : (t.alias ? [t.alias] : []);
+  for (const a of aliases) {
+    if (TOKEN_CLASS[a]) return TOKEN_CLASS[a];
+  }
+  return undefined;
+}
+
+/** Walk a Prism.tokenize() result -- a flat array of plain strings and `Token`
+ * objects whose own `.content` is either a string or a further array of the same
+ * shape (nested grammars: a `${...}` interpolation inside a template string, a
+ * regex's own sub-highlighting, ...) -- into a flat sequence of `[text, class]`
+ * leaf pairs, in source order. `cls` threads the nearest COLOURED ancestor down
+ * to any uncoloured descendant (an inner token type absent from TOKEN_CLASS keeps
+ * reading as whatever coloured token it sits inside, rather than snapping back to
+ * plain base the moment nesting starts) and is overridden the instant a nested
+ * token's own type (or alias -- see tokenClass above) IS in the table.
+ *
+ * Concatenating every leaf's text back together, in order, reproduces the input
+ * text byte for byte -- Prism's own contract for what tokenize() returns -- which
+ * is what lets highlightRows below rebuild exact per-line text out of a token tree
+ * that has no idea where the line breaks are. */
+function flattenTokens(tokens, cls, out) {
+  for (const t of tokens) {
+    if (typeof t === 'string') {
+      if (t) out.push([t, cls]);
+      continue;
+    }
+    const c = tokenClass(t) || cls;
+    if (Array.isArray(t.content)) flattenTokens(t.content, c, out);
+    else if (typeof t.content === 'string') { if (t.content) out.push([t.content, c]); }
+    else flattenTokens([t.content], c, out);
+  }
+}
+
+/** The size above which a code block is rendered plain instead of tokenized.
+ *
+ * SPEC_RENDERING.md's Decisions section says "No size cutoff on highlighting.
+ * Measured: Prism tokenizes 512 KB -- the maximum a reference can be
+ * (MAX_REF_BYTES) -- in 15 ms." That measurement is real and reproduces here (512KB
+ * of this repo's own source: 20 ms). It is also measured on BENIGN input, and the
+ * decision does not survive an adversarial one. Prism's grammars are ordinary
+ * backtracking regexes, and several are quadratic on content that merely fails to
+ * terminate:
+ *
+ *     typescript/tsx/jsx/javascript, `'/' + 'a'.repeat(n)`   -- an unterminated
+ *       regex literal, i.e. any truncated or minified .js:
+ *       4KB 73ms · 8KB 286ms · 16KB 1178ms · 32KB 3.2s · 64KB 12.7s
+ *     css, `'@media ('.repeat(n)`:      16KB 144ms · 64KB 2.2s · 128KB 9.0s
+ *     markup/html, `'<a b="'.repeat(n)`: 16KB 96ms · 64KB 1.5s · 128KB 6.1s
+ *
+ * A clean 4x per doubling in every case. MAX_REF_BYTES is 512 KiB, so the
+ * unbounded worst case was minutes: a single 256 KiB block measured 256.9 SECONDS
+ * through renderBoardPage. And the cost is not paid once at post time -- nothing
+ * caches the highlighted markup, so it is re-paid on every renderBoardPage, every
+ * SSE fragment (src/server.mjs) and every anchored-comment resolve (src/board.mjs's
+ * sectionRoot pass), on a single-threaded daemon where that stops health, every
+ * other board and every open stream. Same hazard class as the "persistent" one
+ * test/check-pure.mjs's N2 section already pins for the markdown path -- which is
+ * exactly why src/markdown.mjs overrides marked's own quadratic tokenizers; the
+ * Prism path simply had neither a bound nor an N2 check.
+ *
+ * 8192 chosen from the table above, not from taste: it is the largest power of two
+ * whose WORST measured adversarial cost (286 ms, typescript) stays in the same
+ * order as a slow request rather than a hang, where the next step up is 1.2 s and
+ * the one after 3.2 s -- each of them repeated on every render of that board. What
+ * the cutoff costs is bounded and visible: a block over ~8 KB renders through the
+ * plain-escaped branch highlightRows already has for an unvendored lang (AC 1),
+ * keeping its gutter, its diff fill and its exact bytes -- it just loses colour.
+ * Compared against length, not byte length, because the regex engine's work scales
+ * with UTF-16 code units.
+ *
+ * Ceiling worth naming: this bounds the request thread by giving up a feature, not
+ * by making the tokenizer linear. The upgrade path, if large blocks ever need
+ * colour, is to move tokenization off the request thread (a worker, or a cache
+ * keyed on the block's existing `sha`) -- at which point the cutoff can rise or go. */
+const MAX_HIGHLIGHT_CHARS = 8192;
+
+/** Split one code block's text into one HTML string per physical line -- no
+ * `grammar` (AC 1's fallback: `lang` absent, or present but not vendored --
+ * grammarFor never throws, just returns undefined) renders every line plain and
+ * escaped, exactly as today; a real grammar wraps each recognised run in a
+ * `tok-*` span per TOKEN_CLASS above.
+ *
+ * The row split happens on the ALREADY-ESCAPED HTML, not on the raw token
+ * stream, specifically so a token that spans a line break (a block comment, a
+ * multi-line template string) gets closed at the end of one row's span and
+ * reopened at the start of the next, rather than emitting one span whose
+ * innerHTML contains a literal newline -- renderCodeBlock below wraps each
+ * returned row in its OWN `<span class="code-row">`, and a highlighting span
+ * that straddled that boundary would leave broken, unbalanced markup (a `</span>`
+ * belonging to one row's wrapper closing a `<span class="tok-comment">` opened in
+ * the row before it). Splitting per leaf run before any wrapping happens keeps
+ * every span self-contained within the one row it is ever wrapped inside. */
+function highlightRows(text, grammar) {
+  const leaves = [];
+  // The one extra condition beside "is there a grammar": over MAX_HIGHLIGHT_CHARS
+  // (see its comment for the measurements) the block takes this same fallback
+  // branch. Same code path, same output shape, so everything built on top of
+  // highlightRows -- the gutter, the diff fill, copy fidelity -- is unaffected.
+  if (grammar && text && text.length <= MAX_HIGHLIGHT_CHARS) flattenTokens(Prism.tokenize(text, grammar), undefined, leaves);
+  else leaves.push([text, undefined]);
+
+  const rows = [];
+  let buf = '';
+  for (const [leafText, cls] of leaves) {
+    const parts = leafText.split('\n');
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i]) buf += cls ? `<span class="${cls}">${escHtml(parts[i])}</span>` : escHtml(parts[i]);
+      if (i < parts.length - 1) { rows.push(buf); buf = ''; }
+    }
+  }
+  rows.push(buf);
+  return rows;
+}
+
 /** A file plus a line range or section, resolved once at post time (see
- * src/resolve.mjs). No syntax highlighting — a
- * hand-rolled cost zero-dependency packaging doesn't buy.
+ * src/resolve.mjs), highlighted (AC 1) and numbered (AC 7) with the file's own
+ * real line numbers.
  *
  * No commentButton/commentArea/pageDomPinLayer, same as renderMarkdownBlock above
- * (ADR.md entry 28). The per-line `<span class="code-line">` wrapping went with
- * them: its only job was to give the generic dom anchor an element per source line
- * to build a step-path to, and a code line is no longer a comment target anywhere.
- * `<pre>` still renders one visual line per source line from the raw text, and
- * copy/paste is now exactly the original bytes rather than the spans stripped. */
+ * (ADR.md entry 28) -- highlighting and the gutter are the only things this ticket
+ * changes; the block still carries no comment affordance of its own.
+ *
+ * The gutter (AC 7, AC 8) is a `data-line` attribute per row plus a stylesheet
+ * `::before { content: attr(data-line) }` (src/styles.mjs's `.code-row`), never a
+ * `<span>` of literal digit characters: generated content is not selectable and
+ * never lands in a copy, which a sibling text node would. Each row is its own
+ * `<span class="code-row">` -- real newline characters sit BETWEEN them, exactly
+ * where they sat in the original text, never inside one -- so selecting and
+ * copying the whole block yields the original bytes back (AC 8): no line-number
+ * digits (they were never text nodes), no injected newlines (none were added,
+ * only the ones already in `block.text`), and no diff signs (this block never
+ * emits any -- ticket 05's diff half owns that).
+ *
+ * Line numbering (the non-diff half of AC 7; ticket 05 owns numbering a diff
+ * row's new/old line) is decided by gutterStart below, which also owns the trust
+ * boundary in front of it: a block resolved from an explicit `source.lines: [from,
+ * to]` range starts counting at `from` -- src/resolve.mjs's sliceLines already
+ * hands back exactly `to - from + 1` lines with no extra trailing blank one added,
+ * so every row here gets its own real gutter number with no ambiguity, a
+ * genuinely blank last line of the range included. A block that carries a
+ * `startLine` (the section case) starts there. Anything else -- a whole-file
+ * reference, a by-value block, a range whose `from` is not an integer -- starts at
+ * line 1 and drops one
+ * trailing empty row -- the artifact of the file's own trailing newline, the same
+ * single-pop convention src/resolve.mjs's fileLines already uses to decide a
+ * file's line COUNT -- while still emitting that trailing newline byte itself
+ * (just outside any row's span, uncounted, exactly as a text editor shows no
+ * phantom blank line number after a file's final newline either). */
 function renderCodeBlock(block) {
   const label = sourceLabel(block.source);
   const kicker = ['Code', block.lang, label].filter(Boolean).map(escHtml).join(' · ');
-  const body = block.error ? resolveErrorNote(block) : `<pre><code>${escHtml(String(block.text ?? ''))}</code></pre>`;
+  const body = block.error ? resolveErrorNote(block) : codeBody(block);
   return `
 <section class="block code-block" data-block-id="${escAttr(block.id)}" data-block-kind="code">
   <div class="block-kicker">${kicker}</div>
   ${body}
 </section>`;
+}
+
+/** The seam ticket 04 (SPEC_RENDERING.md AC 14) hooks markdown into: given a fenced
+ * block's raw text and its `lang` string, tokenize it through the exact same
+ * highlightRows/TOKEN_CLASS a `kind: 'code'` block's body uses and return the
+ * fence's whole `<pre><code>...</code></pre>` markup -- NEVER wrapped in a gutter
+ * span that carries a `data-line` number, unlike codeBody below. A markdown fence
+ * carries no `source.lines`, so there is no "file's real line number" AC 7
+ * promises a `kind: 'code'` block; inventing a fake 1-based count for it would
+ * misrepresent that promise rather than extend it (see src/markdown.mjs's
+ * renderCode for the fuller argument). Dropping the gutter also keeps copy
+ * fidelity trivial here the same way AC 8 keeps it for a real code block: nothing
+ * but the original bytes, `tok-*` span tags, and (diff only, see below) a
+ * fill-only row wrapper ever lands inside `<code>`.
+ *
+ * Ticket 05 widened this for `lang: 'diff'` only: a fenced diff still has no
+ * `source.lines` and therefore still gets no gutter, but the add/remove FILL
+ * (ADR 64) needs nothing but the diff's own hunk headers -- classifyDiffLines
+ * reads those out of `text` directly, no `source.lines` involved -- so a fenced
+ * diff reuses the exact same diffCodeBody row-wrapping this function's `kind:
+ * 'code'` sibling (codeBody, below) uses, just with `gutter: false`: no
+ * `data-line` attribute, no reserved gutter column (`.diff-flat`,
+ * src/styles.mjs), but the same `.diff-add`/`.diff-del` fill class on the same
+ * row. Every OTHER language is untouched -- still the bare `tok-*`-classed join,
+ * inside `<code>`, exactly as before this ticket.
+ *
+ * A small language label (spec contract edit, 2026-08-09: a reader had no way to
+ * tell a bare fence was JSON short of reading its contents, and the standalone
+ * `kind: 'code'` block already names its language in the kicker) is the one piece
+ * of chrome this widens the fence to carry, and only when `lang` names a grammar
+ * this build actually vendored -- `grammarFor(lang)` truthy, the SAME test
+ * highlightRows already makes to decide whether to tokenize at all, so "gets a
+ * label" and "gets colour" are the same condition by construction, not two rules
+ * that could drift. No lang, or a lang with no vendored grammar (an unrecognised
+ * fence tag, or one whose name doesn't match a SUPPORTED_LANGUAGES entry
+ * case-for-case -- grammarFor does no normalising, same as highlightRows), gets no
+ * label and no wrapper at all: the return value is exactly `<pre><code>...` as it
+ * has always been for those two cases, byte for byte.
+ *
+ * The label is generated content, not a text node: `<pre><code>` is left
+ * completely alone (the block chrome rule -- "never inside `<code>`" -- forbids
+ * touching it) and instead an outer `<div class="fence-lang" data-lang="...">`
+ * wraps the whole `<pre>`, with `src/styles.mjs`'s `.fence-lang::before { content:
+ * attr(data-lang) }` painting the name -- same technique AC 7's gutter already
+ * uses for its line numbers (QUIRKS.md), and for the same reason: `content:` text
+ * is never a selectable/copyable DOM node, so wrapping a fence in this div cannot
+ * change what `<code>`'s own textContent is, which is what AC 8's copy-fidelity
+ * promise actually rests on. The label sits on the WRAPPER rather than directly on
+ * `<pre>` itself specifically because `.md-content pre` is `overflow-x: auto`
+ * (long lines scroll, per spec, Out of Scope) -- an absolutely-positioned
+ * pseudo-element whose containing block IS the scrolling element scrolls out of
+ * view with it; one level up, on a plain non-scrolling wrapper, it stays
+ * pinned in the corner regardless of how far the code beneath it has scrolled.
+ * `data-lang` carries `lang` through escAttr: it is the fence's own info string,
+ * caller-supplied file content, landing in a double-quoted HTML attribute.
+ *
+ * src/markdown.mjs cannot import this directly -- src/board.mjs already imports
+ * both `renderBlock` from here and `mdToHtmlAndAnchors` from there (see board.mjs's
+ * own comment on that existing circular edge), so a markdown.mjs -> render.mjs
+ * import would close a second cycle through board.mjs. board.mjs is the one place
+ * already sitting above both modules, so it is the one that wires this function
+ * into mdToHtmlAndAnchors as a plain argument -- dependency injection standing in
+ * for an import edge neither module can carry. That makes board.mjs the only
+ * caller, and TOKEN_CLASS/highlightRows/flattenTokens above the only
+ * tokenize-and-wrap implementation in the tree: a `kind: 'code'` block and a fence
+ * inside markdown both bottom out here. */
+export function highlightFenceHtml(text, lang) {
+  const rows = highlightRows(text, grammarFor(lang));
+  const body = lang === 'diff' ? diffCodeBody(rows, classifyDiffLines(text), { gutter: false }) : rows.join('\n');
+  const pre = `<pre><code>${body}</code></pre>`;
+  // Same vendored-or-not test highlightRows already made above -- see this
+  // function's own comment for why that reuse is deliberate, not incidental.
+  if (!lang || !grammarFor(lang)) return pre;
+  return `<div class="fence-lang" data-lang="${escAttr(lang)}">${pre}</div>`;
+}
+
+/** SPEC_RENDERING.md ticket 05, "A diff reads as a diff" (ADR.md entry 64). AC 7's
+ * diff half: a diff row's gutter number is never `block.source.lines` arithmetic
+ * (that describes a byte range of the .diff FILE ITSELF, if the reference sliced
+ * one -- meaningless as a line number in either file the diff *describes*). It
+ * comes from walking the diff's own `@@ -oldStart,oldCount +newStart,newCount @@`
+ * hunk headers, which is what this function does, independently of highlightRows /
+ * Prism's own tokenization above (Prism's diff grammar groups same-prefix lines
+ * into one token spanning several physical lines and has no idea what a hunk header
+ * even means -- it just recognises 'coord' as *a* line shape. Line numbering needs
+ * the actual arithmetic, not a token type, so it is done here, once, on the raw
+ * text, in lockstep with `text.split('\n')` -- the exact same split highlightRows
+ * performs internally, so index i here and row i there always describe the same
+ * physical line).
+ *
+ * Returns one `{ kind, line }` per physical line of `text`:
+ *   - 'meta', line: null       -- a hunk header, a file header ('---'/'+++'/
+ *                                 'diff --git'/'index ...'), or anything before the
+ *                                 first hunk header is ever seen (a malformed or
+ *                                 header-less diff never leaves this state, so it
+ *                                 degrades to every row reading 'meta' -- no line
+ *                                 number is ever invented, and nothing throws).
+ *   - 'add', line: newLine     -- an added row, numbered in the NEW file (AC 7).
+ *   - 'del', line: oldLine     -- a removed row, numbered in the OLD file -- the
+ *                                 "falling back to the old number" AC 7 asks for:
+ *                                 a removed row has no new-file line at all, so the
+ *                                 old-file number is the only real one it carries.
+ *   - 'context', line: newLine -- an unchanged row. Shown in both files, at
+ *                                 potentially different numbers; the new-file
+ *                                 number is the one convention chosen (matching
+ *                                 'add' above, and the only one this renderer has a
+ *                                 single gutter column for).
+ *
+ * WHAT COUNTS AS A HEADER is decided by hunk state, never by the line's own first
+ * bytes, and that is the whole correctness argument here. A row's '+'/'-' prefix is
+ * prepended to the FILE'S OWN BYTES, so a removed line whose content starts with
+ * '--' arrives as '---...' and an added line starting with '++' arrives as '+++...'
+ * -- indistinguishable, by spelling, from a file header. Testing the spelling first
+ * (which this did) misread both as headers and set BOTH counters to null, so every
+ * following row in the hunk silently lost its gutter number AND its diff-add/
+ * diff-del tint. Trivially reachable: a '---' horizontal rule or YAML front matter
+ * in any .md, a '--' comment in any .sql.
+ *
+ * So the hunk header's own declared counts are consumed instead: '@@ -a,b +c,d @@'
+ * promises exactly `b` old-file lines and `d` new-file lines (a missing count is 1,
+ * git's own default), a '-' row spends one old, a '+' row spends one new, a context
+ * row spends one of each, and the hunk ENDS the moment both are spent. Inside a
+ * hunk every row is content, header-shaped or not; outside one every row is 'meta',
+ * which covers the preamble, '---'/'+++'/'diff --git'/'index', and equally the
+ * extended headers nothing here enumerates (old mode/new mode/similarity index/
+ * rename from-to/Binary files differ) -- they are meta because they are outside a
+ * hunk, not because they were listed. Leaving hunk state at exhaustion is also what
+ * keeps a PLAIN (non-git) multi-file diff correct: it has no 'diff --git' line to
+ * fall back on, so its second file's '---'/'+++' pair can only be recognised as
+ * headers by the first file's hunk already being finished.
+ *
+ * A '\' line ('\ No newline at end of file') is meta before any of that: it is a
+ * line of neither file -- git's note ABOUT the preceding line -- so it takes no
+ * gutter number and spends nothing. It used to fall through to the context branch,
+ * where it took a number of its own and advanced both counters, which pushed every
+ * row after it in the hunk off by one (canonically: the '+three!' of a last-line
+ * edit rendering as line 4 of a three-line file).
+ *
+ * A malformed diff still degrades rather than throwing: counts that overstate the
+ * body leave the hunk open to the end of the text (today's behaviour), and a text
+ * with no '@@' at all never enters a hunk, so every row reads 'meta' and no line
+ * number is ever invented. */
+function classifyDiffLines(text) {
+  const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+  const out = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+  let inHunk = false;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('\\')) {
+      out.push({ kind: 'meta', line: null }); // '\ No newline at end of file'
+      continue;
+    }
+    // Checked ahead of the in-hunk branch so a truncated hunk (declared counts
+    // larger than the body actually delivered) still resyncs at the next real
+    // header. A hunk header can only be confused with content at column 0, and a
+    // diff row's own prefix always occupies that column -- ' @@ ...', '+@@ ...' and
+    // '-@@ ...' all fail this pattern -- so nothing inside a hunk can match it.
+    const hunk = HUNK.exec(line);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[3]);
+      oldLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      newLeft = hunk[4] === undefined ? 1 : Number(hunk[4]);
+      inHunk = oldLeft > 0 || newLeft > 0; // '@@ -0,0 +1,3 @@' (a new file) has an empty old side
+      out.push({ kind: 'meta', line: null });
+      continue;
+    }
+    if (!inHunk) {
+      out.push({ kind: 'meta', line: null }); // preamble, file/extended headers, between hunks
+      continue;
+    }
+    if (line.startsWith('+')) { out.push({ kind: 'add', line: newLine }); newLine += 1; newLeft -= 1; }
+    else if (line.startsWith('-')) { out.push({ kind: 'del', line: oldLine }); oldLine += 1; oldLeft -= 1; }
+    else { out.push({ kind: 'context', line: newLine }); newLine += 1; oldLine += 1; newLeft -= 1; oldLeft -= 1; }
+    if (oldLeft <= 0 && newLeft <= 0) inHunk = false;
+  }
+  return out;
+}
+
+/** Ticket 05's diff half of AC 7/8, built ON highlightRows/codeBody rather than
+ * beside them: `rows` (the highlighted, per-line HTML) and `info` (the structural
+ * kind/line-number per physical line, from classifyDiffLines above) are two
+ * independent passes over the SAME `text.split('\n')`, so they line up index for
+ * index -- row i's markup and info[i]'s classification always describe the same
+ * physical line.
+ *
+ * `diff-add`/`diff-del` on `.code-row` are the ONLY colour this adds -- an
+ * α-0.12 `--good`/`--critical` fill (ADR 64), never a `tok-*` class, which
+ * TOKEN_CLASS's own diff entries (see above) make impossible by construction, not
+ * merely by not calling this function for that. A 'meta'/'context' row gets no
+ * fill class at all.
+ *
+ * `gutter` is the one thing that differs between this function's two callers.
+ * codeBody (below, a `kind: 'code'` diff block) passes the default `true`: it has
+ * real `source.lines`-adjacent hunk-header numbers to give (AC 7), so every row
+ * carries `.code-row`'s full reserved-gutter-column treatment, blank cell and all
+ * on a header row. highlightFenceHtml (above, a markdown diff fence) passes
+ * `false`: a fence has no `source.lines` and never did (ADR 65), so it gets the
+ * FILL (needs only the diff's own hunk headers, nothing file-position-shaped) but
+ * not the gutter -- no `data-line` attribute, and `.diff-flat` (src/styles.mjs)
+ * strips the reserved gutter column's padding so a fenced diff's rows sit flush
+ * left like every other fence, rather than indented for a column that would never
+ * show anything. One row-wrapping function, one shared shape, a boolean is the
+ * whole difference -- not a second implementation. */
+function diffCodeBody(rows, info, { gutter = true } = {}) {
+  return rows.map((row, i) => {
+    const { kind, line } = info[i] || { kind: 'meta', line: null };
+    const classes = ['code-row'];
+    if (!gutter) classes.push('diff-flat');
+    if (kind === 'add') classes.push('diff-add');
+    else if (kind === 'del') classes.push('diff-del');
+    // A header/hunk row (AC 7's "not a source line") gets no `data-line` attribute
+    // at all, rather than an empty one -- `attr(data-line)` on a missing attribute
+    // already renders as '' (a blank gutter cell), so this is the same visible
+    // result with no attribute noise on a header row's markup. A fence (gutter:
+    // false) never gets one either, regardless of `line` -- it has no gutter
+    // column to fill in the first place.
+    const dataLine = gutter && line != null ? ` data-line="${line}"` : '';
+    return `<span class="${classes.join(' ')}"${dataLine}>${row}</span>`;
+  }).join('\n');
+}
+
+/** The gutter's first line number, and the trust boundary in front of it.
+ *
+ * `block.source` is stored VERBATIM by src/board.mjs (`source: raw.source ?? null`),
+ * so everything on it is caller-supplied bytes, not a validated shape -- and
+ * src/resolve.mjs only validates `lines` in the `else if (ref.lines)` arm of an
+ * if/else whose first arm is `ref.section`. A reference carrying BOTH selectors
+ * therefore resolves through the section branch with `lines` never checked and no
+ * `error` set at all: the block looks perfectly healthy, and `source.lines[0]`
+ * arrives here as whatever the caller wrote. It used to be interpolated straight
+ * into `data-line="..."` -- the one value in that template that was not escaped,
+ * where every sibling goes through escAttr/escHtml -- which put live markup on the
+ * page out of an attribute, once per row.
+ *
+ * Hence Number.isInteger, not just escaping. Escaping alone leaves an inert but
+ * nonsense gutter rendered through `::before { content: attr(data-line) }`;
+ * validating alone leaves the next caller that reaches this attribute exposed. A
+ * value that is not an integer is not a line number, so the block is simply not an
+ * explicitly-ranged one and numbers from 1 like any whole-file block.
+ *
+ * `block.startLine` is the section case (a block resolved by `section` has
+ * `source.section` and no `source.lines`, so it used to take the "starts at line 1"
+ * branch and number a section beginning at file line 6 as though it began at 1 -- a
+ * reviewer citing a gutter number was five off). It is read off the BLOCK rather
+ * than off `block.source` deliberately: src/board.mjs builds a code block from an
+ * explicit field list, so a normalised block field cannot be forged by a caller the
+ * way anything under `source` can. src/resolve.mjs does not report it yet -- see
+ * sliceSection's `startIdx`, which already computes it -- so today only a caller of
+ * renderBlock supplies one; the same integer check guards it regardless. */
+function gutterStart(block) {
+  const ranged = block.source && Array.isArray(block.source.lines) && Number.isInteger(block.source.lines[0]);
+  if (ranged) return { start: block.source.lines[0], hasExplicitRange: true };
+  if (Number.isInteger(block.startLine)) return { start: block.startLine, hasExplicitRange: false };
+  return { start: 1, hasExplicitRange: false };
+}
+
+function codeBody(block) {
+  const text = String(block.text ?? '');
+  const rows = highlightRows(text, grammarFor(block.lang));
+  const isDiff = block.lang === 'diff';
+  const info = isDiff ? classifyDiffLines(text) : null;
+
+  // `hasExplicitRange` stays tied to `source.lines` alone: it is src/resolve.mjs's
+  // sliceLines specifically that hands back exactly `to - from + 1` lines with no
+  // trailing blank added, which is what makes suppressing the trailing-newline pop
+  // correct there. A section slice has no such guarantee, so it keeps the ordinary
+  // single-pop convention along with every whole-file and by-value block.
+  const { start: startLine, hasExplicitRange } = gutterStart(block);
+  let trailingNewline = false;
+  if (!hasExplicitRange && rows.length > 1 && rows[rows.length - 1] === '') {
+    rows.pop();
+    if (info) info.pop();
+    trailingNewline = true;
+  }
+
+  let numbered;
+  if (isDiff) {
+    numbered = diffCodeBody(rows, info);
+  } else {
+    numbered = rows.map((row, i) => `<span class="code-row" data-line="${escAttr(startLine + i)}">${row}</span>`).join('\n');
+  }
+
+  // 'code-diff' (AC 5): overrides '.code-block pre code's own --code-base default
+  // by specificity alone (src/styles.mjs) -- syntax colour "drops to --code-ink"
+  // for a diff block specifically, never for an ordinary highlighted one.
+  const codeClass = isDiff ? ' class="code-diff"' : '';
+  return `<pre><code${codeClass}>${numbered}${trailingNewline ? '\n' : ''}</code></pre>`;
 }
 
 // --- design: genuine stage isolation via postMessage -----------------

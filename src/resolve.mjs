@@ -62,7 +62,11 @@ import {
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { slugify } from './markdown.mjs';
+// Heading identity -- which lines are headings, what each one's slug is, and which
+// ordinal a duplicate gets -- is src/markdown.mjs's, whole. This module used to
+// import only `slugify` and re-derive the rest with regexes of its own; see
+// `sliceSection` below for what that cost.
+import { scanHeadings } from './markdown.mjs';
 
 /** Byte cap on one block's content, whether read from disk here or supplied by
  * value (src/board.mjs applies the same number to `text`/`html`). Generous next to
@@ -445,7 +449,8 @@ function fileLines(text) {
 
 /** Slice `text` to 1-based inclusive line range `[from, to]`. Both ends are bounds
  * checked: a range starting past the end of the file, and one whose `to` is past it,
- * are errors, not a silent empty slice. */
+ * are errors, not a silent empty slice. `startLine` (1-based, = `from`) comes back
+ * with the text for the same reason `sliceSection` reports one -- see `resolveRef`. */
 function sliceLines(text, lines) {
   if (!Array.isArray(lines) || lines.length !== 2) {
     return { error: `lines must be [from, to], got ${JSON.stringify(lines)}` };
@@ -461,63 +466,53 @@ function sliceLines(text, lines) {
   if (to > all.length) {
     return { error: `line range [${from}, ${to}] ends past end of file (${all.length} lines)` };
   }
-  return { text: all.slice(from - 1, to).join('\n') };
+  return { text: all.slice(from - 1, to).join('\n'), startLine: from };
 }
 
-/** Is `line` a fenced-code delimiter? src/markdown.mjs consumes fences before it
- * ever looks for a heading, so this scanner has to as well: without the
- * toggle, a `# Install deps` COMMENT inside a ```sh block reads as a heading here.
- * That truncated the enclosing section at the fence with no error at all, and — far
- * worse — shifted every following heading's duplicate-slug ordinal out of step with
- * the anchors markdown.mjs minted from the same file, so `section: 'notes-2'` sliced
- * a different place than the `notes-2` anchor the agent was shown. */
-function isFence(line) {
-  return /^```/.test(line.trim());
-}
-
-/** Slice `text` to the markdown heading matching `section` (a heading slug, minted
- * with the same `slugify` markdown.mjs uses for anchors) and its body, up to but not
- * including the next heading of equal or shallower level. Fenced code is skipped on
- * both scans, exactly as markdown.mjs skips it. */
+/** Slice `text` to the markdown heading whose anchor slug is `section`, and its body,
+ * up to but not including the next heading of equal or shallower level.
+ *
+ * Every one of those decisions -- what is a heading, what its slug is, which ordinal
+ * a duplicate slug gets, what is hidden inside a fence -- belongs to
+ * src/markdown.mjs, which computes them from the real (marked) token stream while
+ * minting the anchors. This function used to re-derive all of it from the raw file
+ * with a second set of regexes, and the two scanners had drifted in five measured
+ * ways: the ATX regex demanded column 0 and a space (marked accepts up to 3 leading
+ * spaces and a bare `#`); the fence test matched only ``` and ignored fence length
+ * (so a heading inside a `~~~` block, or a ``` line inside a ```` block, read as
+ * real); a `---` under an indented code block, an html block or a link-reference
+ * definition invented a setext heading marked never emitted; `slugify` ran on raw
+ * bytes off disk that had never been through markdown.mjs's document-level control
+ * strip, so `# A\x0cB` slugged differently on each side; and a skipped multi-line
+ * setext title removed a name from `used`, shifting every later ordinal.
+ *
+ * Every one of those returned the WRONG section silently rather than erroring, which
+ * is the reason this is now one scanner and not two: the agent asks for the slug the
+ * board displayed, so a disagreement here substitutes a different region of the file
+ * under a name the reviewer trusts. Patching five regexes would have re-opened the
+ * same class the next time marked's tokenizer and these expressions disagreed.
+ *
+ * A setext heading is a heading with no anchor (see markdown.mjs's isSetextHeading):
+ * it cannot be NAMED by a `section:` ref -- there was no slug to show the agent -- but
+ * it does END the section above it, because it is a heading on the page.
+ *
+ * `startLine` comes back with the text: 1-based, the line of the file the slice
+ * begins on, for a caller that has to number a gutter (SPEC_RENDERING.md AC 7). */
 function sliceSection(text, section) {
-  // Trailing CR stripped per line, matching src/markdown.mjs's identical pass: `$`
-  // does not match `\r`, so every heading in a CRLF file failed this regex and every
-  // `section` ref against one reported "not found".
-  const lines = text.split('\n').map(s => (s.endsWith('\r') ? s.slice(0, -1) : s));
-  const used = new Set();
-  // Beside `used`, for the same reason markdown.mjs carries one: without it a file of
-  // N same-slug headings costs O(N^2), and a 512KiB one took 8.8 minutes here.
-  const ordinals = new Map();
-  let startIdx = -1;
-  let startLevel = 0;
-  let inFence = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (isFence(lines[i])) { inFence = !inFence; continue; }
-    if (inFence) continue;
-    const h = lines[i].match(/^(#{1,6})\s+(.*)$/);
-    if (!h) continue;
-    const level = h[1].length;
-    const slug = slugify(h[2], used, ordinals);
-    if (slug === section) {
-      startIdx = i;
-      startLevel = level;
-      break;
-    }
-  }
-  if (startIdx === -1) return { error: `section "${section}" not found` };
+  // Both from one call, so the line numbers and the lines they index cannot
+  // disagree: markdown.mjs normalises `\r\n` and a lone `\r` to `\n` (marked's own
+  // first act) before it counts anything, and hands back the lines it counted.
+  const { lines, headings } = scanHeadings(text);
+  const at = headings.findIndex(h => h.ref === section);
+  if (at === -1) return { error: `section "${section}" not found` };
+  const start = headings[at];
   let endIdx = lines.length;
-  inFence = false;
-  for (let j = startIdx + 1; j < lines.length; j++) {
-    if (isFence(lines[j])) { inFence = !inFence; continue; }
-    if (inFence) continue;
-    const h = lines[j].match(/^(#{1,6})\s+(.*)$/);
-    if (h && h[1].length <= startLevel) {
-      endIdx = j;
-      break;
-    }
+  for (let k = at + 1; k < headings.length; k++) {
+    if (headings[k].level <= start.level) { endIdx = headings[k].line; break; }
   }
-  return { text: lines.slice(startIdx, endIdx).join('\n') };
+  return { text: lines.slice(start.line, endIdx).join('\n'), startLine: start.line + 1 };
 }
+
 
 /** Resolve one content-by-reference `{ path, section?, lines? }` to its snapshotted
  * text and sha, opening the file exactly once. `section` and `lines` are mutually
@@ -573,7 +568,7 @@ export function resolveRef(ref, { cwd, roots } = {}) {
     try { closeSync(fd); } catch { /* already gone */ }
   }
 
-  let sliced = { text: raw };
+  let sliced = { text: raw, startLine: 1 };
   if (ref.section !== undefined && ref.section !== null) {
     // Presence, not truthiness: `section: ''` is falsy, so it used to skip the selector
     // and snapshot the WHOLE file under a ref claiming to be one section -- silently,
@@ -588,7 +583,12 @@ export function resolveRef(ref, { cwd, roots } = {}) {
   }
   if (sliced.error) return { error: sliced.error };
 
-  return { text: sliced.text, sha: sha256(sliced.text) };
+  // `startLine` is TOTAL -- every successful resolution reports one (1 for a whole
+  // file) -- so a caller never has to work out which selector it got before it can
+  // number a gutter. src/render.mjs renders each code row with its file's real line
+  // number (SPEC_RENDERING.md AC 7); a section-sliced block had no way to know its
+  // own offset and numbered from 1, because this function knew and did not say.
+  return { text: sliced.text, sha: sha256(sliced.text), startLine: sliced.startLine };
 }
 
 // Best-effort file-extension -> language guess for a resolved code block's `lang`
@@ -603,6 +603,10 @@ const EXT_LANG = {
   sh: 'bash', bash: 'bash', zsh: 'bash',
   json: 'json', yaml: 'yaml', yml: 'yaml', md: 'markdown',
   html: 'html', css: 'css', sql: 'sql', swift: 'swift', kt: 'kotlin',
+  // SPEC_RENDERING.md ticket 05, AC 3: a referenced .diff/.patch file resolves
+  // to the vendored 'diff' grammar (ADR.md entry 64) with no new concept --
+  // same EXT_LANG table, same langForPath caller in src/board.mjs.
+  diff: 'diff', patch: 'diff',
 };
 
 export function langForPath(p) {

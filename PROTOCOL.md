@@ -40,8 +40,10 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `skills/claude-board/SKILL.md` | the manual for the `ask` tool, and the only prose statement of this protocol a caller reads. `install.sh` copies it to `~/.claude/skills/claude-board/` (ADR 11); `test/check-skill-prose.mjs` binds it to the live shim |
 | `test/check-*.mjs` | the suite; `test/run.mjs` carries an explicit list of them rather than globbing, so a new check runs only once its filename is added there |
 
-Zero dependencies: `node:*` built-ins only, ESM (`.mjs`) throughout, no bundler, no build step.
-Mermaid is the sole exception and stays client-side from its CDN.
+Zero *installed* dependencies: no `npm install`, no `node_modules`, no bundler, no build step;
+ESM (`.mjs`) throughout. `marked` and `prismjs` are vendored as pinned, digest-guarded source
+under `src/vendor/` (ADR 62) and run server-side at post time. Mermaid is the sole thing
+fetched at view time, and stays client-side from its CDN.
 
 ## Paths
 

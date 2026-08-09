@@ -1188,7 +1188,10 @@ async function main() {
 
     assert.ok(markup.includes('some supporting prose'));
     assert.ok(markup.includes('class="block code-block"'));
-    assert.ok(markup.includes('const answer = 42;'));
+    // SPEC_RENDERING.md ticket 02: javascript is a vendored grammar, so `const`
+    // and `42` are now wrapped in their own tok-* spans rather than sitting in one
+    // literal run -- assert the pieces highlighting actually leaves intact.
+    assert.ok(markup.includes('<span class="tok-keyword">const</span> answer = <span class="tok-number">42</span>;'));
     assert.ok(markup.includes('class="block mermaid-block"'));
     assert.ok(markup.includes('<pre class="mermaid">flowchart LR'));
     assert.ok(markup.includes('class="block html-block"'));

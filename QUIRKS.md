@@ -9,6 +9,7 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 - [macOS notifications and sound](#macos-notifications-and-sound)
 - [Shell, C and the filesystem](#shell-c-and-the-filesystem)
 - [Worktrees, the shared checkout, and two files with the same tail](#worktrees-the-shared-checkout-and-two-files-with-the-same-tail)
+- [Vendoring a CJS-shaped npm package under `"type": "module"`](#vendoring-a-cjs-shaped-npm-package-under-type-module)
 
 ---
 
@@ -1253,3 +1254,139 @@ head for this session. If a `Read` result ever looks implausibly behind what
 `git log`/`grep` say the branch contains, the first thing to check is which
 checkout the path you typed actually resolves to, not whether the tool is
 lying.
+
+### Scratch probe scripts belong in the worktree, not `/tmp`
+
+A worktree-isolated session refuses shell commands it cannot statically prove
+stay inside the worktree, and a heredoc redirect (`cat > /tmp/probe.mjs <<'EOF'`)
+is one of them — it is rejected before it runs, however harmless. Write throwaway
+probe scripts to the worktree root with the `Write` tool and delete them before
+committing; `node probe.mjs` from the worktree cwd then resolves `./src/*.mjs`
+relatively, which is also the one import path that cannot accidentally reach the
+SHARED checkout's copy of a tracked file (see above).
+
+---
+
+## Vendoring a CJS-shaped npm package under `"type": "module"`
+
+### `prismjs` has no ESM build, and its component files assume a shared global, not a module system
+
+Vendoring `prismjs@1.30.0` into `src/vendor/prism/` (TICKETS_RENDERING.md ticket
+01) hit a shape mismatch ADR 62's "self-contained ESM" wording glosses over.
+`marked`'s npm package ships `lib/marked.esm.js` with real `export{...}`
+statements — drop it in and `import` just works. `prismjs` ships nothing of the
+kind: `components/prism-core.js` is a UMD script (`var Prism = (function
+(_self) {...})(_self)`, ending in `if (typeof module !== 'undefined' &&
+module.exports) module.exports = Prism; if (typeof global !== 'undefined')
+global.Prism = Prism;`), and every one of the 22 grammar files this repo needs
+(`components/prism-<lang>.js`) references a bare, UNDECLARED `Prism`
+identifier — no `import`, no `require`, just `Prism.languages.python = ...` or
+`(function (Prism) {...}(Prism))` — because the whole ecosystem assumes either
+a `<script>` tag (shared `window.Prism`) or CommonJS `require()` in sequence
+(shared `global.Prism`, since core's unconditional `global.Prism = Prism`
+plants it before any grammar file runs).
+
+Under this repo's root `"type": "module"`, a bare `.js` file anywhere under
+`src/` is parsed as an ES module. Copy `prism-core.js` in unmodified and
+`import` it: nothing throws (`typeof module` and `typeof require` just
+evaluate to `'undefined'` inside the `typeof` guards, which is exactly what
+`typeof` is for), but nothing is exported either — nowhere in the file is
+there an `export` statement — and every grammar file that follows fails with
+`ReferenceError: Prism is not defined`, because ESM is always strict mode and
+strict mode does not fall back to an implicit global for an undeclared
+identifier the way a sloppy-mode `<script>` or CJS wrapper does.
+
+The fix that needed zero bytes of upstream changed: give every vendored
+prismjs file a `.cjs` extension instead of `.js` (content copied verbatim;
+only the vendor-side filename differs from the npm package's own). Node
+decides a module's type from a `.cjs`/`.mjs` extension outright, ignoring the
+nearest `package.json`'s `"type"` field entirely — so these files run as
+CommonJS here regardless of the rest of the repo. Loaded via
+`createRequire(import.meta.url)` from a hand-written `.mjs` loader
+(`src/vendor/prism/index.mjs`), core's `module.exports = Prism` now fires for
+real, AND its `global.Prism = Prism` still runs too (that branch was never
+conditional on which export path was taken) — so requiring each grammar
+`.cjs` file afterward, in dependency order (bases before what extends them:
+`clike` before `javascript`, `javascript` before `typescript`, `markup` before
+`jsx`/`markdown`, ...), resolves their bare `Prism` reference through the real
+process global exactly the way a browser or a CJS `require()` chain would.
+Verified by actually importing the loader and calling `Prism.tokenize` against
+a real sample in all 20 of `langForPath`'s named languages plus `diff`
+(`test/check-vendor-digest.mjs`) — a grammar file merely existing on disk,
+with the right sha256, is not evidence it loads.
+
+The one thing this trades away against ADR 62's literal "self-contained ESM":
+the vendored prismjs files are CommonJS-shaped source reached through Node's
+CJS/ESM interop, not `import`/`export` all the way down. `marked` needed none
+of this. Anyone reaching for the same trick on a future vendor drop: check
+whether the package's OWN npm dist already ships an ESM build (as `marked`
+does) before reaching for `.cjs` + `createRequire` — it is the right tool only
+when the upstream source is genuinely CJS/UMD-shaped and rewriting it byte-for-
+byte is off the table (it is, here — a modified vendored file defeats the
+whole point of pinning a recorded digest against unmodified upstream source).
+
+### `marked`'s own emphasis/strikethrough tokenizer is quadratic on unclosed delimiter runs -- the exact class of bug ADR 62's ceiling asked to close
+
+Ticket 03 (`src/markdown.mjs`, closing the "no reference-style links, no setext
+headings, ..." ceiling) hit this while porting `test/check-pure.mjs`'s N2 perf
+guards to the vendored engine. `Tokenizer.emStrong` (matches `_.._`, `__.._`,
+`*.._`, `**.._`) and `Tokenizer.del` (GFM `~~.._`) are both called once per
+character position by marked's inline scan loop; on failure to find a closer,
+each rescans forward to the end of the remaining string before giving up. That
+is O(n) work per failed position and O(n) failed positions on content shaped
+like `' _a'.repeat(N)` (never closes) -- O(n^2) overall. Measured directly
+against the vendored bundle: 5000 reps (~15KB) took 935ms, 20000 reps (~60KB)
+did not finish in 10s, and the same shape reproduces identically for `*` and
+`~~`. This is the exact DoS class this repo's OWN pre-marked markdown scanner
+was written to avoid (see that module's `emphasize()`, now removed) -- and the
+whole reason a real parser was vendored in the first place (closing a stated
+correctness ceiling) reintroduced a linear-time regression that the same test
+suite already pins.
+
+The vendored bytes cannot be patched (ADR 62 pins them to a recorded sha256
+`test/check-vendor-digest.mjs` asserts offline, deliberately so the digest
+check catches drift). The fix is a targeted `marked.use({tokenizer: {emStrong,
+del}})` override with a linear replacement, memoizing "no closing run exists in
+the searched suffix" per delimiter key -- since the scan loop only ever shrinks
+its remaining string as it advances, one failed full-length scan proves every
+shorter (later) suffix closer-less too, for free. `marked.use({tokenizer:{...}})`
+falls back to the ORIGINAL (quadratic) method only when the override returns
+the literal value `false`; returning `undefined` for "no match" is what keeps
+the slow path from ever running. See `src/markdown.mjs`'s own header comment
+and the `fastEmStrong`/`fastDel` functions for the full argument. Anyone adding
+another marked-based inline extension (ticket 04's syntax highlighting is
+fenced-code-only and shouldn't touch this, but a future one might): check
+whether it has the same "rescan to end of string on failure" shape before
+trusting it at board-content scale, an untrusted-file-sized input, not a
+hand-typed one.
+
+The memo's correctness argument is scoped to ONE pass over ONE string, and
+nothing about a module-level `Map` enforces that: a SUCCESSFUL match calls
+`Lexer.lexInline` on the emphasis content, which fires the same `emStrongMask`
+hook, resets the memo and leaves its own bounds in it. The outer scan then
+inherits a bound derived from an unrelated string — which both deletes emphasis
+silently (`*see _the notes*, then read _this_` renders `_this_` as literal text,
+and `_b_ *_aaaa*` vs `*_aaaa* _b_` disagree, so the bug is history-dependent
+within one paragraph) and voids the linear-time bound itself, because every
+successful match wipes what the failing ones learned: `'*x* _a'.repeat(n)`
+measured 18KB 98ms, 36KB 352ms, 72KB 1344ms, quadratic again. Homogeneous perf
+fixtures (`' _a'.repeat(N)`) cannot catch this — they never match, so they never
+nest — so a DoS guard over one repeated shape can pass while the property it
+names is gone; the N2 fixtures now include an INTERLEAVED one. `src/markdown.mjs`
+saves and restores the memo around the nested lex (`lexNested`). Anything else
+that reaches back into marked's inline lexer from inside a tokenizer override
+needs the same treatment.
+
+### No `timeout`/`gtimeout` on a bare macOS box -- use `perl -e 'alarm N; exec @ARGV' <cmd>` to bound a hanging command
+
+Diagnosing the quadratic-marked issue above needed a hard wall-clock cap on a
+command that might genuinely hang forever (an adversarial input against an
+unknown-complexity tokenizer). GNU `timeout` doesn't exist on stock macOS, and
+`coreutils`' `gtimeout` isn't installed on this machine either. `perl` is
+always present (system Perl ships with the OS) and `alarm(N); exec(@ARGV)`
+sends SIGALRM to the exec'd process after N seconds, killing it if it hasn't
+exited -- a one-liner that needs no install and works for any command, not
+just ones with their own timeout flag. Background-and-poll (`run_in_background`
++ waiting) works too but costs a full round trip per attempt; `perl -e 'alarm
+N; exec @ARGV' node ...` gets a bounded answer synchronously, which is what
+bisecting "how many reps until this blows up" actually wants.

@@ -1,7 +1,10 @@
 // Page CSS for the board, exported as a string so render.mjs can inline it and the
 // page stays a single self-contained file. A calm review surface: one accent,
 // layered surfaces, hairline borders, and motion only where it explains a state
-// change. Dark by default; a light palette (designed against the accent, not a
+// change. One exception, deliberate: the code surface carries a six-hue syntax
+// palette (--code-keyword/string/function/number/comment/base), because
+// highlighting cannot be done in one accent -- ADR.md entry 63 states that this
+// discipline stops describing that one surface, and holds everywhere else. Dark by default; a light palette (designed against the accent, not a
 // mechanical inversion) takes over under `prefers-color-scheme: light` — see the
 // DARK/LIGHT objects below. No web fonts and no external assets — the standalone
 // `file:` archive has to look identical with the network off (see src/render.mjs).
@@ -79,6 +82,25 @@ const DARK = {
   '--muted': '#8690a2',
   '--code-ink': '#cfd8ea',
 
+  // Six-hue syntax palette (SPEC_RENDERING.md ticket 02, ADR.md entry 63) --
+  // twelve new tokens across DARK and LIGHT, one set per theme, each clearing
+  // 4.5:1 against --panel-2 (test/check-contrast.mjs): keyword 7.22:1, string
+  // 9.56:1, function 8.01:1, number 6.95:1, comment 5.49:1, base 11.40:1 here.
+  // Distinct from --code-ink above on purpose: --code-ink stays the
+  // inline-code/markdown colour it always was, while --code-base is specifically
+  // a *highlighted code block's* default (uncoloured-token) text colour --
+  // src/render.mjs's TOKEN_CLASS table leaves most of Prism's own token types
+  // unmapped, and everything unmapped inherits this one rather than getting a
+  // span of its own. Its value happens to equal --code-ink's today (same design
+  // intent, same contrast bar), but the two are free to diverge without one
+  // accidentally dragging the other along.
+  '--code-keyword': '#c299ff',
+  '--code-string': '#7fd99a',
+  '--code-function': '#59c2e8',
+  '--code-number': '#e6975a',
+  '--code-comment': '#8896b3',
+  '--code-base': '#cfd8ea',
+
   // lines: alpha, so they read correctly on every surface level
   '--hairline': 'rgba(255, 255, 255, 0.075)',
   '--hairline-2': 'rgba(255, 255, 255, 0.14)',
@@ -92,6 +114,16 @@ const DARK = {
   '--accent-select': 'rgba(124, 156, 255, 0.3)',
   '--accent-ink': '#0a1020',
   '--good': '#56d68a',
+  // SPEC_RENDERING.md ticket 05, ADR.md entry 64: the conventional diff add/remove
+  // tint, alpha 0.12 -- pre-composited over --good/--critical's own RGB triple, same
+  // convention as --warning-soft/--critical-soft above, because plain CSS can't tear
+  // a custom property's hex apart into rgba(var(--good), 0.12) (and this page has to
+  // render identically from a file:// archive with no CSS engine to lean on for
+  // that). test/check-contrast.mjs composites this OVER --panel-2 specifically (the
+  // code block's own background, .code-block pre), not over --bg the way
+  // resolveSurface's default alpha-surface treatment does -- dark --code-ink on this
+  // fill 8.92:1, on --diff-del-fill 9.61:1.
+  '--diff-add-fill': 'rgba(86, 214, 138, 0.12)',
   '--warning': '#e5b04d',
   '--warning-soft': 'rgba(229, 176, 77, 0.12)',
   '--warning-ink': '#f0cd8c',
@@ -103,6 +135,8 @@ const DARK = {
   '--critical': '#f0757a',
   '--critical-soft': 'rgba(240, 117, 122, 0.08)',
   '--critical-border': 'rgba(240, 117, 122, 0.25)',
+  // Diff fill's other half -- see --diff-add-fill's own comment above.
+  '--diff-del-fill': 'rgba(240, 117, 122, 0.12)',
 
   // elevation (--shadow-3 existed pre-ticket-01 and pre-dates this feature too --
   // no rule anywhere ever referenced it. test/check-contrast.mjs's orphan-token
@@ -154,6 +188,17 @@ const LIGHT = {
   '--muted': '#515c76',
   '--code-ink': '#3a4c78',
 
+  // Six-hue syntax palette -- see DARK's own comment for why these are new
+  // tokens rather than reusing --code-ink. Each clears 4.5:1 against LIGHT's
+  // --panel-2 (#f5f6fb): keyword 5.54:1, string 5.00:1, function 5.21:1, number
+  // 4.89:1, comment 5.49:1, base (== --code-ink) 7.83:1.
+  '--code-keyword': '#7a3fd6',
+  '--code-string': '#1a7a3d',
+  '--code-function': '#0d6f96',
+  '--code-number': '#a15a00',
+  '--code-comment': '#5b6479',
+  '--code-base': '#3a4c78',
+
   // lines: rgba(255,255,255,…) inverted to rgba(0,0,0,…) reads far too weak at
   // DARK's alphas on a light surface, so these are relit by eye, not inverted
   '--hairline': 'rgba(0, 0, 0, 0.1)',
@@ -185,6 +230,10 @@ const LIGHT = {
   // varying alpha, same convention as DARK above; --warning-ink is untouched
   // (still clears 5.58:1 on the new --warning-soft).
   '--good': '#007530',
+  // SPEC_RENDERING.md ticket 05, ADR.md entry 64 -- see DARK's own comment for the
+  // full account. light --code-ink on this fill (composited over --panel-2)
+  // 6.59:1, on --diff-del-fill 6.40:1.
+  '--diff-add-fill': 'rgba(0, 117, 48, 0.12)',
   '--warning': '#805300',
   '--warning-soft': 'rgba(128, 83, 0, 0.12)',
   '--warning-ink': '#7a4a00',
@@ -196,6 +245,7 @@ const LIGHT = {
   '--critical': '#b81b1b',
   '--critical-soft': 'rgba(184, 27, 27, 0.08)',
   '--critical-border': 'rgba(184, 27, 27, 0.25)',
+  '--diff-del-fill': 'rgba(184, 27, 27, 0.12)',
 
   // elevation: much softer/tighter than DARK's heavy black shadows, or a light
   // page reads muddy
@@ -597,6 +647,32 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .md-content pre { background: var(--panel-2); border: 1px solid var(--hairline); padding: 12px 14px;
   border-radius: var(--r-md); overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
 .md-content pre code { background: none; padding: 0; font-size: inherit; }
+
+/* SPEC_RENDERING.md's markdown-fence language label (spec contract edit,
+ * 2026-08-09) -- src/render.mjs's highlightFenceHtml wraps a fence in this div
+ * only when 'lang' names a grammar this build vendored, never for a lang-less or
+ * unrecognised fence. 'position: relative' is the div's whole job: it gives the
+ * '::before' below a containing block that is NOT '.md-content pre' itself, which
+ * matters because that element is 'overflow-x: auto' and an absolutely
+ * positioned box whose containing block scrolls right along with it --
+ * this wrapper never scrolls, so the label stays pinned in the corner no matter
+ * how far a long line has been dragged out of view underneath it.
+ *
+ * The label is 'content: attr(data-lang)', not a text node -- same technique as
+ * '.code-row::before' above for the identical reason: generated content is never
+ * part of the DOM a selection can walk, so this div cannot change what
+ * '<pre><code>' itself contains or what copying it yields (AC 8's promise, which
+ * this fence inherited unchanged from highlightFenceHtml's own contract).
+ * 'user-select: none' is redundant with that, kept for the same belt-and-braces
+ * reason '.code-row::before' keeps it. '--muted' on this div's own transparent
+ * background reads through to '.md-content pre'/'--panel-2' beneath it, the same
+ * pairing test/check-contrast.mjs already asserts at 4.5:1 for every body-text
+ * token against every surface token -- no new token, no new contrast check. */
+.fence-lang { position: relative; }
+.fence-lang::before { content: attr(data-lang); position: absolute; top: 8px; right: 12px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); user-select: none; pointer-events: none; }
+
 .md-content blockquote { margin: 0.8em 0; padding: 2px 14px; border-left: 2px solid var(--accent);
   color: var(--ink-2); background: var(--accent-soft); border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .md-content blockquote p { color: inherit; }
@@ -895,7 +971,100 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
  * the moment a block is confirmed to actually be capped -- see its own comment. */
 .code-block pre { background: var(--panel-2); border: 1px solid var(--hairline); border-radius: var(--r-md);
   padding: 12px 14px; overflow: auto; margin: 0; max-height: 480px; resize: vertical; }
-.code-block pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; color: var(--code-ink); }
+/* --code-base, not --code-ink: this is specifically a highlighted code block's
+ * default/uncoloured-token text colour (see DARK's own palette comment for why
+ * it is a distinct token from the one .md-content's inline code still uses). */
+.code-block pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; color: var(--code-base); }
+
+/* SPEC_RENDERING.md ticket 02, AC 7/8: one row per source line, each carrying its
+ * own real line number in a fixed left gutter column that is never a text node --
+ * a 'data-line' attribute plus a "content: attr(...)" ::before, never a <span> of
+ * literal digits. Generated content is not selectable and is never included in a
+ * copy, so selecting/copying a code block yields exactly 'block.text' back: no
+ * line numbers, and (renderCodeBlock wraps each row in its own .code-row,
+ * splitting on the real newlines already in the text rather than inserting any)
+ * no injected newlines either. 'user-select: none' is redundant with that --
+ * generated content was never selectable to begin with -- kept anyway as the
+ * belt to the CSS's own braces.
+ *
+ * A row is an INLINE box, and that is load-bearing rather than incidental.
+ * src/render.mjs joins the rows on the newline bytes already in the text -- that
+ * is the whole mechanism behind "no injected newlines" above -- and under this
+ * 'white-space: pre' every one of those newlines is a real line break in its own
+ * right. Making the row 'display: block' as well means each row breaks the line AND
+ * the newline between two rows forms an anonymous block that breaks it again:
+ * measured in Chrome against examples/sample-board.html at a 19.38px row box
+ * against a 41.77px row-top-to-row-top delta (five rows occupying 186px instead of
+ * 97px), and a live selection read back over a five-line block returning 8 newlines
+ * against the 4 in its text. Every gutter-numbered block rendered AND copied
+ * double-spaced, next to a single-spaced markdown fence for contrast -- and AC 8 is
+ * a promise about what the BROWSER copies, which is why a suite asserting
+ * textContent (a different string, correct throughout) never saw it.
+ *
+ * The two ways out are not symmetric: dropping those separators would keep the
+ * block-level row but break textContent fidelity, i.e. trade a real bug for the
+ * same bug somewhere less visible. So the separators stay and the row goes inline,
+ * which leaves exactly one line-break mechanism in the block. The gutter column is
+ * then reserved by the ::before being an in-flow inline-block of fixed width rather
+ * than an absolutely positioned box over a padding-left -- absolute positioning
+ * needs the row to be a containing block, which is what forced 'position: relative'
+ * (and with it the block-level display) in the first place.
+ *
+ * One consequence worth naming rather than discovering: the .diff-add/.diff-del
+ * fill below now paints the row's inline box -- its text -- instead of the full
+ * width of the <pre>'s content box. On a line wider than the block that is the more
+ * honest of the two, since a block-level row is clipped at the client width and its
+ * tint stopped dead at the fold with the scrolled-right remainder unfilled
+ * (measured on a long added line: 3076px of scrollable width against a filled row
+ * box of 992px). */
+.code-row::before { content: attr(data-line); display: inline-block; width: 2.75em;
+  margin-right: 0.75em; text-align: right; color: var(--muted); user-select: none; }
+
+/* The six-hue syntax palette (ADR.md entry 63): a class per coloured token type,
+ * never an inline colour, so a theme change re-colours an already-rendered block
+ * with no re-post (AC 6) -- src/render.mjs's TOKEN_CLASS table is what decides
+ * which of Prism's own token types earns which class. */
+.tok-keyword { color: var(--code-keyword); }
+.tok-string { color: var(--code-string); }
+.tok-function { color: var(--code-function); }
+.tok-number { color: var(--code-number); }
+.tok-comment { color: var(--code-comment); font-style: italic; }
+
+/* SPEC_RENDERING.md ticket 05, ADR.md entry 64: inside a diff block the six-hue
+ * palette above never applies at all -- src/render.mjs's TOKEN_CLASS has no diff
+ * token mapped to a tok-* name, so a diff row carries none of the rules above by
+ * construction, not by overriding them here. Syntax colour instead "drops to
+ * --code-ink": .code-diff (src/render.mjs's codeBody, present on <code> only for a
+ * lang: 'diff' block) overrides .code-block pre code's own --code-base default by
+ * specificity alone, one more class on the same selector. */
+.code-block pre code.code-diff { color: var(--code-ink); }
+/* A diff's own structural lines -- '---'/'+++' file headers, '@@ ... @@' hunk
+ * headers -- read like a comment (present, but not a line either file contains):
+ * --muted italic, per ADR 64, rather than --code-comment (the six-hue comment
+ * token this block's own colour system is suppressed). Reached through
+ * TOKEN_CLASS's 'coord' entry, so this applies equally to a kind: 'code' diff
+ * block and a markdown 'diff' fence -- both tokenize through the same
+ * highlightRows/TOKEN_CLASS path (src/render.mjs). */
+.diff-meta { color: var(--muted); font-style: italic; }
+/* The conventional add/remove tint, alpha 0.12 against the code block's own
+ * --panel-2 (src/styles.mjs's --diff-add-fill/--diff-del-fill comments have the
+ * full account of why these are their own pre-composited tokens rather than a
+ * CSS-level rgba(var(--good), 0.12)). Row-level, from src/render.mjs's
+ * diffCodeBody -- an added/removed row's OWN .code-row carries the fill class,
+ * never a wrapper around its tok-* spans, and (per the rule above) a diff row
+ * never has any tok-* spans to wrap regardless. */
+.code-row.diff-add { background: var(--diff-add-fill); }
+.code-row.diff-del { background: var(--diff-del-fill); }
+/* A markdown diff FENCE (src/render.mjs's highlightFenceHtml, gutter: false)
+ * gets the same .diff-add/.diff-del fill above but never a gutter -- it has no
+ * source.lines and never did (ADR.md entry 65), so it has no real line number to
+ * reserve a column for. .diff-flat suppresses the ::before number cell so a fenced
+ * diff's rows sit flush left, the same as every other fenced language, instead of
+ * indented for a column nothing would ever fill in. 'content: none' (not '') is
+ * what does it: it stops the pseudo-element being generated at all, so its
+ * inline-block width goes with it -- there is no separate padding to strip now that
+ * the gutter is in flow rather than absolutely positioned over one. */
+.code-row.diff-flat::before { content: none; }
 
 /* html stage: sandboxed iframe so a hand-mocked preview never leaks into the page */
 .html-stage { display: block; width: 100%; min-height: 320px; resize: vertical; overflow: auto;

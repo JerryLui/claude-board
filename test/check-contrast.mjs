@@ -122,10 +122,30 @@ const TEXT_SITES = [
   ['--accent-hi', '--panel-2'],
   ['--accent-hi', '--accent-soft'],
   ['--accent-hi', '--history-bg'],
-  // `.md-content code` (its own --panel-3 background) and `.code-block pre
-  // code` (background: none, inheriting `.code-block pre`'s own --panel-2).
+  // `.md-content code`, its own --panel-3 background.
   ['--code-ink', '--panel-3'],
+  // SPEC_RENDERING.md ticket 05, ADR.md entry 64: `.code-block pre code.code-diff`
+  // (a diff block's own text colour, unfilled rows -- 'meta'/'context') puts
+  // --code-ink back on --panel-2, the pairing ticket 02 dropped from this list
+  // because nothing rendered there any more. The FILLED-row half of this pairing
+  // (--code-ink over an added/removed row's own alpha-0.12 fill, composited on
+  // --panel-2, not on --bg) isn't expressible through this cross-product helper --
+  // resolveSurface always composites an alpha token over --bg, the wrong base for
+  // a fill that sits on the code block's own --panel-2 -- so that half gets its own
+  // check below instead, built directly from this file's own compositeOver.
   ['--code-ink', '--panel-2'],
+  // SPEC_RENDERING.md ticket 02, AC 4: the six-hue syntax palette (ADR.md entry
+  // 63), each against `.code-block pre`'s own --panel-2 (background: none, so
+  // `.code-block pre code`/`.tok-*` render straight on it). `--code-base` is the
+  // sixth hue -- the default colour of an uncoloured token, `.code-block pre
+  // code`'s own `color:`, distinct from `--code-ink` (still the inline-code/
+  // markdown token, unaffected by this ticket).
+  ['--code-keyword', '--panel-2'],
+  ['--code-string', '--panel-2'],
+  ['--code-function', '--panel-2'],
+  ['--code-number', '--panel-2'],
+  ['--code-comment', '--panel-2'],
+  ['--code-base', '--panel-2'],
   // `.answer-status[data-status="answered"]` -- an answer stays visible (and
   // its status color with it) on a sent round's own page, not just live.
   ['--good', '--panel'],
@@ -156,7 +176,7 @@ for (const [themeName, palette] of Object.entries(palettes)) {
     for (const text of BODY_TEXT_TOKENS) for (const surface of SURFACES) assertClears(themeName, palette, text, surface);
   });
 
-  check(`${themeName}: accent-hi, code-ink, good, warning, warning-ink, critical clear ${MIN_RATIO}:1 everywhere they are actually rendered as text`, () => {
+  check(`${themeName}: accent-hi, code-ink, good, warning, warning-ink, critical and the six-hue code palette clear ${MIN_RATIO}:1 everywhere they are actually rendered as text`, () => {
     for (const [text, surface] of TEXT_SITES) assertClears(themeName, palette, text, surface);
   });
 
@@ -164,6 +184,29 @@ for (const [themeName, palette] of Object.entries(palettes)) {
   // .opt-check are --accent-ink drawn on an --accent-filled background.
   check(`${themeName}: --accent-ink clears ${MIN_RATIO}:1 on --accent`, () => {
     assertClears(themeName, palette, '--accent-ink', '--accent');
+  });
+
+  // SPEC_RENDERING.md ticket 05, ADR.md entry 64, the spec's own Testing section:
+  // "the diff fill composite". An added/removed diff row's real background is
+  // --diff-add-fill/--diff-del-fill (alpha 0.12) painted OVER `.code-block pre`'s
+  // own --panel-2, not over the page's --bg -- resolveSurface's default composite
+  // (used by every pair above, through assertClears) picks the wrong base for this
+  // one, so it's built directly from this file's own compositeOver/parseColor/
+  // contrastRatio (all exported for exactly this -- see this file's own top-of-file
+  // comment) instead of going through assertClears/resolveSurface at all. --code-ink
+  // is the text ADR 64 actually puts on a diff row (.code-diff, src/render.mjs); a
+  // 'meta'/'context' row (no fill) is already covered by TEXT_SITES's own
+  // ['--code-ink', '--panel-2'] pair above, so this is specifically the ADDED/
+  // REMOVED, i.e. FILLED, half.
+  check(`${themeName}: --code-ink clears ${MIN_RATIO}:1 over an added/removed diff row's own fill, composited on --panel-2`, () => {
+    const panel2 = parseColor(palette['--panel-2']);
+    for (const fillToken of ['--diff-add-fill', '--diff-del-fill']) {
+      const composited = compositeOver(parseColor(palette[fillToken]), panel2);
+      const compositeCss = `rgb(${composited.r}, ${composited.g}, ${composited.b})`;
+      const ratio = contrastRatio(palette['--code-ink'], compositeCss);
+      assert.ok(ratio >= MIN_RATIO,
+        `${themeName}: --code-ink on ${fillToken}-over-panel-2 (${compositeCss}): ${ratio.toFixed(2)}:1, need ${MIN_RATIO}:1`);
+    }
   });
 }
 

@@ -55,8 +55,11 @@ would take two seconds.
   working install, one that cannot read board references out of `~/Documents`,
   `~/Desktop` or `~/Downloads`
 
-No install-time dependencies; node built-ins only. Mermaid is the one exception, loaded
-from jsdelivr when a diagram renders.
+Nothing is installed: no `npm install`, no `node_modules`, no bundler. Beyond node's own
+built-ins, two rendering engines are vendored as readable source under `src/vendor/` and
+pinned by sha256 (`marked` and `prismjs`, ADR 62); both run server-side when a board is
+posted, so the page carries their output and never them. Mermaid is the one thing loaded
+at view time, from jsdelivr when a diagram renders.
 
 ## Install
 

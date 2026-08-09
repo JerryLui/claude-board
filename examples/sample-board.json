@@ -41,9 +41,9 @@
       "id": "d1",
       "kind": "markdown",
       "source": null,
-      "text": "# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |",
-      "sha": "12510393283ad4f55b89f4570319cbe7e4cc9495555d177f84660edffb0c4df6",
-      "html": "<h1 id=\"order-routing-redesign\">Order-routing redesign</h1><p>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:</p><ul><li id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket</li><li id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house</li><li id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically</li></ul><table><tr><th>Station</th><th>Avg. ticket time (today)</th><th>Avg. ticket time (proposed)</th></tr><tr><td>Grill</td><td>46s</td><td>33s</td></tr><tr><td>Salad</td><td>28s</td><td>24s</td></tr><tr><td>Expo</td><td>19s</td><td>15s</td></tr></table>",
+      "text": "# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\nThe payload each station receives on a status transition:\n\n```json\n{\n  \"ticketId\": 482,\n  \"status\": \"ready_for_pickup\",\n  \"notifiedStations\": [\"grill\", \"expo\"]\n}\n```\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |",
+      "sha": "30f276f0b30161582322dcef1c9a3c4466f1619e8f63611f292a5a08d3b6b303",
+      "html": "<h1 id=\"order-routing-redesign\">Order-routing redesign</h1><p>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:</p><ul><li id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket</li><li id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house</li><li id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically</li></ul><p>The payload each station receives on a status transition:</p><div class=\"fence-lang\" data-lang=\"json\"><pre><code>{\n  \"ticketId\": <span class=\"tok-number\">482</span>,\n  \"status\": <span class=\"tok-string\">\"ready_for_pickup\"</span>,\n  \"notifiedStations\": [<span class=\"tok-string\">\"grill\"</span>, <span class=\"tok-string\">\"expo\"</span>]\n}</code></pre></div><table><tr><th>Station</th><th>Avg. ticket time (today)</th><th>Avg. ticket time (proposed)</th></tr><tr><td>Grill</td><td>46s</td><td>33s</td></tr><tr><td>Salad</td><td>28s</td><td>24s</td></tr><tr><td>Expo</td><td>19s</td><td>15s</td></tr></table>",
       "anchors": [
         {
           "kind": "md",
@@ -83,6 +83,15 @@
       "text": "function priorityScore(ticket) {\n  const waitMs = Date.now() - ticket.placedAt;\n  const rushBonus = ticket.rush ? 500 : 0;\n  return waitMs + rushBonus;\n}",
       "sha": "6e558853c35e89523f1588343da1ee9b1238bcb0df3d25b321582daa452fb690",
       "lang": "javascript"
+    },
+    {
+      "round": 2,
+      "id": "c2",
+      "kind": "code",
+      "source": null,
+      "text": "--- a/routing.js\n+++ b/routing.js\n@@ -1,5 +1,7 @@\n function priorityScore(ticket) {\n   const waitMs = Date.now() - ticket.placedAt;\n   const rushBonus = ticket.rush ? 500 : 0;\n-  return waitMs + rushBonus;\n+  const recallBonus = ticket.recalled ? 1500 : 0;\n+  return waitMs + rushBonus + recallBonus;\n }",
+      "sha": "8144b07ac5240a2448b9475511c377247c069376848e0f05a115ac0f1ab61679",
+      "lang": "diff"
     },
     {
       "round": 2,

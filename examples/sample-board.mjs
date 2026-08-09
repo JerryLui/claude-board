@@ -8,10 +8,16 @@
 //
 // Round 1 is a PAGE BOARD: one `html` block and nothing else, the rendered
 // kitchen-display mockup the rest of the review is about. Round 2 is the
-// block gallery -- markdown, mermaid, code, compare and every question widget,
-// each answered, reading as the follow-up discussion about round 1's artifact.
-// The board opens on round 2 (its newest round), one chevron ahead of the
-// artifact that started the thread.
+// block gallery -- markdown, mermaid, two code blocks (a highlighted
+// `javascript` one and a `diff` one, ticket 05/ADR.md entry 64), compare and
+// every question widget, each answered, reading as the follow-up discussion
+// about round 1's artifact. The round 2 markdown block also carries a fenced
+// ```json snippet, exercising the fence-highlights-through-the-same-tokenizer
+// path ticket 04/ADR.md entry 65 added -- SPEC_RENDERING.md ticket 06 is what
+// this file exists to satisfy, and a sample that never highlighted a diff or
+// a markdown fence would regenerate clean without ever showing either half of
+// the feature it is meant to demonstrate. The board opens on round 2 (its
+// newest round), one chevron ahead of the artifact that started the thread.
 //
 // A page board is never sent (ADR.md entry 35: "a rendered page is a thing you
 // read, not a form you submit"). That is refused in the browser -- src/ui.mjs's
@@ -237,6 +243,14 @@ export function buildSampleBoard() {
     title: 'Routing walkthrough',
     blocks: [
       {
+        // The fenced ```json below (ticket 06: the sample must exercise every
+        // rendering path a reviewer will actually hit, not just every block
+        // kind) is what proves out ADR.md entry 65 -- a fence inside markdown
+        // highlights through the exact same tokenizer as a `kind: 'code'`
+        // block, just with no gutter (it carries no `source.lines`). Before
+        // this addition the sample's only highlighted code was the
+        // `kind: 'code'` block below; nothing here demonstrated the fence
+        // path AC 14 added.
         kind: 'markdown',
         text: [
           '# Order-routing redesign',
@@ -246,6 +260,16 @@ export function buildSampleBoard() {
           '- Fewer manual status updates per ticket',
           '- A single "Ready for pickup" state visible to front-of-house',
           '- Rush tickets float to the top automatically',
+          '',
+          'The payload each station receives on a status transition:',
+          '',
+          '```json',
+          '{',
+          '  "ticketId": 482,',
+          '  "status": "ready_for_pickup",',
+          '  "notifiedStations": ["grill", "expo"]',
+          '}',
+          '```',
           '',
           '| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |',
           '| --- | --- | --- |',
@@ -267,6 +291,33 @@ export function buildSampleBoard() {
           '  const rushBonus = ticket.rush ? 500 : 0;',
           '  return waitMs + rushBonus;',
           '}',
+        ].join('\n'),
+      },
+      // ticket 06: the sample needs a `lang: 'diff'` block too -- the OTHER
+      // rendering path ticket 05 added (ADR.md entry 64, real gutter numbers
+      // walked from the hunk header, syntax colour suppressed in favour of
+      // the conventional add/remove fill) -- distinct from the fenced diff
+      // path (no gutter) the markdown block above does not exercise either,
+      // since one demonstration of "a diff reads as a diff" is enough for a
+      // sample and this shape is the more complete of the two. The patch
+      // below is the `priorityScore` change the single-choice question's
+      // recorded answer two blocks down ("Add a Recall step from Ready back
+      // to Prepping for remakes") is actually asking for, so it reads as the
+      // round's own follow-up rather than an unrelated snippet.
+      {
+        kind: 'code',
+        lang: 'diff',
+        text: [
+          '--- a/routing.js',
+          '+++ b/routing.js',
+          '@@ -1,5 +1,7 @@',
+          ' function priorityScore(ticket) {',
+          '   const waitMs = Date.now() - ticket.placedAt;',
+          '   const rushBonus = ticket.rush ? 500 : 0;',
+          '-  return waitMs + rushBonus;',
+          '+  const recallBonus = ticket.recalled ? 1500 : 0;',
+          '+  return waitMs + rushBonus + recallBonus;',
+          ' }',
         ].join('\n'),
       },
       {

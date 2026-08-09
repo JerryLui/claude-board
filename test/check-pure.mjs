@@ -16,11 +16,17 @@ import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
+// The pre-marked (edb611b) markdown module, frozen as a fixture: SPEC_RENDERING.md
+// AC 10 ("slugs byte-identical to today's output, so every archived section: ref
+// still resolves") is asserted by running BOTH implementations over one corpus, not
+// by golden strings re-derived from the current source. See the fixture's header.
+import { mdToHtmlAndAnchors as legacyMdToHtmlAndAnchors } from './fixtures/markdown-pre-marked.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, COMMENT_ICON } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, COMMENT_ICON, highlightFenceHtml } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
+import { SUPPORTED_LANGUAGES } from '../src/vendor/prism/index.mjs';
 // Both used only by the reference-boundary checks. The descriptor
 // discipline inside resolveRef is asserted by swapping the file out BETWEEN the check
 // and the read, which means patching the fs namespace src/resolve.mjs imports from --
@@ -276,6 +282,152 @@ check('http, https, mailto, relative and fragment URLs still render as live link
   assert.equal(mdToHtml('[m](mailto:a@b.com)'), '<p><a href="mailto:a@b.com" target="_blank" rel="noopener noreferrer">m</a></p>');
   assert.equal(mdToHtml('[r](/a/b)'), '<p><a href="/a/b" target="_blank" rel="noopener noreferrer">r</a></p>');
   assert.equal(mdToHtml('[f](#sec)'), '<p><a href="#sec" target="_blank" rel="noopener noreferrer">f</a></p>');
+});
+
+// --- markdown.mjs: ticket 03 -- vendoring marked closes the stated ceiling --------
+//
+// src/markdown.mjs now tokenizes through the vendored `marked@18.0.9` (ADR 62)
+// instead of the hand-rolled line scanner these checks used to exercise directly,
+// while keeping slugify, anchor emission and raw-HTML escaping this module's own.
+// One contiguous block, appended after the pre-existing markdown section above so
+// a parallel ticket appending elsewhere in this file merges cleanly.
+
+check('AC 9: raw HTML in a markdown source renders as text, inline and as a block -- never as live markup', () => {
+  const inline = mdToHtml('before <script>alert(1)</script> after, and <img src=x onerror=alert(2)> tag.');
+  assert.ok(!/<script>/i.test(inline), `a raw <script> tag must not reach the page live: ${inline}`);
+  assert.ok(inline.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+  assert.ok(inline.includes('&lt;img src=x onerror=alert(2)&gt;'));
+  assert.ok(!/onerror=/.test(inline.replace(/&lt;.*?&gt;/g, '')), 'no live onerror attribute may survive outside the escaped text');
+
+  const block = mdToHtml('<div class="x" onclick="alert(1)">\nhi\n</div>\n');
+  assert.ok(!/<div/i.test(block), `a raw block-level <div> must not reach the page live: ${block}`);
+  assert.ok(block.includes('&lt;div class="x" onclick="alert(1)"&gt;'));
+
+  // The ablation-verified XSS payloads this fix must not disturb (test/check-pure.mjs's
+  // own security section above) exercise markdown IMAGE/LINK syntax, a completely
+  // different code path from raw inline/block HTML tags -- this check is the raw-HTML
+  // half AC 9 separately requires, closing the gap markdown.mjs's own header comment
+  // used to name as its stated ceiling.
+});
+
+check('AC 10: heading and list-item slugs are byte-identical to the pre-marked implementation, across a corpus including duplicate-disambiguation', () => {
+  // Golden values captured by running this exact corpus through the pre-rewrite
+  // (hand-rolled-scanner) src/markdown.mjs before src/vendor/marked was wired in --
+  // a mechanical snapshot, not a re-derivation from the current source, so a
+  // regression in the anchor-emission rewrite has something independent to diff
+  // against. AC 10's other half -- that `src/resolve.mjs:500`'s independent
+  // `slugify` pass still agrees -- is covered structurally: `slugify` itself is the
+  // same exported function, byte-unchanged by this rewrite (see its own comment).
+  const corpus = [
+    '# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6',
+    '# Notes\n\na\n\n# Notes\n\nb\n\n# Notes\n\nc\n\n# Notes\n\nd',
+    '# Risk & Reward!\n\n## What\'s Next??\n\n### CAFÉ Déjà Vu',
+    '# Section One\n\n- alpha\n- beta\n- gamma\n\n## Section Two\n\n1. first\n2. second\n\n### Section Three',
+    '# Risks\n\n- one\n- two\n\n## Risks li1',
+    '- lone one\n- lone two\n\n# First Heading\n\n- a\n- b',
+    '# Deep\n\n- top1\n  - nested1\n  - nested2\n- top2\n  - nested3',
+    '# Real\n\n> ## Quoted\n> - quoted item\n\n## Real2',
+    Array.from({ length: 12 }, () => '# Same').join('\n\n'),
+  ];
+  const golden = [
+    ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
+    ['notes', 'notes-2', 'notes-3', 'notes-4'],
+    ['risk-reward', 'whats-next', 'caf-dj-vu'],
+    ['section-one', 'section-one-li1', 'section-one-li2', 'section-one-li3', 'section-two', 'section-two-li1', 'section-two-li2', 'section-three'],
+    ['risks', 'risks-li1', 'risks-li2', 'risks-li1-2'],
+    ['_body-li1', '_body-li2', 'first-heading', 'first-heading-li1', 'first-heading-li2'],
+    ['deep', 'deep-li1', 'deep-li2'],
+    ['real', 'real2'],
+    ['same', 'same-2', 'same-3', 'same-4', 'same-5', 'same-6', 'same-7', 'same-8', 'same-9', 'same-10', 'same-11', 'same-12'],
+  ];
+  corpus.forEach((md, i) => {
+    const refs = mdToHtmlAndAnchors(md).anchors.map(a => a.ref);
+    assert.deepEqual(refs, golden[i], `corpus[${i}] slug drift -- got ${JSON.stringify(refs)}, want ${JSON.stringify(golden[i])}`);
+  });
+});
+
+check('AC 11: reference-style links resolve through a [ref]: definition, not just inline (text) syntax', () => {
+  // A link title, if the definition carries one, is not rendered -- same as before
+  // this module vendored marked, which never supported titles at all (the inline
+  // `(href)` syntax had no capture for one).
+  const out = mdToHtml('[ref link][1]\n\n[1]: https://example.com "title"\n');
+  assert.equal(out, '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">ref link</a></p>');
+});
+
+check('AC 11: setext headings (Title\\n===) RENDER as headings at the right level, but mint no anchor -- AC 10 outranks anchoring them', () => {
+  // The product call (SPEC_RENDERING.md AC 11 closes the setext gap; AC 10 requires
+  // slugs byte-identical to the pre-marked parser, which had no setext at all):
+  // setext headings render, and are skipped by the anchor minter. Anchoring them
+  // would consume slug ordinals the old parser never consumed, so a document mixing
+  // a setext heading with a duplicate-text `#` heading would shift every later slug
+  // and break archived `section:` references. The byte-identity proof against the
+  // real pre-marked implementation is the check below.
+  const { html, anchors } = mdToHtmlAndAnchors('Setext One\n==========\n\nbody\n\nSetext Two\n----------\n');
+  assert.equal(html, '<h1>Setext One</h1><p>body</p><h2>Setext Two</h2>');
+  assert.deepEqual(anchors, [], 'a setext heading mints no anchor and consumes no slug');
+});
+
+check('AC 10/11: a document mixing setext and duplicate-text ATX headings mints slugs byte-identical to the pre-marked parser', () => {
+  // Not golden strings: the actual edb611b implementation, imported and run on the
+  // same corpus (test/fixtures/markdown-pre-marked.mjs -- see its header). A setext
+  // heading was invisible to that parser, so every slug after one has to land on the
+  // same ordinal it did then, which is precisely what a setext anchor would break.
+  const corpus = [
+    'Notes\n=====\n\nsetext body\n\n# Notes\n\natx body\n\n# Notes\n\nmore\n',
+    '# Plan\n\n- a\n- b\n\nPlan\n----\n\nquiet\n\n## Plan\n\ntail\n',
+    'Intro\n=====\n\nbody\n\nDetails\n-------\n\ndetail\n\n## Trailer\n\ntrailer\n',
+    '# Same\n\nSame\n----\n\n# Same\n\n- item\n',
+  ];
+  for (const md of corpus) {
+    const now = mdToHtmlAndAnchors(md).anchors.map(a => a.ref);
+    const then = legacyMdToHtmlAndAnchors(md).anchors.map(a => a.ref);
+    assert.deepEqual(now, then, `slug drift against the pre-marked parser for ${JSON.stringify(md)}`);
+  }
+  // ...while the headings themselves still RENDER, which is the half AC 11 keeps.
+  assert.ok(mdToHtmlAndAnchors(corpus[0]).html.startsWith('<h1>Notes</h1>'));
+});
+
+check('AC 11: a loose list (blank line between items) wraps each item in its own <p>, unlike a tight list', () => {
+  const loose = mdToHtml('- one\n\n- two\n\n- three\n');
+  assert.equal(loose, '<ul><li id="_body-li1"><p>one</p></li><li id="_body-li2"><p>two</p></li><li id="_body-li3"><p>three</p></li></ul>');
+  const tight = mdToHtml('- one\n- two\n');
+  assert.equal(tight, '<ul><li id="_body-li1">one</li><li id="_body-li2">two</li></ul>');
+});
+
+check('AC 11: a pipe inside a table cell\'s code span no longer splits the cell in two', () => {
+  const out = mdToHtml('| a | b |\n|---|---|\n| `x|y` | z |\n');
+  assert.equal(out, '<table><tr><th>a</th><th>b</th></tr><tr><td><code>x|y</code></td><td>z</td></tr></table>');
+});
+
+check('AC 12: GFM is on -- task lists, strikethrough, autolinks and tables all render', () => {
+  const tasks = mdToHtml('- [ ] todo\n- [x] done\n');
+  assert.ok(tasks.includes('<input type="checkbox" disabled> todo'));
+  assert.ok(tasks.includes('<input type="checkbox" disabled checked> done'));
+
+  assert.ok(mdToHtml('~~gone~~').includes('<del>gone</del>'));
+
+  const autolinks = mdToHtml('http://example.com and www.foo.com');
+  assert.ok(autolinks.includes('<a href="http://example.com" target="_blank" rel="noopener noreferrer">http://example.com</a>'));
+  assert.ok(autolinks.includes('<a href="http://www.foo.com" target="_blank" rel="noopener noreferrer">www.foo.com</a>'));
+
+  const table = mdToHtml('| L | C | R |\n|:--|:-:|--:|\n| a | b | c |\n');
+  assert.equal(table, '<table><tr><th align="left">L</th><th align="center">C</th><th align="right">R</th></tr>' +
+    '<tr><td align="left">a</td><td align="center">b</td><td align="right">c</td></tr></table>');
+});
+
+check('AC 13: a ```mermaid fence still becomes <pre class="mermaid"> even alongside the new GFM/reference-link machinery', () => {
+  const md = '# Diagram\n\nSee [the spec][s].\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n[s]: https://example.com\n';
+  const out = mdToHtml(md);
+  assert.ok(out.includes('<pre class="mermaid">flowchart LR\n  A --&gt; B</pre>'));
+  assert.ok(out.includes('href="https://example.com"'));
+});
+
+check('N2 (extended): a GFM strikethrough run with no closing ~~ is scanned in linear time -- the same DoS class emphasis was fixed against, now covering marked\'s del tokenizer too', () => {
+  const md = ' ~~a'.repeat(150000); // 600KB, inside the by-value cap
+  const started = Date.now();
+  mdToHtml(md);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `strikethrough scan took ${elapsed}ms on 600KB`);
 });
 
 // --- board.mjs: block normalisation, rounds, packet assembly ----------------------
@@ -2561,11 +2713,17 @@ check('all five context kinds render into the page: markdown, code, mermaid, htm
   assert.ok(markup.includes('some text'));
 
   assert.ok(markup.includes('class="block code-block"'));
-  // ADR.md entry 28 deleted the per-line `<span class="code-line">` wrapping with
-  // the affordance behind it: a code line is no longer a comment target anywhere,
-  // so the body is the escaped text and nothing else.
-  assert.ok(markup.includes('<pre><code>const x = 1;</code></pre>'));
-  assert.ok(!markup.includes('code-line'), 'a code block must emit no per-line anchor spans');
+  // SPEC_RENDERING.md ticket 02 brought the per-row wrapping back, but for a
+  // different reason than ADR.md entry 28 deleted the old `.code-line` anchor
+  // spans for: `.code-row` carries the AC 7 gutter number (a `data-line`
+  // attribute, never a text node -- see test/check-pure.mjs's own dedicated
+  // rendering-ticket-02 section below for the copy-fidelity proof), not a comment
+  // anchor. `const` and `1` are highlighted (javascript is a vendored grammar).
+  assert.ok(markup.includes(
+    '<pre><code><span class="code-row" data-line="1">'
+    + '<span class="tok-keyword">const</span> x = <span class="tok-number">1</span>;</span></code></pre>',
+  ));
+  assert.ok(!markup.includes('code-line'), 'a code block must emit no OLD-style per-line anchor spans (ADR.md entry 28)');
   assert.ok(markup.includes('Code · javascript'));
 
   assert.ok(markup.includes('class="block mermaid-block"'));
@@ -4737,6 +4895,243 @@ check('N6: fenced "#" lines do not shift heading ordinals, so a -2 slug names th
   assert.ok(r.text.includes('second real one'));
 });
 
+// --- SPEC_RENDERING.md ticket 05, revised: a setext heading mints NO anchor (see
+// the AC 10/11 checks near the top of this file), so `sliceSection` must not resolve
+// one either -- an unresolvable ref is an error the agent sees, where a resolvable
+// one nobody minted is content substitution. It still ENDS an enclosing section,
+// because the reader sees a heading there. -----------------------------------
+
+check('N9: a section: ref naming a setext heading does not resolve, because no anchor was ever minted for it -- and it still terminates the section above it', () => {
+  const src = [
+    '## Above', '', 'above body', '',
+    'Details', '-------', '', 'detail body', '',
+    '## Trailer', '', 'trailer body', '',
+  ].join('\n');
+  // The real anchors markdown.mjs mints for this exact file -- the set a `section:`
+  // ref is supposed to agree with, and 'details' is deliberately not in it.
+  const { anchors } = mdToHtmlAndAnchors(src);
+  assert.deepEqual(anchors.map(a => a.ref), ['above', 'trailer']);
+
+  writeFileSync(path.join(fixturesDir, 'setext.md'), src, 'utf8');
+
+  const details = resolveRef({ path: 'setext.md', section: 'details' }, { cwd: fixturesDir });
+  assert.equal(typeof details.error, 'string',
+    'a setext heading has no anchor, so naming its slug must be an error, not a silently different slice');
+
+  // ...but the h2 above it still ends where the (unanchored) setext h2 begins: what
+  // the reader sees as a heading is where the section stops.
+  const above = resolveRef({ path: 'setext.md', section: 'above' }, { cwd: fixturesDir });
+  assert.equal(above.error, undefined);
+  assert.equal(above.text, '## Above\n\nabove body\n');
+
+  const trailer = resolveRef({ path: 'setext.md', section: 'trailer' }, { cwd: fixturesDir });
+  assert.equal(trailer.error, undefined);
+  assert.equal(trailer.text, '## Trailer\n\ntrailer body\n');
+});
+
+check('N9: a "---" horizontal rule, a table\'s own separator row, and a fenced "=====" are never mistaken for a setext underline', () => {
+  // Every one of these traps is independently verified against the REAL parser
+  // above (this file's own manual probes, not re-asserted here) -- this pins the
+  // same non-confusion through sliceSection specifically, since it is a separate,
+  // hand-rolled scanner that has to reach the identical conclusion on its own.
+  const src = [
+    '# Real Heading', '', 'para before hr', '', '---', '', 'after hr, not a heading', '',
+    '| A | B |', '| --- | --- |', '| 1 | 2 |', '',
+    '```', 'fake # heading', '=====', '```', '',
+    '## Trailer', '', 'trailer body', '',
+  ].join('\n');
+  writeFileSync(path.join(fixturesDir, 'setext-traps.md'), src, 'utf8');
+
+  const real = resolveRef({ path: 'setext-traps.md', section: 'real-heading' }, { cwd: fixturesDir });
+  assert.equal(real.error, undefined);
+  // The hr, the table, and the fenced '=====' must all stay INSIDE this section --
+  // none of them may be misread as a heading that would truncate it early.
+  assert.ok(real.text.includes('| --- | --- |'), 'the table separator row must survive as body text');
+  assert.ok(real.text.includes('fake # heading\n====='), 'the fenced "=====" must survive as body text, unexamined');
+  assert.ok(real.text.includes('## Trailer'), 'nothing before it may have truncated the section early');
+
+  // And neither the hr nor the table row ever mints a phantom heading of their
+  // own -- a ref naming the text right after the hr must fail exactly as it did
+  // before this ticket (there is no heading there, only a paragraph).
+  const phantom = resolveRef({ path: 'setext-traps.md', section: 'after-hr-not-a-heading' }, { cwd: fixturesDir });
+  assert.equal(typeof phantom.error, 'string', 'a bare paragraph after an hr must never resolve as a section');
+});
+
+check('N9: ATX resolution is byte-identical to before this ticket -- setext support changes nothing about it', () => {
+  // The exact fixture N6's own ordinal test above uses, plus a bare "---" HR
+  // and a GFM table thrown in beside the ATX headings -- both are shapes a
+  // setext-aware scanner could plausibly trip on, and neither may perturb the
+  // ATX result by one byte. matchHeadingAt's ATX branch returns before any
+  // setext-only guard ever runs, which is what this pins directly rather than
+  // just by inference.
+  const src = [
+    '# Notes', '', 'para one', '', '---', '', 'para two', '',
+    '| A | B |', '| --- | --- |', '| 1 | 2 |', '',
+    '## Sub', '', 'sub body', '',
+  ].join('\n');
+  writeFileSync(path.join(fixturesDir, 'atx-unaffected.md'), src, 'utf8');
+  const notes = resolveRef({ path: 'atx-unaffected.md', section: 'notes' }, { cwd: fixturesDir });
+  assert.equal(notes.error, undefined);
+  assert.equal(notes.text,
+    '# Notes\n\npara one\n\n---\n\npara two\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n## Sub\n\nsub body\n');
+  const sub = resolveRef({ path: 'atx-unaffected.md', section: 'sub' }, { cwd: fixturesDir });
+  assert.equal(sub.error, undefined);
+  assert.equal(sub.text, '## Sub\n\nsub body\n');
+});
+
+// --- S1: heading identity has ONE owner ------------------------------------------
+//
+// src/markdown.mjs mints every anchor from the real (marked) token stream;
+// src/resolve.mjs's sliceSection used to re-derive headings and slugs with a SECOND,
+// hand-rolled scanner. Two scanners drift, and every disagreement returned the WRONG
+// section SILENTLY -- a content-substitution primitive, since the agent asks for the
+// slug the board displayed and the reviewer is shown a different region of the file.
+// The five measured disagreements are pinned individually below, and the property
+// that subsumes them ("the anchor set and the resolvable-section set are the same
+// set, and each slice starts at its own heading") is pinned last, over every one of
+// those corpora at once.
+
+/** Write `md` to a fixture and return { anchors, headingIds, resolve(slug) }.
+ * `headingIds` is read out of the RENDERED html rather than guessed from the anchor
+ * list, so it is exactly the set of ids a reviewer's browser can scroll to. */
+function headingFixture(name, md) {
+  writeFileSync(path.join(fixturesDir, name), md, 'utf8');
+  const { html, anchors } = mdToHtmlAndAnchors(md);
+  const headingIds = [...html.matchAll(/<h[1-6] id="([^"]*)"/g)].map(m => m[1]);
+  return {
+    anchors: anchors.map(a => a.ref),
+    headingIds,
+    resolve: slug => resolveRef({ path: name, section: slug }, { cwd: fixturesDir }),
+  };
+}
+
+check('S1a: an indented ATX heading (up to 3 spaces) and a bare "#" are headings to the parser, so they must be headings to sliceSection too', () => {
+  // Ablation: restore the `^(#{1,6})\s+` column-0 regex and `section: 'notes'` skips
+  // the indented heading entirely, resolving to the plain one -- the reviewer reads
+  // the wrong section with no error anywhere.
+  const f = headingFixture('indented-atx.md', '   ## Notes\n\nindented body\n\n## Notes\n\nplain body\n');
+  assert.deepEqual(f.headingIds, ['notes', 'notes-2']);
+  assert.ok(f.resolve('notes').text.includes('indented body'));
+  assert.ok(!f.resolve('notes').text.includes('plain body'));
+  assert.ok(f.resolve('notes-2').text.includes('plain body'));
+
+  // A bare '#' with no text is a heading to marked (slug 'section', since slugify
+  // falls back to that for empty text); the old regex required a space after the
+  // hashes and missed it.
+  const g = headingFixture('bare-hash.md', '#\n\nbody\n\n# section\n\nother\n');
+  assert.deepEqual(g.headingIds, ['section', 'section-2']);
+  assert.ok(g.resolve('section').text.includes('body'));
+  assert.ok(g.resolve('section-2').text.includes('other'));
+});
+
+check('S1b: a ~~~ fence, and a longer backtick fence containing a shorter one, hide their contents from the section scanner', () => {
+  // Ablation: restore `isFence = /^```/` and the '# Notes' inside the ~~~ fence
+  // counts as a real heading -- 'notes' then resolves to a line of sample code and
+  // the real '## Notes' becomes 'notes-2', which is not the slug the board showed.
+  const tilde = headingFixture('tilde-fence.md', '## API\n\n~~~\n# Notes\n~~~\n\napi body\n\n## Notes\n\nreal notes\n');
+  assert.deepEqual(tilde.headingIds, ['api', 'notes']);
+  assert.ok(tilde.resolve('notes').text.startsWith('## Notes'));
+  assert.ok(tilde.resolve('notes').text.includes('real notes'));
+  assert.ok(tilde.resolve('api').text.includes('api body'), 'the fenced "# Notes" must not truncate the API section');
+
+  // Fence length matching: a ``` line INSIDE a ```` fence closes nothing.
+  const long = headingFixture('long-fence.md', '## API\n\n````\n```\n# Notes\n```\n````\n\n## Notes\n\nreal notes\n');
+  assert.deepEqual(long.headingIds, ['api', 'notes']);
+  assert.ok(long.resolve('notes').text.startsWith('## Notes'));
+  assert.ok(long.resolve('api').text.includes('# Notes'), 'the whole 4-backtick fence stays inside the API section');
+});
+
+check('S1c: an indented code block, an html block and a link-reference definition above a "---" never invent a setext heading', () => {
+  // Ablation: restore looksLikeBlockStart (list markers and '>' only) and the
+  // indented `API` sample above the rule is accepted as a setext title -- inventing
+  // a heading marked never emitted, which took the 'api' slug and pushed the REAL
+  // '## API' section to 'api-2'. Verified end to end: the ref resolved to the code
+  // block.
+  for (const [name, before] of [
+    ['indented-code-rule.md', '    API'],
+    ['html-block-rule.md', '<div>\nx\n</div>'],
+    ['linkdef-rule.md', '[r]: https://x.se'],
+  ]) {
+    const f = headingFixture(name, `# Doc\n\n${before}\n---\n\n## API\n\nreal api body\n`);
+    assert.deepEqual(f.headingIds, ['doc', 'api'], `${name}: only the real headings may exist`);
+    const api = f.resolve('api');
+    assert.equal(api.error, undefined);
+    assert.ok(api.text.startsWith('## API'), `${name}: 'api' must resolve to the real heading, got ${JSON.stringify(api.text.slice(0, 40))}`);
+    assert.ok(api.text.includes('real api body'));
+    assert.equal(typeof f.resolve('api-2').error, 'string', `${name}: there is no second API heading to name`);
+  }
+});
+
+check('S1d: a control byte inside a heading slugs the same on the board and on disk -- the document-level strip is not a second scanner\'s to forget', () => {
+  // \x0c is a benign, common byte in real text, and it matches JS \s -- so a second
+  // scanner calling slugify on RAW bytes off disk (never through
+  // stripDocumentControls) collapsed it to a hyphen and minted 'a-b' where the board
+  // showed 'ab'. This one fires by accident, not just under attack.
+  const f = headingFixture('formfeed.md', '# A\x0cB\n\nbody\n\n# AB\n\nsecond\n');
+  assert.deepEqual(f.headingIds, ['ab', 'ab-2']);
+  assert.ok(f.resolve('ab').text.includes('body'));
+  assert.ok(!f.resolve('ab').text.includes('second'));
+  assert.ok(f.resolve('ab-2').text.includes('second'));
+  assert.equal(typeof f.resolve('a-b').error, 'string', 'the slug nobody minted must not resolve');
+});
+
+check('S1e: a multi-line setext title consumes no ordinal on either side, so every later slug still names the same heading', () => {
+  // The old scanner skipped a multi-line setext title, and the comment claimed that
+  // was "safe... never a WRONG match". Skipping it also removed a name from `used`,
+  // shifting every later ordinal -- so 'notes-2' named a different heading in each
+  // scanner. Now that setext mints no anchor at all, both sides skip it together.
+  const f = headingFixture('multiline-setext.md',
+    '## Notes\n\nfirst\n\nline one\nline two\n---\n\nbody\n\n## Notes\n\nsecond\n');
+  assert.deepEqual(f.headingIds, ['notes', 'notes-2']);
+  assert.ok(f.resolve('notes').text.includes('first'));
+  assert.ok(f.resolve('notes-2').text.includes('second'));
+  assert.equal(typeof f.resolve('line-one-line-two').error, 'string');
+});
+
+check('S1: the anchor set and the resolvable-section set are the same set, and every slice starts at its own heading', () => {
+  // The property the five checks above are instances of. A heading id the board
+  // displays must resolve; a slug nobody minted must not; and the slice must begin
+  // at the heading whose slug was asked for, not merely somewhere plausible.
+  const corpus = {
+    'p-indented.md': '   ## Notes\n\nindented\n\n## Notes\n\nplain\n',
+    'p-fences.md': '## API\n\n~~~\n# Notes\n~~~\n\nbody\n\n## Notes\n\nreal\n',
+    'p-setext.md': 'Setext\n======\n\nbody\n\n# Setext\n\nreal setext\n',
+    'p-controls.md': '# A\x0cB\n\nbody\n\n# AB\n\nsecond\n',
+    'p-quoted.md': '> ## Plan\n> quoted\n\n## Plan\n\nreal plan\n',
+    'p-crlf.md': '# A\r\n\r\nbody\r\n\r\n## B\r\n\r\ntail\r\n',
+    'p-mixed.md': '# Doc\n\n- a\n- b\n\n## Doc\n\n```\n# Doc\n```\n\n## Doc\n\ntail\n',
+  };
+  for (const [name, md] of Object.entries(corpus)) {
+    const f = headingFixture(name, md);
+    for (const id of f.headingIds) {
+      const r = f.resolve(id);
+      assert.equal(r.error, undefined, `${name}: heading id ${JSON.stringify(id)} is on the page but does not resolve`);
+      const first = r.text.split('\n')[0].replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+      assert.match(first, /^ {0,3}#{1,6}/,
+        `${name}: the slice for ${JSON.stringify(id)} must start at its own ATX heading line, got ${JSON.stringify(first)}`);
+    }
+    // ...and a list-item anchor is not a section: it names an element, not a range.
+    for (const ref of f.anchors.filter(a => !f.headingIds.includes(a))) {
+      assert.equal(typeof f.resolve(ref).error, 'string', `${name}: ${ref} is a list-item anchor, not a section`);
+    }
+  }
+});
+
+check('S1/render: a resolved reference reports the 1-based source line its text starts on, so a sliced code block can number its gutter from the file', () => {
+  // Exposed for src/render.mjs's gutter (SPEC_RENDERING.md AC 7: "every code row
+  // carries its file's real line number"). A section-sliced block used to number
+  // from 1 because sliceSection knew the start line and did not report it.
+  const md = ['# Top', '', 'intro', '', '## Middle', '', 'middle body', '', '## End', '', 'tail'].join('\n');
+  writeFileSync(path.join(fixturesDir, 'startline.md'), md, 'utf8');
+  const at = { cwd: fixturesDir };
+  assert.equal(resolveRef({ path: 'startline.md', section: 'middle' }, at).startLine, 5);
+  assert.equal(resolveRef({ path: 'startline.md', section: 'top' }, at).startLine, 1);
+  // Total, not section-only: a line range reports its own start, and a whole-file
+  // read starts at line 1 -- so a caller never has to guess which shape it got.
+  assert.equal(resolveRef({ path: 'startline.md', lines: [3, 5] }, at).startLine, 3);
+  assert.equal(resolveRef({ path: 'startline.md' }, at).startLine, 1);
+});
+
 check('N7: a quoted heading or bullet mints no anchor and consumes no slug', () => {
   // Ablation: drop the `quoted` flag and the quotation takes the `plan` slug while
   // the real heading gets `plan-2` -- which resolveRef (blind to blockquotes) then
@@ -5464,7 +5859,17 @@ check('N1: a leading C0 control byte does not smuggle javascript: past the schem
   // the scheme, so the browser navigates to javascript: and executes at the
   // daemon's origin. Markdown blocks come from arbitrary files on disk, which is the
   // exact threat the allowlist exists for.
-  for (const ctrl of ['\x00', '\x01', '\x08', '\x0e', '\x1f', '\x7f']) {
+  //
+  // A leading SPACE belongs in this loop for exactly the same reason and was missing:
+  // WHATWG's URL parser strips leading and trailing C0 controls *or U+0020* before it
+  // reads the scheme (`new URL(' javascript:alert(1)').protocol === 'javascript:'`),
+  // while the scheme regex here is anchored at offset 0, so a space made the
+  // destination look schemeless -- i.e. relative -- and it was emitted live. The rest
+  // of the whitespace the URL parser removes (tab, LF, CR, stripped from anywhere in
+  // the URL, not just the ends) is already inside the \x00-\x1f range this loop
+  // covers; U+00A0 and friends are NOT stripped by the parser, so a scheme behind one
+  // never reaches the browser as a scheme and needs no entry here.
+  for (const ctrl of ['\x00', '\x01', '\x08', '\x0e', '\x1f', '\x7f', ' ']) {
     const html = mdToHtml(`[x](${ctrl}javascript:alert(1))`);
     assert.ok(!html.includes('javascript:'), `control byte ${ctrl.charCodeAt(0)} must not smuggle a javascript: href`);
     assert.ok(html.includes('href="#"'));
@@ -5478,6 +5883,49 @@ check('N1: a leading C0 control byte does not smuggle javascript: past the schem
   // the original guarantees still hold
   assert.ok(mdToHtml('[t](javascript:alert(1))').includes('href="#"'));
   assert.ok(mdToHtml('[t](https://x.se)').includes('href="https://x.se"'));
+});
+
+check('N1: a leading space in an ANGLE-BRACKET destination or a reference definition does not smuggle a scheme past the allowlist either', () => {
+  // The loop above hides the space case behind CommonMark's own inline-destination
+  // rule (`[x]( javascript:...)` has its leading whitespace eaten by the parser
+  // before the allowlist ever sees it). The two destination syntaxes that PRESERVE a
+  // leading space are both new with marked -- an angle-bracket destination, where
+  // every byte between < and > is the URL, and a reference definition, whose
+  // destination is resolved elsewhere in the document -- so both are regressions
+  // against the pre-marked scanner, which rendered all of these as inert text.
+  //
+  // Ablation: drop the space from stripUrlControls' trim and
+  // `[x](< javascript:alert(1)>)` emits href=" javascript:alert(1)" live, which the
+  // browser navigates to as javascript: at the daemon's origin.
+  // "Live" is the question, not "the word appears": an href of `&lt;javascript:...`
+  // is a RELATIVE url to the browser (a scheme must start with a letter, and `<` is
+  // not one of the bytes the URL parser strips), so it is inert even though the
+  // substring is there. What is live is a blocked scheme behind nothing but the
+  // whitespace the URL parser removes before it reads the scheme.
+  const liveBlockedScheme = html => /(?:href|src)="[\s\x00-\x1f]*(?:javascript|vbscript|data):/i.test(html);
+
+  const link = mdToHtml('[x](< javascript:alert(1)>)');
+  assert.ok(!liveBlockedScheme(link), `angle-bracket destination smuggled a javascript: href: ${link}`);
+  assert.ok(link.includes('href="#"'));
+
+  const ref = mdToHtml('[r]: < vbscript:x>\n\n[r]\n');
+  assert.ok(!liveBlockedScheme(ref), `reference definition smuggled a vbscript: href: ${ref}`);
+
+  const img = mdToHtml('![i](< data:text/html,x>)');
+  assert.ok(!liveBlockedScheme(img), `angle-bracket image destination smuggled a data: src: ${img}`);
+
+  // Trailing space, same parser rule (WHATWG strips C0-or-space from BOTH ends), and
+  // a space on each side at once.
+  assert.ok(!liveBlockedScheme(mdToHtml('[x](<javascript:alert(1) >)')));
+  assert.ok(!liveBlockedScheme(mdToHtml('[x](< javascript:alert(1) >)')));
+
+  // ...while an ordinary angle-bracket destination still renders live, trimmed to
+  // the bytes that were actually vetted.
+  assert.equal(mdToHtml('[x](< https://example.com/a >)'),
+    '<p><a href="https://example.com/a" target="_blank" rel="noopener noreferrer">x</a></p>');
+  // An INTERIOR space is not something the URL parser strips (it percent-encodes it),
+  // so it stays in the emitted href -- trimming is at the ends only.
+  assert.ok(mdToHtml('[x](<a b.png>)').includes('href="a b.png"'));
 });
 
 // --- N2: nothing on the request thread may backtrack quadratically ----------------
@@ -5524,6 +5972,40 @@ check('N2: emphasis still renders correctly after the rewrite -- linearity did n
   assert.ok(mdToHtml('a _em_ b').includes('<em>em</em>'));
   assert.ok(mdToHtml('_Findings for MAP_AUTH.md, census._').includes('<em>Findings for MAP_AUTH.md, census.</em>'));
   assert.ok(!mdToHtml('plain ssn_country stays literal').includes('<em>'));
+});
+
+check('N2: INTERLEAVED successful and failing delimiters are scanned in linear time -- the memo must not survive the nested lexInline a successful match runs', () => {
+  // The memo's soundness argument ("the scan only ever shrinks its remaining
+  // string") holds for ONE inline pass over ONE string. A successful match calls
+  // Lexer.lexInline on the emphasis CONTENT -- a different string, which fires the
+  // same emStrongMask hook and, while the memo was module-level and unsaved, wiped
+  // the outer pass's bounds and left its own behind. The outer scan then inherited a
+  // bound derived from an unrelated string: quadratic again, and (see the check
+  // below) silently wrong.
+  //
+  // Homogeneous input -- ' _a' repeated, as the two checks above use -- cannot catch
+  // this: it never matches, so it never nests, so the memo never leaks. It takes an
+  // input that alternates matching and non-matching delimiters. Measured with the
+  // leak: 18KB 98ms, 36KB 352ms, 72KB 1344ms -- 4x per doubling.
+  const md = '*x* _a'.repeat(50000); // 300KB, inside the by-value cap
+  const started = Date.now();
+  mdToHtml(md);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `interleaved emphasis took ${elapsed}ms on 300KB`);
+});
+
+check('N2: a nested emphasis scan does not silently delete a LATER emphasis in the same paragraph', () => {
+  // The same leak, in its correctness form: the inner lexInline's "no closer below
+  // length L" bound outlived the nested call and rejected a delimiter the outer
+  // string really does close. History-dependent within one paragraph, which is what
+  // makes it so hard to see -- `_b_ *_aaaa*` and `plain _b_` render the emphasis,
+  // `*_aaaa* _b_` drops it.
+  assert.equal(mdToHtml('*see _the notes*, then read _this_'),
+    '<p><em>see _the notes</em>, then read <em>this</em></p>');
+  assert.equal(mdToHtml('*_aaaa* _b_'), '<p><em>_aaaa</em> <em>b</em></p>');
+  assert.equal(mdToHtml('_b_ *_aaaa*'), '<p><em>b</em> <em>_aaaa</em></p>');
+  // strikethrough shares the memo and the same nested-lexInline path
+  assert.equal(mdToHtml('~~x~~ and ~~y~~'), '<p><del>x</del> and <del>y</del></p>');
 });
 
 // --- C2, second half: the caller does not get to choose an unbounded cwd ----------
@@ -8434,6 +8916,942 @@ check('the mermaid CDN is pinned to one exact version everywhere, because the CS
   const uiPins = [...ui.matchAll(/cdn\.jsdelivr\.net\/npm\/(mermaid@[^/\s'"`]*)/g)].map(m => m[1]);
   assert.deepEqual([...new Set(uiPins)], ['mermaid@11.16.1'],
     `the board's own mermaid loader must import the version its CSP allows. Got: ${uiPins.join(', ') || 'no jsdelivr import at all'}`);
+});
+
+// =================================================================================
+// SPEC_RENDERING.md ticket 02, "Code renders as code" -- renderCodeBlock's syntax
+// highlighting, six-hue palette wiring, real-line-number gutter and copy fidelity.
+// AC 1, 4 (contrast half lives in test/check-contrast.mjs), 6, 7 (non-diff half --
+// ticket 05 owns a diff row's new/old fallback), 8. One contiguous block, appended
+// last, so a parallel ticket's own additions elsewhere in this file merge cleanly.
+// =================================================================================
+
+check('AC 1: a lang with a vendored grammar highlights; absent or unvendored lang renders plain and escaped, same as before this ticket', () => {
+  const board = createBoard({
+    title: 'AC 1',
+    blocks: [
+      { kind: 'code', text: 'const x = "hi"; // note', lang: 'javascript' }, // vendored
+      { kind: 'code', text: 'const x = "hi"; // note', lang: 'not-a-real-language' }, // unvendored
+      { kind: 'code', text: '<div>x</div>' }, // no lang at all
+    ],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const sections = [...markup.matchAll(/<section class="block code-block"[\s\S]*?<\/section>/g)].map(m => m[0]);
+  assert.equal(sections.length, 3, 'setup failure: expected three code blocks');
+
+  const [highlighted, unvendored, noLang] = sections;
+  assert.ok(highlighted.includes('class="tok-keyword"'), 'javascript is vendored: const must be tokenised as a keyword');
+  assert.ok(highlighted.includes('class="tok-string"'), 'javascript is vendored: the string literal must be tokenised');
+  assert.ok(highlighted.includes('class="tok-comment"'), 'javascript is vendored: the trailing comment must be tokenised');
+
+  for (const section of [unvendored, noLang]) {
+    assert.ok(!section.includes('class="tok-'), 'no grammar (unvendored lang, or none at all) must emit no tok-* span');
+    // Plain and escaped, exactly as renderCodeBlock did before this ticket -- the
+    // ONLY thing new for a fallback block is the AC 7 gutter row wrapper.
+    assert.ok(/<span class="code-row" data-line="1">[^<]*<\/span>/.test(section) || section.includes('&lt;div&gt;x&lt;/div&gt;'),
+      `fallback body must be plain escaped text inside its one gutter row: ${section}`);
+  }
+  assert.ok(noLang.includes('&lt;div&gt;x&lt;/div&gt;'), 'a lang-less block must still HTML-escape its text');
+});
+
+check('AC 6: highlighting is classes only -- no inline colour anywhere in a code block, so a theme swap re-colours it for free with no re-post', () => {
+  // The whole trick ADR.md entry 63 relies on: renderBoardPage never sees a theme
+  // and never will (theme is a client-side toggle over CSS custom properties,
+  // src/theme.mjs) -- so the only way "switching theme re-colours an
+  // already-rendered block" can be TRUE is if the server never bakes a colour in
+  // at all. Grepping the emitted code-block markup for a hex/rgb colour or a
+  // `style=` attribute is a direct, mechanical proof of that, not an inference.
+  const board = createBoard({
+    title: 'AC 6',
+    blocks: [{ kind: 'code', text: 'def f(x):\n    return x + 1  # comment\n', lang: 'python' }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(section.includes('class="tok-'), 'setup failure: python must actually highlight for this check to mean anything');
+  assert.ok(!/style\s*=/.test(section), 'a code block must carry no inline style attribute at all');
+  assert.ok(!/#[0-9a-fA-F]{3,6}\b/.test(section), 'a code block must carry no literal hex colour');
+  assert.ok(!/rgba?\(/.test(section), 'a code block must carry no literal rgb/rgba colour');
+});
+
+check('AC 7 (non-diff half): a whole-file or by-value block numbers from line 1 and drops the phantom trailing-newline row; an explicit source.lines range numbers from its own start and keeps a genuinely blank last line', () => {
+  const byValue = createBoard({
+    title: 'AC 7a',
+    blocks: [{ kind: 'code', text: 'one\ntwo\nthree', lang: 'javascript' }],
+  });
+  const byValueRows = [...renderBoardPage(byValue).matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1]));
+  assert.deepEqual(byValueRows, [1, 2, 3], 'a by-value block with no trailing newline numbers every real line, starting at 1');
+
+  const trailingNL = createBoard({
+    title: 'AC 7b',
+    blocks: [{ kind: 'code', text: 'one\ntwo\nthree\n', lang: 'javascript' }],
+  });
+  const trailingRows = [...renderBoardPage(trailingNL).matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1]));
+  assert.deepEqual(trailingRows, [1, 2, 3],
+    'a trailing newline is the file\'s own convention (src/resolve.mjs\'s fileLines), not a fourth blank line -- it must not mint a phantom row 4');
+
+  const srcFile = path.join(fixturesDir, 'gutter-range.txt');
+  // Lines: 1 "alpha", 2 "beta", 3 "" (blank), 4 "gamma", 5 "" (blank), 6 "zeta".
+  writeFileSync(srcFile, ['alpha', 'beta', '', 'gamma', '', 'zeta'].join('\n'), 'utf8');
+  const ranged = createBoard({
+    title: 'AC 7c',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'code', source: { path: 'gutter-range.txt', lines: [2, 5] } }],
+  });
+  const rangedRows = [...renderBoardPage(ranged).matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1]));
+  assert.deepEqual(rangedRows, [2, 3, 4, 5],
+    'an explicit source.lines range starts numbering at its own first line and keeps every requested row, blank ones included -- never the from-1/drop-trailing-blank rule the whole-file case uses');
+});
+
+check('AC 8: selecting and copying a code block yields block.text back exactly -- no gutter digits, no injected newlines, for a plain block, a highlighted multi-line one, one with a trailing newline, and one whose last line is genuinely blank', () => {
+  const cases = [
+    'const x = 1;', // single line, highlighted
+    'one\ntwo\nthree', // multi-line, no trailing newline
+    'one\ntwo\nthree\n', // multi-line, WITH a trailing newline (the artifact AC 7 drops from the gutter, but never from the text)
+    'alpha\n\nbeta\n', // a genuinely blank middle line
+    '/* a\n   multi-line\n   comment */\nconst after = 1;', // a single Prism token spanning three physical lines
+    '', // empty block
+  ];
+  for (const text of cases) {
+    const board = createBoard({ title: 'AC 8', blocks: [{ kind: 'code', text, lang: 'javascript' }] });
+    const document = parseHTML(renderBoardPage(board));
+    const codeEl = document.querySelector('.code-block pre code');
+    assert.ok(codeEl, `setup failure: no rendered <code> for ${JSON.stringify(text)}`);
+    assert.equal(codeEl.textContent, text,
+      `copied text must be byte-identical to block.text for ${JSON.stringify(text)}, got ${JSON.stringify(codeEl.textContent)}`);
+  }
+});
+
+check('AC 8, structurally: a multi-line highlighted token never leaves an unbalanced span straddling a row boundary', () => {
+  // The hazard highlightRows (src/render.mjs) exists to avoid: tokenising the WHOLE
+  // text first and only then splitting on '\n' would let a single tok-comment span
+  // cross into the next row's own <span class="code-row">, an invalid nesting no
+  // DOM can represent -- parseHTML would either throw or silently reshuffle it,
+  // either of which breaks the byte-identity check above. Counted directly here so
+  // a regression shows up as an obvious tag-count mismatch, not a confusing parse
+  // failure three checks away.
+  const board = createBoard({
+    title: 'AC 8 balance',
+    blocks: [{ kind: 'code', text: '/* start\nmiddle\nend */\nconst x = 1;\n// trailing comment', lang: 'javascript' }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  const opens = (section.match(/<span/g) || []).length;
+  const closes = (section.match(/<\/span>/g) || []).length;
+  assert.equal(opens, closes, `every opened span must close within the section: ${opens} opens vs ${closes} closes`);
+  // Five physical lines -> five gutter rows, none skipped and none merged.
+  const dataLines = [...section.matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1]));
+  assert.deepEqual(dataLines, [1, 2, 3, 4, 5]);
+});
+
+check('every vendored language src/resolve.mjs\'s langForPath can name actually highlights through renderCodeBlock, not just through grammarFor in isolation', () => {
+  // grammarFor is exercised directly by test/check-vendor-digest.mjs (ticket 01,
+  // AC 2/15); this proves the SAME grammars are reachable end to end through the
+  // render path this ticket owns, for one representative snippet per language.
+  //
+  // ALL 20 of AC 2's languages, not a subset. This sweep used to cover 16 and omit
+  // exactly markdown, tsx, jsx and html -- and `markdown` was the one of those four
+  // that genuinely emitted no tok-* span at all (flattenTokens read only `t.type`,
+  // and Prism's markdown grammar carries every one of its coloured types as an
+  // ALIAS instead: `title` is `alias: 'important'`, `code-snippet` is
+  // `alias: ['code', 'keyword']`, while its own top-level type names -- title, bold,
+  // italic, list, url, code-snippet, blockquote -- intersect TOKEN_CLASS nowhere).
+  // A `markdown` code block was therefore indistinguishable from the no-grammar
+  // fallback, against AC 1's promise, and the sweep's own omission is what let that
+  // ship green. Hence: the list below is asserted to BE AC 2's list, so the next
+  // language added cannot be quietly left out of it either.
+  const samples = {
+    javascript: 'const x = 1; // c',
+    typescript: 'const x: number = 1;',
+    tsx: 'const App = (): JSX.Element => <div className="a">{x}</div>;',
+    jsx: 'const App = () => <div className="a">{x}</div>;',
+    python: 'def f(x):\n    return x',
+    ruby: 'def f(x)\n  x\nend',
+    go: 'func main() { x := 1 }',
+    rust: 'fn main() { let x = 1; }',
+    java: 'class X { int x = 1; }',
+    c: 'int main() { int x = 1; }',
+    cpp: 'int main() { int x = 1; }',
+    bash: 'echo "hi" # note',
+    json: '{"a": 1}',
+    yaml: 'a: 1',
+    markdown: '# Title\n\n**bold** text and `a snippet`.\n',
+    html: '<!doctype html>\n<div class="a">text</div>',
+    css: '/* note */\n.a { content: "x"; }',
+    sql: 'SELECT * FROM t;',
+    swift: 'let x = 1',
+    kotlin: 'val x = 1',
+  };
+  // 'diff' is the one SUPPORTED_LANGUAGES name deliberately absent: ADR.md entry 64
+  // makes "a diff row never carries a six-hue tok-* class" true by construction, so
+  // asserting one here would assert the opposite of AC 5. Its own rendering is
+  // covered by the ticket-05 section below.
+  assert.deepEqual(
+    Object.keys(samples).sort(),
+    SUPPORTED_LANGUAGES.filter(l => l !== 'diff').sort(),
+    'this sweep must cover every vendored language AC 2 names -- no quiet omissions');
+  for (const [lang, text] of Object.entries(samples)) {
+    const board = createBoard({ title: `lang ${lang}`, blocks: [{ kind: 'code', text, lang }] });
+    const markup = renderedMarkup(renderBoardPage(board));
+    const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+    assert.ok(section.includes('class="tok-'), `${lang}: expected at least one highlighted token, got: ${section}`);
+  }
+});
+
+// =================================================================================
+// SPEC_RENDERING.md ticket 04, "One renderer, both places" -- AC 14: a fenced code
+// block inside markdown highlights through the SAME tokenizer a `kind: 'code'`
+// block uses (src/render.mjs's highlightRows/TOKEN_CLASS, reached here through the
+// exported highlightFenceHtml and, in the real render path, src/board.mjs's
+// dependency injection into mdToHtmlAndAnchors -- see ADR.md entry 65 for why an
+// injected argument stands in for an import neither module can carry directly).
+// =================================================================================
+
+check('AC 14: a fenced code block inside markdown highlights through the exact same tokenizer as a kind: "code" block -- same input, same spans, both entry points', () => {
+  const code = 'const x = "hi"; // note\nfunction f(n) {\n  return n + 1;\n}';
+  const board = createBoard({
+    title: 'AC 14',
+    blocks: [
+      { kind: 'code', text: code, lang: 'javascript' },
+      { kind: 'markdown', text: '```javascript\n' + code + '\n```\n' },
+    ],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const codeSection = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  const mdSection = /<section class="block markdown-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  const codeInner = /<pre><code>([\s\S]*?)<\/code><\/pre>/.exec(codeSection);
+  const mdInner = /<pre><code>([\s\S]*?)<\/code><\/pre>/.exec(mdSection);
+  assert.ok(codeInner, 'setup failure: no rendered kind:"code" body');
+  assert.ok(mdInner, 'setup failure: no rendered markdown fence body');
+  assert.ok(codeInner[1].includes('class="tok-keyword"'), 'setup failure: the code block itself must actually highlight');
+
+  // Strip the AC 7 gutter wrapper (`<span class="code-row" data-line="N">...
+  // </span>`, one per real '\n'-joined row -- see codeBody, src/render.mjs) down to
+  // the bare tok-*-classed markup a fence gets directly from highlightFenceHtml,
+  // which never adds that wrapper (this file's own "the gutter is a code-block
+  // affordance" decision -- a fence has no source.lines, so no real line number to
+  // gutter). Splitting on '\n' first is safe here specifically because AC 8's
+  // structural check already proves no tok-* span ever straddles a row boundary,
+  // so every line is exactly one balanced `<span class="code-row" ...>...</span>`.
+  const gutterless = codeInner[1].split('\n')
+    .map(row => row.replace(/^<span class="code-row" data-line="\d+">/, '').replace(/<\/span>$/, ''))
+    .join('\n');
+  assert.equal(gutterless, mdInner[1],
+    'the same source text and lang must produce byte-identical tok-* spans through both entry points, modulo the code-block-only gutter');
+
+  // And directly against the seam itself: proves the markdown path is really
+  // CALLING this function (via board.mjs's injection), not an independent
+  // implementation that happens to agree on this one input. highlightFenceHtml now
+  // returns the fence's WHOLE markup (the label wrapper included, see below), so
+  // the comparison is against its own <code> inner text, extracted the same way
+  // mdInner was, not against the raw return value.
+  const directInner = /<pre><code>([\s\S]*?)<\/code><\/pre>/.exec(highlightFenceHtml(code, 'javascript'));
+  assert.ok(directInner, 'setup failure: highlightFenceHtml(code, \'javascript\') did not return <pre><code>...</code></pre>');
+  assert.equal(mdInner[1], directInner[1],
+    'a markdown fence\'s highlighted body must be exactly what highlightFenceHtml returns for the same text and lang');
+
+  // Spec contract edit, 2026-08-09: a vendored language gets a small label, added
+  // on a wrapper div around <pre> -- never inside <code> (mdInner[1], asserted
+  // above, is unaffected by it) -- so a reader can tell what a fence is without
+  // reading its contents, the same thing the standalone block's kicker already
+  // gives a 'kind: code' block.
+  assert.ok(mdSection.includes('<div class="fence-lang" data-lang="javascript">'),
+    'a fence whose lang has a vendored grammar must be wrapped in the language-label div, carrying the lang verbatim');
+});
+
+check('the language label is generated content, not a DOM node: wrapping a labelled fence in the div does not change what its <code> contains, so copy fidelity holds exactly as it did before the label existed', () => {
+  // Same proof shape as AC 8 above (parseHTML + .textContent), aimed specifically
+  // at the new wrapper: if the label were ever a real text node (or if escAttr's
+  // output somehow leaked into <code>) this would be the assertion that catches
+  // it, since a DOM parse -- unlike a substring check -- reads exactly what a
+  // browser selection would copy.
+  const code = 'const x = "hi"; // note\nfunction f(n) {\n  return n + 1;\n}';
+  const board = createBoard({ title: 'fence label copy', blocks: [{ kind: 'markdown', text: '```javascript\n' + code + '\n```\n' }] });
+  const document = parseHTML(renderBoardPage(board));
+  const wrapper = document.querySelector('.fence-lang');
+  assert.ok(wrapper, 'setup failure: no rendered .fence-lang wrapper');
+  const codeEl = wrapper.querySelector('pre code');
+  assert.ok(codeEl, 'setup failure: no rendered <code> inside the label wrapper');
+  assert.equal(codeEl.textContent, code,
+    `copied fence text must be byte-identical to the fence's own text with a language label present, got ${JSON.stringify(codeEl.textContent)}`);
+});
+
+check('AC 14: a fence with no lang, or an unvendored one, falls back to plain escaped text inside markdown -- same fallback rule as a kind: "code" block (AC 1)', () => {
+  const board = createBoard({
+    title: 'AC 14 fallback',
+    blocks: [
+      { kind: 'markdown', text: '```\n<div>x</div>\n```\n' }, // no lang at all
+      { kind: 'markdown', text: '```not-a-real-language\nconst x = 1;\n```\n' }, // unvendored
+    ],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const sections = [...markup.matchAll(/<section class="block markdown-block"[\s\S]*?<\/section>/g)].map(m => m[0]);
+  assert.equal(sections.length, 2, 'setup failure: expected two markdown blocks');
+  for (const section of sections) {
+    assert.ok(!section.includes('class="tok-'), 'no grammar (unvendored lang, or none at all) must emit no tok-* span inside markdown either');
+    // Spec contract edit, 2026-08-09: the label tracks the exact same
+    // vendored-or-not test as the colour itself (grammarFor(lang)), so neither a
+    // lang-less fence nor an unvendored one gets the wrapper div -- the markup is
+    // byte-for-byte '<pre><code>...' with no label, same as before this change.
+    assert.ok(!section.includes('class="fence-lang"'), 'no vendored grammar must mean no language label either, same condition as the colour');
+    assert.ok(section.includes('<pre><code>'), 'setup failure: expected an unwrapped <pre><code> for a fence with no label');
+  }
+  assert.ok(sections[0].includes('&lt;div&gt;x&lt;/div&gt;'), 'a lang-less fence must still HTML-escape its text');
+});
+
+check('AC 13 still holds alongside AC 14: a ```mermaid fence is never routed through the highlighter, even now that a plain fence is', () => {
+  const board = createBoard({
+    title: 'AC 13 vs 14',
+    blocks: [{ kind: 'markdown', text: '```mermaid\nflowchart TD\n  a --> b\n```\n' }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  assert.ok(markup.includes('<pre class="mermaid">flowchart TD'), 'a mermaid fence must still become <pre class="mermaid">, raw text for the client to read');
+  const section = /<section class="block markdown-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(!section.includes('class="tok-'), 'a mermaid fence must never be tokenised -- it is diagram source, not code');
+  assert.ok(!section.includes('class="code-row"'), 'a mermaid fence must never get a code-block gutter either');
+  // markdown.mjs's renderCode branches to the mermaid host BEFORE ever calling
+  // `highlight` (see its own comment), so the language-label wrapper -- which
+  // only highlightFenceHtml can add -- must never appear on a mermaid fence.
+  assert.ok(!section.includes('class="fence-lang"'), 'a mermaid fence must never get the language label either -- it never reaches highlightFenceHtml at all');
+});
+
+check('every other markdown check (no highlight option passed) keeps rendering a fence plain and escaped, byte-identical to before this ticket', () => {
+  // mdToHtml/mdToHtmlAndAnchors called directly, with no `opts.highlight` -- every
+  // check above this section in this file does exactly that, and this pins the
+  // default explicitly so a future change to board.mjs's wiring can't silently
+  // start highlighting these too without a check noticing.
+  const out = mdToHtml('```javascript\nconst x = 1;\n```\n');
+  assert.equal(out, '<pre><code>const x = 1;</code></pre>', 'no highlight option: a fence must render exactly as it always has, no tok-* span');
+});
+
+// =================================================================================
+// SPEC_RENDERING.md ticket 05, "A diff reads as a diff" -- AC 3 (.diff/.patch ->
+// lang: 'diff'), AC 5 (add/remove fill, six-hue colour suppressed by construction),
+// the diff half of AC 7 (new/old line numbers from the diff's own hunk headers),
+// and AC 8 through the diff path (copy fidelity, '+'/'-' signs included since they
+// are the diff file's own bytes, never anything this renderer invented).
+// =================================================================================
+
+check('AC 3: .diff and .patch resolve to lang: \'diff\' through langForPath', () => {
+  assert.equal(langForPath('changes.diff'), 'diff');
+  assert.equal(langForPath('changes.patch'), 'diff');
+  assert.equal(langForPath('src/foo.diff'), 'diff');
+});
+
+check('AC 3, end to end: a code block resolved from a .diff file gets lang: \'diff\' with no explicit lang, and renders through the diff path', () => {
+  writeFileSync(path.join(fixturesDir, 'sample.diff'), '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n', 'utf8');
+  const board = createBoard({ title: 'AC3', cwd: fixturesDir, blocks: [{ kind: 'code', source: { path: 'sample.diff' } }] });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(section.includes('class="code-diff"'), 'a .diff reference must highlight through the diff path with no lang given explicitly');
+  assert.ok(section.includes('class="code-row diff-del"'));
+  assert.ok(section.includes('class="code-row diff-add"'));
+});
+
+check('AC 5: an added row carries --good at alpha 0.12 (.diff-add), a removed row carries --critical at alpha 0.12 (.diff-del), and a diff block NEVER carries a six-hue tok-* class -- structurally, not by inference', () => {
+  const board = createBoard({
+    title: 'AC 5',
+    blocks: [{
+      kind: 'code',
+      lang: 'diff',
+      text: '--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n context\n-removed line\n+added line\n',
+    }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(/<span class="code-row diff-del" data-line="\d+">-removed line<\/span>/.test(section),
+    'a removed row must carry .diff-del');
+  assert.ok(/<span class="code-row diff-add" data-line="\d+">\+added line<\/span>/.test(section),
+    'an added row must carry .diff-add');
+  // The structural promise itself: "the fill is never composited under a six-hue
+  // token" is made true by construction (TOKEN_CLASS has no diff token mapped to a
+  // tok-* name) -- asserted here directly against the rendered bytes, not trusted
+  // from reading the source.
+  assert.ok(!section.includes('class="tok-'), 'a diff block must never emit a six-hue tok-* span, added/removed rows included');
+  // And the block-level colour drop (AC 5's "syntax colour drops to --code-ink"):
+  // the <code> element itself carries the modifier class that overrides
+  // .code-block pre code's own --code-base default (src/styles.mjs).
+  assert.ok(section.includes('<pre><code class="code-diff">'), 'a diff block\'s <code> must carry the code-diff modifier class');
+});
+
+check('AC 5: a diff\'s own structural lines (file headers, hunk headers) are styled as --muted italic (.diff-meta), never fill, never a gutter number', () => {
+  const board = createBoard({
+    title: 'AC 5 meta',
+    blocks: [{ kind: 'code', lang: 'diff', text: '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n' }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(section.includes('<span class="code-row"><span class="diff-meta">--- a/x</span></span>'));
+  assert.ok(section.includes('<span class="code-row"><span class="diff-meta">+++ b/x</span></span>'));
+  assert.ok(section.includes('<span class="code-row"><span class="diff-meta">@@ -1 +1 @@</span></span>'));
+  assert.ok(!/diff-meta[\s\S]{0,40}data-line/.test(section) && !/data-line="\d+"[^>]*>\s*<span class="diff-meta"/.test(section),
+    'a header row\'s own .code-row must carry no data-line attribute at all -- it names no line in either file');
+});
+
+check('AC 7 (diff half): an added/context row is numbered with the NEW-file line, a removed row falls back to the OLD-file line, and header/hunk rows carry no gutter number at all', () => {
+  const text = [
+    '--- a/x', '+++ b/x',
+    '@@ -1,4 +1,5 @@',
+    ' unchanged one',      // context -- new file line 1
+    '-old two',            // removed -- old file line 2
+    '-old three',          // removed -- old file line 3
+    '+new two',            // added -- new file line 2
+    '+new three',          // added -- new file line 3
+    '+new four',           // added -- new file line 4
+    ' unchanged five',     // context -- new file line 5
+    '',
+  ].join('\n');
+  const board = createBoard({ title: 'AC7 diff', blocks: [{ kind: 'code', lang: 'diff', text }] });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  const rows = [...section.matchAll(/<span class="code-row([^"]*)"( data-line="(\d+)")?>/g)]
+    .map(m => ({ cls: m[1].trim(), line: m[3] ? Number(m[3]) : null }));
+  assert.deepEqual(rows, [
+    { cls: '', line: null },              // --- a/x (file header)
+    { cls: '', line: null },              // +++ b/x (file header)
+    { cls: '', line: null },              // @@ ... @@ (hunk header)
+    { cls: '', line: 1 },                 // unchanged one -> new-file line 1
+    { cls: 'diff-del', line: 2 },         // old two -> old-file line 2
+    { cls: 'diff-del', line: 3 },         // old three -> old-file line 3
+    { cls: 'diff-add', line: 2 },         // new two -> new-file line 2
+    { cls: 'diff-add', line: 3 },         // new three -> new-file line 3
+    { cls: 'diff-add', line: 4 },         // new four -> new-file line 4
+    { cls: '', line: 5 },                 // unchanged five -> new-file line 5
+  ]);
+});
+
+check('AC 7 (diff half): a malformed or header-less diff degrades to every row reading blank in the gutter -- no line number invented, and no throw', () => {
+  const board = createBoard({
+    title: 'AC7 malformed',
+    blocks: [{ kind: 'code', lang: 'diff', text: 'this is not\na real unified diff\nat all\n' }],
+  });
+  assert.doesNotThrow(() => renderBoardPage(board));
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(!/data-line="\d+"/.test(section), 'a diff with no recognisable hunk header must gutter nothing, not guess');
+  assert.ok(!section.includes('diff-add') && !section.includes('diff-del'), 'no add/remove fill without a real hunk to derive it from');
+  assert.ok(section.includes('this is not'), 'the text itself must still render, plain, not dropped');
+});
+
+check('AC 7 (diff half): a multi-file diff resets its line counters at the second file\'s own headers -- never reads it against the first file\'s stale coordinates', () => {
+  const text = [
+    'diff --git a/one.txt b/one.txt',
+    '--- a/one.txt', '+++ b/one.txt',
+    '@@ -1,1 +1,1 @@',
+    '-file one old',
+    '+file one new',
+    'diff --git a/two.txt b/two.txt',
+    '--- a/two.txt', '+++ b/two.txt',
+    '@@ -10,1 +20,1 @@',
+    '-file two old',
+    '+file two new',
+    '',
+  ].join('\n');
+  const board = createBoard({ title: 'AC7 multi-file', blocks: [{ kind: 'code', lang: 'diff', text }] });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(/<span class="code-row diff-del" data-line="1">-file one old<\/span>/.test(section));
+  assert.ok(/<span class="code-row diff-add" data-line="1">\+file one new<\/span>/.test(section));
+  // File two's hunk starts at old=10/new=20 -- if the counters leaked across the
+  // 'diff --git' boundary these would read 2/2 (one past file one's single line)
+  // instead of the coordinates file two's own '@@' actually names.
+  assert.ok(/<span class="code-row diff-del" data-line="10">-file two old<\/span>/.test(section));
+  assert.ok(/<span class="code-row diff-add" data-line="20">\+file two new<\/span>/.test(section));
+});
+
+check('AC 8 through the diff path: selecting and copying a diff block yields the original bytes exactly -- \'+\'/\'-\' signs included (they are the file\'s own bytes), no gutter digits, no injected newlines', () => {
+  const cases = [
+    '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n', // trailing newline
+    '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new',   // no trailing newline
+    'diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,2 +1,3 @@\n ctx\n-gone\n+here\n+also here\n',
+    'not a diff at all, just text\nwith a - dash and a + plus in it\n', // malformed, still must round-trip
+    '',
+  ];
+  for (const text of cases) {
+    const board = createBoard({ title: 'AC8 diff', blocks: [{ kind: 'code', lang: 'diff', text }] });
+    const document = parseHTML(renderBoardPage(board));
+    const codeEl = document.querySelector('.code-block pre code');
+    assert.ok(codeEl, `setup failure: no rendered <code> for ${JSON.stringify(text)}`);
+    assert.equal(codeEl.textContent, text,
+      `copied text must be byte-identical to block.text for ${JSON.stringify(text)}, got ${JSON.stringify(codeEl.textContent)}`);
+  }
+});
+
+check('a markdown \'diff\' fence highlights through the SAME tokenizer as a kind: "code" diff block (ADR.md entry 65) -- header lines get .diff-meta AND added/removed rows get the .diff-add/.diff-del fill (ticket 05\'s Delivers line: "a referenced .patch/.diff file, or a fenced diff, renders with added and removed rows tinted the way a patch viewer tints them"), but still no gutter -- a fence carries no source.lines, so it has no real line number, but the fill needs nothing but the diff\'s own hunk headers', () => {
+  const diffText = '--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n context\n-old\n+new';
+  const board = createBoard({
+    title: 'diff fence',
+    blocks: [{ kind: 'markdown', text: '```diff\n' + diffText + '\n```\n' }],
+  });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block markdown-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(section.includes('class="diff-meta"'), 'the fence\'s own header lines must still get the diff-meta treatment through the shared tokenizer');
+  // The fix this section pins: a fenced diff DOES get the add/remove fill now --
+  // a naive re-read of ADR 65 ("a fence never gets codeBody's gutter") used to be
+  // read as "a fence never gets ANY row wrapper", which silently dropped the fill
+  // too and left a fenced diff reading as undifferentiated text, the exact gap
+  // this ticket exists to close.
+  assert.ok(/<span class="code-row diff-flat diff-del">-old<\/span>/.test(section), 'a removed row inside a diff fence must carry .diff-del');
+  assert.ok(/<span class="code-row diff-flat diff-add">\+new<\/span>/.test(section), 'an added row inside a diff fence must carry .diff-add');
+  // But still no GUTTER: no data-line attribute anywhere (a fence has no
+  // source.lines, so no real line number to show -- AC 7 is a kind: 'code' block
+  // promise only), and .diff-flat is what keeps a fenced diff's rows flush left
+  // rather than indented for a gutter column that would never show anything.
+  assert.ok(!/data-line/.test(section), 'a fence must never gutter a line number, diff or not -- it has no source.lines');
+  assert.ok(section.includes('diff-flat'), 'every row of a diff fence must carry the no-gutter modifier');
+  assert.ok(!section.includes('class="tok-'), 'a diff fence must never emit a six-hue tok-* span, same structural promise as a kind: "code" diff block');
+  // And directly against the seam: byte-identical to what highlightFenceHtml
+  // returns for the same input, same as AC 14's own proof for an ordinary language.
+  // highlightFenceHtml returns the WHOLE fence markup (label wrapper included, see
+  // its own comment), so this compares <code> inner text to <code> inner text.
+  const mdInner = /<pre><code>([\s\S]*?)<\/code><\/pre>/.exec(section);
+  assert.ok(mdInner, 'setup failure: no rendered fence body');
+  const directInner = /<pre><code>([\s\S]*?)<\/code><\/pre>/.exec(highlightFenceHtml(diffText, 'diff'));
+  assert.ok(directInner, 'setup failure: highlightFenceHtml(diffText, \'diff\') did not return <pre><code>...</code></pre>');
+  assert.equal(mdInner[1], directInner[1]);
+
+  // 'diff' is itself a vendored grammar (SUPPORTED_LANGUAGES), so a fenced diff
+  // gets the same language label as any other vendored fence -- the label tracks
+  // "does this lang have a grammar", not "does it use the six-hue palette" (ADR
+  // 64 suppresses colour on a diff row, a separate and later decision).
+  assert.ok(section.includes('<div class="fence-lang" data-lang="diff">'), 'a fenced diff must still get the language label -- diff is vendored too');
+});
+
+check('a markdown \'diff\' fence: copy fidelity still holds through the new fill-only row wrapper -- \'+\'/\'-\' signs included, no gutter digits (there are none), no injected newlines', () => {
+  // A fence's OWN closing ``` sits on its own line, and that line-ending is
+  // fence delimiter syntax, not content -- marked's fence tokenizer never hands
+  // the trailing '\n' immediately before the closing fence to the renderer as
+  // part of `t.text`, for ANY language (verified directly against an ordinary
+  // javascript fence, unrelated to this ticket's diff-only change). So each case
+  // below is built with the closing fence unconditionally on its own fresh line
+  // (never glued onto the diff text's own last line, which would malform the
+  // fence itself), and the byte this must round-trip is `diffText` with at most
+  // one trailing '\n' stripped -- exactly what the fence's `t.text` actually is.
+  const cases = [
+    '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n', // trailing newline
+    '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new',   // no trailing newline
+    '--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n',
+  ];
+  for (const diffText of cases) {
+    const fenceBody = diffText.endsWith('\n') ? diffText : diffText + '\n';
+    const board = createBoard({ title: 'fence copy', blocks: [{ kind: 'markdown', text: '```diff\n' + fenceBody + '```\n' }] });
+    const document = parseHTML(renderBoardPage(board));
+    const codeEl = document.querySelector('.md-content pre code');
+    assert.ok(codeEl, `setup failure: no rendered fence <code> for ${JSON.stringify(diffText)}`);
+    const expected = diffText.replace(/\n$/, '');
+    assert.equal(codeEl.textContent, expected,
+      `copied fence text must be byte-identical to the fence's own text for ${JSON.stringify(diffText)}, got ${JSON.stringify(codeEl.textContent)}`);
+  }
+});
+
+check('a markdown \'diff\' fence: the kind: "code" diff block path is unaffected -- still real gutter numbers, no .diff-flat, exactly as before this fix', () => {
+  const diffText = '--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n context\n-old\n+new\n';
+  const board = createBoard({ title: 'block unaffected', blocks: [{ kind: 'code', lang: 'diff', text: diffText }] });
+  const markup = renderedMarkup(renderBoardPage(board));
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  assert.ok(!section.includes('diff-flat'), 'a kind: "code" diff block must never carry the fence-only no-gutter modifier');
+  assert.ok(/<span class="code-row" data-line="1"> context<\/span>/.test(section), 'a context row must still carry its real gutter number');
+  assert.ok(/<span class="code-row diff-del" data-line="2">-old<\/span>/.test(section), 'a removed row must still carry its real gutter number');
+  assert.ok(/<span class="code-row diff-add" data-line="2">\+new<\/span>/.test(section), 'an added row must still carry its real gutter number');
+});
+
+// =================================================================================
+// SPEC_RENDERING.md audit follow-up -- defects found in src/render.mjs after the
+// rendering feature landed. One contiguous block, appended last, same convention as
+// the ticket sections above. Each check below went red against the code as shipped.
+// =================================================================================
+
+check('a code block\'s gutter number is both escaped and validated: a non-integer source.lines[0] never reaches the data-line attribute, and never as markup', () => {
+  // Reachability, which is the whole reason this is not theoretical: src/resolve.mjs's
+  // resolveRef validates `lines` in the `else if (ref.lines)` arm of an if/else whose
+  // FIRST arm is `ref.section`. A reference carrying BOTH selectors takes the section
+  // branch, so `lines` is never bounds-checked, never integer-checked, and never
+  // errors -- and src/board.mjs stores `source: raw.source ?? null` verbatim, so the
+  // caller's own bytes arrive at codeBody with `block.error` undefined. The block
+  // looks perfectly healthy; the page carries live markup out of an attribute.
+  writeFileSync(path.join(fixturesDir, 'gutter-xss.md'), '# Install\n\nalpha\nbeta\n', 'utf8');
+  const payload = '1"><img src=x onerror=alert(1)><span data-x="';
+  const board = createBoard({
+    title: 'gutter injection',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'code', source: { path: 'gutter-xss.md', section: 'install', lines: [payload, 2] } }],
+  });
+  assert.equal(board.blocks[0].error, undefined,
+    'setup: the section selector wins, so the reference resolves clean -- the "looks healthy" half of the defect');
+  const page = renderBoardPage(board);
+  const markup = renderedMarkup(page);
+
+  // The escaping half. `<img src=x` must not exist as markup anywhere the renderer
+  // wrote it. (The board JSON in #board-data still carries the payload as a JSON
+  // string value -- that is hydration data, not markup, and renderedMarkup strips it;
+  // see QUIRKS.md "a rendered page contains every comment's text twice".)
+  // Note the payload IS expected to appear, escaped, as text: sourceLabel puts the
+  // reference's own selectors in the block kicker, and that string goes through
+  // escHtml like every other kicker. Escaped text carrying the characters 'onerror='
+  // is inert; what must not exist is a TAG.
+  assert.ok(!markup.includes('<img'), `a gutter number must never open a tag: ${markup.slice(markup.indexOf('code-block'), markup.indexOf('code-block') + 400)}`);
+  assert.doesNotMatch(markup, /<\w+[^>]*\son\w+\s*=/i, 'a gutter number must never carry an event handler into a real tag');
+
+  // The validation half. Escaping alone would leave `data-line="1&quot;&gt;&lt;img
+  // ..."` -- inert, but a nonsense gutter rendered through
+  // `::before { content: attr(data-line) }`. Every emitted gutter number is a
+  // plain integer or the attribute is absent; nothing else is a line number.
+  for (const [, value] of markup.matchAll(/data-line="([^"]*)"/g)) {
+    assert.match(value, /^\d+$/, `every data-line value must be a bare integer, got ${JSON.stringify(value)}`);
+  }
+  // And the degradation is the sane one: a block whose range is not a real range is
+  // not an explicit range at all, so it numbers from 1 like any whole-file block
+  // rather than from whatever the caller put there.
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(markup)[0];
+  const lines = [...section.matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1]));
+  assert.equal(lines[0], 1, 'an unvalidated range falls back to the whole-file numbering, not to the caller\'s bytes');
+});
+
+check('N2: a code block is bounded on the request thread -- Prism\'s tokenizers are quadratic on ordinary unterminated content, and the daemon is single-threaded', () => {
+  // Measured on this machine (see MAX_HIGHLIGHT_CHARS in src/render.mjs for the full
+  // table): `'/' + 'a'.repeat(n)` -- an unterminated regex literal, i.e. a truncated
+  // or minified .js -- through the typescript grammar takes 73ms at 4KB, 286ms at
+  // 8KB, 1178ms at 16KB, a clean 4x per doubling. Ablation (drop the cutoff): the
+  // 256KB block below is 8192x the threshold's work at (256/8)^2 = 1024x, i.e. about
+  // five MINUTES of one blocked thread -- and paid AGAIN on every renderBoardPage,
+  // every SSE fragment and every packet build, since highlighting is not cached.
+  const text = '/' + 'a'.repeat(256 * 1024 - 1); // inside byValueText's MAX_REF_BYTES cap
+  const board = createBoard({ title: 'N2 prism', blocks: [{ kind: 'code', lang: 'typescript', text }] });
+  const started = Date.now();
+  const page = renderBoardPage(board);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `rendering a 256KB adversarial code block took ${elapsed}ms`);
+  assert.ok(page.includes('code-block'), 'setup failure: the block must actually have rendered');
+});
+
+check('the highlighting cutoff is a fallback, not a failure: under it a block still highlights, over it it renders exactly as an unvendored lang does, and copy fidelity holds on both sides', () => {
+  const under = 'const x = "hi"; // note\n'.repeat(300); // ~7KB, under the threshold
+  const over = 'const x = "hi"; // note\n'.repeat(2000);  // ~46KB, over it
+  assert.ok(under.length < 8192 && over.length > 8192, 'setup: one sample each side of MAX_HIGHLIGHT_CHARS');
+
+  const boardUnder = createBoard({ title: 'under', blocks: [{ kind: 'code', lang: 'javascript', text: under }] });
+  const boardOver = createBoard({ title: 'over', blocks: [{ kind: 'code', lang: 'javascript', text: over }] });
+  const markupUnder = renderedMarkup(renderBoardPage(boardUnder));
+  const markupOver = renderedMarkup(renderBoardPage(boardOver));
+  assert.ok(markupUnder.includes('class="tok-'), 'a block under the cutoff must still highlight -- the cutoff is not allowed to be so tight it turns the feature off');
+  assert.ok(!markupOver.includes('class="tok-'), 'a block over the cutoff falls back to AC 1\'s plain escaped rendering, the same branch an unvendored lang takes');
+  // AC 7 and AC 8 are unaffected on either side: the gutter still numbers every row,
+  // and the text still round-trips byte for byte.
+  for (const [name, board, text] of [['under', boardUnder, under], ['over', boardOver, over]]) {
+    const document = parseHTML(renderBoardPage(board));
+    assert.equal(document.querySelector('.code-block pre code').textContent, text,
+      `${name} the cutoff, the block's text must still copy back byte-identically`);
+  }
+  assert.ok(/data-line="2000"/.test(markupOver), 'an unhighlighted block still gets its full gutter -- only tokenization is skipped');
+});
+
+check('the diff classifier reads a \'---\'/\'+++\' line as a FILE HEADER only outside a hunk: inside one, those bytes are the file\'s own content behind a +/- prefix', () => {
+  // The prefix is prepended to the file's bytes, so a removed '-- legacy join' (a SQL
+  // comment) arrives as '--- legacy join' and an added '++i_count;' arrives as
+  // '+++i_count;'. Both used to match the file-header branch, which set BOTH counters
+  // to null -- so every row after them lost its gutter number AND its diff-add/
+  // diff-del tint. Trivially reachable: '---' rules and YAML front matter in this
+  // repo's own docs, '--' comments in any .sql.
+  const text = [
+    '--- a/q.sql',
+    '+++ b/q.sql',
+    '@@ -1,3 +1,3 @@',
+    ' SELECT 1;',
+    '--- legacy join',   // REMOVED: the file's own '-- legacy join'
+    '+++i_count;',       // ADDED: the file's own '++i_count;'
+    ' SELECT 2;',
+    '',
+  ].join('\n');
+  const board = createBoard({ title: 'diff header confusion', blocks: [{ kind: 'code', lang: 'diff', text }] });
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(renderedMarkup(renderBoardPage(board)))[0];
+  const rows = [...section.matchAll(/<span class="code-row([^"]*)"( data-line="(\d+)")?>/g)]
+    .map(m => ({ cls: m[1].trim(), line: m[3] ? Number(m[3]) : null }));
+  assert.deepEqual(rows, [
+    { cls: '', line: null },        // --- a/q.sql   (a real file header: outside any hunk)
+    { cls: '', line: null },        // +++ b/q.sql   (ditto)
+    { cls: '', line: null },        // @@ -1,3 +1,3 @@
+    { cls: '', line: 1 },           // ' SELECT 1;'  context, new line 1
+    { cls: 'diff-del', line: 2 },   // '--- legacy join' is CONTENT, not a header
+    { cls: 'diff-add', line: 2 },   // '+++i_count;' likewise
+    { cls: '', line: 3 },           // ' SELECT 2;'  context, new line 3 -- the row that used to lose everything
+  ]);
+});
+
+check('a hunk ends when the line counts its own @@ header declares are exhausted, so a following file\'s headers are read as headers again', () => {
+  // The other half of consuming the declared counts: a plain (non-git) multi-file
+  // unified diff has no 'diff --git' line to fall back on -- only the '---'/'+++'
+  // pair, which is exactly the shape the check above proves is NOT a header inside a
+  // hunk. Leaving hunk state at exhaustion is what makes both true at once.
+  const text = [
+    '--- a/one.txt', '+++ b/one.txt',
+    '@@ -1,1 +1,1 @@',
+    '-one old',
+    '+one new',
+    '--- a/two.txt', '+++ b/two.txt',
+    '@@ -10,1 +20,1 @@',
+    '-two old',
+    '+two new',
+    '',
+  ].join('\n');
+  const board = createBoard({ title: 'plain multi-file diff', blocks: [{ kind: 'code', lang: 'diff', text }] });
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(renderedMarkup(renderBoardPage(board)))[0];
+  const rows = [...section.matchAll(/<span class="code-row([^"]*)"( data-line="(\d+)")?>/g)]
+    .map(m => ({ cls: m[1].trim(), line: m[3] ? Number(m[3]) : null }));
+  assert.deepEqual(rows, [
+    { cls: '', line: null },
+    { cls: '', line: null },
+    { cls: '', line: null },
+    { cls: 'diff-del', line: 1 },
+    { cls: 'diff-add', line: 1 },
+    { cls: '', line: null },        // file two's '---' -- the hunk above is exhausted, so this IS a header
+    { cls: '', line: null },
+    { cls: '', line: null },
+    { cls: 'diff-del', line: 10 },  // file two's own coordinates, never file one's stale ones
+    { cls: 'diff-add', line: 20 },
+  ]);
+});
+
+check('\'\\ No newline at end of file\' is diff meta, not a context line: it is a line of neither file, so it takes no gutter number and advances no counter', () => {
+  // Canonical git output for editing a last line that has no trailing newline. The
+  // marker fell through to the context branch, which gave it a number of its own AND
+  // advanced both counters -- so the added 'three!' (line 3 of the new file) rendered
+  // as line 4, and both marker rows carried numbers.
+  const text = [
+    '--- a/f.txt', '+++ b/f.txt',
+    '@@ -1,3 +1,3 @@',
+    ' one',
+    ' two',
+    '-three',
+    '\\ No newline at end of file',
+    '+three!',
+    '\\ No newline at end of file',
+    '',
+  ].join('\n');
+  const board = createBoard({ title: 'no newline marker', blocks: [{ kind: 'code', lang: 'diff', text }] });
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(renderedMarkup(renderBoardPage(board)))[0];
+  const rows = [...section.matchAll(/<span class="code-row([^"]*)"( data-line="(\d+)")?>/g)]
+    .map(m => ({ cls: m[1].trim(), line: m[3] ? Number(m[3]) : null }));
+  assert.deepEqual(rows, [
+    { cls: '', line: null },        // --- a/f.txt
+    { cls: '', line: null },        // +++ b/f.txt
+    { cls: '', line: null },        // @@ -1,3 +1,3 @@
+    { cls: '', line: 1 },           // ' one'
+    { cls: '', line: 2 },           // ' two'
+    { cls: 'diff-del', line: 3 },   // '-three'   -> OLD file line 3
+    { cls: '', line: null },        // '\ No newline...' -- a line of neither file
+    { cls: 'diff-add', line: 3 },   // '+three!'  -> NEW file line 3, not 4
+    { cls: '', line: null },        // '\ No newline...'
+  ]);
+});
+
+check('flattenTokens consults a token\'s ALIAS as well as its type, which is the only thing that makes lang: \'markdown\' highlight at all', () => {
+  // Prism attaches a token's colour-bearing name to `alias` for whole grammars at a
+  // time -- a string for one name, an array for several. markdown is the extreme
+  // case: not one of its own top-level type names (title, bold, italic, list, url,
+  // code-snippet, blockquote) is in TOKEN_CLASS, while `title` carries
+  // `alias: 'important'` and `code-snippet` carries `alias: ['code', 'keyword']`,
+  // both of which ARE.
+  const board = createBoard({
+    title: 'markdown highlighting',
+    blocks: [{ kind: 'code', lang: 'markdown', text: '# Title\n\nSome **bold** text and `a snippet`.\n' }],
+  });
+  const section = /<section class="block code-block"[\s\S]*?<\/section>/.exec(renderedMarkup(renderBoardPage(board)))[0];
+  assert.ok(section.includes('class="tok-keyword"'),
+    `a markdown heading's 'title' token reaches tok-keyword only through its alias: ${section}`);
+  // The ARRAY form specifically, on its own and not behind an `||`: a string-only
+  // implementation passes the assertion above (title's alias is a bare string) and
+  // still misses this one, which is `code-snippet`'s ['code', 'keyword'] -- 'code'
+  // is not in TOKEN_CLASS, so only walking past it to 'keyword' produces this span.
+  assert.match(section, /<span class="tok-keyword">`a snippet`<\/span>/,
+    'the array-valued alias form (code-snippet -> [code, keyword]) must be consulted too, not just the string form');
+  // And the promise the alias lookup must NOT break: a diff row still carries no
+  // six-hue class. The diff grammar's aliases are deleted/inserted/unchanged/diff/
+  // bold -- none in TOKEN_CLASS -- so ADR 64 holds by construction, alias lookup and
+  // all. Asserted, not assumed, because widening the lookup is exactly the change
+  // that could have quietly broken it.
+  const diffBoard = createBoard({
+    title: 'alias vs diff',
+    blocks: [{ kind: 'code', lang: 'diff', text: '--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n' }],
+  });
+  const diffSection = /<section class="block code-block"[\s\S]*?<\/section>/.exec(renderedMarkup(renderBoardPage(diffBoard)))[0];
+  assert.ok(!diffSection.includes('class="tok-'), 'consulting aliases must not let a diff token pick up a six-hue class');
+});
+
+check('a code block numbers its gutter from a start line the block carries, not from 1 -- the render half of "a section-sliced block is numbered where the section actually starts"', () => {
+  // `hasExplicitRange` was `Array.isArray(source.lines)`, so a block resolved by
+  // `section` (which has source.section and NO source.lines) took the "starts at
+  // line 1" branch reserved for whole-file and by-value blocks: a block whose kicker
+  // reads notes.md#install numbered its first row 1 when the section starts at line
+  // 6, and a reviewer citing a line number was five off.
+  //
+  // Both halves are wired now: src/resolve.mjs reports `startLine` on every
+  // successful resolution, src/board.mjs carries it onto the normalised block, and
+  // renderBlock numbers from it. `block.startLine` is deliberately a normalised BLOCK
+  // field rather than something read back out of `block.source` -- src/board.mjs
+  // builds a code block from an explicit field list, so a caller cannot forge it the
+  // way it can forge `source.lines` (see the gutter-injection check above).
+  writeFileSync(path.join(fixturesDir, 'section-gutter.md'), '# Intro\n\nalpha\n\n# Install\n\nrun it\n', 'utf8');
+  const board = createBoard({
+    title: 'section gutter',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'code', source: { path: 'section-gutter.md', section: 'install' } }],
+  });
+  assert.equal(board.blocks[0].startLine, 5,
+    'the whole point: a section-sliced block knows where its section starts in the file');
+  const sliced = renderBlock(board.blocks[0], board, new Map(), false);
+  assert.deepEqual([...sliced.matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1])), [5, 6, 7],
+    '"# Install" is line 5 of the fixture, so the section\'s first row is gutter 5');
+
+  // A by-value block carries no start line and still numbers from 1, exactly as before.
+  const byValue = renderBlock({ ...board.blocks[0], startLine: undefined }, board, new Map(), false);
+  assert.deepEqual([...byValue.matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1])), [1, 2, 3],
+    'with no start line to consume, a block still numbers from 1 exactly as before');
+
+  // Same trust boundary as source.lines[0]: a start line that is not an integer is
+  // not a start line, and never reaches the attribute.
+  for (const bad of ['5"><img src=x>', 5.5, null, NaN, '5']) {
+    const html = renderBlock({ ...board.blocks[0], startLine: bad }, board, new Map(), false);
+    assert.deepEqual([...html.matchAll(/data-line="(\d+)"/g)].map(m => Number(m[1])), [1, 2, 3],
+      `a non-integer startLine (${JSON.stringify(bad)}) must fall back to 1, not be interpolated`);
+    assert.ok(!html.includes('<img'), 'and must never reach the attribute as markup');
+  }
+});
+
+check('a gutter row is an INLINE box: the rows are joined by the text\'s own real newlines, so a block-level row would render and copy every one of them as a second, blank line', () => {
+  // Found in a real Chrome against the committed examples/sample-board.html:
+  // `.code-row { display: block }` plus the literal '\n' separators src/render.mjs
+  // joins rows with means each of those newlines, under `white-space: pre`, forms an
+  // anonymous block between two block-level rows and renders as a blank line.
+  // Measured there: row box height 19.38px against a row-top-to-row-top delta of
+  // 41.77px, and window.getSelection().toString() over a five-line javascript block
+  // giving 8 newlines against the 4 in its text. Every gutter-numbered block rendered
+  // AND copied double-spaced, which makes AC 8 false in a browser.
+  //
+  // The suite has no browser, so what is asserted here is the INVARIANT the fix
+  // establishes, at the two places that jointly decide the outcome: the renderer
+  // separates rows with a real newline (which is what keeps textContent honest), and
+  // the stylesheet therefore must not make a row a block-level box (which is what
+  // would turn each of those newlines into a second line break). The browser-level
+  // rendering and copy behaviour behind this was verified by hand.
+  const board = createBoard({
+    title: 'row boxes',
+    blocks: [
+      { kind: 'code', lang: 'javascript', text: 'const a = 1;\nconst b = 2;\nconst c = 3;' },
+      { kind: 'code', lang: 'diff', text: '--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n' },
+      { kind: 'markdown', text: '```diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n```\n' },
+    ],
+  });
+  const page = renderBoardPage(board);
+  const markup = renderedMarkup(page);
+  assert.match(markup, /<\/span>\n<span class="code-row/,
+    'setup: rows are separated by a literal newline -- that is what AC 8\'s copy fidelity rests on, and what makes the row\'s own display value load-bearing');
+
+  const document = parseHTML(page);
+  const BLOCK_LEVEL = new Set(['block', 'flex', 'grid', 'list-item', 'table', 'flow-root']);
+  const rows = [
+    document.querySelector('.code-block pre code .code-row'),
+    document.querySelector('.code-block pre code.code-diff .code-row'),
+    document.querySelector('.md-content pre code .code-row'),
+  ];
+  const names = ['a highlighted code block', 'a diff code block', 'a diff fence inside markdown'];
+  rows.forEach((row, i) => {
+    assert.ok(row, `setup failure: no .code-row found for ${names[i]}`);
+    const display = resolveComputedProperty(styles, row, true, 'display').trim();
+    assert.ok(!BLOCK_LEVEL.has(display),
+      `.code-row on ${names[i]} computes 'display: ${display}'. A block-level row beside a literal '\\n' separator double-spaces the block on screen and doubles the newlines in a copy -- either the separators go (breaking textContent fidelity) or the row stays inline. It stays inline.`);
+  });
+
+  // The gutter column still has to be reserved without taking the row out of flow --
+  // the ::before is the only thing that can do that now, so it must be an in-flow
+  // box with a width rather than an absolutely positioned one over a padding-left.
+  const gutterRule = /\.code-row::before\s*\{([^}]*)\}/.exec(styles);
+  assert.ok(gutterRule, 'the gutter ::before rule must still exist');
+  assert.doesNotMatch(gutterRule[1], /position\s*:\s*absolute/,
+    'an absolutely positioned gutter needs the row to establish a containing block, which is what position: relative + display: block was for');
+  assert.match(gutterRule[1], /display\s*:\s*inline-block/,
+    'the gutter cell reserves its column by being an inline-block of fixed width, in flow, inside an inline row');
+});
+
+check('the stylesheet is structurally well formed: every comment closes, no stray \'*/\', and no text sits outside a rule or a comment', () => {
+  // This exists because a malformed COMMENT silently deletes the RULE AFTER IT, and
+  // nothing else in the suite can see that happen. Reproduced, in Chrome, against a
+  // committed examples/sample-board.html: a comment block was closed early by a '*/'
+  // mid-prose, so ~30 lines of explanatory text became bare CSS. A browser's parser
+  // error-recovers by consuming garbage until it resyncs, and the resync point is
+  // the NEXT '{' -- so the prose was swallowed as the prelude of the following rule
+  // and '.code-row::before' vanished from document.styleSheets entirely. Every rule
+  // after it parsed normally, so exactly one rule was lost and nothing else looked
+  // wrong: the gutter numbers stopped rendering while the fill, the flat-fence
+  // modifier and the six-hue palette all still worked.
+  //
+  // The reason this needs its OWN check rather than a better assertion on the rule
+  // is the trap QUIRKS.md names one level up: test/dom-stand-in.mjs's
+  // resolveComputedProperty reads the stylesheet TEXT, so it resolves a rule that a
+  // browser never parsed. Any assertion built on it agrees with a careful reading of
+  // the source by construction, and a careful reading of the source is exactly what
+  // was already wrong. What follows is deliberately not a cascade question at all --
+  // it asks only whether the delimiters that decide where rules BEGIN AND END are
+  // consistent, which is the one property a text-level checker can answer honestly.
+  const scan = { depth: 0, inComment: false, stripped: '' };
+  let line = 1;
+  for (let i = 0; i < styles.length; i++) {
+    if (styles[i] === '\n') line += 1;
+    if (!scan.inComment && styles.startsWith('/*', i)) { scan.inComment = true; i += 1; continue; }
+    if (scan.inComment) {
+      if (styles.startsWith('*/', i)) { scan.inComment = false; i += 1; }
+      continue;
+    }
+    // `line` counts within the emitted stylesheet, NOT within src/styles.mjs -- the
+    // whole file is one template literal that starts partway down it, so the two
+    // differ by however many lines of real JS precede it. The offending text is
+    // quoted for that reason: it is what actually locates the spot.
+    assert.ok(!styles.startsWith('*/', i),
+      `a '*/' with no open comment, at stylesheet line ${line}: ${JSON.stringify(styles.slice(Math.max(0, i - 60), i + 2))}. Everything from the comment's real end to the next '{' is being parsed as CSS, which makes the following rule's prelude garbage and deletes that rule from the stylesheet a browser builds.`);
+    scan.stripped += styles[i];
+  }
+  assert.equal(scan.inComment, false, 'src/styles.mjs ends inside an unterminated comment -- everything from the last \'/*\' onward is missing from the stylesheet');
+
+  // With comments accounted for, the remaining text must be nothing but rules: a
+  // prelude, a balanced block, repeat. A leftover tail is text outside any rule.
+  let prelude = '';
+  const preludes = [];
+  for (const ch of scan.stripped) {
+    if (ch === '{') {
+      if (scan.depth === 0) { preludes.push(prelude.trim()); prelude = ''; }
+      scan.depth += 1;
+    } else if (ch === '}') {
+      scan.depth -= 1;
+      assert.ok(scan.depth >= 0, 'src/styles.mjs closes a brace that was never opened');
+      if (scan.depth === 0) prelude = '';
+    } else if (scan.depth === 0) {
+      prelude += ch;
+    }
+  }
+  assert.equal(scan.depth, 0, 'src/styles.mjs leaves a block unclosed');
+  assert.equal(prelude.trim(), '', `src/styles.mjs has text after its last rule, outside any comment: ${JSON.stringify(prelude.trim().slice(0, 200))}`);
+
+  // And each prelude must actually look like a selector list or an at-rule. A
+  // swallowed comment shows up here as a prelude hundreds of characters long, which
+  // is the shape no real selector in this file has: the longest legitimate one is
+  // 157 characters (the four-part mermaid hover selector built from
+  // MERMAID_NODE_SELECTOR). 400 is that with headroom to spare -- a deliberately
+  // loose bound, since the failure it exists to catch overshot it by 5x.
+  // ponytail: a length bound, not a selector grammar. Its ceiling is a swallowed
+  // comment SHORTER than 400 characters, which would slip past; the upgrade path if
+  // that ever happens is to check the emitted CSS against a real parser rather than
+  // to keep tightening the number. The ';' test below is the same guard from the
+  // other side -- a semicolon can only reach depth 0 out of a declaration that has
+  // escaped its block.
+  for (const p of preludes) {
+    assert.ok(p.length <= 400,
+      `src/styles.mjs has a ${p.length}-character rule prelude, which is prose that escaped a comment rather than a selector: ${JSON.stringify(p.slice(0, 200))}`);
+    assert.ok(!p.includes(';'),
+      `src/styles.mjs has a ';' outside any rule block, in the prelude ${JSON.stringify(p.slice(0, 200))}`);
+  }
+
+  // Finally, the specific rule this was found through -- named, so a regression
+  // reads as "the gutter is gone" rather than as an abstract parse complaint.
+  assert.ok(preludes.includes('.code-row::before'),
+    'the gutter rule must be its own rule, with its own prelude -- not absorbed into the prelude of whatever precedes it');
 });
 
 if (asyncFailures) failures += asyncFailures;

@@ -201,7 +201,14 @@ buys a refusal rather than a page. The id's unguessability is defence in depth b
 gate, never the gate itself; nothing you can bookmark carries a credential.
 
 **Content injection through rendered material.** Markdown, code and file content is escaped
-in both HTML text and attribute positions. HTML stages render inside an iframe with
+in both HTML text and attribute positions. Since `ADR.md` entry 62 that content passes
+through two vendored third-party engines first — `marked` tokenizes markdown, `prismjs`
+tokenizes code — but neither is trusted to emit anything: both are used as *tokenizers*
+only, and `src/markdown.mjs` and `src/render.mjs` walk the resulting token trees and do
+every escape themselves, exactly as they did before a parser was vendored. Raw HTML in a
+markdown source file therefore still renders as text, never as markup. The engines are
+pinned by sha256 with an offline digest check, so the bytes that run are the bytes that
+were reviewed. HTML stages render inside an iframe with
 `sandbox="allow-scripts"` and no `allow-same-origin`, so the stage's browsing context is
 cross-origin from the daemon's own and `contentDocument`/`contentWindow` are unreachable
 from the parent; an isolation check asserts the parent ignores hostile messages that carry

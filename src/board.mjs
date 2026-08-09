@@ -9,8 +9,12 @@ import { resolveAtRoot, sectionRootFrom, resolveMermaidAnchorAtRoot, htmlBodyRoo
 // neither module calls the other at module-evaluation time, only from inside a
 // function body invoked later (renderBlock here, resolveComment there) — see
 // resolveComment's own comment below for why resolving a page-scoped `dom` anchor
-// needs to re-render the block it names.
-import { renderBlock } from './render.mjs';
+// needs to re-render the block it names. `highlightFenceHtml` is injected into
+// markdown.mjs's mdToHtmlAndAnchors below rather than imported there directly, for
+// the same reason: markdown.mjs is upstream of render.mjs through this exact
+// circular edge, so a markdown.mjs -> render.mjs import would close a SECOND cycle
+// (ADR.md entry 65, SPEC_RENDERING.md AC 14 "one renderer, not two").
+import { renderBlock, highlightFenceHtml } from './render.mjs';
 // badge.mjs is pure and imports nothing, so this edge is safe in both directions
 // (render.mjs and ui.mjs also import it -- see its own header comment).
 // `questionBlocks` itself moved to badge.mjs (ticket 04 of SPEC_AWAITED.md, so
@@ -168,7 +172,12 @@ function resolveContent(raw, cwd) {
   if (raw.source) {
     const result = resolveRef(raw.source, { cwd });
     if (result.error) return { text: '', sha: sha256(''), error: result.error };
-    return { text: result.text, sha: result.sha };
+    // `startLine` (1-based) rides along so a code block's gutter can show the file's
+    // OWN line numbers for a `section:` slice too, not just a `lines:` range -- only
+    // src/resolve.mjs knows where a named section actually starts. Carried as a
+    // normalised block field rather than back onto `source`, because `source` is
+    // stored verbatim from the request and a caller could forge it there.
+    return { text: result.text, sha: result.sha, startLine: result.startLine };
   }
   const text = byValueText(raw.text ?? '', 'text');
   return { text, sha: sha256(text) };
@@ -211,7 +220,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     case 'markdown': {
       const id = resolveBlockId(raw, 'markdown', counters, ids, topLevel);
       const { text, sha, error } = resolveContent(raw, cwd);
-      const { html, anchors } = mdToHtmlAndAnchors(text);
+      const { html, anchors } = mdToHtmlAndAnchors(text, { highlight: highlightFenceHtml });
       return {
         ...base,
         id,
@@ -239,7 +248,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     }
     case 'code': {
       const id = resolveBlockId(raw, 'code', counters, ids, topLevel);
-      const { text, sha, error } = resolveContent(raw, cwd);
+      const { text, sha, error, startLine } = resolveContent(raw, cwd);
       const lang = raw.lang ?? (raw.source ? langForPath(raw.source.path) : '');
       return {
         ...base,
@@ -249,6 +258,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         text,
         sha,
         lang,
+        ...(Number.isInteger(startLine) ? { startLine } : {}),
         ...(error ? { error } : {}),
       };
     }
