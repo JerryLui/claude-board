@@ -977,6 +977,34 @@ conditional, so neither real-world default moves. If a check that shells out to 
 is inexplicably slow, this is the first thing to measure — and note it will NOT reproduce
 for anyone whose clone lives outside those three directories.
 
+### `lsregister` records are permanent, share a bundle id, and a dead one is a "damaged app" dialog on repeat
+
+`install.sh` registers the bundle with LaunchServices so macOS will let it post a
+notification at all (see the block that runs `lsregister -f`). The check suite installs into
+throwaway temp roots — fakehomes, `CLAUDE_BOARD_APP_DIR` overrides, and fixtures built
+corrupt on purpose (`Applications-tamper`, `Applications-rogue`) — and every one of those
+runs used to hand its own throwaway bundle to that same call. LaunchServices keeps each
+record forever, they all carry the identical real bundle id, and nothing removes one when
+the directory it names is deleted. Measured on this machine after a few weeks: **6908
+records, exactly one of which still existed on disk.** Notification Center resolves a banner
+by bundle id and picks whichever record it likes, so the symptom is macOS raising
+*"claude-board.app is damaged and can't be opened"* over and over while the real install is
+fine and the board is up and serving. `install.sh` now skips registration for a bundle
+staged under `/tmp` or `/var/folders`, and `test/check-install.mjs` asserts it.
+
+Cleaning up after this, on macOS 26:
+
+- `lsregister -kill -r` **no longer exists** — it prints *"The -kill option has been removed
+  because it was dangerous and no longer useful"* and exits 0, so a script that relies on it
+  silently does nothing. `Date Initialized` in `lsregister -dump` is how you tell a rebuild
+  actually happened.
+- `lsregister -u <path>` does work, including on a path that no longer exists, and takes
+  many paths per invocation: `lsregister -dump | grep -oE '^path: +[^(]*name\.app'` piped
+  through `xargs -n 200 lsregister -u` cleared 6907 records in seconds. One at a time would
+  have been thousands of round trips.
+- `lsregister -dump` prints `/private/var/...` where `tmpdir()` says `/var/...`; a check
+  looking for its own path in that dump has to try both spellings.
+
 ---
 
 ## macOS notifications and sound

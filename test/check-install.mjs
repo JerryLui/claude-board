@@ -564,6 +564,29 @@ async function main() {
     assert.doesNotMatch(ran.stderr || '', /cannot exec/, `the launcher must be able to exec its compiled-in node:\n${ran.stderr}`);
   });
 
+  await check('a bundle staged under a temp root is never registered with LaunchServices', async () => {
+    // This suite installs into throwaway roots, and every such install stages a bundle
+    // carrying the REAL bundle id. install.sh used to hand each one to lsregister, and
+    // LaunchServices keeps those records forever: after a few weeks of runs this machine
+    // held 6908 of them, nearly all naming paths that had long since been deleted and
+    // some naming fixtures built corrupt on purpose (Applications-tamper below).
+    // Notification Center resolves a banner by bundle id and picks whichever record it
+    // likes, so a dead or tampered one is macOS raising "claude-board.app is damaged and
+    // can't be opened", over and over, on a machine whose real install is perfectly fine.
+    // The guard is a path test in install.sh, and this is the assertion that it holds:
+    // appDir is under tmpdir() by construction (workDir, above).
+    const lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
+    if (!existsSync(lsregister)) return; // Apple moved it: nothing was registered either
+    const appPath = path.join(appDir, 'claude-board.app');
+    const dump = spawnSync(lsregister, ['-dump'], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    if (dump.status !== 0) return; // no readable database, so nothing this can prove
+    // Both spellings: LaunchServices records /private/var/... where tmpdir() says /var/...
+    assert.ok(
+      !dump.stdout.includes(appPath) && !dump.stdout.includes(path.join('/private', appPath)),
+      `install.sh registered a temp-staged bundle with LaunchServices: ${appPath}`,
+    );
+  });
+
   await check('the bundle carries a byte-identical copy of bin/daemon.mjs and src/, staged before signing', async () => {
     // The payload half of the hole this task closes: bin/daemon.mjs and everything under
     // src/ used to live only in the clone, outside the signature and outside the rebuild

@@ -1100,8 +1100,25 @@ echo "         $ERR_LOG"
 # lsregister lives at a private path, which is why this is a guarded call and not a
 # dependency: if Apple moves it, the bundle is registered a little later by the scanner
 # instead of immediately by this line, and nothing else about the install changes.
+#
+# NOT done for a bundle staged under a temp root, and that exclusion is the whole reason
+# this block has a condition beyond "is lsregister there". The test suite installs into
+# throwaway roots -- fakehomes, CLAUDE_BOARD_APP_DIR overrides, and fixtures deliberately
+# built corrupt (Applications-tamper, Applications-rogue) -- and every one of those runs
+# used to leave a PERMANENT record in the real LaunchServices database, all of them
+# claiming the same real bundle id. Measured on this machine after a few weeks of test
+# runs: 6908 records, all but a handful naming paths that no longer exist. Notification
+# Center resolves a banner by bundle id and picks whichever record it likes, so a dead or
+# tampered one is macOS putting "claude-board.app is damaged and can't be opened" on
+# screen, on repeat, on a machine whose actual install is fine and whose board is up. A
+# bundle sitting in temp is not one anybody will ever click, so it has no business in that
+# database; the real install is unaffected, since $APP_PATH is under $HOME there.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [ "$USE_LAUNCHER" -eq 1 ] && [ -x "$LSREGISTER" ]; then
+case "$APP_PATH" in
+  /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) REGISTERABLE=0 ;;
+  *) REGISTERABLE=1 ;;
+esac
+if [ "$USE_LAUNCHER" -eq 1 ] && [ "$REGISTERABLE" -eq 1 ] && [ -x "$LSREGISTER" ]; then
   "$LSREGISTER" -f "$APP_PATH" >/dev/null 2>&1 || true
 fi
 
