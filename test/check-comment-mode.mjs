@@ -699,24 +699,31 @@ check('comment mode: mousing out of a hovered element inside a hand-mocked stage
     'mousing out of an element inside the hand-mocked stage must clear its highlight -- this is the stage\'s OWN mouseout listener (a separate document from the page\'s), not the generic page-level one');
 });
 
-// --- src/ui.mjs:623-625 -- aria-pressed and the visible label -----------------
+// --- src/ui.mjs's setCommentMode -- aria-pressed, .active, and the static label ---
 
-check('comment mode: the toggle\'s aria-pressed attribute and visible label both agree with the ACTUAL state, in both directions (ablation: inverting either at src/ui.mjs:623-625)', () => {
+check('comment mode: the toggle\'s aria-pressed attribute and .active class both agree with the ACTUAL state, in both directions (ablation: inverting either in setCommentMode)', () => {
   const document = loadBoard();
   const toggle = document.getElementById('comment-mode-toggle');
   const label = toggle.querySelector('.mode-toggle-label');
   assert.ok(label, 'setup failure: no .mode-toggle-label rendered');
 
+  // SPEC_HEADER.md AC 10: on/off is carried by `.active` and `aria-pressed`
+  // alone -- the label is the static word `Comment` and must never change,
+  // in either direction, so a reader mid-toggle sees the control's own chrome
+  // move rather than reading two different sentences.
   assert.equal(toggle.getAttribute('aria-pressed'), 'false', 'setup failure: must start aria-pressed="false"');
-  assert.equal(label.textContent, 'Comment mode: off', 'setup failure: must start reading "off"');
+  assert.equal(toggle.classList.contains('active'), false, 'setup failure: must start without .active');
+  assert.equal(label.textContent, 'Comment', 'setup failure: the label must read the static word "Comment"');
 
   toggle.dispatchEvent(new StandInEvent('click'));
   assert.equal(toggle.getAttribute('aria-pressed'), 'true', 'aria-pressed must read "true" once comment mode is actually ON');
-  assert.equal(label.textContent, 'Comment mode: on', 'the visible label must read "on" once comment mode is actually ON -- an inverted label reads "off" while a click anchors, which an unambiguous label rules out');
+  assert.equal(toggle.classList.contains('active'), true, '.active must be set once comment mode is actually ON');
+  assert.equal(label.textContent, 'Comment', 'the label must not change when comment mode turns on -- state is carried by .active/aria-pressed, not by the words');
 
   toggle.dispatchEvent(new StandInEvent('click'));
   assert.equal(toggle.getAttribute('aria-pressed'), 'false', 'aria-pressed must read "false" once comment mode is actually OFF');
-  assert.equal(label.textContent, 'Comment mode: off', 'the visible label must read "off" once comment mode is actually OFF');
+  assert.equal(toggle.classList.contains('active'), false, '.active must be cleared once comment mode is actually OFF');
+  assert.equal(label.textContent, 'Comment', 'the label must still read the static word "Comment" once comment mode is off again');
 });
 
 // --- ANCHOR_CHROME_SELECTOR: each entry, dropped individually -------------------

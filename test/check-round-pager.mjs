@@ -174,10 +174,9 @@ check('criterion 19: every round renders, exactly one is the current page, and i
 
   // No JS has run here: the first paint is already on the right page, so a board
   // never flashes round 1 before settling on the newest.
-  assert.equal(document.getElementById('round-badge').textContent, 'round 3 of 3');
 });
 
-check('criterion 19: the chevrons flip one round at a time, and the page, the badge and the layout move together', () => {
+check('criterion 19: the chevrons flip one round at a time, and the page and the layout move together', () => {
   const document = loadBoard(renderBoardPage(threeRounds()));
   const prev = document.querySelector('button#round-prev');
   const next = document.querySelector('button#round-next');
@@ -188,7 +187,6 @@ check('criterion 19: the chevrons flip one round at a time, and the page, the ba
 
   click(prev);
   assert.equal(currentPage(document), '2', 'the previous chevron steps exactly one round');
-  assert.equal(document.getElementById('round-badge').textContent, 'round 2 of 3', 'and the header badge names the page you are on');
   assert.equal(next.disabled, false, 'both ends are reachable again from the middle');
 
   click(prev);
@@ -200,7 +198,6 @@ check('criterion 19: the chevrons flip one round at a time, and the page, the ba
   click(next);
   click(next);
   assert.equal(currentPage(document), '3');
-  assert.equal(document.getElementById('round-badge').textContent, 'round 3 of 3');
 
   // The arriving page is scrolled to its own top: an ordinary round can be
   // taller than the viewport, so a flip that kept the old scroll offset would
@@ -293,7 +290,6 @@ check('criterion 19: a round arriving over SSE becomes the page for a reviewer a
     board,
   }));
   assert.equal(currentPage(document), '2', 'the round the reviewer is waiting for becomes the page they are on');
-  assert.equal(document.getElementById('round-badge').textContent, 'round 2 of 2');
   assert.deepEqual(owedRounds(document), ['2'], 'and the pill\'s dot moves with it');
 
   // Reading an earlier page: not yanked off it. The tab mark and the pager's own
@@ -737,7 +733,6 @@ check('criterion 26: the pager survives the read-only archive\'s blanket disable
   assert.equal(currentPage(document), '2', 'an archived board still pages');
   click(document.querySelector('.round-page[data-round="1"]'));
   assert.equal(currentPage(document), '1');
-  assert.equal(document.getElementById('round-badge').textContent, 'round 1 of 3');
 });
 
 check('criterion 26: the two controls are two positions -- the dock bottom-centre, the chevrons at the left and right edges', () => {

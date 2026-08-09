@@ -350,47 +350,9 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the ATTACHED .resolve-error note (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
 });
 
-// --- the round badge used to be written server-side ---
-// only, and the SSE round-push path never touched it -- stale until reload on a
-// live tab, invisible on a fresh load because a reload always renders the
-// current total. Drives the same subscription every other check in this file
-// drives (never applyRoundPush directly, for the same reason the file header
-// gives: that would prove nothing about whether the badge is wired to the
-// subscription at all), and reads #round-badge's own text back.
-
-check('a round arriving over SSE updates M in the badge immediately, with no reload (ablation: deleting applyRoundPush\'s renderBadge() call)', () => {
-  const board = freshBoard();
-  const pageHtml = renderBoardPage(board);
-  const { document, es } = loadBoardWithEventSource(pageHtml);
-
-  const badge = document.getElementById('round-badge');
-  assert.ok(badge, 'setup failure: no #round-badge rendered');
-  assert.equal(badge.textContent, 'round 1 of 1', 'setup failure: expected the one-round board\'s initial label');
-
-  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: 'round 2, pushed live' }] });
-  const round2BlockId = board.blocks.find(b => b.round === round2).id;
-  const payload = buildRoundPushPayload(board, round2, 'new-round', [round2BlockId]);
-
-  es.dispatch('round', JSON.stringify(payload));
-
-  assert.equal(badge.textContent, 'round 2 of 2',
-    'M must update the instant the round push lands -- no reload. N moves with it now: rounds are pages (ADR.md entry 42) and this reviewer was on the newest one, so the arriving round IS the page they are on');
-});
-
-check('a round going sent over SSE (\'submitted\') leaves the badge total unchanged, but still re-renders rather than being special-cased away', () => {
-  const board = freshBoard();
-  const round2 = addRound(board, { blocks: [{ kind: 'markdown', text: 'round 2, opened first' }] });
-  const pageHtml = renderBoardPage(board);
-  const { document, es } = loadBoardWithEventSource(pageHtml);
-  const badge = document.getElementById('round-badge');
-  assert.equal(badge.textContent, 'round 2 of 2', 'setup failure: a board opens on its NEWEST round (ADR.md entry 42), so N starts at 2 here');
-
-  applySubmit(board, { action: 'send', answers: [], comments: [] }, round2);
-  const payload = buildSubmittedPushPayload(board, round2);
-  es.dispatch('submitted', JSON.stringify(payload));
-
-  assert.equal(badge.textContent, 'round 2 of 2', 'a submit never changes board.rounds.length, so M is unchanged -- and the page under the reviewer does not move either, it only goes read-only');
-});
+// SPEC_HEADER.md AC 12 (ADR.md entry 61) deleted the round badge this section
+// used to drive live over SSE -- the header names no round at all now, at rest
+// or condensed, so there is nothing left here for a round push to update.
 
 // --- the code cap's once-only marker -------
 //

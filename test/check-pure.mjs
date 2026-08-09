@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, COMMENT_ICON } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
@@ -36,11 +36,15 @@ import { TOMATO_ICON, REST_ICON } from '../src/pomodoro-widget.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
 import {
-  badgeLabel,
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
   closeLapsedAwaitedRounds, roundWaitLapsed,
-  PILL_READONLY_TITLE, ROUND_COUNTDOWN_TITLE,
+  PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, ROUND_COUNTDOWN_TITLE,
 } from '../src/badge.mjs';
+// Namespace import, alongside the named one above -- AC 12's own check below
+// needs to assert badgeLabel is ABSENT from this module's exports, which a
+// named `import { badgeLabel }` cannot express (a missing named export is a
+// SyntaxError at load time, not something a check could catch and report).
+import * as badgeExports from '../src/badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from '../src/lens.mjs';
 import {
   extractHint, stepsToPath, pathToSteps, resolveSteps, buildSteps, composeHint,
@@ -547,39 +551,77 @@ check('composeHint: every block-kind noun, and an unknown kind degrades to "bloc
   assert.equal(composeHint('x', 'span', true, 'A', 'nonsense-kind'), 'x in A block');
 });
 
-// The round badge's label, the same
-// toString()-splicing technique again -- see src/badge.mjs's own file comment for
-// why `round ${rounds.length}` (the old, position-blind label) was a real bug,
-// not a wording nitpick.
+// SPEC_HEADER.md AC 12 (ADR.md entry 61) deleted the round badge and its
+// `badgeLabel` formatter along with it -- the checks that used to pin its
+// round-count formatting and its embedded-source went with them. The two
+// checks below pin what replaced them: AC 9's glyph, read off COMMENT_ICON's
+// own path data (same discipline as src/pomodoro-widget.mjs's TOMATO_ICON/
+// REST_ICON, see that check's own comment), and AC 12's absence, which the
+// checks above never asserted -- only a comment said so.
 
-check('the exact badgeLabel embedded in ui.mjs (via .toString()) is executable and behaves identically to the imported one', () => {
-  const rehydrated = new Function('return (' + badgeLabel.toString() + ')')();
-  assert.equal(rehydrated(1, 1), badgeLabel(1, 1));
-  assert.equal(rehydrated(2, 3), badgeLabel(2, 3));
+const COMMENT_PATHS = [...COMMENT_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
+assert.equal(COMMENT_PATHS.length, 1, 'setup sanity: COMMENT_ICON is a single <path>');
+
+check('AC 9 (SPEC_HEADER.md): the comment-mode toggle wears the exact same glyph as the whole-block comment button -- COMMENT_ICON\'s own path data, not a second, re-drawn copy', () => {
+  // Two blocks, neither a page board, so both controls exist on the same
+  // page: an html block earns a .comment-btn (ADR.md entry 28), and the
+  // second block is what keeps this from being inferred as a page board
+  // (isPageRound requires exactly one block) so the header's own actions
+  // row -- and #comment-mode-toggle inside it -- renders in the ordinary,
+  // non-fullpage shape.
+  const board = createBoard({
+    title: 'AC 9 glyph',
+    blocks: [{ kind: 'html', html: '<p>stage</p>' }, { kind: 'markdown', text: 'second block' }],
+  });
+  const document = parseHTML(renderBoardPage(board));
+
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
+  const togglePaths = [...toggle.querySelectorAll('path')].map(p => p.getAttribute('d'));
+  assert.deepEqual(togglePaths, COMMENT_PATHS,
+    'the comment-mode toggle must render COMMENT_ICON\'s own path data, not a hand-drawn glyph (e.g. the old crosshair) that could silently drift from it');
+
+  const commentBtn = document.querySelector('.comment-btn');
+  assert.ok(commentBtn, 'setup failure: no .comment-btn rendered for the html block');
+  const btnPaths = [...commentBtn.querySelectorAll('path')].map(p => p.getAttribute('d'));
+  assert.deepEqual(btnPaths, COMMENT_PATHS, 'setup sanity: the whole-block comment button must also use COMMENT_ICON');
+
+  assert.deepEqual(togglePaths, btnPaths,
+    'the toggle and the whole-block comment button must share the exact same glyph -- one source (COMMENT_ICON), not two spellings of "comment"');
 });
 
-check('ui.mjs embeds the literal source of badgeLabel, not a hand-copied reimplementation', () => {
-  assert.ok(
-    ui.includes(badgeLabel.toString()),
-    'the client script must contain the exact function source, so the checked behaviour and the browser copy can never drift apart',
-  );
-});
+check('AC 12 (SPEC_HEADER.md, ADR.md entry 61): no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and badgeLabel is gone from src/badge.mjs\'s exports', () => {
+  assert.equal('badgeLabel' in badgeExports, false,
+    'src/badge.mjs must no longer export badgeLabel -- AC 12 names this file and this export explicitly');
 
-check('badgeLabel: a single-round board reads "round 1 of 1", never just "round 1"', () => {
-  // The exact case the old label got wrong in the other direction (it would have
-  // read "round 1" here, which is not the bug -- the bug was a two-round board
-  // reading "round 2" throughout). Pinned anyway: it is the cheapest case to get
-  // right and the easiest to get wrong with an off-by-one on `total`.
-  assert.equal(badgeLabel(1, 1), 'round 1 of 1');
-});
+  const ordinary = createBoard({ title: 'AC 12 ordinary', blocks: [{ kind: 'markdown', text: '# hi' }] });
+  addRound(ordinary, { blocks: [{ kind: 'markdown', text: '# second round' }] });
+  const ordinaryHtml = renderBoardPage(ordinary);
+  assert.ok(!ordinaryHtml.includes('round-badge'), 'an ordinary, multi-round board must render no #round-badge/.round-badge element');
 
-check('badgeLabel: the post-push shape -- M grows, N (the round still in view) does not', () => {
-  // A round arriving over SSE grows `total` immediately; the
-  // reviewer's own read position (`current`) is untouched by that arrival. Two
-  // independent numbers, so a one-argument implementation ("round N of N") would
-  // pass the 1-of-1 case above and fail here.
-  assert.equal(badgeLabel(1, 2), 'round 1 of 2');
-  assert.equal(badgeLabel(2, 2), 'round 2 of 2');
+  const page = createBoard({ title: 'AC 12 page board', blocks: [{ kind: 'html', html: '<p>stage</p>' }] });
+  const pageHtml = renderBoardPage(page);
+  assert.ok(!pageHtml.includes('round-badge'), 'a page board must render no #round-badge/.round-badge element either');
+
+  // "At rest or condensed": the two markup shapes are one and the same DOM
+  // node either way (styles.mjs's own comment: "the ONLY #round-meta in the
+  // document, condensed or not" applies by the same construction to every
+  // header control, and .round-badge simply never renders at all now) -- CSS
+  // repositions it, nothing server-side ever emits a second copy for the
+  // condensed state. The live scroll-driven transition itself, on a page
+  // board, is exercised in test/check-page-board.mjs.
+
+  // AC 12's second half: the pager dock, not the header, is where a round is
+  // still named -- confirmed here rather than assumed, so this check would
+  // fail if that naming vanished too rather than just moving.
+  const headerMatch = ordinaryHtml.match(/<header class="board-head">[\s\S]*?<\/header>/);
+  assert.ok(headerMatch, 'setup failure: no <header class="board-head"> found');
+  assert.doesNotMatch(headerMatch[0], /round\s*\d/i,
+    'the header itself must name no round by number, at rest (AC 12)');
+  const captionMatch = ordinaryHtml.match(/<div class="round-pager-caption"[^>]*>([^<]*)<\/div>/);
+  assert.ok(captionMatch, 'setup failure: no .round-pager-caption rendered');
+  assert.match(captionMatch[1], /round\s*\d/i,
+    'the pager dock\'s own caption must still name the round -- proving the naming moved to the dock rather than disappearing entirely');
 });
 
 // SPEC_AWAITED.md ticket 03 -- the waiting signal, src/badge.mjs's own two-
@@ -653,6 +695,9 @@ check('pageBoardPillMeta: the countdown text/title while awaited, "read-only" an
   const now = Date.parse('2026-08-07T12:00:00.000Z');
   const awaited = { status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
   assert.deepEqual(pageBoardPillMeta(awaited, now), { text: '38m left', title: ROUND_COUNTDOWN_TITLE });
+  // Default (no third arg) is 'fullpage', matching every call site before
+  // that parameter existed -- PILL_READONLY_TITLE stays what a page board
+  // (and any caller not yet told otherwise) gets.
   for (const closed of [
     { status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' },
     { status: 'open', awaited: false, awaitDeadline: null },
@@ -660,6 +705,32 @@ check('pageBoardPillMeta: the countdown text/title while awaited, "read-only" an
   ]) {
     assert.deepEqual(pageBoardPillMeta(closed, now), { text: 'read-only', title: PILL_READONLY_TITLE });
   }
+});
+
+check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-unawaited round\'s title stops claiming commenting is off -- it is false directly above a live Send button', () => {
+  // The exact shape a plain `ask` with no `wait: true` leaves behind
+  // (src/board.mjs:526's default): open, not awaited. On a page board this
+  // is genuinely dark (PILL_READONLY_TITLE, unchanged above); on an ordinary
+  // board it sits over an ENABLED send bar (src/ui.mjs's setSendBarEnabled
+  // reads status/openRoundNumber, never awaited) and a comment left there is
+  // drained to the next agent that asks (drainUndeliveredComments,
+  // src/server.mjs) -- so the title must say that instead.
+  const now = Date.parse('2026-08-07T12:00:00.000Z');
+  const openUnawaited = { status: 'open', awaited: false, awaitDeadline: null };
+  assert.deepEqual(pageBoardPillMeta(openUnawaited, now, false),
+    { text: 'read-only', title: ROUND_OPEN_UNAWAITED_TITLE },
+    'fullpage=false, status "open": the title must be ROUND_OPEN_UNAWAITED_TITLE, not the page-board one');
+  // The SAME round object, asked about as a page board (fullpage=true, or the
+  // default), must still get the old title -- a page board's status never
+  // leaves 'open' even once its wait dies (ADR.md entry 44), so `fullpage`
+  // itself, not `round.status` alone, is what has to make this call.
+  assert.deepEqual(pageBoardPillMeta(openUnawaited, now, true), { text: 'read-only', title: PILL_READONLY_TITLE },
+    'the identical round object, asked about as a page board, must keep the page-board title');
+  // A round that really is closed (sent) on an ordinary board is genuinely
+  // read-only -- ROUND_OPEN_UNAWAITED_TITLE must not leak there either.
+  const sent = { status: 'sent', awaited: false, awaitDeadline: null };
+  assert.deepEqual(pageBoardPillMeta(sent, now, false), { text: 'read-only', title: PILL_READONLY_TITLE },
+    'a SENT round on an ordinary board is genuinely read-only -- PILL_READONLY_TITLE, not the live one');
 });
 
 check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) are executable and behave identically to the imported ones', () => {
@@ -672,6 +743,7 @@ check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) a
   const rehydrated = new Function(`
     var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
     var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
+    var ROUND_OPEN_UNAWAITED_TITLE = ${JSON.stringify(ROUND_OPEN_UNAWAITED_TITLE)};
     var roundIsAwaitedOpen = ${roundIsAwaitedOpen.toString()};
     var roundIsCurrentlyAwaited = ${roundIsCurrentlyAwaited.toString()};
     var roundCountdownText = ${roundCountdownText.toString()};
@@ -684,6 +756,11 @@ check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) a
   assert.equal(rehydrated.roundIsCurrentlyAwaited(round, now), roundIsCurrentlyAwaited(round, now));
   assert.equal(rehydrated.roundCountdownText(round, now), roundCountdownText(round, now));
   assert.deepEqual(rehydrated.pageBoardPillMeta(round, now), pageBoardPillMeta(round, now));
+  // The third-arg (fullpage=false) branch too -- otherwise a drift in the
+  // embedded copy's ROUND_OPEN_UNAWAITED_TITLE handling could pass every check
+  // above and still ship a stale title to a live tab.
+  const openUnawaited = { status: 'open', awaited: false, awaitDeadline: null };
+  assert.deepEqual(rehydrated.pageBoardPillMeta(openUnawaited, now, false), pageBoardPillMeta(openUnawaited, now, false));
 });
 
 check('ui.mjs embeds the literal source of every waiting-signal function, not a hand-copied reimplementation', () => {
@@ -1931,7 +2008,7 @@ check('criterion 1: a page board renders the stage edge to edge -- no card, no k
   assert.ok(head, 'the header itself stays -- entry 40 changes its position, never its contents');
   assert.ok(document.getElementById('comment-mode-toggle'), 'including the comment-mode toggle');
   assert.ok(document.getElementById('theme-toggle'), 'and the theme control');
-  assert.ok(document.getElementById('round-badge'), 'and the round badge');
+  assert.ok(document.getElementById('round-meta'), 'and the state label (ADR.md entry 61 -- the round badge that used to sit beside it is gone)');
 
   // the frame is still a frame: same section, same nesting, same sandbox
   assert.equal(section.getAttribute('data-block-kind'), 'html');
@@ -7563,7 +7640,7 @@ check('pomodoro widget: the status text alone denies selection; the settings pan
 });
 
 check('pomodoro widget: reuses formatCountdown verbatim -- indexScript embeds the real function source, not a second mm:ss formatter', () => {
-  assert.ok(indexScript.includes(formatCountdown.toString()), 'indexScript must contain formatCountdown\'s own real source, spliced in via .toString() (src/ui.mjs\'s badgeLabel/computeBoardPatch technique), not a hand-copied restatement of it');
+  assert.ok(indexScript.includes(formatCountdown.toString()), 'indexScript must contain formatCountdown\'s own real source, spliced in via .toString() (src/ui.mjs\'s roundNumberLabel/computeBoardPatch technique), not a hand-copied restatement of it');
   // A second, independently written formatter would very likely reach for the
   // same padStart(2, '0') idiom formatCountdown itself uses -- counting
   // occurrences catches that shape of regression without demanding indexScript

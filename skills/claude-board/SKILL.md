@@ -104,12 +104,6 @@ board the frame's height is derived from what the stage reports, so a page laid 
 placeholder height rather than its own. Size from the content — a `min-height` off what it
 holds, no `100vh` anywhere — and the frame follows it.
 
-**A page-board artifact leaves its top ~96px clear** — a top padding on its own body. The
-board's header floats over the artifact rather than above it, so an artifact opening with
-its own title bar loses the title and the reader sees a headless page. Nothing inside the
-frame can measure the band: an opaque-origin frame cannot read the page around it. Clear
-it rather than detect it — over-clearing reads as spacing, under-clearing loses content.
-
 ## Question blocks
 
 A question carries its `prompt` by value, a `widget`, and its own `context` array:

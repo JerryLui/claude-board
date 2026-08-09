@@ -31,8 +31,8 @@ import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
 import {
-  badgeLabel, roundPageLabel, isPageRound,
-  roundIsAwaitedOpen, PILL_READONLY_TITLE,
+  roundPageLabel, isPageRound,
+  roundIsAwaitedOpen, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE,
 } from './badge.mjs';
 
 /** Content-Security-Policy for every board page, both as the HTTP response
@@ -99,28 +99,41 @@ function safeJson(value) {
  * mercy of the platform's font (colour, weight and baseline all differ across
  * macOS/Windows/Linux, and it ignores `currentColor`, so it stayed loud while the
  * button around it went quiet). Inlined, not linked, like everything else the
- * standalone archive needs. */
-const COMMENT_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-
-/** The comment-mode toggle's icon: a crosshair, distinct from the comment glyph
- * above so the two controls don't read as the same affordance twice. See
- * "The gesture is an explicit comment mode": this
- * button is the one thing on the page that makes the generic element-level
- * gesture discoverable without being told it exists -- it has to be
- * visible chrome, not a held modifier or a hover-only affordance. src/ui.mjs reads
- * its id and toggles `.active` on it and `comment-mode` on `body`; its own click
- * never anchors anything (excluded from the click-to-anchor gesture by class, same
- * as the comment infrastructure it sits beside). */
-const MODE_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>';
+ * standalone archive needs.
+ *
+ * Shared by the whole-block comment button below AND the comment-mode toggle
+ * (commentModeToggle) -- SPEC_HEADER.md AC 9. The toggle used to carry its own
+ * icon (a crosshair) precisely so the two didn't read as the same affordance;
+ * that reasoning no longer holds now that the toggle names no round and holds
+ * only what it does, "comment" -- one glyph for one idea, not two glyphs for two
+ * spellings of it.
+ *
+ * Exported so test/check-pure.mjs can pin AC 9 against the real path data
+ * (same discipline as src/pomodoro-widget.mjs's TOMATO_ICON/REST_ICON) rather
+ * than a hand-typed copy of the `d` attribute that could silently drift from
+ * what actually renders. */
+export const COMMENT_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 
 /** The diagram-expand control's icon: four arrowheads
  * pointing out of the corners, the standard "open this full size" glyph and
- * distinct from the three above. Inline SVG for the same reason every other icon
- * here is — the standalone archive has no network to fetch anything from. */
+ * distinct from the comment glyph above. Inline SVG for the same reason every
+ * other icon here is — the standalone archive has no network to fetch anything
+ * from. */
 const EXPAND_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg>';
 
+/** The comment-mode toggle. See "The gesture is an explicit comment mode": this
+ * button is the one thing on the page that makes the generic element-level
+ * gesture discoverable without being told it exists -- it has to be visible
+ * chrome, not a held modifier or a hover-only affordance. src/ui.mjs reads its
+ * id and toggles `.active` on it, `aria-pressed`, and `comment-mode` on `body`;
+ * its own click never anchors anything (excluded from the click-to-anchor
+ * gesture by class, same as the comment infrastructure it sits beside).
+ *
+ * The label is the static word `Comment` (SPEC_HEADER.md AC 10), never
+ * `Comment mode: on`/`off` -- on/off is carried by `.active` and `aria-pressed`
+ * alone, so src/ui.mjs's setCommentMode never has to rewrite it. */
 function commentModeToggle() {
-  return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false">${MODE_ICON}<span class="mode-toggle-label">Comment mode: off</span></button>`;
+  return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false">${COMMENT_ICON}<span class="mode-toggle-label">Comment</span></button>`;
 }
 
 /** The explicit control that opens a
@@ -798,6 +811,53 @@ function renderCodeBlock(block) {
 //                                          server-verdict-derived comment list
 //                                          (src/ui.mjs's `commentsWithPending`),
 //                                          never to decide WHETHER a pin exists.
+//     'height' { height }               -- `document.body.scrollHeight`, because
+//                                          this document is the only thing that
+//                                          can ever know its own rendered height
+//                                          (see `reportHeight`, below, for why the
+//                                          FIRST call cannot simply run at script
+//                                          scope: a sandboxed srcdoc frame reads 0
+//                                          at `load` and even a zero-delay
+//                                          `setTimeout`, since there is no
+//                                          external subresource for `load` to wait
+//                                          on -- a double `requestAnimationFrame`
+//                                          is what actually waits for layout).
+//                                          STAGE-AUTHORED input like every other
+//                                          field here, so the parent never trusts
+//                                          it outright: src/ui.mjs clamps between
+//                                          `STAGE_HEIGHT_FLOOR` and
+//                                          `STAGE_HEIGHT_CAP` (320 / 600, ADR 41)
+//                                          before it ever touches a frame's inline
+//                                          style, so neither a hostile report nor
+//                                          one measuring a viewport-sized artifact
+//                                          can grow a card without limit -- and
+//                                          the floor stops a report that measured
+//                                          only a collapsed sliver of chrome from
+//                                          locking the card there forever, since a
+//                                          taller report never arrives from
+//                                          content that isn't reflowing. Applied
+//                                          only to a stage inside a
+//                                          '.choice-variant' card; a standalone
+//                                          stage's height is unaffected.
+//     'scroll' { top }                  -- BOTH DIRECTIONS, the one type on this
+//                                          whole channel that is. Outbound (here)
+//                                          it reports "I am at this offset": ADR.md
+//                                          entry 40's page-board header condenses
+//                                          on the READER'S scroll, but on a page
+//                                          board the document itself never scrolls
+//                                          (the artifact scrolls inside this
+//                                          opaque-origin frame instead), so the
+//                                          parent has no way to observe that short
+//                                          of being told. Deduplicated on the last
+//                                          reported value and aimed at whichever
+//                                          element most recently scrolled, not
+//                                          assumed to be the document -- see this
+//                                          file's own "scroll, the one thing the
+//                                          parent genuinely cannot see" comment,
+//                                          above `reportScroll`, for why that
+//                                          assumption was a real, measured defect.
+//                                          See PARENT -> STAGE, below, for the
+//                                          inbound half of this same type.
 //
 //   PARENT -> STAGE
 //     'mode' { commentMode }            -- comment mode turned on/off. The stage
@@ -836,6 +896,45 @@ function renderCodeBlock(block) {
 //                                          again whenever src/ui.mjs's
 //                                          `refreshPins` runs (resize, a comment
 //                                          queued, a submit landing).
+//     'band' { top, bottom }            -- the board's own chrome band, top and
+//                                          bottom, right now (ADR.md entry 59):
+//                                          the parent's header/dock/comment rail
+//                                          float OVER this frame rather than
+//                                          pushing it down, so an artifact that
+//                                          pads nothing loses its own opening
+//                                          under them with nothing to warn it. No
+//                                          fixed number is baked in anywhere on
+//                                          either side -- the header's real height
+//                                          moves with the title's wrap and the
+//                                          viewport's width -- so the parent
+//                                          measures its own live chrome
+//                                          (src/ui.mjs's `reportStageBand`) and
+//                                          tells the stage, which tops its own
+//                                          `body` padding up to at least that much
+//                                          (`applyBand`, below) rather than
+//                                          overwriting whatever padding the
+//                                          artifact already had. Parent -> stage
+//                                          only, no outbound half: the stage never
+//                                          reports a band of its own, since
+//                                          reserving space for the board's chrome
+//                                          is the board's decision, never a
+//                                          negotiation. Sent once a stage
+//                                          announces 'ready' and again whenever
+//                                          `reportStageBand` reruns (resize, the
+//                                          comment rail changing size, a round
+//                                          flip).
+//     'scroll' { top }                  -- the inbound half of the one
+//                                          bidirectional type on this channel (see
+//                                          STAGE -> PARENT, above): "put yourself
+//                                          at this offset", read the other way
+//                                          round, since the parent cannot scroll a
+//                                          cross-origin document itself. Sent only
+//                                          as a reset, `top: 0`, by the board's own
+//                                          back-to-top control -- the SAME message
+//                                          shape the stage reports with, aimed at
+//                                          whichever element last identified
+//                                          itself as the scroller (see the
+//                                          outbound entry).
 //
 // NO 'select' MESSAGE, DELIBERATELY (choose-between-rendered-variants). An earlier version of this widget had
 // the stage post an unconditional, content-free 'select' on every click, so
@@ -1019,6 +1118,76 @@ export function stageAgentScript() {
       for (var k in msg) if (Object.prototype.hasOwnProperty.call(msg, k)) out[k] = msg[k];
       window.parent.postMessage(out, '*');
     } catch (e) { /* no parent reachable -- nothing to anchor to */ }
+  }
+
+  /** Top-up, not add (SPEC_HEADER.md Decisions): 'top'/'bottom' are the
+   * board's OWN chrome bands, never simply written -- padding-top/-bottom
+   * become the LARGER of this document's own CURRENT cascade padding and
+   * whatever the board just reported, so an artifact that already cleared the
+   * band on its own keeps its own number untouched (criterion 2) and one that
+   * pads nothing gets exactly the band (criterion 1). Padding only, on
+   * 'document.body' itself -- no background, colour or border is ever set
+   * here (criterion 4).
+   *
+   * "Own" is read FRESH on every call, never cached from the first one --
+   * clear this document's own previous inline write before measuring, so the
+   * read reflects the artifact's live stylesheet cascade rather than an
+   * earlier call's own number. A once-only baseline (this function's first
+   * cut) gets this wrong in both directions the moment the artifact's own
+   * padding is RESPONSIVE (a media query, say: 12px narrow, 64px past
+   * 900px) -- a baseline captured narrow stays 12 forever even once the
+   * reader widens past 900px and the artifact's own CSS asks for 64
+   * (criterion 2 silently violated, the artifact under-cleared), and a
+   * baseline captured wide pins the artifact at 64px on a phone width where
+   * its own CSS asks for 12 (over-cleared, permanently, for the rest of the
+   * session). Clearing before every read is what keeps the artifact's own
+   * responsive rules authoritative instead of frozen at whatever they were on
+   * first contact -- and it defeats compounding the same way the once-only
+   * capture did, since each call starts from the artifact's own true cascade
+   * value, never from a previous 'band' call's inline write.
+   *
+   * getComputedStyle is feature-detected exactly like every other real-layout
+   * read in this repo (QUIRKS.md "The stand-in has no layout"): unsupported or
+   * unreadable leaves the reading at 0, which is the same answer a genuinely
+   * unpadded artifact would give.
+   *
+   * ponytail: this pads 'document.body' unconditionally, which is correct for
+   * a document that scrolls as a whole (the shape SKILL.md's own "a top
+   * padding on its own body" convention already assumed, and the common
+   * case). It is wrong for the artifact shape this file's own design comment
+   * records above ("The thing that scrolls a rendered artifact is often not
+   * its document" -- a fixed sidebar beside a 'height: 100vh' pane, measured
+   * in Chrome 151): there, body padding pushes the 100vh pane down by exactly
+   * the padding amount, its own bottom falls out of the frame, and the
+   * artifact gains a body scrollbar it never had while the fixed sidebar
+   * stays put -- worse than unpadded. The ceiling is not lifted here: a
+   * static "does the document currently scroll" check
+   * ('document.scrollingElement.scrollHeight <= clientHeight') cannot tell
+   * that shape apart from an ordinary SHORT artifact that fits one screen and
+   * still needs the top clearance -- both read true before any band is ever
+   * applied, and wrongly skipping the far more common short-artifact case
+   * would trade a rare regression for a common one (criterion 1 failing on
+   * exactly the simplest artifacts). The real upgrade path is a signal this
+   * function does not have yet -- an artifact that opts itself out, or a
+   * shape test sturdier than a single geometry snapshot -- not a guess from
+   * one number. */
+  function applyBand(top, bottom) {
+    if (!document.body) return;
+    document.body.style.paddingTop = '';
+    document.body.style.paddingBottom = '';
+    var ownTop = 0;
+    var ownBottom = 0;
+    try {
+      if (typeof getComputedStyle === 'function') {
+        var cs = getComputedStyle(document.body);
+        var parsedTop = parseFloat(cs.getPropertyValue('padding-top'));
+        var parsedBottom = parseFloat(cs.getPropertyValue('padding-bottom'));
+        if (isFinite(parsedTop)) ownTop = parsedTop;
+        if (isFinite(parsedBottom)) ownBottom = parsedBottom;
+      }
+    } catch (e) { /* no computed style reachable -- treat the artifact as padding nothing */ }
+    document.body.style.paddingTop = Math.max(ownTop, top) + 'px';
+    document.body.style.paddingBottom = Math.max(ownBottom, bottom) + 'px';
   }
 
   // Discoverability CSS, applied inside THIS document only -- see QUIRKS.md
@@ -1321,6 +1490,18 @@ export function stageAgentScript() {
       // otherwise be handed to scrollTo.
       if (typeof data.top !== 'number' || !isFinite(data.top)) return;
       scrollTo(data.top);
+      return;
+    }
+    if (data.type === 'band') {
+      // Parent -> stage only, no outbound half: the board telling this
+      // document how tall its own chrome bands are right now (SPEC_HEADER.md
+      // ADR 59). Shape-checked the same way every other inbound number on
+      // this channel is -- a non-finite or negative value never reaches
+      // applyBand, which would otherwise hand it straight to a style
+      // property.
+      if (typeof data.top !== 'number' || !isFinite(data.top) || data.top < 0) return;
+      if (typeof data.bottom !== 'number' || !isFinite(data.bottom) || data.bottom < 0) return;
+      applyBand(data.top, data.bottom);
       return;
     }
     if (data.type === 'locate') {
@@ -1926,20 +2107,31 @@ export function renderBoardPage(board) {
   const pillCount = openRoundQuestionCount(board);
   const pillLabel = `${pillCount} question${pillCount === 1 ? '' : 's'} left`;
   // The waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 46, 47, 49):
-  // `#round-meta` (the page board's own header pill slot) and `#round-countdown`
-  // (the ordinary send bar's) are both first-painted from `roundIsAwaitedOpen`
-  // alone -- deterministic, no clock -- and left EMPTY when the round in
-  // question is open and awaited, exactly the split badge.mjs's own header
-  // comment lays out (and src/pomodoro-widget.mjs's precedent for the identical
-  // problem): the actual "38m left" figure is a wall-clock fact only
-  // src/ui.mjs may compute, filled in at hydrate before the reader can act. The
+  // `#round-meta` (the header's own pill/meta slot, every board since ticket
+  // 03) and `#round-countdown` (the ordinary send bar's) are both
+  // first-painted from `roundIsAwaitedOpen` alone -- deterministic, no clock --
+  // and left EMPTY when the round in question is open and awaited, exactly
+  // the split badge.mjs's own header comment lays out (and
+  // src/pomodoro-widget.mjs's precedent for the identical problem): the
+  // actual "38m left" figure is a wall-clock fact only src/ui.mjs may
+  // compute, filled in at hydrate before the reader can act. The
   // deterministic (never-awaited/sent/timed-out) case needs no such deferral --
   // `read-only` is not a function of the clock at all -- so it renders directly
   // here, the same string ui.mjs's own pageBoardPillMeta falls back to.
   const initialRound = board.rounds.find(r => r.n === initialRoundInView);
   const initialRoundOpenAwaited = roundIsAwaitedOpen(initialRound);
   const roundMetaText = initialRoundOpenAwaited ? '' : 'read-only';
-  const roundMetaTitle = initialRoundOpenAwaited ? '' : PILL_READONLY_TITLE;
+  // The title underneath that word is NOT one string for every board: a page
+  // board's own compose/send surface really does go dark the moment it stops
+  // being awaited (PILL_READONLY_TITLE, badge.mjs's own comment on it), but an
+  // ordinary round with no `wait: true` stays `open` and its send bar stays
+  // enabled the whole time -- "commenting is off" would be false directly
+  // above a live Send button. badge.mjs's own comment on
+  // ROUND_OPEN_UNAWAITED_TITLE has the full reasoning; `initialRound.status`
+  // is what src/ui.mjs's pageBoardPillMeta reads for the identical decision
+  // at hydrate, kept in step here by hand the same way roundMetaText already is.
+  const roundMetaTitle = initialRoundOpenAwaited ? ''
+    : (!fullpage && initialRound && initialRound.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   const latestRoundOpenAwaited = roundIsAwaitedOpen(board.rounds[board.rounds.length - 1]);
   // ADR.md entry 46: a page nobody is listening to is uncommentable whatever kind
   // its one block is (CONTEXT.md "Commentable"). The entry names three things such
@@ -1976,7 +2168,6 @@ ${faviconLink}
     <div class="board-head-actions">
       ${commentModeToggle()}
       ${themeToggle()}
-      <button type="button" class="round-badge" id="round-badge">${escHtml(badgeLabel(initialRoundInView, board.rounds.length))}</button>
       <span class="round-meta" id="round-meta" title="${escAttr(roundMetaTitle)}">${escHtml(roundMetaText)}</span>
     </div>
   </header>

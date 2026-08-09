@@ -145,8 +145,6 @@ check('the page opens on round 2, the newest round', () => {
   const current = document.querySelectorAll('.round-current');
   assert.equal(current.length, 1, 'exactly one round section may be the current page');
   assert.equal(current[0].getAttribute('data-round'), '2', 'the board does not open on its newest round');
-  assert.equal(document.getElementById('round-badge').textContent, 'round 2 of 2',
-    'the round badge does not name round 2 as the page on screen');
 });
 
 // =================================================================================

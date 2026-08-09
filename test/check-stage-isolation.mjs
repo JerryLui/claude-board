@@ -32,6 +32,8 @@
 // actually catches it; the anchoring slice 10 log records the transcripts.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, CSP, STAGE_MARGIN_RESET } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
@@ -1102,6 +1104,117 @@ check('The stage lens opens on the exact same srcdoc, reset included -- it is a 
   assert.equal(lens.getAttribute('srcdoc'), inline.getAttribute('srcdoc'),
     'the lens frame\'s srcdoc must be byte-identical to the inline stage\'s -- including the reset, since it is copied off that frame rather than rebuilt');
   assert.equal(lens.getAttribute('srcdoc').indexOf(STAGE_MARGIN_RESET), 0, 'and must therefore also open with the reset');
+});
+
+// =================================================================================
+// 7. Every live message type is documented in src/render.mjs's own design
+//    comment (the "MESSAGES." section, above stageAgentScript) -- a drift check,
+//    not a behavioural one. That comment has fallen behind twice already
+//    (this chunk added the third missing type, 'band', on top of two others
+//    nobody had caught): a type gets added at a send/receive site and the prose
+//    describing the channel is never touched, because nothing forces it to be.
+//    This makes the omission a red `npm run check` instead of a silent gap.
+// =================================================================================
+
+const RENDER_SRC_PATH = fileURLToPath(new URL('../src/render.mjs', import.meta.url));
+const UI_SRC_PATH = fileURLToPath(new URL('../src/ui.mjs', import.meta.url));
+const renderSrcText = readFileSync(RENDER_SRC_PATH, 'utf8');
+const uiSrcText = readFileSync(UI_SRC_PATH, 'utf8');
+
+/** Every `type:` string either half of the channel actually sends, read off the
+ * real call shapes rather than off any hand-kept list -- `post({ type: 'x', ... })`
+ * (src/render.mjs, the stage) and `postToStage(frame, { type: 'x', ... })`
+ * (src/ui.mjs, the parent), across both files' raw source text so a type
+ * introduced on either side is caught the same way. Deliberately does NOT match
+ * on `data.type === 'x'` (a receive branch): the design comment's own contract is
+ * "every message this channel SENDS", and 'select' is discussed at length in
+ * prose (the "NO 'select' MESSAGE, DELIBERATELY" passage) without ever being sent
+ * by a real `post`/`postToStage` call -- matching receives as well as sends would
+ * require this checker to also know that passage is describing a DELETED type
+ * rather than a live one, which is exactly the judgment a regex should not need
+ * to make. Sends are the ground truth for "is this type live" on a channel where
+ * every receiver already has to tolerate an unrecognised type (shape validation,
+ * this file's own section 3) -- nothing here reaches the parent or the stage
+ * without first being posted. */
+function liveMessageTypes(renderSrc, uiSrc) {
+  const types = new Set();
+  for (const m of renderSrc.matchAll(/\bpost\(\s*\{\s*type:\s*'(\w+)'/g)) types.add(m[1]);
+  for (const m of uiSrc.matchAll(/\bpostToStage\([^,]+,\s*\{\s*type:\s*'(\w+)'/g)) types.add(m[1]);
+  return types;
+}
+
+/** Every `'type'` the design comment documents, read off the comment's own text
+ * rather than off a hand-kept list of what it OUGHT to say. The block is found by
+ * its banner ("--- design: genuine stage isolation via postMessage ---") and read
+ * as every contiguous `//`-prefixed line that follows -- the same "walk until the
+ * shape breaks" idiom `parseBlockShapes` (src/prose-check.mjs) already uses on
+ * PROTOCOL.md, chosen so the comment can grow (this chunk grows it) without this
+ * function's own end marker going stale the same way the count in src/ui.mjs did.
+ * A message-type entry always opens its line as `'name' ...` (see the MESSAGES.
+ * section's own STAGE -> PARENT / PARENT -> STAGE lists) -- a leading single quote
+ * right after the `//` prefix, nothing else in this comment is shaped that way.
+ * In particular this is why the "NO 'select' MESSAGE, DELIBERATELY" line is
+ * inert here: it opens with `NO`, not a quote, so 'select' is discussed at
+ * length without ever registering as documented -- which is correct, since
+ * nothing sends it (see liveMessageTypes above) and a check that accepted
+ * "mentioned anywhere in prose" as documentation would wave through a stray
+ * reference exactly like the deleted type's own name. */
+function documentedMessageTypes(renderSrc) {
+  const banner = '// --- design: genuine stage isolation via postMessage';
+  const bannerIdx = renderSrc.indexOf(banner);
+  assert.ok(bannerIdx >= 0, 'setup failure: design comment banner not found in src/render.mjs');
+  const types = new Set();
+  for (const line of renderSrc.slice(bannerIdx).split('\n')) {
+    if (!line.startsWith('//')) break; // the comment block ends where the `//` run does
+    const m = /^'(\w+)'/.exec(line.slice(2).trim());
+    if (m) types.add(m[1]);
+  }
+  return types;
+}
+
+check('every live message type (a real post()/postToStage() call site) has an entry in the design comment', () => {
+  const live = liveMessageTypes(renderSrcText, uiSrcText);
+  const documented = documentedMessageTypes(renderSrcText);
+  const missing = [...live].filter(t => !documented.has(t));
+  assert.deepEqual(missing, [], `undocumented live message type(s): ${missing.join(', ')}`);
+});
+
+check('the nine live types are exactly ready/hover/click/positions/height/scroll/mode/locate/band', () => {
+  // Pinned by hand once, so a type silently renamed (not just added) is also
+  // caught: the check above only ever notices ADDITIONS relative to the
+  // comment, never a live type and its comment entry drifting to two
+  // different names in lockstep.
+  const live = liveMessageTypes(renderSrcText, uiSrcText);
+  assert.deepEqual([...live].sort(), ['band', 'click', 'height', 'hover', 'locate', 'mode', 'positions', 'ready', 'scroll'].sort());
+});
+
+check('the deleted \'select\' type is not live, and is not required to be documented', () => {
+  const live = liveMessageTypes(renderSrcText, uiSrcText);
+  assert.ok(!live.has('select'), '\'select\' must never be sent by a real post()/postToStage() call');
+  // documentedMessageTypes is free to not know about 'select' at all -- the
+  // "NO 'select' MESSAGE" passage does not open a line with `'select'`, so it
+  // never lands in the documented set either. Asserting that here pins the
+  // negative: a documented set that DID somehow pick up 'select' would still
+  // pass the drift check above (an extra documented entry is harmless), so
+  // this is the only place that would notice the parser drifting the wrong way.
+  const documented = documentedMessageTypes(renderSrcText);
+  assert.ok(!documented.has('select'), 'the "NO select MESSAGE" passage must not parse as a documentation entry');
+});
+
+check('the drift check actually fails when a type is added to the code and not to the comment (proved, not assumed)', () => {
+  // The regression this whole section exists to catch, reproduced directly:
+  // splice in a real-shaped send for a brand new type nowhere in the design
+  // comment, and confirm the same comparison the check above runs actually
+  // flags it. Proves the extractor is live, not a check that only ever passes.
+  const mutatedRenderSrc = renderSrcText.replace(
+    "post({ type: 'ready' });",
+    "post({ type: 'ready' });\n  post({ type: 'zzzUndocumented' });",
+  );
+  assert.notEqual(mutatedRenderSrc, renderSrcText, 'setup failure: the splice point ("post({ type: \'ready\' });") was not found');
+  const live = liveMessageTypes(mutatedRenderSrc, uiSrcText);
+  const documented = documentedMessageTypes(mutatedRenderSrc);
+  const missing = [...live].filter(t => !documented.has(t));
+  assert.deepEqual(missing, ['zzzUndocumented'], 'adding an undocumented send did not trip the drift check');
 });
 
 if (failures) {

@@ -29,7 +29,7 @@
 
 import assert from 'node:assert/strict';
 import { createBoard, addRound, applySubmit } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, groupCommentsByBlock, stageAgentScript, COMMENT_ICON } from '../src/render.mjs';
 // The daemon's own push builder, imported rather than re-implemented: a check
 // that rebuilt the payload locally would assert its own copy of the rule and
 // stay green through any change to the real one (which is how the amend path's
@@ -40,6 +40,16 @@ import { styles } from '../src/styles.mjs';
 import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE } from '../src/badge.mjs';
 import { themeBootScript } from '../src/theme.mjs';
 import { parseHTML, StandInEvent, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
+
+// src/ui.mjs's reportStageBand falls back to hardcoded pixel figures when
+// getComputedStyle cannot be trusted (this suite's DOM stand-in, see this
+// file's own header comment, never implements it) -- figures chosen to match
+// --space-4/--space-3's own declared values in src/styles.mjs. Read out of the
+// already-imported `styles` string here rather than re-typed as bare numbers,
+// so a change to either custom property in src/styles.mjs cannot leave this
+// suite silently asserting a stale fallback.
+const SPACE_4_FALLBACK = parseFloat(styles.match(/--space-4:\s*([\d.]+)px/)[1]);
+const SPACE_3_FALLBACK = parseFloat(styles.match(/--space-3:\s*([\d.]+)px/)[1]);
 
 let failures = 0;
 function check(name, fn) {
@@ -299,7 +309,6 @@ check('criterion 16: the condensed pill is sized by the controls it carries -- t
 // src/styles.mjs's own comments.
 check('criterion 16: the pill wears a corner rather than a capsule, and holds one line of chrome rather than a chip beside a label', () => {
   const { document, frame } = openPageBoard();
-  const badge = document.querySelector('button#round-badge');
   const meta = document.querySelector('span#round-meta');
   const head = document.querySelector('.board-head');
   reportScroll(frame, 800);
@@ -310,11 +319,12 @@ check('criterion 16: the pill wears a corner rather than a capsule, and holds on
   // which the resolver reports as '' -- both spellings of ADR.md entry 52.
   assert.equal(computed(head, 'border-bottom'), 'none',
     'a header that fades draws no hairline under the fade (ADR.md entry 52) -- the gradient is the edge');
-  assert.equal(computed(badge, 'background'), 'none', 'the badge is a label on a page board, not a chip: its own fill was the second round shape arguing with the pill\'s');
-  assert.equal(computed(badge, 'border'), 'none',
-    'and its border goes with the fill -- as border:none rather than a transparent colour, so .board-head .round-badge:hover (which outranks this rule) can still lift the colour without drawing the frame back');
+  // ADR.md entry 61 deleted the round badge this check used to pin as "a
+  // label, not a chip" (background/border: none) -- there is no chip left to
+  // de-chip; the state label alone, with a hairline ahead of it, is what
+  // survives.
   assert.match(computed(meta, 'border-left'), /var\(--hairline\)/,
-    'a hairline is what separates the label from the read-only note once neither wears chrome');
+    'a hairline is what separates the state label from the control before it, once neither wears a second round of chrome');
   // Asserted against the stylesheet text, not through the resolver: ':empty' is
   // a state the stand-in does not evaluate (QUIRKS.md, "the stand-in has no
   // layout" -- it has no live matching either). The fact being pinned is that
@@ -323,6 +333,37 @@ check('criterion 16: the pill wears a corner rather than a capsule, and holds on
   // hydrate) and a divider with nothing after it is what the reviewer would see.
   assert.match(styles, /body\.page-board \.round-meta:empty \{ display: none; \}/,
     'the divider must not be drawn while the slot is still empty');
+});
+
+check('AC 9 (SPEC_HEADER.md): a page board\'s comment-mode toggle wears COMMENT_ICON\'s own glyph, at rest and condensed alike -- the same node, never redrawn or swapped', () => {
+  const { document, frame } = openPageBoard();
+  const commentPaths = [...COMMENT_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
+  assert.deepEqual([...toggle.querySelectorAll('path')].map(p => p.getAttribute('d')), commentPaths,
+    'at rest, the toggle must render COMMENT_ICON\'s own path data');
+
+  reportScroll(frame, 800);
+  assert.equal(condensed(document), true, 'setup failure: the scroll must have condensed the header into the pill');
+  // Condensing is a pure CSS change of box, never of markup (src/styles.mjs's
+  // own comment: "there is still exactly ONE #comment-mode-toggle in the
+  // document, condensed or not") -- so the SAME element, not a second one, is
+  // what this re-reads.
+  const stillToggle = document.getElementById('comment-mode-toggle');
+  assert.equal(stillToggle, toggle, 'condensing must not swap in a second #comment-mode-toggle element');
+  assert.deepEqual([...stillToggle.querySelectorAll('path')].map(p => p.getAttribute('d')), commentPaths,
+    'condensed, the toggle must still render COMMENT_ICON\'s own path data');
+});
+
+check('AC 12 (SPEC_HEADER.md, ADR.md entry 61): a page board\'s header names no round, at rest or condensed', () => {
+  const { document, frame } = openPageBoard();
+  assert.equal(document.getElementById('round-badge'), null, 'setup: no #round-badge at rest');
+  assert.equal(document.querySelectorAll('.round-badge').length, 0, 'setup: no .round-badge element at rest');
+
+  reportScroll(frame, 800);
+  assert.equal(condensed(document), true, 'setup failure: the scroll must have condensed the header into the pill');
+  assert.equal(document.getElementById('round-badge'), null, 'condensing must not resurrect a #round-badge element');
+  assert.equal(document.querySelectorAll('.round-badge').length, 0, 'condensing must not resurrect a .round-badge element');
 });
 
 check('criterion 16: the frame is untouched across a whole condense/expand cycle -- it floats OVER the frame, which stays a constant 100vh', () => {
@@ -593,6 +634,12 @@ check('the INBOUND half of the channel is shape-checked too -- the stage refuses
 
   const themeBefore = root.getAttribute('data-theme');
   assert.equal(themeBefore, 'dark', 'setup: the stage starts painted in the board\'s theme');
+  // SPEC_HEADER.md ADR 59: the 'band' handler's own guards (applyBand's
+  // Math.max is never reached at all unless both fields pass the same
+  // finite/non-negative shape check 'scroll''s top does) had never run under a
+  // check either -- everything below asserts padding stays exactly where
+  // setup left it across the whole malformed batch.
+  const paddingBefore = { top: frame.contentDocument.body.style.paddingTop, bottom: frame.contentDocument.body.style.paddingBottom };
 
   const bad = [
     null,
@@ -611,6 +658,16 @@ check('the INBOUND half of the channel is shape-checked too -- the stage refuses
     { cb: 'cb-stage', type: 'locate', requestId: 7, refs: [] },  // a non-string request id
     { cb: 'cb-stage', type: 'locate', requestId: 'r1', refs: 'nope' },
     { cb: 'cb-stage', type: 'locate', requestId: 'r1' },         // no refs at all
+    { cb: 'cb-stage', type: 'band', top: '0', bottom: 0 },       // a string top
+    { cb: 'cb-stage', type: 'band', top: 0, bottom: '0' },       // a string bottom
+    { cb: 'cb-stage', type: 'band', top: NaN, bottom: 0 },
+    { cb: 'cb-stage', type: 'band', top: 0, bottom: NaN },
+    { cb: 'cb-stage', type: 'band', top: Infinity, bottom: 0 },
+    { cb: 'cb-stage', type: 'band', top: 0, bottom: Infinity },
+    { cb: 'cb-stage', type: 'band', top: -1, bottom: 0 },        // negative
+    { cb: 'cb-stage', type: 'band', top: 0, bottom: -1 },
+    { cb: 'cb-stage', type: 'band', top: 0 },                    // no bottom at all
+    { cb: 'cb-stage', type: 'band', bottom: 0 },                 // no top at all
     { cb: 'cb-stage', type: 'nonsense' },
   ];
   for (const data of bad) {
@@ -618,6 +675,10 @@ check('the INBOUND half of the channel is shape-checked too -- the stage refuses
     assert.deepEqual(scrolls, [], `a malformed parent message must never reach scrollTo: ${JSON.stringify(data)}`);
     assert.equal(root.getAttribute('data-theme'), themeBefore,
       `nor repaint the artifact: ${JSON.stringify(data)}`);
+    assert.deepEqual(
+      { top: frame.contentDocument.body.style.paddingTop, bottom: frame.contentDocument.body.style.paddingBottom },
+      paddingBefore,
+      `nor touch the band padding: ${JSON.stringify(data)}`);
   }
   assert.equal(root.style.colorScheme, 'dark', 'and none of them may have moved color-scheme either');
 
@@ -874,9 +935,249 @@ check('criterion 2: a page board\'s frame never takes an inline height from a re
 });
 
 // =================================================================================
+// SPEC_HEADER.md, criteria 1-6: the board clears its own chrome band, the artifact
+// does not (ADR.md entry 59). src/ui.mjs's reportStageBand measures the header's
+// band at rest and the round pager dock's band, and posts them to the CURRENT
+// page board's stage over the same channel 'mode'/'scroll'/'height' already use;
+// src/render.mjs's stageAgentScript tops its own body padding up to whichever is
+// larger of that report and whatever the artifact's own markup already gave it.
+//
+// Numbered distinctly from this file's own "criterion 2"/"criterion 3"/etc. above
+// -- those are SPEC_AWAITED.md's numbering; every check below is prefixed
+// "SPEC_HEADER.md criterion N" to keep the two specs' numbers from colliding.
+//
+// What no check here can prove: the artifact's OWN declared padding, read via
+// applyBand's `getComputedStyle(document.body)` (src/render.mjs). test/dom-stand-in.mjs
+// has no box model or cascade engine for an arbitrary document (QUIRKS.md "The
+// stand-in has no layout"), and stageAgentScript reads that API as a bare,
+// unqualified identifier -- exactly like every other real-layout read in this
+// codebase (measurePillHalf's own `getComputedStyle`, reportHeightAfterLayout's
+// `requestAnimationFrame`) -- which Node's own global scope never defines, so the
+// baseline-capture branch never runs here and the artifact's own baseline is
+// always 0 in this suite, same as it would genuinely be for an artifact that
+// really pads nothing. What every check below CAN and does prove: the band is
+// applied as padding and nothing else (criterion 4), a fresh artifact gets
+// exactly the reported band (criterion 1, the same scenario the stand-in's
+// baseline-of-0 happens to model correctly), the bottom band clears the dock
+// (criterion 3), a repeated report never stacks a second band on top of the
+// first (the half of criterion 2 that does not depend on cascade CSS), and a
+// resize re-measures and re-sends (criterion 5).
+
+const stageBody = (frame) => frame.contentDocument.body;
+
+check('SPEC_HEADER.md criterion 1: a page board whose artifact pads nothing is topped up to exactly the header\'s own band, so its first element renders in full at scroll top', () => {
+  const { document, frame } = openPageBoard();
+  const head = document.querySelector('.board-head');
+  const expectedTop = head.getBoundingClientRect().height;
+  assert.ok(expectedTop > 0, 'setup: the header must measure to something real');
+  assert.equal(stageBody(frame).style.paddingTop, expectedTop + 'px',
+    'an artifact with no padding of its own must be topped up to exactly the header\'s own band -- never left at zero');
+});
+
+check('SPEC_HEADER.md criterion 3: the bottom edge is topped up to clear the round pager dock, with its own breathing room beyond the bare dock height', () => {
+  const { document, frame } = openPageBoard();
+  const dock = document.querySelector('.round-pager-dock');
+  const dockHeight = dock.getBoundingClientRect().height;
+  assert.ok(dockHeight > 0, 'setup: the dock must measure to something real');
+  const appliedBottom = parseFloat(stageBody(frame).style.paddingBottom);
+  assert.ok(appliedBottom > dockHeight,
+    'the bottom band must clear more than the bare dock -- .page-comments\' own bottom offset (--space-4 + dock + --space-3, src/styles.mjs) is the same reservation this reuses, and both extra terms are positive');
+
+  // The dock's real height passes straight through, 1:1 -- proof the bottom
+  // band is genuinely MEASURED, not a number picked to fit today's dock.
+  dock.getBoundingClientRect = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: dockHeight + 40 });
+  document.defaultView.dispatchEvent(new StandInEvent('resize'));
+  const appliedBottom2 = parseFloat(stageBody(frame).style.paddingBottom);
+  assert.equal(appliedBottom2 - appliedBottom, 40,
+    'a dock that grows 40px taller must grow the bottom band by exactly 40px -- the extra clearance beyond the dock is a constant, not a second measurement that also moved');
+});
+
+check('SPEC_HEADER.md criterion 3 (the comment rail): a rail carrying chrome is cleared on top of the dock, not merely the gap the dock alone leaves', () => {
+  // openPageBoard's default fixture is awaited (SPEC_AWAITED.md ticket 03: a
+  // send control at every comment count), so '.page-comments' carries real
+  // chrome -- a '.page-send-bar' -- from the very first paint, with zero
+  // comments queued. '.page-comments' is 'position: fixed' with its own
+  // 'max-height' (src/styles.mjs), floating ABOVE the dock's own offset --
+  // the dock-only figure clears the GAP below the rail, never the rail
+  // itself, so an artifact's last element sits under the rail whenever the
+  // rail holds anything at all.
+  const { document, frame } = openPageBoard();
+  const dock = document.querySelector('.round-pager-dock');
+  const rail = document.querySelector('.round-current .page-comments');
+  assert.ok(rail, 'setup: the page board must render its comment rail');
+  assert.ok(rail.querySelector('.page-send-bar'),
+    'setup: an awaited page board\'s rail carries a send control at every comment count (SPEC_AWAITED.md ticket 03), so it has real chrome from the first paint');
+
+  // The same fallback space4/space3 this whole section's other checks rely on
+  // (this suite's bare, unqualified `getComputedStyle` is never a function in
+  // Node -- see this section's own header comment -- so src/ui.mjs's
+  // reportStageBand always falls back to SPACE_4_FALLBACK/SPACE_3_FALLBACK here).
+  const dockOnlyBand = dock.getBoundingClientRect().height + SPACE_4_FALLBACK + SPACE_3_FALLBACK;
+  const railHeight = rail.getBoundingClientRect().height;
+  assert.ok(railHeight > 0, 'setup: the rail must measure to something real');
+  const appliedBottom = parseFloat(stageBody(frame).style.paddingBottom);
+  assert.equal(appliedBottom, dockOnlyBand + railHeight,
+    'the bottom band must clear the rail\'s own height ON TOP OF the dock\'s clearance -- clearing only the dock leaves the rail itself floating over the artifact');
+});
+
+check('SPEC_HEADER.md criterion 3 (the comment rail): a rail carrying nothing adds no extra clearance -- only the dock\'s own applies', () => {
+  // The "never awaited" branch of renderPageCommentPanel (src/render.mjs):
+  // no compose form, no hint, no send control, and an empty comment-list --
+  // '.page-comments' is still emitted (so a later push can still find it) but
+  // matches none of '.comment-form.open' / '.comment-item' / '.page-send-bar',
+  // the same three the stylesheet's own ':has()' rule gates its chrome on.
+  const { document, frame } = openPageBoard(nonAwaitedPageBoard());
+  const dock = document.querySelector('.round-pager-dock');
+  const rail = document.querySelector('.round-current .page-comments');
+  assert.ok(rail, 'setup: the wrapper div is still rendered');
+  assert.equal(rail.querySelector('.comment-form.open, .comment-item, .page-send-bar'), null,
+    'setup: a page board nobody is waiting on, with nothing queued, renders a rail with no chrome-triggering child');
+
+  const dockOnlyBand = dock.getBoundingClientRect().height + SPACE_4_FALLBACK + SPACE_3_FALLBACK;
+  const appliedBottom = parseFloat(stageBody(frame).style.paddingBottom);
+  assert.equal(appliedBottom, dockOnlyBand,
+    'a rail carrying nothing must not widen the bottom band -- only the dock\'s own clearance applies, exactly as before the rail was ever considered');
+});
+
+check('SPEC_HEADER.md criterion 4: the clearance is padding only -- no background, colour or border ever reaches the stage from the board', () => {
+  const { frame } = openPageBoard();
+  const body = stageBody(frame);
+  assert.ok(body.style.paddingTop, 'setup: the band mechanism did run');
+  // The stand-in's inline style is a plain object (test/dom-stand-in.mjs
+  // makeStyle): a property nothing ever wrote reads back `undefined`, not a
+  // real CSSStyleDeclaration's `''` -- `!x` covers both spellings of "unset".
+  assert.ok(!body.style.background, 'the board must never paint the stage\'s own body');
+  assert.ok(!body.style.backgroundColor, 'the board must never paint the stage\'s own body');
+  assert.ok(!body.style.border, 'nor draw a border into it');
+  assert.ok(!body.style.borderTop, 'nor draw a border into it');
+  assert.ok(!body.style.color, 'nor set a text colour');
+  // Structural, not just behavioural: applyBand (src/render.mjs) must have no
+  // OTHER style write in it at all, or a future edit could add one this
+  // fixture's plain artifact would never exercise.
+  const script = stageAgentScript();
+  const applyBandBody = script.slice(script.indexOf('function applyBand'), script.indexOf('function applyBand') + 900);
+  assert.doesNotMatch(applyBandBody, /\.style\.(background|border|color)/,
+    'applyBand must only ever write paddingTop/paddingBottom -- any other style property is exactly the wash entry 40 already ruled out');
+});
+
+check('SPEC_HEADER.md criterion 2: a repeated band report never stacks a second band on top of the first', () => {
+  const { frame } = openPageBoard();
+  const body = stageBody(frame);
+  const before = body.style.paddingTop;
+  assert.ok(parseFloat(before) > 0, 'setup: a band was already applied');
+
+  // The identical report again -- the shape a resize that measured no real
+  // change would produce. Forged directly on the stage's own window, the same
+  // idiom every other inbound-channel check in this file already uses.
+  frame.contentWindow.postMessage({ cb: 'cb-stage', type: 'band', top: parseFloat(before), bottom: parseFloat(body.style.paddingBottom) });
+  assert.equal(body.style.paddingTop, before,
+    'a second report at the same height must leave the padding exactly where it was, not add a second band on top');
+
+  // And a SMALLER report tops down to the new, smaller value -- proving the
+  // mechanism recomputes max(baseline, band) fresh every time rather than
+  // ratcheting up against whatever it last applied (which is what "add"
+  // instead of "top-up" would look like from the outside).
+  frame.contentWindow.postMessage({ cb: 'cb-stage', type: 'band', top: 1, bottom: 1 });
+  assert.equal(body.style.paddingTop, '1px',
+    'the baseline in this suite is always 0 (see this section\'s own header comment), so a smaller report must be honoured, not floored at the earlier, larger one');
+});
+
+check('SPEC_HEADER.md criterion 5: resizing the viewport re-measures the header and the artifact\'s clearance follows it, up or down', () => {
+  const { document, frame } = openPageBoard();
+  const head = document.querySelector('.board-head');
+
+  head.getBoundingClientRect = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 40 });
+  document.defaultView.dispatchEvent(new StandInEvent('resize'));
+  assert.equal(stageBody(frame).style.paddingTop, '40px',
+    'a resize that leaves the header shorter must shrink the artifact\'s own clearance to match');
+
+  head.getBoundingClientRect = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 130 });
+  document.defaultView.dispatchEvent(new StandInEvent('resize'));
+  assert.equal(stageBody(frame).style.paddingTop, '130px',
+    'and a resize that grows it (a title wrapping to two lines) must grow the clearance to match');
+});
+
+check('the top band is measured only while the header is genuinely at rest -- a header shortened by scrolling, not by a real resize, must never shrink the artifact\'s clearance mid-read', () => {
+  const { document, frame } = openPageBoard();
+  const head = document.querySelector('.board-head');
+  const restBand = stageBody(frame).style.paddingTop;
+
+  reportScroll(frame, 800);
+  assert.equal(condensed(document), true, 'setup: the header is condensed');
+  // The condensed header's own box is shorter than its resting one (the pill
+  // is smaller than the expanded wash) -- exactly the height a naive
+  // ResizeObserver-on-the-header would see and wrongly report as a resize.
+  head.getBoundingClientRect = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 20 });
+  document.defaultView.dispatchEvent(new StandInEvent('resize'));
+  assert.equal(stageBody(frame).style.paddingTop, restBand,
+    'the artifact\'s clearance must not follow a height change caused by condensing -- ADR.md entry 40 chose an overlay specifically so nothing reflows mid-scroll, and a shrinking padding here would be exactly that');
+});
+
+check('SPEC_HEADER.md criteria 1 and 5: a genuine resize taken WHILE condensed still re-measures the header once the reader returns to rest', () => {
+  // The gate the check just above this one pins ("skip the header's box while
+  // condensed") is correct and stays -- src/styles.mjs really does shrink
+  // '.board-head''s own box as it condenses, so measuring mid-scroll would
+  // pull the padding out from under the reader. What that gate does NOT do on
+  // its own is THAW: nothing re-measures on the way back to rest, so a real
+  // viewport resize taken while scrolled (the header's own rest height
+  // genuinely changing underneath the skip) left the artifact padded for a
+  // stale number for the rest of the session -- reproduced directly: 76px at
+  // rest, scroll away, the header's rest height becomes 100px (unmeasured,
+  // by the gate above's own design), scroll back to the top, and the stage
+  // stayed padded for the stale 76 with nothing to ever correct it. Fixed by
+  // applyStageProgress (src/ui.mjs) calling reportStageBand exactly on the
+  // 'stage-scrolled' present -> absent edge -- the one place that knows the
+  // transition happened at all.
+  const { document, frame } = openPageBoard();
+  const head = document.querySelector('.board-head');
+  const restBand = stageBody(frame).style.paddingTop;
+
+  reportScroll(frame, 800);
+  assert.equal(condensed(document), true, 'setup: the header is condensed');
+
+  // No resize event is dispatched here on purpose -- a real viewport resize
+  // taken while scrolled changes the header's box without the DOM stand-in
+  // (or a real browser) ever telling this code apart from condensing itself,
+  // which is exactly the case the gate above has to stay blind to. The stale
+  // value has to be corrected on the scroll transition, not on a resize this
+  // code cannot trust while condensed.
+  head.getBoundingClientRect = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 100 });
+  assert.equal(stageBody(frame).style.paddingTop, restBand, 'setup: still stale while condensed, same as the check above');
+
+  reportScroll(frame, 0);
+  assert.equal(condensed(document), false, 'setup: back at rest');
+  assert.equal(stageBody(frame).style.paddingTop, '100px',
+    'returning to rest must re-measure the header and thaw the artifact\'s clearance -- staying at the stale pre-scroll value is 24px of the artifact\'s own first element left under the header, for the rest of the session');
+});
+
+check('SPEC_HEADER.md criterion 5: the band is re-sent when a round is flipped to, so a page board arrived at over the pager is topped up too', () => {
+  // Round 2, not round 1, renders '.round-current' at hydrate (renderRoundSection:
+  // "const current = lastRound.n === roundN") -- so the page board has to be round
+  // 1 here for "not current yet" to be the genuine starting state this checks.
+  const board = createBoard({
+    title: 'two rounds',
+    blocks: [{ kind: 'html', html: ARTIFACT }],
+  });
+  addRound(board, { blocks: [{ kind: 'markdown', text: 'round two' }] });
+  const document = loadBoard(renderBoardPage(board));
+  const frame1 = document.querySelector('.round[data-round="1"] .html-stage');
+  assert.ok(frame1, 'setup: round 1 must render its own stage');
+  frame1.loadSrcdoc();
+  assert.equal(document.body.classList.contains('page-board'), false, 'setup: round 2 (markdown) is current at hydrate, not the page board');
+  assert.equal(stageBody(frame1).style.paddingTop, undefined,
+    'setup: a round that is not current yet gets no band -- reportStageBand only ever targets .round-current');
+
+  const head = document.querySelector('.board-head');
+  const expectedTop = head.getBoundingClientRect().height;
+  document.querySelector('button#round-prev').dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.body.classList.contains('page-board'), true, 'setup: round 1 is now current, and it is a page board');
+  assert.equal(stageBody(frame1).style.paddingTop, expectedTop + 'px',
+    'flipping to a page board round must top its stage up immediately, not wait for a resize or a scroll');
+});
+
+// =================================================================================
 // Criterion 11 and its seam: no way to send, and what happens when a round lands.
 // =================================================================================
-
 check('criterion 11: a page board hydrates with nothing to send -- no open question, no count, and the pill never turns itself on', () => {
   const { document } = openPageBoard();
   assert.equal(document.querySelectorAll('.round-open .question-block').length, 0,

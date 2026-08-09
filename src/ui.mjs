@@ -50,10 +50,10 @@ import {
   findPendingCommentForAnchor, removePendingComment,
 } from './anchor.mjs';
 import {
-  badgeLabel, roundPageLabel, roundNumberLabel, isPageRound,
+  roundPageLabel, roundNumberLabel, isPageRound,
   questionBlocks, roundIsAwaited,
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
-  ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE,
+  ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE,
   PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE,
 } from './badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
@@ -230,13 +230,7 @@ export const ui = `
   var findPendingCommentForAnchor = ${findPendingCommentForAnchor.toString()};
   var removePendingComment = ${removePendingComment.toString()};
 
-  // The badge label, same technique again: 'round N of M' is pure
-  // formatting with no DOM, and src/badge.mjs is what test/check-pure.mjs
-  // exercises directly -- embedding its literal source here (not a hand copy)
-  // is what proves this page renders the exact string that was checked.
-  var badgeLabel = ${badgeLabel.toString()};
-
-  // The other two pure round facts from src/badge.mjs, spliced the same way: the
+  // Two pure round facts from src/badge.mjs, spliced the same way: the
   // pager names a round with the SAME function src/render.mjs printed that
   // round's own label with, and it asks whether the page it is flipping to is a
   // full-viewport artifact with the SAME function that decided how the server
@@ -271,6 +265,7 @@ export const ui = `
   // never does, so a rendered page stays a pure function of its board JSON.
   var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
   var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
+  var ROUND_OPEN_UNAWAITED_TITLE = ${JSON.stringify(ROUND_OPEN_UNAWAITED_TITLE)};
   var PAGE_SEND_EXPIRED_LABEL = ${JSON.stringify(PAGE_SEND_EXPIRED_LABEL)};
   var PAGE_SEND_EXPIRED_TITLE = ${JSON.stringify(PAGE_SEND_EXPIRED_TITLE)};
   var roundIsAwaitedOpen = ${roundIsAwaitedOpen.toString()};
@@ -363,7 +358,7 @@ export const ui = `
   // Every id lookup in this file -- the per-block ones (form#comment-form-,
   // div#comment-target-, div#comment-list-<blockId>) and the page-wide ones
   // (script#board-data, button#theme-toggle, button#comment-mode-toggle,
-  // button#send-btn/button#discuss-btn/span#send-status, button#round-badge,
+  // button#send-btn/button#discuss-btn/span#send-status,
   // div#blocks) -- is tag-qualified rather than a bare getElementById. Board
   // content is markdown snapshotted from arbitrary files (src/markdown.mjs's
   // threat-model comment), and a heading or top-level list item can mint an id
@@ -374,9 +369,8 @@ export const ui = `
   // these lookups' tag qualifiers can ever match -- so tag-qualifying removes
   // the collision, and the tree-order dependence it used to rely on, entirely.
   //
-  // Two of these are not obvious from the id alone and were checked against
-  // src/render.mjs rather than assumed: 'round-badge' is a <button> (it was
-  // promoted from the <div> it used to be), and 'comment-list-<blockId>' is
+  // One of these is not obvious from the id alone and was checked against
+  // src/render.mjs rather than assumed: 'comment-list-<blockId>' is
   // a <div>, not a <ul>. And the qualifier survives the diagram lens: lensAdopt
   // MOVES the real div#comment-target-/form#comment-form- into a <dialog> that
   // lensOpen appended to document.body, so both stay in this document and a
@@ -808,8 +802,11 @@ export const ui = `
   // The parent's half of the design in src/render.mjs's 'stageAgentScript'
   // comment. Three responsibilities: find which live '.html-stage' frame a
   // message actually came from (never trust an id the message itself claims),
-  // validate its shape before touching any field, and act on exactly the five
-  // message types the stage ever sends.
+  // validate its shape before touching any field, and act on every message
+  // type the stage ever sends -- the listener below (window.addEventListener
+  // 'message', at the end of this section) is the exhaustive list; count them
+  // there rather than here, since a number restated in prose is exactly the
+  // kind of fact this comment has already fallen behind on before.
 
   var STAGE_CB = 'cb-stage';
   var nextLocateId = 1;
@@ -847,7 +844,10 @@ export const ui = `
   // a dead zone moves the boundary, it does not remove it.
   //
   // 140px is a bit over one scroll notch, so an accidental nudge barely stains
-  // the header while a deliberate read completes it.
+  // the header while a deliberate read completes it. Shared, unchanged, by
+  // refreshDocumentScrollChrome (SPEC_HEADER.md ticket 03): the same "one
+  // notch is a nudge, past it is a read" fact holds for a reader scrolling an
+  // ordinary board's own document, not just a page board's stage.
   var STAGE_SCROLL_CONDENSE_PX = 140;
 
   /** Post one message to 'frame''s stage agent. Wrapped in try/catch: a frame
@@ -1020,6 +1020,12 @@ export const ui = `
     // round's stage 'commentMode: true' straight from the global toggle with
     // no gate in the way.
     postToStage(frame, { type: 'mode', commentMode: commentMode && pageRoundCommentsAllowed(section), sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
+    // SPEC_HEADER.md criterion 1: a stage that has just announced itself is
+    // exactly the moment its own padding is still whatever its markup alone
+    // gave it -- the first (and often only) chance to top it up before the
+    // reader ever sees it unpadded. reportStageBand re-derives the CURRENT
+    // frame itself, so this is a correct no-op on a frame that isn't it.
+    reportStageBand();
     if (layer) requestStagePositions(frame, blockId, layer);
   }
 
@@ -1206,25 +1212,211 @@ export const ui = `
    * part of the look is on '--stage-p'. They flip at the first pixel rather
    * than at a threshold, and the control is fully transparent there
    * (src/styles.mjs), so nothing appears until the fade actually starts. */
-  function refreshStageChrome() {
-    var frame = document.querySelector('.round-current .html-stage');
-    var top = frame && typeof frame.__cbStageTop === 'number' ? frame.__cbStageTop : 0;
-    var pageBoard = document.body.classList.contains('page-board');
-    var p = pageBoard ? Math.min(1, Math.max(0, top / STAGE_SCROLL_CONDENSE_PX)) : 0;
+  /** Shared by refreshStageChrome and refreshDocumentScrollChrome (below): both
+   * derive the identical 0-to-1 figure from a different offset, and this is
+   * the one place that turns it into what the stylesheet reads.
+   *
+   * Also the one place that KNOWS when 'stage-scrolled' just cleared -- the
+   * transition back to rest, and the only place reportStageBand's own gate
+   * (below) can be trusted to re-measure the header from. reportStageBand
+   * skips the header's box entirely while 'stage-scrolled' is present (the
+   * condense genuinely shrinks it, src/styles.mjs, and reporting THAT would
+   * pull the artifact's padding out from under the reader mid-scroll -- ADR.md
+   * entry 40's whole reason for an overlay over a header that pushes). But
+   * nothing else ever re-enters that measurement on the way back down: a
+   * resize taken while scrolled changes the header's REST height without
+   * anyone re-checking it, and the class clearing on its own is not an event
+   * anything observes. Confirmed (a real regression, not a theory): 76px at
+   * rest, scroll away, resize the viewport while still scrolled (so the
+   * header's rest height becomes 100px, unmeasured because the gate above
+   * skips it), scroll back to the top -- the stage stays padded for the STALE
+   * 76px, 24px of the artifact's own first element sitting under the header,
+   * for the rest of the session. Calling reportStageBand here, exactly on the
+   * present -> absent edge, is what closes it: 'p<=0' is checked against
+   * whether the class WAS set a moment ago, not against its own value, so an
+   * ordinary re-render at rest (p already 0) does not re-post on every call.
+   * No recursion -- reportStageBand never re-enters the progress/chrome path,
+   * it only ever reads '.board-head''s current box and posts a message. */
+  function applyStageProgress(p) {
     // Three decimals, not the raw float: the value lands in a style attribute
     // that the comment/anchor code reads back, and '0.6100000000000001' is a
     // diff nobody wants to see. Below a thousandth is under a tenth of a pixel
     // of pill travel.
     document.body.style.setProperty('--stage-p', p.toFixed(3));
+    var wasScrolled = document.body.classList.contains('stage-scrolled');
     document.body.classList.toggle('stage-scrolled', p > 0);
+    if (wasScrolled && p <= 0) reportStageBand();
+  }
+
+  function refreshStageChrome() {
+    // SPEC_HEADER.md ticket 03 (ADR.md entry 60): an ordinary board's own
+    // header condenses off this DOCUMENT's scroll instead
+    // (refreshDocumentScrollChrome, below). Returning here rather than
+    // forcing '--stage-p' to 0 is what keeps the two writers from fighting --
+    // stageAgentScript is the SAME script in every stage, so an ordinary
+    // board's own embedded artifact still posts scroll reports on this
+    // channel, and one arriving after the reader has scrolled the document
+    // itself must not stomp the value that scroll set.
+    if (!document.body.classList.contains('page-board')) return;
+    var frame = document.querySelector('.round-current .html-stage');
+    var top = frame && typeof frame.__cbStageTop === 'number' ? frame.__cbStageTop : 0;
+    var p = Math.min(1, Math.max(0, top / STAGE_SCROLL_CONDENSE_PX));
+    applyStageProgress(p);
     if (backToTopBtn) backToTopBtn.classList.toggle('visible', p > 0);
+  }
+
+  /** SPEC_HEADER.md ADR 59: the board clears its own chrome band, the artifact
+   * does not. This measures the two bands the board's own floating chrome
+   * occupies on a page board -- the header at rest, and the round pager dock
+   * plus its own clearance -- and hands them to the CURRENT round's stage over
+   * the same postMessage channel every other stage fact travels on
+   * (stageAgentScript's 'band' handler tops its own padding up to whichever is
+   * larger, never adds the two, which is what keeps criterion 2 true without
+   * this file or that script ever touching a single artifact).
+   *
+   * Re-derives the current frame itself rather than trusting a caller's own
+   * reference, so a call from handleStageReady (which runs once per frame that
+   * announces itself, including a round that is not the current one) can never
+   * address the wrong stage.
+   *
+   * The top band is measured only while the header is genuinely at rest
+   * ('stage-scrolled' absent). ADR.md entry 40's own condense changes
+   * '.board-head''s rendered height as a side effect of scrolling
+   * (padding-block eases with --stage-p), and reporting THAT would shrink the
+   * artifact's own clearance mid-scroll -- exactly the reflow entry 40 chose an
+   * overlay to prevent. The last band measured at rest is kept in a closure
+   * variable and resent on every later call, including ones a mid-scroll
+   * resize fires.
+   *
+   * The bottom band is the dock's own clearance (--space-4 + the dock's real
+   * measured height + --space-3, the same arithmetic '.page-comments''s
+   * 'bottom' offset already uses, src/styles.mjs) PLUS the comment rail's own
+   * height on top of it, when the rail is actually carrying chrome. The dock
+   * term alone is only "clear of the dock" -- '.page-comments' floats ABOVE
+   * that offset and is 'position: fixed' with a 'max-height' that can run to
+   * nearly the full viewport (SPEC_HEADER.md criterion 3: the rail is named
+   * separately from the dock precisely because it is not bounded by the
+   * dock's own size), so an artifact's last element sits under the rail
+   * whenever the rail holds a form, a comment or the send bar --
+   * '.page-comments:has(...)' is the same three-selector test this mirrors in
+   * JS, since 'querySelector' is what a stand-in without ':has()' support can
+   * still answer. A rail with none of the three contributes nothing: it is
+   * either not rendered at all (no page round, ADR.md entry 45) or rendered
+   * empty (a page round that is not awaited and has no comments on record),
+   * and an empty '.page-comments' reserves no chrome of its own.
+   *
+   * Re-observed on every call rather than wired once at boot: the rail's own
+   * height changes as comments are queued or the compose form opens, with no
+   * resize, scroll or round flip in the picture, so its ResizeObserver has to
+   * be re-pointed at whichever round's rail is current right now -- the same
+   * reasoning 'frame'/'head'/'dock' above are re-derived fresh on every call,
+   * not cached from the first one. */
+  var lastTopBand = 0;
+  var bandRailObserver = null;
+  var bandObservedRail = null;
+  function railHasChrome(rail) {
+    return !!(rail && rail.querySelector
+      && rail.querySelector('.comment-form.open, .comment-item, .page-send-bar'));
+  }
+  function reportStageBand() {
+    var pageBoard = document.body.classList.contains('page-board');
+    var frame = pageBoard ? document.querySelector('.round-current .html-stage') : null;
+    if (!pageBoard || !frame) {
+      // A round that WAS current and rail-observed can flip away to an
+      // ordinary one (or a page round with no stage at all, structurally
+      // impossible today but not a case worth trusting) -- detach here rather
+      // than leaving the observer attached to a departed round's rail for the
+      // rest of the tab. Harmless in practice (the callback re-gates on
+      // page-board/frame and no-ops), but nothing else ever clears it.
+      if (bandObservedRail && bandRailObserver) {
+        bandRailObserver.unobserve(bandObservedRail);
+        bandObservedRail = null;
+      }
+      return;
+    }
+    var head = document.querySelector('.board-head');
+    if (head && head.getBoundingClientRect && !document.body.classList.contains('stage-scrolled')) {
+      lastTopBand = head.getBoundingClientRect().height;
+    }
+    var bottom = 0;
+    var dock = document.querySelector('.round-pager-dock');
+    if (dock && dock.getBoundingClientRect) {
+      var cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+      var space4 = cs ? parseFloat(cs.getPropertyValue('--space-4')) : NaN;
+      var space3 = cs ? parseFloat(cs.getPropertyValue('--space-3')) : NaN;
+      bottom = dock.getBoundingClientRect().height
+        + (isFinite(space4) ? space4 : 16)
+        + (isFinite(space3) ? space3 : 12);
+    }
+    var rail = document.querySelector('.round-current .page-comments');
+    if (rail && rail.getBoundingClientRect && railHasChrome(rail)) {
+      bottom += rail.getBoundingClientRect().height;
+    }
+    if (typeof ResizeObserver === 'function') {
+      if (!bandRailObserver) bandRailObserver = new ResizeObserver(reportStageBand);
+      if (rail !== bandObservedRail) {
+        if (bandObservedRail) bandRailObserver.unobserve(bandObservedRail);
+        if (rail) bandRailObserver.observe(rail);
+        bandObservedRail = rail;
+      }
+    }
+    postToStage(frame, { type: 'band', top: lastTopBand, bottom: bottom });
+  }
+
+  /** SPEC_HEADER.md ticket 03 (ADR.md entry 60): an ordinary board's own
+   * sticky header condenses on THIS document's scroll, off the identical
+   * '--stage-p' the stylesheet ramps every page-board rule on -- just
+   * written from a plain scroll offset instead of a stage's postMessage'd
+   * one, since an ordinary board scrolls itself rather than a fixed-height
+   * stage frame. Gated dynamically (checked on every scroll, not just once at
+   * setup), so a page board that turns into an ordinary one in place (a round
+   * arriving, applyRoundPush) picks this up with no extra wiring -- the exact
+   * counterpart of refreshStageChrome's own gate above, for the reverse
+   * direction. */
+  function refreshDocumentScrollChrome() {
+    if (document.body.classList.contains('page-board')) return;
+    var top = typeof window.pageYOffset === 'number' ? window.pageYOffset
+      : (document.documentElement && typeof document.documentElement.scrollTop === 'number'
+        ? document.documentElement.scrollTop : 0);
+    applyStageProgress(Math.min(1, Math.max(0, top / STAGE_SCROLL_CONDENSE_PX)));
+    // Unlike refreshStageChrome, always forced off rather than derived from
+    // 'p': back-to-top is a page-board affordance only (there is no fixed
+    // 100vh frame here for it to scroll, ADR.md entry 40 -- this ticket
+    // condenses the header, not the frame it floats over). Needed for
+    // goToRound's own call through refreshCondenseChrome above: without this,
+    // flipping FROM a condensed page board TO an ordinary one left the
+    // control visible and offering to scroll a stage that is no longer on
+    // screen -- refreshStageChrome's own early return (above) is what stops
+    // it from being cleared any other way once this document is the one
+    // driving the chrome.
+    if (backToTopBtn) backToTopBtn.classList.remove('visible');
+  }
+  window.addEventListener('scroll', refreshDocumentScrollChrome, { passive: true });
+  // Explicit initial call, the same reasoning measurePillHalf's own comment
+  // below gives: a reader who reloads mid-scroll, or arrives via a '#anchor'
+  // link already partway down the page, must not wait for the NEXT scroll
+  // event to see a condensed header that already matches where they are.
+  refreshDocumentScrollChrome();
+
+  /** The one caller (goToRound, below) that cannot know in advance which of
+   * the two condense mechanisms owns the page it is about to land on: a flip
+   * can go either way, page board to ordinary or back, and ADR.md entry 40's
+   * "the chrome belongs to the page that earned it" has to be true the
+   * instant the flip completes, not only after the next scroll or stage
+   * report arrives. handleStageScroll and the window 'scroll' listener each
+   * already know which mechanism they are (a stage message only ever means
+   * one, a document scroll only ever means the other), so they call their own
+   * function directly and never need this. */
+  function refreshCondenseChrome() {
+    if (document.body.classList.contains('page-board')) refreshStageChrome();
+    else refreshDocumentScrollChrome();
   }
 
   /** The pill's own half-width, handed to the stylesheet so its centred band is
    * exactly as wide as the controls that survive the condense. Measured rather
-   * than hardcoded because two of those controls resize at runtime: the round
-   * badge relabels on a flip ('Round 3 of 5' is not 'Round 12 of 40') and the
-   * read-only slot (ADR.md entry 46) appears and goes.
+   * than hardcoded because one of those controls resizes at runtime: the
+   * read-only slot (ADR.md entry 46) appears, goes, and swaps its own text
+   * between a countdown ('38m left') and 'read-only'.
    *
    * Read off the two survivors' own widths, never off the header's -- the
    * header is full-bleed at every progress by design, so its width says
@@ -1260,8 +1452,8 @@ export const ui = `
   }
 
   // Measure once now, and again whenever the controls that make up the pill
-  // change size (the round badge relabels on a flip; the read-only slot comes
-  // and goes). The initial call is explicit rather than left to the observer's
+  // change size (the read-only slot comes, goes, and relabels). The initial
+  // call is explicit rather than left to the observer's
   // own first delivery -- measured in Chrome 152, observing an element that is
   // already laid out and never resized again delivers NOTHING, so an
   // observe-only wiring left --pill-half unset for the whole session and the
@@ -1276,6 +1468,24 @@ export const ui = `
     measurePillHalf();
     if (typeof ResizeObserver === 'function') new ResizeObserver(measurePillHalf).observe(actions);
   }());
+
+  /** SPEC_HEADER.md ticket 03: how far an ordinary board's condensed wash
+   * (body:not(.page-board) .board-head::after, src/styles.mjs) reaches to go
+   * full-bleed without a 'vw' unit -- 'vw' includes the scrollbar's own
+   * width, and an ordinary board is exactly the surface that always has a
+   * real document scrollbar (a page board's own full-bleed header never had
+   * to consider this: body.page-board sets 'overflow: hidden', no scrollbar
+   * at all). 'clientWidth' excludes it by definition, the same measured-not-
+   * guessed idiom measurePillHalf above and reportStageBand use elsewhere in
+   * this file. Feature-detected only by existing (documentElement is always
+   * present); harmless without a later resize, since the wash simply keeps
+   * whatever width it last had -- a stale-but-still-full-bleed rectangle is
+   * a far smaller defect than the seam this exists to fix at all. */
+  function measureDocWidth() {
+    document.body.style.setProperty('--doc-w', document.documentElement.clientWidth + 'px');
+  }
+  measureDocWidth();
+  window.addEventListener('resize', measureDocWidth);
 
   // Tag-qualified, same reason as every other id-by-string lookup in this file:
   // a heading '## Back to top' slugifies to a second id="back-to-top"
@@ -1551,7 +1761,7 @@ export const ui = `
   // while a 380-line dedicated check stayed green.
 
   // The view math is pure and lives in src/lens.mjs, spliced in verbatim by
-  // .toString() (same discipline as computeBoardPatch/composeHint/badgeLabel):
+  // .toString() (same discipline as computeBoardPatch/composeHint/roundNumberLabel):
   // "the point under the cursor stays under the cursor" and "fit centres the
   // whole diagram" are arithmetic invariants a check can hold this to, and are
   // otherwise the kind of thing verified by eye and wrong by a half-pixel
@@ -2547,10 +2757,11 @@ export const ui = `
   function setCommentMode(on) {
     commentMode = !!on && !readonly;
     if (modeToggleBtn) {
+      // SPEC_HEADER.md AC 10: the label is the static word 'Comment' (see
+      // src/render.mjs's commentModeToggle) -- on/off is carried by .active
+      // and aria-pressed alone, so there is no label text to rewrite here.
       modeToggleBtn.classList.toggle('active', commentMode);
       modeToggleBtn.setAttribute('aria-pressed', commentMode ? 'true' : 'false');
-      var label = modeToggleBtn.querySelector('.mode-toggle-label');
-      if (label) label.textContent = 'Comment mode: ' + (commentMode ? 'on' : 'off');
     }
     document.body.classList.toggle('comment-mode', commentMode);
     if (!commentMode) clearAnchorHover();
@@ -3376,7 +3587,10 @@ export const ui = `
   // Repositioning only -- refreshPins (above) deliberately does not re-run the
   // click-listener wiring, or every resize would stack another click handler on
   // the same iframe/diagram.
-  window.addEventListener('resize', function () { refreshPins(document); });
+  // SPEC_HEADER.md criterion 5: the one event AC 5 names outright -- resizing
+  // the viewport is what makes the header wrap its title differently and
+  // change height, so this is where the band gets re-measured and re-sent.
+  window.addEventListener('resize', function () { refreshPins(document); reportStageBand(); });
 
   // --- the two ways out: Send, and Discuss in chat -----------------------------
   //
@@ -3525,12 +3739,12 @@ export const ui = `
   // the observer is deleted rather than left running against a layout it can no
   // longer describe.
   //
-  // Everything that names a round now reads currentRound: the header badge
-  // ('round N of M'), the pager's own current entry and its dot, the chevrons'
-  // disabled ends, whether <body> is laid out as a page board, whether <body> is
-  // a sent page, and whether the send bar may be used at all. refreshPager is
-  // the single place that writes them all, and goToRound is the single place
-  // that moves currentRound, so they cannot drift out of step with each other.
+  // Everything that names a round now reads currentRound: the pager's own
+  // current entry and its dot, the chevrons' disabled ends, whether <body> is
+  // laid out as a page board, whether <body> is a sent page, and whether the
+  // send bar may be used at all. refreshPager is the single place that writes
+  // them all, and goToRound is the single place that moves currentRound, so
+  // they cannot drift out of step with each other.
   var sendBarDockObserver = null;
 
   /** The page rendered current by the server (renderBoardPage puts the board on
@@ -3573,11 +3787,6 @@ export const ui = `
     return (board.blocks || []).some(function (b) { return b.round === r.n && b.kind === 'question'; });
   }
 
-  function renderBadge() {
-    var el = document.querySelector('button#round-badge');
-    if (el) el.textContent = badgeLabel(currentRound, (board.rounds || []).length);
-  }
-
   /** SPEC_AWAITED.md ticket 03 (AC 6, AC 8, AC 11, AC 12): repaint every place a
    * round's countdown or read-only state shows, from 'board.rounds' and this
    * reader's own clock -- '#round-meta' (the page board's own pill/meta slot,
@@ -3605,6 +3814,10 @@ export const ui = `
    * gone from still working. */
   function refreshAwaitDisplay() {
     var now = Date.now();
+    // Read once, used by both the uncommentable class below and the pill/meta
+    // title just after it -- both need to know whether the round on screen is
+    // a page board's or an ordinary one's.
+    var fullpage = isPageRound(blocksOfRound(currentRound));
     // ADR.md entry 46's half that outlives the first paint (src/render.mjs's own
     // 'pageUncommentable' is the render-time half): the comment-mode toggle has
     // to go on a page board that was never awaited AND on one whose wait dies
@@ -3612,11 +3825,15 @@ export const ui = `
     // lives here rather than in refreshPager (which calls this on every flip
     // anyway, so the class is correct on both routes).
     document.body.classList.toggle('page-uncommentable',
-      isPageRound(blocksOfRound(currentRound))
-      && !roundIsCurrentlyAwaited(roundEntry(currentRound), now));
+      fullpage && !roundIsCurrentlyAwaited(roundEntry(currentRound), now));
     var meta = document.querySelector('span#round-meta');
     if (meta) {
-      var m = pageBoardPillMeta(roundEntry(currentRound), now);
+      // 'fullpage' is what tells pageBoardPillMeta which of PILL_READONLY_TITLE
+      // / ROUND_OPEN_UNAWAITED_TITLE is true for the 'read-only' case -- see
+      // that function's own comment (src/badge.mjs): a page board's status
+      // never leaves 'open' even once its wait dies, so the round object alone
+      // cannot make this call.
+      var m = pageBoardPillMeta(roundEntry(currentRound), now, fullpage);
       meta.textContent = m.text;
       meta.title = m.title;
     }
@@ -3662,9 +3879,9 @@ export const ui = `
 
   /** Repaint every control that names a round, from currentRound and 'board'.
    * Called on every flip AND after every push that changes what the rounds are
-   * (a new one arriving, an earlier one going sent), so the pager, the badge,
-   * the body's layout classes and the send bar are always one consistent
-   * statement about the same page.
+   * (a new one arriving, an earlier one going sent), so the pager, the body's
+   * layout classes and the send bar are always one consistent statement about
+   * the same page.
    *
    * Entries are created once and updated in place, never rebuilt wholesale:
    * rounds are only ever appended (src/board.mjs never removes one), and a
@@ -3741,7 +3958,6 @@ export const ui = `
     var open = openRoundNumber();
     if (!submitInFlight) setSendBarEnabled(open !== null && currentRound === open);
 
-    renderBadge();
     refreshAwaitDisplay();
   }
 
@@ -3785,7 +4001,22 @@ export const ui = `
     // an earlier version that cleared there wiped the condensed header out from
     // under a reviewer who was still scrolled into the artifact and had not
     // flipped anywhere.
-    refreshStageChrome();
+    //
+    // refreshCondenseChrome, not refreshStageChrome directly (SPEC_HEADER.md
+    // ticket 03): a flip can land on either board type, and refreshStageChrome
+    // alone now only ever answers for a page board -- it deliberately leaves an
+    // ordinary board's own '--stage-p' untouched (see its own comment) so a
+    // stray stage message cannot fight the document-scroll-driven value. Landing
+    // on an ordinary board therefore needs refreshDocumentScrollChrome called
+    // instead, or the header would keep whatever condense state the PREVIOUS
+    // (page-board) page had earned, floating a pill over a column that has
+    // nothing to do with it.
+    refreshCondenseChrome();
+    // The band belongs to the page just flipped TO, same reasoning as
+    // refreshCondenseChrome just above: a page board arriving here needs its
+    // stage topped up, and a round that isn't one is simply ignored by
+    // reportStageBand's own page-board gate.
+    reportStageBand();
     updateQuestionsLeftPill();
     refreshPins(document);
     if (scroll !== false && section.scrollIntoView) section.scrollIntoView({ block: 'start' });
@@ -3921,13 +4152,21 @@ export const ui = `
     // 63.4px. Not a crash, which is why it survived: a too-large fallback
     // over-reserves rather than overlapping, so the failure looks like slightly
     // loose spacing.
+    // reportStageBand reads the dock's own box again rather than this
+    // property (SPEC_HEADER.md: the stand-in's getComputedStyle cannot see a
+    // runtime .style.setProperty write, only a static stylesheet, so the
+    // bottom band is measured straight off the element every time, same as
+    // write() does here); called alongside write() so the two never drift
+    // apart on which dock height is current.
     write(dock.getBoundingClientRect().height);
+    reportStageBand();
     if (typeof ResizeObserver !== 'function') return;
     // The entry is deliberately unread: its 'contentRect' is the content box,
     // and write() wants the border box on both paths (see its comment). The
     // observer here is a trigger, not a source of the measurement.
     var ro = new ResizeObserver(function () {
       write(dock.getBoundingClientRect().height);
+      reportStageBand();
     });
     ro.observe(dock);
   }
@@ -3996,27 +4235,21 @@ export const ui = `
    * showing, and inert when nothing is open at all (every round already sent,
    * nothing left to go to).
    *
-   * Shared by the round badge, the
-   * notification's click handler, and arrival from the index (below), all of
-   * which want the same destination for the same reason: each is the reviewer
-   * saying "take me to the thing that needs an answer". One implementation, so
-   * they can never drift into disagreeing about where that is -- and it routes
-   * through goToRound, so it cannot drift from the pager either. */
+   * Shared by the notification's click handler and arrival from the index
+   * (below) -- both want the same destination for the same reason: each is the
+   * reviewer saying "take me to the thing that needs an answer". One
+   * implementation, so they can never drift into disagreeing about where that
+   * is -- and it routes through goToRound, so it cannot drift from the pager
+   * either.
+   *
+   * ADR.md entry 61: the header's own round badge used to be a third caller,
+   * deferring to this same function on click rather than navigating on its
+   * own -- the badge is gone (SPEC_HEADER.md AC 12), and this function stays
+   * exactly as it was for its two remaining callers. */
   function jumpToOpenRound() {
     var target = openRoundNumber();
     if (target == null || target === currentRound) return;
     goToRound(target);
-  }
-
-  var roundBadgeBtn = document.querySelector('button#round-badge');
-  if (roundBadgeBtn) {
-    // The badge keeps the click it has always had -- "take me to the round that
-    // still needs an answer" -- but it is no longer a second way to navigate:
-    // it defers to the pager's own goToRound, so the badge, the chevrons and
-    // the pill are three doors onto one mechanism rather than two notions of
-    // where a round lives. The spec's decision is that the header gains no new
-    // contents and the pager owns round navigation; this is both.
-    roundBadgeBtn.addEventListener('click', jumpToOpenRound);
   }
 
   // Arriving from the index, whose live rows link to '#open-round'
@@ -4410,9 +4643,9 @@ export const ui = `
   }
 
   /** Focus a question block's note field and bring it on screen -- the same
-   * guarded scrollIntoView shape highlightAnchor and the round-badge click
-   * handler above already use, so a DOM stand-in with no scrollIntoView at
-   * all still runs this without throwing. */
+   * guarded scrollIntoView shape highlightAnchor and goToRound above already
+   * use, so a DOM stand-in with no scrollIntoView at all still runs this
+   * without throwing. */
   function focusNoteField(block) {
     var el = block && block.querySelector ? block.querySelector('[data-note-for]') : null;
     if (!el) return;
@@ -4680,11 +4913,12 @@ export const ui = `
       try {
         var notif = new Notification(baseTitle, { body: body, tag: 'claude-board-' + boardId + '-' + n });
         // Focus, then land on the round that needs an answer, then dismiss. The
-        // jump is the round badge's own helper, not a second implementation of
-        // it: a reviewer who clicks a notification is asking the same question
-        // the badge answers, and arriving at whatever they last scrolled to
-        // makes them ask it again by hand. Ordering matters -- the scroll must
-        // happen on a window already brought forward.
+        // jump reuses jumpToOpenRound rather than a second implementation of it
+        // (ADR.md entry 61: this notification click is one of its two remaining
+        // callers) -- a reviewer who clicks a notification is asking the same
+        // question that function answers, and arriving at whatever they last
+        // scrolled to makes them ask it again by hand. Ordering matters -- the
+        // scroll must happen on a window already brought forward.
         notif.onclick = function () { window.focus(); jumpToOpenRound(); notif.close(); };
       } catch (e) { /* denied or unsupported */ }
     }

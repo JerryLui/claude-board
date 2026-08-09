@@ -129,10 +129,6 @@ const board = createBoard({
         '',
         'The container every pushed round is inserted into.',
         '',
-        '## Round badge',
-        '',
-        'DESIGN.md polish ticket 04 promoted the real one from a <div> to a <button>.',
-        '',
         `## Comment list ${STAGE_ID}`,
         '',
         'The queued-comment list for the diagram below -- a composed id, minted by a heading.',
@@ -202,7 +198,7 @@ function loadArchiveThemed(html) {
 
 const COLLIDING_IDS = [
   'board-data', 'send-btn', 'discuss-btn', 'send-status', 'theme-toggle',
-  'comment-mode-toggle', 'blocks', 'round-badge',
+  'comment-mode-toggle', 'blocks',
   `comment-list-${STAGE_ID}`, `comment-form-${STAGE_ID}`, `comment-target-${STAGE_ID}`,
 ];
 
@@ -262,8 +258,8 @@ check('archive with colliding headings: the theme control is the one exception, 
 // =================================================================================
 // 3. The one composed id whose collision is observable in a DOM stand-in: the
 //    queued-comment list. Every OTHER real element these headings shadow
-//    (script#board-data, the send bar, the mode toggle, div#blocks,
-//    button#round-badge) is emitted in <head> or in .board-head -- EARLIER in
+//    (script#board-data, the send bar, the mode toggle, div#blocks) is emitted
+//    in <head> or in .board-head -- EARLIER in
 //    tree order than any block content -- so `getElementById` returns the real
 //    element by luck, and no runtime assertion can tell the bare form from the
 //    qualified one. div#comment-list-<blockId> is the exception: it is rendered
@@ -346,7 +342,7 @@ check('no client script looks an id up bare: every getElementById is gone and ev
   for (const [label, src] of CLIENT_SCRIPTS) {
     const bare = src.match(/[)\]\w$]\s*\.\s*getElementById\s*\(/g) || [];
     assert.equal(bare.length, 0,
-      `${label}: found ${bare.length} bare getElementById call(s). Board content is markdown snapshotted from arbitrary files, so a heading or top-level list item can mint any id this page uses (src/markdown.mjs slugify) -- use a tag-qualified querySelector instead ('form#comment-form-' + blockId, 'div#comment-list-' + blockId, 'button#round-badge', ...), matching the tag src/render.mjs actually emits`);
+      `${label}: found ${bare.length} bare getElementById call(s). Board content is markdown snapshotted from arbitrary files, so a heading or top-level list item can mint any id this page uses (src/markdown.mjs slugify) -- use a tag-qualified querySelector instead ('form#comment-form-' + blockId, 'div#comment-list-' + blockId, 'button#theme-toggle', ...), matching the tag src/render.mjs actually emits`);
 
     // An unqualified '#id' selector has exactly the same hole as
     // getElementById: it matches whichever element comes first in tree order,
@@ -363,7 +359,7 @@ check('the sweep above would actually catch a regression (ablation on its own re
   const bareRe = /[)\]\w$]\s*\.\s*getElementById\s*\(/;
   const unqualRe = /(?:querySelector|querySelectorAll|closest|matches)\s*\(\s*['"`]\s*#/;
   for (const sample of [
-    "var el = document.getElementById('round-badge');",
+    "var el = document.getElementById('theme-toggle');",
     "var list = document.getElementById('comment-list-' + entry.blockId);",
     "lensAdopt(document.getElementById('comment-target-' + blockId));",
     "root.getElementById('x')",
@@ -373,7 +369,7 @@ check('the sweep above would actually catch a regression (ablation on its own re
   for (const sample of [
     "document.querySelector('#board-data')",
     'document.querySelectorAll("#blocks")',
-    "ev.target.closest('#round-badge')",
+    "ev.target.closest('#theme-toggle')",
   ]) {
     assert.match(sample, unqualRe, `the unqualified-selector pattern must match ${JSON.stringify(sample)}`);
   }
@@ -381,7 +377,7 @@ check('the sweep above would actually catch a regression (ablation on its own re
   // sweep is unfailable-by-being-always-red rather than a guard.
   for (const sample of [
     "document.querySelector('form#comment-form-' + blockId)",
-    "document.querySelector('button#round-badge')",
+    "document.querySelector('button#theme-toggle')",
     "document.querySelector('script#board-data[type=\"application/json\"]')",
   ]) {
     assert.doesNotMatch(sample, bareRe, `the bare-lookup pattern must not fire on ${JSON.stringify(sample)}`);

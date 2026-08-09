@@ -262,7 +262,7 @@ in a line rather than argued at length.
 
 ## 60. The condense is every board's, not the page board's — 2026-08-09
 **Status:** accepted; widens 40
-**Context:** entry 40 gave the page board a condensing header and left the ordinary board a static sticky one, so two board types in the same product read as two designs. **Decision:** both condense into the same centred pill on scroll, keeping the controls in the order the expanded header already has (mark, comment toggle, theme, round badge). **Consequences:** an ordinary board must reserve the header's flow box so condensing can never reflow its column, and the pill's contents become one spec serving both surfaces rather than a page-board special case.
+**Context:** entry 40 gave the page board a condensing header and left the ordinary board a static sticky one, so two board types in the same product read as two designs. **Decision:** both condense into the same centred pill on scroll, keeping the controls in the order the expanded header already has (mark, comment toggle, theme, state label). **Consequences:** an ordinary board must reserve the header's flow box so condensing can never reflow its column, and the pill's contents become one spec serving both surfaces rather than a page-board special case.
 
 ## 61. The header stops naming the round — 2026-08-09
 **Status:** accepted; narrows 42

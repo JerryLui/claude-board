@@ -5,26 +5,12 @@
 // one place either can import from -- src/ui.mjs cannot import src/render.mjs
 // (render.mjs imports the client script, so the edge would be circular).
 // See PROTOCOL.md "Board document" for `rounds`.
-// The round badge states position and total, not just total: `total` alone
-// (the old label, `round ${rounds.length}`) was a real bug rather than a
-// wording nitpick: on a two-round board it read
-// "ROUND 2" while the reviewer was still looking at round 1.
 //
-// `current` is the round whose page is on screen -- the board's pages are its
-// rounds (ADR.md entry 42), so the badge names the page the pager last flipped
-// to (src/ui.mjs's goToRound). `total` is `board.rounds.length`.
-//
-// Same discipline as src/patch.mjs's `computeBoardPatch`: one implementation,
-// imported directly here for the node checks and embedded verbatim into the
-// client script via `badgeLabel.toString()` (src/ui.mjs), so the tested string
-// and the one a live tab actually renders can never drift apart -- a hand-copied
-// reimplementation could silently diverge and nothing would notice. Also called
-// server-side by src/render.mjs for the page's first paint, before any client
-// script has run, so a fresh load and a post-hydrate re-render of the same two
-// numbers are provably the same text.
-export function badgeLabel(current, total) {
-  return 'round ' + current + ' of ' + total;
-}
+// ADR.md entry 61: the header used to carry a `round N of M` badge (`badgeLabel`,
+// deleted from here) whose click routed through the same `jumpToOpenRound`
+// (src/ui.mjs) the pager's own chevrons already did -- three doors onto one
+// mechanism, and a round named twice (the pager dock's caption is now the only
+// place a round is named at all). `roundNumberLabel` below is what survives.
 
 // "Round N", the half of a round's name that is only ever the number. The pager
 // used to print the whole label below on every entry, title and all, and a
@@ -47,8 +33,9 @@ export function roundNumberLabel(n) {
 // hover title (ADR.md entry 42 -- "a pill at the bottom naming the rounds").
 // Built on roundNumberLabel above so the number the pager shows and the number
 // the heading opens with are one string, not two that could drift.
-// Embedded into the client script by `.toString()` exactly like badgeLabel
-// above, since the pager is rebuilt live whenever a round arrives or is sent.
+// Embedded into the client script by `.toString()`, same discipline as every
+// other export here (see this file's own header comment), since the pager is
+// rebuilt live whenever a round arrives or is sent.
 export function roundPageLabel(n, title) {
   return title ? roundNumberLabel(n) + ' · ' + title : roundNumberLabel(n);
 }
@@ -246,8 +233,28 @@ export const ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
 // The page board pill's own fallback title (ADR.md entries 46, 49) -- read by
 // src/render.mjs for the deterministic (never-awaited) case and by this file's
 // own pageBoardPillMeta for every other closed case, so the two routes to the
-// same word never explain it two different ways.
+// same word never explain it two different ways. True on a page board
+// specifically: entries 45/46 turn its WHOLE compose/send surface off the
+// moment it stops being awaited, so "commenting is off" is not an
+// exaggeration there -- src/styles.mjs hides that board type's ordinary
+// '.send-bar' outright (ADR.md entry 34), leaving nothing else to send with.
 export const PILL_READONLY_TITLE = 'No agent is listening on this page -- commenting is off.';
+
+// The SAME 'read-only' word's title on an ORDINARY board (SPEC_HEADER.md
+// ticket 01, PM follow-up after ticket 03 put the state label there too,
+// src/styles.mjs:464): PILL_READONLY_TITLE's "commenting is off" is simply
+// false on that surface. `roundIsAwaited` (CONTEXT.md "Awaited") is about
+// whether an `ask` call is still blocked waiting on this exact round -- a
+// plain `ask` with no `wait: true` is never awaited, but its round is `open`
+// the whole time, its ordinary send bar stays enabled throughout
+// (src/ui.mjs's setSendBarEnabled reads `openRoundNumber`/`status`, never
+// `awaited`), and a comment left there is drained to whichever agent asks
+// next exactly like any other undelivered one (`drainUndeliveredComments`,
+// src/server.mjs). The PM's call (not a defect to re-litigate): keep the
+// visible word `read-only` exactly as AC 13 prescribes -- it is pinned there
+// on purpose -- and fix only the claim underneath it that was actually false.
+export const ROUND_OPEN_UNAWAITED_TITLE =
+  'No agent is waiting live right now -- comments and answers here are saved and reach the next agent that asks.';
 
 // What the page board's own Send control says once its round's wait has died
 // under the reviewer (AC 12). The control freezes rather than vanishing, and it
@@ -262,15 +269,28 @@ export const PAGE_SEND_EXPIRED_LABEL = 'Goes out with the next round';
 export const PAGE_SEND_EXPIRED_TITLE =
   'This round ended. Comments left here are stored and reach the next agent that asks.';
 
-// The page board's own pill/meta slot (ADR.md entry 49, "the pill may hold a
-// label alone"): the countdown while someone is actually waiting, or the bare
-// word `read-only` the moment nobody is -- never awaited at all (AC 8), sent,
-// timed out, or archived (AC 11's fallback). Client-only (see this section's
-// header comment); src/render.mjs's own first-paint fallback is `read-only`
-// only, computed straight from `roundIsAwaitedOpen` with no clock at all -- the
-// live figure is filled in at hydrate, before the reader can act on it.
-export function pageBoardPillMeta(round, nowMs) {
+// The header's own pill/meta slot (ADR.md entry 49, "the pill may hold a
+// label alone"; SPEC_HEADER.md ticket 03 widened it from a page-board-only
+// slot to every board's): the countdown while someone is actually waiting, or
+// the bare word `read-only` the moment nobody is -- never awaited at all
+// (AC 8), sent, timed out, or archived (AC 11's fallback). Client-only (see
+// this section's header comment); src/render.mjs's own first-paint fallback
+// is `read-only` only, computed straight from `roundIsAwaitedOpen` with no
+// clock at all -- the live figure is filled in at hydrate, before the reader
+// can act on it.
+//
+// `fullpage` (default `true`, matching every caller before this parameter
+// existed -- src/render.mjs's own page-board-era callers, and this file's own
+// original name) is what tells the `read-only` case which of the two titles
+// above is true for the round it is about (PILL_READONLY_TITLE stays the
+// default rather than requiring every existing call site to opt back into
+// it): a page board's `status` never leaves `open` even once its wait dies
+// (ADR.md entry 44, "a page board is never sent"), so `round.status` alone
+// cannot tell the two surfaces apart -- only the caller, which already knows
+// whether it is rendering a page board or an ordinary one, can.
+export function pageBoardPillMeta(round, nowMs, fullpage = true) {
   const countdown = roundCountdownText(round, nowMs);
   if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
-  return { text: 'read-only', title: PILL_READONLY_TITLE };
+  const title = (!fullpage && round && round.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
+  return { text: 'read-only', title };
 }

@@ -19,8 +19,8 @@ import { roundIsAwaited } from './badge.mjs';
 // clock are owned by other tickets and stay untouched here (this file consumes
 // the API, it does not extend it). Reused rather than reimplemented in
 // indexScript below, via the same Function.prototype.toString() embedding
-// src/ui.mjs already uses for computeBoardPatch/composeHint/badgeLabel (see
-// that file's own comment) -- one mm:ss formatter, not two that can drift.
+// src/ui.mjs already uses for computeBoardPatch/composeHint/roundNumberLabel
+// (see that file's own comment) -- one mm:ss formatter, not two that can drift.
 import { formatCountdown } from './pomodoro.mjs';
 import { pomodoroWidget, TOMATO_ICON, REST_ICON } from './pomodoro-widget.mjs';
 

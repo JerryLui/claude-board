@@ -177,12 +177,6 @@ check('a sent (historical) round renders NO .round-end -- the rail is for the ro
   assert.ok(!html.includes('round-end'), 'a historical round must never carry a .round-end rail');
 });
 
-check('out of scope: the round badge\'s own label is untouched -- this spec is about position WITHIN a round, not across rounds', () => {
-  const board = createBoard({ title: 'Round end - badge untouched', blocks: [Q1] });
-  const html = renderBoardPage(board);
-  assert.ok(html.includes('round 1 of 1'), 'the round badge must keep stating position and total across rounds, unrelated to this rail');
-});
-
 // =====================================================================================
 // The rail's CSS: exact wording, matching QUIRKS.md's own convention for rules
 // asserted by their text rather than their effect ("readonly is locked twice",
@@ -484,9 +478,9 @@ check('singular at exactly one outstanding question', () => {
   assert.match(html, /class="questions-left-pill visible" id="questions-left-pill">1 question left</);
 });
 
-check('the pill is grey (--panel-2/--ink-2, the same chrome .round-badge and .mode-toggle already use), never the send guard\'s warning amber, and floats centered above the send bar', () => {
+check('the pill is grey (--panel-2/--ink-2, the same chrome .mode-toggle already uses), never the send guard\'s warning amber, and floats centered above the send bar', () => {
   assert.match(styles, /\.questions-left-pill\s*\{[^}]*background:\s*var\(--panel-2\)[^}]*color:\s*var\(--ink-2\)[^}]*\}/,
-    'expected the pill\'s base rule to use the same grey chrome tokens as .round-badge/.mode-toggle');
+    'expected the pill\'s base rule to use the same grey chrome tokens as .mode-toggle');
   assert.match(styles, /\.questions-left-pill\s*\{[^}]*position:\s*absolute[^}]*left:\s*50%[^}]*bottom:\s*100%[^}]*transform:\s*translateX\(-50%\)[^}]*\}/,
     'expected the pill centered (left: 50%, translateX(-50%)) and floating above the send bar (bottom: 100%, i.e. its OWN bottom edge sits at the bar\'s top edge)');
 });

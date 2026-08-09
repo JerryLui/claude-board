@@ -7,7 +7,7 @@
 //
 // Split out of src/ui.mjs, and embedded back into its client script verbatim by
 // `.toString()` (the same technique as `composeHint`/`parseMermaidDomId` in
-// src/anchor.mjs and `badgeLabel` in src/badge.mjs), for the reason this repo has
+// src/anchor.mjs and `roundNumberLabel` in src/badge.mjs), for the reason this repo has
 // four recorded instances of: arithmetic that lives inline in a pointer handler is
 // verified by eye, and "the diagram drifted off-screen when I zoomed" is exactly
 // the class of defect no DOM stand-in can see and no reviewer reliably notices.

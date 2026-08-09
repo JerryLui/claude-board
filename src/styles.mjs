@@ -440,24 +440,6 @@ svg { flex: none; }
 }
 .back-to-index:hover { opacity: 1; }
 body.readonly .back-to-index { display: none; }
-/* font: inherit is not decoration -- this was turned from a <span> into a
-   <button> (src/render.mjs), and a button does NOT inherit font-family from its
-   ancestors: without this the badge renders in the UA's own default (measured in
-   Chrome: Arial) beside a .round-label pill in Inter, so the two controls that
-   are meant to read as the same object silently stopped matching. Every other
-   button rule in this file already carries it; this one was missed at the
-   span-to-button conversion. Same reason :hover is qualified with :not(:disabled)
-   -- an archive hard-disables the badge (src/ui.mjs's readonly pass), and an
-   unqualified :hover lights a dead control up as if it were live, exactly as
-   .mode-toggle and .btn-send below already guard against. */
-.board-head .round-badge {
-  flex: none; font: inherit; color: var(--ink-2); font-size: 11.5px; font-weight: 550;
-  letter-spacing: 0.04em; text-transform: uppercase;
-  background: var(--panel-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-pill); padding: 5px 12px;
-  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-.board-head .round-badge:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
 /* AC 6, AC 8, AC 11: the page board's own pill/meta slot (ADR.md entry 49,
@@ -474,6 +456,12 @@ body.readonly .back-to-index { display: none; }
 .round-meta { display: none; flex: none; font: inherit; color: var(--muted); font-size: 11.5px;
   font-weight: 550; letter-spacing: 0.02em; white-space: nowrap; }
 body.page-board .round-meta { display: inline; }
+/* SPEC_HEADER.md ticket 03 (AC 7): an ordinary board's pill carries the same
+   state label a page board's does -- the element and its text are already
+   rendered/kept current for every board (src/render.mjs, src/ui.mjs's
+   refreshAwaitDisplay), so this is the one CSS rule standing between it and
+   showing here too. */
+body:not(.page-board) .round-meta { display: inline; }
 
 /* the comment-mode toggle: visible chrome, not a held modifier -- this IS
    discoverability. Off by default, so the page behaves exactly as before until
@@ -545,9 +533,9 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
    pages absorb its job and .round-pager (below) is how you reach them.
 
    display:none rather than an off-screen position: nothing here is measured
-   while it is hidden (the pins and the round badge are recomputed on every flip,
-   src/ui.mjs's goToRound), and a hidden page must not add scroll height to the
-   page that IS showing.
+   while it is hidden (the pins and the pager's own caption are recomputed on
+   every flip, src/ui.mjs's goToRound), and a hidden page must not add scroll
+   height to the page that IS showing.
 
    scroll-margin-top clears the sticky .board-head when a flip scrolls the
    arriving page's top back under it. */
@@ -1697,7 +1685,9 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
 
    What condenses is the header's IDENTITY TEXT, not its controls. The title and
    the thread/id line go; the mark, the comment-mode toggle, the theme control
-   and the round badge stay, so the pill is never decorative -- entry 40's
+   and the state label stay (ADR.md entry 61 -- the round badge that used to
+   round out this row is gone, the header names no round at rest or condensed),
+   so the pill is never decorative -- entry 40's
    "the pill keeps the comment-mode toggle, so the mode is switched mid-read
    rather than being suspended by the scroll". Collapsing those two elements
    rather than moving any control means there is still exactly ONE
@@ -1715,8 +1705,9 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    does not, which is what made an animation here look impossible before.
 
    --pill-half is measured once by src/ui.mjs (half the width of the controls
-   that survive the condense) rather than hardcoded, because the round badge's
-   label and the read-only slot both change width at runtime.
+   that survive the condense) rather than hardcoded, because the state label
+   (the read-only slot, ADR.md entry 46) changes width at runtime -- appearing,
+   going, and swapping between a countdown and 'read-only'.
 
    --head-clear (see :root) is untouched on purpose. It is a scroll-margin for
    anchor jumps down a scrolling DOCUMENT, and a page board's document does not
@@ -1827,7 +1818,7 @@ body.page-board .board-head h1,
 body.page-board .board-head .meta { white-space: nowrap; }
 
 /* What sets the condensed pill's height. Nothing here is a page-board layout
-   rule in the sense of the ones above -- it is the three surviving controls
+   rule in the sense of the ones above -- it is the two surviving controls
    being sized for a floating pill instead of a full-width header.
 
    The mark was the whole 46px: 30px of tile with 8px of air over and under it,
@@ -1847,39 +1838,12 @@ body.page-board .back-to-index { width: 22px; height: 22px; }
    intrinsic size unless the box is told otherwise -- without this the 30px
    drawing simply overflows the 22px slot. */
 body.page-board .back-to-index svg { width: 100%; height: 100%; }
-/* The badge stops being a chip AS THE PILL ARRIVES, not on a page board as
-   such: its stadium is a second round shape arguing with the pill's own, and
-   its 5px of padding-block puts the box above the mark again -- both of which
-   are complaints about the condensed pill. The expanded header has the room and
-   reads thin without the chip, so the chip leaves on the ramp instead of being
-   gone before the header has moved.
-   'border: none' rather than a transparent border-colour is what lets
-   '.board-head .round-badge:hover' stand -- that rule outranks this one on
-   specificity, but a border-colour on a zero-width border draws nothing, so the
-   hover survives as the colour lift alone and the control stays a control.
-   The chrome moves to a ::before for the reason the header's own pill and wash
-   use pseudo-elements: an opacity on the ramp is the only way this stylesheet
-   can fade a colour at all (no color-mix() here -- see the token block at the
-   top of this file: an archive has to render in whatever browser opens a
-   file:// copy of it), and fading the badge itself would take its text with it.
-   Only padding-BLOCK rides the ramp. Padding-inline is a constant 10px because
-   measurePillHalf (src/ui.mjs) sums '.board-head-actions'.offsetWidth, and its
-   ResizeObserver delivers after layout: an inline padding that moved with the
-   ramp would leave --pill-half one frame stale, drawing the band a few px off
-   the contents it is measured to fit -- the same trap the constant 22px mark
-   above avoids, answered the same way. */
-body.page-board .board-head .round-badge {
-  position: relative; background: none; border: none;
-  padding: calc(2px + (1 - var(--stage-p)) * 3px) 10px;
-}
-body.page-board .board-head .round-badge::before {
-  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-  background: var(--panel-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-pill); opacity: calc(1 - var(--stage-p));
-}
-/* ...which leaves the badge and the read-only note as two runs of text with no
-   chrome between them. A hairline rule is the divider, so the pill reads as one
-   toolbar rather than as a label that happens to have a word after it. */
+/* ADR.md entry 61 deleted the round badge that used to sit here between the
+   theme control and the state label -- with it gone, the theme control's own
+   .mode-toggle chrome (shared with the comment-mode toggle, unchanged by this
+   file) is the last thing before the state label, and a hairline is what
+   separates them: without a rule between two controls of different kinds the
+   pill reads as a label that happens to have a word after it, not one toolbar. */
 body.page-board .round-meta { border-left: 1px solid var(--hairline); padding-left: var(--space-3); }
 /* ...but not while the slot is empty, which on an awaited page board is exactly
    how it first paints: src/render.mjs leaves the countdown out at render time
@@ -1887,6 +1851,162 @@ body.page-board .round-meta { border-left: 1px solid var(--hairline); padding-le
    hydrate. Without this the pill opens carrying a divider with nothing after it
    and 24px of air holding the space. */
 body.page-board .round-meta:empty { display: none; }
+
+/* --- SPEC_HEADER.md ticket 03 (ADR.md entry 60): an ordinary board condenses
+   too, into the same pill above -- the two board types stop reading as two
+   designs. Every rule below reads the identical '--stage-p'/'--pill-half' the
+   page-board rules above do (written here by refreshDocumentScrollChrome,
+   src/ui.mjs, off this document's own scroll instead of a stage's postMessage
+   -- an ordinary board scrolls itself rather than a fixed-height stage frame,
+   so only the PROGRESS SOURCE differs), and keeps the expanded header's own
+   control order and colour tokens (mark, comment toggle, theme, state label --
+   ADR.md entry 61 already left that the order everywhere else).
+
+   AC 8 is why the MECHANISM differs from the page board's, not just the
+   source: '.board-head' here is 'position: sticky', still IN normal flow --
+   an ordinary board has no fixed 100vh frame to float over, it is the
+   document itself that scrolls. A sticky element's own box stays part of flow
+   at every scroll offset (only its rendering position changes once stuck), so
+   letting the ramp touch anything that changes THAT box's height --
+   'padding-block', 'margin-top', or the '.board-head-ident' 'max-height' the
+   page-board rules collapse -- would push the column underneath it up or down
+   on every scroll frame, exactly what AC 8 forbids. None of those three
+   properties appear anywhere below: '.board-head-ident' still narrows to
+   nothing and fades out (AC 7's "same contents"), but keeps its own height,
+   so '.board-head' itself measures the same at every progress by
+   construction -- nothing to reserve because nothing was ever going to move.
+   test/check-header-condense.mjs pins that as a fact about the stylesheet
+   (no rule in this block sets a height-affecting property off '--stage-p'),
+   the only way to prove it without a layout engine -- QUIRKS.md, "the
+   stand-in has no layout".
+
+   That leaves the pill's own chrome (::before) unable to reuse 'inset-block:
+   0' the way the page board's does -- spanning a box that never shrinks would
+   draw a tall rounded panel, not a pill. Its height is a plain constant
+   instead, and hardcoding it here is harmless in a way hardcoding
+   '.board-head''s OWN height would not have been: a ::before is
+   'position: absolute', out of flow inside a positioned ancestor (sticky
+   qualifies), so it contributes nothing to the box whose constancy AC 8
+   actually depends on. */
+body:not(.page-board) { --stage-p: 0; --pill-half: 120px; }
+/* '+ var(--space-3)', where the page-board rule below has none: that rule's
+   OWN padding-inline eases between two edge tokens ('--space-5' at rest,
+   '--space-3' condensed) BEFORE adding the '(50% - --pill-half)' inset term,
+   and it is that easing, not the inset term, which supplies the pill's inner
+   air on a page board -- '--pill-half' is measured as half the CONTENT plus
+   '--space-3' (src/ui.mjs's measurePillHalf: 'half = (brand + gap +
+   actions) / 2 + pad'), and the page board's own '::before' (inset-inline:
+   50% - pill-half alone, no added term) is exactly '2 * pill-half' wide, i.e.
+   content-width plus that same '--space-3' on both edges.
+   An ordinary board has no edge-token easing to borrow that air from -- rest
+   state here is a flush '0' inline padding, not '--space-5' -- so without
+   this term 'padding-inline' at full condense pulls the CONTENT in to
+   exactly '2 * pill-half' too, matching the panel's own width bolt for bolt,
+   and 'justify-content: space-between' (unchanged, above) has nowhere to put
+   the pill-half's baked-in slack except the one gap it controls: between the
+   mark and the actions row. Measured live in Chrome against
+   examples/sample-board.html (coordinator review, 2026-08-09): a 24px hole
+   dead centre in the pill, the mark flush on its left border and the state
+   label flush on its right. Adding '--space-3' here shrinks the padding by
+   that same amount, which shrinks the CONTENT'S width to exactly
+   'brand + gap + actions' (pill-half's own '- pad' term, undone) -- tight
+   against itself, with the panel's unchanged extra width now free to sit as
+   symmetric air on both edges instead of a gap in the middle. */
+body:not(.page-board) .board-head {
+  padding-inline: calc(var(--stage-p) * (50% - var(--pill-half) + var(--space-3)));
+  /* the wash moves to its own layer below so it can fade against the pill,
+     same split the page-board rules above use and for the same reason. */
+  background: none; border-bottom: none; backdrop-filter: none;
+}
+body:not(.page-board) .board-head::before,
+body:not(.page-board) .board-head::after {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+}
+/* the pill itself: a fixed-height band (mark's own 30px plus 6px of air each
+   side, the same 6px the page-board pill's own padding-block ramp ends at),
+   centred on the CONTROL ROW -- not on '.board-head''s own box, which is a
+   different centre. Measured live in Chrome against examples/sample-board.html
+   (coordinator review, 2026-08-09): a first attempt centred this on the box
+   ('top: 50%; height: 42px; transform: translateY(-50%)') drew a panel
+   40.18px to 82.18px down an 80.376px box -- 3.6px past the box's own bottom
+   edge, with every control (mark 16-68px, actions 28-56px) sitting mostly or
+   entirely ABOVE it. The header's own padding is NOT symmetric ('padding:
+   var(--space-4) 0 var(--space-3)', 16px over 12px), and 'align-items: center'
+   centres each flex child on the CONTENT box (the padding box minus that
+   padding), not on the border box -- so the true centreline sits
+   '(--space-4 - --space-3) / 2' below the border box's own 50%, which a plain
+   'top: 50%' never accounted for. 'transform: translateY(-50%)' compounded it:
+   a computed-style read (what the coordinator's tooling and this repo's own
+   'resolveComputedProperty' both do -- neither runs layout) reports 'top' and
+   'bottom' from BEFORE the transform is painted, so nothing here could even
+   assert the corrected position without dropping the transform entirely.
+   'top'/'bottom' set together (no 'height', no 'transform') fixes both at
+   once: their SUM is fixed at 42px regardless of the box's own height (so the
+   panel is still exactly 42px tall), and shifting both by the same
+   '(--space-4 - --space-3) / 2' moves the centreline to match the content
+   box's, using the identical tokens '.board-head''s own padding already
+   declares -- so a future change to either token keeps this in step without
+   a second number to maintain. */
+body:not(.page-board) .board-head::before {
+  top: calc(50% + (var(--space-4) - var(--space-3)) / 2 - 21px);
+  bottom: calc(50% - (var(--space-4) - var(--space-3)) / 2 - 21px);
+  inset-inline: calc(var(--stage-p) * (50% - var(--pill-half)));
+  background: var(--panel); border: 1px solid var(--hairline);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-2);
+  opacity: var(--stage-p);
+}
+/* Full-bleed, not 'inset: 0' -- the page-board rule above uses 'inset: 0'
+   safely because THAT header is itself full-bleed (position: fixed over a
+   100vh frame with no document scrollbar at all, body.page-board sets
+   overflow: hidden). This one is 'position: sticky' inside the 1120px
+   column, so 'inset: 0' would size the wash to the COLUMN, not the
+   viewport -- a ~1072px rounded blur-plus-gradient rectangle sitting on the
+   page's own plain background outside it, with a visible seam at both edges
+   (PM review of a real screenshot, 2026-08-09: "since the header doesn't
+   expand all the way out, you can clearly see the gradient against the
+   plain colour at the edges").
+   'width: 100vw' (the usual full-bleed escape) is unsafe here specifically:
+   'vw' units include the scrollbar's own width, and an ordinary board is
+   exactly the one surface that always has a real document scrollbar (a page
+   board never does, which is why its own full-bleed geometry never had to
+   consider this) -- '100vw' overflows the actual visible width by the
+   scrollbar's, trading the seam for a horizontal scrollbar instead. Measured
+   instead: '--doc-w' is 'document.documentElement.clientWidth'
+   (measureDocWidth, src/ui.mjs), which excludes the scrollbar by
+   definition, the same 'measure it, don't guess it' idiom '--pill-half' and
+   '--round-pager-dock-h' already use in this file. 'left: 50%; transform:
+   translateX(-50%)' centres a box of that measured width on '.board-head''s
+   OWN horizontal centre, which is also the viewport's -- '.board-shell'
+   ('margin: 0 auto') centres the column at every width, including one
+   narrower than 1120px where the column simply fills 100% and the centring
+   is a no-op -- so this lands flush with both real edges at any viewport,
+   with no vw-based overflow risk. Verified live in Chrome (coordinator
+   review, 2026-08-09) on examples/sample-board.html's ordinary-board round,
+   tall enough to carry a real scrollbar, at 1324px and narrower: no seam,
+   no induced horizontal scrollbar. */
+body:not(.page-board) .board-head::after {
+  top: 0; bottom: 0;
+  left: 50%; transform: translateX(-50%);
+  width: var(--doc-w, 100%);
+  background: linear-gradient(to bottom, var(--bg) 62%, var(--bg-fade-0));
+  backdrop-filter: blur(10px);
+  opacity: calc(1 - var(--stage-p));
+}
+/* collapses by width and fades by opacity, same as the page-board rules
+   above -- deliberately NOT by 'max-height' (see this block's own comment). */
+body:not(.page-board) .board-head-ident {
+  min-width: 0; overflow: hidden;
+  max-width: calc((1 - var(--stage-p)) * 60vw);
+  opacity: calc(1 - var(--stage-p) * 1.8);
+}
+body:not(.page-board) .board-head-title { gap: calc((1 - var(--stage-p)) * var(--space-3)); }
+body:not(.page-board) .board-head h1,
+body:not(.page-board) .board-head .meta { white-space: nowrap; }
+/* the same divider the page-board rules draw between the theme control and
+   the state label, once the state label is showing here too (see the base
+   '.round-meta' rule above). */
+body:not(.page-board) .round-meta { border-left: 1px solid var(--hairline); padding-left: var(--space-3); }
+body:not(.page-board) .round-meta:empty { display: none; }
 
 /* the back-to-top control (ADR.md entry 40), in the questions-left pill's own
    shape -- one visual object for "a pill floating at the bottom of the board",
@@ -1939,5 +2059,35 @@ body.page-board .back-to-top.visible {
   .send-status { width: 100%; margin-bottom: var(--space-2); }
   .btn-send, .btn-discuss { flex: 1; }
   .search-form { flex-wrap: wrap; }
+  /* SPEC_HEADER.md ticket 03: the condense is suppressed below this
+     breakpoint rather than taught a second, column-aware shape. '--pill-half'
+     is measured as one SINGLE-ROW sum (brand + columnGap + actions,
+     src/ui.mjs's measurePillHalf) and describes nothing once the rule two
+     lines up turns '.board-head' into two stacked rows -- measured live in
+     Chrome (coordinator review, 2026-08-09) against
+     examples/sample-board.html: the actions row hugs the pill's left border
+     with ~60px of empty pill to its right, a 42px band drawn across the
+     middle of a two-row ~115px header with the mark above it and the state
+     label below it, neither inside the band. A pill that does not fit its
+     own contents is worse than no pill, and nothing about AC 7 requires one
+     at every viewport -- the header just stays exactly as it always has
+     below this breakpoint, at every scroll offset.
+     '!important' is load-bearing: refreshDocumentScrollChrome (src/ui.mjs)
+     writes '--stage-p' as an INLINE style on <body>, which outranks a plain
+     stylesheet rule regardless of specificity -- only '!important' on the
+     stylesheet side can still win, and every rule this ticket added reads
+     '--stage-p' rather than testing 'stage-scrolled' directly, so pinning the
+     ONE variable neutralises all of them at once with no second override to
+     keep in sync. AC 8 is untouched by this: it was never about whether the
+     header condenses, only about whether condensing (whenever it happens)
+     moves anything -- and below this breakpoint it now simply never
+     happens.
+     'body', not 'body:not(.page-board)': a page board reaches the pill by the
+     same arithmetic off the same single-row '--pill-half', and the
+     'flex-direction: column' rule above is not scoped away from it either, so
+     it breaks here in exactly the way an ordinary board did. The first pass
+     scoped this rule to ordinary boards only because its ticket was about
+     them, not because a page board was found to survive. */
+  body { --stage-p: 0 !important; }
 }
 `;

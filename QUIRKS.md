@@ -8,6 +8,7 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 - [launchd, TCC and the app bundle](#launchd-tcc-and-the-app-bundle)
 - [macOS notifications and sound](#macos-notifications-and-sound)
 - [Shell, C and the filesystem](#shell-c-and-the-filesystem)
+- [Worktrees, the shared checkout, and two files with the same tail](#worktrees-the-shared-checkout-and-two-files-with-the-same-tail)
 
 ---
 
@@ -132,6 +133,41 @@ exact literal text elsewhere in the suite (`qsa('textarea, input, button')` in
 override. Before reusing a control's class for one with different readonly semantics,
 grep every place that class is gated on `body.readonly`: CSS and JS are not the same
 gate.
+
+### `100vw` is wider than the page whenever the page actually scrolls
+
+The classic full-bleed-inside-a-centred-column trick (`left: 50%; transform:
+translateX(-50%); width: 100vw`) breaks the instant the page it's on has a real
+vertical scrollbar: `vw` units are defined against the viewport's full width,
+scrollbar included, while the space a scrollbar-bearing page actually has to paint
+into is narrower by however wide that scrollbar is. A box sized in `vw` therefore
+overflows the true content width by the scrollbar's own width — on a page that had
+no horizontal scrollbar before, this trick is what gives it one.
+
+Hit extending `body.page-board`'s full-bleed header wash (`src/styles.mjs`,
+`body.page-board .board-head::after`, `inset: 0`) to an ORDINARY board's sticky
+header, which sits inside a centred 1120px column rather than covering the whole
+viewport. The page-board version was never at risk: `body.page-board` sets
+`overflow: hidden`, so that surface never has a document scrollbar to be wider than
+in the first place. An ordinary board is exactly the opposite case — it is the
+document itself that scrolls — so `100vw` there is a live bug, not a latent one.
+
+The fix is the same "measure it, don't guess it" idiom this file already has several
+of (`--pill-half`, `--round-pager-dock-h`): `document.documentElement.clientWidth`
+excludes the scrollbar by definition, so writing it to a custom property
+(`--doc-w`, `measureDocWidth`, `src/ui.mjs`) and using THAT in place of `100vw` gets
+the full-bleed geometry right without the overflow. Re-measured on `resize` only, not
+on every scroll frame or DOM mutation — a scrollbar that appears mid-session because
+content grew taller (a comment posted while the tab is in the background, say) will
+leave the wash a few pixels short until the next resize, which is an accepted,
+narrow, cosmetic gap rather than a mutation-observed re-measure. Nothing in
+`test/dom-stand-in.mjs` can catch a defect of this shape at all — it has no layout,
+so no scrollbar, so no width to overflow — which is exactly why the whole suite
+stayed green while a real Chrome, scrolled far enough for a real scrollbar to
+appear, showed either the seam (before) or a horizontal scrollbar (a naive `100vw`
+fix). Verify anything using this trick in a real browser, on a page long enough to
+actually need a scrollbar — the one case that matters is also the one no automated
+check here can produce.
 
 ---
 
@@ -758,6 +794,21 @@ hand-typed literal name in a fixture, and the byte-identity check next to it is
 the real backstop for anything machine-derived: content that varies by machine
 cannot survive a regeneration comparison anywhere but the machine that made it.
 
+### A comment-only edit to src/ui.mjs can still break check-sample-board.mjs
+
+`ui` (src/ui.mjs's export) is the parent-side script's own source, embedded
+verbatim into every rendered board page inside a `<script>` tag — not
+recompiled, not summarized, the literal file text. `examples/sample-board.html`
+is a committed byte-identity fixture built from that same render path, so a
+change to src/ui.mjs that touches not one line of *behaviour* — adding a
+sentence to a comment, say — still changes the committed HTML's bytes and
+fails `check-sample-board.mjs`'s "byte-identical to the committed sample" check.
+src/render.mjs's design comment (the one this file's own `stageAgentScript`
+lives under) is NOT embedded the same way — only the returned template literal
+is — so a comment edit there is inert for this purpose. The fix, same as any
+other genuine drift: `node examples/sample-board.mjs`, then diff the result to
+confirm the only change is the one you made.
+
 ---
 
 ## launchd, TCC and the app bundle
@@ -1130,3 +1181,45 @@ for the network. If you shorten the poll interval or add a second waiter, that f
 the thing to re-check — and the symptom of getting it wrong is silent, since both sides
 report `status: 'timeout'` either way. The check that catches it runs a daemon and a
 shim on one shared cap and asserts the ROUND was closed on disk.
+
+---
+
+## Worktrees, the shared checkout, and two files with the same tail
+
+### The same absolute-looking path can name two different checkouts
+
+A worktree agent's own tracked files live under
+`.claude/worktrees/<name>/...`, but this repo's `SPEC_*.md`/`TICKETS_*.md` are
+gitignored and only exist in the SHARED checkout
+(`/Users/jerry/Documents/claude-board/SPEC_*.md`), read/edited there on purpose
+(the brief that hands out a worktree says so explicitly). That trains a
+reasonable habit — "this repo's absolute path is
+`/Users/jerry/Documents/claude-board/...`" — that is wrong for every TRACKED
+file: `/Users/jerry/Documents/claude-board/src/styles.mjs` and
+`.claude/worktrees/<name>/src/styles.mjs` are two separate files on disk (two
+git checkouts), and nothing about `Read`ing the former warns you it is not the
+one your `Bash` commands (which default to the worktree's cwd) are operating
+on.
+
+Measured cost: after `git merge --no-edit direct/header` in the worktree
+(fast-forward, no conflicts), `Read` on the SHARED checkout's
+`src/styles.mjs`/`src/render.mjs` kept returning `.round-badge`/`badgeLabel` —
+controls a prior ticket's log said were deleted, confirmed gone by `git
+show` on the worktree's own HEAD. It looked exactly like a stale cache (same
+apparent path string typed each time, different tool giving a different
+answer) until reading the SAME line range through the full WORKTREE-prefixed
+path returned the current text immediately — the merge the worktree branch
+had was simply never applied to the shared checkout's own working tree, which
+still sat on whatever commit it last had checked out. Two separate, entirely
+correct answers to two different files.
+
+The fix is not "distrust `Read`" (it was accurate throughout — for the file it
+was actually pointed at). It is: once a task hands you a shared-checkout path
+for the gitignored spec/tickets files, do not let that path's PREFIX leak into
+where you read or edit anything else. Every tracked file's path starts with
+the worktree's own root, spelled out in full, even though it is easy to
+type the shorter shared-checkout-looking one from memory once it is in your
+head for this session. If a `Read` result ever looks implausibly behind what
+`git log`/`grep` say the branch contains, the first thing to check is which
+checkout the path you typed actually resolves to, not whether the tool is
+lying.

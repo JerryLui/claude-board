@@ -48,7 +48,7 @@ const STATE_LABEL = {
 };
 
 // Three inline glyphs, one per state -- no external assets ever (QUIRKS.md),
-// same stroke-based style as src/render.mjs's COMMENT_ICON/MODE_ICON. Declared
+// same stroke-based style as src/render.mjs's COMMENT_ICON. Declared
 // once here and spliced into BOTH themeToggle()'s server-rendered markup and
 // themeBootScript's client-side icon swap below, via template interpolation --
 // never a second, hand-copied set of paths that could drift from the first.
