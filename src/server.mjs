@@ -46,18 +46,19 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readBoard, writeBoard, writePage, boardHome, listBoards, searchBoards } from './store.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments, questionBlocks } from './board.mjs';
+import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly, STRANDED_BANNER } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
-import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
+import { buildThreadIndex, renderIndexPage, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
-import { isPageRound, roundIsAwaited, roundWaitLapsed, closeLapsedAwaitedRounds } from './badge.mjs';
-import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
-import { notifyBoundary, notifyTest } from './notify.mjs';
+import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, closeLapsedAwaitedRounds } from './badge.mjs';
+import { createPomodoro, readDoc as readPomodoroDoc, roundBannersEnabled } from './pomodoro.mjs';
+import { notifyBoundary, notifyTest, notifyRound, withdrawClickChild, CLICK_LIFETIME_MAX_MS } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
 import { resolveRefRoots } from './resolve.mjs';
 
@@ -79,26 +80,53 @@ function sseHeartbeatMs() {
 
 /** Per-server-instance SSE subscriber registry, keyed by board id. Scoped inside
  * createRequestHandler (below) rather than module-level, so two independent daemon
- * instances in the same process (as the checks spin up) never share subscribers. */
-function createSseHub() {
-  const subs = new Map(); // boardId -> Set<res>
+ * instances in the same process (as the checks spin up) never share subscribers.
+ *
+ * Each subscriber (CONTEXT.md "Watcher") is tracked by a server-minted `watcherId`,
+ * not by `res` alone, because a Watcher now carries a second fact besides "is this
+ * connection open" — whether the tab holding it is Attended (visible and focused).
+ * The id is handed to the Watcher as the first thing the stream sends (`handleEvents`
+ * below), so an `attended` report can name which Watcher it is updating without the
+ * daemon ever trusting an identifier the tab chose for itself. Entries live exactly as
+ * long as the subscription does: `unsubscribe` removes the attended flag along with
+ * everything else, which is what makes "a tab that goes away stops counting" true
+ * for free rather than needing its own timeout.
+ *
+ * Exported for the same reason `activeWaitCount` is: the OR-across-Watchers rule
+ * (`isAttended`) and the "gone means gone" rule (`unsubscribe`) are invariants worth
+ * a direct check, and nothing over HTTP surfaces them directly -- `createStrandedWatch`
+ * below is what reads `isAttended` to decide whether a round is Stranded, and it is the
+ * only reader. `res` is never inspected here, only held and later `.write()`n,
+ * so a check can pass any object with a `write` method (or none) as a stand-in. */
+export function createSseHub() {
+  const subs = new Map(); // boardId -> Map<watcherId, { res, attended }>
   return {
     subscribe(boardId, res) {
-      let set = subs.get(boardId);
-      if (!set) { set = new Set(); subs.set(boardId, set); }
-      set.add(res);
+      let board = subs.get(boardId);
+      if (!board) { board = new Map(); subs.set(boardId, board); }
+      const watcherId = randomBytes(16).toString('hex');
+      // A freshly opened stream is Attended-UNKNOWN (`null`), not Attended-true. The
+      // page corrects it within one round trip -- src/ui.mjs's `watcher` event handler
+      // reports the tab's real state the moment it learns this id -- so the unknown
+      // state lasts milliseconds, but it is a distinct state and the difference is
+      // load-bearing twice over. It is not evidence the reviewer is there, so it can
+      // neither end an absence nor hold a banner back (`isConfirmedAttended` below is
+      // what the stranded rule asks); and it is not evidence they are gone either, so
+      // `isAttended` still counts it for anything merely asking whether a tab is open.
+      board.set(watcherId, { res, attended: null, seq: -1 });
+      return watcherId;
     },
-    unsubscribe(boardId, res) {
-      const set = subs.get(boardId);
-      if (!set) return;
-      set.delete(res);
-      if (set.size === 0) subs.delete(boardId);
+    unsubscribe(boardId, watcherId) {
+      const board = subs.get(boardId);
+      if (!board) return;
+      board.delete(watcherId);
+      if (board.size === 0) subs.delete(boardId);
     },
     broadcast(boardId, eventName, data) {
-      const set = subs.get(boardId);
-      if (!set || set.size === 0) return;
+      const board = subs.get(boardId);
+      if (!board || board.size === 0) return;
       const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
-      for (const res of set) {
+      for (const { res } of board.values()) {
         try { res.write(payload); } catch { /* dead connection; the 'close' handler cleans it up */ }
       }
     },
@@ -108,10 +136,591 @@ function createSseHub() {
      * to ask for this over a `GET /api/board/:id/clients` route that was never routed
      * here, so it always got null and never reopened. */
     clientCount(boardId) {
-      const set = subs.get(boardId);
-      return set ? set.size : 0;
+      const board = subs.get(boardId);
+      return board ? board.size : 0;
+    },
+    /** Record whether one Watcher's tab is Attended. A report naming a `watcherId`
+     * this board has no live subscription for -- a reconnect race, or a report that
+     * lost the network after its tab had already closed -- is silently dropped: there
+     * is nothing to update, and the tab has no way to know that timing from its own
+     * side, so refusing it would only teach the page to retry forever. Returns whether
+     * the report was APPLIED, which is what `handleAttended` gates the stranded rule on.
+     *
+     * `seq` is the page's own monotonic counter for the edge it is reporting, and it is
+     * what keeps two reports in flight at once from landing in the wrong order. They can
+     * be: a focus and a blur ~100ms apart are two POSTs, and the browser opens a second
+     * connection for the later one while the first is still outstanding, so the network
+     * decides which arrives first. Applying them in arrival order can leave a Watcher
+     * marked attended with the reviewer gone -- and then `isConfirmedAttended` is true
+     * forever, every evaluate resolves to `returned`, no grace is ever armed, and no
+     * banner fires for the rest of that wait, with no further DOM edge coming to correct
+     * it. The reverse ordering fires a banner at a reviewer who is looking at the board.
+     *
+     * A report carrying no `seq` at all is applied and leaves the counter alone, so a page
+     * that predates this ordering still works exactly as it did rather than going silent
+     * -- the same "degrade, do not refuse" rule the rest of this route follows. */
+    setAttended(boardId, watcherId, attended, seq = null) {
+      const board = subs.get(boardId);
+      const watcher = board && board.get(watcherId);
+      if (!watcher) return false;
+      if (Number.isInteger(seq)) {
+        if (seq <= watcher.seq) return false; // an older edge, overtaken in flight
+        watcher.seq = seq;
+      }
+      watcher.attended = !!attended;
+      return true;
+    },
+    /** CONTEXT.md "Attended": true iff ANY Watcher of this board might be looking at
+     * it right now. Two tabs on one board count as looking if either one does; a board
+     * with no Watchers at all is not Attended, same as one whose every Watcher has
+     * REPORTED that it is hidden or unfocused. A Watcher that has not reported yet
+     * counts as looking, so "nothing here says the reviewer is away" -- which is what a
+     * caller deciding whether to RAISE a banner wants, since a tab that has only just
+     * connected is exactly the shape of a reconnect.
+     *
+     * Nothing in the stranded rule reads this: deciding whether to RAISE a banner asks
+     * `isConfirmedAttended` below instead, because "has not said anything yet" is not
+     * evidence of a reviewer, and a subscriber that never reports would otherwise be a
+     * mute button obtainable with a READ credential. This stays as the hub's plain
+     * answer to "does anything here look open", which is what `clientCount`'s
+     * neighbours have always meant by it. */
+    isAttended(boardId) {
+      const board = subs.get(boardId);
+      if (!board) return false;
+      for (const watcher of board.values()) if (watcher.attended !== false) return true;
+      return false;
+    },
+    /** The stricter question, and the one a caller deciding whether the reviewer has
+     * COME BACK has to ask: has any Watcher actually SAID it is looking? A freshly
+     * subscribed one has not, so this is false through the reconnect and true again a
+     * round trip later if the tab really is in front of the reviewer.
+     *
+     * The two are not interchangeable and the difference is a defect if it is collapsed.
+     * `isAttended` alone would have a hidden tab's reconnect -- a dropped socket, a
+     * laptop wake, a daemon restart -- read as the reviewer returning, clearing the
+     * announced marker off a board nobody had looked at, and the tab's own "still
+     * hidden" report a moment later would then announce it a second time for the same
+     * absence (SPEC_STRANDED.md criterion 7). See `createStrandedWatch.evaluate`. */
+    isConfirmedAttended(boardId) {
+      const board = subs.get(boardId);
+      if (!board) return false;
+      for (const watcher of board.values()) if (watcher.attended === true) return true;
+      return false;
     },
   };
+}
+
+/** How long a board has to go without being Attended before the daemon announces that a
+ * round on it is Stranded (CONTEXT.md "Stranded"). Fifteen seconds is exactly one
+ * DEFAULT_SSE_HEARTBEAT_MS, and that is the whole point of the number: a tab that is
+ * going to come back -- an EventSource reconnecting after a daemon restart, a laptop
+ * waking, a socket some idle timer dropped -- has already come back by then, so what
+ * is left standing after the grace is a reviewer who is genuinely gone rather than the
+ * false zero the shim's old reopen kept firing on (ADR.md entry 55).
+ *
+ * An environment variable rather than a settings row, exactly like the heartbeat above
+ * and the wait cap below: this is a characteristic of the machine, not a preference,
+ * and a check has to be able to drive the whole rule without sleeping fifteen real
+ * seconds.
+ *
+ * Strictly positive, matching `sseHeartbeatMs` above and `waitTimeoutMs` below rather
+ * than being clever about it. `Number('')` is 0, and blanking a plist entry
+ * (`<string></string>`) is the ordinary way an operator turns one off -- so accepting 0
+ * would turn "I meant to unset this" into a zero grace, i.e. exactly the false positive
+ * on a reconnecting tab that ADR.md entry 55 exists to remove. Zero, negative, empty and
+ * unparseable all fall back to the default. */
+export const DEFAULT_STRANDED_GRACE_MS = 15_000;
+
+function strandedGraceMs() {
+  const v = Number(process.env.CLAUDE_BOARD_STRANDED_GRACE_MS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_STRANDED_GRACE_MS;
+}
+
+/** Every stranded watch alive in this process, and ONE 'exit' listener serving all of
+ * them. Criterion 15's last sentence -- "stopping the daemon leaves none of them
+ * running" -- is not free: a click-serving process is a separate, deliberately unref'd
+ * process (src/notify.mjs) that would otherwise outlive its owner all the way to its
+ * own deadline, which is up to forty minutes of banners for a daemon that is gone.
+ * `server.on('close')` in startServer below covers the graceful stop; this covers the
+ * abrupt one, since bin/daemon.mjs's shutdown backstop calls `process.exit()` outright
+ * when a socket refuses to die, and an 'exit' listener is the last hook that still runs
+ * there. SIGKILL is the one case nothing can cover, and there the child's own deadline
+ * is what bounds it. */
+const liveStrandedWatches = new Set();
+let strandedExitHookInstalled = false;
+function registerStrandedWatch(watch) {
+  liveStrandedWatches.add(watch);
+  if (strandedExitHookInstalled) return;
+  strandedExitHookInstalled = true;
+  process.on('exit', () => {
+    for (const w of liveStrandedWatches) w.close();
+  });
+}
+
+/** The stranded rule (SPEC_STRANDED.md; ADR.md entries 55 and 58), built beside the SSE
+ * hub because it is a reader of `sse.isAttended` and of nothing else the daemon does not
+ * already know. One instance per request handler, like the hub and the handoff store, so
+ * two daemons in one process (as the checks spin up) never announce for each other.
+ *
+ * The rule in one sentence: a board with at least one open, awaited round on it and no
+ * Watcher looking at it is Stranded, and after a grace it gets ONE banner -- per board,
+ * per absence, not per round. Rounds arrive faster than a reviewer returns, so counting
+ * per board is what makes "one per absence" mean anything; the banner's click carries
+ * only the board's own URL plus the `#stranded-round` sentinel, which the page resolves
+ * to the oldest round still waiting AT THE MOMENT IT IS CLICKED rather than to whichever
+ * round happened to trigger this.
+ *
+ * Four things drive it, and all four are events the daemon already handles: a round
+ * landing (`handlePostBoard`), a Watcher arriving or leaving (`handleEvents`), a tab
+ * reporting whether it is looked at (`handleAttended`), and a round being answered
+ * (`handleSubmit`). There is no polling and no clock of its own beyond the one grace
+ * timer per board, because everything else it needs to know is a fact it can read off
+ * the board when one of those four happens. That is why an absence ending is decided
+ * LAZILY -- see `standingBanner` -- rather than on a timer at `awaitDeadline`: nothing
+ * fires when a wait lapses, and a timer built to fire there would be the "notice after
+ * it has lapsed" the spec puts out of scope. It is the same absence of an event that
+ * makes the click-serving child hold its own deadline as a backstop rather than waiting
+ * to be told to stand down (ADR.md entry 57).
+ *
+ * `notify` and `withdraw` are `notifyRound` and `withdrawClickChild`, and the daemon
+ * never passes anything else. They are seams for the checks alone: the PATH-stubbed
+ * notifier the suite already uses can see that a banner was raised and what it says, but
+ * the click target and the child's lifetime cross on the BUNDLE path only, and
+ * `withdrawClickChild` does nothing at all outside a bundle -- so nothing that observes
+ * an `osascript` invocation can prove either. `withdraw` in particular guards a SIGTERM
+ * that must never reach the launchd job supervising this daemon, which is worth a check
+ * that can actually see the decision. Same reasoning that made `createSseHub` worth
+ * exporting for test/check-attended.mjs. */
+export function createStrandedWatch({
+  home = boardHome(),
+  sse,
+  notify = notifyRound,
+  withdraw = withdrawClickChild,
+} = {}) {
+  // boardId -> { timer, target }: the grace, one per board, holding the click target
+  // captured when this board first started looking Stranded. Never replaced by a later
+  // evaluate: every target is built from the daemon's own bound socket
+  // (`strandedTarget`), so a second one can only ever say the same thing.
+  const pending = new Map();
+  // boardId -> ChildProcess: the click-serving process this daemon owns for the banner
+  // currently on screen for that board. At most one, because there is at most one
+  // banner per board.
+  const children = new Map();
+  // boardId -> record, ONLY for boards whose durable write failed. The board document is
+  // the source of truth and a restart is meant to read it back (that is the whole point
+  // of recording it there); this is the degraded path, so that a read-only store costs
+  // this rule its memory of one absence across a restart rather than a banner per round
+  // for as long as the store stays broken. Empty in every healthy install.
+  const unpersisted = new Map();
+
+  // readBoard throws on an id that cannot be a path (src/store.mjs's assertSafeId) and
+  // on any unreadable file. Neither is a reason for a banner rule to take down the
+  // request it is riding on -- `POST /api/board/:id/attended` in particular answers 200
+  // for a board id that names nothing -- so every read here degrades to "there is
+  // nothing to announce" rather than throwing.
+  function boardOf(boardId) {
+    try { return readBoard(boardId, home); } catch { return null; }
+  }
+
+  /** Every durable write this rule makes, in one place, and every failure swallowed.
+   *
+   * The callers are a timer callback and an SSE socket's own close handler: by the time
+   * either runs, the request handler's try/catch is long gone, so an uncaught throw here
+   * is an uncaught exception at the top of the event loop -- and bin/daemon.mjs answers
+   * one of those by exiting, taking every blocked `/wait` and every open stream with it.
+   * A store that has gone read-only, a full disk, or a single board whose `id` disagrees
+   * with its filename must cost this rule its banner and nothing else. */
+  function persist(board) {
+    try {
+      // Re-read, and copy across ONLY this rule's own field. Writing back the whole
+      // object the caller is holding would make this rule a participant in every
+      // read-modify-write race on the board document rather than in none of them:
+      // `drainUndeliveredComments`'s `commit` (see handleWait) captures whole boards and
+      // runs from a later macrotask than this timer callback -- two writers each saving
+      // their own captured copy is how one of them silently loses the other's write.
+      // `commit` now does the same on its own field (ticket 09), so the race is closed
+      // in both directions rather than just this one.
+      //
+      // Today no caller here holds a stale object -- every one of them reads through
+      // `boardOf` and writes in the same synchronous turn, with no await between -- so
+      // this changes no outcome yet. It is deliberate anyway, and deliberately not
+      // "optimised" back: it makes the safety local to this function instead of resting on
+      // a property of four call sites that a single later `await` would quietly end.
+      const fresh = readBoard(board.id, home);
+      if (!fresh) return false; // the board is gone; there is nothing to record on
+      fresh[STRANDED_BANNER] = board[STRANDED_BANNER] ?? null;
+      writeBoard(fresh, home);
+      return true;
+    } catch (err) {
+      console.error(`claude-board: could not record the stranded banner for board ${board && board.id}: ${(err && err.message) || err}`);
+      return false;
+    }
+  }
+
+  // CONTEXT.md's Stranded is "Awaited while its board is not Attended", so this is the
+  // Awaited half, per round: open AND minted awaited. `roundIsAwaitedOpen` (src/badge.mjs)
+  // is the same predicate the countdown and the read-only downgrade already read, which
+  // is what makes criterion 8 hold with no code of its own -- a round that was never
+  // awaited carries `awaited: false`, one already answered is no longer `open`, and one
+  // whose wait lapsed was swept back to `awaited: false` by `readBoard` itself.
+  function stillWaiting(board) {
+    return ((board && board.rounds) || []).filter(roundIsAwaitedOpen);
+  }
+
+  /** The record for this board, wherever it is: the board document normally, and the
+   * in-memory fallback below only when the durable write failed. The document is the
+   * source of truth and a restart is meant to read it back; `unpersisted` exists purely
+   * so that a store which has gone read-only costs this rule its memory of one absence
+   * rather than turning that absence into a banner per round. */
+  function recordOn(board) {
+    return (board && board[STRANDED_BANNER]) || unpersisted.get(board && board.id) || null;
+  }
+
+  /** The banner recorded on this board, if it still STANDS -- that is, if this board's
+   * absence has already been announced and is still running. Exactly one question, asked
+   * of exactly one round: is the round this record NAMES still awaited?
+   *
+   * That is criterion 7 read literally, and the literal reading is the one that was
+   * chosen: one banner per board until the reviewer actually comes back. Two nearby
+   * readings were rejected, and both are easy to drift back into:
+   *
+   *  - "is ANYTHING on the board still awaited". Wrong, and wrong in the shape
+   *    `handlePostBoard` calls ordinary -- an awaited page round beside a question round.
+   *    The named round dying while the second is still live would leave the record
+   *    standing forever, and the second round would never get a banner of its own.
+   *  - "is the banner still on screen" (`until`, below). Rejected deliberately. It made a
+   *    replacement appear once the first banner's process had exited, which is a second
+   *    banner for an absence nobody had come back from.
+   *
+   * THE COST, accepted with the trade-off in view rather than overlooked: a reviewer who
+   * dismisses a banner without opening the board gets nothing further for that board until
+   * the announced round's wait ends. The signal is one per absence, and dismissing it is
+   * spending it.
+   *
+   * Not a timer. Read lazily off events the daemon already handles; a timer on
+   * `awaitDeadline` would be precisely the "notice after the wait has lapsed" the spec
+   * puts out of scope. `roundIsAwaitedOpen` is the same predicate `stillWaiting` applies,
+   * so "the wait ended" reaches here as a fact `readBoard` already swept. */
+  function standingBanner(board) {
+    const rec = recordOn(board);
+    if (!rec) return null;
+    return roundIsAwaitedOpen((board.rounds || []).find(r => r.n === rec.round)) ? rec : null;
+  }
+
+  /** Retire the record on this board, and withdraw whatever is still serving it -- either
+   * because the reviewer came back, or because the round it named stopped being awaited
+   * and there is nothing left for its click to open.
+   *
+   * WRITE FIRST, WITHDRAW SECOND, and the order is the whole point: the record and the
+   * screen have to agree. Withdrawing first and then restoring the record on a write that
+   * failed left the banner gone AND the board believing it had one, which suppressed
+   * every replacement for the rest of the wait -- the reviewer silently loses the signal
+   * on exactly the machine that is already in trouble. So on a store that refuses the
+   * write, nothing is withdrawn either: the banner stays up and the record stays standing,
+   * which is consistent and recoverable, at the price of a return not withdrawing until
+   * the store comes back.
+   *
+   * Covers the submit-by-secret edge too -- a round answered by a script carrying the
+   * local secret leaves no attended Watcher to resolve into a return, so its record is
+   * retired here on the next evaluation instead. */
+  function spend(board) {
+    const rec = recordOn(board);
+    const saved = board[STRANDED_BANNER];
+    board[STRANDED_BANNER] = null;
+    if (!persist(board)) {
+      board[STRANDED_BANNER] = saved; // the document goes back exactly as it was
+      return;
+    }
+    unpersisted.delete(board.id);
+    terminate(board.id, rec);
+  }
+
+  /** Is there something to announce about this board, and may it be announced? Also the
+   * one place a spent record is retired, deliberately ahead of the suppression check
+   * below -- the other order is what leaves a board deaf. */
+  function mayAnnounce(board) {
+    if (recordOn(board) && !standingBanner(board)) spend(board);
+    // One banner per absence, per board (criterion 7): a further round landing on a board
+    // whose announced round is still awaited adds nothing, and neither does a second tab
+    // closing, and neither does that banner having expired off the screen. A restart reads
+    // the same record off disk and says the same.
+    if (recordOn(board)) return false;
+    return stillWaiting(board).length > 0; // criterion 8: nothing awaited, nothing stranded
+  }
+
+  function cancel(boardId) {
+    const entry = pending.get(boardId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    pending.delete(boardId);
+  }
+
+  /** Withdraw the banner currently on screen for `boardId`, by killing the process that
+   * serves its click. SIGTERM specifically, never SIGKILL: the SIGTERM path in
+   * bin/notify.m is what WITHDRAWS the delivered notification from Notification Center,
+   * so criterion 6's withdrawal is this kill and not a second mechanism -- a SIGKILLed
+   * child leaves its banner sitting there.
+   *
+   * `rec` is the board's recorded banner, and it is the only thing that can make this
+   * signal a pid it did not spawn. A SIGKILLed daemon (`launchctl kickstart -k`, or
+   * launchd after `ExitTimeOut`) leaves the record on disk and the `children` map empty,
+   * so a replacement daemon would otherwise have no way to withdraw a banner still on
+   * screen and criterion 6 would fail for the rest of that wait.
+   *
+   * `until` is what bounds that, and this is the ONE place it is still consulted: whether
+   * the record still SUPPRESSES is a different question with a different answer (see
+   * `standingBanner`), but a record whose banner's own process must long since have exited
+   * names a pid that has been recycled onto something else, and signalling it would be
+   * signalling a stranger. The pid path is therefore gated on the banner plausibly still
+   * existing, even though the suppression is not. */
+  function terminate(boardId, rec = null) {
+    const held = children.get(boardId);
+    if (held) {
+      children.delete(boardId);
+      try { held.child.kill('SIGTERM'); } catch { /* already gone: the outcome we wanted */ }
+      return true;
+    }
+    if (!rec || !rec.pid) return false;
+    const until = Date.parse(rec.until);
+    if (Number.isFinite(until) && Date.now() >= until) return false; // its process is gone
+    // `at` is the second half of what makes the pid safe to signal -- see withdrawClickChild.
+    withdraw(rec.pid, Date.parse(rec.at));
+    return true;
+  }
+
+  /** The reviewer is looking at this board again (criterion 6). Stops the pending
+   * banner, withdraws the delivered one, and clears the record so that leaving again MAY
+   * raise a fresh one -- which is what makes it mean "this absence has been announced"
+   * rather than "this board has been announced once, ever". */
+  function returned(boardId) {
+    cancel(boardId);
+    const board = boardOf(boardId);
+    if (!recordOn(board)) {
+      // Nothing recorded: no durable write on the ordinary path, which matters because
+      // this runs on every `attended` report a tab sends and a page board's document can
+      // be megabytes. The in-memory handle is still worth checking.
+      terminate(boardId, null);
+      return;
+    }
+    spend(board);
+  }
+
+  /** The grace has elapsed. Everything is re-decided here rather than trusted from when
+   * the timer was armed: fifteen seconds is long enough for the tab to come back, the
+   * round to be answered, or the wait to lapse.
+   *
+   * Wrapped whole, because this is a timer callback -- see `persist` above for what an
+   * uncaught throw out of one costs. `readPomodoroDoc` and `folderName` are as capable
+   * of throwing as the write is. */
+  function announce(boardId, target) {
+    pending.delete(boardId);
+    try {
+      // Only a Watcher that has SAID it is looking holds the banner back, and the
+      // arming rule above is what makes that safe for criterion 4: a countdown is only
+      // ever started at a moment when nobody was confirmed, so by the time it fires the
+      // board has gone a full grace with nobody saying they are there. A tab that drops
+      // and reconnects inside that window reports from its `watcher` handler one round
+      // trip later, and THAT is what cancels this -- not the bare fact of a socket.
+      //
+      // Counting an unreported Watcher here instead was a mute button obtainable with a
+      // read credential: `/events` needs no write, and a subscriber that reconnects
+      // shortly before each grace expires is never old enough to age out, so no
+      // per-Watcher bound could close it. There is nothing to bound now.
+      if (sse.isConfirmedAttended(boardId)) return;
+      const board = boardOf(boardId);
+      if (!board || !mayAnnounce(board)) return;
+      // The reviewer's own switch (ticket 03): off means this whole rule is silent, while
+      // the pomodoro clock's own banners carry on. Read fresh here, not captured at boot,
+      // for the same reason notifyBoundary re-reads on every interval -- a toggle flipped
+      // mid-day takes effect on the next banner, not the next restart.
+      if (!roundBannersEnabled(readPomodoroDoc(home).settings)) return;
+      // The oldest round still waiting is what the click resolves to, so it is also what
+      // bounds the child that serves the click, and it is what the record below names.
+      // The fragment is `#stranded-round` and NOT `#open-round`: the two look alike and
+      // mean different things. `#open-round` resolves to the newest open round, which is
+      // right for the index's live-row links; a banner has to land on the OLDEST round
+      // still waiting, which is the one the reviewer owes an answer for and the one this
+      // banner's lifetime is bounded by (src/ui.mjs's `oldestAwaitedRoundNumber`
+      // resolves it, on load and on hashchange/focus/visibilitychange so a tab that was
+      // already open moves too).
+      const oldest = stillWaiting(board)[0];
+      const deadlineAt = Date.parse(oldest.awaitDeadline);
+      const child = notify(folderName(board.cwd), {
+        url: target && target.url ? `${target.url}#stranded-round` : null,
+        // The same one read of the bound socket the URL came from, handed over separately
+        // because the launcher checks the two against each other -- see `strandedTarget`.
+        port: (target && target.port) || null,
+        deadlineAt,
+      });
+      const at = Date.now();
+      // Recorded durably, all four parts together. `round` is the load-bearing one: the
+      // absence ends when THAT round stops being awaited. `at` and `pid` are what let a
+      // replacement daemon withdraw a banner it did not raise, and `until` -- when the
+      // process serving this banner will exit and withdraw it, the same
+      // `min(the round's deadline, the launcher's hard ceiling)` src/notify.mjs applies to
+      // the lifetime it sends -- is what bounds that pid to a process that can still be
+      // the one written down. Recomputed here rather than reported back because it is one
+      // expression and a second return value out of `notify` would be a contract change
+      // for every caller; if the two ever drift, this side is the conservative one (it can
+      // only under-estimate the banner's life, which costs a withdrawal not attempted
+      // rather than a stranger signalled). `notify` swallows its own failures and never
+      // throws, so this cannot record a banner that never appeared.
+      const rec = {
+        at: new Date(at).toISOString(),
+        round: oldest.n,
+        pid: (child && child.pid) || null,
+        until: new Date(Number.isFinite(deadlineAt)
+          ? Math.min(deadlineAt, at + CLICK_LIFETIME_MAX_MS)
+          : at + CLICK_LIFETIME_MAX_MS).toISOString(),
+      };
+      board[STRANDED_BANNER] = rec;
+      // Honoured, not fired and forgotten. A store that has gone read-only would
+      // otherwise leave this daemon unable to remember it had announced anything, and
+      // every round after this one would raise another banner for the same absence --
+      // the exact pile-up the record exists to prevent, arriving precisely when the
+      // machine is already in trouble. The board document stays the source of truth and
+      // a restart still reads it; this only covers the degraded case.
+      if (!persist(board)) unpersisted.set(boardId, rec);
+      else unpersisted.delete(boardId);
+      if (child) {
+        // The round rides with the handle so that `answered` can tell whether a submit is
+        // about THIS banner without reading the board back off disk on every submit.
+        children.set(boardId, { child, round: oldest.n });
+        // The handle is only good while the process is alive. Without this the map keeps
+        // a reaped pid forever and `terminate` reports success for a child that exited on
+        // its own deadline minutes ago -- and on the osascript fallback, where the child
+        // exits in milliseconds, it is stale the moment it is stored.
+        child.once('exit', () => {
+          const held = children.get(boardId);
+          if (held && held.child === child) children.delete(boardId);
+        });
+      }
+    } catch (err) {
+      console.error(`claude-board: stranded banner for board ${boardId} failed: ${(err && err.message) || err}`);
+    }
+  }
+
+  const watch = {
+    /** Re-decide one board, from scratch. Called after every event that can change the
+     * answer; safe to call for a board that has nothing to do with any of this, which is
+     * what lets the call sites stay one line each with no conditions of their own.
+     *
+     * `target` is `strandedTarget(req, boardId)` -- the board's URL and this daemon's
+     * bound port, from the socket rather than from any header, and never a handoff since
+     * no credential goes on a command line (criterion 13). Absent, the banner still
+     * fires; it just cannot be clicked.
+     *
+     * Wrapped whole for the same reason `announce` is: one of the call sites is an SSE
+     * connection's own close handler, which runs with no request frame around it. */
+    evaluate(boardId, target = null) {
+      try {
+        // A Watcher has SAID it is looking: the reviewer is back. End the absence --
+        // withdraw the banner, clear the record -- so that leaving again may raise a
+        // fresh one (criterion 6). This is the ONLY thing that ends an absence while its
+        // round is still awaited: a Watcher that has merely subscribed has not said
+        // anything yet, and a hidden tab reconnecting must not be read as a reviewer
+        // returning (criterion 7).
+        if (sse.isConfirmedAttended(boardId)) return returned(boardId);
+        const board = boardOf(boardId);
+        // Nothing to announce -- nothing awaited (criterion 8), or an absence already
+        // announced and still standing (criterion 7). Either way a grace still counting
+        // down is counting down to nothing, so it goes. `mayAnnounce` also retires a
+        // record whose round is over, which is the other way an absence ends.
+        if (!board || !mayAnnounce(board)) return cancel(boardId);
+        // Already counting down: leave it alone, deadline and target both. Re-arming on
+        // every event would let a busy agent, or a tab on a flaky socket that reconnects
+        // oftener than the grace is long, hold the countdown open forever and never
+        // produce a banner at all. What suppresses a banner for a tab that has just
+        // reconnected is `announce`'s own re-check at fire time, not the absence of a
+        // timer -- which is exactly where a decision about the present belongs.
+        if (pending.has(boardId)) return;
+        const entry = { target };
+        entry.timer = setTimeout(() => announce(boardId, entry.target), strandedGraceMs());
+        // A banner that has not fired yet must never be what keeps a daemon from
+        // exiting, exactly like the heartbeat interval above.
+        entry.timer.unref?.();
+        pending.set(boardId, entry);
+      } catch (err) {
+        console.error(`claude-board: stranded rule for board ${boardId} failed: ${(err && err.message) || err}`);
+      }
+    },
+
+    /** THE round this board's banner is about was answered (criterion 15): the process
+     * serving that banner has nothing left to serve, so the daemon that owns it kills it.
+     * Deliberately NOT a clear of the record -- answering is not the same event as
+     * returning, and the `evaluate` the caller makes right after this is what decides
+     * everything else.
+     *
+     * `round` is why this takes an argument at all. Criterion 15 says the child goes when
+     * "the round is answered", meaning the round the banner is ABOUT, and a board can hold
+     * two awaited rounds at once (ADR.md entry 45: an awaited page round beside a question
+     * round). The banner names the oldest. Answering the OTHER one used to withdraw it
+     * anyway -- and then `evaluate` found the announced round still awaited, so the record
+     * still stood, so nothing could replace what had just been taken off the screen. The
+     * reviewer lost the signal for a round still waiting, with the suppression rule itself
+     * forbidding a replacement for the rest of its forty minutes.
+     *
+     * The board is only read when this process has no handle of its own -- an unclean
+     * restart, where the orphan's pid on the record is the only way to reach it, and where
+     * a submit carrying the local secret produces no Watcher and no attended report to
+     * resolve it any other way. In the ordinary case the daemon serving the submit is the
+     * one that raised the banner, `handleSubmit` has already read this board, and reading
+     * it again to discard the answer would be a second parse of a document that can run to
+     * megabytes. `terminate`'s own `until` bound is what keeps signalling a recorded pid
+     * safe; being answered says nothing about whether the child has exited, since its
+     * lifetime is the round's DEADLINE. */
+    answered(boardId, round) {
+      const held = children.get(boardId);
+      if (held) return held.round === round ? terminate(boardId) : false;
+      const rec = recordOn(boardOf(boardId));
+      if (!rec || rec.round !== round) return false;
+      return terminate(boardId, rec);
+    },
+
+    /** Stop owning anything: every pending grace and every click-serving process this
+     * daemon spawned goes with it (criterion 15). Idempotent.
+     *
+     * Deliberately WITHOUT retiring the records those children serve. Killing them does
+     * take their banners off the screen -- SIGTERM is how a banner is withdrawn -- and it
+     * is tempting to reason that a board with no banner on screen should be announceable
+     * again. That is the reading criterion 7 rules out in as many words: further rounds
+     * raise nothing more until the reviewer comes back, "whether or not the banner already
+     * raised is still on screen". An absence ends two ways and only two, the reviewer
+     * returning or the announced round ceasing to be awaited, and a daemon stop is
+     * neither. Retiring here meant a reviewer who was told once at t=0 was told again
+     * after an ordinary `install.sh` update -- two signals for one absence.
+     *
+     * Nothing here may skip the kill, either: criterion 15's last sentence is
+     * unconditional, and an unref'd child left behind by a shutdown outlives its owner by
+     * up to an hour with a banner whose click hands LaunchServices a port that now belongs
+     * to nothing. With no write in this path there is nothing that can fail and no
+     * temptation to make the kill conditional on it. */
+    close() {
+      for (const boardId of [...pending.keys()]) cancel(boardId);
+      for (const boardId of [...children.keys()]) {
+        // The pid goes even though the record stays. Leaving the record standing is the
+        // point (see above), but the pid ON it names a process this daemon is about to
+        // kill, while `until` goes on claiming that process may live for another hour --
+        // and the successor's own launchd supervisor starts AFTER `rec.at`, so the
+        // start-time gate that used to exclude a supervisor no longer does. A wrapped pid
+        // space then makes that record a loaded gun pointed at the supervisor.
+        // `mayWithdrawPid` is the guard that makes this safe; this narrows the window it
+        // has to guard. A failed write is harmless here: the old record stands, and
+        // standing is what it already meant.
+        const board = boardOf(boardId);
+        const rec = board && board[STRANDED_BANNER];
+        if (rec && rec.pid != null) {
+          rec.pid = null;
+          persist(board);
+        }
+        terminate(boardId);
+      }
+      unpersisted.clear();
+      liveStrandedWatches.delete(watch);
+    },
+  };
+  registerStrandedWatch(watch);
+  return watch;
 }
 
 function readPkgVersion() {
@@ -283,12 +892,34 @@ function isPomodoroCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
 }
 
+/** The board writes a cookie-holding browser may perform: `submit`, and now
+ * `attended` (CONTEXT.md "Watcher", "Attended" — ADR.md entry 58). Named and
+ * enumerated exactly like `POMODORO_COOKIE_ACTIONS` above, for the identical
+ * reason: a bare `parts[1] === 'board'` prefix match would silently hand the
+ * cookie every board write this file ever grows.
+ *
+ * `attended` belongs on this list because it is the only party that CAN send it —
+ * a browser holding a live stream on this board, reporting whether its own tab is
+ * visible and focused. It reaches less than `submit` already does: it names no
+ * round, carries no answer, and touches nothing durable, only the in-memory SSE
+ * hub's per-Watcher flag (`createSseHub`'s `setAttended`, above) that a restart
+ * clears for free. Leaving it off this list, requiring the local secret instead,
+ * would make it unreachable from the one place it has to be reachable from — see
+ * SPEC_STRANDED.md's Next Steps item 3, which is explicit that skipping this
+ * would either 403 every report or, if left ungated entirely, let a forged report
+ * from any local process silence every banner on the machine. */
+const BOARD_COOKIE_ACTIONS = new Set(['submit', 'attended']);
+
+function isBoardCookieWrite(parts) {
+  return parts[0] === 'api' && parts[1] === 'board' && parts.length === 4 && BOARD_COOKIE_ACTIONS.has(parts[3]);
+}
+
 /** True iff this write may proceed. Two ways to hold a credential, and they are not
  * interchangeable:
  *
  *  - the secret itself, in the `x-claude-board-secret` header. That is the shim, and it
- *    is what EVERY write except submit and the five pomodoro actions below demands —
- *    including `POST /api/board`, the only route that resolves a file, and
+ *    is what EVERY write except `submit`/`attended` and the pomodoro actions below
+ *    demands — including `POST /api/board`, the only route that resolves a file, and
  *    `POST /api/handoff`, which mints browser credentials and so must never be
  *    reachable with one.
  *  - the session cookie an authorized browser holds, accepted on submit, and — as of
@@ -300,17 +931,18 @@ function isPomodoroCookieWrite(parts) {
  *    pausing an advisory clock that never touches a board, never gates an `ask`, and
  *    never reaches a tool is strictly less than that — `isSameOriginWrite` still stands
  *    in front of it, exactly as it does for submit. The board-scoped fallback token that
- *    used to sit here is deleted rather than kept beside it.
+ *    used to sit here is deleted rather than kept beside it. `attended` joins the cookie
+ *    set on the same footing again, reaching less than either: see
+ *    `BOARD_COOKIE_ACTIONS` above.
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. The
- * pomodoro exception is itself a closed, named list for the same reason — see
- * POMODORO_COOKIE_ACTIONS above. */
+ * board and pomodoro exceptions are each a closed, named list for the same reason — see
+ * `BOARD_COOKIE_ACTIONS` and `POMODORO_COOKIE_ACTIONS` above. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
-  const isSubmit = parts[0] === 'api' && parts[1] === 'board' && parts.length === 4 && parts[3] === 'submit';
-  if (!isSubmit && !isPomodoroCookieWrite(parts)) return false;
+  if (!isBoardCookieWrite(parts) && !isPomodoroCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
@@ -427,6 +1059,30 @@ function boardUrl(req, id) {
   return `http://${req.headers.host}/b/${id}`;
 }
 
+/** The board's URL and this daemon's own port, for a banner's click target -- built from
+ * the SOCKET the request arrived on and never from `boardUrl` above.
+ *
+ * `boardUrl` reflects the `Host` header, which is right for a URL handed back to the
+ * caller that sent that header: it keeps a reviewer on the origin they are already using
+ * and holding a session cookie for. It is exactly wrong here. `isLoopbackHost` admits any
+ * `<anything>.localhost` and pins no port, so a `Host: localhost:31337` on a plain read --
+ * `GET /api/board/<id>/events` needs only a read credential -- would put an attacker's
+ * loopback origin into argv of the signed, Documents-granted launcher, and the reviewer
+ * would get a genuine claude-board banner whose click opened someone else's server.
+ *
+ * `req.socket.localPort` is the port THIS process is listening on, learned from the
+ * kernel rather than from anything a caller can write, and the host is the literal
+ * 127.0.0.1 that `startServer` binds. The port is returned alongside the URL and not
+ * merely embedded in it, because `notifyRound` passes it to the launcher as its own
+ * argument: bin/launcher.c's `is_board_url` compares the two and refuses a URL whose port
+ * disagrees, so the number has to come from one read of one authoritative source rather
+ * than being derived twice and hoped to agree. */
+export function strandedTarget(req, id) {
+  const port = req.socket && req.socket.localPort;
+  if (!Number.isInteger(port) || port <= 0) return { url: null, port: null };
+  return { url: `http://127.0.0.1:${port}/b/${id}`, port };
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -472,7 +1128,11 @@ function resolveBoardComments(board) {
   const resolvedComments = resolveComments(board, board.comments);
   return {
     commentsByBlock: groupCommentsByBlock(resolvedComments),
-    boardForClient: { ...board, comments: resolvedComments },
+    // `stripDaemonOnly` for the same reason renderBoardPage applies it: a client's local
+    // `board` is hydrated from the rendered payload and then patched from these pushes,
+    // so a field present in one and absent from the other would show up as a spurious
+    // diff in `computeBoardPatch` on the first push after a banner went up.
+    boardForClient: stripDaemonOnly({ ...board, comments: resolvedComments }),
   };
 }
 
@@ -532,7 +1192,7 @@ function boundCwdForThread(thread, home) {
   return inThread.length ? inThread[0].cwd : null;
 }
 
-async function handlePostBoard(req, res, home, sse) {
+async function handlePostBoard(req, res, home, sse, stranded) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -683,6 +1343,12 @@ async function handlePostBoard(req, res, home, sse) {
   writeBoard(board, home);
   writePage(board.id, html, home);
   if (pushMode) sse.broadcast(board.id, 'round', buildRoundPushPayload(board, round, pushMode, touchedBlockIds));
+  // A round has just landed: if nobody is looking at this board, it is Stranded and the
+  // daemon says so after the grace (criteria 1 and 3). After the persist and the push,
+  // deliberately -- the rule reads the board back off disk, and the banner it may raise
+  // is about the state this request has already committed, not the one it is midway
+  // through writing.
+  stranded.evaluate(board.id, strandedTarget(req, board.id));
   // `clients` is the count at the instant this round landed, which is what lets the shim
   // tell "the reviewer closed the tab" from "the reviewer is looking at it" and reopen
   // only in the first case. See createSseHub.clientCount.
@@ -827,8 +1493,10 @@ function drainUndeliveredComments(thread, board, round, home) {
   const boards = listBoards(home)
     .filter(b => b && b.thread === thread)
     // Reuse the already-loaded board for its own entry rather than the copy
-    // listBoards just re-read from disk -- same file, but writing back `board` keeps
-    // this in step with the packet already built from it.
+    // listBoards just re-read from disk -- same file, but it keeps the `pending`
+    // entries below pointing at the very objects the packet was built from. `commit`
+    // no longer writes this object back (it re-reads), so this is about which comments
+    // get drained, not about which document gets saved.
     .map(b => (b.id === board.id ? board : b))
     .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
   const comments = [];
@@ -845,8 +1513,42 @@ function drainUndeliveredComments(thread, board, round, home) {
   }
   const commit = () => {
     for (const { board: b, pending } of pendingByBoard) {
+      // Kept even though nothing in this process reads it again before `commit` runs
+      // (the packet was already built from `resolveComments`' own copies, above): it
+      // costs nothing, and it keeps this in-memory board agreeing with what is about to
+      // be written, rather than depending on an argument about who else might hold `b`.
       for (const c of pending) c.delivered = true;
-      writeBoard(b, home);
+      // Re-read, and copy across ONLY the delivered marks this rule owns -- matched by
+      // each comment's stable, append-only per-board `n` (src/board.mjs), never by
+      // identity or array position. Writing back the whole captured `b`, as this used
+      // to, made this function a participant in every read-modify-write race on the
+      // board document rather than in none of them: `commit` runs on the response's own
+      // `finish` event (see handleWait), a LATER macrotask than the capture above -- and
+      // in that window the stranded rule's timer callback can have written a fresh
+      // `STRANDED_BANNER` record onto this same board (its own `persist`, above, already
+      // defends that field against this exact writer, by name, in its own comment). This
+      // is the reverse direction: without it, this closure's stale whole-board write
+      // would silently erase that record, or resurrect one the reviewer had already
+      // dismissed.
+      //
+      // A throw here is an uncaught exception at the top of the event loop -- by the
+      // time a `finish` handler runs, the request's own try/catch is long gone, and
+      // bin/daemon.mjs answers one of those by exiting, taking every blocked `/wait`
+      // with it. So, like `persist`, swallow per board: the comment simply stays
+      // undelivered and rides the next `/wait` on the thread instead, which is noise
+      // (ADR 35 already tolerates a redelivery), not the data loss a crashed daemon
+      // would be.
+      try {
+        const fresh = readBoard(b.id, home);
+        if (!fresh) continue; // the board is gone; nothing to mark
+        const deliveredNs = new Set(pending.map(c => c.n));
+        for (const fc of fresh.comments || []) {
+          if (deliveredNs.has(fc.n)) fc.delivered = true;
+        }
+        writeBoard(fresh, home);
+      } catch (err) {
+        console.error(`claude-board: could not mark comments delivered for board ${b && b.id}: ${(err && err.message) || err}`);
+      }
     }
   };
   return { comments, commit };
@@ -936,7 +1638,7 @@ async function handleWait(req, res, id, url, home, sse) {
   return sendJson(res, 200, packet);
 }
 
-async function handleSubmit(req, res, id, home, sse) {
+async function handleSubmit(req, res, id, home, sse, stranded) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -1031,7 +1733,79 @@ async function handleSubmit(req, res, id, home, sse) {
   const { commentsByBlock, boardForClient } = resolveBoardComments(board);
   const html = renderRoundSection(board, round, commentsByBlock);
   sse.broadcast(id, 'submitted', { round, board: boardForClient, html });
+  // Criterion 15: the daemon owns the click-serving process and terminates it "once the
+  // reviewer returns to the board OR the round is answered". This is the second half --
+  // a banner still on screen pointing at a round that has just been answered has nothing
+  // left to open, and killing it withdraws it. `round` is passed because the banner is
+  // about ONE round and this board may have another awaited beside it; answering that
+  // other one must leave the banner alone. The `evaluate` after decides the rest:
+  // whoever answered is normally looking at the board, so this usually resolves to a
+  // return. A submit carrying the local secret rather than a browser session does not --
+  // there is no Watcher to be attended -- and there the record is retired instead, by
+  // `mayAnnounce`, once the round it named stops being awaited.
+  stranded.answered(id, round);
+  stranded.evaluate(id, strandedTarget(req, id));
   return sendJson(res, 200, { ok: true, board: board.id, round });
+}
+
+/** POST /api/board/:id/attended: the open board tab reporting whether it is Attended
+ * (CONTEXT.md "Watcher", "Attended") -- visible and focused, right now. Body:
+ * `{ watcher, attended }`, where `watcher` is the id the SSE stream handed this same
+ * tab in its own `watcher` event (see `handleEvents`, below) and `attended` is a
+ * plain boolean. Cookie-authenticated exactly like `submit` -- `attended` joins
+ * `BOARD_COOKIE_ACTIONS` above, so `isAuthorizedWrite` accepts the session cookie
+ * here too -- because a browser holding that cookie is the only party that can
+ * honestly answer this question. Leaving it off every list would either 403 every
+ * report a real tab sends or, if left open with no credential at all, accept one
+ * from any local process, which would let a forged report silence every banner
+ * (SPEC_STRANDED.md's Next Steps item 3; ADR.md entry 58) -- the one thing in this
+ * route that is security-relevant.
+ *
+ * What it STORES is a fact about a live SSE connection (`sse.setAttended`, in
+ * `createSseHub` above) and nothing about the board. It is not, however, a route with no
+ * durable consequence: the stranded rule reads that fact on the line below, and a report
+ * that ends an absence retires the record standing on the board -- one `readBoard` and
+ * one `writeBoard`, and for a page board that document can be large. That is the price of
+ * a marker that survives a restart, and it is paid only when the reviewer actually comes
+ * back to a board that had been announced; the ordinary report writes nothing.
+ *
+ * An unknown board id and an unknown `watcher` id are both accepted as a silent no-op
+ * rather than answered with 404 -- see `setAttended`'s own comment for why a report
+ * cannot always know it lost that race -- and an unknown `watcher` stops there, before
+ * the rule is consulted at all. */
+async function handleAttended(req, res, id, sse, stranded) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  if (typeof body.watcher !== 'string' || !body.watcher) {
+    return sendJson(res, 400, { error: 'attended requires a string "watcher" naming the SSE connection it updates' });
+  }
+  if (typeof body.attended !== 'boolean') {
+    return sendJson(res, 400, { error: 'attended requires a boolean "attended"' });
+  }
+  // Optional, and a 400 only when present and malformed: a page that predates the
+  // ordering sends none and is applied as it always was (see `setAttended`).
+  if (body.seq !== undefined && !(Number.isInteger(body.seq) && body.seq >= 0)) {
+    return sendJson(res, 400, { error: 'attended\'s optional "seq" must be a non-negative integer' });
+  }
+  // The return value is the point: `setAttended` is what knows whether this report names
+  // a Watcher this board actually has AND whether it is newer than the one already
+  // applied. A report that names none, or that lost a race to a later edge, changed
+  // nothing -- so there is nothing to re-decide. Acting on it anyway would let any caller
+  // holding a credential drive the stranded rule with a made-up id -- reaching a durable
+  // write, and steering the click target with this request's socket -- on a route whose
+  // whole answer is otherwise a silent no-op. Still a 200: see `setAttended` for why a tab
+  // cannot know it lost that race.
+  if (!sse.setAttended(id, body.watcher, body.attended, body.seq ?? null)) return sendJson(res, 200, { ok: true });
+  // The one report that changes whether this board is Attended is also the one event
+  // that can strand a round without a round having landed or a tab having closed:
+  // switching away from a board with something awaited on it (criterion 3), and coming
+  // back to one already announced (criterion 6). Both are this line.
+  stranded.evaluate(id, strandedTarget(req, id));
+  return sendJson(res, 200, { ok: true });
 }
 
 /** GET /api/board/:id/events: subscribe this connection to round pushes and submit
@@ -1041,9 +1815,14 @@ async function handleSubmit(req, res, id, home, sse) {
  * proxies (see DEFAULT_SSE_HEARTBEAT_MS); `req`/`res` close/error tear the
  * subscription and the interval down so a disconnected client is never broadcast
  * to. See PROTOCOL.md "SSE events". */
-function handleEvents(req, res, id, home, sse) {
+function handleEvents(req, res, id, home, sse, stranded) {
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
+  // Captured while the socket is unambiguously alive, because the cleanup below runs
+  // after it has gone: a banner raised fifteen seconds after the last tab closed still
+  // has to be able to name the board it is about, and `req.socket.localPort` is not
+  // something to be reading off a destroyed socket.
+  const target = strandedTarget(req, id);
 
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -1051,7 +1830,20 @@ function handleEvents(req, res, id, home, sse) {
     'connection': 'keep-alive',
   });
   res.write(': connected\n\n');
-  sse.subscribe(id, res);
+  const watcherId = sse.subscribe(id, res);
+  // Handed to the client as a real event, not a comment, because the page has to
+  // read it as data: it is what an `attended` report (below) names to say which
+  // Watcher it is updating. Sent before anything else so a report the page fires
+  // off its very first visibilitychange/focus handler still has an id to carry.
+  res.write(`event: watcher\ndata: ${JSON.stringify({ id: watcherId })}\n\n`);
+  // A tab arriving holds any banner back at once, which is what makes "a tab that drops
+  // and reconnects inside the grace window raises no banner" and "restarting the daemon
+  // under an open board is silent" (criterion 4) true without a reconnect ever being a
+  // case anything has to recognise. It does NOT end an absence: this Watcher is
+  // Attended-unknown until it reports (see `subscribe`), and it is the report a moment
+  // later -- `handleAttended`, below -- that decides whether the reviewer is actually
+  // here or whether this is a buried tab that merely found its socket again.
+  stranded.evaluate(id, target);
 
   const heartbeat = setInterval(() => {
     try { res.write(': heartbeat\n\n'); } catch { /* connection is gone; cleanup below handles it */ }
@@ -1060,7 +1852,13 @@ function handleEvents(req, res, id, home, sse) {
 
   const cleanup = () => {
     clearInterval(heartbeat);
-    sse.unsubscribe(id, res);
+    sse.unsubscribe(id, watcherId);
+    // The disconnect hook: this Watcher is gone, so ask again whether anything is still
+    // looking at this board. The last tab on a board with a round still awaited is
+    // criterion 2, and the grace is what keeps a mere reconnect from being one. Fires on
+    // req close, res close and res error alike, which is fine: a grace already counting
+    // down is left alone rather than re-armed, so calling this three times costs nothing.
+    stranded.evaluate(id, target);
   };
   req.on('close', cleanup);
   res.on('close', cleanup);
@@ -1209,6 +2007,11 @@ async function handlePomodoro(req, res, parts, pomo, home) {
  * handlers built in the same process — as the checks do — never share subscribers. */
 export function createRequestHandler({ home = boardHome(), secret: pinnedSecret, pomodoro } = {}) {
   const sse = createSseHub();
+  // Per-instance for the same reason, and built here rather than passed in because it
+  // reads THIS handler's hub: two daemons in one process must not announce for each
+  // other's boards. `requestHandler.close` below is how startServer hands it its own
+  // shutdown -- criterion 15's "stopping the daemon leaves none of them running".
+  const stranded = createStrandedWatch({ home, sse });
   // A caller-supplied instance (startServer's, below) is what makes pause/resume/reset/
   // settings and the boot-time clock share the ONE live setTimeout for this daemon —
   // two independent createPomodoro() instances against the same home would each arm
@@ -1243,7 +2046,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       `claude-board repository to generate one; an existing secret is never rotated.`
     );
   }
-  return async function requestHandler(req, res) {
+  const requestHandler = async function requestHandler(req, res) {
     try {
       const secret = currentSecret();
       if (!isLoopbackHost(req.headers.host)) {
@@ -1317,7 +2120,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'POST' && url.pathname === '/api/board') {
-        return await handlePostBoard(req, res, home, sse);
+        return await handlePostBoard(req, res, home, sse, stranded);
       }
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
@@ -1331,10 +2134,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
           return await handleWait(req, res, boardId, url, home, sse);
         }
         if (req.method === 'GET' && action === 'events') {
-          return handleEvents(req, res, boardId, home, sse);
+          return handleEvents(req, res, boardId, home, sse, stranded);
         }
         if (req.method === 'POST' && action === 'submit') {
-          return await handleSubmit(req, res, boardId, home, sse);
+          return await handleSubmit(req, res, boardId, home, sse, stranded);
+        }
+        if (req.method === 'POST' && action === 'attended') {
+          return await handleAttended(req, res, boardId, sse, stranded);
         }
       }
 
@@ -1353,6 +2159,14 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       return sendJson(res, status, { error: String((err && err.message) || err) });
     }
   };
+  // A property on the handler rather than a second return value: every caller this
+  // module has ever had takes a bare listener function, and the one thing that needs
+  // releasing is owned by a closure nothing else can reach. Idempotent, so a caller that
+  // never calls it (a check building a handler and dropping it) loses only the pending
+  // graces, which are unref'd timers, and the process-wide 'exit' hook still catches any
+  // click-serving child.
+  requestHandler.close = () => stranded.close();
+  return requestHandler;
 }
 
 /** Start listening on 127.0.0.1. Resolves once bound, with the actual port (useful
@@ -1380,10 +2194,18 @@ export function startServer({ home = boardHome(), port = Number(process.env.CLAU
   // `secret` is passed through UNRESOLVED on purpose: defaulting it to readSecret() here
   // would pin the value for the life of the process and undo S4's fix one layer down,
   // where it would be much harder to notice. Absent means "read it per request".
-  const server = http.createServer(createRequestHandler({ home, secret, pomodoro }));
+  const handler = createRequestHandler({ home, secret, pomodoro });
+  const server = http.createServer(handler);
 
   pomodoro.boot();
-  server.on('close', () => pomodoro.close());
+  // Both closed on 'close' rather than left to their own unrefs: the pomodoro clock so a
+  // restart against the same home never runs two live timers over one file, and the
+  // stranded watch so that stopping this daemon takes every click-serving process it
+  // spawned with it (criterion 15). See createStrandedWatch for the abrupt-exit half.
+  server.on('close', () => {
+    pomodoro.close();
+    handler.close();
+  });
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);

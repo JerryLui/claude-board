@@ -201,16 +201,19 @@ async function main() {
       }
     });
 
-    // Nine fields now, not six: the `sound` checkbox retired into three independent
-    // per-phase cue pickers (ADR.md entry 20). Three
+    // Ten fields now, not six: the `sound` checkbox retired into three independent
+    // per-phase cue pickers (ADR.md entry 20), and notifyRounds (ticket 03, ADR.md
+    // entry 58) joined notify as the round banner's own tick. Three
     // DIFFERENT names are chosen deliberately rather than three copies of one -- "each
     // remembers its own choice independently of the other two" is the criterion, and a
     // check that set all three alike would pass just as happily against a bug that
     // collapsed them into a single stored value. The names come off cueNames() rather
     // than being hardcoded, for the same reason src/pomodoro-widget.mjs builds its
     // options from it: this suite must not assert a 14-name list that is a property of
-    // the machine it runs on.
-    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all nine fields, the three cues independently', async () => {
+    // the machine it runs on. notify and notifyRounds are set OPPOSITE each other below
+    // for the same reason as check-pure.mjs's own arrangement: a bug that wired the two
+    // checkboxes together would show up as a mismatch, not a coincidental pass.
+    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all ten fields, the three cues and the two notify toggles independently', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
@@ -225,13 +228,14 @@ async function main() {
         form.querySelector('input[name="longBreakMin"]').value = '18';
         form.querySelector('input[name="longEvery"]').value = '5';
         form.querySelector('input[name="notify"]').checked = false;
+        form.querySelector('input[name="notifyRounds"]').checked = true;
         form.querySelector('select[name="cueWork"]').value = cueWork;
         form.querySelector('select[name="cueBreak"]').value = cueBreak;
         form.querySelector('select[name="cueLongBreak"]').value = cueLongBreak;
         form.dispatchEvent(new StandInEvent('submit'));
         await flush();
         const onDisk = readPomodoroDoc(home);
-        assert.deepEqual(onDisk.settings, { workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, cueWork, cueBreak, cueLongBreak }, 'all nine fields must actually persist on disk, exactly as entered');
+        assert.deepEqual(onDisk.settings, { workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, notifyRounds: true, cueWork, cueBreak, cueLongBreak }, 'all ten fields must actually persist on disk, exactly as entered');
         // Restated as its own assertion rather than left implicit in the deepEqual
         // above: the deepEqual would still pass if the three cues happened to be equal
         // AND the arrangement above had picked three equal names, so this pins the

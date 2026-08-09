@@ -182,15 +182,18 @@ browser ends up holding nothing — cleared cookies, a second profile, a differe
 the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone.
 
 **What the cookie may write.** The secret authorizes every write. The cookie authorizes a
-strictly smaller, closed set: `submit` plus the pomodoro actions named in
-`POMODORO_COOKIE_ACTIONS` (`src/server.mjs`). That set is a
+strictly smaller, closed set: `submit` and `attended` (`BOARD_COOKIE_ACTIONS`) plus the
+pomodoro actions named in `POMODORO_COOKIE_ACTIONS` (`src/server.mjs`). That set is a
 named list rather than a `/api/pomodoro/*` prefix match, so a pomodoro route added later is
 secret-only until someone adds it deliberately. What it means in practice, and it is more
 than the name suggests: a browser holding only the cookie can start, pause, resume and
 reset a work interval, skip or rewind a phase (`forward`, `restart`), trigger the
 notification that fires at an interval boundary (`notifyTest`), play a cue through
-`afplay` (`preview`), and — through `settings` — rewrite every duration along with both
-the notify and cue settings. The same-origin write check stands in front of all of it.
+`afplay` (`preview`), rewrite every duration along with both the notify and cue settings
+through `settings`, and report a board Attended or not (`attended`) — which is why that
+report has to be authenticated at all: an unauthenticated one could silence every Stranded
+banner the daemon would otherwise raise (ADR.md entry 58). The same-origin write check
+stands in front of all of it.
 
 **Guessing a board URL.** Board ids are 16 random bytes — but that entropy is not what
 protects the board. Every route requires a credential, reads included, so a guessed id

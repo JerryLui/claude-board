@@ -3318,23 +3318,27 @@ function namedFunctionBody(src, name) {
 
 check('mode detection is synchronous, from the document\'s own protocol -- never a network probe to the daemon', () => {
   assert.ok(/var readonly\s*=\s*\(location\.protocol === 'file:'\)/.test(ui));
-  // Exactly three fetches, all accounted for: the ordinary send bar's submit,
+  // Exactly four fetches, all accounted for: the ordinary send bar's submit,
   // the resync that catches this client up on anything broadcast while it was
-  // disconnected, and (SPEC_AWAITED.md ticket 03) submitPageRound's own submit
-  // -- a second POST to the same route, since an awaited page round's Send
+  // disconnected, (SPEC_AWAITED.md ticket 03) submitPageRound's own submit --
+  // a second POST to the same route, since an awaited page round's Send
   // control names its OWN round rather than sharing submitBoard's
-  // openRoundNumber()-targeted path (ticket 01's own note left for this one).
-  // Any fourth is a network call nobody has justified -- in particular, mode
-  // detection must never become a probe to the daemon.
+  // openRoundNumber()-targeted path (ticket 01's own note left for this one) --
+  // and (SPEC_STRANDED.md ticket 02) reportAttended's POST to /attended, the
+  // tab telling the daemon whether it is being looked at. Any fifth is a
+  // network call nobody has justified -- in particular, mode detection must
+  // never become a probe to the daemon.
   const fetchCalls = [...ui.matchAll(/fetch\(([^)]*)/g)].map(m => m[1]);
-  assert.equal(fetchCalls.length, 3, `expected exactly the two submit fetches and the resync, found ${fetchCalls.length}`);
+  assert.equal(fetchCalls.length, 4, `expected exactly the two submit fetches, the resync and the attended report, found ${fetchCalls.length}`);
   const submitCalls = fetchCalls.filter(c => c.includes('/submit'));
   assert.equal(submitCalls.length, 2, 'both submitBoard and submitPageRound must post to /submit');
   assert.ok(fetchCalls.some(c => c.includes("'/b/'")), 'one fetch must be the resync read of the board');
-  // All three live behind a readonly guard: the standalone file:// archive is
+  assert.ok(fetchCalls.some(c => c.includes('/attended')), 'one fetch must be the attended report');
+  // All four live behind a readonly guard: the standalone file:// archive is
   // network-free, period.
   assert.match(namedFunctionBody(ui, 'resync'), /if \(readonly\) return;/);
   assert.match(namedFunctionBody(ui, 'submitPageRound'), /^\s*if \(readonly\) return;/);
+  assert.match(namedFunctionBody(ui, 'reportAttended'), /if \(readonly \|\| !attendedWatcherId\) return;/);
 });
 
 check('every ui.mjs listener that mutates answer/comment state or submits guards on readonly', () => {
@@ -5710,22 +5714,19 @@ check('Discuss posts the same body as Send through one shared submit path, diffe
   assert.match(discussListener, /\breadonly\b/, 'Discuss must be inert in readonly mode');
 });
 
-check('Send also requests notification permission -- the one click guaranteed to be on a focused tab', () => {
-  // notifyRound's own requestPermission() call only fires from the hidden-tab
-  // branch, i.e. the one moment Chrome will NOT raise the prompt in the
-  // foreground (it queues it instead). Send is the fix: the tab is definitely
-  // focused there, so a reviewer stuck at "default" permission has a way in.
+check('Send never requests browser notification permission -- that entry point is gone with the browser notifier', () => {
+  // ADR.md entry 58: the daemon is the one notifier now; the page has nothing
+  // left to ask permission for. requestNotifyPermissionFromSend does not exist,
+  // and nothing on the Send/Cmd+Enter paths calls the browser's own
+  // requestPermission -- see the criterion-21 grep in check-notify-cleanup.mjs
+  // for the tree-wide version of this assertion.
+  assert.equal(namedFunctionBody(ui, 'requestNotifyPermissionFromSend'), null,
+    'requestNotifyPermissionFromSend must be deleted, not left as dead code');
   const listeners = listenerBodies(ui);
   const sendListener = listeners.find(b => /submitBoard\('send'\)/.test(b));
   assert.ok(sendListener, "expected the Send click listener");
-  assert.match(sendListener, /requestNotifyPermissionFromSend\(\)|requestPermission\(\)/, 'Send must request notification permission');
-  const permFn = namedFunctionBody(ui, 'requestNotifyPermissionFromSend');
-  assert.ok(permFn, 'expected a requestNotifyPermissionFromSend helper in src/ui.mjs');
-  assert.match(permFn, /if \(readonly\) return;/, 'must be inert in the file:// archive -- it requests nothing');
-  assert.match(permFn, /typeof Notification === 'undefined'/, 'must degrade silently where Notification does not exist');
-  assert.match(permFn, /Notification\.permission !== 'default'/, 'granted must be left alone and denied must never be re-prompted');
-  assert.match(permFn, /requestPermission\(\)/);
-  assert.ok(!/new Notification\(/.test(permFn), 'the Send path requests permission only -- creating a Notification stays notifyRound\'s job');
+  assert.ok(!/requestNotifyPermissionFromSend\(\)|requestPermission\(\)/.test(sendListener),
+    'Send must no longer request browser notification permission');
 });
 
 // --- P6: a queued comment gets its pin immediately ------------------------------
@@ -5881,11 +5882,12 @@ check('removePendingComment with an id that matches nothing queued is a no-op', 
   assert.deepEqual(emptied, [], 'removing from an already-empty queue is also a no-op, not a throw');
 });
 
-// --- P2 (page side): mark the tab and notify, never steal focus ---------------
+// --- P2 (page side): mark the tab, never steal focus ---------------
 //
-// The decision "Open once, then badge and notify": the page's own
-// amber tile carrying a bold ink numeral on the favicon, and a macOS
-// notification instead of a focus steal when the tab is open but unfocused.
+// The decision "Open once, then badge": the page's own amber tile carrying a
+// bold ink numeral on the favicon. The notification that used to fire beside
+// it is gone -- ADR.md entry 58 moved that job to the daemon, which the tab
+// now feeds through the attended report (below) instead of raising its own.
 // The title used to carry a "(n) " prefix; it lost it for good -- a numeral
 // already sitting in the tab mark makes that case weaker, not stronger, so
 // document.title stays untouched even though the mark itself counts again.
@@ -5898,27 +5900,23 @@ check('document.title never takes a pending-count prefix -- setTitleBadge is gon
   assert.ok(!/document\.title\s*=/.test(ui), 'nothing may assign document.title any more -- the tab stops counting');
 });
 
-check('an SSE round push marks the tab: favicon mark and a notification, no title write', () => {
+check('an SSE round push marks the tab: favicon mark, no title write, no notification call', () => {
   const push = namedFunctionBody(ui, 'applyRoundPush');
   assert.ok(push, 'expected applyRoundPush in src/ui.mjs');
   assert.match(push, /markPendingRound\(/, 'a round push must mark the tab -- the tab is never reopened, so the page has to say so itself');
   const mark = namedFunctionBody(ui, 'markPendingRound');
   assert.match(mark, /setFaviconBadge\(/);
-  assert.match(mark, /notifyRound\(/);
+  assert.ok(!/notifyRound\(/.test(mark), 'markPendingRound must no longer call a browser notifyRound -- ADR.md entry 58 moved that job to the daemon');
   assert.ok(!/setTitleBadge/.test(mark), 'marking a round pending must no longer touch the title');
   assert.match(mark, /if \(readonly\) return;/, 'marking must be inert in readonly mode');
-  // AC 9/AC 10 (SPEC_AWAITED.md ticket 04): the tab mark and the notification
-  // must agree on the same definition of "this one wants you" -- gated here,
-  // in markPendingRound, rather than in notifyRound alone, so a round nobody is
-  // waiting on (a fire-and-forget artifact posted without wait: true) neither
-  // marks the favicon nor fires a Notification. The shared predicate, not a
-  // bespoke re-check: reads roundIsAwaited off the SAME board this function's
-  // caller already advanced to the post-push state (applyRoundPush's own
-  // comment on why 'board' is reassigned before markPendingRound runs).
+  // AC 9 (SPEC_AWAITED.md ticket 04): the tab mark gates on whether the round
+  // is genuinely awaited -- reads roundIsAwaited off the SAME board this
+  // function's caller already advanced to the post-push state (applyRoundPush's
+  // own comment on why 'board' is reassigned before markPendingRound runs).
   assert.match(mark, /roundIsAwaited\(/, 'the gate must read the shared roundIsAwaited predicate (src/badge.mjs), not reinvent one');
 });
 
-check('markPendingRound: an awaited round marks the tab and notifies; a non-awaited one (including a legacy-shaped round with no awaited key) does neither', () => {
+check('markPendingRound: an awaited round marks the tab; a non-awaited one (including a legacy-shaped round with no awaited key) does not', () => {
   // Same ablation-through-a-real-scope technique as the favicon checks below
   // (drawFavicon/setFaviconBadge run through new Function against a stand-in) --
   // the extracted markPendingRound/roundIsAwaited/questionBlocks bodies are the
@@ -5930,12 +5928,11 @@ check('markPendingRound: an awaited round marks the tab and notifies; a non-awai
   assert.ok(markBody && awaitedBody && questionBody, 'expected markPendingRound, roundIsAwaited and questionBlocks in src/ui.mjs');
 
   function run(board, n) {
-    const calls = { setFaviconBadge: [], notifyRound: [] };
+    const calls = { setFaviconBadge: [] };
     const scope = new Function(
       'board', 'n', 'calls',
       `var readonly = false; var pendingRounds = 0;
        function setFaviconBadge(p) { calls.setFaviconBadge.push(p); }
-       function notifyRound(nn) { calls.notifyRound.push(nn); }
        function questionBlocks(b) {${questionBody}}
        function roundIsAwaited(b, r) {${awaitedBody}}
        function markPendingRound(n) {${markBody}}
@@ -5946,9 +5943,8 @@ check('markPendingRound: an awaited round marks the tab and notifies; a non-awai
     return { pendingRounds, calls };
   }
   // setFaviconBadge is stubbed rather than spliced in real: this check is about
-  // WHETHER markPendingRound reaches the favicon/notification calls at all, not
-  // about drawFavicon's own drawing, which the checks above already cover
-  // directly.
+  // WHETHER markPendingRound reaches the favicon call at all, not about
+  // drawFavicon's own drawing, which the checks above already cover directly.
 
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'mark-pending');
   mkdirSync(dir, { recursive: true });
@@ -5957,26 +5953,23 @@ check('markPendingRound: an awaited round marks the tab and notifies; a non-awai
   const asking = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
   let r = run(asking, 1);
   assert.equal(r.pendingRounds, 1, 'an awaited question round must mark the tab');
-  assert.deepEqual(r.calls.notifyRound, [1], 'and must notify');
 
   // A fresh page round posted WITHOUT wait: true -- awaited is stamped false.
   const plainPage = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'html', html: '<p>hi</p>' }] });
   assert.equal(plainPage.rounds[0].awaited, false, 'setup sanity: a page round without wait must mint awaited: false');
   r = run(plainPage, 1);
   assert.equal(r.pendingRounds, 0, 'a fire-and-forget artifact round must not mark the tab');
-  assert.deepEqual(r.calls.notifyRound, [], 'and must not notify -- nothing is waiting for a submit that will never come');
 
   // A fresh page round posted WITH wait: true -- awaited is stamped true.
   const awaitedPage = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'html', html: '<p>hi</p>' }], wait: true });
   assert.equal(awaitedPage.rounds[0].awaited, true, 'setup sanity: wait: true must mint awaited: true');
   r = run(awaitedPage, 1);
   assert.equal(r.pendingRounds, 1, 'an awaited page round must mark the tab');
-  assert.deepEqual(r.calls.notifyRound, [1], 'and must notify');
 
   // Legacy shape: a round record with NO awaited key at all (undefined, not
   // false) -- the exact shape a board persisted before ADR.md entry 45 carries.
   // A question block still present must fall back to the OLD shape-based
-  // inference and still mark/notify, or an amend arriving live on an old open
+  // inference and still mark, or an amend arriving live on an old open
   // question round would silently stop marking the tab it always used to.
   const legacyAsking = createBoard({ title: 'x', cwd: dir, blocks: [{ kind: 'question', prompt: 'q', widget: 'text' }] });
   delete legacyAsking.rounds[0].awaited;
@@ -5984,7 +5977,6 @@ check('markPendingRound: an awaited round marks the tab and notifies; a non-awai
   assert.ok(!('awaited' in legacyAsking.rounds[0]), 'setup sanity: the key must be genuinely absent, not merely undefined-valued');
   r = run(legacyAsking, 1);
   assert.equal(r.pendingRounds, 1, 'a legacy round with a question block must still mark the tab');
-  assert.deepEqual(r.calls.notifyRound, [1], 'and still notify -- this is the exact regression the shared roundIsAwaited fallback exists to prevent');
 
   // Legacy shape, page round: no awaited key AND no question block -- the old
   // inference reads this as not-awaited too, so it must stay silent, the same
@@ -5994,7 +5986,6 @@ check('markPendingRound: an awaited round marks the tab and notifies; a non-awai
   delete legacyPage.rounds[0].awaitDeadline;
   r = run(legacyPage, 1);
   assert.equal(r.pendingRounds, 0, 'a legacy page round with no question block must not mark the tab');
-  assert.deepEqual(r.calls.notifyRound, [], 'and must not notify');
 });
 
 check('the favicon mark draws the page\'s own amber tile with a bold ink numeral -- no inverted tile anywhere', () => {
@@ -6163,34 +6154,19 @@ check('the tab mark and the in-page mark are one drawing, at two sizes', () => {
   assert.match(head[1], /width="36" height="36"/);
 });
 
-check('the notification fires only when the tab is unfocused, degrades silently, and never steals focus', () => {
-  const notify = namedFunctionBody(ui, 'notifyRound');
-  assert.ok(notify, 'expected notifyRound in src/ui.mjs');
-  assert.match(notify, /typeof Notification === 'undefined'/, 'must degrade silently where Notification does not exist');
-  assert.match(notify, /document\.hidden/, 'a visible, focused tab already shows the round -- no notification');
-  assert.match(notify, /hasFocus/);
-  assert.match(notify, /if \(!unfocused\) return;/);
-  assert.match(notify, /Notification\.permission === 'denied'/, 'a denied permission must never be re-prompted');
-  assert.match(notify, /requestPermission\(\)/, 'permission is requested lazily, on the first round that would notify');
-  assert.match(notify, /if \(readonly\) return;/, 'the standalone file:// archive must never ask for notification permission');
-  // The tag carries the round number: round 3 must not silently replace round
-  // 2's entry in Notification Center. Only a genuine re-delivery of the SAME
-  // round (same n) should collapse into one.
-  assert.match(notify, /tag: 'claude-board-' \+ boardId \+ '-' \+ n/, 'the notification tag must be unique per round, not per board');
-  // A click on the notification brings the tab forward, lands on the round that
-  // needs an answer, and dismisses itself -- the one deliberate exception to
-  // "never steal focus" (see below). The order is asserted, not just the three
-  // calls: scrolling a window that has not been brought forward yet is what the
-  // reviewer would experience as the jump silently not happening.
-  assert.match(notify, /\.onclick\s*=\s*function\s*\(\)\s*\{\s*window\.focus\(\);\s*jumpToOpenRound\(\);\s*\S*\.close\(\);?\s*\}/, 'a click on the notification must focus the tab, jump to the open round, then dismiss itself -- in that order');
-  // The focus steal is exactly what this replaces: nothing in the client script
-  // may pull the window forward UNBIDDEN. "Never" means never unbidden, not
-  // never at all -- a click on the notification IS the reviewer asking, which
-  // is why the assertion below allows exactly one occurrence, and only inside
-  // the click handler just asserted above.
+check('the browser notifier is gone: no notifyRound, no Notification API, no unbidden window.focus(', () => {
+  // ADR.md entry 58: one notifier for a round, and it is the daemon's. The
+  // page-side notifyRound, its permission dance, and the click handler that
+  // used to steal focus back are all deleted outright, not left unused --
+  // see the criterion-21 grep in check-notify-cleanup.mjs for the tree-wide
+  // assertion this narrows to src/ui.mjs's own client script.
+  assert.equal(namedFunctionBody(ui, 'notifyRound'), null, 'the browser-side notifyRound must be deleted, not left as dead code');
+  assert.ok(!/\bNotification\b/.test(ui), 'no reference to the browser Notification API may remain in the client script');
+  // window.focus( used to appear exactly once, inside notifyRound's own click
+  // handler -- the one deliberate exception to "never steal focus". With that
+  // handler gone, nothing may pull the window forward at all any more.
   const focusCalls = ui.match(/window\.focus\(/g) || [];
-  assert.equal(focusCalls.length, 1, 'window.focus( must appear exactly once in the whole file -- inside the notification click handler and nowhere else');
-  assert.match(notify, /window\.focus\(\)/, 'the sole window.focus( call in the file must live inside notifyRound (the click handler built above)');
+  assert.equal(focusCalls.length, 0, 'window.focus( must not appear anywhere in the client script -- its one caller, the notification click handler, is deleted');
 });
 
 check('coming back to the tab clears the mark', () => {
@@ -7471,7 +7447,7 @@ const CUE_A = ALL_CUES[1] || NO_CUE;
 const CUE_B = ALL_CUES[2] || NO_CUE;
 const CUE_C = ALL_CUES[3] || NO_CUE;
 
-const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, cueWork: CUE_A, cueBreak: CUE_B, cueLongBreak: NO_CUE };
+const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, notifyRounds: true, cueWork: CUE_A, cueBreak: CUE_B, cueLongBreak: NO_CUE };
 
 /** Parse the real renderIndexPage() output and run the real indexScript against
  * it, capturing every setInterval registration by hand (there are three: refresh's
@@ -7504,7 +7480,7 @@ function fetchPomodoroFn(intervals) {
   return matches[matches.length - 1].fn;
 }
 
-check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all eight settings fields present', () => {
+check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all nine settings fields present', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<div class="pomodoro-widget" id="pomodoro-widget">/);
   assert.match(html, /<span class="pomodoro-status" id="pomodoro-status">/);
@@ -7517,7 +7493,7 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   assert.match(html, /id="pomodoro-toggle"[^>]*aria-label="Start pomodoro"/, 'an icon-only control must name the action it performs');
   assert.match(html, /<details class="pomodoro-settings" id="pomodoro-settings">/, 'the settings panel must be a <details> -- collapsed by default with no JS required to open it');
   assert.match(html, /<form class="pomodoro-settings-form" id="pomodoro-settings-form">/);
-  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'cueWork', 'cueBreak', 'cueLongBreak']) {
+  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'notifyRounds', 'cueWork', 'cueBreak', 'cueLongBreak']) {
     assert.match(html, new RegExp(`name="${field}"`), `settings form must carry a ${field} field`);
   }
   // The retired boolean ("not kept as a master mute") must be
@@ -8109,13 +8085,16 @@ await checkAsync('pomodoro widget: reset needs two clicks -- the first only rela
   }
 });
 
-await checkAsync('pomodoro widget: submitting the settings form posts all eight fields to /api/pomodoro/settings, and the response is applied back into the form', async () => {
+await checkAsync('pomodoro widget: submitting the settings form posts all nine fields to /api/pomodoro/settings, and the response is applied back into the form', async () => {
   const nowMs = Date.now();
   const initial = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   // Rotated relative to POMODORO_SETTINGS (CUE_A/CUE_B/None), not just three
   // arbitrary new names -- proves each of the three fields round-trips its
-  // OWN new value rather than the write path silently mixing them up.
-  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, cueWork: CUE_B, cueBreak: NO_CUE, cueLongBreak: CUE_C };
+  // OWN new value rather than the write path silently mixing them up. notifyRounds is
+  // flipped to false OPPOSITE notify (which goes false too here) so a bug that wired
+  // the two checkboxes to the same underlying value, rather than two independent ones,
+  // would still show up as a mismatch against POMODORO_SETTINGS' own notifyRounds: true.
+  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, notifyRounds: false, cueWork: CUE_B, cueBreak: NO_CUE, cueLongBreak: CUE_C };
   const saved = { ...initial, settings: savedSettings };
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? saved : initial), async () => {
@@ -8127,6 +8106,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eight 
     form.querySelector('input[name="longBreakMin"]').value = '20';
     form.querySelector('input[name="longEvery"]').value = '3';
     form.querySelector('input[name="notify"]').checked = false;
+    form.querySelector('input[name="notifyRounds"]').checked = false;
     form.querySelector('select[name="cueWork"]').value = CUE_B;
     form.querySelector('select[name="cueBreak"]').value = NO_CUE;
     form.querySelector('select[name="cueLongBreak"]').value = CUE_C;
@@ -8136,7 +8116,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eight 
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'submitting must POST');
   assert.equal(post.url, '/api/pomodoro/settings');
-  assert.deepEqual(post.body, savedSettings, 'all eight settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, cueWork, cueBreak, cueLongBreak');
+  assert.deepEqual(post.body, savedSettings, 'all nine settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, notifyRounds, cueWork, cueBreak, cueLongBreak');
   // Applied back, not merely echoed: re-reading the form after the response
   // shows the daemon's own saved value, proving the round trip is real -- for
   // both a duration field and one cue field (each picker is its
@@ -8159,6 +8139,21 @@ await checkAsync('pomodoro widget: the three cue pickers sync independently from
     assert.equal(form.querySelector('select[name="cueWork"]').value, CUE_A);
     assert.equal(form.querySelector('select[name="cueBreak"]').value, CUE_B);
     assert.equal(form.querySelector('select[name="cueLongBreak"]').value, NO_CUE);
+  });
+});
+
+await checkAsync('pomodoro widget: the round-banner tick syncs from settings.notifyRounds independently of Notify (criterion 17)', async () => {
+  const nowMs = Date.now();
+  // notify ON, notifyRounds OFF -- the two disagree, so a sync bug that read one
+  // checkbox off the other's value (or off a single shared field) shows up here as a
+  // mismatch, not a coincidental pass.
+  const doc = { settings: { ...POMODORO_SETTINGS, notify: true, notifyRounds: false }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const form = document.querySelector('form#pomodoro-settings-form');
+    assert.equal(form.querySelector('input[name="notify"]').checked, true, 'notify must sync to its own saved value');
+    assert.equal(form.querySelector('input[name="notifyRounds"]').checked, false, 'notifyRounds must sync to ITS OWN saved value, not follow notify');
   });
 });
 
@@ -8222,6 +8217,21 @@ await checkAsync('pomodoro widget: unticking Notify fires nothing -- a banner sa
     notify.dispatchEvent(new StandInEvent('change'));
   });
   assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/notifyTest'), []);
+});
+
+await checkAsync('pomodoro widget: ticking Round banners fires no test banner -- that audition stays Notify\'s alone (criterion 18: not one per kind)', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    document.querySelector('details#pomodoro-settings').open = true;
+    const notifyRounds = document.querySelector('form#pomodoro-settings-form input[name="notifyRounds"]');
+    notifyRounds.checked = true;
+    notifyRounds.dispatchEvent(new StandInEvent('change'));
+  });
+  assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/notifyTest'), [], 'a second on/off tick must not gain a second way to fire the one test banner');
+  assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'ticking Round banners must not save anything either -- Save is still the write');
 });
 
 await checkAsync('pomodoro widget: selecting None previews it like any other value -- no special-cased silence on the client, the server owns "plays nothing"', async () => {

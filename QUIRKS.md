@@ -980,39 +980,69 @@ for anyone whose clone lives outside those three directories.
 
 ## macOS notifications and sound
 
-### The board's notification works; macOS Focus is what hides it
+### The board's banner works; macOS Focus is what hides it
 
-`notifyRound` (`src/ui.mjs`) fires on an SSE round push into a hidden or unfocused
-tab. When a reviewer reports it "never fires", check the OS before the code — Chrome keeps
-the receipts and they settle it in one read:
-
-    ~/Library/Application Support/Google/Chrome/Default/Preferences
-
-`profile.content_settings.exceptions.notifications` holds the grant per origin
-(`"setting": 1` is allow), and `notification_interactions` holds a per-day
-`display_count`. A nonzero `display_count` with no interactions means Chrome displayed the
-notification and the reviewer never saw it — which is Focus, not JavaScript.
+`notifyRound` (`src/notify.mjs`) fires on the daemon's own stranded rule: a round left
+awaited with no Watcher looking at its board, after the fifteen-second grace (ADR.md
+entries 55, 58; CONTEXT.md "Stranded"). When a reviewer reports it "never fires", check the
+OS before the code.
 
 Focus config lives in `~/Library/DoNotDisturb/DB/`: `ModeConfigurations.json` for the
 schedules, `ModeConfigurationsSecure.json` for the per-mode allow-list, and
 `Assertions.json` for whether a mode is active *right now* (empty file = none active). A
-mode in allow-list mode that does not list Google Chrome routes every board notification
-straight to Notification Center with no banner and no sound.
+mode in allow-list mode that does not list the notifying app routes every board banner
+straight to Notification Center with no banner and no sound — indistinguishable from the
+banner never having fired at all unless you go look.
 
-Two things that will mislead you while chasing this:
+One thing that will mislead you while chasing this: which app belongs on that allow-list
+depends on which path fired. A daemon running from an installed bundle posts as
+claude-board's own `CFBundleExecutable` and gets its own row in System Settings >
+Notifications; a daemon running from the clone (no bundle) falls back to `osascript` and
+posts as Script Editor instead (`src/notify.mjs`, `bin/notify.m` — see "A bundle's
+notification identity belongs to `CFBundleExecutable`" below). Allow-listing one does
+nothing for the other, and there is no longer a per-origin or per-browser-profile grant to
+chase — the browser side that used to need one is gone (ADR.md entry 58).
 
-- Permission is **per origin**. `http://127.0.0.1:7391`, `http://localhost:7391` and
-  `http://board.localhost:7391` are three separate grants, and the daemon reflects the
-  `Host` header into the board URL, so which one you get depends on how the tab was
-  opened. It is also **per Chrome profile** — a grant on `Default` does nothing for
-  `Profile 1`.
-- `notifyRound` requests permission from the hidden/unfocused branch, the one moment
-  Chrome will not raise a foreground prompt; Chrome queues it until the tab is next shown.
-  A reviewer who dismisses that queued prompt is stuck at `default`.
+Verifying it end to end takes a board nobody is Attending: post a round to a board with no tab open
+on it, or close the only tab watching one, then wait past the fifteen-second grace. A board
+a reviewer is actually looking at correctly raises nothing, so testing with the board in
+front of you proves the wrong thing.
 
-Verifying it end to end takes a hidden tab: post a second round to an existing board while
-the reviewer is in another app. A round pushed into a visible, focused tab correctly
-notifies nothing, so testing with the board in front of you proves the wrong thing.
+### A top-level board field you add is served into the page, so `writeBoard` without `writePage` breaks the archive
+
+`renderBoardPage` spreads the whole board into `<script id="board-data">`, and
+`test/check-http.mjs` pins that the served page, `pages/<id>.html` on disk and a fresh
+render of the stored JSON are all byte-identical — which is what makes an archived board
+open from Finder with no daemon. So a field written by anything that does NOT also
+re-render the page silently breaks that invariant: the served markup grows a key the
+file on disk does not have.
+
+The stranded rule hit this (`strandedBanner`, written from a timer callback, where
+re-rendering a multi-megabyte page board would be absurd). The fix is `stripDaemonOnly`
+in `src/board.mjs` — a daemon-only field is removed from the client payload at both
+places one is built (`renderBoardPage`, and `resolveBoardComments` for the SSE pushes).
+Add a durable field the daemon writes outside a request and you want the same treatment,
+or `writePage` beside every `writeBoard`.
+
+The trap is that the suite will not tell you: `test/run.mjs` pushes the stranded grace out
+of reach for every other check, so `npm run check` stays green and only
+`node test/check-http.mjs` run alone with a live grace fails.
+
+### Any check that boots a daemon will raise real banners unless the stranded grace is pushed out of reach
+
+Since the stranded rule landed (`createStrandedWatch`, `src/server.mjs`), a board with an
+open awaited round and nobody watching it is announced with a real `osascript` banner after
+fifteen seconds — and "post an awaited round, then walk away" is what almost every check
+that boots a daemon does. Measured, not assumed: `node test/check-http.mjs` on its own, with
+a 200ms grace and a stub counting invocations, produced **nine** banners.
+
+`test/run.mjs` therefore sets `CLAUDE_BOARD_STRANDED_GRACE_MS` to a day for the whole suite,
+so `npm run check` is silent. **A check run on its own does not get that**, so a single
+`node test/check-<whatever>.mjs` that keeps a daemon alive past fifteen seconds will put
+banners on your screen. The checks that mean to exercise the rule
+(`check-stranded.mjs`, `check-notify-round.mjs`, `check-notify-click.mjs`) set the variable
+themselves and stand a fake `osascript` ahead of the real one on `PATH`; anything else that
+grows a daemon and a long life wants the same two lines.
 
 ### A bundle's notification identity belongs to `CFBundleExecutable`, and to nothing else in it
 

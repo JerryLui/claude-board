@@ -59,22 +59,45 @@
  * launcher_paths.h for where the compiled-in values come from.
  *
  * One thing this binary does besides supervise node: `claude-board --notify <phase>
- * [cue]` posts the pomodoro boundary notification and exits, without forking anything.
- * That mode exists here, in the file whose whole subject is not spending the grant,
- * because a notification's name, icon and System Settings row come from the bundle of
- * the process that posts it and from nothing else — and macOS refuses to let any
- * executable other than the bundle's own CFBundleExecutable claim that identity, so a
- * helper binary beside this one could not do it (bin/notify.m's header, and QUIRKS.md,
- * record the measurement). The daemon spawns this mode; launchd never does. What argv
- * chooses for the phase is one index into MESSAGES below, never a string that reaches
- * the screen — see NOTIFY_FLAG. The optional third argument names the cue (ADR.md entry
- * 20) — see is_safe_cue_name below for why that one is a character
- * filter rather than a second closed table: the cue vocabulary is whatever
- * /System/Library/Sounds holds on THIS machine, read live by src/cues.mjs (there is no
- * install-time snapshot of it -- QUIRKS.md "soundNamed: searches /System/Library/Sounds
- * and does NOT search the app bundle" is why a staged copy was dropped), which this
- * binary has no compiled-in list of, so "closed set" here means "argv cannot be anything
- * but a bare sound name" rather than "argv must be one of N literal strings".
+ * [arg]` posts a notification and exits, without forking anything. That mode exists
+ * here, in the file whose whole subject is not spending the grant, because a
+ * notification's name, icon and System Settings row come from the bundle of the process
+ * that posts it and from nothing else — and macOS refuses to let any executable other
+ * than the bundle's own CFBundleExecutable claim that identity, so a helper binary
+ * beside this one could not do it (bin/notify.m's header, and QUIRKS.md, record the
+ * measurement). The daemon spawns this mode; launchd never does. What argv chooses for
+ * the phase is one index into MESSAGES below, never a string that reaches the screen —
+ * see NOTIFY_FLAG. Each row carries its own title (SPEC_STRANDED.md: "Pomodoro" beside
+ * "Board") rather than this file compiling in one constant the way bin/notify.m's
+ * kTitle used to.
+ *
+ * The optional third argument, argv[3], means one of two things depending on which row
+ * argv[2] selected — a row never uses both. For a fixed-message row (every pomodoro
+ * phase, plus "test") it names a cue (ADR.md entry 20): see is_safe_cue_name below for
+ * why that one is a character filter rather than a second closed table — the cue
+ * vocabulary is whatever /System/Library/Sounds holds on THIS machine, read live by
+ * src/cues.mjs (there is no install-time snapshot of it -- QUIRKS.md "soundNamed:
+ * searches /System/Library/Sounds and does NOT search the app bundle" is why a staged
+ * copy was dropped), which this binary has no compiled-in list of, so "closed set" here
+ * means "argv cannot be anything but a bare sound name" rather than "argv must be one of
+ * N literal strings". For a row with a `format` (currently just "round"), argv[3] fills
+ * that row's one format slot instead — the project folder name the daemon derives with
+ * src/indexpage.mjs's `folderName` (ADR.md entry 56) — gated by is_safe_folder_name,
+ * shaped exactly like is_safe_cue_name for the identical reason: this binary holds the
+ * reader's Documents grant and the plist that spawns it is user-writable, so the least
+ * of what argv can put on screen is the goal, not the exception. An argument that fails
+ * either filter is treated as absent rather than rejected — a format row falls back to
+ * its own `unnamed` sentence, exactly as ADR.md entry 56 decided.
+ *
+ * Three more optional arguments belong to the format row alone, and turn the notify mode
+ * from fire-and-exit into something that lives for minutes: argv[4] is the board URL a
+ * click opens, argv[5] is the daemon's own bound port, which that URL must name, and
+ * argv[6] is how many seconds this process may wait for that click (ADR.md entry 57).
+ * All three are filtered here — is_board_url, parse_port and click_seconds_from —
+ * before any of them reaches bin/notify.m, and none carries a credential: the URL is a
+ * plain board URL and the browser's own session is what authorizes it, which is the
+ * whole reason a click minutes later is servable at all without putting a secret on a
+ * command line. Absent or unsafe, the banner still fires and simply is not clickable.
  */
 #include <ctype.h>
 #include <errno.h>
@@ -135,6 +158,7 @@ static const char *const PASSTHROUGH_NAMES[] = {
   "CLAUDE_BOARD_PORT",
   "CLAUDE_BOARD_SHUTDOWN_MS",
   "CLAUDE_BOARD_SSE_HEARTBEAT_MS",
+  "CLAUDE_BOARD_STRANDED_GRACE_MS",
   "CLAUDE_BOARD_TIMEOUT_MS",
   "CLAUDE_BOARD_HANDOFF_TTL_MS",
   "TMPDIR",
@@ -167,11 +191,20 @@ static int build_passthrough_entry(const char *name, char **out) {
  * Implemented in bin/notify.m, compiled into this same binary (see this file's header
  * for why it cannot be a separate executable). Declared here rather than in a header:
  * there is exactly one caller and exactly one definition, both compiled together by the
- * one `cc` invocation in install.sh, and two arguments are few enough to check by eye
- * against the definition. `body == NULL` requests authorization and posts nothing.
- * `cue_name == NULL` posts with no sound, exactly as a phase set to `None` in
- * src/cues.mjs intends. Returns 0 on success. */
-extern int cb_notify(const char *body, const char *cue_name);
+ * one `cc` invocation in install.sh, and six arguments are few enough to check by eye
+ * against the definition. `body == NULL` requests authorization and posts nothing, and
+ * `title` is unused on that call. `cue_name == NULL` with `use_default_sound == 0` posts
+ * with no sound at all, exactly as a phase set to `None` in src/cues.mjs intends;
+ * `use_default_sound` nonzero plays the system default instead, for a row with no cue of
+ * its own.
+ *
+ * `board_url` non-NULL is what turns this from fire-and-exit into the click-serving mode
+ * of ADR.md entry 57: the notification carries an action category, this process stays
+ * alive to serve one click, and `click_seconds` bounds how long it will wait (ignored
+ * when `board_url` is NULL). It has already passed is_board_url below -- notify.m does
+ * no filtering of its own. Returns 0 on success. */
+extern int cb_notify(const char *title, const char *body, const char *cue_name, int use_default_sound,
+                     const char *board_url, int click_seconds);
 
 static const char *const NOTIFY_FLAG = "--notify";
 static const char *const NOTIFY_AUTHORIZE_FLAG = "--notify-authorize";
@@ -200,18 +233,249 @@ static int is_safe_cue_name(const char *s) {
   return 1;
 }
 
-/* The phases this binary will display something for, paired with the exact sentence it
- * displays. A closed table, matching src/notify.mjs's MESSAGES on the other side of the
- * spawn, and for the identical reason stated there: the string that reaches the screen is
- * a literal out of this array, never a byte of argv. argv chooses WHICH entry, and an
- * unrecognised phase chooses none — it is not a format string, a fallback, or a default.
- * This binary holds the reader's Documents grant, and the plist that spawns it is
- * user-writable; "the notification body is free text from the command line" is exactly
- * the kind of thing that should stay impossible here. */
-static const struct { const char *phase; const char *message; } MESSAGES[] = {
-  { "work",      "Work interval started" },
-  { "break",     "Break started" },
-  { "longBreak", "Long break started" },
+/* The project-folder argument's own filter, for a row whose MESSAGES entry below sets
+ * `format` -- ADR.md entry 56. Shaped exactly like is_safe_cue_name above rather than
+ * sharing it: the two gate unrelated arguments (a sound name off this machine's
+ * /System/Library/Sounds against a folder name off this reader's filesystem) that only
+ * happen to want the same character-level rule today, and a future divergence between
+ * them should not have to fight a shared function to happen. Longer than
+ * MAX_CUE_NAME_LEN because a project folder name runs longer than a sound name in
+ * practice; matched by src/notify.mjs's own MAX_FOLDER_NAME_LEN so the two mirrored
+ * tables agree on every input, not just on the ones under 64 characters. */
+#define MAX_FOLDER_NAME_LEN 80
+static int is_safe_folder_name(const char *s) {
+  size_t len = strlen(s);
+  if (len == 0 || len >= MAX_FOLDER_NAME_LEN) return 0;
+  if (!isalnum((unsigned char)s[0])) return 0;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (!(isalnum(c) || c == ' ' || c == '_' || c == '-')) return 0;
+  }
+  return 1;
+}
+
+/* --- The click target -----------------------------------------------------------
+ *
+ * ADR.md entry 57: a round's banner is clickable, and what a click opens is a plain
+ * board URL of THIS daemon -- no credential in it, and none anywhere else on this
+ * command line either (a fresh handoff cannot be minted for a click that happens
+ * minutes later without a long-lived credential, and one in argv is exactly what this
+ * file exists to refuse). The browser's own long-lived session is what authorizes the
+ * page; a browser that has never held one lands on the refusal page src/render.mjs
+ * already renders, naming src/handoff.mjs's recoveryCommand.
+ *
+ * That makes this filter the whole of the check on argv[4] before a URL is handed to
+ * LaunchServices, which will act on ANY scheme it can resolve -- `file:`, an app's
+ * custom scheme, a remote `https:` phishing page. It is deliberately a hand-written
+ * scanner rather than NSURL's parse-then-inspect: NSURL accepts a great deal this
+ * daemon never emits (userinfo, percent-escapes, backslashes, a second authority),
+ * and every one of those is a place where what C decides and what a browser does can
+ * differ. What is accepted here is exactly the shape src/server.mjs's boardUrl()
+ * builds:
+ *
+ *     http://<loopback host>[:<port>]/b/<board id>[#<fragment>]
+ *
+ * with the host set mirroring isLoopbackHost() there (localhost, 127.0.0.1, [::1], or
+ * a subdomain of the reserved .localhost TLD), the path exactly one `/b/<id>` segment,
+ * and the fragment the board page's own `#open-round` sentinel (src/indexpage.mjs) --
+ * which is what makes the click land on the round still waiting rather than on round 1.
+ * Anything else is treated as no URL at all: the banner still fires, it just cannot be
+ * clicked, the same degradation an unsafe folder name gets.
+ *
+ * The port is checked too, against `expected_port`, which the daemon passes as its own
+ * bound port (argv[5], required -- no port, no click). Loopback alone is not enough:
+ * every service on this machine shares it, so a URL naming another one would have a
+ * genuine claude-board banner open somebody else's page. The daemon knows the port it
+ * bound and already fills this argv, so there is nothing to read out of the environment
+ * for it -- which matters, since the environment is the one place a rewritable plist
+ * reaches and this file therefore never trusts. */
+#define MAX_BOARD_URL_LEN 200
+
+/* Case-insensitive compare of a bounded span against a lowercase literal. Host names
+ * are case-insensitive and src/server.mjs lowercases the Host header before its own
+ * check, so a reviewer who typed `LOCALHOST` into the URL bar must not silently lose
+ * the click. */
+static int span_equals_ci(const char *s, size_t len, const char *lit) {
+  if (strlen(lit) != len) return 0;
+  for (size_t i = 0; i < len; i++) {
+    if (tolower((unsigned char)s[i]) != (unsigned char)lit[i]) return 0;
+  }
+  return 1;
+}
+
+/* Mirrors src/server.mjs's isLoopbackHost for the two forms that can appear unbracketed.
+ * `.localhost` is admitted for the reason stated there: RFC 6761 reserves the TLD, so no
+ * attacker can own a name under it. */
+static int is_loopback_host(const char *host, size_t len) {
+  if (span_equals_ci(host, len, "localhost")) return 1;
+  if (span_equals_ci(host, len, "127.0.0.1")) return 1;
+  static const char SUFFIX[] = ".localhost";
+  size_t suffix_len = sizeof(SUFFIX) - 1;
+  if (len <= suffix_len) return 0;
+  if (!span_equals_ci(host + len - suffix_len, suffix_len, SUFFIX)) return 0;
+  if (!isalnum((unsigned char)host[0])) return 0;
+  for (size_t i = 0; i < len - suffix_len; i++) {
+    unsigned char c = (unsigned char)host[i];
+    if (!(isalnum(c) || c == '-' || c == '.')) return 0;
+  }
+  return 1;
+}
+
+/* The daemon's own bound port, from argv. 0 for anything that is not a port, which
+ * is_board_url below then refuses every URL against -- a malformed port must cost the
+ * click rather than skip the check it exists to make. */
+static int parse_port(const char *s) {
+  if (s == NULL) return 0;
+  size_t len = strlen(s);
+  if (len == 0 || len > 5) return 0;
+  int value = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (!isdigit((unsigned char)s[i])) return 0;
+    value = value * 10 + (s[i] - '0');
+  }
+  if (value < 1 || value > 65535) return 0;
+  return value;
+}
+
+static int is_board_url(const char *s, int expected_port) {
+  if (expected_port < 1 || expected_port > 65535) return 0;
+  size_t len = strlen(s);
+  if (len == 0 || len >= MAX_BOARD_URL_LEN) return 0;
+  /* Before a single byte is parsed: printable ASCII only. A space, a tab, a control
+   * character or a UTF-8 byte in a URL is either an encoding trick or a mistake, and
+   * neither is something this daemon ever emits. */
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c <= 0x20 || c >= 0x7f) return 0;
+  }
+
+  static const char SCHEME[] = "http://";
+  size_t scheme_len = sizeof(SCHEME) - 1;
+  /* Not case-insensitive, and http only: this daemon serves plain http on loopback and
+   * emits its own URLs lowercase, so there is nothing legitimate to be tolerant of. */
+  if (strncmp(s, SCHEME, scheme_len) != 0) return 0;
+  const char *p = s + scheme_len;
+
+  if (*p == '[') {
+    /* A bracketed literal must be the whole host, exactly as src/server.mjs requires of
+     * the Host header -- `[::1]@evil.com` and `[::1].evil.com` are the cases that check
+     * was tightened for, and they die here on the same rule: everything after `]` has to
+     * be a port or nothing. */
+    const char *close = strchr(p, ']');
+    if (close == NULL) return 0;
+    if (!span_equals_ci(p + 1, (size_t)(close - (p + 1)), "::1")) return 0;
+    p = close + 1;
+  } else {
+    const char *host = p;
+    while (*p != '\0' && *p != ':' && *p != '/') p++;
+    if (!is_loopback_host(host, (size_t)(p - host))) return 0;
+  }
+
+  /* 80 is the port a URL carrying none names, and the Host header carries none on port
+   * 80 -- so the comparison below is against a real number in both spellings rather than
+   * against "absent", which would have been a hole shaped exactly like the one this
+   * check closes. */
+  int port = 80;
+  if (*p == ':') {
+    p++;
+    size_t digits = 0;
+    port = 0;
+    while (isdigit((unsigned char)*p)) {
+      port = port * 10 + (*p - '0');
+      p++;
+      digits++;
+    }
+    if (digits == 0 || digits > 5) return 0;
+  }
+  if (port != expected_port) return 0;
+
+  /* Exactly one path segment under /b/, so `/b/../../etc`, `/api/...` and a query
+   * string all fail: `.` and `?` are not in the accepted id character set. */
+  static const char PREFIX[] = "/b/";
+  size_t prefix_len = sizeof(PREFIX) - 1;
+  if (strncmp(p, PREFIX, prefix_len) != 0) return 0;
+  p += prefix_len;
+  size_t id_len = 0;
+  while (*p != '\0' && *p != '#') {
+    unsigned char c = (unsigned char)*p;
+    if (!(isalnum(c) || c == '_' || c == '-')) return 0;
+    p++;
+    id_len++;
+  }
+  if (id_len == 0) return 0;
+  if (*p == '\0') return 1;
+
+  /* The fragment, if there is one: the board page's own sentinel (`#stranded-round`),
+   * which src/ui.mjs resolves to the oldest round still waiting. Not `#open-round`, the
+   * index's live-row sentinel, which resolves to the newest open one. A name, never a
+   * path -- this check is on the shape, so either spelling crosses and only the daemon
+   * decides which is sent. */
+  p++;
+  size_t fragment_len = 0;
+  while (*p != '\0') {
+    unsigned char c = (unsigned char)*p;
+    if (!(isalnum(c) || c == '-' || c == '_')) return 0;
+    p++;
+    fragment_len++;
+  }
+  return fragment_len > 0;
+}
+
+/* How long the click-serving process may live, in seconds, from argv[5].
+ *
+ * The daemon sends the round's own remaining wait, because that is the moment after
+ * which a click has nothing left to open (ADR.md entry 50: the deadline passing clears
+ * `awaited`). It is a backstop and not the mechanism -- SPEC_STRANDED.md criterion 15
+ * makes the daemon the owner that kills this process when the reviewer comes back or
+ * the round is answered -- but it has to exist, because a wait that simply lapses fires
+ * no event a child could be waiting for.
+ *
+ * Clamped rather than rejected, and defaulted when absent or unparseable: a missing or
+ * malformed lifetime must not turn into an immortal process, and must not lose the
+ * banner either. The cap is the real guarantee here; the default matches the 40 minutes
+ * ADR.md entry 47 fixes every wait at. */
+#define CLICK_SECONDS_MAX 3600
+#define CLICK_SECONDS_DEFAULT 2400
+static int click_seconds_from(const char *s) {
+  if (s == NULL) return CLICK_SECONDS_DEFAULT;
+  size_t len = strlen(s);
+  if (len == 0 || len > 5) return CLICK_SECONDS_DEFAULT;
+  int value = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (!isdigit((unsigned char)s[i])) return CLICK_SECONDS_DEFAULT;
+    value = value * 10 + (s[i] - '0');
+  }
+  if (value < 1) return 1;
+  if (value > CLICK_SECONDS_MAX) return CLICK_SECONDS_MAX;
+  return value;
+}
+
+/* The phases this binary will display something for, paired with the title and the
+ * sentence it displays -- a closed table, matching src/notify.mjs's MESSAGES on the
+ * other side of the spawn, and for the identical reason stated there: everything that
+ * reaches the screen is a literal out of this array, never a byte of argv. argv chooses
+ * WHICH entry, and an unrecognised phase chooses none — it is not a format string, a
+ * fallback, or a default. This binary holds the reader's Documents grant, and the plist
+ * that spawns it is user-writable; "the notification body is free text from the command
+ * line" is exactly the kind of thing that should stay impossible here.
+ *
+ * Two shapes of row, told apart by `format`. NULL there means a fixed `message` and
+ * argv[3] (if it passes is_safe_cue_name) names a cue, exactly as every phase below did
+ * before this table carried a title of its own. Non-NULL means a folder-format row
+ * instead: `message` is unused, `format` is a printf literal with exactly one %s, and
+ * argv[3] (if it passes is_safe_folder_name) fills it -- otherwise `unnamed` is shown
+ * instead of the row being rejected (ADR.md entry 56). A row is one shape or the other;
+ * nothing here needs both a cue and a format argument at once. */
+static const struct {
+  const char *phase;
+  const char *title;
+  const char *message;  /* fixed body, for a row with no format argument */
+  const char *format;   /* printf literal with one %s, for a row that takes one */
+  const char *unnamed;  /* body shown when the format argument is absent or unsafe */
+} MESSAGES[] = {
+  { "work",      "Pomodoro", "Work interval started",    NULL, NULL },
+  { "break",     "Pomodoro", "Break started",             NULL, NULL },
+  { "longBreak", "Pomodoro", "Long break started",        NULL, NULL },
   /* Not a phase the clock settles on: "test" is what src/notify.mjs's notifyTest sends
    * when the reader ticks Notify, so the question "did that do anything?" is answered by
    * a banner instead of by waiting out an interval. A row in this table, not a special
@@ -219,7 +483,15 @@ static const struct { const char *phase; const char *message; } MESSAGES[] = {
    * Note for an install that predates it: the daemon selects a row it can no longer find
    * and shows nothing, which is the same failure mode as any unrecognised phase --
    * re-run install.sh to recompile this binary. */
-  { "test",      "Notifications are working" },
+  { "test",      "Pomodoro", "Notifications are working", NULL, NULL },
+  /* SPEC_STRANDED.md: the daemon's own banner for a round nobody is watching. No cue of
+   * its own (Out of Scope: "a choosable sound for the board banner" -- the cue pickers
+   * stay the pomodoro clock's), so this row always plays the system default sound
+   * instead (main()'s dispatch below passes use_default_sound=1, cue_name=NULL for it).
+   * The folder is what src/indexpage.mjs's `folderName` derives from a board's cwd,
+   * crossing here exactly as a cue name always has: as argv[3], filtered before it
+   * reaches this table at all. */
+  { "round",     "Board",    NULL, "%s: a round is waiting.",   "A round is waiting." },
 };
 enum { MESSAGES_N = (int)(sizeof(MESSAGES) / sizeof(MESSAGES[0])) };
 
@@ -251,20 +523,55 @@ int main(int argc, char **argv) {
    * through to supervising node, exactly as an argv-less invocation always has, because
    * launchd's invocation is the one that must never depend on getting argv right. */
   if (argc >= 2 && strcmp(argv[1], NOTIFY_AUTHORIZE_FLAG) == 0) {
-    return cb_notify(NULL, NULL);
+    /* Unaffected by any of the above -- no phase, so no row and no title to pick, and
+     * nothing to click either. */
+    return cb_notify(NULL, NULL, NULL, 0, NULL, 0);
   }
   if (argc >= 3 && strcmp(argv[1], NOTIFY_FLAG) == 0) {
-    /* Two arguments' worth of argv, both filtered before either reaches cb_notify:
-     * argv[2] selects a row of MESSAGES (and selects nothing at all if it matches no
-     * row); argv[3], if present, is a cue name that must pass is_safe_cue_name or it is
-     * treated as absent -- src/notify.mjs never sends one that would fail this (cueFor
-     * there already collapsed anything isCue() refuses to "no cue"), so this is a second
-     * line of defense against a hand-invoked launcher, not the primary one. */
-    const char *cue_name = (argc >= 4 && is_safe_cue_name(argv[3])) ? argv[3] : NULL;
+    /* argv[2] selects a row of MESSAGES, and selects nothing at all if it matches no
+     * row -- an install that predates a phase src/notify.mjs has started sending falls
+     * straight to "unrecognised notify phase" below, the same silence any unrecognised
+     * phase always got. */
     for (int i = 0; i < MESSAGES_N; i++) {
-      if (strcmp(argv[2], MESSAGES[i].phase) == 0) {
-        return cb_notify(MESSAGES[i].message, cue_name);
+      if (strcmp(argv[2], MESSAGES[i].phase) != 0) continue;
+
+      if (MESSAGES[i].format != NULL) {
+        /* A folder-format row: argv[3], filtered through is_safe_folder_name, fills the
+         * row's one %s; absent or unsafe falls back to the row's own `unnamed` sentence
+         * rather than the phase being rejected (ADR.md entry 56). Always the system
+         * default sound -- see the MESSAGES table's own comment on why this row has no
+         * cue of its own. */
+        char body_buf[MAX_FOLDER_NAME_LEN + 32];
+        const char *body;
+        if (argc >= 4 && is_safe_folder_name(argv[3])) {
+          snprintf(body_buf, sizeof(body_buf), MESSAGES[i].format, argv[3]);
+          body = body_buf;
+        } else {
+          body = MESSAGES[i].unnamed;
+        }
+        /* argv[4], argv[5] and argv[6] are this row's click target, the port that target
+         * must name, and the lifetime that bounds serving it (ADR.md entry 57) -- read
+         * here rather than beside the cue above because a fixed-message row has nothing
+         * to open: a pomodoro boundary is an event, not a place. A URL that fails
+         * is_board_url is treated as absent, so the banner still fires and simply cannot
+         * be clicked -- the same degradation the clone install lives with permanently
+         * (criterion 19), and the same shape is_safe_folder_name already applies to the
+         * name. The port is required and the lifetime is not: without a port there is
+         * nothing to check the URL against, while without a lifetime there is a
+         * compiled-in default that is still bounded. */
+        const char *board_url =
+            (argc >= 6 && is_board_url(argv[4], parse_port(argv[5]))) ? argv[4] : NULL;
+        int click_seconds = click_seconds_from(argc >= 7 ? argv[6] : NULL);
+        return cb_notify(MESSAGES[i].title, body, NULL, 1, board_url, click_seconds);
       }
+
+      /* A fixed-message row: argv[3], if present, is a cue name that must pass
+       * is_safe_cue_name or it is treated as absent -- src/notify.mjs never sends one
+       * that would fail this (cueFor there already collapsed anything isCue() refuses to
+       * "no cue"), so this is a second line of defense against a hand-invoked launcher,
+       * not the primary one. */
+      const char *cue_name = (argc >= 4 && is_safe_cue_name(argv[3])) ? argv[3] : NULL;
+      return cb_notify(MESSAGES[i].title, MESSAGES[i].message, cue_name, 0, NULL, 0);
     }
     fprintf(stderr, "claude-board: unrecognised notify phase\n");
     return 1;

@@ -313,9 +313,14 @@ async function main() {
     // and this route deliberately ignores that value, which is the whole point of it.
     // Seeded off below for exactly that reason: a green result proves the test banner is
     // not gated on the setting the reader has ticked but not yet saved.
+    //
+    // notifyRounds seeded off too (ticket 03, ADR.md entry 58, criterion 18): the round
+    // banner's own tick lives in the same settings document now, and this route must
+    // remain wholly indifferent to it -- exactly one banner, never zero (gated on the
+    // wrong toggle) and never two (one per kind), regardless of what either tick says.
     const log = freshLog();
     const home = mkdtempSync(path.join(tmpdir(), 'claude-board-notifytest-e2e-'));
-    writeDoc({ settings: { ...DEFAULT_SETTINGS, notify: false }, cycle: 0, cycleDate: null, timer: null }, home);
+    writeDoc({ settings: { ...DEFAULT_SETTINGS, notify: false, notifyRounds: false }, cycle: 0, cycleDate: null, timer: null }, home);
 
     await withStubOnPath(log, {}, async () => {
       const { server } = await startServer({ home, port: 0 });
@@ -328,7 +333,7 @@ async function main() {
         assert.equal(r.status, 200);
         assert.deepEqual(await r.json(), { ok: true });
         const lines = await waitForLines(log, 1, 5000);
-        assert.equal(lines.length, 1, 'exactly one osascript invocation reached through the route');
+        assert.equal(lines.length, 1, 'exactly one osascript invocation reached through the route -- one banner, not one per kind, and not gated on either toggle');
         const [, script] = lines[0];
         assert.match(script, /Notifications are working/);
         assert.doesNotMatch(script, /sound name/, 'the test banner stays silent through the route too');
@@ -438,8 +443,10 @@ process.exit(0);
     // only, which is the drift this exists to catch.
     const js = readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8');
     const jsTable = js.slice(js.indexOf('const MESSAGES = {'), js.indexOf('const CUE_KEYS'));
-    const phases = [...jsTable.matchAll(/^\s{2}(\w+):\s*'/gm)].map(m => m[1]);
-    assert.ok(phases.length >= 4, `expected to parse src/notify.mjs's MESSAGES keys, got ${JSON.stringify(phases)}`);
+    // Each row is `phase: { ... }` since SPEC_STRANDED.md generalised MESSAGES to carry
+    // a per-row title -- was `phase: 'message'` before.
+    const phases = [...jsTable.matchAll(/^\s{2}(\w+):\s*\{/gm)].map(m => m[1]);
+    assert.ok(phases.length >= 5, `expected to parse src/notify.mjs's MESSAGES keys, got ${JSON.stringify(phases)}`);
     for (const phase of phases) {
       assert.match(table, new RegExp(`"${phase}"`), `bin/launcher.c must know the '${phase}' phase`);
     }

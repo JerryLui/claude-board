@@ -98,16 +98,18 @@ with a vastly wider blast radius ([SECURITY.md](SECURITY.md#defended)).
 
 ### The second click: allowing notifications
 
-The index page carries a pomodoro clock, and the same bundle posts its boundary
-notifications — which is what puts claude-board's own name, mark and cue on them instead
-of Script Editor's. macOS asks about that separately, and the installer triggers the
-prompt at the end of an install rather than letting it turn up hours later at the end of
-a work interval. Saying no costs the notifications and nothing else.
+The bundle posts every notification claude-board raises, which is what puts its own name,
+mark and cue on them instead of Script Editor's. There are two: a pomodoro boundary from
+the clock on the index page, and a round left waiting on a board nobody is looking at.
+macOS asks about them together and once, and the installer triggers the prompt at the end
+of an install rather than letting it turn up hours later at the end of a work interval.
+Saying no costs the notifications and nothing else.
 
-A boundary is a **banner** by default, gone in seconds whether or not you were looking.
-Set claude-board to **Alerts** under **System Settings → Notifications** to make it wait
-for you — a per-app setting with no API, and the reason a bundle of ours has to be the
-thing posting.
+Each has its own switch beside the clock, so silencing one leaves the other alone. Both
+are a **banner** by default, gone in seconds whether or not you were looking. Set
+claude-board to **Alerts** under **System Settings → Notifications** to make them wait for
+you — a per-app setting with no API, and the reason a bundle of ours has to be the thing
+posting.
 
 Verify:
 

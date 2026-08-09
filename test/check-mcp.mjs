@@ -21,7 +21,7 @@
 //     SIGTERMed and restarted underneath the shim);
 //   * bin/daemon.mjs exiting promptly on SIGTERM with an SSE stream open;
 //   * a daemon 4xx reported as a rejection rather than as a dead service;
-//   * a later round reopening the tab when nothing is connected to the board.
+//   * a later round never opening a tab, even with no client connected to the board.
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
@@ -295,89 +295,6 @@ function openSseStream(port, boardId) {
       }
     );
     req.on('error', reject);
-  });
-}
-
-/** A pass-through in front of the real daemon that REWRITES the `clients` count on the
- * POST /api/board response, so a check can drive the shim's reopen decision without
- * standing up real browsers and real SSE subscriptions.
- *
- * It used to fabricate a `GET /api/board/:id/clients` route instead — a route
- * src/server.mjs has never served. That kept this check green while the reopen path was
- * dead in production for every real user: the probe 404ed, the count came back null, and
- * the tab was never reopened. The daemon now reports the count on
- * the POST response from its own SSE hub, so this only has to override a real field.
- * `state.clients === null` stands in for a daemon too old to report it at all, which is
- * the field being absent — not a fabricated 404. */
-function startClientsProxy(targetPort, state) {
-  // Every POST /api/handoff body the shim sends, in order. The URL the shim opens is
-  // `/auth/<token>` and carries no board id by design (that is the point of the
-  // handoff), so this is how a check can still assert WHICH board the reopened tab was
-  // for. Buffered and re-sent rather than piped, since reading the body consumes it.
-  const handoffMints = [];
-  const proxy = http.createServer((req, res) => {
-    const u = new URL(req.url, 'http://internal');
-    if (req.method === 'POST' && u.pathname === '/api/handoff') {
-      const chunks = [];
-      req.on('data', c => chunks.push(c));
-      req.on('end', () => {
-        const raw = Buffer.concat(chunks);
-        try { handoffMints.push(JSON.parse(raw.toString('utf8') || '{}')); } catch { handoffMints.push(null); }
-        const up = http.request(
-          { hostname: '127.0.0.1', port: targetPort, path: req.url, method: 'POST', headers: { ...req.headers, 'content-length': raw.length } },
-          ures => { res.writeHead(ures.statusCode, ures.headers); ures.pipe(res); }
-        );
-        up.on('error', () => { try { res.writeHead(502); res.end(); } catch { /* client gone */ } });
-        up.end(raw);
-      });
-      return;
-    }
-    if (req.method === 'POST' && u.pathname === '/api/board') {
-      const reqChunks = [];
-      req.on('data', c => reqChunks.push(c));
-      req.on('end', () => {
-        const raw = Buffer.concat(reqChunks);
-        const up = http.request(
-          { hostname: '127.0.0.1', port: targetPort, path: req.url, method: 'POST', headers: { ...req.headers, 'content-length': raw.length } },
-          ures => {
-            const resChunks = [];
-            ures.on('data', c => resChunks.push(c));
-            ures.on('end', () => {
-              let body = Buffer.concat(resChunks).toString('utf8');
-              if (ures.statusCode === 200) {
-                try {
-                  const json = JSON.parse(body);
-                  // Override the daemon's real count with the one this check is driving.
-                  // null means "this daemon does not report it": delete the field rather
-                  // than inventing a value, because absence is what an older daemon sends.
-                  if (state.clients === null) delete json.clients;
-                  else json.clients = state.clients;
-                  body = JSON.stringify(json);
-                } catch { /* not JSON: pass it through untouched */ }
-              }
-              const headers = { ...ures.headers, 'content-length': Buffer.byteLength(body) };
-              res.writeHead(ures.statusCode, headers);
-              res.end(body);
-            });
-          }
-        );
-        up.on('error', () => { try { res.writeHead(502); res.end(); } catch { /* client gone */ } });
-        up.end(raw);
-      });
-      return;
-    }
-    const upstream = http.request(
-      { hostname: '127.0.0.1', port: targetPort, path: req.url, method: req.method, headers: req.headers },
-      ures => {
-        res.writeHead(ures.statusCode, ures.headers);
-        ures.pipe(res);
-      }
-    );
-    upstream.on('error', () => { try { res.writeHead(502); res.end(); } catch { /* client gone */ } });
-    req.pipe(upstream);
-  });
-  return new Promise(resolve => {
-    proxy.listen(0, '127.0.0.1', () => resolve({ proxy, port: proxy.address().port, handoffMints }));
   });
 }
 
@@ -1323,62 +1240,43 @@ async function main() {
     }
   });
 
-  // --- a later round reopens the tab when nothing is connected --------------
-  // "Open once, then badge and notify... If no client is connected at all the
-  // daemon opens the tab again." Without the reopen, a round pushed into a tab the
-  // reviewer closed blocks the call in silence for the full wall clock.
+  // --- a later round never opens a tab, connected or not (ADR 55) -----------
+  // The forced reopen is deleted: the daemon announces a stranded round on its own
+  // now (test/check-stranded.mjs), so the shim's only remaining tab-opening occasion
+  // is a thread's first board (covered elsewhere in this file, e.g. "CLAUDE_BOARD_OPEN_CMD
+  // alone satisfies..." above). This proves the negative even with no client connected
+  // to the board at all -- the one case the old reopen would have fired on.
 
-  await check('a later round reopens the tab only when no client is connected', async () => {
-    const dir = tempHome('reopen');
+  await check('a later round never opens a tab, even with no client connected to the board', async () => {
+    const dir = tempHome('no-reopen');
     const recorder = makeOpenRecorder(dir);
-    const clientsState = { clients: 1 }; // a tab is connected to start with
-    const { proxy, port: proxyPort, handoffMints } = await startClientsProxy(port, clientsState);
-    const proxyBase = `http://127.0.0.1:${proxyPort}`;
     const knownIds = listBoardIds(home);
     const openClient = spawnShim({
       ...baseEnv,
-      CLAUDE_BOARD_PORT: String(proxyPort),
       CLAUDE_BOARD_NO_OPEN: undefined, // let it "open" for real, into the recorder
       CLAUDE_BOARD_OPEN_CMD: recorder.script,
       CLAUDE_BOARD_OPEN_LOG: recorder.log,
     });
     try {
       const first = openClient.request('tools/call', {
-        name: 'ask', arguments: { title: 'Reopen round 1', blocks: [QUESTION] },
+        name: 'ask', arguments: { title: 'Round 1', blocks: [QUESTION] },
       });
       const boardId = await waitForNewBoardFile(home, knownIds);
       assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1, 'the first board always opens the tab');
-      await submitBoard(proxyBase, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
+      await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }] });
       await withTimeout(first, 8000, 'round 1 must return');
 
-      // The reviewer closed the tab. Round 2 must reopen it.
-      clientsState.clients = 0;
+      // No client has ever connected to this board -- the old reopen's clearest
+      // trigger case -- and round 2 must still not open a second tab.
       const second = openClient.request('tools/call', {
-        name: 'ask', arguments: { title: 'Reopen round 2', blocks: [QUESTION] },
-      });
-      const afterRound2 = await recorder.waitForOpens(2, 10_000);
-      assert.equal(afterRound2.length, 2, 'a round pushed where no client is connected must reopen the tab');
-      // The reopened tab lands on a handoff, not on the board URL — that is what makes
-      // it land ALREADY AUTHORIZED. The board it is for is
-      // in the mint request, not in the URL, which is the whole point: nothing a
-      // bookmark or a `ps` line captures names a credential AND a board.
-      assert.match(afterRound2[1], new RegExp(`^${proxyBase}/auth/[0-9a-f]{64}$`), 'the reopened tab must be opened on a one-time handoff');
-      assert.equal(handoffMints.at(-1)?.boardId, boardId, 'and that handoff must have been minted for this board');
-      await submitBoard(proxyBase, boardId, { answers: [{ id: 'q2', status: 'answered', choice: 'Yes', note: '' }] });
-      await withTimeout(second, 8000, 'round 2 must return');
-
-      // A tab is connected again: round 3 must NOT steal focus.
-      clientsState.clients = 2;
-      const third = openClient.request('tools/call', {
-        name: 'ask', arguments: { title: 'Reopen round 3', blocks: [QUESTION] },
+        name: 'ask', arguments: { title: 'Round 2', blocks: [QUESTION] },
       });
       await sleep(500);
-      assert.equal(recorder.opened().length, 2, 'a round pushed into a live tab must not reopen (no focus steal)');
-      await submitBoard(proxyBase, boardId, { answers: [{ id: 'q3', status: 'answered', choice: 'Yes', note: '' }] });
-      await withTimeout(third, 8000, 'round 3 must return');
+      assert.equal(recorder.opened().length, 1, 'a later round must never open a tab, connected or not');
+      await submitBoard(base, boardId, { answers: [{ id: 'q2', status: 'answered', choice: 'Yes', note: '' }] });
+      await withTimeout(second, 8000, 'round 2 must return');
     } finally {
       openClient.close();
-      proxy.close();
     }
   });
 

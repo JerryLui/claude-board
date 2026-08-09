@@ -123,7 +123,7 @@ round carries a question block anywhere in it (top-level, or nested in a questio
 else (ADR 33) — posted with `wait: true` (`POST /api/board`, below). It is the one property
 behind three surfaces: it is what makes a round sendable at all beyond ADR 35's carve-out,
 what the index's "N rounds left" badge and the tab mark count, and what gates the SSE
-arrival notification. `awaitDeadline` is `null` when `awaited` is `false`, otherwise the ISO
+arrival mark and the daemon's Stranded banner. `awaitDeadline` is `null` when `awaited` is `false`, otherwise the ISO
 8601 instant `postedAt` plus the wait timeout in effect when the round was minted (default
 40 minutes, `CLAUDE_BOARD_TIMEOUT_MS` — the same clock `GET /api/board/:id/wait` enforces,
 below) — stamped at mint time and never recomputed by an amend of the same round.
@@ -150,7 +150,7 @@ field read, precisely for this case: it reads `r.awaited` directly when it is a 
 and for exactly a legacy round falls back to the old shape-based inference (a question block
 anywhere in the round) that decided the same question before this pair of fields existed. The
 undelivered-comment drain path (`src/server.mjs` `drainUndeliveredComments`), the index badge
-and tab mark (`src/indexpage.mjs` `openAwaitedRounds`), and the SSE arrival notification
+and tab mark (`src/indexpage.mjs` `openAwaitedRounds`), and the SSE arrival favicon mark
 (`src/ui.mjs` `markPendingRound`, spliced from the same `src/badge.mjs` source) all read it —
 one definition, so a board already on disk keeps its exact prior behaviour on every one of
 these surfaces rather than any single one of them reading a legacy round as suddenly
@@ -503,6 +503,11 @@ POST /api/board                     post a board or a round into a live thread
 GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet
 GET  /api/board/:id/events          SSE: round pushes, state changes
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
+POST /api/board/:id/attended        { watcher, attended, seq? } -> { ok: true }; the open
+                                    tab reporting whether it is Attended right now
+                                    (CONTEXT.md "Watcher", "Attended"); stores nothing
+                                    durable itself, but a report that ends an absence
+                                    retires the stranded banner recorded on that board
 GET  /api/search?q=                 archive search
 GET  /api/pomodoro                  the whole document -> { settings, cycle, cycleDate, timer, now }
 POST /api/pomodoro/ensure           ensure a timer exists; no-op if one already does (any phase)
@@ -516,7 +521,7 @@ POST /api/pomodoro/restart          re-mint the current interval's deadline to a
                                     duration (current settings); phase/cycle untouched;
                                     no-op while idle; fires no notification and no cue
 POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEvery?, notify?,
-                                    cueWork?, cueBreak?, cueLongBreak? }
+                                    notifyRounds?, cueWork?, cueBreak?, cueLongBreak? }
                                     merged into the stored settings, not replaced
 POST /api/pomodoro/preview          { cue } -> { ok: true }; plays a cue immediately, reads
                                     and writes nothing
@@ -551,8 +556,9 @@ x-claude-board-secret: <secret>    request header; the file is re-read per gated
                                    crypto.timingSafeEqual, length-guarded
 ```
 
-**Every non-GET request** must carry it — except `POST /api/board/:id/submit`, which also takes
-the session cookie below. A missing or wrong credential is **401 with no body**: nothing about
+**Every non-GET request** must carry it — except `POST /api/board/:id/submit` and
+`POST /api/board/:id/attended`, which also take the session cookie below. A missing or wrong
+credential is **401 with no body**: nothing about
 what is behind it, not even whether the board exists. A daemon that finds no secret file says so
 on stderr at startup and refuses everything gated: it fails closed, never open. `bin/mcp.mjs`
 reads the secret at startup, sends it on every call, and refuses to post at all (naming
@@ -581,6 +587,11 @@ once — intended.
 Its strength, precisely: "may read every board and answer any open round". It is refused in the
 `x-claude-board-secret` header, so it can never create a board and therefore never make the daemon
 resolve a file. It is **not** scoped to one board.
+
+It is additionally accepted on `POST /api/board/:id/attended` — a browser holding the cookie is the
+only party that can honestly report whether its own tab is Attended, and the report reaches less
+than `submit` already does: no round named, no answer carried, nothing durable touched (see that
+route's own section, below).
 
 It is additionally accepted on nine pomodoro writes — `ensure`, `pause`, `resume`, `reset`,
 `settings`, `preview`, `notifyTest`, `forward`, `restart` — so the index page's switch and its
@@ -696,6 +707,110 @@ second path:
 The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`), which
 `body.readonly` hides wholesale — so the standalone `file:` archive offers neither.
 
+### `POST /api/board/:id/attended`
+
+```js
+{ watcher: '<id from the stream's own "watcher" event>', attended: true | false, seq?: 0, 1, 2… }
+  -> { ok: true }
+```
+
+The open board tab reporting whether it is Attended (CONTEXT.md "Watcher", "Attended") — visible
+and focused, right now. `watcher` names which SSE connection (`GET /api/board/:id/events`) this
+report updates; a `watcher` the daemon has no live subscription for, or a board id with none at
+all, is a silent no-op rather than a 404 or a 400, since the tab has no way to know from its own
+side whether it lost that race against a disconnect.
+
+`seq` is the page's own monotonic counter for the edge being reported, and reports that arrive out
+of order are dropped rather than applied. They can arrive out of order: a focus and a blur ~100ms
+apart are two POSTs, and the browser opens a second connection for the later one while the first is
+still outstanding. A blur overtaken by its own earlier focus would otherwise leave the Watcher
+marked attended with the reviewer gone, and no further DOM edge is coming to correct it — so the
+board would raise no banner for the rest of that wait. It is optional, and a report without one is
+applied and leaves the counter alone, so a page predating the ordering keeps working; present and
+malformed is a 400.
+
+Cookie-authenticated exactly like `submit` (see "The browser session cookie" above): a browser
+holding a live stream on this board is the only party that can honestly answer this question, and
+an unauthenticated report is refused rather than believed — accepting one from any local process
+with no credential would let a forged report silence every banner the daemon would otherwise raise
+(ADR.md entry 58).
+
+What it stores is a fact about a live SSE connection and nothing about the board. It is not,
+however, a route with no durable consequence: the stranded rule reads that fact immediately, and a
+report that ends an absence retires the banner record standing on the board — one read and one
+write, and for a page board that document can be large. That is the price of a marker that survives
+a restart, and it is paid only when the reviewer really comes back to a board that had been
+announced; the ordinary report writes nothing. A report naming a `watcher` this board has no live
+subscription for stops before the rule is consulted at all.
+
+The daemon ORs this flag across every Watcher currently subscribed to a board — two tabs on it
+count as looking if either one does — and the flag is held only as long as its SSE connection is:
+closing the tab (or the connection dropping) removes it, which is what makes "a tab that goes away
+stops counting" true with no separate timeout.
+
+A Watcher that has subscribed but not yet reported is **unknown**, not attended: it holds a banner
+back (a tab that has only just connected is what a reconnect looks like) but it does not count as
+the reviewer having come back, so it cannot end an absence. The page closes that gap in one round
+trip — it reports the moment the stream hands it a `watcher` id — but the distinction is
+load-bearing: without it, a buried tab's reconnect would clear the announced marker off a board
+nobody had looked at, and that tab's own "still hidden" report a moment later would announce the
+same absence a second time. Nor does an unreported Watcher hold a banner back: the stranded rule
+asks only whether one has *said* it is looking, so holding `/events` open and saying nothing — which
+needs only a read credential — cannot mute a board. A tab that drops and reconnects inside the grace
+is silent because it reports, not because its socket exists.
+
+### The stranded banner
+
+The daemon raises one native notification for a board that has an open, awaited round on it and no
+Watcher looking at it (CONTEXT.md "Stranded"; ADR.md entries 55 and 58). It is re-decided after
+every event that can change the answer — a round landing, a Watcher arriving or leaving, an
+`attended` report, a submit — never polled, and it fires after a grace of 15000ms
+(`CLAUDE_BOARD_STRANDED_GRACE_MS` overrides, and the launcher passes it through), which is one SSE
+heartbeat, so a tab that is merely reconnecting is never mistaken for an absent reviewer.
+
+One banner per **board**, per absence: further rounds landing on a board whose announced round is
+still awaited add nothing. The click carries the board's own URL plus the `#stranded-round`
+sentinel, which resolves to the oldest round still waiting at the moment it is clicked (not
+`#open-round`, which resolves to the newest open round and belongs to the index's live-row links).
+The URL is built from the socket the daemon is bound to and never from the `Host` header, and the
+bound port crosses to the launcher as its own argument so the two can be checked against each
+other.
+
+The banner is recorded on the board document as `strandedBanner`,
+`{ at, until, round, pid } | null`: when it went up, when the process serving it will exit and
+withdraw it (the round's deadline or the launcher's hard ceiling, whichever is sooner), which round
+was announced, and that process's pid. It is stripped from everything a client sees, so the served
+page stays byte-identical to `pages/<id>.html`. A daemon restart reads it back and does not
+re-announce.
+
+An absence ends exactly two ways: the reviewer returns (a Watcher *reports* it is looking), or the
+round named in `round` stops being awaited — answered, or its wait lapsed — whereupon the next round
+on that board starts a fresh absence and may raise a banner of its own. Both are read lazily off
+events the daemon already handles; there is no timer on `awaitDeadline`.
+
+A daemon restart is neither, on either path. Killed outright, the daemon leaves its child orphaned
+with the banner still up and the record on disk. Stopped gracefully, it SIGTERMs the child — so the
+banner goes off the screen — and leaves the record standing with only its `pid` cleared, since that
+pid now names a process it has just killed. Both mean the same thing to the successor: this board's
+absence has been announced, and nothing more is raised for it until the reviewer comes back.
+
+Nothing else ends it. In particular a banner that has expired off the screen still counts as this
+board's one announcement while the round it named is awaited, so **a reviewer who dismisses a banner
+without opening the board is told nothing further about it until that round's wait ends**. That is
+criterion 7 read literally, and it is a deliberate trade: the alternative raises a second banner for
+an absence the reviewer never came back from.
+
+The daemon owns the process serving the click and kills it with SIGTERM — which is also what
+withdraws the delivered banner — when the reviewer returns, when **the round the banner is about** is
+answered (a board can hold two awaited rounds at once, and answering the other one leaves the banner
+alone), and unconditionally when the daemon itself stops. The recorded pid lets a replacement daemon withdraw a banner it did not raise;
+that is the one thing `until` is consulted for, since past it the child has exited and its pid has
+been recycled. Signalling additionally requires that the pid is neither this process nor its parent,
+that it is that executable, and that it started no earlier than the record did. The parent check is
+the load-bearing one: the same path names every claude-board process, the supervising launchd job
+included, SIGTERM to that one is relayed to the daemon, and a supervisor started by a restart is
+*newer* than the record, so the start-time test does not exclude it.
+
 ### `GET /api/board/:id/wait?round=N`
 
 A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 40m, ADR.md entry 47): when it fires
@@ -744,14 +859,11 @@ Three marks, and no others (ADR 30, 31): the unbadged board mark every page emit
 `restFaviconHref`, on the index tab only, while the pomodoro is in an unpaused break. A pending
 count outranks the rest mark outright. `document.title` is left alone.
 
-A `round` push also raises a `Notification`, but only while the document is hidden or unfocused.
-Its `tag` is `claude-board-<boardId>-<n>`, so two unread rounds are two entries and only a genuine
-re-delivery collapses; its click calls `window.focus()` and flips to the open round's page through
-the same `jumpToOpenRound` the round badge uses. Permission is requested lazily on the first round
-that would notify and on a Send click, and a denial is never re-prompted. Every part degrades
-silently: a failure anywhere leaves the round pushed and the page working, just unmarked, and all
-of it is inert in readonly mode. Shim/daemon side: reopening the tab when no client is connected
-at all, and printing the board URL in chat as the fallback that cannot fail.
+The favicon mark is the only notice the page itself raises; a round nobody is watching for is the
+daemon's own native banner instead ("The stranded banner", below), which is what a closed or
+buried tab now relies on. Every part of the mark degrades silently: a failure anywhere leaves the
+round pushed and the page working, just unmarked, and all of it is inert in readonly mode. Shim
+side: printing the board URL in chat as the fallback that cannot fail.
 
 ## SSE events
 
@@ -761,15 +873,23 @@ never ends on its own. Heartbeat comment lines (`: heartbeat\n\n`) keep it alive
 timers and proxies — invisible to `EventSource`'s message events, so they never surface as a stray
 event. `CLAUDE_BOARD_SSE_HEARTBEAT_MS` overrides the cadence (default 15000), for checks only.
 
-Three named events. The first two carry the full board JSON (the same shape a served page inlines)
+Four named events. The middle two carry the full board JSON (the same shape a served page inlines)
 so a client can diff against its own last-known copy, plus enough to apply the push without a
 reload:
 
 ```js
-event: round         data: { round, mode: 'new-round' | 'amend', blockIds, html, board }
-event: submitted     data: { round, board, html }
-event: awaitExpired  data: { round }
+event: watcher        data: { id }
+event: round          data: { round, mode: 'new-round' | 'amend', blockIds, html, board }
+event: submitted      data: { round, board, html }
+event: awaitExpired   data: { round }
 ```
+
+`watcher` is the first thing the stream sends, ahead of any of the other three, on every open and
+every reconnect alike: a server-minted id naming this one connection (CONTEXT.md "Watcher"), which
+the same tab then carries on every `POST /api/board/:id/attended` it sends (see below) so the
+daemon knows which live connection an attended report is updating. It is not a credential — it
+authorizes nothing on its own, the cookie still does that — only an identifier scoped to one open
+stream and worthless once that stream closes.
 
 `html` is a pre-rendered fragment covering exactly `blockIds` — never the whole page — so the
 client only ever inserts or replaces that much DOM: `renderRoundSection`'s output (a full
@@ -829,8 +949,10 @@ nobody can see and block for the full wall-clock cap. Both session checks are be
 
 The shim tracks one thread per process (one shim per Claude session): the first `ask` call starts
 a new thread and opens its tab; every later `ask` call in the same process pushes a round into the
-same live board (`POST /api/board` with `boardId` set) and reopens the tab only when no client is
-connected to that board at all. It never reopens a tab the reviewer already has open.
+same live board (`POST /api/board` with `boardId` set) and opens no tab of its own. A round
+landing with nobody watching is the daemon's stranded banner to raise, not the shim's tab to force
+open. `bin/authorize.mjs` still opens a tab, being the standalone recovery command a reviewer runs
+deliberately.
 
 ### MCP shim environment
 

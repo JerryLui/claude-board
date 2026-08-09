@@ -15,8 +15,8 @@ import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { startServer, activeWaitCount, buildPacketWithUndelivered, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
-import { DEFAULT_AWAIT_TIMEOUT_MS } from '../src/board.mjs';
-import { readBoard, searchBoards } from '../src/store.mjs';
+import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER } from '../src/board.mjs';
+import { readBoard, writeBoard, searchBoards } from '../src/store.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
 // through the HTTP routes, never these directly. See the pomodoro checks near the
@@ -395,11 +395,10 @@ async function main() {
   // --- SSE round pushes into a live thread --------------------------
 
   await check('POST /api/board reports how many browsers have the board open, from the real subscriber set', async () => {
-    // The check that was missing when the reopen path died. The
-    // shim decides whether to reopen a closed tab from this number, and it used to ask a
-    // route the daemon never served: it got null every time, so a later round never
-    // reopened anything. test/check-mcp.mjs covered the DECISION against a proxy that
-    // fabricated the route, so nothing anywhere covered the daemon actually reporting.
+    // `clients` stays published protocol even though the shim's forced reopen that
+    // once read it is gone (ADR 55): the daemon computes this count anyway, for the
+    // stranded rule's own use (test/check-stranded.mjs), so deleting the field would
+    // be a protocol change bought for nothing.
     // Ablation: delete the `clients` field from handlePostBoard's response and this reds.
     const created = await (await fetch(`${base}/api/board`, {
       method: 'POST',
@@ -424,7 +423,7 @@ async function main() {
       headers: writeHeaders(),
       body: JSON.stringify({ boardId: created.boardId, title: 'Client count', blocks: [{ kind: 'markdown', text: '# Three' }] }),
     })).json();
-    assert.equal(afterClose.clients, 0, 'a closed tab drops back to zero, which is what makes the shim reopen it');
+    assert.equal(afterClose.clients, 0, 'a closed tab drops back to zero, which is what the stranded rule watches for');
   });
 
   await check('a retried post carrying the same requestId is applied once, not appended twice', async () => {
@@ -3525,6 +3524,72 @@ async function main() {
     assert.equal(third.packet.comments.length, 0, 'once committed, the comment is truly gone from future packets');
   });
 
+  await check('commit does not clobber a stranded banner written by a second writer in the window between capture and commit (ticket 09)', async () => {
+    // `commit` captures whole board objects when `buildPacketWithUndelivered` is called,
+    // but only runs on the response's own `finish` event (`res.once('finish', commit)` in
+    // handleWait) -- a strictly LATER macrotask. In that window the stranded rule's timer
+    // callback (`persist`, src/server.mjs) can land a fresh STRANDED_BANNER record on the
+    // very same board `commit` is holding a stale copy of. The old `commit` wrote that
+    // stale copy back wholesale, silently erasing whatever the second writer had just
+    // recorded -- `persist` already defends its own field against exactly this writer, by
+    // name, in its own comment; this proves the reverse direction is closed too.
+    const html = '<!doctype html><html><body><h1>RACE_MARKER page</h1></body></html>';
+    const posted1 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Raced page board', blocks: [{ kind: 'html', html }] }),
+    })).json();
+    const board1 = posted1.boardId;
+    const thread = posted1.thread;
+    const h1 = readBoard(board1, home).blocks[0].id;
+    await fetch(`${base}/api/board/${board1}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'RACED_COMMENT' }],
+      }),
+    });
+
+    const posted2 = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Collecting round',
+        thread,
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    const board2 = readBoard(posted2.boardId, home);
+
+    // Capture, the way handleWait does before wiring `res.once('finish', commit)` -- at
+    // this instant `commit`'s closure is holding board1 with no STRANDED_BANNER on it.
+    const { packet, commit } = buildPacketWithUndelivered(board2, 1, 'http://test.invalid/', home);
+    assert.equal(packet.comments.length, 1, 'the packet must carry the undelivered comment');
+
+    // Simulate the stranded rule's timer firing in the window between capture and
+    // `commit()` -- a genuine second writer, through readBoard/writeBoard exactly like
+    // `persist` uses, not a hand-rolled JSON poke.
+    const rec = { at: new Date().toISOString(), round: 1, pid: null, until: new Date(Date.now() + 60_000).toISOString() };
+    const racedBoard = readBoard(board1, home);
+    racedBoard[STRANDED_BANNER] = rec;
+    writeBoard(racedBoard, home);
+
+    // Now the response "finishes" and commit runs, against the now-stale captured board1.
+    commit();
+
+    assert.deepEqual(
+      readBoard(board1, home)[STRANDED_BANNER], rec,
+      'the stranded banner recorded between capture and commit must survive commit -- commit owns only the delivered marks, not the whole document',
+    );
+    assert.equal(
+      readBoard(board1, home).comments[0].delivered, true,
+      'commit must still do its own job: the comment it drained is marked delivered',
+    );
+  });
+
   await check('map-context question round trip (/wayfind\'s shape): post one question whose context references a map section by its heading SLUG, render it, answer it, and prove the referenced content actually resolved -- not merely that the post returned 200', async () => {
     // The trap this migration already got bitten by once:
     // `section` is the heading's SLUG, never its text. Get it wrong and the block is
@@ -3869,6 +3934,11 @@ async function main() {
       [{ longEvery: 0 }, /longEvery/, 'zero would divide by zero in settleBoundary'],
       [{ longEvery: -1 }, /longEvery/, 'a negative longEvery is meaningless'],
       [{ notify: 'yes' }, /notify/, 'a truthy non-boolean is still rejected'],
+      // The round-banner tick (ticket 03, ADR.md entry 58) is validated the same way,
+      // and must name ITS OWN field, not "notify" -- a shared regex here would pass
+      // even if the two toggles were validated by the same code path with the wrong
+      // key baked into the message.
+      [{ notifyRounds: 'yes' }, /notifyRounds/, 'a truthy non-boolean is rejected on the round-banner toggle too'],
       [{ cueWork: 'Sosumi ' }, /cueWork/, 'a name outside the closed set (trailing space) is rejected'],
       [{ cueBreak: 'NotASound' }, /cueBreak/, 'a name macOS does not ship is rejected'],
       [{ cueLongBreak: 1 }, /cueLongBreak/, 'a non-string cue value is rejected'],
@@ -3921,7 +3991,7 @@ async function main() {
     const sounds = cueNames().filter(n => n !== NO_CUE);
     assert.ok(sounds.length >= 2, 'this machine must ship at least two real sounds for this check to mean anything');
     const [soundA, soundB] = sounds;
-    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, cueWork: soundA, cueBreak: soundB, cueLongBreak: NO_CUE };
+    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, notifyRounds: false, cueWork: soundA, cueBreak: soundB, cueLongBreak: NO_CUE };
     const written = await (await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) })).json();
     assert.equal(written.settings.workMin, 33, 'the write itself must reflect the patch');
 
@@ -3941,6 +4011,7 @@ async function main() {
     assert.equal(reread.settings.longBreakMin, 21, 'longBreakMin must survive a daemon restart');
     assert.equal(reread.settings.longEvery, 5, 'longEvery must survive a daemon restart');
     assert.equal(reread.settings.notify, false, 'the notify toggle must survive a daemon restart');
+    assert.equal(reread.settings.notifyRounds, false, 'the round-banner toggle must survive a daemon restart, independently of notify');
     assert.equal(reread.settings.cueWork, soundA, 'cueWork must survive a daemon restart');
     assert.equal(reread.settings.cueBreak, soundB, 'cueBreak must survive a daemon restart');
     assert.equal(reread.settings.cueLongBreak, NO_CUE, 'cueLongBreak must survive a daemon restart');

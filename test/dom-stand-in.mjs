@@ -926,6 +926,43 @@ export class StandInWindow extends EventTarget {
   }
 }
 
+/** Minimal `window.history` stand-in for `history.replaceState(state, title,
+ * url)` -- test/dom-stand-in.mjs otherwise has no navigation model at all.
+ * NOT attached to StandInWindow by default: a check that wants the
+ * `window.history.replaceState` branch of some client code exercised attaches
+ * one explicitly (`window.history = new StandInHistory(location)`), which is
+ * also what keeps a callee's OWN fallback for "no window.history" -- src/ui.mjs's
+ * maybeJumpToStrandedRound has one -- under its own coverage: a check that does
+ * nothing special gets `window.history === undefined`, exactly like before this
+ * class existed, rather than every check silently losing that branch the moment
+ * a generic stand-in grew a history object.
+ *
+ * Records every call verbatim (`replaceStateCalls`), so a check can assert
+ * exactly what was replaced, and applies the one real side effect anything in
+ * this repo depends on: replacing the URL updates the bound `location`-like
+ * object to match, including dropping any fragment the new URL does not carry.
+ * A real `history.replaceState(null, '', pathnamePlusSearch)` -- the shape
+ * src/ui.mjs's own call takes -- does exactly this to `location.hash` with no
+ * navigation and no event; it is the mechanism the sentinel-consumption logic
+ * depends on to make a later, genuine re-click detectable again. Splits the
+ * fragment off `url` by hand rather than parsing it as a real URL: this
+ * repo's `location` stand-ins are plain objects, not real Location/URL
+ * instances (test/check-sample-board.mjs's `{ protocol: 'file:' }`, this
+ * file's own callers' `{ protocol, hash }`), so a real URL parser would choke
+ * on a bare path-plus-search string with no origin. */
+export class StandInHistory {
+  constructor(location) {
+    this.location = location;
+    this.replaceStateCalls = [];
+  }
+  replaceState(state, title, url) {
+    this.replaceStateCalls.push({ state, title, url });
+    if (!this.location) return;
+    const hashIdx = url.indexOf('#');
+    this.location.hash = hashIdx === -1 ? '' : url.slice(hashIdx);
+  }
+}
+
 /** An element's inline `style`: a plain object for ordinary properties, plus the
  * three methods a custom property needs. Real CSSStyleDeclaration stores custom
  * properties in their own namespace reachable only through these -- `el.style['--x']`

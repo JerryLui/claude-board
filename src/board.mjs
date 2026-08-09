@@ -1061,3 +1061,53 @@ export function buildPacket(board, round, url) {
     url,
   };
 }
+
+// --- fields the daemon keeps on the board but never shows a client -------------
+//
+// The stranded rule (src/server.mjs's createStrandedWatch, SPEC_STRANDED.md) records on
+// the board itself the banner it currently has standing for it, because the thing that
+// record defends against is a daemon RESTART and an in-memory one is empty in exactly
+// that case. One field holding one record rather than three parallel ones that must be
+// written, cleared and stripped together:
+//
+//   board.strandedBanner = { at, until, round, pid } | null
+//
+//   at     when the banner went up, an ISO stamp like `sentAt`/`postedAt` beside it.
+//          Also what bounds `pid` below: a process that started before this did is not
+//          the one this record names, whatever it is called.
+//   until  when the process serving the banner will exit and withdraw it -- the round's
+//          own deadline, or the launcher's hard ceiling, whichever comes first. Used for
+//          ONE thing: deciding whether `pid` is still worth signalling. It is deliberately
+//          NOT a term in whether the record suppresses -- a banner that has expired off
+//          the screen still counts as this board's one announcement, which is criterion 7
+//          read literally, and that reading was chosen with the cost in view.
+//   round  which round the reviewer was told about, and the load-bearing field: the
+//          absence ends when THIS round stops being awaited (answered, or its wait
+//          lapsed), whereupon the next round on the board starts a fresh one.
+//   pid    the process serving that banner's click, so a daemon that did not spawn it
+//          can still withdraw it after an unclean restart. Null on the osascript
+//          fallback, which has no process that outlives its post.
+//
+// Declared HERE rather than in src/server.mjs because the renderer has to know it by
+// name too, and src/render.mjs cannot import from the server (the server imports it).
+export const STRANDED_BANNER = 'strandedBanner';
+
+/** A shallow copy of `board` with that record removed, for anything a client sees.
+ *
+ * Not a nicety. The daemon writes the marker with `writeBoard` and does NOT re-render
+ * the page (that would mean re-rendering a possibly multi-megabyte page board from a
+ * timer callback), so if the marker reached the rendered payload, `GET /b/:id` would
+ * serve markup that `pages/:id.html` on disk does not have -- breaking the invariant
+ * test/check-http.mjs pins byte-for-byte ("the served page, the pages/ file on disk,
+ * and a fresh renderBoardPage() of the stored JSON are all byte-identical"), which is
+ * what makes an archived board openable from Finder with no daemon at all. Keeping
+ * these out of the payload keeps the rendered bytes a pure function of the board's
+ * REVIEWER-facing state, which is the property that invariant is really about.
+ *
+ * It is also simply true: nothing in the page has any use for it. `cwd` is dropped from
+ * the same payload for a different reason (it leaks the reader's directory layout into a
+ * file meant to be handed around) and is dropped at its own call site. */
+export function stripDaemonOnly(board) {
+  const { [STRANDED_BANNER]: _banner, ...rest } = board;
+  return rest;
+}

@@ -137,7 +137,10 @@ const notifyBuild = spawnSync(ccCmd,
   ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', notifyObj, notifySrc], { encoding: 'utf8' });
 const build = notifyBuild.status !== 0 ? notifyBuild : spawnSync(ccCmd,
   ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj,
-   '-framework', 'Foundation', '-framework', 'UserNotifications'], { encoding: 'utf8' });
+   // AppKit joins the two frameworks UNUserNotificationCenter needs because the click
+   // -serving mode becomes an NSApplication to receive its own notification's response
+   // (ADR.md entry 57, bin/notify.m). install.sh links the same three.
+   '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' });
 
 async function main() {
   await check('the launcher compiles clean against the generated header (no warnings, same flags install.sh uses plus -Wextra)', async () => {
@@ -184,6 +187,7 @@ async function main() {
     CLAUDE_BOARD_PORT: '48123',
     CLAUDE_BOARD_SHUTDOWN_MS: '4242',
     CLAUDE_BOARD_SSE_HEARTBEAT_MS: '5353',
+    CLAUDE_BOARD_STRANDED_GRACE_MS: '8686',
     CLAUDE_BOARD_TIMEOUT_MS: '6464',
     CLAUDE_BOARD_HANDOFF_TTL_MS: '7575',
     TMPDIR: path.join(workDir, 'poison-tmpdir'),
@@ -215,6 +219,7 @@ async function main() {
       'CLAUDE_BOARD_HOME', 'CLAUDE_BOARD_REF_ROOTS',
       'CLAUDE_BOARD_REPO_ROOT',
       'CLAUDE_BOARD_PORT', 'CLAUDE_BOARD_SHUTDOWN_MS', 'CLAUDE_BOARD_SSE_HEARTBEAT_MS',
+      'CLAUDE_BOARD_STRANDED_GRACE_MS',
       'CLAUDE_BOARD_TIMEOUT_MS', 'CLAUDE_BOARD_HANDOFF_TTL_MS', 'TMPDIR',
     ].sort();
     // TMPDIR is the one passthrough name macOS also sets on its own account in some
@@ -246,6 +251,10 @@ async function main() {
     assert.equal(childEnv.CLAUDE_BOARD_PORT, '48123');
     assert.equal(childEnv.CLAUDE_BOARD_SHUTDOWN_MS, '4242');
     assert.equal(childEnv.CLAUDE_BOARD_SSE_HEARTBEAT_MS, '5353');
+    // The stranded grace (SPEC_STRANDED.md criterion 4, "overridable by environment
+    // variable, as the other timings are"): a bundled install that dropped it here would
+    // leave the shipped fifteen seconds the only value reachable under a real install.
+    assert.equal(childEnv.CLAUDE_BOARD_STRANDED_GRACE_MS, '8686');
     assert.equal(childEnv.CLAUDE_BOARD_TIMEOUT_MS, '6464');
     assert.equal(childEnv.CLAUDE_BOARD_HANDOFF_TTL_MS, '7575');
     assert.equal(childEnv.TMPDIR, path.join(workDir, 'poison-tmpdir'));

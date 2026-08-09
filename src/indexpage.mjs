@@ -585,6 +585,7 @@ function pomodoroSyncForm() {
   var longBreakMin = form.querySelector('input[name="longBreakMin"]');
   var longEvery = form.querySelector('input[name="longEvery"]');
   var notify = form.querySelector('input[name="notify"]');
+  var notifyRounds = form.querySelector('input[name="notifyRounds"]');
   // The three cue pickers, synced the same way and on the same
   // condition as every field above -- each is its own <select>, so this is
   // what makes "reverting a change without saving leaves the stored cue
@@ -600,6 +601,7 @@ function pomodoroSyncForm() {
   if (longBreakMin && active !== longBreakMin) longBreakMin.value = s.longBreakMin;
   if (longEvery && active !== longEvery) longEvery.value = s.longEvery;
   if (notify && active !== notify) notify.checked = !!s.notify;
+  if (notifyRounds && active !== notifyRounds) notifyRounds.checked = !!s.notifyRounds;
   if (cueWork && active !== cueWork) cueWork.value = s.cueWork;
   if (cueBreak && active !== cueBreak) cueBreak.value = s.cueBreak;
   if (cueLongBreak && active !== cueLongBreak) cueLongBreak.value = s.cueLongBreak;
@@ -742,6 +744,7 @@ function onPomodoroSettingsSubmit(ev) {
     longBreakMin: parseInt(form.querySelector('input[name="longBreakMin"]').value, 10),
     longEvery: parseInt(form.querySelector('input[name="longEvery"]').value, 10),
     notify: !!form.querySelector('input[name="notify"]').checked,
+    notifyRounds: !!form.querySelector('input[name="notifyRounds"]').checked,
     cueWork: form.querySelector('select[name="cueWork"]').value,
     cueBreak: form.querySelector('select[name="cueBreak"]').value,
     cueLongBreak: form.querySelector('select[name="cueLongBreak"]').value,

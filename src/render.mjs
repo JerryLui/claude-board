@@ -28,7 +28,7 @@
 import { styles, palettes, faviconLink, markSvg } from './styles.mjs';
 import { ui } from './ui.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
-import { resolveComments } from './board.mjs';
+import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
 import {
   roundPageLabel, isPageRound,
@@ -2092,7 +2092,11 @@ export function renderBoardPage(board) {
   // whole directory layout, riding along inside a document nobody reads it out
   // of. Nothing in src/ui.mjs touches it; the index page reads `cwd` off the
   // stored board, never off this payload.
-  const { cwd: _cwd, ...boardForClient } = { ...board, comments: resolvedComments };
+  // `stripDaemonOnly` (src/board.mjs) drops the stranded rule's own bookkeeping for a
+  // second, independent reason: the daemon writes that record WITHOUT re-rendering the
+  // page, so anything of it that reached this payload would make the served markup
+  // disagree with `pages/<id>.html` on disk. See that function's own comment.
+  const { cwd: _cwd, ...boardForClient } = stripDaemonOnly({ ...board, comments: resolvedComments });
   // The page-board layout follows the PAGE on screen, not the board: a thread
   // whose first round was an artifact and whose second asks a question is one
   // board with one full-viewport page and one ordinary one, and flipping between

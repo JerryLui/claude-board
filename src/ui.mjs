@@ -12,8 +12,10 @@
 // actually gone out, since the send bar sits outside the round section and no
 // history collapse can reach it. Subscribes over SSE so a follow-up round pushes
 // into this already-open tab instead of requiring a reload — marking that tab
-// (title count, favicon badge, notification when it's unfocused) rather than
-// stealing focus back — and re-reads the board on every (re)connect, because the
+// (title count, favicon badge) rather than stealing focus back, and reporting
+// whether it is being looked at so the daemon's own banner (ADR.md entry 58)
+// can tell a buried tab from a genuinely absent reviewer — and re-reads the
+// board on every (re)connect, because the
 // stream has no replay and a disconnected client would otherwise lose a push for
 // good.
 //
@@ -242,8 +244,10 @@ export const ui = `
   var isPageRound = ${isPageRound.toString()};
 
   // Same technique a third time: whether a round is *awaited* (CONTEXT.md
-  // "Awaited") is what markPendingRound below gates the tab mark and the
-  // notification on (AC 9/AC 10, SPEC_AWAITED.md ticket 04) -- the exact same
+  // "Awaited") is what markPendingRound below gates the tab mark on, and what
+  // the banner's own click target (oldestAwaitedRoundNumber) reads to find the
+  // oldest one still waiting (AC 9, SPEC_AWAITED.md ticket 04; SPEC_STRANDED.md
+  // criterion 12) -- the exact same
   // predicate src/indexpage.mjs's badge count and src/server.mjs's
   // drainUndeliveredComments read, spliced in rather than hand-copied so a legacy
   // round (minted before ADR.md entry 45, carrying neither an awaited flag nor an
@@ -4235,17 +4239,19 @@ export const ui = `
    * showing, and inert when nothing is open at all (every round already sent,
    * nothing left to go to).
    *
-   * Shared by the notification's click handler and arrival from the index
-   * (below) -- both want the same destination for the same reason: each is the
-   * reviewer saying "take me to the thing that needs an answer". One
-   * implementation, so they can never drift into disagreeing about where that
-   * is -- and it routes through goToRound, so it cannot drift from the pager
-   * either.
+   * Shared by arrival from the index (below) -- the banner's own click target
+   * is a DIFFERENT function, jumpToStrandedRound (further below), because it
+   * wants a different round (criterion 12: the oldest still awaited, not the
+   * latest unsent one this one names). Both exist for the same reason: each is
+   * the reviewer saying "take me to the thing that needs an answer", just
+   * naming a different "thing". One implementation per meaning, so neither can
+   * drift into disagreeing with itself about where that is -- and this one
+   * routes through goToRound, so it cannot drift from the pager either.
    *
    * ADR.md entry 61: the header's own round badge used to be a third caller,
    * deferring to this same function on click rather than navigating on its
    * own -- the badge is gone (SPEC_HEADER.md AC 12), and this function stays
-   * exactly as it was for its two remaining callers. */
+   * exactly as it was for its remaining caller. */
   function jumpToOpenRound() {
     var target = openRoundNumber();
     if (target == null || target === currentRound) return;
@@ -4285,6 +4291,86 @@ export const ui = `
     if (document.readyState === 'complete') jumpToOpenRoundAfterPaint();
     else window.addEventListener('load', jumpToOpenRoundAfterPaint);
   }
+
+  /** The banner's own click target (SPEC_STRANDED.md criterion 12, Decisions:
+   * "the click resolves to the oldest round still waiting at the moment it is
+   * clicked"). Deliberately NOT openRoundNumber() -- that names the LATEST
+   * unsent round, which is right for '#open-round' (arriving from the index)
+   * and for what this page can still submit, but wrong here: a lapsed round
+   * must never outrank an older one still genuinely awaited, and 'sent' vs
+   * 'not sent' is not the same question as 'awaited' at all (a page round can
+   * be unsent and still not awaited, ADR.md entry 35). Walks ascending
+   * board.rounds and returns the FIRST match, so it is the oldest by
+   * construction, reading roundIsAwaited -- the same predicate markPendingRound
+   * gates the tab mark on -- off the live 'board' SSE keeps current, so a
+   * click landing on a tab that has been open and pushing to in the
+   * background resolves against whatever is awaited right now, not whatever
+   * was awaited when the banner first fired. */
+  function oldestAwaitedRoundNumber() {
+    var rounds = board.rounds || [];
+    var now = Date.now();
+    for (var i = 0; i < rounds.length; i++) {
+      // roundIsCurrentlyAwaited, NOT roundIsAwaited: the bare flag is write-once
+      // in the only direction that matters here, because applySubmit
+      // (src/board.mjs) stamps 'status: sent' on an answered round and leaves
+      // 'awaited: true' standing. Reading the flag alone therefore resolved this
+      // click to the first round the reviewer had ALREADY ANSWERED, on every
+      // board past its first exchange -- which is every board this feature is
+      // for. This is the same predicate the countdown and the send surface read
+      // (roundIsAwaitedOpen plus a live deadline), so the page cannot disagree
+      // with itself about which round is waiting; and it is what the daemon's own
+      // stillWaiting (src/server.mjs) asks, so the click lands on the round the
+      // banner was raised about rather than on some earlier one.
+      if (roundIsCurrentlyAwaited(rounds[i], now)) return rounds[i].n;
+    }
+    return null;
+  }
+
+  function jumpToStrandedRound() {
+    var target = oldestAwaitedRoundNumber();
+    if (target == null || target === currentRound) return;
+    goToRound(target);
+  }
+
+  function jumpToStrandedRoundAfterPaint() {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(jumpToStrandedRound);
+    else jumpToStrandedRound();
+  }
+
+  // '#stranded-round': the daemon's banner click, distinct from '#open-round'
+  // (src/indexpage.mjs's live rows, above) so that sentinel's own "latest
+  // unsent round" meaning is untouched -- src/notify.mjs and bin/notify.m
+  // compose the URL this reads.
+  //
+  // Checked from four edges, not just 'load' the way '#open-round' is: the
+  // commonest stranded shape is a hidden-but-CONNECTED tab, so the click is a
+  // same-document fragment change on a tab that is already open -- no 'load'
+  // fires at all, only 'hashchange'. And a second click landing while the tab
+  // is still sitting at this exact hash from an earlier one is not even a
+  // navigation the browser reports -- revealing an already-frontmost-URL tab
+  // is silent, hash unchanged, no 'hashchange' either -- so this also rides
+  // 'visibilitychange' and 'focus', below, the two edges that mean the
+  // reviewer just arrived (not 'blur', which means the opposite).
+  // The hash is consumed (cleared, no navigation) the instant it is read, so
+  // an ordinary LATER refocus -- the reviewer having since navigated on their
+  // own -- can never re-trigger the jump and steal it back; and because it is
+  // cleared, a genuine follow-up click reusing the same literal hash value is
+  // once again a real change from the browser's point of view, so it is
+  // detected the same way the first one was.
+  function maybeJumpToStrandedRound() {
+    if (!location || location.hash !== '#stranded-round') return;
+    if (window.history && typeof window.history.replaceState === 'function') {
+      window.history.replaceState(null, '', location.pathname + location.search);
+    } else {
+      location.hash = '';
+    }
+    jumpToStrandedRoundAfterPaint();
+  }
+  if (location && location.hash === '#stranded-round') {
+    if (document.readyState === 'complete') maybeJumpToStrandedRound();
+    else window.addEventListener('load', maybeJumpToStrandedRound);
+  }
+  window.addEventListener('hashchange', maybeJumpToStrandedRound);
 
   /** Enable/disable BOTH send-bar buttons together. They live in .send-bar,
    * outside any round section, so markRoundHistory (which disables everything
@@ -4401,23 +4487,6 @@ export const ui = `
     });
   }
 
-  /** A second entry point into the SAME permission dance notifyRound runs, fired
-   * from the one moment the tab is definitely focused: Chrome only raises the
-   * prompt in the foreground on a focused tab, and notifyRound's own request
-   * happens from the hidden-tab branch -- the one moment it CAN'T. A reviewer
-   * stranded at "default" would otherwise have no way to reach "granted" short
-   * of a round landing while they happen to be looking away. Request only, never
-   * a Notification -- that stays notifyRound's job alone. */
-  function requestNotifyPermissionFromSend() {
-    if (readonly) return;
-    if (typeof Notification === 'undefined') return;
-    try {
-      if (Notification.permission !== 'default') return; // granted: nothing to do; denied: never re-prompt
-      var req = Notification.requestPermission();
-      if (req && typeof req.then === 'function') req.then(function () {}, function () { /* ignore */ });
-    } catch (e) { /* degrade silently -- must never block or delay the submit */ }
-  }
-
   if (sendBtn) {
     sendBtn.addEventListener('click', function () {
       if (readonly) return;
@@ -4429,7 +4498,6 @@ export const ui = `
       // already has.
       if (sendArmed) {
         disarmSend();
-        requestNotifyPermissionFromSend();
         submitBoard('send');
         return;
       }
@@ -4443,7 +4511,6 @@ export const ui = `
         armSendGuard(outstanding);
         return;
       }
-      requestNotifyPermissionFromSend();
       submitBoard('send');
     });
   }
@@ -4791,35 +4858,32 @@ export const ui = `
     if (outstanding.length) {
       armSendGuard(outstanding);
     } else {
-      requestNotifyPermissionFromSend();
       submitBoard('send');
     }
   });
 
-  // --- "Open once, then badge and notify" ------------
+  // --- "Open once, then badge" ------------
   //
   // The tab is opened exactly once, for a thread's first board; every later round
   // arrives over SSE into that same tab, so the page itself has to be what tells
-  // the reviewer something new landed. Two marks, both page-side, neither of which
-  // steals focus (the whole reason the tab is not reopened): the page's own amber
-  // tile carrying a bold ink numeral for how many rounds are owed, drawn onto a
-  // data-URI favicon, and -- only when this document is hidden or unfocused -- a
-  // system notification that does carry the round number, because Notification
-  // Center is not a tab strip glanced at in passing.
+  // the reviewer something new landed. A page-side mark that never steals focus
+  // (the whole reason the tab is not reopened): the page's own amber tile
+  // carrying a bold ink numeral for how many rounds are owed, drawn onto a
+  // data-URI favicon. The notification that used to fire alongside it, for a
+  // hidden or unfocused tab, is gone -- the daemon raises that banner now
+  // (ADR.md entry 58), reading the same visibility/focus edges via the attended
+  // report just below, so the favicon stays the tab's own silent glance.
   // The title used to carry a "(n) " prefix too; it doesn't any more -- a numeral
   // already sitting in the tab mark makes that case weaker, not stronger, so
   // document.title is just left alone.
   //
-  // Every part degrades silently and never blocks: no canvas, no Notification
-  // constructor, permission denied or a throw from any of them leaves the round
-  // pushed and the page working, just unmarked. Permission is requested lazily, on
-  // the first round that would actually notify, never at load. All of it is inert
-  // in readonly mode -- there is no SSE connection there to push a round in the
-  // first place, and every entry point below returns early on 'readonly' anyway,
-  // so the standalone file:// archive neither draws a mark nor asks for anything.
+  // Every part degrades silently and never blocks: no canvas, a throw from it
+  // leaves the round pushed and the page working, just unmarked. All of it is
+  // inert in readonly mode -- there is no SSE connection there to push a round
+  // in the first place, and every entry point below returns early on 'readonly'
+  // anyway, so the standalone file:// archive never draws a mark.
 
   var pendingRounds = 0;
-  var baseTitle = document.title;
   var faviconLink = null;
   var baseFavicon = null;
 
@@ -4892,65 +4956,23 @@ export const ui = `
       }
       var href = drawFavicon(pending);
       if (href) faviconLink.setAttribute('href', href);
-    } catch (e) { /* no favicon mark; the notification still covers a hidden tab */ }
+    } catch (e) { /* no favicon mark; the daemon's banner still covers a hidden tab */ }
   }
 
-  /** A notification INSTEAD of a focus steal, and only when the reviewer isn't
-   * already looking: a visible, focused tab already shows the round, so notifying
-   * would be noise. Nothing here ever pulls the window forward UNBIDDEN -- the
-   * one exception is the notification's own click handler below, because a
-   * click on it is the reviewer asking to be brought back. */
-  function notifyRound(n) {
-    if (readonly) return;
-    if (typeof Notification === 'undefined') return;
-    var unfocused = document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus());
-    if (!unfocused) return;
-    var body = 'Round ' + n + ' is waiting for you.';
-    function fire() {
-      // The tag carries the round number so round 3 gets its own entry in
-      // Notification Center instead of silently replacing round 2's -- only a
-      // genuine re-delivery of the SAME round should collapse into one.
-      try {
-        var notif = new Notification(baseTitle, { body: body, tag: 'claude-board-' + boardId + '-' + n });
-        // Focus, then land on the round that needs an answer, then dismiss. The
-        // jump reuses jumpToOpenRound rather than a second implementation of it
-        // (ADR.md entry 61: this notification click is one of its two remaining
-        // callers) -- a reviewer who clicks a notification is asking the same
-        // question that function answers, and arriving at whatever they last
-        // scrolled to makes them ask it again by hand. Ordering matters -- the
-        // scroll must happen on a window already brought forward.
-        notif.onclick = function () { window.focus(); jumpToOpenRound(); notif.close(); };
-      } catch (e) { /* denied or unsupported */ }
-    }
-    try {
-      if (Notification.permission === 'granted') { fire(); return; }
-      if (Notification.permission === 'denied') return;              // never re-prompt
-      var req = Notification.requestPermission();                     // lazily, on the first round that would notify
-      if (req && typeof req.then === 'function') {
-        req.then(function (perm) { if (perm === 'granted') fire(); }, function () { /* ignore */ });
-      }
-    } catch (e) { /* degrade silently -- marking the tab must never block a push */ }
-  }
-
-  /** The tab mark (AC 9) and the notification (AC 10) gate on the SAME thing --
-   * whether round n is awaited, i.e. whether the ask() call that posted it is
-   * still genuinely blocked on it (CONTEXT.md "Awaited"). A fire-and-forget
-   * artifact round (no wait) is not: nobody is listening for a submit that will
-   * never come, so marking it pending or notifying about it would both be the
-   * same lie in two different UI surfaces. Gated here, once, rather than in
-   * notifyRound alone, precisely so the favicon badge and the notification can
-   * never disagree about which rounds count -- the exact drift AC 9/AC 10
-   * together forbid. 'board' is read directly off the closure rather than
-   * passed in: applyRoundPush (this function's only caller) has already
-   * reassigned it to the post-push board by the time this runs, so n's own
-   * round record -- awaited flag included -- is right there. */
+  /** The tab mark (AC 9) gates on whether round n is awaited, i.e. whether the
+   * ask() call that posted it is still genuinely blocked on it (CONTEXT.md
+   * "Awaited"). A fire-and-forget artifact round (no wait) is not: nobody is
+   * listening for a submit that will never come, so marking it pending would be
+   * a lie the UI has no business telling. 'board' is read directly off the
+   * closure rather than passed in: applyRoundPush (this function's only caller)
+   * has already reassigned it to the post-push board by the time this runs, so
+   * n's own round record -- awaited flag included -- is right there. */
   function markPendingRound(n) {
     if (readonly) return;
     var r = (board.rounds || []).filter(function (x) { return x.n === n; })[0];
     if (!roundIsAwaited(board, r)) return;
     pendingRounds++;
     setFaviconBadge(pendingRounds);
-    notifyRound(n);
   }
 
   function clearPendingMark() {
@@ -4959,15 +4981,144 @@ export const ui = `
     setFaviconBadge(0);
   }
 
+  // --- Attended report: does the daemon know this tab is being looked at? -----
+  //
+  // CONTEXT.md "Watcher"/"Attended", ADR.md entry 58: the daemon is the one
+  // notifier now, and it can only tell a buried tab from a genuinely absent
+  // reviewer if the tab itself says which. 'attendedWatcherId' is the id the SSE
+  // stream hands this connection in its own 'watcher' event (below, where 'es' is
+  // created) -- nothing is reported before it arrives, since a report naming no
+  // watcher has nothing to update. Fed from the SAME visibility/focus listeners
+  // the favicon badge already uses, just below, PLUS 'blur' (which the favicon
+  // mark has no use for -- losing focus while still visible never means "come
+  // back and look", so clearPendingMark stays off it).
+  //
+  // 'blur' is not a latency gap, it is the product's main scenario: a board left
+  // open on one screen while the reviewer works in another window or the
+  // terminal is not hidden and not unfocused-via-visibilitychange -- it just
+  // never regains focus again until they come back on their own, so with only
+  // visibilitychange/focus this tab reports 'attended: true' once, at open, and
+  // never again for the rest of the wait. The daemon reads that stale true as
+  // "someone is looking" and raises nothing, for a board sitting in the single
+  // most common posture this product has. 'blur' closes it: the OS handing focus
+  // to another app is exactly the edge visibilitychange/focus cannot see on
+  // their own (document.hidden stays false, and 'focus' only fires on
+  // REGAINING it).
+  var attendedWatcherId = null;
+  // Bumped by every reportAttended() call -- a fresh DOM edge or a fresh
+  // watcher id (a reconnect) alike -- so a POST or a pending retry from an
+  // EARLIER call can tell it has been superseded before it acts. A single
+  // timer handle cannot do this alone: more than one POST can be in flight
+  // at once (a reviewer alt-tabbing across the board -- focus, blur, focus,
+  // blur, all within a couple hundred milliseconds, is the exact edge this
+  // listener exists to catch), and each fires its own reportAttended() before
+  // any of the earlier ones has rejected, so there is nothing yet to clear.
+  // Comparing against a shared, monotonically increasing epoch instead of a
+  // single cleared/not-cleared handle is what lets EVERY stale chain recognise
+  // itself as stale, not just the one a lone handle happened to be tracking.
+  //
+  // Also sent on the wire as 'seq' (below): ordering held client-side alone is
+  // not enough when two POSTs for the SAME watcher are genuinely in flight at
+  // once (the alt-tab burst above) -- HTTP does not guarantee the second one
+  // sent lands second, and a focus->true then a blur->false racing out of
+  // order at the daemon leaves it holding 'true' with nobody looking, silent
+  // for the rest of the wait. Never reset on reconnect: a fresh watcherId
+  // starts a fresh, seq-less record on the daemon side, so a counter that only
+  // ever grows is what keeps every report this tab EVER sends -- across every
+  // reconnect -- ordered against itself without needing to coordinate a reset
+  // with the server.
+  var attendedEpoch = 0;
+
+  function isTabAttended() {
+    return !document.hidden && (typeof document.hasFocus !== 'function' || document.hasFocus());
+  }
+
+  // Doubles from 2s, capped at the SSE heartbeat interval (15s default --
+  // PROTOCOL.md, src/server.mjs's DEFAULT_SSE_HEARTBEAT_MS; not imported here,
+  // this being the standalone client script, so the two are kept in step by
+  // hand rather than by reference) -- the connection is already paying for a
+  // wakeup at that cadence, so retrying any faster once failures are settled
+  // buys nothing. Three doublings (2s, 4s, 8s) clear the ceiling, then every
+  // attempt after holds there for as long as the daemon stays unreachable.
+  var ATTENDED_RETRY_CEILING_MS = 15000;
+  function nextAttendedRetryDelay(attempt) {
+    return Math.min(2000 * Math.pow(2, attempt), ATTENDED_RETRY_CEILING_MS);
+  }
+
+  /** Sends one attended report, and -- only on failure -- arms a retry.
+   * UNBOUNDED in attempts, deliberately: a tab that is visible and focused
+   * produces no further visibility/focus/blur edge to retry it on its own (the
+   * reviewer is already looking and has no reason to touch it), so a fixed
+   * retry count just moves the mute hole from "one dropped POST" to "three or
+   * however many" -- worse during exactly the daemon-restart storm where
+   * failures cluster, since isAttended no longer tolerates a Watcher that has
+   * never successfully reported at all. Idle the instant a report lands
+   * (nothing schedules anything on success): only a FAILED report may ever
+   * leave a timer armed, so an attended tab that is reporting fine costs
+   * nothing beyond the edges it already rides. */
+  function reportAttended() {
+    if (readonly || !attendedWatcherId) return;
+    attendedEpoch++;
+    sendAttended(attendedEpoch, 0);
+  }
+
+  function sendAttended(epoch, attempt) {
+    // Guards the SEND, not just the retry: a stale timer firing after a
+    // fresher call already reported is a no-op outright, rather than an
+    // extra (merely redundant, since the body always reads isTabAttended()
+    // live) POST the daemon has to receive and this connection has to pay
+    // for. Always true on attempt 0 -- reportAttended just bumped the epoch
+    // to this exact value the line before calling here -- so this only ever
+    // turns AWAY a retry, never the report that armed it.
+    if (readonly || epoch !== attendedEpoch) return;
+    var watcher = attendedWatcherId;
+    // 'seq' is THIS call's own epoch, captured as the function's argument --
+    // never the live attendedEpoch read fresh at send time, which a retry
+    // would otherwise report as newer than the (possibly stale) attended
+    // value it is actually carrying.
+    fetch('/api/board/' + boardId + '/attended', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watcher: watcher, attended: isTabAttended(), seq: epoch }),
+    }).then(function (r) {
+      // A rejected response (401 mid-secret-rotation, 5xx, anything not 2xx)
+      // resolves this promise -- only a network failure rejects it on its own --
+      // so without this the daemon recording nothing reads to the page as
+      // indistinguishable from success, and nothing here would ever retry.
+      // Thrown INTO the catch below so a bad response takes the exact same
+      // unbounded-with-backoff path a dropped one already does; the argument
+      // for why that path must be unbounded (this function's own header
+      // comment) applies to a rejected report every bit as much as a lost one.
+      if (!r.ok) throw new Error('attended report rejected: ' + r.status);
+    }).catch(function () {
+      // Superseded -- a fresher reportAttended() call (a later edge, or a
+      // reconnect's fresh watcher id) already bumped attendedEpoch past the
+      // one THIS chain was minted under -- must never arm its own retry on
+      // top of whatever the fresher call is already doing. readonly can in
+      // principle flip too (the archive never sets attendedWatcherId in the
+      // first place, so this is belt only).
+      if (readonly || epoch !== attendedEpoch) return;
+      setTimeout(function () { sendAttended(epoch, attempt + 1); }, nextAttendedRetryDelay(attempt));
+    });
+  }
+
   // Coming back to the tab is the acknowledgement: the mark clears the moment the
   // document becomes visible/focused again, so a stale numeral never outlives
-  // the rounds it counted.
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) clearPendingMark(); });
-  window.addEventListener('focus', function () { clearPendingMark(); });
+  // the rounds it counted. The attended report rides the same edges (AC 16's
+  // daemon-side accessor; see SPEC_STRANDED.md) PLUS 'blur', which has nothing
+  // to say to the favicon or the banner's click sentinel (losing focus while
+  // still visible is not "come back and look", nor is it an arrival) but
+  // everything to say to the daemon (see attendedWatcherId's own comment above
+  // for why). The banner's own click sentinel, maybeJumpToStrandedRound, rides
+  // visibilitychange and focus only -- the two edges that mean "arriving", not
+  // blur, which means the opposite.
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) clearPendingMark(); reportAttended(); maybeJumpToStrandedRound(); });
+  window.addEventListener('focus', function () { clearPendingMark(); reportAttended(); maybeJumpToStrandedRound(); });
+  window.addEventListener('blur', function () { reportAttended(); });
 
   // --- SSE: a follow-up round pushes into this already-open tab ---------------
   //
-  // "Open once, then badge and notify" / "Always on under launchd":
+  // "Open once, then badge" / "Always on under launchd":
   // the daemon can restart mid-review -- on a crash, a kickstart, or an install
   // taking an update -- so the page
   // must reconnect rather than lose the thread. EventSource does that natively
@@ -5442,6 +5593,14 @@ export const ui = `
     // 'open' fires on the first connection AND on every automatic reconnect,
     // which is exactly the set of moments this client may have missed something.
     es.addEventListener('open', function () { resync(); });
+    // Sent first, ahead of anything else, by src/server.mjs's handleEvents -- see
+    // PROTOCOL.md "SSE events". Reporting immediately on receipt covers both the
+    // initial load (a tab opened straight into the background never fires
+    // visibilitychange/focus on its own) and every reconnect (a fresh watcherId
+    // needs its own first report, since the daemon holds no history for it).
+    es.addEventListener('watcher', function (ev) {
+      try { attendedWatcherId = JSON.parse(ev.data).id; reportAttended(); } catch (e) { /* malformed; the next reconnect tries again */ }
+    });
     es.addEventListener('round', function (ev) {
       try { applyRoundPush(JSON.parse(ev.data)); } catch (e) { /* malformed push; ignore rather than crash the page */ }
     });

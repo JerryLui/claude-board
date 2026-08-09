@@ -775,14 +775,17 @@ INFO
   # Two compiler invocations rather than one, because the two halves are different
   # languages: -fobjc-arc is meaningless for C and passing it alongside a .c file makes
   # clang say so. notify.m compiles to an object first, then launcher.c compiles and links
-  # against it with the two frameworks UNUserNotificationCenter needs. Both halves land in
-  # one binary on purpose — see bin/notify.m's header for why a second executable in the
-  # bundle cannot post a notification.
+  # against it with the three frameworks it needs: Foundation and UserNotifications for
+  # posting, and AppKit for the click — a notification's delegate is only called on a
+  # RUNNING app, and becoming one is NSApplication's job (ADR.md entry 57, narrowing
+  # entry 9's "no AppKit"; bin/notify.m's own header has the reasoning). Both halves land
+  # in one binary on purpose — see bin/notify.m's header for why a second executable in
+  # the bundle cannot post a notification.
   elif ! {
     "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/notify.o" "$STAGED_NOTIFY_SRC" 2>&1 \
       && "$CC_CMD" -O2 -Wall -o "$STAGED_APP/Contents/MacOS/$LABEL" \
            -iquote "$LAUNCHER_BUILD_DIR" "$STAGED_LAUNCHER_SRC" "$LAUNCHER_BUILD_DIR/notify.o" \
-           -framework Foundation -framework UserNotifications 2>&1
+           -framework Foundation -framework UserNotifications -framework AppKit 2>&1
   }; then
     launcher_degraded "the launcher failed to compile (output above)"
   # The daemon's own payload, staged into Contents/Resources BEFORE signing so the
@@ -1117,7 +1120,7 @@ if [ "$USE_LAUNCHER" -eq 1 ] && [ -x "$APP_EXEC" ]; then
   # returns instantly, which is the price of not having to know in advance which run is
   # the first one.
   echo "==> if macOS asks whether \"$LABEL\" may send notifications, say Allow"
-  echo "    (pomodoro boundaries; nothing else on the board notifies)"
+  echo "    (pomodoro boundaries, and a round waiting on a board nobody is looking at)"
   "$APP_EXEC" --notify-authorize >/dev/null 2>&1 || true
 fi
 
@@ -1135,6 +1138,7 @@ if [ "$USE_LAUNCHER" -eq 1 ]; then
   # is why this is a printed instruction rather than a line of code. It is worth printing
   # at all because the setting is the whole reason the notification comes from this bundle
   # rather than from osascript: before, the row to change said "Script Editor".
-  echo "          Pomodoro notifications come from it too. To make them stay on screen until"
-  echo "          dismissed: System Settings -> Notifications -> $LABEL -> Alerts."
+  echo "          Both kinds of notification come from it -- pomodoro boundaries and a round"
+  echo "          left waiting. To make them stay on screen until dismissed:"
+  echo "          System Settings -> Notifications -> $LABEL -> Alerts."
 fi

@@ -146,6 +146,14 @@ export function pomodoroWidget() {
       <label class="pomodoro-field">Long break (min)<input type="number" name="longBreakMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Long break every<input type="number" name="longEvery" min="1" max="100" step="1"></label>
       <label class="pomodoro-field pomodoro-field-check">Notify<input type="checkbox" name="notify"></label>
+      <!-- Round banners' own tick, independent of Notify above (ADR.md entry 58;
+           CONTEXT.md's Banner) -- Notify gates a pomodoro boundary's banner, this one
+           gates a Stranded round's, and unlike the pickers below it fires no test
+           banner of its own on the way on: that audition stays Notify's alone
+           (src/indexpage.mjs's onPomodoroNotifyChange), so this checkbox's 'change'
+           reaches no handler beyond the ordinary sync/submit every other field here
+           already gets. -->
+      <label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>
       <!-- The 'sound' checkbox is gone (retired, not kept as a
            master mute) -- Cues below is its replacement, three independent
            pickers rather than one on/off switch. A hairline + caption, not a

@@ -24,6 +24,8 @@ import {
   readDoc,
   writeDoc,
   createPomodoro,
+  mergeSettings,
+  roundBannersEnabled,
 } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
 import { NO_CUE } from '../src/cues.mjs';
@@ -470,6 +472,61 @@ async function main() {
     assert.equal(settings.cueBreak, 'Glass');
     assert.equal(settings.cueLongBreak, 'Glass');
     assert.equal('sound' in settings, false);
+  });
+
+  // -------------------------------------------------------------------------------
+  // notifyRounds -- round banners' own on/off tick (ticket 03, ADR.md entry 58),
+  // independent of `notify` in both directions (criterion 17). `notify` itself is
+  // covered against the real daemon in test/check-http.mjs; these are the pure-logic
+  // half: the default, the stale-document read, and the merge boundary.
+  // -------------------------------------------------------------------------------
+
+  await check('DEFAULT_SETTINGS: notifyRounds defaults on, same as notify', () => {
+    assert.equal(DEFAULT_SETTINGS.notifyRounds, true);
+  });
+
+  await check('roundBannersEnabled: on by default, off only when explicitly false', () => {
+    assert.equal(roundBannersEnabled({ notifyRounds: true }), true);
+    assert.equal(roundBannersEnabled({ notifyRounds: false }), false);
+    // A settings file written before this field existed carries no notifyRounds key
+    // at all -- the exact "reader who never opens settings" constraint -- and must
+    // still read as on, not off and not undefined.
+    assert.equal(roundBannersEnabled({}), true, 'a missing key must read as on, not off');
+    assert.equal(roundBannersEnabled(undefined), true, 'no settings object at all must still read as on');
+    assert.equal(roundBannersEnabled({ notifyRounds: 'nope' }), true, 'a non-boolean garbage value must not be mistaken for off');
+  });
+
+  await check('normalizeDoc: a document with no notifyRounds key at all (written before this field existed) reads as on', () => {
+    const settings = normalizeDoc({ settings: { workMin: 40 } }).settings;
+    assert.equal(settings.notifyRounds, true);
+  });
+
+  await check('normalizeDoc: an explicit notifyRounds: false survives normalization untouched', () => {
+    const settings = normalizeDoc({ settings: { notifyRounds: false } }).settings;
+    assert.equal(settings.notifyRounds, false);
+  });
+
+  await check('normalizeDoc: a non-boolean notifyRounds (hand-edited garbage) falls back to the default, same coercion notify already gets', () => {
+    const settings = normalizeDoc({ settings: { notifyRounds: 'nope' } }).settings;
+    assert.equal(settings.notifyRounds, true);
+  });
+
+  await check('mergeSettings: patching notify alone leaves notifyRounds untouched', () => {
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notifyRounds: false } };
+    const next = mergeSettings(doc, { notify: false });
+    assert.equal(next.settings.notify, false);
+    assert.equal(next.settings.notifyRounds, false, 'must survive a patch that never mentions it');
+  });
+
+  await check('mergeSettings: patching notifyRounds alone leaves notify untouched -- independent in the other direction too', () => {
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false } };
+    const next = mergeSettings(doc, { notifyRounds: false });
+    assert.equal(next.settings.notifyRounds, false);
+    assert.equal(next.settings.notify, false, 'must survive a patch that never mentions it');
+  });
+
+  await check('mergeSettings: a non-boolean notifyRounds is rejected, naming the field, same validation notify already gets', () => {
+    assert.throws(() => mergeSettings(defaultDoc(), { notifyRounds: 'yes' }), /notifyRounds/);
   });
 
   // -------------------------------------------------------------------------------

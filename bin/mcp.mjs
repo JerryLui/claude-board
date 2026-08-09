@@ -377,9 +377,9 @@ async function handoffUrl(boardId) {
   return `${BASE_URL}/auth/${token}`;
 }
 
-/** Open the tab on a fresh handoff, falling back to the board URL itself. Awaited by its
- * callers only for the mint — `open` is spawned detached either way, so nothing here
- * blocks on a browser. */
+/** Open the tab on a fresh handoff, falling back to the board URL itself. Its one caller,
+ * a thread's first board, awaits it only for the mint — `open` is spawned detached
+ * either way, so nothing here blocks on a browser. */
 async function openAuthorizedTab(boardId, url) {
   if (NO_OPEN) return; // no HTTP either: a headless run must not mint credentials it will not use
   openBoardTab((await handoffUrl(boardId)) ?? url);
@@ -402,40 +402,6 @@ function openBoardTab(url) {
   } catch (err) {
     logErr('failed to open board tab (non-fatal):', err.message);
   }
-}
-
-/** How many clients are connected to `boardId` right now, or null when the daemon
- * does not report it — an older daemon, which reads as "unknown". We do not reopen on a
- * guess, because opening every round is exactly the focus-stealing behaviour rejected
- * here. Unknown is logged to stderr rather than swallowed.
- *
- * ONE source: the `clients` count on the POST response, which is free and race-free —
- * it is the count at the instant the round landed. There used to be a second, a
- * `GET /api/board/:id/clients` probe, and src/server.mjs has never routed it: it 404ed,
- * so this returned null every time and the reopen below has never once fired in
- * production, while test/check-mcp.mjs kept it green by standing the route up in a
- * proxy. Deleted rather than implemented on the daemon side too,
- * because the POST response already knows and a second source is a second thing to keep
- * true. */
-function connectedClientCount(posted) {
-  return typeof posted.clients === 'number' ? posted.clients : null;
-}
-
-/** Reopen the tab for a later round when the reviewer has no window on this board
- * open any more. Never called for the first board (that always opens). */
-async function reopenIfNoClient(posted, url) {
-  const clients = connectedClientCount(posted);
-  if (clients === null) {
-    logErr(
-      `daemon does not report connected clients for board ${posted.boardId}; not reopening the tab. ` +
-      `The board URL is in every progress notification and in the result: ${url}`
-    );
-    return false;
-  }
-  if (clients > 0) return false;
-  logErr(`no client connected to board ${posted.boardId}; reopening the tab at ${url}`);
-  await openAuthorizedTab(posted.boardId, url);
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -799,8 +765,9 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   if (!url) throw new ToolError(`daemon returned an unusable board id: ${JSON.stringify(posted.boardId)}`);
   session.url = url;
 
+  // The daemon announces a stranded round on its own now (ADR 55); this shim only
+  // ever opens a tab for a thread's first board.
   if (isFirstBoard) await openAuthorizedTab(posted.boardId, url);
-  else await reopenIfNoClient(posted, url);
 
   // A round with nothing awaited on it (see `isAwaited` above) has nothing a human
   // needs to submit, so there is nothing left to wait for — return the instant the

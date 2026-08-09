@@ -49,12 +49,34 @@ export const DEFAULT_SETTINGS = Object.freeze({
   longBreakMin: 15,
   longEvery: 4,
   notify: true,
+  // Round banners' own on/off tick (ADR.md entry 58; CONTEXT.md's Banner), independent
+  // of `notify` above -- that one gates pomodoro boundary banners alone, this one gates
+  // a Stranded round's banner alone, and each can be silenced without touching the
+  // other. On by default, INCLUDING for a settings document written before this field
+  // existed: normalizeDoc below fills a missing/non-boolean value in from this same
+  // default, so a reader who has never opened settings still gets round banners. See
+  // roundBannersEnabled below for the read side a later chunk consults.
+  notifyRounds: true,
   // Three DIFFERENT cues -- one per phase, so the reader tells
   // work/short-break/long-break apart by ear without looking at the screen.
   cueWork: pickCue('Hero'),
   cueBreak: pickCue('Purr'),
   cueLongBreak: pickCue('Submarine'),
 });
+
+/** The plain, obvious predicate a round's Stranded path (a later chunk, wired into the
+ * daemon around sse.clientCount in src/server.mjs) consults before raising a Banner for
+ * a round -- as opposed to `settings.notify`, which gates a pomodoro boundary's banner
+ * and nothing else (ADR.md entry 58; criterion 17: independent of the pomodoro control
+ * in both directions). Takes a settings object (typically `readDoc(home).settings`)
+ * rather than a whole doc, matching how notify.mjs's own notifyBoundary is called.
+ * Defaults ON for anything that is not exactly `false` -- absent, missing, or a stale
+ * document with no `notifyRounds` key at all -- the same "on unless explicitly turned
+ * off" reading normalizeDoc's coercion gives every other toggle here, so a settings file
+ * from before this field existed still returns true. */
+export function roundBannersEnabled(settings) {
+  return !settings || settings.notifyRounds !== false;
+}
 
 /** How late a deadline is allowed to run before the interval counts as EXPIRED rather
  * than merely late. Below this, `settleBoundary` advances the loop as if it ran on
@@ -285,7 +307,12 @@ export function resetTimer(doc, _now) {
 // ---------------------------------------------------------------------------------
 
 const DURATION_KEYS = ['workMin', 'breakMin', 'longBreakMin'];
-const TOGGLE_KEYS = ['notify'];
+// `notify` gates a pomodoro boundary's banner; `notifyRounds` gates a Stranded round's
+// (roundBannersEnabled above) -- two independent booleans validated identically, which
+// is what "silencing one leaves the other alone" (criterion 17) comes down to at this
+// layer: neither key's presence or absence in a patch ever touches the other's stored
+// value, the same as any two unrelated keys in this loop.
+const TOGGLE_KEYS = ['notify', 'notifyRounds'];
 // The three per-phase cue settings -- validated against
 // src/cues.mjs's isCue, the one place the closed set of legal values (the 14 sounds
 // macOS ships, plus `None`) is enumerated. Not re-enumerated here on purpose (this
@@ -467,7 +494,13 @@ export function normalizeDoc(parsed) {
   for (const key of ['workMin', 'breakMin', 'longBreakMin', 'longEvery']) {
     if (!isPositiveFinite(settings[key])) settings[key] = DEFAULT_SETTINGS[key];
   }
-  if (typeof settings.notify !== 'boolean') settings.notify = DEFAULT_SETTINGS.notify;
+  // Both toggles (TOGGLE_KEYS above), not just `notify` -- an older document with no
+  // `notifyRounds` key at all is exactly the "settings file written before this work
+  // existed" case the constraint names, and this loop is what makes it read as on
+  // rather than as a validation failure that would otherwise fall through to `undefined`.
+  for (const key of TOGGLE_KEYS) {
+    if (typeof settings[key] !== 'boolean') settings[key] = DEFAULT_SETTINGS[key];
+  }
   for (const key of ['cueWork', 'cueBreak', 'cueLongBreak']) {
     if (!isCue(settings[key])) settings[key] = DEFAULT_SETTINGS[key];
   }
