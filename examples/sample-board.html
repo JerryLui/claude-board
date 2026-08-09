@@ -463,7 +463,10 @@ body.readonly .mode-toggle, body.page-uncommentable .mode-toggle { display: none
    symmetric padding around a single glyph instead of text-plus-icon spacing. */
 .mode-toggle-icon { padding: 7px; }
 /* Unlike .mode-toggle, this control stays live in a read-only archive -- an
-   archive reader is exactly who needs to switch theme. An id
+   archive reader is exactly who needs to switch theme. Same for an
+   uncommentable page board: nothing there is answerable, but the theme of a
+   full-viewport artifact is exactly what a reader still wants to change, so
+   both of .mode-toggle's hiding gates above are carved out here. An id
    selector outranks body.readonly .mode-toggle's class selector regardless of
    source order, so that rule's own wording (asserted verbatim by
    test/check-archive.mjs) never has to change to carve this control out of it.
@@ -474,7 +477,7 @@ body.readonly .mode-toggle, body.page-uncommentable .mode-toggle { display: none
    qualifier is what the real button has and
    a markdown-minted heading never can -- see src/ui.mjs's matching
    'button#theme-toggle' lookup and its own comment on the same collision. */
-body.readonly button#theme-toggle { display: inline-flex; }
+body.readonly button#theme-toggle, body.page-uncommentable button#theme-toggle { display: inline-flex; }
 
 .readonly-banner { display: none; background: var(--warning-soft); border: 1px solid var(--warning-border);
   color: var(--warning-ink); font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }

@@ -43,9 +43,9 @@
 | 37 | The renderer templates pin the mermaid CDN fallback and keep the vendored copy | 2026-08-07 | accepted (see *Smaller decisions*) |
 | 38 | `/file/` is deleted; the board is the only way to see a rendered page | 2026-08-07 | accepted; supersedes 10 |
 | 39 | The board pushes its theme into the stage | 2026-08-07 | accepted (see *Smaller decisions*) |
-| 40 | The page board header condenses into a centred pill on reading | 2026-08-07 | accepted; **corrected by 49** |
+| 40 | The page board header condenses into a centred pill on reading | 2026-08-07 | accepted; **corrected by 49**; **narrowed by 59**; **widened by 60** |
 | 41 | A reported stage height is floored at the placeholder, not only capped | 2026-08-07 | accepted (see *Smaller decisions*) |
-| 42 | Rounds are the board's pages, flipped left and right | 2026-08-07 | accepted |
+| 42 | Rounds are the board's pages, flipped left and right | 2026-08-07 | accepted; **narrowed by 61** |
 | 43 | A page board carries no expand control | 2026-08-07 | accepted (see *Smaller decisions*) |
 | 44 | "A page board is never sent" is a browser rule, not a daemon rule | 2026-08-07 | accepted |
 | 45 | A page board may be awaited, and the caller declares it | 2026-08-07 | accepted; narrows 35; completed by 50 |
@@ -56,6 +56,13 @@
 | 50 | A wait that dies is recorded on the round | 2026-08-08 | accepted; completes 45 |
 | 51 | The docked send bar draws no hairline | 2026-08-08 | accepted (see *Smaller decisions*) |
 | 52 | A header that fades draws no border under the fade | 2026-08-08 | accepted (see *Smaller decisions*) |
+| 55 | A stranded round is announced, not opened onto | 2026-08-09 | accepted; narrows 4; widened by 58 |
+| 56 | The launcher may compose a notification body, behind a filter | 2026-08-09 | accepted; narrows 19 |
+| 57 | The banner opens the board it names | 2026-08-09 | accepted; narrows 9 |
+| 58 | One notifier for a round, and it is the daemon's | 2026-08-09 | accepted; widens 55 |
+| 59 | The board clears its own chrome band, the artifact does not | 2026-08-09 | accepted; narrows 40 |
+| 60 | The condense is every board's, not the page board's | 2026-08-09 | accepted; widens 40 |
+| 61 | The header stops naming the round | 2026-08-09 | accepted; narrows 42 |
 
 Entries 32-43 come from the page-board grill and are built, with one part-exception: 37 lives in
 the renderer skills under `~/.claude/skills`, outside this repo, so only its board-side half (the
@@ -198,11 +205,11 @@ in a line rather than argued at length.
 **Context:** entry 10 existed because markdown cannot link to `file://`, and a page board embeds the artifact, so the route is now a second way to look at one thing. **Decision:** `handleServeFile`, `SERVE_CSP`, `SERVE_TYPES`, the `CLAUDE_BOARD_SERVE_ROOTS` allowlist and its install step and record file all go. **Consequences:** every already-archived board's link 404s, and an artifact is capped at one self-contained file, since an opaque origin resolves no relative URL.
 
 ## 40. The page board header condenses into a centred pill on reading — 2026-08-07
-**Status:** accepted; corrected by 49
+**Status:** accepted; corrected by 49; narrowed by 59; widened by 60
 **Context:** the header has to be minimizable, and every treatment that puts a control on it spends a click and a piece of chrome on a state the reader's own scrolling already announces. **Decision:** scroll offset becomes a 0-to-1 progress across 140px (`--stage-p` on `<body>`), insetting a centred band behind a header that stays full-bleed and keeps the comment-mode toggle live. **Consequences:** the frame stays a constant viewport height, so condensing can never reflow a long document mid-read, and the stage agent gains a scroll message, shape-checked like every other on that channel. Why the ramp replaced a boolean flipped at 24px: DESIGN.md.
 
 ## 42. Rounds are the board's pages, flipped left and right — 2026-08-07
-**Status:** accepted
+**Status:** accepted; narrowed by 61
 **Context:** rounds stack vertically down one board, which a round that fills the viewport breaks outright. **Decision:** a thread keeps its single board and rounds become its pages — edge chevrons to flip, and a fixed `.round-pager-dock` of bare numerals dotting any round that still owes an answer. **Consequences:** the history rail is deleted, so the pager itself must keep a sent page read-only, and two rounds are never visible at once, so a question has to carry what it refers to. Why per-artifact boards and full round titles were dropped: DESIGN.md.
 
 ## 44. "A page board is never sent" is a browser rule, not a daemon rule — 2026-08-07
@@ -232,3 +239,30 @@ in a line rather than argued at length.
 ## 50. A wait that dies is recorded on the round — 2026-08-08
 **Status:** accepted; completes 45
 **Context:** entry 45's `awaited` flag was stamped at mint and never unstamped, so a lapsed round still counted toward the index badge, swallowed its own comments, and resumed on a re-post against a deadline already past. **Decision:** the deadline passing clears `awaited` at `readBoard`, the one choke point every reader of a stored board goes through; `awaitDeadline` and `status` are left alone, so a lapsed round stays distinguishable from one never awaited. **Consequences:** every surface keeps its bare `awaited` read and becomes correct for free, and a lapsed round is not re-waitable, which is the price of the single stored fact. Why not a clock in every reader: DESIGN.md.
+
+## 55. A stranded round is announced, not opened onto — 2026-08-09
+**Status:** accepted; narrows 4; widened by 58
+**Context:** everything that raises a signal for an awaited round is code inside the board tab, so a reviewer who closes that tab mid-wait is told nothing for the rest of the wait; the shim's one cover, forcing a tab open when the board reports no client, runs at post time only, steals focus, and fires on the false zero an SSE reconnect produces. **Decision:** the daemon raises a native banner when a round becomes stranded, evaluated at post and again when the last watcher leaves, after a short grace; the shim's forced reopen is deleted and the first board of a thread still opens as it always has. **Consequences:** the reviewer chooses when to come back rather than having a tab appear mid-sentence, at the price of the daemon owning a per-board timer and a disconnect hook it did not before, and of a signal that is silent where notifications are.
+
+## 56. The launcher may compose a notification body, behind a filter — 2026-08-09
+**Status:** accepted; narrows 19
+**Context:** entry 19's launcher takes argv only to select a row of a compiled-in table, deliberately, because it holds the reader's Documents grant and the plist that spawns it is user-writable; a banner that cannot name which project wants you is close to useless once more than one session runs. **Decision:** the launcher gains one format slot, filled only by an argument passing a strict name pattern in C, the same shape `is_safe_cue_name` already applies to a cue; an argument that fails the pattern selects the unnamed sentence instead of being rejected. **Consequences:** "no byte of argv reaches the screen" is given up and replaced by "no byte reaches the screen unfiltered", so the pattern is now load-bearing and belongs with the cue filter in review; a project name outside it degrades silently rather than failing loudly.
+
+## 57. The banner opens the board it names — 2026-08-09
+**Status:** accepted; narrows 9
+**Context:** a banner that cannot be clicked can only say "go look", leaving the reviewer to find a board the banner is forbidden from linking; the posting binary must be the bundle's own executable, so no separate helper can serve the click. **Decision:** the notify mode registers an action category and a delegate and stays alive to serve one click, opening a URL that must match a board URL pattern checked in C; it exits when the board gains a watcher, when the round stops being awaited, or at the wait's deadline, whichever comes first. **Consequences:** a second short-lived process now exists per stranded round rather than per boundary, so it must handle the signals the fire-and-exit mode never installed, and the clone install keeps a banner it cannot click.
+
+## 58. One notifier for a round, and it is the daemon's — 2026-08-09
+**Status:** accepted; widens 55
+**Context:** entry 55 gave the daemon a banner for a round nobody has a tab on, which left two implementations of one idea: the page notifying when its own tab is hidden, the daemon notifying when there is no tab, split on an accident of where the code can run rather than on anything a reviewer would recognise. The browser half also carries a permission grant that is per origin and per Chrome profile, so `localhost`, `127.0.0.1` and `board.localhost` are three separate answers and a denied prompt is unrecoverable in place. **Decision:** `notifyRound` and its permission request are deleted; the daemon raises every round notification, and the board tab reports whether it is Attended so the daemon can tell "you are looking at this" from "a tab exists". The favicon numeral stays, being a mark rather than a notification, and the title names the kind of thing that happened, `Board` beside the existing `Pomodoro`, with the body carrying the detail. **Consequences:** one notification identity, one on/off control and one System Settings row for the whole product, paid for with a new report from page to daemon, with the opened URL having to name the round so a click still lands where the deleted notification landed, and with the title becoming a per-row value rather than the single constant both sides compile in today.
+## 59. The board clears its own chrome band, the artifact does not — 2026-08-09
+**Status:** accepted; narrows 40
+**Context:** entry 40's floating header made every artifact responsible for ~96px of top padding, a number stated only as prose in `skills/claude-board/SKILL.md` against a header whose real height moves with the title's wrap and the viewport's width — so an artifact that padded nothing lost its own opening, silently, and nothing warned anyone. **Decision:** the parent reports its chrome band to the stage over the existing `stageAgentScript` channel and the stage tops its own `body` padding up to it, top and bottom, padding only and never a background. **Consequences:** the ~96px paragraph is deleted rather than corrected, an artifact that already pads keeps its own larger value, and the parent owes a fresh report on resize as well as at first paint.
+
+## 60. The condense is every board's, not the page board's — 2026-08-09
+**Status:** accepted; widens 40
+**Context:** entry 40 gave the page board a condensing header and left the ordinary board a static sticky one, so two board types in the same product read as two designs. **Decision:** both condense into the same centred pill on scroll, keeping the controls in the order the expanded header already has (mark, comment toggle, theme, round badge). **Consequences:** an ordinary board must reserve the header's flow box so condensing can never reflow its column, and the pill's contents become one spec serving both surfaces rather than a page-board special case.
+
+## 61. The header stops naming the round — 2026-08-09
+**Status:** accepted; narrows 42
+**Context:** entry 42 put a fixed dock at the bottom of every board whose caption prints the round's full name at all times, which left the header's `round N of M` badge saying the same thing twice — and saying it on a button whose click already routed through the pager's own `goToRound`, three doors onto one mechanism. **Decision:** the badge goes, at rest and condensed alike; `badgeLabel` is deleted and `roundNumberLabel` becomes the single place a round is named. The state label beside it stays in both states, since the countdown it carries (entry 49) is the one thing on the header no other surface says. **Consequences:** `jumpToOpenRound` keeps its remaining callers (the notification, arrival from the index) and loses only the badge's, and "hide it when condensed" never becomes a rule because nothing is left to hide.
