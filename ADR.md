@@ -57,3 +57,6 @@ link where it is worth reading.
 | 66 | [The owed-round dot takes a different hue in each theme](.agents/adr/0066-the-owed-round-dot-takes-a-different-hue-in-each.md) | 2026-08-09 | narrows 30 |
 | 67 | [The pomodoro day runs 05:00 to 05:00, and its rollover ends the loop](.agents/adr/0067-the-pomodoro-day-runs-05-00-to-05-00-and.md) | 2026-08-10 | narrows 8; narrowed by 68 |
 | 68 | [A session that must not start the timer marks itself](.agents/adr/0068-a-session-that-must-not-start-the-timer-marks.md) | 2026-08-10 | narrows 67 |
+| 69 | [A conversation boundary is declared by the agent, and starts a new thread](.agents/adr/0069-a-conversation-boundary-is-declared-by-the-agent.md) | 2026-08-10 | narrows 4 |
+| 70 | [A page references its script and styles, content-addressed and never rewritten](.agents/adr/0070-a-page-references-its-script-and-styles-content-addressed.md) | 2026-08-10 | accepted |
+| 71 | [The store is prunable by hand, and the promise not to prune it is dropped](.agents/adr/0071-the-store-is-prunable-by-hand-and-the-promise-is-dropped.md) | 2026-08-10 | relates to 70 |
