@@ -4,7 +4,7 @@
 // C4: three sections invited the click-to-anchor gesture but had no pin-layer to
 // draw into -- a compare block's own `.compare-side`/`.compare-grid` chrome, a
 // markdown block's `.resolve-error` branch, and a mermaid block's `.resolve-error`
-// branch. Two of the three are retired rather than fixed now: ADR.md entry 6 took
+// branch. Two of the three are retired rather than fixed now: ADR.md entry 28 took
 // the affordance off the compare wrapper, and entry 28 took it off `markdown`
 // entirely. What survives is the mermaid case
 // (a mermaid section's ONLY pin-layer used to be the stage-scoped one
@@ -78,11 +78,11 @@ function clickAndSubmit(document, el, blockId, text) {
   return form;
 }
 
-// --- C4 (retired by ADR.md entry 6): a compare side's own chrome ----------------
+// --- C4 (retired by ADR.md entry 28): a compare side's own chrome ----------------
 //
 // This check used to prove that clicking a compare side's own chrome (not the
 // content nested inside it) minted a page-scoped `dom` anchor into the OUTER
-// compare section's own pin-layer. ADR.md entry 6, "Commenting is confined to
+// compare section's own pin-layer. ADR.md entry 28, "Commenting is confined to
 // content blocks" (2026-08-01), reverses that: `compare` is a wrapper, not
 // content, and loses the comment affordance entirely, including this outer
 // pin-layer -- src/render.mjs's renderCompareBlock no longer renders one at
@@ -98,9 +98,9 @@ function clickAndSubmit(document, el, blockId, text) {
 // re-pointed case proving the wrapper's own nested content did NOT lose the
 // guarantee this file exists to protect.
 
-check('C4 (retired by ADR.md entry 6): a compare block renders no page-scoped pin-layer of its own, and clicking a side\'s own chrome mints no comment at all', () => {
+check('C4 (retired by ADR.md entry 28): a compare block renders no page-scoped pin-layer of its own, and clicking a side\'s own chrome mints no comment at all', () => {
   const board = createBoard({
-    title: 'ADR entry 6 -- a compare wrapper has no comment affordance of its own',
+    title: 'ADR entry 28 -- a compare wrapper has no comment affordance of its own',
     blocks: [{
       kind: 'compare',
       left: { label: 'Before', block: { kind: 'markdown', text: 'old copy' } },
@@ -116,7 +116,7 @@ check('C4 (retired by ADR.md entry 6): a compare block renders no page-scoped pi
   const side = document.querySelectorAll('.compare-side')[0];
   assert.ok(side, 'setup failure: no .compare-side rendered');
 
-  assert.equal(directChildPinLayer(section), null, 'a compare block must no longer carry a direct-child page-scoped pin-layer of its own (ADR.md entry 6)');
+  assert.equal(directChildPinLayer(section), null, 'a compare block must no longer carry a direct-child page-scoped pin-layer of its own (ADR.md entry 28)');
   assert.equal(document.getElementById('comment-form-' + compareBlockId), null, 'a compare block must no longer carry a comment-form of its own');
 
   // Click the side's own chrome -- its label, structural not authored --

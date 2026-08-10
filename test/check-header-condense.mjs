@@ -129,7 +129,7 @@ check('AC 7: the pill holds mark, comment toggle, theme, then the state label --
   assert.equal(head.children[1], actions, 'setup: the actions group follows it');
   assert.ok(titleGroup.children[0].classList.contains('back-to-index'), 'the mark is the first thing in that group');
   assert.deepEqual(actions.children.map((c) => c.id), ['comment-mode-toggle', 'theme-toggle', 'round-meta'],
-    'comment toggle, theme, state label -- ADR.md entry 61\'s order, with no round badge back between theme and the label');
+    'comment toggle, theme, state label -- ADR.md entry 42\'s order, with no round badge back between theme and the label');
 
   scrollDocumentTo(document, 800);
   assert.equal(condensed(document), true, 'setup: condensed');

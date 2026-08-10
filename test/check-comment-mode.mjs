@@ -16,7 +16,7 @@
 //     of a code reference); entry 28 inverts those into the table
 //     immediately below it, which drives the same gesture and asserts it mints
 //     nothing. ("a question's own widget" was inverted the same way one ADR
-//     earlier, by entry 6.)
+//     earlier, by entry 28.)
 //   - an `html` stage and a `mermaid` diagram are commentable
 //     WHEREVER they appear -- including inside a question's `context` and inside
 //     a compare side. Checked by driving the real gesture in each position, not
@@ -1231,7 +1231,7 @@ check("a mermaid diagram nested inside a compare side is commentable exactly as 
     "clicking inside a compare side's own diagram must mint a comment against that NESTED block's own id");
 
   // The compare wrapper renders no comment-form of its own at all any more
-  // (ADR.md entry 6), so this is checked the same way the wrapper-gating
+  // (ADR.md entry 28), so this is checked the same way the wrapper-gating
   // checks above do: no hover affordance, and no ADDITIONAL open form/queued
   // comment appears anywhere on the page beyond the nested one that already
   // opened -- proving the grid's click did nothing, not that a particular

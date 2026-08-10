@@ -799,7 +799,7 @@ async function main() {
     return m ? m[0] : null;
   }
 
-  await check('the index lists a posted thread with its actual rounds-left count, live vs settled (ADR.md entry 25)', async () => {
+  await check('the index lists a posted thread with its actual rounds-left count, live vs settled', async () => {
     const r = await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(),
@@ -818,7 +818,7 @@ async function main() {
     const rowBefore = threadRowFor(before, idxThread);
     assert.ok(rowBefore, 'the posted thread must appear in the index');
     // Two question BLOCKS, but one open ROUND that asks something -- the badge
-    // counts trips back to the board, never question blocks (ADR.md entry 25).
+    // counts trips back to the board, never question blocks.
     assert.match(rowBefore, /data-rounds-left="1"/, 'one open round, regardless of how many questions it carries');
     assert.match(rowBefore, /data-live="true"/);
     assert.match(rowBefore, /class="thread-item live"/, 'a thread with an open round must be visually distinct (the "live" class)');
@@ -888,7 +888,7 @@ async function main() {
     const rowB = threadRowFor(idxHtml, postB.thread);
     assert.ok(rowA && rowB, 'both same-cwd threads must be listed as separate rows');
     // Each thread has exactly one open round -- A's carries three question blocks,
-    // B's carries two, and the count must read 1 for both regardless (ADR.md entry 25).
+    // B's carries two, and the count must read 1 for both regardless.
     assert.match(rowA, /data-rounds-left="1"/);
     assert.match(rowB, /data-rounds-left="1"/);
 
@@ -1352,7 +1352,7 @@ async function main() {
             prompt: 'Pick one',
             widget: 'single',
             options: [{ label: 'Yes' }, { label: 'No' }],
-            // ADR.md entry 6 ("Commenting is confined to content blocks",
+            // ADR.md entry 28 ("Commenting is confined to content blocks",
             // 2026-08-01): the question wrapper itself (its prompt, its
             // options, its note field) lost the comment affordance entirely.
             // Its `context` entries did not -- they render through the same
@@ -2860,7 +2860,7 @@ async function main() {
     const page2 = markup.slice(r2);
     assert.ok(page1.includes('TWO_ASK_ARTIFACT'), 'setup failure: the artifact is not in round 1\'s markup');
     assert.ok(!page1.includes('block-kicker'), 'the artifact\'s page carries no kicker');
-    assert.ok(!page1.includes('expand-btn'), 'and no expand control (ADR.md entry 43)');
+    assert.ok(!page1.includes('expand-btn'), 'and no expand control');
     assert.ok(page1.includes('page-comments'), 'and its comment surface floats over the frame');
     assert.ok(page2.includes('question-block'), 'round 2 renders as an ordinary question round on its own page');
 

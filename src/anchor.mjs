@@ -233,25 +233,20 @@ export function extractHint(text, max = DEFAULT_HINT_MAX) {
   return collapsed.slice(0, max - 1).replace(/\s+$/, '') + '…';
 }
 
-/** Compose a hint ("the Send button in the after stage") from
- * already-extracted, DOM-free inputs. src/ui.mjs is the only caller that ever
- * has a real element to read `text`/`tagName`/`insideCompare`/`compareLabel`/
- * `blockKind` off of -- gathering those five values IS the DOM-touching half
- * (its own `anchorContext`, next to where it embeds this function) -- but the
- * RULE for turning them into a hint string has no DOM in its signature at all,
- * which is what makes it embeddable via `composeHint.toString()` (see
- * src/patch.mjs's `computeBoardPatch` for the established precedent this
- * copies) rather than a second, hand-written copy that could silently drift --
- * see this file's design comment above ("HOW A HINT IS DERIVED") for why that
- * distinction matters here specifically.
+/** Compose a hint ("the Send button in the after stage") from already-extracted,
+ * DOM-free inputs. Gathering `text`/`tagName`/`insideCompare`/`compareLabel`/`blockKind`
+ * off a real element is the DOM-touching half and stays in src/ui.mjs (its own
+ * `anchorContext`); the RULE for turning them into a hint string has no DOM in its
+ * signature at all, which is what makes it embeddable via `composeHint.toString()` (the
+ * precedent is src/patch.mjs's `computeBoardPatch`) rather than a second, hand-written
+ * copy that could silently drift. See "HOW A HINT IS DERIVED" above.
  *
- * `ROLE_WORD`/`BLOCK_NOUN` are declared INSIDE this function on purpose, exactly
- * like `computeBoardPatch`'s own inner helpers: the embedded copy carries only
- * this function's own body, so a module-level constant would import cleanly
- * here and be a ReferenceError in the served page. `text` is expected to already
- * be `extractHint(el.textContent)` -- this function does not re-trim or
- * re-truncate it, only decides whether to append a role word and/or a
- * "in <context>" suffix. */
+ * `ROLE_WORD`/`BLOCK_NOUN` are declared INSIDE this function on purpose, exactly like
+ * `computeBoardPatch`'s own inner helpers: the embedded copy carries only this
+ * function's body, so a module-level constant would import cleanly here and be a
+ * ReferenceError in the served page. `text` is expected to already be
+ * `extractHint(el.textContent)` -- this only decides whether to append a role word
+ * and/or an "in <context>" suffix, never re-trimming or re-truncating. */
 export function composeHint(text, tagName, insideCompare, compareLabel, blockKind) {
   var ROLE_WORD = { button: 'button', a: 'link', img: 'image', input: 'field', textarea: 'field', select: 'menu' };
   var BLOCK_NOUN = { html: 'stage', mermaid: 'diagram', code: 'reference', question: 'question', compare: 'comparison', markdown: 'block' };
@@ -261,8 +256,8 @@ export function composeHint(text, tagName, insideCompare, compareLabel, blockKin
   // unguarded `ROLE_WORD[tag]` walks the prototype chain for a tag like
   // 'constructor', returning `Object` (the constructor FUNCTION, not a role
   // word), which `JSON.stringify` then silently drops when the anchor is
-  // persisted. `hasOwnProperty` closes that off the same way `NAMED_ENTITIES`
-  // above already guards its own lookup.
+  // persisted. `hasOwnProperty` closes that off the same way `decodeEntities`
+  // below already guards its own `NAMED_ENTITIES` lookup.
   var role = Object.prototype.hasOwnProperty.call(ROLE_WORD, tag) ? ROLE_WORD[tag] : undefined;
   var context = insideCompare
     ? (String(compareLabel || '') + ' ' + (Object.prototype.hasOwnProperty.call(BLOCK_NOUN, blockKind) ? BLOCK_NOUN[blockKind] : 'block')).replace(/\s+/g, ' ').trim()
@@ -332,8 +327,6 @@ export function buildSteps(root, el) {
   return steps;
 }
 
-// --- html tree, just enough of one --------------------------------------------
-//
 // resolveDomAnchor (below) needs to answer two questions about a *snapshotted*
 // html string with no browser available: does this stored ref (an index chain)
 // still address an element, and does that element's own text contain the hint?
@@ -407,8 +400,6 @@ const NAMED_ENTITIES = {
   yacute: 'ý', thorn: 'þ', yuml: 'ÿ',
 };
 
-// --- tag omission ------------------------------------------------------------
-//
 // The index chain in a stored `dom` anchor is minted by src/ui.mjs against the
 // BROWSER's parse of the stage html and resolved here against this module's parse
 // of the same string. If the two trees differ by a single node, the chain addresses
@@ -485,19 +476,15 @@ const MAX_CODE_POINT = 0x10ffff;
  * this module -- one entity table, not two that could disagree on, say, `&mdash;`
  * inside an agent-supplied html-stage mock.
  *
- * An entity this function cannot decode -- an unknown name, or a numeric
- * reference out of Unicode's range -- degrades to the literal matched text
- * (`whole`), exactly like an already-unknown named entity does two lines below.
- * That is the same "good enough, not exhaustive" degrade-don't-throw rule this
- * whole parser is built on (see parseHtmlTree's own comment), and it is what
- * keeps this function honouring parseHtmlTree's "Never throws" contract: before
- * this guard, `Number.isFinite(code)` let through any finite-but-out-of-range
- * code point (`&#1114112;` is one past the max; `&#x999999999;` parses to a
- * finite number nowhere near Unicode), and `String.fromCodePoint` raised
- * `RangeError` on it -- a throw from deep inside a "never throws" tree-builder,
- * reachable from raw, un-decoded attacker-supplied `block.html` on an html stage
- * (markdown escapes `&` before block parsing, so this is the one path that
- * reaches this function with content nobody already sanitised). */
+ * An entity this function cannot decode -- an unknown name, or a numeric reference out
+ * of Unicode's range -- degrades to the literal matched text (`whole`). That is the same
+ * "good enough, not exhaustive" degrade-don't-throw rule this whole parser is built on,
+ * and it is what keeps parseHtmlTree's "Never throws" contract true here: a finite
+ * but out-of-range code point (`&#1114112;` is one past the max; `&#x999999999;` parses
+ * to a finite number nowhere near Unicode) makes `String.fromCodePoint` raise
+ * `RangeError` from deep inside a tree-builder that must not throw, reachable from raw,
+ * un-decoded attacker-supplied `block.html` on an html stage (markdown escapes `&`
+ * before block parsing, so this is the one path reaching here unsanitised). */
 export function decodeEntities(s) {
   return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);/g, (whole, ent) => {
     if (ent[0] === '#') {
@@ -513,12 +500,11 @@ export function decodeEntities(s) {
  * tokens, or null if it has none. `attrs` is one tag's ALREADY-CAPTURED
  * attribute substring (tokenRe's own `m[3]`), never the whole document, so
  * this is a bounded secondary scan over a few dozen characters at most -- not
- * a second backtracking-capable pass over attacker-controlled input the way
- * tokenRe's own comment above warns against avoiding. The only attribute
- * value this otherwise attribute-blind parser reads (see this section's own
- * header comment) -- added so resolveDomAnchorInSection can
- * recognise the board's own rendered chrome and refuse to resolve a ref that
- * lands there. */
+ * a second backtracking-capable pass over attacker-controlled input, which is
+ * what `tokenRe`'s own comment below warns against. The only attribute
+ * value this otherwise attribute-blind parser reads -- added so
+ * resolveDomAnchorInSection can recognise the board's own rendered chrome and
+ * refuse to resolve a ref that lands there. */
 function parseClassAttr(attrs) {
   if (!attrs) return null;
   const m = /(?:^|\s)class\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*))/i.exec(attrs);
@@ -702,33 +688,20 @@ function roleAwareInPrefix(text, tag) {
   return a.slice(0, commonPrefixLength(a, b));
 }
 
-/** Whether `node`'s own
- * live content still backs a stored `hint`. Content is snapshotted at post time,
- * so a still-live element's own text hasn't changed since mint time:
- * re-deriving the IDENTITY half of composeHint's rule from that unchanged text
- * (extractHint of the resolved element's own text, or -- when there's no text
- * at all, e.g. an image -- composeHint's own role-word/tag fallback) reproduces
- * exactly what composeHint started the stored hint with at mint time.
+/** Whether `node`'s own live content still backs a stored `hint`. Content is
+ * snapshotted at post time, so a still-live element's text has not changed since mint
+ * time: re-deriving the IDENTITY half of composeHint's rule from it (extractHint of the
+ * element's own text, or -- with no text at all, e.g. an image -- composeHint's
+ * role-word/tag fallback) reproduces exactly what composeHint started the stored hint
+ * with.
  *
- * The ORIGINAL version checked `hint.startsWith(recomputedIdentity)`,
- * which reads right (a hint with an appended role word or "in <context>" suffix
- * really does start with its own identity) but is backwards as a MATCH test: a
- * live element whose text shrank to a literal prefix of some unrelated stored
- * hint -- `<button>S</button>` against a stored hint `'Send'`, or ANY empty
- * element against a stored hint beginning with its bare tag name (`'div is
- * broken'` against an empty `<div>`, whose fallback identity is the string
- * `'div'`) -- also satisfies `startsWith` by coincidence, without the two
- * strings actually being the same identity: it does
- * not merely fail to catch a lost anchor, it resolves the comment onto the
- * WRONG element and reports it resolved.
- *
- * The fix checks EQUALITY against one of the exact shapes composeHint can
- * produce -- `identity`, `identity + ' in ' + <anything>`, or `identity + ' '
- * + role + ' in ' + <anything>` -- rather than inferring the identity portion
- * with a prefix test. A bare tag-name fallback identity (no role word, no
- * text) therefore only ever matches a hint that equals it exactly or extends
- * it with a genuine " in <context>" suffix, never an unrelated hint that
- * merely happens to start with the same three letters. */
+ * Matched by EQUALITY against one of the exact shapes composeHint can produce --
+ * `identity`, `identity + ' in ' + <anything>`, or `identity + ' ' + role + ' in ' +
+ * <anything>` -- never by `hint.startsWith(identity)`. A prefix test resolves the
+ * comment onto the WRONG element and reports it resolved: `<button>S</button>` satisfies
+ * it against a stored hint `'Send'`, and ANY empty element satisfies it against a hint
+ * beginning with its bare tag name (`'div is broken'` against an empty `<div>`, whose
+ * fallback identity is the string `'div'`). */
 function domIdentityHintMatches(node, hint) {
   const normalizedHint = String(hint ?? '').replace(/\s+/g, ' ').trim();
   if (!normalizedHint) return false;
@@ -745,8 +718,6 @@ function domIdentityHintMatches(node, hint) {
     && normalizedHint.startsWith(roleInPrefix);
 }
 
-// --- html body root --------------------------------------------------------
-//
 // resolveDomAnchor's `ref` is a step chain minted client-side from a real
 // browser's `document.body` (src/ui.mjs's wireHtmlStage roots buildSteps at
 // `frame.contentDocument.body`, exactly like a page-scoped anchor roots at a
@@ -846,24 +817,17 @@ function resolveStepsRejectingChrome(root, steps) {
   return node;
 }
 
-/** The ref+hint check every `dom`/`mermaid` resolution path below ultimately
- * reduces to, against an ALREADY-PARSED root. Factored out of resolveDomAnchor/
- * resolveDomAnchorInSection: `resolveComment` used to call
- * those two functions once per COMMENT, and each call parsed (and, for the
- * page-scoped case, re-rendered) the anchored block from scratch -- on a board
- * with many comments on the same block, every comment after the first repeated
- * work whose result could not have changed, since nothing about the block
- * changed between comments in the same resolution pass. This is the shared
- * bottom half that lets a caller parse/render a block ONCE and resolve every
- * comment on it against that one root -- src/board.mjs's `resolveComment` is
- * that caller; `resolveDomAnchor`/`resolveDomAnchorInSection` below remain the
- * right thing to call for a single one-off anchor (as every existing test
- * does), and are now thin wrappers around this.
+/** The ref+hint check every `dom`/`mermaid` resolution path below ultimately reduces to,
+ * against an ALREADY-PARSED root. This is the shared bottom half that lets a caller
+ * parse/render a block ONCE and resolve every comment on it against that one root
+ * (src/board.mjs's `resolveComment` is that caller), instead of re-parsing -- and, for
+ * the page-scoped case, re-rendering -- the block once per comment for a result that
+ * cannot change within one pass. `resolveDomAnchor`/`resolveDomAnchorInSection` below
+ * stay the right call for a single one-off anchor and are thin wrappers around this.
  *
- * Walks via `resolveStepsRejectingChrome` (above) rather than plain
- * `resolveSteps`, so every caller that bottoms out here refuses to resolve
- * into the board's own rendered chrome, the same exclusion src/ui.mjs's click
- * listener already applies before it ever mints a ref. */
+ * Walks via `resolveStepsRejectingChrome` (above) rather than plain `resolveSteps`, so
+ * every caller that bottoms out here refuses to resolve into the board's own rendered
+ * chrome, the same exclusion src/ui.mjs's click listener applies before minting a ref. */
 export function resolveAtRoot(root, ref, hint) {
   const steps = pathToSteps(ref);
   if (!steps.length) return false;
@@ -923,8 +887,6 @@ export function resolveDomAnchorInSection(sectionHtml, ref, hint) {
   if (!sectionRoot) return false;
   return resolveAtRoot(sectionRoot, ref, hint);
 }
-
-// --- mermaid ---------------------------------------------------------------
 
 /** Mermaid's own generated element id for a flowchart node ends
  * `flowchart-<nodeId>-<sequence>`, and in the mermaid 11 the page actually loads
@@ -1005,6 +967,17 @@ export function mermaidRefResolves(source, ref) {
   }
 }
 
+/** Same precedence as `resolveMermaidAnchor` below, against an ALREADY-PARSED
+ * section root (see `resolveAtRoot`/`sectionRootFrom` above) instead of a raw
+ * `sectionHtml` string this function would otherwise parse
+ * itself on every call. `sectionRoot` may be null (an empty/unrenderable
+ * section) -- the generic half then simply cannot resolve, same as
+ * `resolveDomAnchorInSection` returning false for a missing section root. */
+export function resolveMermaidAnchorAtRoot(sectionRoot, source, anchor) {
+  if (sectionRoot && resolveAtRoot(sectionRoot, anchor?.domRef, anchor?.hint)) return true;
+  return mermaidRefResolves(source, anchor?.ref);
+}
+
 /** Whether a mermaid node's anchor still resolves -- the generic,
  * page-scoped dom reference tried first, the node id leaned on as a fallback.
  * See this file's diagram-node design comment above for the full reasoning; this
@@ -1019,17 +992,6 @@ export function mermaidRefResolves(source, ref) {
  * before this design. `anchor` is the stored `{ kind: 'mermaid', ref, domRef,
  * hint }` object (or an older one carrying only `ref` -- both
  * `domRef` and `hint` are optional on purpose, see the design comment). */
-/** Same precedence as `resolveMermaidAnchor` below, against an ALREADY-PARSED
- * section root (see `resolveAtRoot`/`sectionRootFrom` above) instead of a raw
- * `sectionHtml` string this function would otherwise parse
- * itself on every call. `sectionRoot` may be null (an empty/unrenderable
- * section) -- the generic half then simply cannot resolve, same as
- * `resolveDomAnchorInSection` returning false for a missing section root. */
-export function resolveMermaidAnchorAtRoot(sectionRoot, source, anchor) {
-  if (sectionRoot && resolveAtRoot(sectionRoot, anchor?.domRef, anchor?.hint)) return true;
-  return mermaidRefResolves(source, anchor?.ref);
-}
-
 export function resolveMermaidAnchor(sectionHtml, source, anchor) {
   return resolveMermaidAnchorAtRoot(sectionRootFrom(sectionHtml), source, anchor);
 }
@@ -1038,17 +1000,15 @@ export function resolveMermaidAnchor(sectionHtml, source, anchor) {
 //
 // `pendingComments` itself (an array of `{ id, blockId, anchor, text }`) lives
 // only in src/ui.mjs's page-lifetime state -- there is no server shape for it,
-// nothing here persists it, and ADR.md entry 2 is why: deletion and editing
+// nothing here persists it, deliberately: deletion and editing
 // apply only to a comment still queued client-side, never to anything in
-// `board.comments`, which stays append-only. These two functions are the ones
-// this section's own notes call out for extraction: the click-to-edit gesture
-// and the list entry's delete control used to be
-// logic inline in a click handler, verified only by eye -- this repo's own
-// recorded pattern for how a gesture ships dead under a green suite. Both are
-// embedded verbatim into src/ui.mjs's client script via `.toString()` (the
-// same technique as `composeHint`/`parseMermaidDomId` above), so anything
-// either one needs is declared INSIDE its own body, not as a further
-// module-level helper the embedded copy could never see.
+// `board.comments`, which stays append-only. The two functions below carry the
+// click-to-edit gesture and the list entry's delete control, out here rather
+// than inline in a click handler where only the eye could verify them. Both are
+// embedded verbatim into src/ui.mjs's client script via `.toString()` (the same
+// technique as `composeHint`/`parseMermaidDomId` above), so anything either one
+// needs is declared INSIDE its own body, not as a further module-level helper
+// the embedded copy could never see.
 
 /** The still-QUEUED comment (an entry of `pendingComments`, never
  * `board.comments`) already anchored at `blockId` + the same clicked-element
@@ -1060,15 +1020,13 @@ export function resolveMermaidAnchor(sectionHtml, source, anchor) {
  * a blank form, so a second click on an element already carrying a queued
  * comment reopens and edits it instead of queuing a duplicate.
  *
- * A SENT comment can never satisfy this by construction, not merely by
- * caller discipline ("no edit path" for a sent comment): it
- * lives in `board.comments`, a different array from `pendingComments` in
- * every real call site -- this function has no notion of "sent" at all, it
- * only ever searches whatever list it is given. (src/ui.mjs also calls this
- * same function with `board.comments` itself, deliberately, to answer a
- * different question -- "does this element already carry a
- * SENT comment" -- reusing the one match rule rather than a second copy of
- * it; that reuse is what "no notion of sent" buys.) */
+ * A SENT comment can never satisfy this by construction rather than by caller
+ * discipline: it lives in `board.comments`, a different array from
+ * `pendingComments` at every real call site, and this function has no notion of
+ * "sent" at all -- it only searches whatever list it is given. src/ui.mjs
+ * deliberately calls it with `board.comments` too, to answer the different
+ * question "does this element already carry a SENT comment", reusing the one
+ * match rule rather than a second copy of it. */
 export function findPendingCommentForAnchor(pendingComments, blockId, anchor) {
   function sameTarget(a, b) {
     if (!a || !b) return false;
@@ -1082,27 +1040,21 @@ export function findPendingCommentForAnchor(pendingComments, blockId, anchor) {
   return undefined;
 }
 
-/** `pendingComments` with the entry whose own `id` is `id` removed -- a NEW
- * array, never a mutation of the one passed in (a caller still holding the
- * old reference is unaffected). "Using it removes the entry ...
- * and renumbers the remaining provisional pins so they stay contiguous."
- * Renumbering needs no extra step here: a provisional comment's number is
- * never stored ON it, it is derived from its POSITION in this array
- * (`nextCommentNumber() + index`, src/ui.mjs's `commentsWithPending`) every
- * time the pin layers and comment lists are redrawn -- so removing one entry
- * and re-deriving numbers from the shorter array's order is already
- * contiguous, which is what makes "removing the middle of three" an ordinary
- * case rather than a special one.
+/** `pendingComments` with the entry whose own `id` is `id` removed -- a NEW array,
+ * never a mutation of the one passed in, so a caller still holding the old reference
+ * is unaffected. An `id` matching nothing already queued is a no-op.
  *
- * Keyed by `id`, not by `blockId`+`anchor`: a whole-block comment (`{ kind:
- * 'block' }`) carries no `ref` at all, and this codebase's own design
- * explicitly keeps that gesture free to add several separate,
- * textually-different remarks on one block -- so several legitimate queued
- * comments can share one anchor, and a caller deleting ONE specific list
- * entry must not risk removing a different one that merely looks the same.
- * An `id` matching nothing already queued (already removed, or never queued
- * at all) is a no-op: the array comes back with the same elements in the
- * same order. */
+ * Renumbering the remaining provisional pins so they stay contiguous needs no step
+ * here: a provisional comment's number is never stored ON it, it is derived from its
+ * POSITION in this array (`nextCommentNumber() + index`, src/ui.mjs's
+ * `commentsWithPending`) every time the pin layers and comment lists are redrawn, so
+ * "removing the middle of three" is an ordinary case rather than a special one.
+ *
+ * Keyed by `id`, not by `blockId`+`anchor`: a whole-block comment (`{ kind: 'block' }`)
+ * carries no `ref` at all, and the design explicitly keeps that gesture free to add
+ * several separate, textually-different remarks on one block -- so several legitimate
+ * queued comments can share one anchor, and deleting ONE list entry must not risk
+ * removing a different one that merely looks the same. */
 export function removePendingComment(pendingComments, id) {
   var list = pendingComments || [];
   var out = [];

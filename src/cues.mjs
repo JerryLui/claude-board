@@ -31,7 +31,7 @@ import { homedir } from 'node:os';
  * would not. `~/Library/Sounds` is the drop-in point for sounds macOS does not ship, and it
  * IS searched, which is what makes a reader-supplied cue possible at all. ADR.md entry 20
  * refused to *write* into that namespace, since it is shared with every other app's picker
- * and uninstall would have to tell its own files from the reader's; entry 23 only reads it,
+ * and uninstall would have to tell its own files from the reader's; entry 20 only reads it,
  * which carries none of that cost. */
 export const SOUNDS_DIRS = ['/System/Library/Sounds', `${homedir()}/Library/Sounds`];
 
@@ -57,8 +57,7 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
 // the whole way a reader adds a cue, and a cue that needs a daemon restart to appear in the
 // picker is a feature nobody finds. ponytail: a time-based re-read, not a watcher, because
 // two small readdirs a few seconds apart cost nothing next to an fs.watch and its teardown.
-// The
-// ceiling is the window itself: a just-dropped file can take up to TTL_MS to show up.
+// The ceiling is the window itself: a just-dropped file can take up to TTL_MS to show up.
 // Upgrade path if that ever matters: fs.watch both directories and clear `cached`.
 let cached = null;
 let cachedAt = 0;

@@ -1,7 +1,7 @@
 // Acceptance checks for Cmd+Enter board traversal (src/ui.mjs, search
 // "Cmd+Enter board traversal"): one chord that walks a board's question notes
 // and, on arriving at Send, does exactly what a click on Send would do right
-// now (ADR.md entry 29). Same harness idiom as
+// now. Same harness idiom as
 // test/check-click.mjs and test/check-comment-mode.mjs -- drives the REAL
 // src/ui.mjs client script, in the real DOM stand-in, through the actual
 // keyboard gesture, and asserts on what a reviewer would actually see

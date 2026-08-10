@@ -350,7 +350,7 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the ATTACHED .resolve-error note (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
 });
 
-// SPEC_HEADER.md AC 12 (ADR.md entry 61) deleted the round badge this section
+// SPEC_HEADER.md AC 12 (ADR.md entry 42) deleted the round badge this section
 // used to drive live over SSE -- the header names no round at all now, at rest
 // or condensed, so there is nothing left here for a round push to update.
 

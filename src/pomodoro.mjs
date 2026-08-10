@@ -36,13 +36,12 @@ import { isCue, pickCue, NO_CUE, SOUNDS_DIRS } from './cues.mjs';
 // The three per-phase cue defaults go through pickCue (src/cues.mjs) rather than
 // being spelled as literals, so a machine missing one of these three preferred sounds
 // degrades to `None` for that phase instead of shipping a default the validator would
-// refuse on the very next save (see pickCue's own comment). That is a computed lookup
-// (cueNames() reads src/cues.mjs's SOUNDS_DIRS and caches briefly), so this object is
-// built once at module load and frozen, same as before -- not a literal, but still
-// computed exactly once, never re-derived per read. The freeze is what makes these three
-// defaults immune to cueNames() re-reading later: a sound a reader deletes after startup
-// leaves the default naming it, which mergeSettings below then refuses on the next save,
-// the same way it refuses any other name that is no longer a cue.
+// refuse on the very next save (see pickCue's own comment). cueNames() reads
+// src/cues.mjs's SOUNDS_DIRS and caches briefly, so this object is computed once, at
+// module load, and frozen -- never re-derived per read. The freeze is what makes these
+// three defaults immune to cueNames() re-reading later: a sound a reader deletes after
+// startup leaves the default naming it, which mergeSettings below then refuses on the
+// next save, the same way it refuses any other name that is no longer a cue.
 export const DEFAULT_SETTINGS = Object.freeze({
   workMin: 25,
   breakMin: 5,
@@ -202,13 +201,13 @@ export function settleBoundary(doc, now) {
   return { doc: nextDoc, boundary: { phase: nextPhase } };
 }
 
-/** Forward (ADR.md entry 24).
+/** Forward.
  * No-op — returns `doc` UNCHANGED, by reference — against no timer at all: idle has no
  * interval to end early, and inventing one here would be `startWork`'s
  * job, not this one's.
  *
  * Otherwise this reuses `settleBoundary` itself rather than re-deriving its cycle
- * bookkeeping (ADR 24's whole point): it forges a doc whose timer already looks like
+ * bookkeeping: it forges a doc whose timer already looks like
  * it hit its deadline exactly now — `paused: false` (forwarding a paused
  * timer both advances AND leaves the next phase running, so the paused flag a real
  * boundary would never see is cleared before settleBoundary ever looks at it) and
@@ -481,14 +480,13 @@ export function normalizeDoc(parsed) {
   // the daemon ACT. A timer with no `deadline` compares `now < undefined` as false and
   // `NaN > EXPIRY_GRACE_MS` as false, so settleBoundary skipped its EXPIRED guard and
   // took the ADVANCE branch: a real notification and cue for an interval that never ran.
-  // A non-numeric workMin yielded setTimeout(NaN) -> 1ms -> a full write per millisecond.
-  // Deliberately weaker than mergeSettings, which is the HTTP trust boundary and stays
-  // strict (bounded integers). This layer only has to guarantee the arithmetic downstream
-  // cannot produce NaN -- `deadline = now + workMin * 60_000` with a string workMin gave
-  // setTimeout(NaN) -> 1ms -> a full write per millisecond. A finite positive number is
-  // therefore the whole requirement: a fractional duration written straight to disk is a
-  // legitimate thing to do (the suite seeds sub-second intervals that way) and harmless,
-  // now that arm() clamps the far end too.
+  // A non-numeric workMin fed straight into `deadline = now + workMin * 60_000` gave
+  // setTimeout(NaN) -> 1ms -> a full write per millisecond. Deliberately weaker than
+  // mergeSettings, which is the HTTP trust boundary and stays strict (bounded integers).
+  // This layer only has to guarantee the arithmetic downstream cannot produce NaN -- a
+  // finite positive number is therefore the whole requirement: a fractional duration
+  // written straight to disk is a legitimate thing to do (the suite seeds sub-second
+  // intervals that way) and harmless, now that arm() clamps the far end too.
   const settings = { ...DEFAULT_SETTINGS, ...soundMigration, ...rest };
   const isPositiveFinite = v => typeof v === 'number' && Number.isFinite(v) && v > 0;
   for (const key of ['workMin', 'breakMin', 'longBreakMin', 'longEvery']) {
@@ -594,6 +592,12 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     return next;
   }
 
+  // pause/resume/forward/restart/reset below share one shape: read the doc off
+  // disk, apply one pure transform, and persist + re-arm only when something
+  // actually changed (arm() is what turns any newly-written deadline into a real
+  // boundary later, so skipping it on a no-op leaves whatever was already armed
+  // untouched). Each method's own comment below states only its delta from that
+  // shape.
   return {
     /** Boot-time reconciliation: apply the expiry rule to whatever is
      * on disk and arm the next real boundary if a timer survives it. Deliberately
@@ -616,10 +620,9 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
       }
       return next;
     },
-    /** Pause (src/server.mjs POST /api/pomodoro/pause). Wraps the pure pauseTimer:
-     * read, apply, and — only when something actually changed — persist and re-arm.
-     * Re-arming matters here too, not just on resume: pauseTimer drops `deadline`
-     * entirely, and arm() reads `doc.timer.paused` and clears the outstanding
+    /** Pause (src/server.mjs POST /api/pomodoro/pause). Re-arming matters here
+     * too, not just on resume: pauseTimer drops `deadline` entirely, and arm()
+     * reads `doc.timer.paused` and clears the outstanding
      * setTimeout without setting a new one, so the interval that was counting down
      * stops actually being counted down by anything, not merely on paper. Skipping
      * this on a no-op (pausing nothing, or pausing an already-paused timer) leaves
@@ -651,13 +654,12 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
       }
       return next;
     },
-    /** Forward (src/server.mjs POST /api/pomodoro/forward). Wraps the pure
-     * forwardTimer: read, apply, and — only when something actually changed — persist
-     * and re-arm. Re-arming matters exactly the way it does after resume: forwardTimer
-     * mints a brand-new absolute deadline for the next phase, and only a live
+    /** Forward (src/server.mjs POST /api/pomodoro/forward). Re-arming matters
+     * exactly the way it does after resume: forwardTimer mints a brand-new
+     * absolute deadline for the next phase, and only a live
      * setTimeout counting down to THAT deadline turns it into a real boundary later.
-     * Deliberately does not pass an `onBoundary` callback anywhere in this path (ADR.md
-     * entry 24) — `arm` only ever schedules the NEXT natural boundary's setTimeout, it
+     * Deliberately does not pass an `onBoundary` callback anywhere in this path —
+     * `arm` only ever schedules the NEXT natural boundary's setTimeout, it
      * never itself fires notification code, so nothing here can. */
     forward(now = Date.now()) {
       const doc = readDoc(home);
@@ -668,9 +670,8 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
       }
       return next;
     },
-    /** Restart (src/server.mjs POST /api/pomodoro/restart). Same wrapper shape as
-     * forward above — read, apply the pure restartTimer, and only persist/re-arm on an
-     * actual change (idle stays a no-op). */
+    /** Restart (src/server.mjs POST /api/pomodoro/restart). Same shape as forward
+     * above, applying the pure restartTimer instead. */
     restart(now = Date.now()) {
       const doc = readDoc(home);
       const next = restartTimer(doc, now);

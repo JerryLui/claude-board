@@ -43,10 +43,8 @@ function hex(n) {
   return randomBytes(n).toString('hex');
 }
 
-/** Board ids are 16 bytes, not 4. The width was forced when read
- * routes were open and the id was therefore the only thing gating `GET /b/:id`: at 4
- * bytes a local process could enumerate the space in seconds, at 16 it cannot. Reads are
- * gated now, so this is defence in depth rather than the whole defence,
+/** Board ids are 16 bytes, not 4: at 4 a local process enumerates the space in seconds.
+ * Reads are gated now, so the width is defence in depth rather than the whole defence,
  * and it stays that way — an id still travels in redirect targets and in whatever a
  * reviewer pastes into a chat. Thread ids stay short: a thread is a label in the index,
  * nothing is authorised by knowing one. */
@@ -103,13 +101,12 @@ function emptyIdLedger() {
  * verbatim -- a hand-crafted id is exactly the string that would otherwise reach
  * a CSS attribute selector unescaped in src/ui.mjs.
  *
- * Throws on a DUPLICATE `raw.id` too, and raises `counters` to the
- * accepted ordinal so the next mint cannot land on it either. Both halves matter:
- * `board.answers` is keyed by block id, so two question blocks sharing an id
- * collapse to one answer entry and the packet reports the reviewer's answer to the
- * *first* question against the *second* question's prompt -- the agent is told,
- * confidently, something the reviewer never said. Ids are the board's only join
- * key; a duplicate is a wrong answer, not a cosmetic clash. */
+ * Throws on a DUPLICATE `raw.id` too, and raises `counters` to the accepted ordinal so
+ * the next mint cannot land on it either. Ids are the board's only join key, and
+ * `board.answers` is keyed by block id: two question blocks sharing one collapse to a
+ * single answer entry, and the packet then reports the reviewer's answer to the *first*
+ * question against the *second* question's prompt. A duplicate is a wrong answer, not a
+ * cosmetic clash. */
 function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
   if (raw.id != null) {
     const m = typeof raw.id === 'string' ? BLOCK_ID_RE.exec(raw.id) : null;
@@ -119,8 +116,7 @@ function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
     // then returns the same string forever and the re-mint loop below never
     // terminates. A 21-digit ordinal also round-trips through `parseInt` as `1e+21`,
     // which is minted as a literal `q1e+21`: an id that fails BLOCK_ID_RE, is stored
-    // anyway, and breaks every `querySelector` built from it. The board persists
-    // before the spin, so the poisoned file re-wedges the daemon on the next ask.
+    // anyway, and breaks every `querySelector` built from it.
     if (m[2].length > MAX_ID_ORDINAL_DIGITS) {
       throw new Error(`invalid block id: ${JSON.stringify(raw.id)} has an implausible ordinal`);
     }
@@ -138,12 +134,10 @@ function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
       throw new Error(`duplicate block id ${id}: two blocks in this post claim it`);
     }
     // `replaceable` holds the open round's TOP-LEVEL ids, so only a top-level block
-    // may claim one. The check used to ask solely where the id's existing
-    // owner sat, never where the claiming block sat: a question nested in a `compare`
-    // side or another question's `context` could name a live top-level id, and
-    // `amendRound` -- which splices on top-level ids only -- appended it instead of
-    // substituting. Two live blocks then shared one id, `answers` is keyed by id, and
-    // the packet reported the reviewer's single "yes" against BOTH prompts.
+    // may claim one -- where the CLAIMING block sits matters as much as where the id's
+    // existing owner sits. `amendRound` splices on top-level ids only, so a nested
+    // claimant would be appended rather than substituted, leaving two live blocks
+    // sharing one id and one `answers` entry answering both prompts.
     if (ids.taken.has(id) && !(topLevel && ids.replaceable.has(id))) {
       const owner = ids.taken.get(id);
       throw new Error(ids.openRound != null && owner !== ids.openRound
@@ -183,14 +177,13 @@ function resolveContent(raw, cwd) {
   return { text, sha: sha256(text) };
 }
 
-/** Bound a by-value `text`/`html` payload the same way src/resolve.mjs bounds a
- * file read. The stat/size cap there covers content read from disk; by-value
- * content arrives straight off the wire and gets fed to exactly the same
- * single-threaded, inline-on-the-request scanners (markdown block parsing,
- * src/anchor.mjs's html tree, and every re-render and packet build afterwards).
- * Loud (a 400 naming the field and the cap) rather than truncated: silently
- * dropping half a block's content would be a paraphrase, which is the one thing
- * content-by-reference exists to prevent. */
+/** Bound a by-value `text`/`html` payload the same way src/resolve.mjs bounds a file
+ * read: its stat/size cap covers content read from disk, and by-value content arrives
+ * straight off the wire into exactly the same single-threaded, inline-on-the-request
+ * scanners (markdown block parsing, src/anchor.mjs's html tree, and every re-render and
+ * packet build afterwards). Loud (a 400 naming the field and the cap) rather than
+ * truncated: silently dropping half a block's content would be a paraphrase, the one
+ * thing content-by-reference exists to prevent. */
 function byValueText(value, field) {
   const text = typeof value === 'string' ? value : String(value ?? '');
   if (Buffer.byteLength(text, 'utf8') > MAX_REF_BYTES) {
@@ -325,14 +318,12 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     }
     case 'question': {
       const id = resolveBlockId(raw, 'question', counters, ids, topLevel);
-      // An unrecognised widget is a rejection, not a silent fallback to 'single'.
-      // `{ widget: 'freetext' }` -- one word off the spec's 'text' --
-      // used to render a question with no cards and no textarea: literally
-      // unanswerable, and Send then reported it back as `unanswered`, so the agent
-      // told the human's colleague "the reviewer left it blank" about a question
-      // they were never given a control for. Same reasoning for a choice widget
-      // with zero options. A 400 naming the widget is recoverable; a silently
-      // unanswerable question is not.
+      // An unrecognised widget is a rejection, not a silent fallback to 'single': a
+      // widget name one word off the spec ('freetext' for 'text') renders a question
+      // with no cards and no textarea, which Send then reports back as `unanswered` --
+      // the agent tells someone "the reviewer left it blank" about a question they were
+      // never given a control for. Same reasoning for a choice widget with zero options.
+      // A 400 naming the widget is recoverable; a silently unanswerable question is not.
       if (raw.widget != null && !WIDGETS.includes(raw.widget)) {
         throw new Error(`unknown widget: ${JSON.stringify(raw.widget)} (expected one of ${WIDGETS.join(', ')})`);
       }
@@ -461,17 +452,15 @@ function idLedgerFromBoard(board, replaceRound = null) {
  * caller names an existing thread, `threadCwd` is that thread's already-bound directory
  * and the request may only agree with it, never move it.
  *
- * Be precise about what this achieves, because the shape of the remaining hole matters.
- * It makes the read AUDITABLE (the board records the canonical
- * directory its content came from), STABLE (a live board cannot be retargeted mid-thread
- * — the case where a reviewer approves a diff and a later round quietly re-points the
- * same board at something else), and BOUNDED (`/` and `$HOME` are refused, so the blast
- * radius of a bad value is one project rather than the disk). It does NOT make the
- * choice unforgeable: any local process that can reach the loopback port can still POST
- * a NEW board naming a `cwd` it picked and read that directory back off the served page.
- * Closing that step needs the daemon to distinguish the session's own shim from any
- * other local caller, i.e. a credential the shim holds — which "no
- * tokens, no login" currently forbids. That is a spec question, deliberately not
+ * What this achieves, and the shape of the hole it leaves. It makes the read AUDITABLE
+ * (the board records the canonical directory its content came from), STABLE (a live
+ * board cannot be retargeted mid-thread — a reviewer approves a diff, a later round
+ * quietly re-points the same board elsewhere), and BOUNDED (`/` and `$HOME` are refused,
+ * so a bad value costs one project rather than the disk). It does NOT make the choice
+ * unforgeable: any local process reaching the loopback port can still POST a NEW board
+ * naming a `cwd` it picked and read that directory back off the served page. Closing
+ * that needs the daemon to tell the session's own shim from any other local caller, a
+ * credential "no tokens, no login" currently forbids — a spec question, deliberately not
  * answered here with an invented token. */
 function bindBoardCwd(requested, threadCwd) {
   const resolved = resolveBoardCwd(requested);
@@ -506,9 +495,8 @@ function assertCwdNotRetargeted(cwd, board) {
  * src/server.mjs's `handlePostBoard` always passes the env-resolved
  * `waitTimeoutMs()` explicitly, so `CLAUDE_BOARD_TIMEOUT_MS` governs both the
  * deadline stamped here and the wall-clock cap `/wait` actually enforces (one
- * clock, one env var). Exported so a check can assert the two stay equal rather
- * than drifting the way `TIMEOUT_MS` (bin/mcp.mjs) and the old
- * `DEFAULT_WAIT_TIMEOUT_MS` (src/server.mjs) already once did at 2h apiece. */
+ * clock, one env var). Exported so a check can assert this and
+ * `DEFAULT_WAIT_TIMEOUT_MS` (src/server.mjs) stay equal rather than drifting. */
 export const DEFAULT_AWAIT_TIMEOUT_MS = 2_400_000;
 
 /** Whether a round being minted is *awaited* (CONTEXT.md), and the absolute instant
@@ -688,9 +676,6 @@ export function findBlock(board, blockId) {
   return null;
 }
 
-// questionBlocks moved to src/badge.mjs (re-exported above) -- see that file's
-// own comment on why.
-
 // Every shape a stored `anchor` is allowed to take (PROTOCOL.md "Answers,
 // comments, anchors"). Anything else degrades to a whole-block comment rather
 // than being stored verbatim -- see sanitizeAnchor below.
@@ -739,19 +724,6 @@ function sanitizeAnchor(anchor) {
   return out;
 }
 
-/** Apply a submit request to the board in place: merge answers (synthesising an
- * explicit `unanswered` entry for every question block never answered), append
- * comments, mark the round sent, and set board.state. Returns nothing; caller
- * persists `board`.
- *
- * An answer is only merged if its id names a question block OF THE ROUND BEING
- * SUBMITTED. The submit body is untrusted: a forged POST could otherwise
- * write `board.answers['ghost9']`, and `buildPacket` hands the agent whatever
- * `board.answers` holds. Answers for a question the reviewer was never shown, for a
- * markdown block, or for an already-sent round's question (which would rewrite a
- * settled answer from a later round's Send) are all dropped silently rather than
- * stored -- there is nothing for the reviewer to fix, and a request that carries one
- * is not a request the human made. */
 /** The closed set of answer statuses, and the only way one enters the store.
  *
  * `status` carries the whole decision on its own: PROTOCOL.md pins that a caller reads
@@ -769,6 +741,19 @@ function normalizeStatus(a) {
   return a.choice != null ? 'answered' : 'unanswered';
 }
 
+/** Apply a submit request to the board in place: merge answers (synthesising an
+ * explicit `unanswered` entry for every question block never answered), append
+ * comments, mark the round sent, and set board.state. Returns nothing; caller
+ * persists `board`.
+ *
+ * An answer is only merged if its id names a question block OF THE ROUND BEING
+ * SUBMITTED. The submit body is untrusted: a forged POST could otherwise
+ * write `board.answers['ghost9']`, and `buildPacket` hands the agent whatever
+ * `board.answers` holds. Answers for a question the reviewer was never shown, for a
+ * markdown block, or for an already-sent round's question (which would rewrite a
+ * settled answer from a later round's Send) are all dropped silently rather than
+ * stored -- there is nothing for the reviewer to fix, and a request that carries one
+ * is not a request the human made. */
 export function applySubmit(board, { action, answers, comments }, round) {
   const now = new Date().toISOString();
 
@@ -914,35 +899,32 @@ function stageRootForBlock(blockCache, block) {
   return entry.stageRoot;
 }
 
-/** Resolve one stored comment against the board's current blocks: a `dom` anchor
- * anchored to an html stage is resolved if its ref addresses an element in that
- * block's snapshotted markup whose own text contains the hint (src/anchor.mjs's
- * resolveDomAnchor — both ref and hint have to agree, not just the hint appearing
- * somewhere in the block); a `dom` anchor anchored to any other block kind is
- * resolved the same way against that block RE-RENDERED from
- * its own stored content (src/render.mjs's `renderBlock`, exported for exactly
- * this — resolveDomAnchorInSection walks it the way resolveDomAnchor walks an html
- * stage's snapshot, rooted at the block's own section rather than a synthetic
- * document root, and checks the resolved element's identity rather than the full
- * "identity in context" hint — see that function's own comment for why); a
- * `mermaid` anchor (a diagram node folds into the same generic model,
- * src/anchor.mjs's comment has the full reasoning) is resolved
- * by resolveMermaidAnchor, which tries the SAME resolveDomAnchorInSection call
- * this branch already makes for every other block kind first, against `domRef`/
- * `hint`, and falls back to its node id (`ref`) still appearing in the mermaid
- * block's snapshotted diagram source only if that fails — an anchor stored before this
- * fallback existed (no `domRef`/`hint` stored) resolves exactly as before, since the generic
- * attempt returns false immediately for an absent ref; a `block` anchor is always
- * resolved (the block itself, if present). An anchor that no longer exists reports which anchor it lost
- * rather than vanishing. `lost` always falls back to naming *something* (lostLabel above) rather than
- * coming back undefined, so a malformed/hand-edited anchor still names what it
- * lost instead of dropping the field.
+/** Resolve one stored comment against the board's current blocks. One rule per anchor
+ * kind, each reducing to src/anchor.mjs:
  *
- * `blockCache` is optional and private to this module: every
- * external caller keeps calling `resolveComment(board, comment)` exactly as
- * before, unchanged signature, unchanged per-call cost. `resolveComments` below
- * is what actually passes one, shared across a whole board's worth of comments,
- * for the hot paths that resolve every comment on the board in one pass. */
+ *  - `dom` on an html stage: `ref` must address an element in that block's snapshotted
+ *    markup AND that element's own identity must back the stored `hint`
+ *    (resolveDomAnchor) — both, never just the hint appearing somewhere in the block.
+ *  - `dom` on any other kind: the same check against the block RE-RENDERED from its own
+ *    stored content (src/render.mjs's `renderBlock`, exported for exactly this), rooted
+ *    at the block's own section rather than a synthetic document root, and matching the
+ *    element's identity rather than the full "identity in context" hint — see
+ *    resolveDomAnchorInSection's own comment for why.
+ *  - `mermaid`: resolveMermaidAnchorAtRoot, which makes that same section-rooted attempt
+ *    FIRST against `domRef`/`hint` and falls back to the node id (`ref`) still appearing
+ *    in the block's snapshotted diagram source. An anchor stored before that fallback
+ *    existed carries no `domRef`/`hint` and resolves exactly as it always did, since the
+ *    generic attempt returns false immediately for an absent ref.
+ *  - `block`: always resolved, if the block is still there.
+ *
+ * An anchor that no longer resolves reports WHAT it lost rather than vanishing, and
+ * `lost` always names *something* (lostLabel above), so a malformed or hand-edited
+ * anchor still says what it lost instead of dropping the field.
+ *
+ * `blockCache` is optional and private to this module: every external caller keeps
+ * calling `resolveComment(board, comment)` with an unchanged signature and unchanged
+ * per-call cost. `resolveComments` below passes one, shared across a whole board's
+ * comments, for the hot paths that resolve them all in a single pass. */
 export function resolveComment(board, comment, blockCache = new Map()) {
   const block = findBlock(board, comment.blockId);
   const out = {
@@ -967,7 +949,7 @@ export function resolveComment(board, comment, blockCache = new Map()) {
   const anchorKind = comment.anchor?.kind;
   // ADR.md entry 28: there is no `md` branch any more. A stored `md` anchor from an
   // archived board falls through every branch below and stays `resolved`, exactly
-  // like the whole-block comment on a `question` entry 6 already left unsupported --
+  // like the whole-block comment on a `question` entry 28 already left unsupported --
   // the block it names renders no comment list at all now, so there is nothing for
   // a verdict to decorate.
   if (anchorKind === 'dom') {
@@ -1087,10 +1069,10 @@ export function buildPacket(board, round, url) {
 //          the one this record names, whatever it is called.
 //   until  when the process serving the banner will exit and withdraw it -- the round's
 //          own deadline, or the launcher's hard ceiling, whichever comes first. Used for
-//          ONE thing: deciding whether `pid` is still worth signalling. It is deliberately
-//          NOT a term in whether the record suppresses -- a banner that has expired off
-//          the screen still counts as this board's one announcement, which is criterion 7
-//          read literally, and that reading was chosen with the cost in view.
+//          ONE thing: deciding whether `pid` is still worth signalling. Deliberately NOT
+//          a term in whether the record SUPPRESSES -- a banner that has expired off the
+//          screen still counts as this board's one announcement (criterion 7, read
+//          literally).
 //   round  which round the reviewer was told about, and the load-bearing field: the
 //          absence ends when THIS round stops being awaited (answered, or its wait
 //          lapsed), whereupon the next round on the board starts a fresh one.
@@ -1098,8 +1080,9 @@ export function buildPacket(board, round, url) {
 //          can still withdraw it after an unclean restart. Null on the osascript
 //          fallback, which has no process that outlives its post.
 //
-// Declared HERE rather than in src/server.mjs because the renderer has to know it by
-// name too, and src/render.mjs cannot import from the server (the server imports it).
+// Declared HERE rather than in src/server.mjs because `stripDaemonOnly` below is what
+// strips it and src/render.mjs calls that; render.mjs cannot import from the server,
+// which imports it.
 export const STRANDED_BANNER = 'strandedBanner';
 
 /** A shallow copy of `board` with that record removed, for anything a client sees.
@@ -1112,11 +1095,7 @@ export const STRANDED_BANNER = 'strandedBanner';
  * and a fresh renderBoardPage() of the stored JSON are all byte-identical"), which is
  * what makes an archived board openable from Finder with no daemon at all. Keeping
  * these out of the payload keeps the rendered bytes a pure function of the board's
- * REVIEWER-facing state, which is the property that invariant is really about.
- *
- * It is also simply true: nothing in the page has any use for it. `cwd` is dropped from
- * the same payload for a different reason (it leaks the reader's directory layout into a
- * file meant to be handed around) and is dropped at its own call site. */
+ * REVIEWER-facing state, which is the property that invariant is really about. */
 export function stripDaemonOnly(board) {
   const { [STRANDED_BANNER]: _banner, ...rest } = board;
   return rest;

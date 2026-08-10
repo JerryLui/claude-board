@@ -78,26 +78,16 @@ function sseHeartbeatMs() {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_SSE_HEARTBEAT_MS;
 }
 
-/** Per-server-instance SSE subscriber registry, keyed by board id. Scoped inside
- * createRequestHandler (below) rather than module-level, so two independent daemon
- * instances in the same process (as the checks spin up) never share subscribers.
+/** SSE subscriber registry, keyed by board id, one entry per Watcher (CONTEXT.md).
  *
- * Each subscriber (CONTEXT.md "Watcher") is tracked by a server-minted `watcherId`,
- * not by `res` alone, because a Watcher now carries a second fact besides "is this
- * connection open" — whether the tab holding it is Attended (visible and focused).
- * The id is handed to the Watcher as the first thing the stream sends (`handleEvents`
- * below), so an `attended` report can name which Watcher it is updating without the
- * daemon ever trusting an identifier the tab chose for itself. Entries live exactly as
- * long as the subscription does: `unsubscribe` removes the attended flag along with
- * everything else, which is what makes "a tab that goes away stops counting" true
- * for free rather than needing its own timeout.
+ * Keyed by a server-minted `watcherId` rather than by `res` alone, so an `attended`
+ * report can name which Watcher it is updating without the daemon ever trusting an
+ * identifier the tab chose for itself; `handleEvents` below sends that id as the
+ * stream's first event. Entries live exactly as long as the subscription does, which
+ * is what makes "a tab that goes away stops counting" true with no timeout of its own.
  *
- * Exported for the same reason `activeWaitCount` is: the OR-across-Watchers rule
- * (`isAttended`) and the "gone means gone" rule (`unsubscribe`) are invariants worth
- * a direct check, and nothing over HTTP surfaces them directly -- `createStrandedWatch`
- * below is what reads `isAttended` to decide whether a round is Stranded, and it is the
- * only reader. `res` is never inspected here, only held and later `.write()`n,
- * so a check can pass any object with a `write` method (or none) as a stand-in. */
+ * Exported for the checks: `res` is never inspected here, only held and later
+ * `.write()`n, so a stand-in carrying a `write` method (or none) is enough. */
 export function createSseHub() {
   const subs = new Map(); // boardId -> Map<watcherId, { res, attended }>
   return {
@@ -130,35 +120,29 @@ export function createSseHub() {
         try { res.write(payload); } catch { /* dead connection; the 'close' handler cleans it up */ }
       }
     },
-    /** How many browsers currently have this board open. Reported on the POST response
-     * so the shim can tell "the reviewer closed the tab" from "the reviewer is looking
-     * at it", which is what decides whether a later round reopens the tab. The shim used
-     * to ask for this over a `GET /api/board/:id/clients` route that was never routed
-     * here, so it always got null and never reopened. */
+    /** How many browsers currently have this board open, reported on the POST response.
+     * Nothing in bin/ reads it: the shim opens a tab for a thread's FIRST board only,
+     * and the daemon announces a stranded round itself (ADR.md entry 55). */
     clientCount(boardId) {
       const board = subs.get(boardId);
       return board ? board.size : 0;
     },
-    /** Record whether one Watcher's tab is Attended. A report naming a `watcherId`
-     * this board has no live subscription for -- a reconnect race, or a report that
-     * lost the network after its tab had already closed -- is silently dropped: there
-     * is nothing to update, and the tab has no way to know that timing from its own
-     * side, so refusing it would only teach the page to retry forever. Returns whether
-     * the report was APPLIED, which is what `handleAttended` gates the stranded rule on.
+    /** Record whether one Watcher's tab is Attended; returns whether the report was
+     * APPLIED, which is what `handleAttended` gates the stranded rule on. A report
+     * naming a `watcherId` this board has no live subscription for -- a reconnect race,
+     * or a report whose tab had already closed -- is dropped silently: the tab has no
+     * way to know that timing from its own side, so refusing it would only teach the
+     * page to retry forever.
      *
      * `seq` is the page's own monotonic counter for the edge it is reporting, and it is
-     * what keeps two reports in flight at once from landing in the wrong order. They can
-     * be: a focus and a blur ~100ms apart are two POSTs, and the browser opens a second
-     * connection for the later one while the first is still outstanding, so the network
-     * decides which arrives first. Applying them in arrival order can leave a Watcher
-     * marked attended with the reviewer gone -- and then `isConfirmedAttended` is true
-     * forever, every evaluate resolves to `returned`, no grace is ever armed, and no
-     * banner fires for the rest of that wait, with no further DOM edge coming to correct
-     * it. The reverse ordering fires a banner at a reviewer who is looking at the board.
-     *
-     * A report carrying no `seq` at all is applied and leaves the counter alone, so a page
-     * that predates this ordering still works exactly as it did rather than going silent
-     * -- the same "degrade, do not refuse" rule the rest of this route follows. */
+     * what keeps two reports in flight at once from landing in the wrong order: a focus
+     * and a blur ~100ms apart are two POSTs on two connections, so the network decides
+     * which arrives first. Applied in arrival order they can leave a Watcher marked
+     * attended with the reviewer gone -- `isConfirmedAttended` then true forever, every
+     * evaluate resolving to `returned`, no grace ever armed and no banner for the rest
+     * of that wait, with no further DOM edge coming to correct it -- or, reversed, fire
+     * a banner at a reviewer who is looking at the board. A report carrying no `seq` is
+     * applied and leaves the counter alone: degrade, do not refuse. */
     setAttended(boardId, watcherId, attended, seq = null) {
       const board = subs.get(boardId);
       const watcher = board && board.get(watcherId);
@@ -174,16 +158,13 @@ export function createSseHub() {
      * it right now. Two tabs on one board count as looking if either one does; a board
      * with no Watchers at all is not Attended, same as one whose every Watcher has
      * REPORTED that it is hidden or unfocused. A Watcher that has not reported yet
-     * counts as looking, so "nothing here says the reviewer is away" -- which is what a
-     * caller deciding whether to RAISE a banner wants, since a tab that has only just
-     * connected is exactly the shape of a reconnect.
+     * counts as looking -- "nothing here says the reviewer is away".
      *
-     * Nothing in the stranded rule reads this: deciding whether to RAISE a banner asks
-     * `isConfirmedAttended` below instead, because "has not said anything yet" is not
-     * evidence of a reviewer, and a subscriber that never reports would otherwise be a
-     * mute button obtainable with a READ credential. This stays as the hub's plain
-     * answer to "does anything here look open", which is what `clientCount`'s
-     * neighbours have always meant by it. */
+     * Nothing in production reads this. It exists for test/check-attended.mjs, which
+     * pins the OR-across-Watchers rule directly because nothing over HTTP surfaces it.
+     * Deciding whether to RAISE a banner asks `isConfirmedAttended` below instead:
+     * "has not said anything yet" is not evidence of a reviewer, and a subscriber that
+     * never reports would otherwise be a mute button obtainable with a READ credential. */
     isAttended(boardId) {
       const board = subs.get(boardId);
       if (!board) return false;
@@ -195,12 +176,11 @@ export function createSseHub() {
      * subscribed one has not, so this is false through the reconnect and true again a
      * round trip later if the tab really is in front of the reviewer.
      *
-     * The two are not interchangeable and the difference is a defect if it is collapsed.
-     * `isAttended` alone would have a hidden tab's reconnect -- a dropped socket, a
-     * laptop wake, a daemon restart -- read as the reviewer returning, clearing the
-     * announced marker off a board nobody had looked at, and the tab's own "still
-     * hidden" report a moment later would then announce it a second time for the same
-     * absence (SPEC_STRANDED.md criterion 7). See `createStrandedWatch.evaluate`. */
+     * Collapsing the two is a defect: `isAttended` alone would read a hidden tab's
+     * reconnect -- a dropped socket, a laptop wake, a daemon restart -- as the reviewer
+     * returning, clearing the announced marker off a board nobody had looked at, and the
+     * tab's own "still hidden" report a moment later would announce the same absence a
+     * second time (SPEC_STRANDED.md criterion 7). See `createStrandedWatch.evaluate`. */
     isConfirmedAttended(boardId) {
       const board = subs.get(boardId);
       if (!board) return false;
@@ -215,20 +195,16 @@ export function createSseHub() {
  * DEFAULT_SSE_HEARTBEAT_MS, and that is the whole point of the number: a tab that is
  * going to come back -- an EventSource reconnecting after a daemon restart, a laptop
  * waking, a socket some idle timer dropped -- has already come back by then, so what
- * is left standing after the grace is a reviewer who is genuinely gone rather than the
- * false zero the shim's old reopen kept firing on (ADR.md entry 55).
+ * is left standing after the grace is a reviewer who is genuinely gone (ADR.md entry 55).
  *
  * An environment variable rather than a settings row, exactly like the heartbeat above
  * and the wait cap below: this is a characteristic of the machine, not a preference,
  * and a check has to be able to drive the whole rule without sleeping fifteen real
- * seconds.
- *
- * Strictly positive, matching `sseHeartbeatMs` above and `waitTimeoutMs` below rather
- * than being clever about it. `Number('')` is 0, and blanking a plist entry
- * (`<string></string>`) is the ordinary way an operator turns one off -- so accepting 0
- * would turn "I meant to unset this" into a zero grace, i.e. exactly the false positive
- * on a reconnecting tab that ADR.md entry 55 exists to remove. Zero, negative, empty and
- * unparseable all fall back to the default. */
+ * seconds. Zero, negative, empty and unparseable all fall back to the default --
+ * `Number('')` is 0 and blanking a plist entry (`<string></string>`) is the ordinary
+ * way an operator turns one off, so accepting 0 would turn "I meant to unset this" into
+ * a zero grace, i.e. exactly the false positive on a reconnecting tab that entry 55
+ * exists to remove. */
 export const DEFAULT_STRANDED_GRACE_MS = 15_000;
 
 function strandedGraceMs() {
@@ -258,7 +234,7 @@ function registerStrandedWatch(watch) {
 }
 
 /** The stranded rule (SPEC_STRANDED.md; ADR.md entries 55 and 58), built beside the SSE
- * hub because it is a reader of `sse.isAttended` and of nothing else the daemon does not
+ * hub because it is a reader of `sse.isConfirmedAttended` and of nothing else the daemon does not
  * already know. One instance per request handler, like the hub and the handoff store, so
  * two daemons in one process (as the checks spin up) never announce for each other.
  *
@@ -847,56 +823,44 @@ function isSameOriginRead(req) {
   return true;
 }
 
-/** The pomodoro writes a cookie-holding browser may perform, and NOT a moment more.
- * Named and enumerated exactly like `isSubmit` below, on purpose — never a
- * `parts[1] === 'pomodoro'` prefix match, which would silently hand the cookie every
- * pomodoro write this file ever grows, including ones that should stay secret-only.
- * `ensure` was originally left OUT of this set, on the reasoning that its one caller
- * (the session-start hook) is a shell script holding the secret and never a
- * browser. It is in now, because that stopped being true: the index widget's switch
- * starts a pomodoro by hand, and a browser is exactly what performs it. The reach it
- * adds is the smallest of the five — `startWork` is a no-op against any timer that
- * already exists (src/pomodoro.mjs), so the worst a cookie-holder can do with it is
- * begin an advisory clock that `reset`, already on this list, would have let them end
- * anyway. It stays a NAMED member of a closed set rather than a
- * `parts[1] === 'pomodoro'` prefix match, so the next pomodoro write this file grows
- * is still secret-only until someone deliberately types it here.
+/** The pomodoro writes a cookie-holding browser may perform, and NOT a moment more. A
+ * NAMED closed set, never a `parts[1] === 'pomodoro'` prefix match, which would silently
+ * hand the cookie every pomodoro write this file ever grows, including ones that should
+ * stay secret-only; the next one is secret-only until someone deliberately types it
+ * here. `BOARD_COOKIE_ACTIONS` below is the same rule for the board routes.
  *
- * `preview` joins for the same reason `ensure` did: its one caller is the settings
- * popover's picker (ADR.md entry 20 — a picker must audition a cue the
- * instant the reader selects it, before anything is saved, which only a browser holding
- * the cookie can reach), and it is advisory in the same sense — it reads and writes
- * NOTHING (not pomodoro.json, not settings.notify), so a cookie holder gains at most
- * "spawn `afplay` against one of the 14 files src/cues.mjs's closed set admits" — less
- * reach than `settings`, already on this list, which lets the same caller rewrite every
- * duration and toggle in the document.
+ * Each member is on the list because a browser holding only the cookie is what performs
+ * it, and none reaches further than something already on it:
  *
- * `notifyTest` joins on the same footing as `preview`, and is the visual half of it: its
- * one caller is the same popover, ticking Notify (src/indexpage.mjs), and it reads and
- * writes nothing either. What a cookie holder gains is one banner reading "Notifications
- * are working". That text is a literal out of src/notify.mjs's closed table, never
- * anything the request supplies, and there is no body to supply it with.
- *
- * `forward` and `restart` join on the same footing as `reset`: a browser holding the
- * cookie is exactly what clicks either control (ADR.md entry 24), and neither reaches
- * further than `reset` already does — `forward` ends the running interval early (reset
- * already lets a cookie holder end it outright) and `restart` re-mints the current
- * interval's deadline (settings, already on this list, already lets the same caller
- * change what every FUTURE deadline computes from). Both are silent by construction
- * (src/pomodoro.mjs's forwardTimer/restartTimer never surface a `boundary` their
- * caller could feed a notification), so neither adds "can make the machine make a
- * sound" to what a cookie holder already gains from this set. */
+ *  - `ensure`: the index widget's switch starts a pomodoro by hand. `startWork` is a
+ *    no-op against any timer that already exists (src/pomodoro.mjs), so the worst a
+ *    cookie holder does with it is begin an advisory clock that `reset` would have let
+ *    them end anyway.
+ *  - `preview`: the settings popover's picker must audition a cue the instant the reader
+ *    selects it, before anything is saved (ADR.md entry 20). It reads and writes NOTHING
+ *    (not pomodoro.json, not settings.notify), so a cookie holder gains at most "spawn
+ *    `afplay` against one of the 14 files src/cues.mjs's closed set admits" — less reach
+ *    than `settings`, which lets the same caller rewrite every duration and toggle.
+ *  - `notifyTest`: the visual half of `preview`, from the same popover's Notify tick
+ *    (src/indexpage.mjs). Reads and writes nothing either; what it gains is one banner
+ *    reading "Notifications are working", a literal out of src/notify.mjs's closed
+ *    table, never anything the request supplies, and there is no body to supply it with.
+ *  - `forward`/`restart`: a browser holding the cookie is exactly what clicks either
+ *    control. `forward` ends the running interval early (`reset`
+ *    already lets a cookie holder end it outright) and `restart` re-mints the current
+ *    interval's deadline (`settings` already lets the same caller change what every
+ *    FUTURE deadline computes from). Both are silent by construction (src/pomodoro.mjs's
+ *    forwardTimer/restartTimer never surface a `boundary` their caller could feed a
+ *    notification), so neither adds "can make the machine make a sound". */
 const POMODORO_COOKIE_ACTIONS = new Set(['ensure', 'pause', 'resume', 'reset', 'settings', 'preview', 'notifyTest', 'forward', 'restart']);
 
 function isPomodoroCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'pomodoro' && parts.length === 3 && POMODORO_COOKIE_ACTIONS.has(parts[2]);
 }
 
-/** The board writes a cookie-holding browser may perform: `submit`, and now
- * `attended` (CONTEXT.md "Watcher", "Attended" — ADR.md entry 58). Named and
- * enumerated exactly like `POMODORO_COOKIE_ACTIONS` above, for the identical
- * reason: a bare `parts[1] === 'board'` prefix match would silently hand the
- * cookie every board write this file ever grows.
+/** The board writes a cookie-holding browser may perform: `submit`, and `attended`
+ * (CONTEXT.md "Watcher", "Attended" — ADR.md entry 58). A named closed set for the
+ * reason `POMODORO_COOKIE_ACTIONS` above states.
  *
  * `attended` belongs on this list because it is the only party that CAN send it —
  * a browser holding a live stream on this board, reporting whether its own tab is
@@ -937,8 +901,7 @@ function isBoardCookieWrite(parts) {
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. The
- * board and pomodoro exceptions are each a closed, named list for the same reason — see
- * `BOARD_COOKIE_ACTIONS` and `POMODORO_COOKIE_ACTIONS` above. */
+ * two exception lists are `BOARD_COOKIE_ACTIONS` and `POMODORO_COOKIE_ACTIONS` above. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
@@ -1087,16 +1050,17 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** Poll the store until `round` is sent. Reads from disk each iteration, so this is
- * agnostic to whether the caller was here before a daemon restart.
+/** Poll the store until `round` is sent, reading from disk each iteration, so this is
+ * agnostic to whether the caller was here before a daemon restart. Returns a tagged
+ * result rather than a board, so the caller can tell "gone" from "nobody answered"
+ * from "the client left".
  *
- * Two ways out other than the round being sent, because this is a `for(;;)` in a
- * single-threaded daemon that launchd keeps alive forever: `isAborted()` (the client
- * hung up — the same liveness rule handleEvents applies to an SSE subscription) and
- * `deadlineAt` (the wall-clock cap). Without them every timed-out or abandoned `ask`
- * would leave a loop re-parsing a board JSON — which embeds full file snapshots — every
- * 120ms for the life of the machine. Returns a tagged result rather than a board so the
- * caller can tell "gone" from "nobody answered" from "the client left". */
+ * Two ways out besides the round being sent, because this is a `for(;;)` in a daemon
+ * launchd keeps alive forever: `isAborted()` (the client hung up — the same liveness
+ * rule handleEvents applies to an SSE subscription) and `deadlineAt` (the wall-clock
+ * cap). Without them every timed-out or abandoned `ask` would leave a loop re-parsing a
+ * board JSON — which embeds full file snapshots — every 120ms for the life of the
+ * machine. */
 async function waitForRound(boardId, round, home, { intervalMs = 120, isAborted = () => false, deadlineAt = Infinity } = {}) {
   activeWaits++;
   try {
@@ -1128,10 +1092,9 @@ function resolveBoardComments(board) {
   const resolvedComments = resolveComments(board, board.comments);
   return {
     commentsByBlock: groupCommentsByBlock(resolvedComments),
-    // `stripDaemonOnly` for the same reason renderBoardPage applies it: a client's local
-    // `board` is hydrated from the rendered payload and then patched from these pushes,
-    // so a field present in one and absent from the other would show up as a spurious
-    // diff in `computeBoardPatch` on the first push after a banner went up.
+    // `stripDaemonOnly` for the same reason renderBoardPage applies it (see its own
+    // comment in src/board.mjs): a field present in the rendered payload and absent from
+    // these pushes shows up as a spurious `computeBoardPatch` diff on the client.
     boardForClient: stripDaemonOnly({ ...board, comments: resolvedComments }),
   };
 }
@@ -1147,22 +1110,18 @@ function resolveBoardComments(board) {
  *
  * Both modes derive `fullpage` from the round's own shape rather than being told
  * it, and the amend branch has to do so explicitly because it renders blocks
- * without a round wrapper: renderRoundSection derives it for the 'new-round'
- * branch (src/render.mjs), and passing nothing here meant `false` -- so an
- * amended page-board block came back as an ORDINARY stage while a reload of the
- * same board still rendered it as a page. That is the one thing this function's
- * own contract forbids: the push and a later full reload must be byte-identical
- * for the same board. Live, the difference is visible damage rather than a
- * cosmetic drift -- the fragment resurrects a kicker and an expand control over
- * a 100vh frame (criteria 1 and 25) and drops `.page-comments`, which drops the
- * comment form below the fold of a page that cannot scroll (criterion 5) --
- * and applyRoundPush replaces the block outright, so nothing repairs it short of
- * a reload.
+ * without a round wrapper (renderRoundSection derives it for the 'new-round'
+ * branch, src/render.mjs). This function's contract is that the push and a later
+ * full reload are byte-identical for the same board, and here the difference would
+ * be visible damage rather than cosmetic drift: an amended page-board block
+ * rendered as an ORDINARY stage resurrects a kicker and an expand control over a
+ * 100vh frame (criteria 1 and 25) and drops `.page-comments`, putting the comment
+ * form below the fold of a page that cannot scroll (criterion 5) -- and
+ * applyRoundPush replaces the block outright, so nothing repairs it short of a
+ * reload.
  *
- * Exported for test/check-page-board.mjs, which builds the payload for a
- * page-board round directly and compares it against what renderRoundSection
- * renders for the same round. Nothing else calls it; the daemon's own call site
- * is one line, below. */
+ * Exported for test/check-page-board.mjs; the daemon's own call site is one line
+ * below. */
 export function buildRoundPushPayload(board, round, mode, blockIds) {
   const { commentsByBlock, boardForClient } = resolveBoardComments(board);
   const fullpage = isPageRound(board.blocks.filter(b => b.round === round));
@@ -1207,30 +1166,25 @@ async function handlePostBoard(req, res, home, sse, stranded) {
     if (body.boardId) {
       board = readBoard(body.boardId, home);
       if (!board) return sendJson(res, 404, { error: 'board not found' });
-      // Idempotency. Everything after readJsonBody is synchronous,
-      // so a socket that dies before the response lands — a reload-on-change exit, a
-      // kickstart, the shim's own inactivity timeout — leaves the round fully applied and
-      // the caller told it failed. The agent then retries, and amendRound APPENDS a second
-      // copy of every block: the reviewer sees the same question twice in one round. A
-      // retry carrying the same `requestId` is answered from what that id already did.
-      // Scoped to the round it guarded. `lastRequestId` used to persist for
-      // the life of the board, and `requestId` is derived from the round's CONTENT --
-      // so the ordinary fix-and-reconfirm loop ("show file, ask, fix, show the same
-      // file, ask again") posted a byte-identical body and was answered as a retry.
-      // No round was created, nothing was pushed, and the shim's /wait returned the
-      // PREVIOUS round's answer in milliseconds: the agent was handed a decision the
-      // reviewer never made. The lost-response retry this defends against always
-      // targets a still-open round, so gating on that costs nothing.
+      // Idempotency. Everything after readJsonBody is synchronous, so a socket that dies
+      // before the response lands — a reload-on-change exit, a kickstart, the shim's own
+      // inactivity timeout — leaves the round fully applied and the caller told it
+      // failed; the agent retries, and amendRound APPENDS a second copy of every block.
+      // A retry carrying the same `requestId` is answered from what that id already did.
       //
-      // "Still open" is not enough on its own once a page board can be awaited
-      // (ADR.md entry 45): a re-posted identical artifact resumed the round it
-      // matched, the caller's fresh `/wait` then ran against a deadline that had
-      // already lapsed, and the reviewer faced a read-only panel for the whole
-      // cap while the agent got nothing -- and the timeout text telling the agent
-      // to post a fresh round landed straight back in this dedupe. A lapsed round
-      // can never hand an agent anything again, so it is never the answer to a
-      // retry; the post falls through and mints round N+1 with a live deadline,
-      // which is what the timeout text promised.
+      // Scoped to a round that is still `open` AND has not lapsed, never to the board.
+      // `requestId` is derived from the round's CONTENT, so the ordinary
+      // fix-and-reconfirm loop ("show file, ask, fix, show the same file, ask again")
+      // posts a byte-identical body: a board-lifetime `lastRequestId` answered that as a
+      // retry and handed the agent the PREVIOUS round's answer, a decision the reviewer
+      // never made. And once a page board can be awaited (ADR.md entry 45), "still open"
+      // alone let a re-posted artifact resume a round whose deadline had already lapsed --
+      // a read-only panel for the reviewer, nothing for the agent, and the timeout text
+      // telling the agent to post a fresh round landing straight back in this dedupe. A
+      // lapsed round can never hand an agent anything again, so it is never the answer to
+      // a retry; the post falls through and mints round N+1 with a live deadline. The
+      // lost-response retry this defends against always targets a live open round, so
+      // neither gate costs anything.
       const guarded = board.rounds[board.rounds.length - 1];
       if (body.requestId && board.lastRequestId === body.requestId && guarded && guarded.status === 'open'
         && !roundWaitLapsed(guarded)) {
@@ -1252,17 +1206,10 @@ async function handlePostBoard(req, res, home, sse, stranded) {
       // `open` for good (ADR.md entry 35 makes a page board unsendable, and
       // `applySubmit` is the only writer of `sent`).
       //
-      // Without this the two facts multiplied: post an artifact, then ask about
-      // it, and the question was folded INTO the artifact's own round instead of
-      // opening the page beside it. The artifact stopped being a page round
-      // (isPageRound, src/badge.mjs) and dropped out of its 100vh layout back
-      // into the 320px porthole this whole feature exists to delete, while
-      // "an artifact and the questions about it are one flip apart" became
-      // unreachable through the shipped tool -- the ONE flow the manual
-      // prescribes. Nested questions count too (questionBlocks walks context,
-      // compare sides and variant options, and normalizeBlock stamps the same
-      // `round` on every one), so a round whose only question sits inside a
-      // compare is still amendable.
+      // Nested questions count too (questionBlocks walks context, compare sides
+      // and variant options, and normalizeBlock stamps the same `round` on every
+      // one), so a round whose only question sits inside a compare is still
+      // amendable.
       //
       // The consequence, and it is a real one: two rounds can now be open at the
       // same time -- an artifact round that will never be sent, and the question
@@ -1349,9 +1296,8 @@ async function handlePostBoard(req, res, home, sse, stranded) {
   // is about the state this request has already committed, not the one it is midway
   // through writing.
   stranded.evaluate(board.id, strandedTarget(req, board.id));
-  // `clients` is the count at the instant this round landed, which is what lets the shim
-  // tell "the reviewer closed the tab" from "the reviewer is looking at it" and reopen
-  // only in the first case. See createSseHub.clientCount.
+  // `clients` is the count at the instant this round landed. Nothing in bin/ reads it --
+  // see createSseHub.clientCount.
   return sendJson(res, 200, {
     boardId: board.id,
     thread: board.thread,
@@ -1444,23 +1390,18 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
 }
 
 /** ADR 35: a comment left on a round that returned no packet is held as undelivered
- * and rides the next packet the same thread returns, once. "No packet" used to be a
- * SHAPE, not a flag -- it happened exactly when a round carried no question block
- * anywhere in it, the same `hasQuestionBlock` shape the shim's `ask()` checked before
- * ever calling `/wait` at all. ADR.md entry 45 gave a page board a second way to get
- * its own `/wait` call and its own packet -- `wait: true` -- without changing its
- * shape at all, which is exactly the shape this predicate used to key on; left alone,
- * an awaited page round's comments came back once in its own packet (`buildPacket`'s
- * ordinary round-scoped filter, same as any question round) and then a SECOND time
- * here, because this function still thought "no question block" meant "nobody is
- * listening." `roundIsAwaited` (src/badge.mjs -- shared with the index badge/tab
- * mark and the arrival notification, see its own comment for the legacy-board
- * fallback) is what "nobody is listening" actually means now, for both routes in: a
- * round carrying a question always is, and a page board is only when the call said
- * `wait` (CONTEXT.md "Awaited"). So a comment is only ever a DRAIN candidate when
- * its own round is NOT awaited; `delivered` is not what decides that, it only
- * guarantees such a comment is handed back exactly once across repeat waits on the
- * thread, including a second wait on a round that already drained it.
+ * and rides the next packet the same thread returns, once.
+ *
+ * "Nobody is listening" means `roundIsAwaited` (src/badge.mjs -- shared with the index
+ * badge/tab mark and the arrival notification, see its own comment for the legacy-board
+ * fallback), never the round's SHAPE: a round carrying a question always is awaited, and
+ * a page board is when the call said `wait` (CONTEXT.md "Awaited", ADR.md entry 45).
+ * Keying on shape instead handed an awaited page round's comments back twice -- once in
+ * its own packet, through `buildPacket`'s ordinary round-scoped filter, and again here.
+ * So a comment is only ever a DRAIN candidate when its own round is NOT awaited;
+ * `delivered` is not what decides that, it only guarantees such a comment is handed back
+ * exactly once across repeat waits on the thread, including a second wait on a round
+ * that already drained it.
  *
  * Walks every board of `thread`, not just `board`: a thread's rounds can span more
  * than one board (`boundCwdForThread` above does the same walk for the same reason),
@@ -1476,12 +1417,10 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
  * only reads and resolves, and returns a `commit` closure that does the actual
  * `delivered = true` flip and `writeBoard` -- untouched until the CALLER decides the
  * packet is safely gone (see `buildPacketWithUndelivered` and `handleWait`, which
- * commit only on the response's own `finish` event). Marking eagerly here, before the
- * packet is known to have left the daemon, was the first cut's bug: a request that
- * aborts, or a daemon that restarts, between the write and the response flushing left
- * the comment marked collected and gone forever -- worse than the redelivery bug this
- * predicate already fixes once, since noise beats data loss and ADR 35 exists
- * precisely so a comment produces something somebody reads. */
+ * commit only on the response's own `finish` event). Marking eagerly, before the packet
+ * is known to have left the daemon, loses the comment outright to a request that aborts
+ * or a daemon that restarts in that window -- and noise beats data loss, since ADR 35
+ * exists precisely so a comment produces something somebody reads. */
 function drainUndeliveredComments(thread, board, round, home) {
   // ponytail: this reads and parses every board in the store on every `/wait` that
   // resolves, to find the few in this thread. The ceiling is the store's total size,
@@ -1561,9 +1500,8 @@ function drainUndeliveredComments(thread, board, round, home) {
  *
  * Returns `{ packet, commit }`, not a bare packet: see `drainUndeliveredComments` for
  * why persisting the delivered marks is deliberately not this function's job. Exported
- * for the checks, same reason `activeWaitCount` is -- proving the marks stay
- * unpersisted until `commit()` runs needs a seam that does not depend on winning a
- * real socket-abort race. */
+ * so a check can prove the marks stay unpersisted until `commit()` runs without having
+ * to win a real socket-abort race. */
 export function buildPacketWithUndelivered(board, round, url, home) {
   const packet = buildPacket(board, round, url);
   const { comments: drained, commit } = drainUndeliveredComments(board.thread, board, round, home);
@@ -1648,30 +1586,23 @@ async function handleSubmit(req, res, id, home, sse, stranded) {
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
   // A round is answered exactly once, and the submitter must name which round it is
-  // answering. Applying a body to "whichever round the server currently thinks is open"
-  // rewrote history two ways: after a round was sent it landed on that sent round
-  // (rewriting answers, notes, comments and even `sentAt`, forever), and while a stale
-  // client held an OLDER round's page it could still overwrite what a newer round had
-  // already recorded. A stale client is the normal case, not an attack: a laptop waking
-  // from sleep with no SSE replay, a second tab, or a plain double-click on Send. The
-  // board is meant to be the durable record of what was decided, so a submit naming a
+  // answering. The board is the durable record of what was decided, so a submit naming a
   // round that is not currently `open` is refused with 409 and changes nothing — which
   // is also what makes a client retry safe, rather than duplicating every comment (and
-  // its pin number, PROTOCOL.md "Identifiers") and re-applying every answer.
+  // its pin number, PROTOCOL.md "Identifiers") and re-applying every answer. A stale
+  // client is the normal case, not an attack: a laptop waking from sleep with no SSE
+  // replay, a second tab, or a plain double-click on Send.
   //
-  // A board can now hold MORE than one open round at once, and more than one of
-  // them can be genuinely awaited -- an artifact round (never sendable, ADR.md
-  // entry 35, unless it is itself awaited per ADR.md entry 45) and the question
-  // round posted after it (see handlePostBoard's amend rule above). This used to
-  // gate on "names the LATEST open round", which broke the exact case entry 45
-  // adds: an awaited page round whose /wait a caller is still blocked on stops
-  // being submittable the moment a second round opens beside it, and the shim's
-  // wait then hangs to the wall clock instead of ever seeing the submit. So the
-  // check is now per-round -- does `claimed` name a round that is CURRENTLY
-  // `open` -- not "is it the single most-recent open round". `openN` (the latest
-  // open round, or null) is kept only for the two places that still need a single
-  // number to report: the already-submitted short-circuit below, and the 409
-  // body's resync hint when `claimed` names something else.
+  // The check is PER-ROUND -- does `claimed` name a round that is currently `open` --
+  // and not "is it the single most-recent open round", because a board can hold more
+  // than one open round at once and more than one of them can be genuinely awaited: an
+  // artifact round (never sendable, ADR.md entry 35, unless itself awaited per ADR.md
+  // entry 45) and the question round posted after it (see handlePostBoard's amend rule
+  // above). Gating on the latest instead stops an awaited page round being submittable
+  // the moment a second round opens beside it, and the shim's wait then hangs to the
+  // wall clock. `openN` (the latest open round, or null) is kept only for the two places
+  // that still need a single number to report: the already-submitted short-circuit
+  // below, and the 409 body's resync hint when `claimed` names something else.
   const openRounds = board.rounds.filter(r => r.status === 'open');
   const openRound = openRounds.length ? openRounds[openRounds.length - 1] : null;
   const openN = openRound ? openRound.n : null;
@@ -1709,12 +1640,8 @@ async function handleSubmit(req, res, id, home, sse, stranded) {
     // fault instead of a rejected request.
     return sendJson(res, 400, { error: String(err.message || err) });
   }
-  // Rendered BEFORE either persist call below -- see
-  // handlePostBoard's identical ordering, and its comment, for the full
-  // reasoning: a board that fails to render must never become the persisted
-  // state, since GET /b/:id and /wait both re-render that same persisted board
-  // on every future request, and a failure that only shows up after the durable
-  // write is a wedge for the life of the board, not a single failed request.
+  // Rendered BEFORE either persist call below -- see handlePostBoard's identical
+  // ordering, and its comment, for the reasoning.
   const pageHtml = renderBoardPage(board);
   writeBoard(board, home);
   writePage(board.id, pageHtml, home);
@@ -1753,26 +1680,23 @@ async function handleSubmit(req, res, id, home, sse, stranded) {
  * `{ watcher, attended }`, where `watcher` is the id the SSE stream handed this same
  * tab in its own `watcher` event (see `handleEvents`, below) and `attended` is a
  * plain boolean. Cookie-authenticated exactly like `submit` -- `attended` joins
- * `BOARD_COOKIE_ACTIONS` above, so `isAuthorizedWrite` accepts the session cookie
- * here too -- because a browser holding that cookie is the only party that can
- * honestly answer this question. Leaving it off every list would either 403 every
- * report a real tab sends or, if left open with no credential at all, accept one
- * from any local process, which would let a forged report silence every banner
- * (SPEC_STRANDED.md's Next Steps item 3; ADR.md entry 58) -- the one thing in this
- * route that is security-relevant.
+ * `BOARD_COOKIE_ACTIONS` above -- because a browser holding that cookie is the only
+ * party that can honestly answer this question, and it is the security-relevant part of
+ * this route: off every list it would 403 every report a real tab sends, and ungated it
+ * would accept a forged report from any local process, silencing every banner on the
+ * machine (SPEC_STRANDED.md's Next Steps item 3; ADR.md entry 58).
  *
  * What it STORES is a fact about a live SSE connection (`sse.setAttended`, in
- * `createSseHub` above) and nothing about the board. It is not, however, a route with no
- * durable consequence: the stranded rule reads that fact on the line below, and a report
- * that ends an absence retires the record standing on the board -- one `readBoard` and
- * one `writeBoard`, and for a page board that document can be large. That is the price of
- * a marker that survives a restart, and it is paid only when the reviewer actually comes
- * back to a board that had been announced; the ordinary report writes nothing.
+ * `createSseHub` above) and nothing about the board -- but it is not free of durable
+ * consequence: the stranded rule reads that fact on the line below, and a report that
+ * ends an absence retires the record standing on the board, one `readBoard` and one
+ * `writeBoard` over a document that can be large for a page board. That cost is paid
+ * only when the reviewer actually comes back to a board that had been announced; the
+ * ordinary report writes nothing.
  *
- * An unknown board id and an unknown `watcher` id are both accepted as a silent no-op
- * rather than answered with 404 -- see `setAttended`'s own comment for why a report
- * cannot always know it lost that race -- and an unknown `watcher` stops there, before
- * the rule is consulted at all. */
+ * An unknown board id and an unknown `watcher` id are both a silent no-op rather than a
+ * 404 -- see `setAttended` for why a report cannot always know it lost that race -- and
+ * an unknown `watcher` stops there, before the rule is consulted at all. */
 async function handleAttended(req, res, id, sse, stranded) {
   let body;
   try {
@@ -2002,15 +1926,18 @@ async function handlePomodoro(req, res, parts, pomo, home) {
 }
 
 /** Build the daemon's request handler as a plain `node:http` listener, without
- * binding a port — used directly by the check and by `startServer` below. Each
- * call gets its own SSE subscriber registry (createSseHub), so two independent
- * handlers built in the same process — as the checks do — never share subscribers. */
+ * binding a port — used directly by the check and by `startServer` below.
+ *
+ * PER-INSTANCE, and this is the one place that rule is stated: everything the handler
+ * owns — the SSE subscriber registry, the stranded watch, the handoff store — is built
+ * here rather than at module scope, so two independent daemons in one process (as the
+ * checks spin up) never share subscribers, announce for each other's boards, or redeem
+ * each other's handoffs. */
 export function createRequestHandler({ home = boardHome(), secret: pinnedSecret, pomodoro } = {}) {
   const sse = createSseHub();
-  // Per-instance for the same reason, and built here rather than passed in because it
-  // reads THIS handler's hub: two daemons in one process must not announce for each
-  // other's boards. `requestHandler.close` below is how startServer hands it its own
-  // shutdown -- criterion 15's "stopping the daemon leaves none of them running".
+  // Built here rather than passed in because it reads THIS handler's hub.
+  // `requestHandler.close` below is how startServer hands it its own shutdown --
+  // criterion 15's "stopping the daemon leaves none of them running".
   const stranded = createStrandedWatch({ home, sse });
   // A caller-supplied instance (startServer's, below) is what makes pause/resume/reset/
   // settings and the boot-time clock share the ONE live setTimeout for this daemon —
@@ -2021,8 +1948,6 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // pomodoro; nothing today calls it that way, and this instance is never booted here —
   // boot-time reconciliation is startServer's job, exactly as it already was.
   const pomo = pomodoro || createPomodoro({ home });
-  // Per-instance, like the SSE hub and for the same reason: two daemons in one process
-  // (as the checks spin up) must not redeem each other's handoffs.
   const handoffs = createHandoffStore();
   // Re-read PER REQUEST, not once at startup. SECURITY.md,
   // PROTOCOL.md, CHANGELOG.md and src/secret.mjs all name rotating the secret as THE way
@@ -2077,10 +2002,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // credential — index, board page, search, /wait and the SSE stream alike. Unlike
       // the write refusal this one carries a body, because the caller it most often
       // refuses is a human looking at a tab, not a program: see sendCredentialRefusal.
-      //
-      // (Ablation: delete this block and an unauthenticated index, board page and event
-      // stream all answer 200 again — i.e. any local process reads every board, source
-      // excerpts included. test/check-http.mjs is where that shows up, and nowhere else.)
+      // Without it any local process reads every board, source excerpts included.
       if (req.method === 'GET' && !isOpenRoute(url.pathname, parts) && !isAuthorizedRead(req, secret)) {
         return sendCredentialRefusal(req, res, url.pathname);
       }

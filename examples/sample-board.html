@@ -95,26 +95,15 @@
     else if (systemQuery.addListener) systemQuery.addListener(onSystemPreferenceChange); // Safari < 14
   }
 
-  // A second tab must not silently overwrite what the
-  // reader just chose. 'cb-theme' is one value per origin, but each
-  // document's own cycle position (currentState(), read off ITS OWN
-  // data-theme attribute) is snapshotted at boot and never told about a
-  // write some OTHER tab made -- with the index open in tab A and a board
-  // open in tab B (the ordinary case), choosing Dark in A left B's control
-  // reading a stale "Theme: System", so one click in B walked ITS stale
-  // cycle position System -> Light and overwrote what A had just chosen, and
-  // A reloaded Light. The 'storage' event is the platform's own signal for
-  // "localStorage changed in ANOTHER browsing context sharing this origin"
-  // -- it never fires in the context that made the write, so this can never
-  // double-apply a click setState above already handled. Gated on
-  // 'e.key === KEY' (an explicit light/dark write or an explicit removeItem
-  // back to System) OR 'e.key === null' (what clear() reports, per the DOM
-  // spec -- readStored() re-reads rather than trusting e.newValue, so both
-  // collapse onto the same one-value-per-origin truth this file already
-  // treats as authoritative). Same file:/try-catch gating as every other
-  // storage access in this file (readStored, setState): an archive is
-  // storage-free by decision, and this must never act if that protocol
-  // check somehow lies.
+  // The cross-tab scenario this guards against is job 4 of this file's own
+  // header comment, above 'themeBootScript'. Gated on 'e.key === KEY' (an
+  // explicit light/dark write or an explicit removeItem back to System) OR
+  // 'e.key === null' (what clear() reports, per the DOM spec -- readStored()
+  // re-reads rather than trusting e.newValue, so both collapse onto the same
+  // one-value-per-origin truth this file already treats as authoritative).
+  // Same file:/try-catch gating as every other storage access in this file
+  // (readStored, setState): an archive is storage-free by decision, and this
+  // must never act if that protocol check somehow lies.
   if (location.protocol !== 'file:' && window.addEventListener) {
     window.addEventListener('storage', function (e) {
       if (e.key !== KEY && e.key !== null) return;
@@ -186,6 +175,7 @@
   --good: #56d68a;
   --diff-add-fill: rgba(86, 214, 138, 0.12);
   --warning: #e5b04d;
+  --owed-dot: var(--accent);
   --warning-soft: rgba(229, 176, 77, 0.12);
   --warning-ink: #f0cd8c;
   --warning-border: rgba(229, 176, 77, 0.35);
@@ -238,6 +228,7 @@
   --good: #007530;
   --diff-add-fill: rgba(0, 117, 48, 0.12);
   --warning: #805300;
+  --owed-dot: #e5b04d;
   --warning-soft: rgba(128, 83, 0, 0.12);
   --warning-ink: #7a4a00;
   --warning-border: rgba(128, 83, 0, 0.35);
@@ -290,6 +281,7 @@
   --good: #007530;
   --diff-add-fill: rgba(0, 117, 48, 0.12);
   --warning: #805300;
+  --owed-dot: #e5b04d;
   --warning-soft: rgba(128, 83, 0, 0.12);
   --warning-ink: #7a4a00;
   --warning-border: rgba(128, 83, 0, 0.35);
@@ -310,7 +302,6 @@
   /* non-color tokens: theme-independent, so they live in one shared block rather
      than being duplicated into both DARK and LIGHT */
 
-  /* radii */
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 14px;
@@ -324,7 +315,6 @@
   --space-5: 24px;
   --space-6: 32px;
 
-  /* motion */
   --dur: 160ms;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -432,12 +422,12 @@ svg { flex: none; }
 body.readonly .back-to-index { display: none; }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
-/* AC 6, AC 8, AC 11: the page board's own pill/meta slot (ADR.md entry 49,
+/* AC 6, AC 8, AC 11: the page board's own pill/meta slot (ADR.md entry 40,
    "the pill may hold a label alone"). Sits in '.board-head-actions', which
    entry 40's condensing rule never touches (only 'h1'/'.meta' hide there), so
    ONE element renders in both the expanded header and the condensed pill with
    no second copy and no extra selector -- exactly AC 6's "in both the expanded
-   header and the condensed pill". A muted figure, never a chip: entry 49
+   header and the condensed pill". A muted figure, never a chip: entry 40
    corrects entry 40's assumption that this slot needed a real control, and a
    label alone is what the countdown and 'read-only' both are. Hidden on every
    board that is not laid out as a page board -- src/render.mjs renders it on
@@ -797,7 +787,6 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .answer-textarea:focus, .note-field textarea:focus, .comment-form input[type=text]:focus, .search-input:focus {
   outline: none; border-color: var(--accent); box-shadow: var(--ring); }
 
-/* drag-to-rank */
 .rank-list { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .rank-list li { display: flex; align-items: center; gap: var(--space-3); background: var(--panel-2);
   border: 1px solid var(--hairline); border-radius: var(--r-md); padding: 10px 14px; cursor: grab;
@@ -1028,9 +1017,9 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 
 /* Both stage kinds are clickable at element level, and both read as pictures with no
    built-in cue of their own -- the comment-mode toggle is the one thing on the page
-   that says so now (ADR.md 21 deleted the kicker's own per-stage hint: repeated once
+   that says so now: the kicker's own per-stage hint was deleted for repeating once
    per variant option, in the place vertical space is scarcest, saying what the toggle
-   was already visible chrome to say). A mermaid node highlights under the cursor (the
+   was already visible chrome to say. A mermaid node highlights under the cursor (the
    html stage's equivalent is injected into the iframe's own document by src/ui.mjs,
    since this stylesheet deliberately does not reach inside it). Neither applies in a
    standalone file: archive, where nothing is clickable. One gesture,
@@ -1212,7 +1201,7 @@ body.comment-mode .blocks { cursor: crosshair; }
    gradient scrim above is what separates the bar from the content running on
    underneath it. */
 .send-bar.docked { background: var(--bg); backdrop-filter: none; }
-/* the questions-left pill (ADR.md entry 27): a
+/* the questions-left pill: a
    live, additive count of the open round's still-unanswered questions, floating
    centered above the send bar. Nested INSIDE .send-bar itself rather than beside
    it -- position: absolute against the bar's own sticky positioning is exactly
@@ -1272,14 +1261,11 @@ body.comment-mode .blocks { cursor: crosshair; }
    someone typed once and nobody re-measured.
 
    CSS anchor positioning ('anchor-name'/'anchor()') was tried here first and
-   reverted: it requires the anchor to precede the positioned element in tree
-   order, which '.page-comments' does not (it is nested inside the page
-   board's own '.block.html-block', rendered well before this dock in
-   src/render.mjs), and moving it earlier in the DOM ran into a second,
-   separate containing-block problem on top of that -- confirmed wrong in a
-   real Chrome (getComputedStyle().bottom computed to 'auto', not the
-   anchored value), which this repo's DOM stand-in cannot see at all
-   (QUIRKS.md, "The stand-in has no layout") and did not catch. */
+   reverted: '.page-comments' doesn't precede this dock in tree order (it's
+   nested inside the page board's own '.block.html-block', src/render.mjs),
+   and moving it earlier hit a second, separate containing-block problem --
+   confirmed in a real Chrome, not the DOM stand-in (QUIRKS.md, "The stand-in
+   has no layout"), since getComputedStyle().bottom simply came back 'auto'. */
 .round-pager-dock { position: fixed; z-index: 40; left: 50%; bottom: var(--space-4); transform: translateX(-50%);
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   max-width: min(560px, calc(100vw - 2 * var(--space-6))); }
@@ -1326,10 +1312,11 @@ body.readonly:not(.page-board) .board-shell {
   transition: color var(--dur) var(--ease); }
 .round-page:hover { color: var(--ink); }
 .round-page-current { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
-/* the dot on the round that still owes an answer -- the mark's amber, the hue
-   this board already spends on "waiting on you" (ADR.md entry 12). */
+/* the dot on the round that still owes an answer. Its hue is the one place
+   "waiting on you" is not one colour across both themes -- see '--owed-dot'
+   (ADR.md entry 66) for which each takes and why. */
 .round-page-owed::after { content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px;
-  border-radius: 50%; background: var(--accent); vertical-align: middle; }
+  border-radius: 50%; background: var(--owed-dot); vertical-align: middle; }
 .round-flip { position: fixed; z-index: 40; top: 50%; transform: translateY(-50%);
   width: 32px; height: 64px; display: flex; align-items: center; justify-content: center;
   background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--hairline);
@@ -1580,7 +1567,7 @@ body.readonly:not(.page-board) .board-shell {
   70% { box-shadow: 0 0 0 7px var(--warning-fade); }
   100% { box-shadow: 0 0 0 0 var(--warning-fade); }
 }
-/* Only ever rendered when count > 0 (ADR.md entry 25) -- there is no zero state
+/* Only ever rendered when count > 0 -- there is no zero state
    to style, so the amber "waiting on you" treatment is the whole rule. */
 .rounds-left-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
@@ -1603,7 +1590,7 @@ body.readonly:not(.page-board) .board-shell {
      document's height is exactly the frame's (ADR.md entry 40, whose condensing
      behaviour lands on top of this).
    - the frame is a CONSTANT 100vh and scrolls its own content; the page itself
-     does not scroll at all (ADR.md entry 34). Not min-height, not a height
+     does not scroll at all. Not min-height, not a height
      grown from what the artifact reports: the rendered templates use
      position: sticky and their own full-viewport <dialog>, and both of those
      mean something only against a viewport-sized box. 'resize: none' drops the
@@ -1668,24 +1655,20 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    (it cannot know the dock's real height either) but wrong on the safe
    side, clear of even a three-line dock.
 
-   Confirmed 2026-08-07 against a real Chrome (127.0.0.1, examples/sample-board.html,
-   not this repo's DOM stand-in, which cannot see any of this -- QUIRKS.md,
-   "The stand-in has no layout"): with the dock actually measured at
-   63.4px tall, '--round-pager-dock-h' resolved to '63.40625px' and this
-   'bottom' computed to '91.4062px' -- exactly var(--space-4) [16px] +
-   that measurement + var(--space-3) [12px], not the fallback. With the
-   panel given real content (0, 4, then 20 queued comments, the last one
-   911px tall and overflowing off the TOP of the viewport) its measured
-   rect bottom stayed exactly 12px above the dock's measured rect top in
-   every case, because the panel grows upward, away from the dock -- the
-   clearance is a property of the DOCK's height alone, not the panel's. */
+   Verified against a real Chrome, which this repo's own DOM stand-in cannot
+   substitute for (QUIRKS.md, "The stand-in has no layout"): 'bottom' resolves
+   to exactly var(--space-4) + the dock's measured height + var(--space-3),
+   not the fallback, and with the panel given real content (growing content,
+   overflowing off the TOP of the viewport) its measured rect bottom stayed
+   exactly var(--space-3) above the dock's measured rect top in every case,
+   because the panel grows upward, away from the dock -- the clearance is a
+   property of the DOCK's height alone, not the panel's. */
 /* SPEC_AWAITED.md ticket 03: the panel used to grow upward with NO ceiling --
    fine while it only ever held the compose form and a short list, wrong the
    moment ticket 03 put a send control inside it (AC 4) that has to stay
-   reachable at every comment count. Measured against the merged branch on a
-   357px-tall viewport before this change: at 12 comments the panel's own TOP
-   edge sat at -338px, at 30 comments -1130px -- reachable at zero comments and
-   unreachable everywhere past a handful. 'max-height' below puts a ceiling on
+   reachable at every comment count: unbounded growth pushed the panel's own
+   top edge off the top of a short viewport well before the list got long,
+   taking the send control with it. 'max-height' below puts a ceiling on
    the panel itself, tied to the SAME '--round-pager-dock-h' the 'bottom' value
    already reads (no second number to keep in sync): whatever the dock's real
    height is, the panel's own height is capped at "the rest of the viewport,
@@ -1726,7 +1709,7 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    inside this box, so they never scroll out of reach regardless of how many
    comments are queued. */
 .comment-list-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-/* ADR.md entry 48: the click-to-comment gesture's own hint, back in exactly
+/* The click-to-comment gesture's own hint, back in exactly
    one place -- the awaited page board's empty comment panel, because comment
    mode already starts ON there (src/ui.mjs), so the mode toggle itself is no
    longer what reveals the gesture the way it is everywhere else.
@@ -1798,7 +1781,7 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
 
    What condenses is the header's IDENTITY TEXT, not its controls. The title and
    the thread/id line go; the mark, the comment-mode toggle, the theme control
-   and the state label stay (ADR.md entry 61 -- the round badge that used to
+   and the state label stay (ADR.md entry 42 -- the round badge that used to
    round out this row is gone, the header names no round at rest or condensed),
    so the pill is never decorative -- entry 40's
    "the pill keeps the comment-mode toggle, so the mode is switched mid-read
@@ -1951,7 +1934,7 @@ body.page-board .back-to-index { width: 22px; height: 22px; }
    intrinsic size unless the box is told otherwise -- without this the 30px
    drawing simply overflows the 22px slot. */
 body.page-board .back-to-index svg { width: 100%; height: 100%; }
-/* ADR.md entry 61 deleted the round badge that used to sit here between the
+/* ADR.md entry 42 deleted the round badge that used to sit here between the
    theme control and the state label -- with it gone, the theme control's own
    .mode-toggle chrome (shared with the comment-mode toggle, unchanged by this
    file) is the last thing before the state label, and a hairline is what
@@ -1965,7 +1948,7 @@ body.page-board .round-meta { border-left: 1px solid var(--hairline); padding-le
    and 24px of air holding the space. */
 body.page-board .round-meta:empty { display: none; }
 
-/* --- SPEC_HEADER.md ticket 03 (ADR.md entry 60): an ordinary board condenses
+/* --- SPEC_HEADER.md ticket 03 (ADR.md entry 40): an ordinary board condenses
    too, into the same pill above -- the two board types stop reading as two
    designs. Every rule below reads the identical '--stage-p'/'--pill-half' the
    page-board rules above do (written here by refreshDocumentScrollChrome,
@@ -1973,7 +1956,7 @@ body.page-board .round-meta:empty { display: none; }
    -- an ordinary board scrolls itself rather than a fixed-height stage frame,
    so only the PROGRESS SOURCE differs), and keeps the expanded header's own
    control order and colour tokens (mark, comment toggle, theme, state label --
-   ADR.md entry 61 already left that the order everywhere else).
+   ADR.md entry 42 already left that the order everywhere else).
 
    AC 8 is why the MECHANISM differs from the page board's, not just the
    source: '.board-head' here is 'position: sticky', still IN normal flow --
@@ -2017,11 +2000,10 @@ body:not(.page-board) { --stage-p: 0; --pill-half: 120px; }
    exactly '2 * pill-half' too, matching the panel's own width bolt for bolt,
    and 'justify-content: space-between' (unchanged, above) has nowhere to put
    the pill-half's baked-in slack except the one gap it controls: between the
-   mark and the actions row. Measured live in Chrome against
-   examples/sample-board.html (coordinator review, 2026-08-09): a 24px hole
-   dead centre in the pill, the mark flush on its left border and the state
-   label flush on its right. Adding '--space-3' here shrinks the padding by
-   that same amount, which shrinks the CONTENT'S width to exactly
+   mark and the actions row -- without this term that slack shows up as a gap
+   dead centre in the pill instead of air on both edges. Adding '--space-3'
+   here shrinks the padding by that same amount, which shrinks the CONTENT'S
+   width to exactly
    'brand + gap + actions' (pill-half's own '- pad' term, undone) -- tight
    against itself, with the panel's unchanged extra width now free to sit as
    symmetric air on both edges instead of a gap in the middle. */
@@ -2038,28 +2020,22 @@ body:not(.page-board) .board-head::after {
 /* the pill itself: a fixed-height band (mark's own 30px plus 6px of air each
    side, the same 6px the page-board pill's own padding-block ramp ends at),
    centred on the CONTROL ROW -- not on '.board-head''s own box, which is a
-   different centre. Measured live in Chrome against examples/sample-board.html
-   (coordinator review, 2026-08-09): a first attempt centred this on the box
-   ('top: 50%; height: 42px; transform: translateY(-50%)') drew a panel
-   40.18px to 82.18px down an 80.376px box -- 3.6px past the box's own bottom
-   edge, with every control (mark 16-68px, actions 28-56px) sitting mostly or
-   entirely ABOVE it. The header's own padding is NOT symmetric ('padding:
+   different centre. The header's own padding is NOT symmetric ('padding:
    var(--space-4) 0 var(--space-3)', 16px over 12px), and 'align-items: center'
    centres each flex child on the CONTENT box (the padding box minus that
    padding), not on the border box -- so the true centreline sits
    '(--space-4 - --space-3) / 2' below the border box's own 50%, which a plain
-   'top: 50%' never accounted for. 'transform: translateY(-50%)' compounded it:
-   a computed-style read (what the coordinator's tooling and this repo's own
-   'resolveComputedProperty' both do -- neither runs layout) reports 'top' and
-   'bottom' from BEFORE the transform is painted, so nothing here could even
-   assert the corrected position without dropping the transform entirely.
-   'top'/'bottom' set together (no 'height', no 'transform') fixes both at
-   once: their SUM is fixed at 42px regardless of the box's own height (so the
-   panel is still exactly 42px tall), and shifting both by the same
-   '(--space-4 - --space-3) / 2' moves the centreline to match the content
-   box's, using the identical tokens '.board-head''s own padding already
-   declares -- so a future change to either token keeps this in step without
-   a second number to maintain. */
+   'top: 50%' would miss. 'top'/'bottom' set together (no 'height', no
+   'transform') fixes both at once: their SUM is fixed at 42px regardless of
+   the box's own height (so the panel is still exactly 42px tall), and
+   shifting both by the same '(--space-4 - --space-3) / 2' moves the
+   centreline to match the content box's, using the identical tokens
+   '.board-head''s own padding already declares -- so a future change to
+   either token keeps this in step without a second number to maintain. A
+   'transform: translateY()' can't do this instead: a computed-style read
+   (what 'resolveComputedProperty' does -- it never runs layout) reports 'top'
+   and 'bottom' from before any transform paints, so nothing here could assert
+   the corrected position without dropping the transform entirely. */
 body:not(.page-board) .board-head::before {
   top: calc(50% + (var(--space-4) - var(--space-3)) / 2 - 21px);
   bottom: calc(50% - (var(--space-4) - var(--space-3)) / 2 - 21px);
@@ -2075,9 +2051,7 @@ body:not(.page-board) .board-head::before {
    column, so 'inset: 0' would size the wash to the COLUMN, not the
    viewport -- a ~1072px rounded blur-plus-gradient rectangle sitting on the
    page's own plain background outside it, with a visible seam at both edges
-   (PM review of a real screenshot, 2026-08-09: "since the header doesn't
-   expand all the way out, you can clearly see the gradient against the
-   plain colour at the edges").
+   against the page background beyond the column.
    'width: 100vw' (the usual full-bleed escape) is unsafe here specifically:
    'vw' units include the scrollbar's own width, and an ordinary board is
    exactly the one surface that always has a real document scrollbar (a page
@@ -2093,10 +2067,7 @@ body:not(.page-board) .board-head::before {
    ('margin: 0 auto') centres the column at every width, including one
    narrower than 1120px where the column simply fills 100% and the centring
    is a no-op -- so this lands flush with both real edges at any viewport,
-   with no vw-based overflow risk. Verified live in Chrome (coordinator
-   review, 2026-08-09) on examples/sample-board.html's ordinary-board round,
-   tall enough to carry a real scrollbar, at 1324px and narrower: no seam,
-   no induced horizontal scrollbar. */
+   with no vw-based overflow risk. */
 body:not(.page-board) .board-head::after {
   top: 0; bottom: 0;
   left: 50%; transform: translateX(-50%);
@@ -2176,13 +2147,10 @@ body.page-board .back-to-top.visible {
      breakpoint rather than taught a second, column-aware shape. '--pill-half'
      is measured as one SINGLE-ROW sum (brand + columnGap + actions,
      src/ui.mjs's measurePillHalf) and describes nothing once the rule two
-     lines up turns '.board-head' into two stacked rows -- measured live in
-     Chrome (coordinator review, 2026-08-09) against
-     examples/sample-board.html: the actions row hugs the pill's left border
-     with ~60px of empty pill to its right, a 42px band drawn across the
-     middle of a two-row ~115px header with the mark above it and the state
-     label below it, neither inside the band. A pill that does not fit its
-     own contents is worse than no pill, and nothing about AC 7 requires one
+     lines up turns '.board-head' into two stacked rows: the fixed-height band
+     it draws no longer matches either row, with the mark sitting above it and
+     the state label below it, neither one inside it. A pill that does not
+     fit its own contents is worse than no pill, and nothing about AC 7 requires one
      at every viewport -- the header just stays exactly as it always has
      below this breakpoint, at every scroll offset.
      '!important' is load-bearing: refreshDocumentScrollChrome (src/ui.mjs)
@@ -2475,15 +2443,14 @@ body.page-board .back-to-top.visible {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps &amp;&amp; steps.length) ? stepsToPath(steps) : null;
-    // An element whose own ref already carries a SENT comment is
-    // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
-    // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
-    // below still posts 'click' unconditionally, exactly as before; &quot;clicking
-    // it does nothing&quot; is already enforced on the other side of the channel
-    // (src/ui.mjs's handleStageClick calls isSentAnchor before ever opening a
-    // form), which is the side that actually holds board.comments and can
-    // tell a resolved sent comment from a stale ref this document has no way
-    // to distinguish on its own.
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. &quot;Clicking it does nothing&quot; is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
     if (ref !== null &amp;&amp; sentRefs.indexOf(ref) !== -1) {
       hovered.classList.add(SENT_CLASS);
     } else {
@@ -2587,8 +2554,8 @@ body.page-board .back-to-top.visible {
   // either. 'top' is a plain number in both directions and is validated as one
   // on both sides.
   //
-  // A real scroll listener, deliberately: the no-scroll-handler rule (ADR.md
-  // entry 27, src/badge.mjs) is a rule about the BOARD page, where an
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
   // IntersectionObserver can see everything a scroll handler could. Nothing can
   // observe this document from outside it, so the listener lives here, in the
   // one place that can see the fact. Deduplicated on the last reported value,
@@ -2669,7 +2636,7 @@ body.page-board .back-to-top.visible {
     if (scroller) scroller.scrollTop = top;
   }
 
-  // ADR.md entry 39: the board's theme control paints this document too, so a
+  // The board's theme control paints this document too, so a
   // rendered artifact needs none of its own. The parent resolves its own
   // three-state control (light / dark / the attribute's ABSENCE, meaning
   // System) down to a concrete 'light' or 'dark' before sending -- see
@@ -2707,8 +2674,8 @@ body.page-board .back-to-top.visible {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
       // 'theme' widens this message the same way 'sentRefs' above already does
-      // (ADR.md entry 39 -- &quot;over the channel that already carries comment
-      // mode&quot;), rather than minting a type of its own: same tolerance, same
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
       // convention. An absent or unrecognised value leaves this document's
       // theme exactly as it was, so a stage that is never told stays on
       // whatever its own markup chose.
@@ -2761,7 +2728,7 @@ body.page-board .back-to-top.visible {
   reportHeightAfterLayout();
   // Keeps the report tracking a mock whose content changes size AFTER first
   // paint (an image loading in, a toggle revealing more copy) -- guarded
-  // exactly the way src/ui.mjs's setupRoundObserver guards
+  // exactly the way src/ui.mjs's setupSendBarDock guards
   // 'IntersectionObserver' (QUIRKS.md &quot;The stand-in has no layout&quot;): this
   // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
   // neither the first, layout-deferred report nor a later resize-driven one
@@ -3047,15 +3014,14 @@ body.page-board .back-to-top.visible {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps &amp;&amp; steps.length) ? stepsToPath(steps) : null;
-    // An element whose own ref already carries a SENT comment is
-    // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
-    // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
-    // below still posts 'click' unconditionally, exactly as before; &quot;clicking
-    // it does nothing&quot; is already enforced on the other side of the channel
-    // (src/ui.mjs's handleStageClick calls isSentAnchor before ever opening a
-    // form), which is the side that actually holds board.comments and can
-    // tell a resolved sent comment from a stale ref this document has no way
-    // to distinguish on its own.
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. &quot;Clicking it does nothing&quot; is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
     if (ref !== null &amp;&amp; sentRefs.indexOf(ref) !== -1) {
       hovered.classList.add(SENT_CLASS);
     } else {
@@ -3159,8 +3125,8 @@ body.page-board .back-to-top.visible {
   // either. 'top' is a plain number in both directions and is validated as one
   // on both sides.
   //
-  // A real scroll listener, deliberately: the no-scroll-handler rule (ADR.md
-  // entry 27, src/badge.mjs) is a rule about the BOARD page, where an
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
   // IntersectionObserver can see everything a scroll handler could. Nothing can
   // observe this document from outside it, so the listener lives here, in the
   // one place that can see the fact. Deduplicated on the last reported value,
@@ -3241,7 +3207,7 @@ body.page-board .back-to-top.visible {
     if (scroller) scroller.scrollTop = top;
   }
 
-  // ADR.md entry 39: the board's theme control paints this document too, so a
+  // The board's theme control paints this document too, so a
   // rendered artifact needs none of its own. The parent resolves its own
   // three-state control (light / dark / the attribute's ABSENCE, meaning
   // System) down to a concrete 'light' or 'dark' before sending -- see
@@ -3279,8 +3245,8 @@ body.page-board .back-to-top.visible {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
       // 'theme' widens this message the same way 'sentRefs' above already does
-      // (ADR.md entry 39 -- &quot;over the channel that already carries comment
-      // mode&quot;), rather than minting a type of its own: same tolerance, same
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
       // convention. An absent or unrecognised value leaves this document's
       // theme exactly as it was, so a stage that is never told stays on
       // whatever its own markup chose.
@@ -3333,7 +3299,7 @@ body.page-board .back-to-top.visible {
   reportHeightAfterLayout();
   // Keeps the report tracking a mock whose content changes size AFTER first
   // paint (an image loading in, a toggle revealing more copy) -- guarded
-  // exactly the way src/ui.mjs's setupRoundObserver guards
+  // exactly the way src/ui.mjs's setupSendBarDock guards
   // 'IntersectionObserver' (QUIRKS.md &quot;The stand-in has no layout&quot;): this
   // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
   // neither the first, layout-deferred report nor a later resize-driven one
@@ -3569,15 +3535,14 @@ body.page-board .back-to-top.visible {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps &amp;&amp; steps.length) ? stepsToPath(steps) : null;
-    // An element whose own ref already carries a SENT comment is
-    // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
-    // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
-    // below still posts 'click' unconditionally, exactly as before; &quot;clicking
-    // it does nothing&quot; is already enforced on the other side of the channel
-    // (src/ui.mjs's handleStageClick calls isSentAnchor before ever opening a
-    // form), which is the side that actually holds board.comments and can
-    // tell a resolved sent comment from a stale ref this document has no way
-    // to distinguish on its own.
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. &quot;Clicking it does nothing&quot; is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
     if (ref !== null &amp;&amp; sentRefs.indexOf(ref) !== -1) {
       hovered.classList.add(SENT_CLASS);
     } else {
@@ -3681,8 +3646,8 @@ body.page-board .back-to-top.visible {
   // either. 'top' is a plain number in both directions and is validated as one
   // on both sides.
   //
-  // A real scroll listener, deliberately: the no-scroll-handler rule (ADR.md
-  // entry 27, src/badge.mjs) is a rule about the BOARD page, where an
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
   // IntersectionObserver can see everything a scroll handler could. Nothing can
   // observe this document from outside it, so the listener lives here, in the
   // one place that can see the fact. Deduplicated on the last reported value,
@@ -3763,7 +3728,7 @@ body.page-board .back-to-top.visible {
     if (scroller) scroller.scrollTop = top;
   }
 
-  // ADR.md entry 39: the board's theme control paints this document too, so a
+  // The board's theme control paints this document too, so a
   // rendered artifact needs none of its own. The parent resolves its own
   // three-state control (light / dark / the attribute's ABSENCE, meaning
   // System) down to a concrete 'light' or 'dark' before sending -- see
@@ -3801,8 +3766,8 @@ body.page-board .back-to-top.visible {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
       // 'theme' widens this message the same way 'sentRefs' above already does
-      // (ADR.md entry 39 -- &quot;over the channel that already carries comment
-      // mode&quot;), rather than minting a type of its own: same tolerance, same
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
       // convention. An absent or unrecognised value leaves this document's
       // theme exactly as it was, so a stage that is never told stays on
       // whatever its own markup chose.
@@ -3855,7 +3820,7 @@ body.page-board .back-to-top.visible {
   reportHeightAfterLayout();
   // Keeps the report tracking a mock whose content changes size AFTER first
   // paint (an image loading in, a toggle revealing more copy) -- guarded
-  // exactly the way src/ui.mjs's setupRoundObserver guards
+  // exactly the way src/ui.mjs's setupSendBarDock guards
   // 'IntersectionObserver' (QUIRKS.md &quot;The stand-in has no layout&quot;): this
   // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
   // neither the first, layout-deferred report nor a later resize-driven one
@@ -4228,15 +4193,14 @@ body.page-board .back-to-top.visible {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps &amp;&amp; steps.length) ? stepsToPath(steps) : null;
-    // An element whose own ref already carries a SENT comment is
-    // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
-    // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
-    // below still posts 'click' unconditionally, exactly as before; &quot;clicking
-    // it does nothing&quot; is already enforced on the other side of the channel
-    // (src/ui.mjs's handleStageClick calls isSentAnchor before ever opening a
-    // form), which is the side that actually holds board.comments and can
-    // tell a resolved sent comment from a stale ref this document has no way
-    // to distinguish on its own.
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. &quot;Clicking it does nothing&quot; is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
     if (ref !== null &amp;&amp; sentRefs.indexOf(ref) !== -1) {
       hovered.classList.add(SENT_CLASS);
     } else {
@@ -4340,8 +4304,8 @@ body.page-board .back-to-top.visible {
   // either. 'top' is a plain number in both directions and is validated as one
   // on both sides.
   //
-  // A real scroll listener, deliberately: the no-scroll-handler rule (ADR.md
-  // entry 27, src/badge.mjs) is a rule about the BOARD page, where an
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
   // IntersectionObserver can see everything a scroll handler could. Nothing can
   // observe this document from outside it, so the listener lives here, in the
   // one place that can see the fact. Deduplicated on the last reported value,
@@ -4422,7 +4386,7 @@ body.page-board .back-to-top.visible {
     if (scroller) scroller.scrollTop = top;
   }
 
-  // ADR.md entry 39: the board's theme control paints this document too, so a
+  // The board's theme control paints this document too, so a
   // rendered artifact needs none of its own. The parent resolves its own
   // three-state control (light / dark / the attribute's ABSENCE, meaning
   // System) down to a concrete 'light' or 'dark' before sending -- see
@@ -4460,8 +4424,8 @@ body.page-board .back-to-top.visible {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
       // 'theme' widens this message the same way 'sentRefs' above already does
-      // (ADR.md entry 39 -- &quot;over the channel that already carries comment
-      // mode&quot;), rather than minting a type of its own: same tolerance, same
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
       // convention. An absent or unrecognised value leaves this document's
       // theme exactly as it was, so a stage that is never told stays on
       // whatever its own markup chose.
@@ -4514,7 +4478,7 @@ body.page-board .back-to-top.visible {
   reportHeightAfterLayout();
   // Keeps the report tracking a mock whose content changes size AFTER first
   // paint (an image loading in, a toggle revealing more copy) -- guarded
-  // exactly the way src/ui.mjs's setupRoundObserver guards
+  // exactly the way src/ui.mjs's setupSendBarDock guards
   // 'IntersectionObserver' (QUIRKS.md &quot;The stand-in has no layout&quot;): this
   // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
   // neither the first, layout-deferred report nor a later resize-driven one
@@ -4747,15 +4711,14 @@ body.page-board .back-to-top.visible {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps &amp;&amp; steps.length) ? stepsToPath(steps) : null;
-    // An element whose own ref already carries a SENT comment is
-    // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
-    // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
-    // below still posts 'click' unconditionally, exactly as before; &quot;clicking
-    // it does nothing&quot; is already enforced on the other side of the channel
-    // (src/ui.mjs's handleStageClick calls isSentAnchor before ever opening a
-    // form), which is the side that actually holds board.comments and can
-    // tell a resolved sent comment from a stale ref this document has no way
-    // to distinguish on its own.
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. &quot;Clicking it does nothing&quot; is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
     if (ref !== null &amp;&amp; sentRefs.indexOf(ref) !== -1) {
       hovered.classList.add(SENT_CLASS);
     } else {
@@ -4859,8 +4822,8 @@ body.page-board .back-to-top.visible {
   // either. 'top' is a plain number in both directions and is validated as one
   // on both sides.
   //
-  // A real scroll listener, deliberately: the no-scroll-handler rule (ADR.md
-  // entry 27, src/badge.mjs) is a rule about the BOARD page, where an
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
   // IntersectionObserver can see everything a scroll handler could. Nothing can
   // observe this document from outside it, so the listener lives here, in the
   // one place that can see the fact. Deduplicated on the last reported value,
@@ -4941,7 +4904,7 @@ body.page-board .back-to-top.visible {
     if (scroller) scroller.scrollTop = top;
   }
 
-  // ADR.md entry 39: the board's theme control paints this document too, so a
+  // The board's theme control paints this document too, so a
   // rendered artifact needs none of its own. The parent resolves its own
   // three-state control (light / dark / the attribute's ABSENCE, meaning
   // System) down to a concrete 'light' or 'dark' before sending -- see
@@ -4979,8 +4942,8 @@ body.page-board .back-to-top.visible {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
       // 'theme' widens this message the same way 'sentRefs' above already does
-      // (ADR.md entry 39 -- &quot;over the channel that already carries comment
-      // mode&quot;), rather than minting a type of its own: same tolerance, same
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
       // convention. An absent or unrecognised value leaves this document's
       // theme exactly as it was, so a stage that is never told stays on
       // whatever its own markup chose.
@@ -5033,7 +4996,7 @@ body.page-board .back-to-top.visible {
   reportHeightAfterLayout();
   // Keeps the report tracking a mock whose content changes size AFTER first
   // paint (an image loading in, a toggle revealing more copy) -- guarded
-  // exactly the way src/ui.mjs's setupRoundObserver guards
+  // exactly the way src/ui.mjs's setupSendBarDock guards
   // 'IntersectionObserver' (QUIRKS.md &quot;The stand-in has no layout&quot;): this
   // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
   // neither the first, layout-deferred report nor a later resize-driven one
@@ -5095,15 +5058,23 @@ body.page-board .back-to-top.visible {
 <script id="board-data" type="application/json">{"id":"b_00112233445566778899aabbccddeeff","thread":"th_01234567","title":"feature/kitchen-routing-v2","createdAt":"2026-07-14T09:12:00.000Z","updatedAt":"2026-07-15T10:31:00.000Z","state":"submitted","rounds":[{"n":1,"postedAt":"2026-07-14T09:12:00.000Z","status":"open","sentAt":null,"title":"feature/kitchen-routing-v2","awaited":false,"awaitDeadline":null},{"n":2,"postedAt":"2026-07-15T10:05:00.000Z","status":"sent","sentAt":"2026-07-15T10:31:00.000Z","title":"Routing walkthrough","awaited":true,"awaitDeadline":"2026-07-15T10:45:00.000Z","action":"submitted"}],"blocks":[{"round":1,"id":"h1","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 104px 24px 32px; font-family: system-ui, sans-serif; background: #111827; }\n  .kd-board { max-width: 900px; margin: 0 auto; }\n  .kd-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; color: #f9fafb; }\n  .kd-head h1 { font-size: 20px; margin: 0; font-weight: 700; }\n  .kd-head .clock { font-size: 13px; opacity: .75; font-variant-numeric: tabular-nums; }\n  .kd-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }\n  .ticket { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.25); overflow: hidden; border: 1px solid #e2e2e2; }\n  .ticket-head { background: #1f2937; color: #fff; padding: 14px 18px; display: flex; justify-content: space-between; align-items: baseline; }\n  .ticket-head .num { font-size: 18px; font-weight: 700; }\n  .ticket-head .table { font-size: 13px; opacity: .8; }\n  .ticket-body { padding: 14px 18px; }\n  .item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #e5e5e5; font-size: 14px; color: #111; }\n  .item:last-child { border-bottom: none; }\n  .chip { display: inline-block; margin: 10px 0 4px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }\n  .chip.prep { background: #fef3c7; color: #92400e; }\n  .chip.ready { background: #dcfce7; color: #166534; }\n  .chip.rush { background: #fee2e2; color: #991b1b; }\n  .chip.served { background: #e5e7eb; color: #374151; }\n  .actions { padding: 12px 18px 18px; }\n  button { width: 100%; padding: 10px 0; border: none; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }\n  button:disabled { background: #9ca3af; cursor: default; }\n\u003c/style>\n\u003cdiv class=\"kd-board\">\n  \u003cdiv class=\"kd-head\">\u003ch1>Kitchen Display — Dinner Rush\u003c/h1>\u003cspan class=\"clock\">6:42 PM · 4 open tickets\u003c/span>\u003c/div>\n  \u003cdiv class=\"kd-grid\">\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#482\u003c/span>\u003cspan class=\"table\">Table 6\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Grilled salmon\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Caesar salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Sparkling water\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n        \u003cspan class=\"chip prep\">In prep\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Confirm\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#481\u003c/span>\u003cspan class=\"table\">Table 9\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Seared tuna\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>Miso soup\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip rush\">Rush\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Confirm\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#483\u003c/span>\u003cspan class=\"table\">Table 2\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Roast chicken\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n        \u003cdiv class=\"item\">\u003cspan>House salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip ready\">Ready for pickup\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton>Mark served\u003c/button>\u003c/div>\n    \u003c/div>\n    \u003cdiv class=\"ticket\">\n      \u003cdiv class=\"ticket-head\">\u003cspan class=\"num\">#479\u003c/span>\u003cspan class=\"table\">Table 11\u003c/span>\u003c/div>\n      \u003cdiv class=\"ticket-body\">\n        \u003cdiv class=\"item\">\u003cspan>Margherita pizza\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n        \u003cspan class=\"chip served\">Served\u003c/span>\n      \u003c/div>\n      \u003cdiv class=\"actions\">\u003cbutton disabled>Served\u003c/button>\u003c/div>\n    \u003c/div>\n  \u003c/div>\n\u003c/div>","sha":"71edcc41ce8a43542eacac6126ad45acc74550ec80799fc1d621a677c827f4ef"},{"round":2,"id":"d1","kind":"markdown","source":null,"text":"# Order-routing redesign\n\nThe kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\n\n- Fewer manual status updates per ticket\n- A single \"Ready for pickup\" state visible to front-of-house\n- Rush tickets float to the top automatically\n\nThe payload each station receives on a status transition:\n\n```json\n{\n  \"ticketId\": 482,\n  \"status\": \"ready_for_pickup\",\n  \"notifiedStations\": [\"grill\", \"expo\"]\n}\n```\n\n| Station | Avg. ticket time (today) | Avg. ticket time (proposed) |\n| --- | --- | --- |\n| Grill | 46s | 33s |\n| Salad | 28s | 24s |\n| Expo | 19s | 15s |","sha":"30f276f0b30161582322dcef1c9a3c4466f1619e8f63611f292a5a08d3b6b303","html":"\u003ch1 id=\"order-routing-redesign\">Order-routing redesign\u003c/h1>\u003cp>The kitchen display one page back is the mockup. Three things change for the pass, and the routing rewrite underneath them is what this round is asking about:\u003c/p>\u003cul>\u003cli id=\"order-routing-redesign-li1\">Fewer manual status updates per ticket\u003c/li>\u003cli id=\"order-routing-redesign-li2\">A single \"Ready for pickup\" state visible to front-of-house\u003c/li>\u003cli id=\"order-routing-redesign-li3\">Rush tickets float to the top automatically\u003c/li>\u003c/ul>\u003cp>The payload each station receives on a status transition:\u003c/p>\u003cdiv class=\"fence-lang\" data-lang=\"json\">\u003cpre>\u003ccode>{\n  \"ticketId\": \u003cspan class=\"tok-number\">482\u003c/span>,\n  \"status\": \u003cspan class=\"tok-string\">\"ready_for_pickup\"\u003c/span>,\n  \"notifiedStations\": [\u003cspan class=\"tok-string\">\"grill\"\u003c/span>, \u003cspan class=\"tok-string\">\"expo\"\u003c/span>]\n}\u003c/code>\u003c/pre>\u003c/div>\u003ctable>\u003ctr>\u003cth>Station\u003c/th>\u003cth>Avg. ticket time (today)\u003c/th>\u003cth>Avg. ticket time (proposed)\u003c/th>\u003c/tr>\u003ctr>\u003ctd>Grill\u003c/td>\u003ctd>46s\u003c/td>\u003ctd>33s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Salad\u003c/td>\u003ctd>28s\u003c/td>\u003ctd>24s\u003c/td>\u003c/tr>\u003ctr>\u003ctd>Expo\u003c/td>\u003ctd>19s\u003c/td>\u003ctd>15s\u003c/td>\u003c/tr>\u003c/table>","anchors":[{"kind":"md","ref":"order-routing-redesign","label":"Order-routing redesign"},{"kind":"md","ref":"order-routing-redesign-li1","label":"Fewer manual status updates per ticket"},{"kind":"md","ref":"order-routing-redesign-li2","label":"A single \"Ready for pickup\" state visible to front-of-house"},{"kind":"md","ref":"order-routing-redesign-li3","label":"Rush tickets float to the top automatically"}]},{"round":2,"id":"m1","kind":"mermaid","source":null,"text":"flowchart LR\n  Placed[Order placed] --> Prepping[In prep] --> Ready[Ready for pickup] --> Served[Served]","sha":"0730e47488c90846e75d0577056f696c04cc7c4c4e64ad7a16ddc98d6ddba561"},{"round":2,"id":"c1","kind":"code","source":null,"text":"function priorityScore(ticket) {\n  const waitMs = Date.now() - ticket.placedAt;\n  const rushBonus = ticket.rush ? 500 : 0;\n  return waitMs + rushBonus;\n}","sha":"6e558853c35e89523f1588343da1ee9b1238bcb0df3d25b321582daa452fb690","lang":"javascript"},{"round":2,"id":"c2","kind":"code","source":null,"text":"--- a/routing.js\n+++ b/routing.js\n@@ -1,5 +1,7 @@\n function priorityScore(ticket) {\n   const waitMs = Date.now() - ticket.placedAt;\n   const rushBonus = ticket.rush ? 500 : 0;\n-  return waitMs + rushBonus;\n+  const recallBonus = ticket.recalled ? 1500 : 0;\n+  return waitMs + rushBonus + recallBonus;\n }","sha":"8144b07ac5240a2448b9475511c377247c069376848e0f05a115ac0f1ab61679","lang":"diff"},{"round":2,"id":"x1","kind":"compare","left":{"label":"Before","block":{"round":2,"id":"h2","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; background: #f3f4f6; }\n  .ticket { max-width: 300px; margin: 0 auto; background: #fff; border: 1px solid #d1d5db; padding: 10px 12px; font-size: 12px; line-height: 1.5; color: #374151; }\n  .ticket p { margin: 2px 0; }\n  .head { font-size: 12px; font-weight: 600; margin-bottom: 6px; color: #111; }\n  button { margin-top: 8px; padding: 6px 10px; font-size: 12px; background: #e5e7eb; border: 1px solid #9ca3af; border-radius: 4px; color: #111; cursor: pointer; }\n\u003c/style>\n\u003cdiv class=\"ticket\">\n  \u003cdiv class=\"head\">Order #482 — Table 6 — Placed 6:42 PM — Status: Awaiting confirmation\u003c/div>\n  \u003cp>1x Grilled salmon\u003c/p>\n  \u003cp>1x Caesar salad\u003c/p>\n  \u003cp>2x Sparkling water\u003c/p>\n  \u003cp>Estimated prep time: 12 minutes\u003c/p>\n  \u003cbutton>Confirm order now, please\u003c/button>\n\u003c/div>","sha":"d2f4bf94fc4f9fb3efc463751e1b1558f6c726ee18d6c6cb32ce16e89d5afe7e"}},"right":{"label":"After","block":{"round":2,"id":"h3","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .ticket { max-width: 260px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); overflow: hidden; border: 1px solid #e2e2e2; }\n  .head { background: #1f2937; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; }\n  .body { padding: 10px 14px; font-size: 13px; color: #111; }\n  .item { display: flex; justify-content: space-between; padding: 4px 0; }\n  button { width: 100%; padding: 9px 0; border: none; background: #2563eb; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }\n\u003c/style>\n\u003cdiv class=\"ticket\">\n  \u003cdiv class=\"head\">\u003cspan>#482\u003c/span>\u003cspan>Table 6\u003c/span>\u003c/div>\n  \u003cdiv class=\"body\">\n    \u003cdiv class=\"item\">\u003cspan>Grilled salmon\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n    \u003cdiv class=\"item\">\u003cspan>Caesar salad\u003c/span>\u003cspan>x1\u003c/span>\u003c/div>\n    \u003cdiv class=\"item\">\u003cspan>Sparkling water\u003c/span>\u003cspan>x2\u003c/span>\u003c/div>\n  \u003c/div>\n  \u003cbutton>Confirm\u003c/button>\n\u003c/div>","sha":"22d5a3e98bc92a5b3b0c9b31e3d273cdc5e44418a219e1c6e2c2e3c1d67d359c"}}},{"round":2,"id":"q1","kind":"question","prompt":"Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?","context":[{"round":2,"id":"d2","kind":"markdown","source":null,"text":"Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).","sha":"05178d55126abc3fe8e2f881c14f407099dbd591085b71844695445ef041d892","html":"\u003cp>Background: average ticket time today is 31 seconds across the three prep stations (grill, salad, expo).\u003c/p>","anchors":[]}],"widget":"single","options":[{"label":"Yes, ship it","description":"","preview":null},{"label":"Close, one tweak needed","description":"","preview":null},{"label":"No, rework it","description":"","preview":null}]},{"round":2,"id":"q2","kind":"question","prompt":"Which stations need their ticket displays updated to match the round 1 mockup?","context":[],"widget":"multi","options":[{"label":"Grill","description":"","preview":null},{"label":"Salad","description":"","preview":null},{"label":"Expo","description":"","preview":null},{"label":"Bar","description":"","preview":null}]},{"round":2,"id":"q3","kind":"question","prompt":"Anything else the kitchen team should flag before we ship?","context":[],"widget":"text","options":[]},{"round":2,"id":"q4","kind":"question","prompt":"Rank these three palettes for the status chips (In prep / Rush / Ready for pickup) by legibility under kitchen pass lighting, most legible first. The display one page back uses the first of them.","context":[],"widget":"rank","options":[{"label":"High-contrast","description":"","preview":null},{"label":"Pastel","description":"","preview":null},{"label":"Monochrome","description":"","preview":null}]},{"round":2,"id":"q5","kind":"question","prompt":"Which ticket-card layout reads faster at a glance?","context":[],"widget":"choose-between-rendered-variants","options":[{"label":"Layout A","description":"Compact, single line","block":{"round":2,"id":"h4","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #fff; border: 1px solid #e2e2e2; border-radius: 8px; max-width: 340px; margin: 0 auto; font-size: 14px; color: #111; }\n  .row b { font-weight: 700; }\n  .dot { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; }\n\u003c/style>\n\u003cdiv class=\"row\">\u003cb>#482\u003c/b>\u003cspan class=\"dot\">\u003c/span>\u003cspan>Table 6\u003c/span>\u003cspan class=\"dot\">\u003c/span>\u003cspan>3 items\u003c/span>\u003c/div>","sha":"f9a5a0eae4bfb8e37f564df601089bf20340fd0664dc81f55ce23de254ede822"}},{"label":"Layout B","description":"Spacious, three lines","block":{"round":2,"id":"h5","kind":"html","source":null,"html":"\u003cstyle>\n  body { margin: 0; padding: 16px 0; font-family: system-ui, sans-serif; }\n  .card { max-width: 340px; margin: 0 auto; padding: 18px; background: #fff; border: 1px solid #e2e2e2; border-radius: 10px; }\n  .line { padding: 6px 0; font-size: 15px; color: #111; border-bottom: 1px solid #f0f0f0; }\n  .line:last-child { border-bottom: none; }\n  .line.title { font-size: 18px; font-weight: 700; }\n\u003c/style>\n\u003cdiv class=\"card\">\n  \u003cdiv class=\"line title\">Order #482\u003c/div>\n  \u003cdiv class=\"line\">Table 6\u003c/div>\n  \u003cdiv class=\"line\">3 items\u003c/div>\n\u003c/div>","sha":"ae7daf4d634328cacbb56dbdd5a5c4451e4a93dfc4b032a54c4b478386cbd39c"}}]}],"answers":{"q1":{"id":"q1","status":"answered","choice":"Close, one tweak needed","note":"Add a Recall step from Ready back to Prepping for remakes."},"q2":{"id":"q2","status":"answered","choice":["Grill","Expo"],"note":"Bar can wait until next sprint."},"q3":{"id":"q3","status":"answered","choice":"Make sure the Recall state also resets the rush-bonus timer, or repeat rush tickets will always sort to the top.","note":""},"q4":{"id":"q4","status":"answered","choice":["High-contrast","Monochrome","Pastel"],"note":"Pastel washes out completely under the heat-lamp lighting."},"q5":{"id":"q5","status":"answered","choice":"Layout A","note":""}},"comments":[{"n":1,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"block"},"text":"This matches the walkthrough from Tuesday's stand-up. Nice work.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":2,"blockId":"h1","blockKind":"html","anchor":{"kind":"dom","ref":"1.2.1.3.1","hint":"Confirm"},"text":"Consider making this button say 'Confirm order' for clarity.","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true},{"n":3,"blockId":"m1","blockKind":"mermaid","anchor":{"kind":"mermaid","ref":"Ready"},"text":"Should Ready also branch to a Recall state if an item comes back?","round":2,"createdAt":"2026-07-15T10:31:00.000Z","resolved":true}]}</script>
 <script type="module">
 (function () {
-  // Tag/type-qualified, not a bare getElementById: board content is markdown
-  // snapshotted from arbitrary files (src/markdown.mjs's own comment on the
-  // threat model), and a heading '## Board data' slugifies to a SECOND
-  // id="board-data" on an <h2> that renders before this real script tag in
-  // tree order. A bare id lookup for
-  // 'board-data' used to return that heading, JSON.parse threw on its text, and the whole
-  // client IIFE died before body.readonly was ever applied -- a file:// archive
-  // then rendered as if it were a live, writable board. No heading is ever a
-  // <script>, so this selector cannot be satisfied by anything markdown emits.
+  // THE ID RULE FOR THIS WHOLE FILE, stated here once: every id lookup is
+  // tag/type-qualified, never a bare getElementById or a bare '#id' selector.
+  // Board content is markdown snapshotted from arbitrary files (src/markdown.mjs's
+  // threat-model comment), and a heading or top-level list item mints an id of its
+  // own through slugify -- '## Board data' becomes a second id="board-data", and a
+  // composed id like 'comment-form-q1' is exactly as mintable. Only render.mjs's
+  // OWN element ever carries the matching tag (<script>, <form>, <div>, <button>,
+  // <nav>, <span>): a heading is always <h1>-<h6> and a list item always <li>, so
+  // the qualifier removes the collision, and the tree-order dependence it used to
+  // rest on, entirely. test/check-archive-ids.mjs pins both halves -- a real board
+  // whose markdown mints every one of these ids as a heading, and a static sweep
+  // of all three client scripts that fails the moment a bare lookup comes back.
+  //
+  // This lookup is the loudest case: a bare id lookup for 'board-data' returned
+  // the heading, JSON.parse threw on its text, and the whole client IIFE died
+  // before body.readonly was ever applied -- a file:// archive then rendered as if
+  // it were a live, writable board.
   var dataEl = document.querySelector('script#board-data[type="application/json"]');
   if (!dataEl) return;
   var board = JSON.parse(dataEl.textContent);
@@ -5147,26 +5118,20 @@ body.page-board .back-to-top.visible {
   var commentMode = false;
 
   // Which html-stage <iframe>s have a stage-side agent that confirmed 'ready'
-  // (see the design comment above
-  // src/render.mjs's 'stageAgentScript'). Replaces the old 'stageHoverClears'
-  // array, which reached across into each stage's own document directly to
-  // clear an in-progress hover -- no longer possible at all once
-  // 'allow-same-origin' is dropped (the parent can no longer touch
-  // 'contentDocument'/'contentWindow.document'); a stage clears its own hover
-  // locally now, the moment it hears 'commentMode: false' over postMessage
-  // ('stageAgentScript''s own 'mode' handler).
+  // (see the design comment above src/render.mjs's 'stageAgentScript'). A stage
+  // clears its own in-progress hover locally the moment it hears
+  // 'commentMode: false' over postMessage ('stageAgentScript''s own 'mode'
+  // handler) -- with 'allow-same-origin' dropped the parent cannot reach
+  // 'contentDocument'/'contentWindow.document' to do it from here.
   //
-  // A WeakSet, not a plain array: the PREVIOUS version of this same idea (a
-  // plain array every wire pass pushed a new entry onto, nothing ever removed)
-  // leaked one entry per stage forever, including for the placeholder document
-  // nothing will ever click again. A
-  // WeakSet only ever answers "is this specific, still-referenced frame one
-  // I've heard from" ('isWiredStage', 'markStageWired' below) -- membership is
-  // never enumerated directly; every caller that needs to ACT on "every wired
-  // stage" derives its candidate list fresh from the live DOM
-  // ('qsa('.html-stage', document)') and filters through 'isWiredStage', so a
-  // frame an amend has already replaced is simply absent from that list and
-  // costs nothing, ever, without this needing its own cleanup pass.
+  // A WeakSet, not a plain array: it only ever answers "is this specific,
+  // still-referenced frame one I've heard from" ('isWiredStage',
+  // 'markStageWired' below), and membership is never enumerated. Every caller
+  // that needs to ACT on "every wired stage" derives its candidate list fresh
+  // from the live DOM ('qsa('.html-stage', document)') and filters through
+  // 'isWiredStage', so a frame an amend has already replaced -- or a placeholder
+  // document nothing will ever click again -- is simply absent from that list
+  // and costs nothing, with no cleanup pass of its own.
   var wiredStageFrames = typeof WeakSet === 'function' ? new WeakSet() : null;
   function isWiredStage(frame) { return !!wiredStageFrames && wiredStageFrames.has(frame); }
   function markStageWired(frame) { if (wiredStageFrames) wiredStageFrames.add(frame); }
@@ -5290,12 +5255,7 @@ body.page-board .back-to-top.visible {
   // The hint rule, spliced in the same way and for the same
   // reason: the exact function test/check-comment-mode.mjs's hint checks run
   // against IS src/anchor.mjs's composeHint, not a second, hand-written copy of
-  // its logic. An earlier draft got this wrong: src/anchor.mjs carried only a
-  // design COMMENT describing this rule, no actual
-  // code, so nothing bound "what the design says" to "what this page runs" --
-  // reverting that file changed nothing any check could see. Embedding the real
-  // function closes that gap the same way computeBoardPatch above already does.
-  // Gathering the DOM inputs this takes (buildHint, below) stays here, same
+  // its logic. Gathering the DOM inputs this takes (buildHint, below) stays here, same
   // split as buildSteps being parity-bound while "which element did the click
   // land on" is not.
   var composeHint = function composeHint(text, tagName, insideCompare, compareLabel, blockKind) {
@@ -5307,8 +5267,8 @@ body.page-board .back-to-top.visible {
   // unguarded `ROLE_WORD[tag]` walks the prototype chain for a tag like
   // 'constructor', returning `Object` (the constructor FUNCTION, not a role
   // word), which `JSON.stringify` then silently drops when the anchor is
-  // persisted. `hasOwnProperty` closes that off the same way `NAMED_ENTITIES`
-  // above already guards its own lookup.
+  // persisted. `hasOwnProperty` closes that off the same way `decodeEntities`
+  // below already guards its own `NAMED_ENTITIES` lookup.
   var role = Object.prototype.hasOwnProperty.call(ROLE_WORD, tag) ? ROLE_WORD[tag] : undefined;
   var context = insideCompare
     ? (String(compareLabel || '') + ' ' + (Object.prototype.hasOwnProperty.call(BLOCK_NOUN, blockKind) ? BLOCK_NOUN[blockKind] : 'block')).replace(/\s+/g, ' ').trim()
@@ -5484,10 +5444,7 @@ body.page-board .back-to-top.visible {
     // archive reader is exactly who needs it. Re-enabled right after the
     // blanket disable above rather than excluded from that selector, so the
     // selector's own literal text stays intact (test/check-pure.mjs asserts
-    // it verbatim) and this reads as the carve-out it is. Tag-qualified
-    // ('button#theme-toggle', not a bare id) for the same reason as
-    // src/theme.mjs's own lookup -- a heading can mint a second
-    // id="theme-toggle" that is never a <button>.
+    // it verbatim) and this reads as the carve-out it is.
     var themeToggleBtn = document.querySelector('button#theme-toggle');
     if (themeToggleBtn) themeToggleBtn.disabled = false;
     // Back-to-top is the second exception, for the same reason and by the same
@@ -5502,56 +5459,33 @@ body.page-board .back-to-top.visible {
 
   // Opens (and fills in) blockId's comment-form for a given anchor. Shared by the
   // .comment-btn handler and the html-stage / mermaid element-click handlers
-  // (below) -- exactly one place decides what
-  // "commenting on:" reads. Declared here, above wireRoot, alongside every
-  // anchor helper it's shared with: it only ever reads/writes form state
-  // already in the document, so (unlike everything wireRoot itself does) it
-  // never needs to be re-scoped or guarded against being called more than once.
+  // (below), so exactly one place decides what "commenting on:" reads. Declared
+  // above wireRoot alongside the other anchor helpers: it only ever reads/writes
+  // form state already in the document, so (unlike everything wireRoot itself
+  // does) it never needs re-scoping per wire pass.
   //
-  // anchorDomRef is the generic page-scoped step-path a diagram-node
-  // click ALSO mints, alongside its node-id anchorRef -- see src/anchor.mjs's
-  // "design" comment for why a mermaid anchor carries both. It is only
-  // ever non-empty for anchorKind 'mermaid'; every other caller omits it and the
-  // stored attribute is just the empty string, harmless since the submit
-  // handler below only reads it for that one kind.
+  // anchorDomRef is the generic page-scoped step-path a diagram-node click ALSO
+  // mints, alongside its node-id anchorRef -- see src/anchor.mjs's "design"
+  // comment for why a mermaid anchor carries both. Non-empty only for anchorKind
+  // 'mermaid'; every other caller omits it, harmless since the submit handler
+  // below only reads it for that one kind.
   //
-  // editing is the existing
-  // pendingComments entry this same anchor already matched
-  // (findPendingCommentForAnchor), found by the caller -- never re-derived
-  // here. When present, the form is stamped with the entry's own id and the
-  // input is prefilled with its text, so THIS form's submit handler (below)
-  // replaces that entry rather than queuing a duplicate. Every caller that has
-  // no such entry (including every '.comment-btn' click, which never looked
-  // for one) omits it, which is what clears any stale edit-target left over
-  // from the last anchor this same per-block form happened to be opened for.
+  // editing is the existing pendingComments entry this same anchor already
+  // matched (findPendingCommentForAnchor), found by the caller and never
+  // re-derived here. When present the form is stamped with that entry's own id
+  // and prefilled with its text, so THIS form's submit handler replaces the entry
+  // rather than queuing a duplicate. Every caller with no such entry omits it,
+  // which is what clears a stale edit-target left over from the last anchor this
+  // same per-block form happened to be opened for.
   //
-  // Every id lookup in this file -- the per-block ones (form#comment-form-,
-  // div#comment-target-, div#comment-list-<blockId>) and the page-wide ones
-  // (script#board-data, button#theme-toggle, button#comment-mode-toggle,
-  // button#send-btn/button#discuss-btn/span#send-status,
-  // div#blocks) -- is tag-qualified rather than a bare getElementById. Board
-  // content is markdown snapshotted from arbitrary files (src/markdown.mjs's
-  // threat-model comment), and a heading or top-level list item can mint an id
-  // identical to any of these (slugify), including a composed one like
-  // 'comment-form-q1'. Only render.mjs's OWN element ever carries the matching
-  // tag (<form>, <div>, <button>, ...) for one of these ids -- a heading is
-  // always <h1>-<h6> and a list item is always <li>, neither of which any of
-  // these lookups' tag qualifiers can ever match -- so tag-qualifying removes
-  // the collision, and the tree-order dependence it used to rely on, entirely.
-  //
-  // One of these is not obvious from the id alone and was checked against
-  // src/render.mjs rather than assumed: 'comment-list-<blockId>' is
-  // a <div>, not a <ul>. And the qualifier survives the diagram lens: lensAdopt
-  // MOVES the real div#comment-target-/form#comment-form- into a <dialog> that
-  // lensOpen appended to document.body, so both stay in this document and a
-  // document-rooted qualified selector still finds exactly one of each while
-  // the lens is open (what it leaves behind is a <span class="lens-slot">,
-  // which carries no id at all).
-  //
-  // test/check-archive-ids.mjs pins both halves: a real board whose markdown
-  // mints every one of these ids as a heading, and a static sweep of all three
-  // client scripts that fails the moment a bare getElementById (or an
-  // unqualified '#id' selector) comes back.
+  // The lookups here follow this file's tag-qualified id rule (stated once, at
+  // the board-data lookup above). Two of them are worth naming: 'comment-list-'
+  // is a <div>, not a <ul>, checked against src/render.mjs rather than assumed;
+  // and the qualifier survives the diagram lens, since lensAdopt MOVES the real
+  // div#comment-target-/form#comment-form- into a <dialog> appended to
+  // document.body -- both stay in THIS document, so a document-rooted qualified
+  // selector still finds exactly one of each while the lens is open (what it
+  // leaves behind is a <span class="lens-slot">, which carries no id at all).
   function openCommentForm(blockId, anchorKind, anchorRef, anchorHint, anchorDomRef, editing) {
     var form = document.querySelector('form#comment-form-' + blockId);
     if (!form) return;
@@ -5564,33 +5498,27 @@ body.page-board .back-to-top.visible {
     var target = document.querySelector('div#comment-target-' + blockId);
     if (target) {
       target.textContent = anchorKind === 'block' ? 'commenting on: whole block' : 'commenting on: ' + (anchorHint || anchorRef);
-      // Shown only while a comment is actually being composed on this block --
-      // it is rendered on every block unconditionally (src/render.mjs), so it
-      // opens and closes together with the form it labels.
       target.classList.add('open');
     }
     form.classList.add('open');
     var input = form.querySelector('input[type=text]');
     if (input) {
-      // A DRAFT IN PROGRESS IS NEVER SILENTLY THROWN AWAY. This
-      // used to be an unconditional 'input.value = editing ? editing.text : """"',
-      // which was harmless while a comment form was only opened by pressing an
-      // explicit button -- but comment mode makes EVERY click on EVERY block
-      // element open it, so one stray click halfway through writing a remark
-      // wiped what had been typed, with no undo and nothing to say it had
-      // happened. New behaviour introduced by this batch, not old behaviour.
-      //
-      // So the field is only ever written when there is something to write:
-      //   - an 'editing' target -- reopening a
-      //     queued comment shows that comment's own text; the reviewer clicked
-      //     an element they know already carries one.
+      // A DRAFT IN PROGRESS IS NEVER SILENTLY THROWN AWAY. Comment mode makes
+      // EVERY click on EVERY block element open this form, so an unconditional
+      // write here would let one stray click halfway through writing a remark
+      // wipe what had been typed, with no undo and nothing to say it happened.
+      // The field is therefore only ever written when there is something to
+      // write:
+      //   - an 'editing' target -- reopening a queued comment shows that
+      //     comment's own text; the reviewer clicked an element they know
+      //     already carries one.
       //   - an empty (or whitespace-only) field, where there is nothing to lose.
       // A non-empty draft otherwise travels to the newly-clicked anchor
-      // untouched. That is deliberate rather than a compromise: the
-      // 'commenting on:' label directly above the field is rewritten in the same
-      // call and names the new target, so the reviewer can see where the text
-      // will land -- visible reattachment, and reversible (the delete
-      // control), rather than invisible destruction.
+      // untouched. Deliberate rather than a compromise: the 'commenting on:'
+      // label directly above the field is rewritten in the same call and names
+      // the new target, so the reviewer can see where the text will land --
+      // visible reattachment, and reversible (the delete control), rather than
+      // invisible destruction.
       if (editing) input.value = editing.text;
       else if (!String(input.value || '').trim()) input.value = '';
       input.focus();
@@ -5659,27 +5587,25 @@ body.page-board .back-to-top.visible {
       .map(function (c) { return c.anchor.ref; });
   }
 
-  // --- element-level anchoring: click an element inside an html    ---
-  // stage or a node inside a rendered mermaid diagram to anchor a comment to it.
-  // The path/hint/node-id logic below mirrors src/anchor.mjs exactly (that module
-  // is what test/check-pure.mjs exercises without a browser); this copy is a thin
-  // DOM adapter over it, duplicated because the served page is a single
-  // self-contained file with no import graph at runtime (see the file-level
-  // comment above and the standalone-archive guarantee).
+  // --- element-level anchoring -------------------------------------------------
   //
-  // Declared here, above wireRoot: wireHtmlStage is CALLED from inside wireRoot
-  // (scoped to root, below) and wireMermaidBlock is called from
-  // renderMermaidBlocks (also root-scoped, further down) -- both need these in
-  // scope, and neither is itself a "wire this root" loop, so neither belongs
-  // nested inside wireRoot's own body. An html/mermaid block can arrive in ANY
-  // round, including one pushed over SSE long after hydrate, and it has to be
-  // just as clickable as one that was on the page at load: wireHtmlStage's own
-  // guard (keyed on which live contentDocument was actually wired, not a boolean --
-  // see its own comment for why), plus every actual wiring loop below being scoped
-  // to root rather than document, is what keeps a push from re-wiring (and
-  // double-registering pin-layer state on) a stage that arrived earlier -- a
-  // push that re-wires already-placed elements is
-  // exactly how multi-select and Defer went silently dead there.
+  // Click an element inside an html stage, or a node inside a rendered mermaid
+  // diagram, to anchor a comment to it. The path/hint/node-id logic below mirrors
+  // src/anchor.mjs exactly (that module is what test/check-pure.mjs exercises
+  // without a browser); this copy is a thin DOM adapter over it, duplicated
+  // because the served page is a single self-contained file with no import graph
+  // at runtime (see the file-level comment above and the standalone-archive
+  // guarantee).
+  //
+  // Declared here, above wireRoot: wireMermaidBlock is called from
+  // renderMermaidBlocks (root-scoped, further down) and needs these in scope,
+  // and is not itself a "wire this root" loop, so it does not belong nested
+  // inside wireRoot's own body. An html/mermaid block can arrive in ANY round,
+  // including one pushed over SSE long after hydrate, and it has to be just as
+  // clickable as one that was on the page at load: every actual wiring loop below
+  // is scoped to root rather than document, which is what keeps a push from
+  // re-wiring (and double-registering listeners on) a block that arrived earlier
+  // -- exactly how multi-select and Defer once went silently dead.
 
   // The three functions below are the ones that MINT an anchor at click time
   // (extractHint the hint, buildSteps the raw path, stepsToPath its serialised
@@ -5756,9 +5682,11 @@ body.page-board .back-to-top.visible {
   // renderMermaidPins and the hover/cursor rules in src/styles.mjs all use it.
   var MERMAID_NODE_SELECTOR = "[id*=\"-flowchart-\"], [id^=\"flowchart-\"]";
 
-  // --- hint derivation: gather DOM inputs, then hand them to the  ---
-  // embedded composeHint (declared near the top of this script) for the actual
-  // composition rule. This function is ONLY the DOM-touching half -- finding a
+  // --- hint derivation ---------------------------------------------------------
+  //
+  // Gather the DOM inputs, then hand them to the embedded composeHint (declared
+  // near the top of this script) for the actual composition rule. This function
+  // is ONLY the DOM-touching half -- finding a
   // compare-side ancestor and its label, finding the containing block's own kind
   // -- closest()/querySelector() have no meaning against the plain-object trees
   // src/anchor.mjs's own tests build, which is why THAT half stays here rather
@@ -5785,17 +5713,15 @@ body.page-board .back-to-top.visible {
     return composeHint(extractHint(el.textContent), el.tagName, insideCompare, compareLabel, blockKind);
   }
 
-  // html stage: the iframe no longer carries
-  // 'allow-same-origin' (src/render.mjs), so its browsing context is genuinely
-  // cross-origin from this page and 'contentDocument'/'contentWindow.document'
-  // are unreachable here -- reaching in is exactly the pre-existing security
-  // hole this closes. Element-level
-  // click-to-comment instead runs over a 'postMessage' protocol with the
-  // stage's OWN agent script (injected into every html block's 'srcdoc' by
-  // src/render.mjs's 'stageAgentScript' -- see that function's own, full design
-  // comment for the message list, the origin/identity reasoning on both sides,
-  // and the shape-validation rule; this file's listener below is the other
-  // half of that same design, kept in one place rather than restated). Pins
+  // html stage: the iframe carries no 'allow-same-origin' (src/render.mjs), so
+  // its browsing context is genuinely cross-origin from this page and
+  // 'contentDocument'/'contentWindow.document' are unreachable here.
+  // Element-level click-to-comment instead runs over a 'postMessage' protocol
+  // with the stage's OWN agent script (injected into every html block's 'srcdoc'
+  // by src/render.mjs's 'stageAgentScript'); PROTOCOL.md "Stage postMessage
+  // channel" carries the message tables, the origin/identity reasoning on both
+  // sides and the shape-validation rule, and this file's listener below is the
+  // parent half of that same design. Pins
   // for comments already on the board render regardless of readonly, so an
   // archived board still shows them (the stage answers a 'locate' request the
   // moment it announces itself 'ready', unconditionally); only the
@@ -5804,16 +5730,12 @@ body.page-board .back-to-top.visible {
 
   // A lost/unpositionable pin still has to go SOMEWHERE visible: stack them with a
   // small offset per layer rather than piling every one on the exact same pixel
-  // (each .pin-layer gets its own counter via a WeakMap, so blocks don't interfere).
-  //
-  // This counter used to
-  // live for the page's whole lifetime, incrementing every call while
-  // 'layer.innerHTML = ''' (renderDomPins/renderMermaidPins, below) cleared the
-  // very pins it was counting -- so a layer re-rendered on every resize, queued
-  // comment and push walked further from its own top-left on every pass, with
-  // nothing to do with how many lost pins were ever actually IN it at once.
-  // resetStackedOffset is called right next to each innerHTML reset so the
-  // counter always reflects only the pins currently being drawn into this pass.
+  // (each .pin-layer gets its own counter via a WeakMap, so blocks don't
+  // interfere). resetStackedOffset is called right beside each innerHTML reset
+  // (renderDomPins/renderMermaidPins, below) because the counter has to reflect
+  // only the pins in the pass currently being drawn -- one that lived for the
+  // page's lifetime would walk a re-rendered layer further from its own top-left
+  // on every resize, queued comment and push.
   var stackedPinCount = typeof WeakMap === 'function' ? new WeakMap() : null;
   function resetStackedOffset(layer) {
     if (stackedPinCount) stackedPinCount.delete(layer);
@@ -5972,31 +5894,25 @@ body.page-board .back-to-top.visible {
 
   // --- html-stage postMessage protocol -----------------------------
   //
-  // The parent's half of the design in src/render.mjs's 'stageAgentScript'
-  // comment. Three responsibilities: find which live '.html-stage' frame a
+  // The parent's half of the channel PROTOCOL.md "Stage postMessage channel"
+  // documents. Three responsibilities: find which live '.html-stage' frame a
   // message actually came from (never trust an id the message itself claims),
-  // validate its shape before touching any field, and act on every message
-  // type the stage ever sends -- the listener below (window.addEventListener
-  // 'message', at the end of this section) is the exhaustive list; count them
-  // there rather than here, since a number restated in prose is exactly the
-  // kind of fact this comment has already fallen behind on before.
+  // validate its shape before touching any field, and act on every message type
+  // the stage sends -- the listener below (window.addEventListener 'message', at
+  // the end of this section) is the exhaustive list; read it there rather than
+  // restating a count here.
 
   var STAGE_CB = 'cb-stage';
   var nextLocateId = 1;
   var pendingLocates = {}; // requestId -> { layer: pin-layer element, comments: [...] }
-  // The clip point for a variant option's stage
-  // (handleStageHeight, below) -- tuned once against a real mock, to around
-  // 600px. Hand-kept in step with src/styles.mjs's
-  // '.choice-variant .html-stage' 'max-height', the same "two independent
-  // places, kept in sync by convention" shape QUIRKS.md's "Two stylesheets,
-  // one palette" already documents for this file's stage-side hex and
-  // 'cursor' rule -- neither file can read a value out of the other (this one
-  // is a client script in a template literal; the CSS is a second, separate
-  // one). The CSS max-height is a backstop only: THIS clamp is the one that
-  // actually stops a hostile report, since it runs before the value ever
-  // touches the frame's inline style at all.
+  // The clip point for a variant option's stage (handleStageHeight, below),
+  // tuned against a real mock. Hand-kept in step with src/styles.mjs's
+  // '.choice-variant .html-stage' 'max-height' -- neither file can read a value
+  // out of the other (QUIRKS.md "Two stylesheets, one palette"). The CSS
+  // max-height is a backstop only: THIS clamp is what actually stops a hostile
+  // report, since it runs before the value ever touches the frame's inline style.
   var STAGE_HEIGHT_CAP = 600;
-  // The floor beside that cap (ADR 41): a stage that sizes itself from the
+  // The floor beside that cap: a stage that sizes itself from the
   // viewport rather than from its own content can report a height that
   // measures whatever sliver of chrome happened to be visible -- a few
   // pixels of label, nothing else -- and without a floor that report would
@@ -6071,17 +5987,6 @@ body.page-board .back-to-top.visible {
     }
   }
 
-  /** Tell every wired stage the CURRENT comment mode, the CURRENT sent-refs for
-   * its own block, and the CURRENT theme (ADR.md entry 39 -- theme rides the
-   * message that already carries comment mode rather than minting a type of its
-   * own; the stage tolerates each field being absent, the widening convention
-   * 'sentRefs' set). One function so a mode change and a theme change can never
-   * send differently-shaped messages, and so a stage is never left holding a
-   * stale value of the field the other caller happened not to care about.
-   *
-   * Iterates frames still live in THIS document, filtered through isWiredStage
-   * -- a frame that was only ever the about:blank placeholder, or one an amend
-   * already replaced, is simply absent from the query and never touched. */
   /** SPEC_AWAITED.md ticket 03, AC 8/AC 12: is the click-to-anchor gesture even
    * on offer for 'section' (a '.html-block')? 'true' for every stage that is
    * NOT a page board's own -- ADR.md entry 28's rule stays kind-based
@@ -6104,6 +6009,17 @@ body.page-board .back-to-top.visible {
     if (!isPageRound(blocksOfRound(n))) return true;
     return roundIsCurrentlyAwaited(roundEntry(n), Date.now());
   }
+  /** Tell every wired stage the CURRENT comment mode, the CURRENT sent-refs for
+   * its own block, and the CURRENT theme (the theme rides the
+   * message that already carries comment mode rather than minting a type of its
+   * own; the stage tolerates each field being absent, the widening convention
+   * 'sentRefs' set). One function so a mode change and a theme change can never
+   * send differently-shaped messages, and so a stage is never left holding a
+   * stale value of the field the other caller happened not to care about.
+   *
+   * Iterates frames still live in THIS document, filtered through isWiredStage
+   * -- a frame that was only ever the about:blank placeholder, or one an amend
+   * already replaced, is simply absent from the query and never touched. */
   function broadcastStageMode() {
     qsa('.html-stage', document).forEach(function (frame) {
       if (!isWiredStage(frame)) return;
@@ -6182,7 +6098,7 @@ body.page-board .back-to-top.visible {
     // that has just announced itself needs to know which of ITS OWN elements
     // are already off-limits before its first hover, same as it needs to know
     // whether comment mode is even on.
-    // theme travels in the same message for the same reason (ADR.md entry 39):
+    // theme travels in the same message for the same reason:
     // a stage that has just announced itself has to be painted in the reader's
     // theme before its first frame is looked at, not at the next toggle.
     //
@@ -6213,14 +6129,6 @@ body.page-board .back-to-top.visible {
     if (!pageRoundCommentsAllowed(section)) return;
     if (typeof data.ref !== 'string' || !data.ref) return;
     var anchor = { kind: 'dom', ref: data.ref };
-    // An element inside this stage
-    // that already carries a SENT comment is no longer a comment target at
-    // all -- clicking it does nothing (the parent never even opens a form),
-    // one of the three anchor-minting entry points this rule has to hold
-    // for. The stage's own hover styling is unchanged by this (see QUIRKS.md
-    // "Two stylesheets, one palette" -- that de-affordance would need its own
-    // protocol addition into stageAgentScript, deliberately left out of this
-    // client-side-only slice; noted as a known gap, not silently dropped).
     if (isSentAnchor(blockId, anchor)) return;
     // A stage message is ATTACKER-CONTROLLED input, not a user gesture: the
     // sandboxed document runs agent-supplied script in the same document as
@@ -6291,7 +6199,7 @@ body.page-board .back-to-top.visible {
    * and STAGE_HEIGHT_CAP before it ever touches 'frame.style.height', so no
    * report can grow a card without limit, push page chrome off screen, or
    * claim more than its own box -- and no report can shrink one below the
-   * placeholder either (ADR 41): a stage that sizes itself from the viewport
+   * placeholder either: a stage that sizes itself from the viewport
    * rather than its own content can report a collapsed height (a sliver of
    * label, nothing else) that never grows again, and without the floor that
    * would lock the card there permanently instead of leaving it at the
@@ -6320,12 +6228,12 @@ body.page-board .back-to-top.visible {
     // the same shape src/anchor.mjs already guards on its own lookups.
     var pending = Object.prototype.hasOwnProperty.call(pendingLocates, data.requestId)
       ? pendingLocates[data.requestId] : null;
-    if (!pending) return; // unknown/stale request id -- never trusted blindly
+    if (!pending) return;
     delete pendingLocates[data.requestId];
     var layer = pending.layer;
     if (layer.__cbLocateId !== data.requestId) return; // superseded by a later request
     layer.innerHTML = '';
-    resetStackedOffset(layer); // Reset next to every innerHTML clear
+    resetStackedOffset(layer);
     pending.comments.forEach(function (c) {
       var raw = Object.prototype.hasOwnProperty.call(data.positions, c.anchor.ref) ? data.positions[c.anchor.ref] : null;
       placePin(layer, c, !!c.resolved, isUsablePosition(raw) ? raw : null);
@@ -6363,6 +6271,37 @@ body.page-board .back-to-top.visible {
     refreshStageChrome();
   }
 
+  /** Shared by refreshStageChrome and refreshDocumentScrollChrome (below): both
+   * derive the identical 0-to-1 figure from a different offset, and this is the
+   * one place that turns it into what the stylesheet reads.
+   *
+   * It is also the present -> absent edge of 'stage-scrolled', which is the only
+   * moment reportStageBand can be trusted to re-measure the header from.
+   * reportStageBand skips the header's box entirely while 'stage-scrolled' is
+   * present (the condense genuinely shrinks it, src/styles.mjs, and reporting
+   * THAT would pull the artifact's padding out from under the reader mid-scroll
+   * -- ADR.md entry 40's whole reason for an overlay over a header that pushes),
+   * and nothing else ever re-enters that measurement on the way back down: a
+   * resize taken while scrolled changes the header's REST height with nobody
+   * re-checking it, and the class clearing on its own is not an event anything
+   * observes. Measured: 76px at rest, resize while still scrolled so the rest
+   * height becomes 100px, scroll back to the top -- the stage stayed padded for
+   * the stale 76px, 24px of the artifact's own first element under the header,
+   * for the rest of the session. 'p<=0' is checked against whether the class WAS
+   * set a moment ago, not against its own value, so an ordinary re-render at rest
+   * does not re-post on every call. No recursion: reportStageBand only ever reads
+   * '.board-head''s current box and posts a message. */
+  function applyStageProgress(p) {
+    // Three decimals, not the raw float: the value lands in a style attribute
+    // that the comment/anchor code reads back, and '0.6100000000000001' is a
+    // diff nobody wants to see. Below a thousandth is under a tenth of a pixel
+    // of pill travel.
+    document.body.style.setProperty('--stage-p', p.toFixed(3));
+    var wasScrolled = document.body.classList.contains('stage-scrolled');
+    document.body.classList.toggle('stage-scrolled', p > 0);
+    if (wasScrolled && p <= 0) reportStageBand();
+  }
+
   /** ADR.md entry 40's chrome, derived from the CURRENT page's own stage rather
    * than remembered as state: called on a report and on every flip, so the one
    * answer is computed the same way whichever of the two moved, and a report
@@ -6385,44 +6324,8 @@ body.page-board .back-to-top.visible {
    * part of the look is on '--stage-p'. They flip at the first pixel rather
    * than at a threshold, and the control is fully transparent there
    * (src/styles.mjs), so nothing appears until the fade actually starts. */
-  /** Shared by refreshStageChrome and refreshDocumentScrollChrome (below): both
-   * derive the identical 0-to-1 figure from a different offset, and this is
-   * the one place that turns it into what the stylesheet reads.
-   *
-   * Also the one place that KNOWS when 'stage-scrolled' just cleared -- the
-   * transition back to rest, and the only place reportStageBand's own gate
-   * (below) can be trusted to re-measure the header from. reportStageBand
-   * skips the header's box entirely while 'stage-scrolled' is present (the
-   * condense genuinely shrinks it, src/styles.mjs, and reporting THAT would
-   * pull the artifact's padding out from under the reader mid-scroll -- ADR.md
-   * entry 40's whole reason for an overlay over a header that pushes). But
-   * nothing else ever re-enters that measurement on the way back down: a
-   * resize taken while scrolled changes the header's REST height without
-   * anyone re-checking it, and the class clearing on its own is not an event
-   * anything observes. Confirmed (a real regression, not a theory): 76px at
-   * rest, scroll away, resize the viewport while still scrolled (so the
-   * header's rest height becomes 100px, unmeasured because the gate above
-   * skips it), scroll back to the top -- the stage stays padded for the STALE
-   * 76px, 24px of the artifact's own first element sitting under the header,
-   * for the rest of the session. Calling reportStageBand here, exactly on the
-   * present -> absent edge, is what closes it: 'p<=0' is checked against
-   * whether the class WAS set a moment ago, not against its own value, so an
-   * ordinary re-render at rest (p already 0) does not re-post on every call.
-   * No recursion -- reportStageBand never re-enters the progress/chrome path,
-   * it only ever reads '.board-head''s current box and posts a message. */
-  function applyStageProgress(p) {
-    // Three decimals, not the raw float: the value lands in a style attribute
-    // that the comment/anchor code reads back, and '0.6100000000000001' is a
-    // diff nobody wants to see. Below a thousandth is under a tenth of a pixel
-    // of pill travel.
-    document.body.style.setProperty('--stage-p', p.toFixed(3));
-    var wasScrolled = document.body.classList.contains('stage-scrolled');
-    document.body.classList.toggle('stage-scrolled', p > 0);
-    if (wasScrolled && p <= 0) reportStageBand();
-  }
-
   function refreshStageChrome() {
-    // SPEC_HEADER.md ticket 03 (ADR.md entry 60): an ordinary board's own
+    // SPEC_HEADER.md ticket 03 (ADR.md entry 40): an ordinary board's own
     // header condenses off this DOCUMENT's scroll instead
     // (refreshDocumentScrollChrome, below). Returning here rather than
     // forcing '--stage-p' to 0 is what keeps the two writers from fighting --
@@ -6536,7 +6439,7 @@ body.page-board .back-to-top.visible {
     postToStage(frame, { type: 'band', top: lastTopBand, bottom: bottom });
   }
 
-  /** SPEC_HEADER.md ticket 03 (ADR.md entry 60): an ordinary board's own
+  /** SPEC_HEADER.md ticket 03 (ADR.md entry 40): an ordinary board's own
    * sticky header condenses on THIS document's scroll, off the identical
    * '--stage-p' the stylesheet ramps every page-board rule on -- just
    * written from a plain scroll offset instead of a stage's postMessage'd
@@ -6660,9 +6563,6 @@ body.page-board .back-to-top.visible {
   measureDocWidth();
   window.addEventListener('resize', measureDocWidth);
 
-  // Tag-qualified, same reason as every other id-by-string lookup in this file:
-  // a heading '## Back to top' slugifies to a second id="back-to-top"
-  // (src/markdown.mjs), and only the real control is a <button>.
   var backToTopBtn = document.querySelector('button#back-to-top');
   if (backToTopBtn) {
     backToTopBtn.addEventListener('click', function () {
@@ -6759,13 +6659,13 @@ body.page-board .back-to-top.visible {
   // the lens is open (the spec's own named trap).
   function mermaidHostFor(anchor, svg, section) {
     if (!svg || !anchor) return null;
-    // Try the generic domRef first, against the LIVE
-    // rendered SVG (something only the client, not resolveComment's server-side
-    // verdict, can ever do -- see src/anchor.mjs's "design" comment).
-    // Trusted only if the element it lands on ALSO carries the stored node id in
-    // its own generated id -- a cheap cross-check against mermaid's internal SVG
-    // structure having shifted since mint time, which would otherwise silently
-    // position the pin on the wrong node.
+    // The domRef is resolved against the LIVE rendered SVG (something only the
+    // client, not resolveComment's server-side verdict, can ever do -- see
+    // src/anchor.mjs's "design" comment), and trusted only if the element it
+    // lands on ALSO carries the stored node id in its own generated id: a cheap
+    // cross-check against mermaid's internal SVG structure having shifted since
+    // mint time, which would otherwise silently position the pin on the wrong
+    // node.
     if (anchor.domRef && section) {
       var steps = pathToSteps(anchor.domRef);
       var viaSteps = steps.length ? resolveSteps(section, steps) : null;
@@ -6776,8 +6676,6 @@ body.page-board .back-to-top.visible {
     // Iterate and compare via parseMermaidDomId rather than interpolating the
     // stored ref into a CSS attribute-selector string: a crafted ref could
     // otherwise break out of the selector.
-    // This is display-positioning only -- resolved/lost styling never depends on
-    // this lookup succeeding, either path.
     var candidates = svg.querySelectorAll(MERMAID_NODE_SELECTOR);
     for (var i = 0; i < candidates.length; i++) {
       if (parseMermaidDomId(candidates[i].getAttribute('id')) === anchor.ref) return candidates[i];
@@ -6822,22 +6720,16 @@ body.page-board .back-to-top.visible {
   // "opened a form" without re-deriving that.
   function mintMermaidComment(section, blockId, host, ref) {
     var anchor = { kind: 'mermaid', ref: ref };
-    // A node that already carries a SENT comment is no longer a
-    // comment target -- clicking it does nothing, in the lens exactly as inline.
     if (isSentAnchor(blockId, anchor)) return false;
-    // Mint the SAME generic domRef + hint every other
-    // element-level click mints (buildSteps/buildHint, declared above, already
-    // used by the html stage and the generic listener) -- the node id stays the
-    // fallback ref, not the model (src/anchor.mjs's "design" comment).
-    // A failure to build steps (host somehow not reachable from section) still
-    // mints the anchor with an empty domRef rather than aborting: the node id
-    // alone is enough to comment, exactly as it was before.
+    // The SAME generic domRef + hint every other element-level click mints
+    // (buildSteps/buildHint, declared above) -- the node id stays the fallback
+    // ref, not the model (src/anchor.mjs's "design" comment). A failure to build
+    // steps (host somehow not reachable from section) still mints the anchor with
+    // an empty domRef rather than aborting: the node id alone is enough to
+    // comment.
     var steps = host ? buildSteps(section, host) : null;
     var domRef = (steps && steps.length) ? stepsToPath(steps) : '';
     var hint = host ? buildHint(section, host) : '';
-    // A second click on a node that
-    // already has a QUEUED (unsent) comment reopens and edits it, rather than
-    // minting a duplicate -- again, in the lens exactly as inline.
     openCommentForm(blockId, 'mermaid', ref, hint, domRef, findPendingCommentForAnchor(pendingComments, blockId, anchor));
     return true;
   }
@@ -7210,16 +7102,12 @@ body.page-board .back-to-top.visible {
     renderLensPins();
   }
 
-  /** The two batches' one real collision: a theme
-   * change re-renders every inline diagram (runMermaidRedrawPass, further
-   * down), and mermaid does that by REPLACING each 'pre.mermaid''s svg with a
-   * brand-new element drawn in the new palette. The lens holds a
-   * cloneNode(true) of the OLD one, so an already-open lens went on showing a
-   * dark diagram inside light chrome (or the reverse) until it was closed and
-   * reopened -- measured in Chrome 2026-07-31: after a light switch the lens's
-   * node rects still read rgb(24, 32, 47) (dark --panel-2) with rgb(234, 238,
-   * 246) labels while the inline diagram behind it had correctly become
-   * rgb(245, 246, 251) / rgb(23, 28, 42).
+  /** A theme change re-renders every inline diagram (runMermaidRedrawPass,
+   * further down), and mermaid does that by REPLACING each 'pre.mermaid''s svg
+   * with a brand-new element drawn in the new palette. The lens holds a
+   * cloneNode(true) of the OLD one, so without this an already-open lens goes on
+   * showing a dark diagram inside light chrome (or the reverse) until it is
+   * closed and reopened.
    *
    * Reachable WITHOUT the theme control: a modal dialog makes the rest of the
    * document inert, so the control itself cannot be clicked while the lens is
@@ -7327,41 +7215,32 @@ body.page-board .back-to-top.visible {
     });
 
     // Pointer capture is taken only once a press has become a PAN, never on the
-    // press itself. Measured in Chrome, and it is the whole difference between
-    // this lens being commentable and not: with capture active, the browser
-    // retargets everything that follows -- pointerup, mouseup and the resulting
-    // CLICK -- at the capture element, so the click handler below sees
-    // '.lens-stage' as its target instead of the diagram node the pointer was
-    // actually over, 'closest(MERMAID_NODE_SELECTOR)' finds nothing, and
-    // clicking a node in the lens silently does nothing. Nothing in a DOM
-    // stand-in can see that (there is no such thing as pointer capture there),
-    // which puts it squarely in this repo's own recorded failure pattern:
-    // QUIRKS.md "Real mermaid node ids are prefixed", the same gesture, dead in
-    // every browser under a green suite. Deferring the capture costs nothing --
-    // the first few pixels of a pan are still delivered to the stage because the
-    // pointer is over it -- and a drag that then leaves the stage entirely is
-    // captured by the time it gets there.
-    // TWO points are tracked per press, not one, and the difference is the
-    // whole of whether the threshold below means anything:
+    // press itself -- the whole difference between this lens being commentable
+    // and not. With capture active the browser retargets everything that follows
+    // (pointerup, mouseup and the resulting CLICK) at the capture element, so the
+    // click handler below sees '.lens-stage' as its target instead of the diagram
+    // node the pointer was over, 'closest(MERMAID_NODE_SELECTOR)' finds nothing,
+    // and clicking a node in the lens silently does nothing. A DOM stand-in
+    // cannot see that (there is no pointer capture there), which is this repo's
+    // recorded failure pattern -- QUIRKS.md "Real mermaid node ids are prefixed",
+    // the same gesture, dead in every browser under a green suite.
+    //
+    // TWO points are tracked per press, and the difference is the whole of
+    // whether the 3px threshold below means anything:
     //
     //   ox/oy  the PRESS ORIGIN. Never reassigned for the life of the press.
-    //          The 3px threshold is measured from here, so it asks the only
-    //          question worth asking -- 'has the pointer travelled more than
-    //          3px since the button went down'.
-    //   x/y    the LAST MOVE. Reassigned every event, because each frame's pan
-    //          is the delta since the previous frame.
+    //          The threshold is measured from here, so it asks the only question
+    //          worth asking -- 'has the pointer travelled more than 3px since the
+    //          button went down'.
+    //   x/y    the LAST MOVE. Reassigned every event, because each frame's pan is
+    //          the delta since the previous frame.
     //
-    // An earlier version kept one pair and reassigned it on every move, so
-    // 'dx/dy' was the PER-EVENT delta and the gate read 'did this single frame
-    // move more than 3px'. A 120px pan dispatched as 60 moves of 2px -- an
-    // ordinary slow drag, and exactly what a trackpad produces -- never
-    // satisfied it: lensDragMoved stayed false the whole way, the branch below
-    // never ran, so the pointer capture was never taken either (dead code in
-    // the same 'if'), and releasing over a node opened the comment form on
-    // whatever the pan had merely dragged PAST. Measured in Chrome, and
-    // invisible to a structural check, which is why there is now a behavioural
-    // one in test/check-mermaid-anchor.mjs that dispatches exactly that
-    // sequence.
+    // Measured from the last move instead, a 120px pan dispatched as 60 moves of
+    // 2px -- an ordinary slow trackpad drag -- never crosses the threshold at
+    // all: lensDragMoved stays false, the capture is never taken, and releasing
+    // over a node opens the comment form on whatever the pan merely dragged PAST.
+    // Invisible to a structural check, so test/check-mermaid-anchor.mjs
+    // dispatches exactly that sequence.
     var drag = null;
     stage.addEventListener('pointerdown', function (ev) {
       if (!lens.open || ev.button) return;
@@ -7434,81 +7313,67 @@ body.page-board .back-to-top.visible {
 
   // --- the html-stage lens --------------------
   //
-  // "Every html stage carries an expand control that opens the stage
-  // in the lens". "Inside the lens the stage receives real pointer
-  // input: a mock with its own scrollable content can be scrolled there".
+  // "Every html stage carries an expand control that opens the stage in the
+  // lens", and "inside the lens the stage receives real pointer input: a mock
+  // with its own scrollable content can be scrolled there".
   //
   // It BORROWS THE DIAGRAM LENS'S CHROME, NOT ITS VIEW MATHS (the spec's Out of
-  // Scope says so in as many words): same full-viewport <dialog>, same '.lens-bar'
-  // / '.lens-title' / '.lens-btn' vocabulary, built once and reused. But its
-  // contents are a LIVE BROWSING CONTEXT, not a cloned SVG on a pannable canvas --
-  // an iframe scrolls, zooms and lays itself out on its own, so lensZoomAt/
-  // lensFit/lensOneToOne and the whole clone-and-transform path above have nothing
-  // to do here. A second <dialog> rather than a mode flag on the first one: they
-  // share no state, only styling, and folding two unrelated stages into one
-  // element is how the diagram lens's pan/zoom listeners would end up firing over
-  // an iframe.
+  // Scope says so in as many words): same full-viewport <dialog>, same
+  // '.lens-bar' / '.lens-title' / '.lens-btn' vocabulary, built once and reused.
+  // But its contents are a LIVE BROWSING CONTEXT, not a cloned SVG on a pannable
+  // canvas -- an iframe scrolls, zooms and lays itself out on its own, so
+  // lensZoomAt/lensFit/lensOneToOne and the whole clone-and-transform path above
+  // have nothing to do here. A second <dialog> rather than a mode flag on the
+  // first: they share no state, only styling, and folding two unrelated stages
+  // into one element is how the diagram lens's pan/zoom listeners would end up
+  // firing over an iframe.
   //
   // THE FRAME IS A SECOND MOUNT OF THE SAME SRCDOC, AND DELIBERATELY NOT A
-  // '.html-stage'. This is the one decision here worth arguing rather than
-  // reading off the code:
-  //
-  //   - The parent identifies a stage message's sender by walking
-  //     qsa('.html-stage', document) and comparing event.source to each frame's
-  //     contentWindow (findStageFrame, above). That walk carries an ASSUMPTION,
-  //     not just a lookup: every mounted '.html-stage' is exactly one block's
-  //     inline stage, so the frame it finds names the block ('.html-block'
-  //     ancestor), the pin layer to draw into and the sentRefs to send. A second
-  //     frame wearing that class for the same block makes that claim false --
-  //     'ready' would re-run handleStageReady for a block whose inline stage is
-  //     already wired, and the two frames' 'positions' replies would race for one
-  //     pin layer (the layer keeps only the latest requestId, so whichever answers
-  //     second wins and the other's pins vanish).
-  //   - So the lens frame carries '.stage-lens-frame' and never '.html-stage'.
-  //     findStageFrame returns null for it, and its messages are dropped at the
-  //     identity check, before any shape validation -- the same treatment any
-  //     other window on the page gets. That is a strictly SMALLER surface than the
-  //     inline stage has, not a new one, which is the direction to fail in for a
-  //     frame whose whole content is agent-authored.
-  //   - What it costs: the lens copy is not commentable at element level (no
-  //     'ready' means no 'mode', so its own agent never turns its hover/click
-  //     gesture on). The inline stage still is, unchanged -- and for a variant
-  //     option the spec had already given that up to the inertness rule ("Out of
-  //     Scope: restoring element-level comment anchoring inside a variant
-  //     option's stage").
+  // '.html-stage'. findStageFrame (above) identifies a message's sender by
+  // walking qsa('.html-stage', document) and comparing event.source to each
+  // frame's contentWindow, and that walk carries an ASSUMPTION rather than just a
+  // lookup: every mounted '.html-stage' is exactly one block's inline stage, so
+  // the frame it finds names the block ('.html-block' ancestor), the pin layer to
+  // draw into and the sentRefs to send. A second frame wearing that class for the
+  // same block makes the claim false -- 'ready' would re-run handleStageReady for
+  // an already-wired block, and the two frames' 'positions' replies would race
+  // for one pin layer (which keeps only the latest requestId, so the loser's pins
+  // vanish). So the lens frame carries '.stage-lens-frame' and never
+  // '.html-stage': findStageFrame returns null for it and its messages are
+  // dropped at the identity check, before any shape validation -- a strictly
+  // SMALLER surface than the inline stage has, which is the direction to fail in
+  // for a frame whose whole content is agent-authored. What it costs is
+  // element-level commenting inside the lens copy (no 'ready' means no 'mode');
+  // the inline stage is unchanged, and for a variant option the spec had already
+  // given that up to the inertness rule.
   //
   // A COPY, NOT THE INLINE FRAME MOVED IN (which is what lensAdopt does for the
-  // block's comment form, and would have been the obvious symmetry). Re-parenting
-  // an <iframe> destroys and recreates its browsing context -- the srcdoc document
-  // reloads, so "move it in, move it back" is two reloads of the mock rather than
-  // none -- and while it sat in the dialog it would be outside its own
-  // '.html-block', so findStageFrame would match it and the closest('.html-block')
-  // lookup right after would return null: every message from the block's own
-  // stage silently dropped for as long as the lens was open. A fresh mount leaves
-  // the inline stage untouched, which is most of what's needed.
+  // block's comment form). Re-parenting an <iframe> destroys and recreates its
+  // browsing context, so "move it in, move it back" is two reloads of the mock --
+  // and while it sat in the dialog it would be outside its own '.html-block', so
+  // findStageFrame would match it while the closest('.html-block') lookup right
+  // after returned null: every message from the block's own stage silently
+  // dropped for as long as the lens was open.
   //
   // POINTER-EVENTS, i.e. why this costs nothing at the trust boundary.
   // '.choice-variant .html-stage { pointer-events: none; }' (src/styles.mjs) is a
-  // security rule, not a style choice (the spec's Decisions pin
-  // it verbatim). Nothing here relaxes it: the lens frame is neither inside a
-  // '.choice-variant' card nor a '.html-stage', so the rule simply does not
-  // address it, and the frame is live because a plain iframe in a plain dialog is
-  // live. "The lens is where a stage becomes live" (ADR 22) is implemented by
-  // mounting a second copy somewhere the rule was never about, never by weakening
-  // the rule.
+  // security rule, not a style choice (the spec's Decisions pin it verbatim).
+  // Nothing here relaxes it: the lens frame is neither inside a '.choice-variant'
+  // card nor a '.html-stage', so the rule simply does not address it. "The lens is
+  // where a stage becomes live" (ADR 22) is implemented by mounting a second copy
+  // somewhere the rule was never about, never by weakening the rule.
   //
   // THE SANDBOX IS COPIED, NEVER RE-SPELLED. The attribute is read off the inline
-  // frame and set on the copy before anything else and before it is attached, so
-  // the two frames are sandboxed identically by construction and there is no
-  // moment in which agent script could run under a weaker one. A lens frame that
-  // gained 'allow-same-origin' would re-open that chain
-  // wholesale (test/check-stage-isolation.mjs's header), so a frame with no
-  // sandbox attribute at all is refused outright rather than mounted: fail closed,
-  // because the failure this guards is total.
+  // frame and set on the copy before it is attached, so the two are sandboxed
+  // identically by construction and there is no moment in which agent script
+  // could run under a weaker one. A lens frame that gained 'allow-same-origin'
+  // would re-open that chain wholesale (test/check-stage-isolation.mjs's header),
+  // so a frame with no sandbox attribute at all is refused outright rather than
+  // mounted: fail closed, because the failure this guards is total.
   //
-  // THE PICK CONTROL lives in the bar, in the '.lens-actions'
-  // slot between the title and close. See stageLensPick below for the whole of why
-  // that address is the security property and not a layout preference.
+  // THE PICK CONTROL lives in the bar, in the '.lens-actions' slot between the
+  // title and close. See stageLensPick below for why that address is the security
+  // property and not a layout preference.
   var stageLens = null;
 
   function buildStageLens() {
@@ -7581,59 +7446,51 @@ body.page-board .back-to-top.visible {
     else l.dlg.setAttribute('open', ''); // no <dialog> support (this repo's DOM stand-in)
   }
 
-  /** The control that picks the option this lens was opened
-   * from. Built per open and dropped on teardown -- never once, at build time --
-   * because WHICH option it names is a fact about this open, and
-   * "a lens opened from a standalone stage carries no such control" is the case
-   * where the answer is "none at all".
+  /** The control that picks the option this lens was opened from. Built per open
+   * and dropped on teardown -- never once, at build time -- because WHICH option
+   * it names is a fact about this open, and "a lens opened from a standalone
+   * stage carries no such control" is the case where the answer is "none at all".
    *
-   * WHY THE BAR IS THE SECURITY PROPERTY, not a layout preference (the terms ADR 22 was accepted on). The control is an ordinary <button> in
-   * the PARENT document, a flex sibling of the '.stage-lens-body' that holds the
-   * frame -- never inside the frame, never overlapping it. Four attacks and what
-   * actually stops each, all four mechanisms structural rather than guarded:
+   * WHY THE BAR IS THE SECURITY PROPERTY, not a layout preference (the terms ADR
+   * 22 was accepted on): the control is an ordinary <button> in the PARENT
+   * document, a flex sibling of the '.stage-lens-body' that holds the frame --
+   * never inside the frame, never overlapping it. Four attacks, each stopped
+   * structurally rather than by a guard:
    *
    *   - PRESSING IT. A click inside a cross-origin frame is delivered in that
-   *     frame's own document and does not cross the boundary; the stage's script
-   *     can dispatch all the clicks it likes on its own elements and none of them
-   *     is this button. There is no synthesized-click path either, because:
+   *     frame's own document and does not cross the boundary.
    *   - REACHING IT THROUGH THE DOM. 'sandbox="allow-scripts"' with no
    *     'allow-same-origin' gives the frame an opaque origin, so
    *     'window.parent.document' is unreachable from inside it -- the property
    *     test/check-stage-isolation.mjs exists to pin.
    *   - FORGING A MESSAGE. There is no message type on the stage channel that
-   *     records a pick (stageAgentScript's "NO 'select' MESSAGE, DELIBERATELY"),
-   *     and this lens's frame is not even in the '.html-stage' walk the listener
-   *     identifies senders with, so nothing it posts is dispatched at all.
+   *     records a pick (src/render.mjs's stage-channel comment: there is
+   *     deliberately no 'select' message), and this lens's frame is not even in
+   *     the '.html-stage' walk the listener identifies senders with, so nothing
+   *     it posts is dispatched at all.
    *   - COVERING IT. A frame paints only inside its own box, and nothing in the
-   *     lens's own CSS takes the body or the frame out of flow (no position,
-   *     no z-index -- src/styles.mjs), so the stage has no way to draw over the
-   *     bar.
+   *     lens's own CSS takes the body or the frame out of flow (no position, no
+   *     z-index -- src/styles.mjs).
    *
-   * What remains, and is accepted rather than solved (ADR 22's Consequences): a
-   * mock can draw CONVINCING FAKE CHROME inside its own box. Pressing that does
-   * nothing -- which is the point -- but nothing here can stop it being drawn.
-   * The real control's fixed home in the bar, above and outside the frame, is the
-   * whole of the mitigation.
+   * What remains, accepted rather than solved (ADR 22's Consequences): a mock can
+   * draw CONVINCING FAKE CHROME inside its own box. Pressing that does nothing --
+   * which is the point -- but nothing here can stop it being drawn. The real
+   * control's fixed home in the bar, above and outside the frame, is the whole of
+   * the mitigation.
    *
    * The label is agent-authored board content and lands via 'textContent': no
    * parse, so no markup in a label can ever become an element in this document.
    *
-   * THREE STATES WHERE A PICK IS REFUSED, and what this control does in each --
-   * every one of them is 'selectVariant''s own guard, mirrored into the chrome so
-   * the control never reads as live while being inert:
-   *   - readonly (a standalone file: archive): no control at all. There is no
-   *     answer to record in an archive -- the send bar is gone and every input is
-   *     hard-disabled -- and the diagram lens already sets this precedent by
-   *     hosting no comment form there. The archive's stage lens is a viewer.
-   *   - a historical round ('aria-disabled' on the card): rendered, disabled. The
-   *     card behaves the same way -- visible, still showing which option won,
-   *     refusing to change it -- and a control that is present-but-unavailable
-   *     says that, where an absent one would read as a missing feature.
-   *   - comment mode on: rendered, disabled, for the same reason the card itself
-   *     stands down in comment mode (every widget handler does). Decided once, at
-   *     open: a modal dialog makes the rest of the page inert, so the toggle
-   *     cannot be reached while the lens is up and the state cannot change under
-   *     it. */
+   * THREE STATES WHERE A PICK IS REFUSED, each of them 'selectVariant''s own
+   * guard mirrored into the chrome so the control never reads as live while being
+   * inert. readonly (a standalone file: archive): no control at all, since there
+   * is no answer to record there -- the diagram lens sets the same precedent by
+   * hosting no comment form. A historical round ('aria-disabled' on the card):
+   * rendered, disabled, so it says present-but-unavailable where an absent
+   * control would read as a missing feature. Comment mode on: rendered, disabled,
+   * for the same reason the card itself stands down. Decided once, at open -- a
+   * modal dialog makes the rest of the page inert, so the toggle cannot be
+   * reached while the lens is up and the state cannot change under it. */
   function stageLensPick(section) {
     var l = stageLens;
     l.actions.innerHTML = '';
@@ -7643,9 +7500,6 @@ body.page-board .back-to-top.visible {
     l.card = card;
     var pick = document.createElement('button');
     pick.type = 'button';
-    // '.lens-btn' for the bar's own chrome, '.lens-pick' as the accent that
-    // makes the one control that RECORDS something look unlike the one that
-    // merely closes (src/styles.mjs).
     pick.className = 'lens-btn lens-pick';
     pick.textContent = 'Pick ' + (card.getAttribute('data-choice') || 'this option');
     if (commentMode || card.getAttribute('aria-disabled') === 'true') pick.disabled = true;
@@ -7655,10 +7509,9 @@ body.page-board .back-to-top.visible {
       // handler must not be the one place that difference matters -- so the
       // disabled state is re-read here rather than trusted to the platform.
       if (pick.disabled) return;
-      // "In one act": record through the ONE path that records
-      // every other pick, then close. selectVariant re-applies all three guards
-      // above on its own -- this control is a caller, never an authority -- so
-      // a pick that it refuses records nothing and simply closes the lens.
+      // selectVariant re-applies all three guards above on its own -- this
+      // control is a caller, never an authority -- so a pick it refuses records
+      // nothing and simply closes the lens.
       if (l.card) selectVariant(l.card);
       stageLensClose();
     });
@@ -7678,7 +7531,7 @@ body.page-board .back-to-top.visible {
     stageLens.body.innerHTML = '';
     // The pick control named ONE option, and its listener holds that card. The
     // next open clears this slot again before filling it (stageLensPick), so
-    // This does not rest on this line alone -- what it adds is that a
+    // correctness does not rest on this line alone -- what it adds is that a
     // CLOSED lens holds neither a control nor a reference to a card an SSE
     // re-render may already have replaced.
     stageLens.actions.innerHTML = '';
@@ -7753,33 +7606,6 @@ body.page-board .back-to-top.visible {
     });
   }
 
-  /** Re-render (and reposition) every pin layer under 'root' from the current
-   * commentsWithPending(). Repositioning ONLY -- it must never re-run the
-   * click-listener wiring (that stays one-time per stage document, since the
-   * stage's own agent script attaches its listeners exactly once, when it
-   * first runs -- see src/render.mjs's stageAgentScript), or every resize and
-   * every queued comment would stack another click handler inside the same
-   * iframe/diagram. Called on resize, the moment a comment is queued (so its
-   * provisional pin appears without waiting for Send) and again once a submit
-   * lands (so the provisional pins give way to the server's). For an
-   * html-stage, "re-render" means asking that stage for fresh positions
-   * (async, over postMessage) rather than reading them directly;
-   * only stages isWiredStage recognises (i.e. that have answered 'ready' at
-   * least once) are asked, since one that never will can never answer
-   * anyway.
-   *
-   * The queued comments' LIST entries are rebuilt here too,
-   * rather than at each of this function's call sites. A pin and a list entry
-   * are two renderings of one array, and they were drifting: every push path
-   * (applyRoundPush, applySubmittedPush, applyResync) and the post-Send handler
-   * called refreshPins alone, so an amend that replaced a block left the queued
-   * comment's hollow pin drawn on the new markup with no list entry beside it --
-   * no anchor tag, no text, and no delete control,
-   * while the comment itself stayed in pendingComments and went out on the next
-   * Send. Folding the two together is what stops a future call site
-   * reintroducing that by remembering one and forgetting the other; it is
-   * document-wide regardless of 'root' on purpose, since provisional numbering
-   * spans the whole board (refreshPendingCommentItems' own comment). */
   /** SPEC_AWAITED.md ticket 03 (AC 4, AC 5): keeps every page round's own send
    * control and hint honest as pendingComments changes -- called from
    * refreshPins (queue/edit/delete, a submit landing, a resize -- see that
@@ -7808,6 +7634,33 @@ body.page-board .back-to-top.visible {
     });
   }
 
+  /** Re-render (and reposition) every pin layer under 'root' from the current
+   * commentsWithPending(). Repositioning ONLY -- it must never re-run the
+   * click-listener wiring (that stays one-time per stage document, since the
+   * stage's own agent script attaches its listeners exactly once, when it
+   * first runs -- see src/render.mjs's stageAgentScript), or every resize and
+   * every queued comment would stack another click handler inside the same
+   * iframe/diagram. Called on resize, the moment a comment is queued (so its
+   * provisional pin appears without waiting for Send) and again once a submit
+   * lands (so the provisional pins give way to the server's). For an
+   * html-stage, "re-render" means asking that stage for fresh positions
+   * (async, over postMessage) rather than reading them directly;
+   * only stages isWiredStage recognises (i.e. that have answered 'ready' at
+   * least once) are asked, since one that never will can never answer
+   * anyway.
+   *
+   * The queued comments' LIST entries are rebuilt here too,
+   * rather than at each of this function's call sites. A pin and a list entry
+   * are two renderings of one array, and they were drifting: every push path
+   * (applyRoundPush, applySubmittedPush, applyResync) and the post-Send handler
+   * called refreshPins alone, so an amend that replaced a block left the queued
+   * comment's hollow pin drawn on the new markup with no list entry beside it --
+   * no anchor tag, no text, and no delete control,
+   * while the comment itself stayed in pendingComments and went out on the next
+   * Send. Folding the two together is what stops a future call site
+   * reintroducing that by remembering one and forgetting the other; it is
+   * document-wide regardless of 'root' on purpose, since provisional numbering
+   * spans the whole board (refreshPendingCommentItems' own comment). */
   function refreshPins(root) {
     refreshPendingCommentItems();
     updatePageSendControls();
@@ -7831,15 +7684,6 @@ body.page-board .back-to-top.visible {
     renderLensPins();
   }
 
-  /** Page-scoped dom pins: every block whose content lives in this
-   * document, not an iframe/svg -- see directChildPinLayer below for why this is a
-   * shallow, direct-children-only lookup rather than qsa('.pin-layer', section).
-   * Called both from refreshPins (resize / a comment just queued / submitted) and
-   * once at wire time from wireRoot itself (below) -- unlike the html-stage/
-   * mermaid cases, there is no async 'load'/render event to hang the FIRST paint
-   * of an already-persisted comment's pin off of, so wireRoot has to do it
-   * directly or a board reopened with existing element-level comments would show
-   * no pins at all until the next resize. */
   /** "Can be dragged taller": measured
    * in real Chrome (not assumed -- resize interacts
    * with max-height in ways worth checking), CSS max-height clamps the rendered
@@ -7856,7 +7700,6 @@ body.page-board .back-to-top.visible {
    * anything for max-height to clamp. */
   function unlockCodeCapForDrag(pre) {
     if (pre.__cbCapUnlocked) return;
-    // The marker is claimed only once there is a real box to measure.
     // wireRoot runs against a DETACHED subtree on every push path
     // -- applyRoundPush wires 'wrap'/'frag' before appending, applySubmittedPush
     // wires 'replacement' before the swap, both deliberately (see their own
@@ -7877,6 +7720,15 @@ body.page-board .back-to-top.visible {
     }
   }
 
+  /** Page-scoped dom pins: every block whose content lives in this
+   * document, not an iframe/svg -- see directChildPinLayer below for why this is a
+   * shallow, direct-children-only lookup rather than qsa('.pin-layer', section).
+   * Called both from refreshPins (resize / a comment just queued / submitted) and
+   * once at wire time from wireRoot itself (below) -- unlike the html-stage/
+   * mermaid cases, there is no async 'load'/render event to hang the FIRST paint
+   * of an already-persisted comment's pin off of, so wireRoot has to do it
+   * directly or a board reopened with existing element-level comments would show
+   * no pins at all until the next resize. */
   function wirePageDomPins(root) {
     qsa('[data-block-id]', root).forEach(function (section) {
       var layer = directChildPinLayer(section);
@@ -7908,34 +7760,31 @@ body.page-board .back-to-top.visible {
     return null;
   }
 
-  // --- comment mode: a visible toggle gates one generic, page-wide  --
-  // hover/click gesture over everything the board renders that is NOT already its
-  // own special case (the html stage's and mermaid's own element click handlers,
-  // above -- those are no longer a standing exemption from the toggle,
-  // the user's 'one gesture, toggle-gated everywhere' decision put an
-  // 'if (readonly || !commentMode) return;' guard on both, same as this listener.
-  // They stay SEPARATE listeners, not because they are exempt, but because each
-  // already mints the more specific anchor shape its surface needs -- a mermaid
-  // anchor tied to the clicked node id, or a dom anchor rooted at the iframe's
-  // OWN document via buildSteps(doc.body, el) rather than this page's. Letting
-  // this generic listener ALSO fire on the same click would either double-mint a
-  // second, conflicting anchor for a mermaid node click (wireMermaidBlock's
-  // listener lives in this same document, on pre.mermaid, so the click genuinely
-  // bubbles here too) or mint a nonsense page-scoped anchor against the iframe
-  // element's own boundary (a click on its border/padding is the one part of an
-  // html stage this document's listeners CAN see -- content inside the sandboxed
-  // document never bubbles out to here at all). ANCHOR_CHROME_SELECTOR below is
-  // what keeps both out of this listener's reach.
+  // --- comment mode -------------------------------------------------------------
   //
-  // Off by default (commentMode, declared at the top of this script) is what
-  // makes this true by construction: every ordinary widget handler in
-  // wireRoot below has its own "if (commentMode) return;" guard, so turning this
-  // OFF (the default, and the only state a reviewer who never finds the toggle
-  // ever sees) reproduces the old behaviour exactly, and turning it ON stands
-  // those handlers down so a click anchors instead of mutating an answer.
+  // A visible toggle gates one generic, page-wide hover/click gesture over
+  // everything the board renders that is NOT already its own special case (the
+  // html stage's and mermaid's own element click handlers, above). Those are not
+  // exempt from the toggle -- 'one gesture, toggle-gated everywhere' put an
+  // 'if (readonly || !commentMode) return;' guard on both, same as this listener.
+  // They stay SEPARATE listeners because each already mints the more specific
+  // anchor shape its surface needs: a mermaid anchor tied to the clicked node id,
+  // or a dom anchor rooted at the iframe's OWN document via buildSteps(doc.body,
+  // el) rather than this page's. Letting this generic listener ALSO fire on the
+  // same click would either double-mint a second, conflicting anchor for a
+  // mermaid node click (wireMermaidBlock's listener lives in this same document,
+  // on pre.mermaid, so the click genuinely bubbles here too) or mint a nonsense
+  // page-scoped anchor against the iframe element's own boundary (a click on its
+  // border/padding is the one part of an html stage this document's listeners CAN
+  // see -- content inside the sandboxed document never bubbles out to here at
+  // all). ANCHOR_CHROME_SELECTOR below is what keeps both out of this listener's
+  // reach.
+  //
+  // Off by default (commentMode, declared at the top of this script): every
+  // ordinary widget handler in wireRoot below carries its own
+  // "if (commentMode) return;" guard, so turning this ON stands those handlers
+  // down and a click anchors instead of mutating an answer.
 
-  // Tag-qualified, same reason as every other id-by-string lookup in this
-  // file -- see openCommentForm's own comment above.
   var modeToggleBtn = document.querySelector('button#comment-mode-toggle');
 
   function setCommentMode(on) {
@@ -7953,22 +7802,17 @@ body.page-board .back-to-top.visible {
     // node hover/cursor affordance (src/styles.mjs's .lens-canvas rules), so the
     // only thing it needs told directly is what its hint line should now say.
     lensUpdateHint();
-    // One gesture, toggle-gated everywhere: every currently-known html stage is told the CURRENT state on
-    // every toggle, on or off -- the stage's own hover/click lives
-    // in a separate document with no reach for a single page-level
-    // 'body.comment-mode' class to cross into (QUIRKS.md "Two stylesheets, one
-    // palette"), so each stage clears its own in-progress hover locally the
-    // moment it hears 'commentMode: false' (see stageAgentScript's own 'mode'
-    // handler) rather than this page reaching in to do it.
-    //
-    // sentRefs travels alongside commentMode on every toggle, not just at
-    // 'ready' -- the moment mode turns on is exactly the moment the stage's
-    // hover starts mattering, so it needs the current sent-list right then,
-    // rather than whatever it happened to hear last. So does the theme (ADR.md
-    // entry 39), which is why the whole broadcast is one shared function
-    // (broadcastStageMode, up in the stage-protocol section) rather than a loop
-    // here and a second, drifting one on the theme change: whichever of the two
-    // facts changed, a stage is told BOTH, and neither caller can ship a
+    // Every wired html stage is told the CURRENT state on every toggle, on or
+    // off: a stage's own hover/click lives in a separate document that a
+    // page-level 'body.comment-mode' class cannot reach into (QUIRKS.md "Two
+    // stylesheets, one palette"), so each stage clears its own in-progress hover
+    // locally the moment it hears 'commentMode: false' (stageAgentScript's own
+    // 'mode' handler). sentRefs and the theme ride the same
+    // message -- the moment mode turns on is exactly when the stage's hover
+    // starts mattering, so it needs the current sent-list right then rather than
+    // whatever it last happened to hear. One shared broadcast rather than a loop
+    // here and a second, drifting one on the theme change: whichever fact moved,
+    // a stage is told all of them, and neither caller can ship a
     // differently-shaped message.
     broadcastStageMode();
   }
@@ -7982,54 +7826,38 @@ body.page-board .back-to-top.visible {
 
   // Chrome that is never an anchor target even while comment mode is on: the
   // comment infrastructure itself (a click there keeps its own, existing
-  // meaning), the pins, the mode toggle, a compare side's own label (structural
-  // chrome, not authored content), the round's own heading, and pre.mermaid /
-  // .html-stage -- NOT because those two are still exempt from the
-  // toggle (they aren't, see the comment mode section above), but because each
-  // already has its own listener, gated the same way, that mints a more specific
-  // anchor for its surface than this generic one could. Excluding them here is
-  // what stops this listener from double-anchoring the same click.
+  // meaning), the pins, the mode toggle, the round's own heading, a compare
+  // side's label and a variant option's caption (structural chrome naming the
+  // thing, not authored content -- without the caption exclusion a click on it
+  // falls through to the enclosing QUESTION block, the nearest [data-block-id]
+  // above it, since .variant-card carries none of its own), and pre.mermaid /
+  // .html-stage. Those last two are NOT exempt from the toggle (see the comment
+  // mode section above); each simply has its own listener, gated the same way,
+  // that mints a more specific anchor for its surface. Excluding them here is
+  // what stops this listener double-anchoring the same click.
   //
-  // .stage-wrap: the part of an html
-  // OR mermaid stage outside the iframe/svg it wraps -- its own border/padding,
-  // never any authored content of its own. Before this line, a click landing
-  // there (not chrome-excluded) still found the block's own [data-block-id]
-  // section as its anchorRootFor root and minted a page-scoped 'dom' ref
-  // against THAT section. For a mermaid block that ref resolves correctly
-  // (resolveDomAnchorInSection walks the SAME document the block re-renders
-  // into); for an html block it does not -- the server's 'resolveComment'
-  // resolves EVERY 'dom' anchor on an html-kind block through
-  // 'resolveDomAnchor', which roots against the IFRAME's own document, not the
-  // page-scoped section the click actually minted the ref against. A ref built
-  // from one tree and resolved against a different one can coincidentally
-  // resolve to an unrelated element inside the mock rather than reporting
-  // lost -- the exact false-positive-resolution failure mode this whole spec
-  // exists to rule out. Simplest correct fix (weighed
-  // against a wire-format 'root' discriminator that would need coordinating
-  // mid-flight, for a gesture -- anchoring a stage's own blank
-  // padding -- nothing needs): exclude '.stage-wrap' outright, on both stage
-  // kinds, the same way '.html-stage'/'pre.mermaid' already are. Does NOT
-  // change what a click INSIDE either stage mints -- the html stage's own
-  // postMessage-minted ref and mermaid's own node-click ref are
-  // untouched; only the wrap's own dead padding stops being anchorable.
+  // .stage-wrap is the part of an html OR mermaid stage outside the iframe/svg it
+  // wraps -- its own border/padding, never any authored content. A click landing
+  // there otherwise finds the block's own [data-block-id] section as its
+  // anchorRootFor root and mints a page-scoped 'dom' ref against THAT section.
+  // For a mermaid block that ref resolves correctly (resolveDomAnchorInSection
+  // walks the SAME document the block re-renders into); for an html block it does
+  // not, since the server's 'resolveComment' resolves EVERY 'dom' anchor on an
+  // html-kind block through 'resolveDomAnchor', which roots against the IFRAME's
+  // own document. A ref built from one tree and resolved against a different one
+  // can coincidentally resolve to an unrelated element inside the mock rather
+  // than reporting lost -- the exact false-positive resolution this whole design
+  // exists to rule out. Excluding '.stage-wrap' outright was weighed against a
+  // wire-format 'root' discriminator that would need coordinating mid-flight, for
+  // a gesture -- anchoring a stage's own blank padding -- nothing needs. It does
+  // NOT change what a click INSIDE either stage mints.
   //
-  // .diagram-lens: the lens dialog is a direct child
-  // of <body>, so nothing inside it has a [data-block-id] ancestor and this
-  // listener would already find no root for a click there -- EXCEPT that the
-  // block's own comment form is moved into the lens while it is open, and that
-  // form does carry data-block-id. Excluding the lens outright keeps the generic
-  // gesture out of it entirely (hover marking included) and leaves the lens's own
-  // listener, which mints the specific mermaid anchor its surface needs, as the
-  // only thing that answers a click in there.
-  //
-  // .variant-label: a choose-between-rendered-variants option's own
-  // caption (its label/description) -- structural chrome naming the option, not
-  // authored content, exactly the same reasoning as .compare-label just above
-  // it. Without this, clicking the caption would fall through to the enclosing
-  // QUESTION block's own section (the nearest [data-block-id] above it, since
-  // .variant-card itself carries no data-block-id of its own) and mint a
-  // page-scoped anchor there -- harmless, but not what a click on a caption
-  // should mean.
+  // .diagram-lens: the lens dialog is a direct child of <body>, so nothing inside
+  // it has a [data-block-id] ancestor -- EXCEPT the block's own comment form,
+  // moved into the lens while it is open, which does. Excluding the lens outright
+  // keeps the generic gesture out of it entirely (hover marking included) and
+  // leaves the lens's own listener, which mints the specific mermaid anchor its
+  // surface needs, as the only thing that answers a click in there.
   var ANCHOR_CHROME_SELECTOR = '.block-kicker, .comment-btn, .comment-form, .comment-target, '
     + '.comment-list, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
     + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens';
@@ -8078,9 +7906,6 @@ body.page-board .back-to-top.visible {
   function clearAnchorHover() {
     if (anchorHovered && anchorHovered.classList) {
       anchorHovered.classList.remove(STAGE_HOVER_CLASS);
-      // The de-affordance class the
-      // mouseover handler below applies instead of STAGE_HOVER_CLASS when the
-      // hovered element already carries a SENT comment.
       anchorHovered.classList.remove('cb-anchor-sent');
     }
     anchorHovered = null;
@@ -8093,13 +7918,9 @@ body.page-board .back-to-top.visible {
     if (!el || el.nodeType !== 1 || isAnchorChrome(el)) return;
     var root = anchorRootFor(el);
     if (!root || el === root || isNonAnchorableRoot(root)) return;
-    // Marks ONLY ev.target ("that element, and not its ancestors") --
-    // never walked up, exactly like the iframe's own hover handler above.
     anchorHovered = el;
-    // An element that already carries a
-    // SENT comment is visibly not a comment target -- de-affordanced (no
-    // outline, cursor: not-allowed via .cb-anchor-sent in src/styles.mjs)
-    // rather than marked with the ordinary "you can anchor here" outline.
+    // '.cb-anchor-sent' de-affordances (no outline, cursor: not-allowed --
+    // src/styles.mjs) instead of the ordinary "you can anchor here" outline.
     var steps = buildSteps(root, el);
     var blockId = root.getAttribute('data-block-id');
     var sent = steps && steps.length && isSentAnchor(blockId, { kind: 'dom', ref: stepsToPath(steps) });
@@ -8120,12 +7941,8 @@ body.page-board .back-to-top.visible {
     ev.preventDefault();
     var blockId = root.getAttribute('data-block-id');
     var anchor = { kind: 'dom', ref: stepsToPath(steps) };
-    // Already carries a SENT comment -- no longer a comment
-    // target, clicking it does nothing.
     if (isSentAnchor(blockId, anchor)) { clearAnchorHover(); return; }
     clearAnchorHover();
-    // A second click on an element that already has a QUEUED
-    // (unsent) comment reopens and edits it, rather than minting a duplicate.
     openCommentForm(blockId, 'dom', anchor.ref, buildHint(root, el), '', findPendingCommentForAnchor(pendingComments, blockId, anchor));
   });
 
@@ -8170,8 +7987,6 @@ body.page-board .back-to-top.visible {
 
   function wireRoot(root) {
 
-  // --- single-choice: one selection per question -----------------------------
-
   qsa('.choice-single', root).forEach(function (btn) {
     var qid = btn.getAttribute('data-question-id');
     var choice = btn.getAttribute('data-choice');
@@ -8189,8 +8004,6 @@ body.page-board .back-to-top.visible {
       updateQuestionsLeftPill();
     });
   });
-
-  // --- multi-select: independently toggled cards ------------------------------
 
   qsa('.choice-multi', root).forEach(function (btn) {
     var qid = btn.getAttribute('data-question-id');
@@ -8218,16 +8031,13 @@ body.page-board .back-to-top.visible {
   // generically by currentAnswer's default branch below), which is why there is
   // no separate case there.
   //
-  // No stage-message path feeds this. An earlier version had the html-stage
-  // agent (stageAgentScript, src/render.mjs) report every click over
-  // postMessage so one landing on the visible mock content could select the
-  // card too -- reverted before this change merged: that message is
+  // No stage-message path feeds this, deliberately: a stage message is
   // STAGE-AUTHORED input (the mock's own script can dispatch a click on
   // itself with no reviewer involved, and separately can forge the message
   // directly, since origin/identity validation only prove SOME live stage
   // sent it, never that a human did), and letting it pick an answer is the
-  // agent handing itself the answer to its own question -- see
-  // stageAgentScript's own "NO 'select' MESSAGE, DELIBERATELY" comment. An
+  // agent handing itself the answer to its own question -- see src/render.mjs's
+  // stage-channel comment on why there is deliberately no 'select' message. An
   // 'html' option's iframe is instead rendered 'pointer-events: none' inside
   // a '.choice-variant' card (src/styles.mjs), so a real click over the mock
   // can never reach the iframe at all -- it lands on THIS card, in the parent
@@ -8263,8 +8073,6 @@ body.page-board .back-to-top.visible {
     });
   });
 
-  // --- free text: the answer itself, separate from the per-question note -----
-
   qsa('textarea[data-answer-for]', root).forEach(function (ta) {
     var qid = ta.getAttribute('data-answer-for');
     ta.addEventListener('input', function () {
@@ -8275,10 +8083,8 @@ body.page-board .back-to-top.visible {
     });
   });
 
-  // --- drag-to-rank: native HTML5 drag and drop reorder -----------------------
-  //
-  // The gesture itself can't be asserted without a browser; what matters
-  // for the node checks is that the answer ends up as the
+  // Native HTML5 drag and drop. The gesture itself can't be asserted without a
+  // browser; what matters for the node checks is that the answer ends up as the
   // ordered array of option labels, read from DOM order on drop.
 
   function rankOrder(list) {
@@ -8323,8 +8129,6 @@ body.page-board .back-to-top.visible {
     });
   });
 
-  // --- per-question note (every widget carries one) ---------------------------
-
   qsa('textarea[data-note-for]', root).forEach(function (ta) {
     var qid = ta.getAttribute('data-note-for');
     if (notes[qid]) ta.value = notes[qid];
@@ -8333,8 +8137,6 @@ body.page-board .back-to-top.visible {
       notes[qid] = ta.value;
     });
   });
-
-  // --- per-question defer: distinct from simply leaving a question blank -----
 
   qsa('.btn-defer', root).forEach(function (btn) {
     var qid = btn.getAttribute('data-defer-for');
@@ -8352,10 +8154,10 @@ body.page-board .back-to-top.visible {
     });
   });
 
-  // --- comments: block-level, or an element-level click inside an html stage /  --
-  // mermaid diagram (wired further below) -- both target the one shared
-  // comment-form for their block, via openCommentForm (declared above wireRoot,
-  // alongside the other anchor helpers it's shared with).
+  // A block-level comment and an element-level click inside an html stage or a
+  // mermaid diagram both target the one shared comment-form for their block, via
+  // openCommentForm (declared above wireRoot, alongside the other anchor helpers
+  // it is shared with).
 
   // src/render.mjs's commentButton emits exactly one shape now: the whole-block
   // "Add comment" affordance, on the two kinds ADR.md entry 28 leaves commentable.
@@ -8409,15 +8211,10 @@ body.page-board .back-to-top.visible {
       } else {
         pendingComments.push({ id: nextPendingId++, blockId: blockId, anchor: anchor, text: text });
       }
-      // The pin lands NOW, not after Send: a queued comment has no server-assigned
-      // n, so commentsWithPending mints a provisional one continuing the sequence
-      // and placePin draws it hollow (.pin-pending). Re-rendering the whole layer
-      // rather than appending one pin is what keeps the provisional numbers
-      // consistent as more comments queue up behind this one. The comment-list
-      // entries are rebuilt the same way (refreshPins calls
-      // refreshPendingCommentItems), not just appended to --
-      // editing in place must not also produce a stray second list entry for
-      // the same, now-updated queue item.
+      // The whole layer is re-rendered rather than one pin appended, so the
+      // provisional numbers stay consistent as more comments queue up behind this
+      // one; refreshPins rebuilds the list entries the same way, so editing in
+      // place cannot also leave a stray second entry for the same queue item.
       refreshPins(document);
       input.value = '';
       form.removeAttribute('data-editing-id');
@@ -8450,10 +8247,6 @@ body.page-board .back-to-top.visible {
   // message from the stage to become bindable.
   qsa('.html-block', root).forEach(function (section) { wireStageExpand(section); });
 
-  // Page-scoped dom pins: same-document content needs no 'load' event
-  // to wait on, so this runs synchronously, right here, for whatever root wireRoot
-  // was just given -- see wirePageDomPins's own comment for why this can't just
-  // wait for the next refreshPins call.
   wirePageDomPins(root);
 
   } // end wireRoot
@@ -8466,14 +8259,12 @@ body.page-board .back-to-top.visible {
   // already carries a numbered pin drawn ON the thing it is about, so there is
   // nothing left for a second, list-side highlight to point at.)
 
-  // --- delete a queued (unsent) comment from its own list entry -----------------
-  // Delegated from the document: a
-  // pending entry can appear
-  // at any time after hydrate (queued locally, or -- reopened and re-edited --
-  // rebuilt by refreshPendingCommentItems), so there is no single wireRoot pass
-  // that could wire a "delete" button once and for all. A SENT comment's
-  // server-rendered entry never carries a '.comment-delete' at all,
-  // so this can never reach one.
+  // Deleting a queued (unsent) comment is delegated from the document: a pending
+  // entry can appear at any time after hydrate (queued locally, or -- reopened
+  // and re-edited -- rebuilt by refreshPendingCommentItems), so there is no
+  // single wireRoot pass that could wire a "delete" button once and for all. A
+  // SENT comment's server-rendered entry never carries a '.comment-delete' at
+  // all, so this can never reach one.
 
   document.addEventListener('click', function (ev) {
     var btn = ev.target && ev.target.closest ? ev.target.closest('.comment-delete') : null;
@@ -8483,7 +8274,7 @@ body.page-board .back-to-top.visible {
     if (!item) return;
     var id = Number(item.getAttribute('data-pending-id'));
     pendingComments = removePendingComment(pendingComments, id);
-    refreshPins(document); // rebuilds the list entries too
+    refreshPins(document);
     // A form still open, reopened on the entry just deleted
     // instead of resubmitted: close it rather than leaving stale prefilled
     // text that would otherwise queue right back as a brand-new comment.
@@ -8553,23 +8344,18 @@ body.page-board .back-to-top.visible {
     return vars;
   }
 
-  // Every mermaid pass below -- the very first render,
-  // a later SSE push's render of newly-inserted nodes, or a theme-triggered
-  // redraw -- is queued onto this ONE module-scoped promise chain instead of
-  // running the moment it's called. Real mermaid 11 claims a node's
-  // data-processed flag and does innerHTML = '' before its own first
-  // internal per-node await, so two passes that are merely STARTED (not
-  // SETTLED) can still write to the SAME node in the same tick: the newer
-  // pass's restore-to-source can land on a node the older pass has already
-  // begun re-rendering, and the older pass's eventual innerHTML = svg can
-  // land back on that node before the newer pass ever reaches it -- so the
-  // newer pass ends up parsing the OLDER pass's rendered SVG as if it were
-  // diagram source ("Maximum text size in diagram exceeded" /
-  // "Syntax error in text", permanently, since nothing redraws it again
-  // until the NEXT theme change). Queuing makes "started" and "settled" the
-  // same event for every caller here: a pass's own function body does not
-  // even begin running until every previously queued pass has fully
-  // resolved, so no pass can ever observe another pass's half-finished node.
+  // Every mermaid pass below -- the very first render, a later SSE push's render
+  // of newly-inserted nodes, or a theme-triggered redraw -- is queued onto this
+  // ONE module-scoped promise chain instead of running the moment it is called.
+  // Real mermaid 11 claims a node's data-processed flag and does innerHTML = ''
+  // before its own first internal per-node await, so two passes that are merely
+  // STARTED (not SETTLED) can write to the SAME node in the same tick, and the
+  // newer one ends up parsing the older one's rendered SVG as if it were diagram
+  // source ("Maximum text size in diagram exceeded" / "Syntax error in text",
+  // permanently, since nothing redraws it again until the NEXT theme change).
+  // Queuing makes "started" and "settled" the same event for every caller here:
+  // a pass's body does not begin running until every previously queued pass has
+  // fully resolved.
   var mermaidQueue = Promise.resolve();
   function queueMermaidTask(fn) {
     var result = mermaidQueue.then(fn, fn);
@@ -8694,16 +8480,15 @@ body.page-board .back-to-top.visible {
     // retheme" rather than invisible as "one shape is the wrong colour".
     var vars = mermaidThemeVariables();
     if (!vars) return;
-    // Only nodes this pass could RESTORE may be handed to run(). An unstashed node is
-    // one that appeared after the queue snapshot -- applyRoundPush attaches a new
-    // round's <pre class="mermaid"> synchronously, so a redraw already queued when a
-    // round lands sees it here with no stash. Rendering it anyway (which this used to
-    // do: the restore skipped it, the run did not) let the render pass that follows
-    // stash its RENDERED SVG TEXT as if it were diagram source. The next theme switch
-    // then restored that text, mermaid failed to parse it, and the diagram was
-    // permanently an error graphic -- a third and fourth switch never recovered it
-    // The render pass owns first-render for those nodes and will
-    // stash them correctly; leaving them alone here is what lets it.
+    // Only nodes this pass could RESTORE may be handed to run(). An unstashed
+    // node is one that appeared after the queue snapshot -- applyRoundPush
+    // attaches a new round's <pre class="mermaid"> synchronously, so a redraw
+    // already queued when a round lands sees it here with no stash. Rendering it
+    // anyway lets the render pass that follows stash its RENDERED SVG TEXT as if
+    // it were diagram source, and the next theme switch restores that text into
+    // something mermaid cannot parse -- permanently an error graphic, since no
+    // later switch recovers it. The render pass owns first-render for those nodes
+    // and will stash them correctly; leaving them alone here is what lets it.
     var restorable = [];
     nodes.forEach(function (n) {
       var original = mermaidSourceByBlock && mermaidSourceByBlock.has(n) ? mermaidSourceByBlock.get(n) : null;
@@ -8750,7 +8535,7 @@ body.page-board .back-to-top.visible {
   // triggered it, only that the active palette may have just changed under an
   // already-rendered diagram.
   //
-  // ADR.md entry 39 puts a second job on the same signal: an html stage is a
+  // A second job rides the same signal: an html stage is a
   // separate document that no stylesheet of ours reaches (QUIRKS.md "Two
   // stylesheets, one palette"), so the board's one theme control has to PUSH
   // the new value in. Same broadcast handleStageReady and setCommentMode use,
@@ -8765,15 +8550,10 @@ body.page-board .back-to-top.visible {
 
   // Cheap, partial mitigation for pin drift: reposition every pin on a window
   // resize. Does not track an iframe's own internal scroll or its resize-drag
-  // handle (gesture-level fidelity like this is outside automated
-  // scope; a known, accepted gap rather than an attempt at full continuous
-  // tracking).
-  // Repositioning only -- refreshPins (above) deliberately does not re-run the
-  // click-listener wiring, or every resize would stack another click handler on
-  // the same iframe/diagram.
-  // SPEC_HEADER.md criterion 5: the one event AC 5 names outright -- resizing
-  // the viewport is what makes the header wrap its title differently and
-  // change height, so this is where the band gets re-measured and re-sent.
+  // handle -- a known, accepted gap rather than full continuous tracking.
+  // SPEC_HEADER.md criterion 5: resizing the viewport is what makes the header
+  // wrap its title differently and change height, so this is also where the band
+  // gets re-measured and re-sent.
   window.addEventListener('resize', function () { refreshPins(document); reportStageBand(); });
 
   // --- the two ways out: Send, and Discuss in chat -----------------------------
@@ -8816,18 +8596,13 @@ body.page-board .back-to-top.visible {
     return { choice: raw != null ? raw : null, answered: raw != null };
   }
 
-  // Tag-qualified, same reason as every other id-by-string lookup in this
-  // file (see openCommentForm's own comment) -- '## Send btn' is exactly as
-  // mintable as '## Board data', and unlike the board-data collision (which
-  // throws and kills the whole script) this one is silent: the handler binds
-  // to the heading instead of the button, and Send just never fires.
+  // A collision here is SILENT, unlike the board-data one at the top of this
+  // script: the handler binds to a '## Send btn' heading instead of the button,
+  // and Send just never fires.
   var sendBtn = document.querySelector('button#send-btn');
   var discussBtn = document.querySelector('button#discuss-btn');
   var sendStatus = document.querySelector('span#send-status');
   var sendBar = document.querySelector('div.send-bar');
-  // Tag-qualified, same reason as every other id-by-string lookup in this file --
-  // '## Questions left' is exactly as mintable as '## Board data' (see the
-  // Send-btn lookup's own comment just below).
   var questionsLeftPill = document.querySelector('button#questions-left-pill');
 
   /** Collect the open round's answers exactly as they stand right now. Shared
@@ -8868,9 +8643,9 @@ body.page-board .back-to-top.visible {
 
   /** Best-known answer to "is the round's own closing rail on screen right now" --
    * written ONLY by setupSendBarDock's own IntersectionObserver callback, below,
-   * the exact signal that already docks the send bar (ADR.md entry 27: "one IntersectionObserver on the closing rail
-   * drives both, so the two can never disagree and no scroll handler is
-   * introduced"). Defaults to false -- "the rail is not on screen" -- matching
+   * the exact signal that already docks the send bar (one IntersectionObserver
+   * on the closing rail drives both, so the two can never disagree and no
+   * scroll handler is introduced). Defaults to false -- "the rail is not on screen" -- matching
    * setupSendBarDock's own pre-report default (no '.docked' class until an
    * intersection actually arrives) and its "no IntersectionObserver at all"
    * fallback (the bar stays permanently floating): both are exactly the state
@@ -8913,15 +8688,13 @@ body.page-board .back-to-top.visible {
   // only that one, so "which round am I on" is EXPLICIT STATE here, written in
   // one place, rather than a scroll position measured against the header.
   //
-  // What this replaced, and why it could not survive: N used to be "the topmost
-  // round crossing the sticky header line", computed by an IntersectionObserver
-  // over a 96px band under the header, with a clamp for the case where a short
-  // trailing round could never reach that band at all. Every part of that
-  // apparatus assumed rounds stack down one scrolling document. A round that
-  // fills the viewport does not stack under the round before it -- there is no
-  // round before it on screen at all -- so the band has nothing to measure, and
-  // the observer is deleted rather than left running against a layout it can no
-  // longer describe.
+  // There is no round-band IntersectionObserver any more: N used to be "the
+  // topmost round crossing the sticky header line", measured over a 96px band
+  // under the header, and every part of that assumed rounds stack down one
+  // scrolling document. A round that fills the viewport does not stack under the
+  // round before it -- there is no round before it on screen at all -- so the
+  // band has nothing to measure, and the observer is deleted rather than left
+  // running against a layout it can no longer describe.
   //
   // Everything that names a round now reads currentRound: the pager's own
   // current entry and its dot, the chevrons' disabled ends, whether <body> is
@@ -8963,7 +8736,7 @@ body.page-board .back-to-top.visible {
   }
 
   /** Does this round still owe an answer? Not sent AND actually asking something
-   * -- the same rule the index badge counts by (ADR.md entry 25), which is what
+   * -- the same rule the index badge counts by, which is what
    * keeps the dot off a page-board round: nothing ever sends one, so it is open
    * forever and would otherwise sit there accusing the reviewer of stalling. */
   function roundOwesAnswer(r) {
@@ -9105,10 +8878,6 @@ body.page-board .back-to-top.visible {
         btn.disabled = false;
       });
     }
-    // The caption names the round the reviewer is on, so it is rewritten on
-    // every flip -- the one place the pager still spends a title.
-    // Tag-qualified like every other id lookup in this file -- '## Round pager
-    // caption' is exactly as mintable as '## Board data'.
     var caption = document.querySelector('div#round-pager-caption');
     if (caption) {
       var cur = null;
@@ -9241,9 +9010,9 @@ body.page-board .back-to-top.visible {
    * (markRoundHistory) removes one. No '.round-end' at all (every round sent,
    * nothing left to reach) leaves the bar in its ordinary floating state.
    *
-   * ADR.md entry 27: this is also the pill's own
-   * signal now -- "one IntersectionObserver on the closing rail drives both, so
-   * the two can never disagree and no scroll handler is introduced". railIntersecting
+   * This is also the pill's own
+   * signal now: one IntersectionObserver on the closing rail drives both, so
+   * the two can never disagree and no scroll handler is introduced. railIntersecting
    * (above) is written ONLY here, and updateQuestionsLeftPill is called on every
    * branch that changes what it should read -- never a second, independent
    * observer, which is the whole point. */
@@ -9259,10 +9028,10 @@ body.page-board .back-to-top.visible {
     // 'docked' the instant the rail's first pixel enters the viewport -- while
     // that pixel is still BEHIND the bar. That window (the bar's own height,
     // measured in Chrome at ~77px) used to be covered by the docked bar's top
-    // hairline; ADR.md entry 51 removed it on the grounds that the rail is
+    // hairline; it was removed on the grounds that the rail is
     // already a line two rows above, which is only true once the rail has
     // cleared the bar. Shrinking the observer's root by the bar's height is
-    // what makes the entry's premise true: 'docked' now means "the rail is on
+    // what makes that premise true: 'docked' now means "the rail is on
     // screen AND above the bar", and until then the bar keeps its gradient
     // scrim, which is the treatment for content still running on underneath.
     // Measured at observe time rather than hardcoded, for the same reason
@@ -9279,37 +9048,27 @@ body.page-board .back-to-top.visible {
     sendBarDockObserver.observe(rail);
   }
 
-  /** Ticket 02 (SPEC_AWAITED.md): '.page-comments' (a page board's floating
-   * comment panel) has to clear '.round-pager-dock' -- the round pager's
-   * fixed, bottom-centre box -- and cannot do that with a number typed into
-   * the stylesheet, because the dock's own height changes with its own
-   * content ('2379f12' grew it from one row to two and broke exactly that
-   * kind of number) and ticket 03 is about to make the PANEL taller too.
+  /** '.page-comments' (a page board's floating comment panel) has to clear
+   * '.round-pager-dock', the round pager's fixed bottom-centre box. A
+   * ResizeObserver on the dock is the mechanism that survives: it measures the
+   * dock's REAL box, independent of where either element sits in the tree, and
+   * writes it to '--round-pager-dock-h' (src/styles.mjs's '.page-comments'),
+   * which recomputes its 'bottom' every time the property changes -- CSS custom
+   * properties are live, so no second call is needed to push the new value into
+   * layout. Observed rather than measured once at load, so a change to the dock's
+   * own font size, padding or row count carries with it.
    *
-   * CSS anchor positioning ('anchor()') was tried first and reverted: it
-   * requires the anchor to precede the positioned element in DOM order,
-   * which the dock does not (it renders after '.blocks', and
-   * '.page-comments' is nested inside a block within '.blocks'), and it hit
-   * a second, separate containing-block failure even after that was worked
-   * around -- confirmed wrong in a real browser (computed 'bottom: auto'),
-   * a class of failure this repo's DOM stand-in cannot see at all
-   * (QUIRKS.md, "The stand-in has no layout": no ResizeObserver either,
-   * hence the guard below).
-   *
-   * A ResizeObserver on the dock is the mechanism that survives that: it
-   * measures the dock's REAL box, independent of where either element sits
-   * in the tree, and writes it to '--round-pager-dock-h' (src/styles.mjs's
-   * '.page-comments'), which recomputes its 'bottom' every time the
-   * property changes -- CSS custom properties are live, so no second call
-   * is needed to push the new value into layout. Observed, not measured
-   * once at load: a future change to the dock's own font size, padding or
-   * row count updates this with it, with nothing to remember to keep in
-   * step. */
+   * A number typed into the stylesheet cannot do this: the dock's height changes
+   * with its own content ('2379f12' grew it from one row to two and broke exactly
+   * that kind of number). CSS anchor positioning ('anchor()') was tried and
+   * reverted -- it requires the anchor to precede the positioned element in DOM
+   * order, which the dock does not (it renders after '.blocks', and
+   * '.page-comments' is nested inside a block within '.blocks'), and it hit a
+   * second, separate containing-block failure even after that was worked around:
+   * confirmed wrong in a real browser (computed 'bottom: auto'), a class of
+   * failure this repo's DOM stand-in cannot see at all (QUIRKS.md "The stand-in
+   * has no layout" -- no ResizeObserver either, hence the guard below). */
   function setupPagerDockHeightTracking() {
-    // Tag-qualified, the same convention every other chrome lookup in this file
-    // follows: board content mints its own ids and classes (src/markdown.mjs's
-    // slugify), and a querySelector that names only the class can be answered
-    // by an element the agent wrote.
     var dock = document.querySelector('div.round-pager-dock');
     if (!dock) return;
     // Both writers report the same box. 'contentRect' is the CONTENT box and
@@ -9325,23 +9084,21 @@ body.page-board .back-to-top.visible {
       document.documentElement.style.setProperty('--round-pager-dock-h', h + 'px');
     }
     // Measured once here, and only THEN observed -- the same correction
-    // measurePillHalf's own wiring carries, for the identical reason: measured
-    // in Chrome, a ResizeObserver on an element that is already laid out and
-    // never resized again delivers nothing at all. Every board that loads with
-    // its dock at its final size (which is most of them: the dock only changes
-    // when a round arrives and relabels it) therefore left this property unset
+    // measurePillHalf's own wiring carries, for the identical reason: measured in
+    // Chrome, a ResizeObserver on an element already laid out and never resized
+    // again delivers nothing at all. Without this explicit first measure, a board
+    // whose dock loads at its final size (most of them) leaves the property unset
     // for the whole session, and every rule that reads it -- '.page-comments''s
     // clearance and the sent round's own bottom reservation, both in
-    // src/styles.mjs -- silently ran on its 84px fallback instead of the real
-    // 63.4px. Not a crash, which is why it survived: a too-large fallback
-    // over-reserves rather than overlapping, so the failure looks like slightly
-    // loose spacing.
-    // reportStageBand reads the dock's own box again rather than this
-    // property (SPEC_HEADER.md: the stand-in's getComputedStyle cannot see a
-    // runtime .style.setProperty write, only a static stylesheet, so the
-    // bottom band is measured straight off the element every time, same as
-    // write() does here); called alongside write() so the two never drift
-    // apart on which dock height is current.
+    // src/styles.mjs -- silently runs on its 84px fallback instead of the real
+    // 63.4px. Not a crash: a too-large fallback over-reserves rather than
+    // overlapping, so it reads as slightly loose spacing.
+    // reportStageBand reads the dock's own box again rather than this property
+    // (SPEC_HEADER.md: the stand-in's getComputedStyle cannot see a runtime
+    // .style.setProperty write, only a static stylesheet, so the bottom band is
+    // measured straight off the element every time, same as write() does here),
+    // and is called alongside write() so the two never drift apart on which dock
+    // height is current.
     write(dock.getBoundingClientRect().height);
     reportStageBand();
     if (typeof ResizeObserver !== 'function') return;
@@ -9366,7 +9123,7 @@ body.page-board .back-to-top.visible {
   // header comment on why -- no 'Date.now()' at render time).
   refreshPager();
   // AC 5: an awaited page round opens with comment mode ON, so the reviewer
-  // never has to find the toggle first -- the ADR 48 hint inside the empty
+  // never has to find the toggle first -- the hint inside the empty
   // panel (renderPageCommentPanel, src/render.mjs) is what teaches the
   // click-to-comment gesture instead, since the toggle itself is no longer
   // what reveals it here. 'roundIsCurrentlyAwaited', not merely
@@ -9428,7 +9185,7 @@ body.page-board .back-to-top.visible {
    * drift into disagreeing with itself about where that is -- and this one
    * routes through goToRound, so it cannot drift from the pager either.
    *
-   * ADR.md entry 61: the header's own round badge used to be a third caller,
+   * ADR.md entry 42: the header's own round badge used to be a third caller,
    * deferring to this same function on click rather than navigating on its
    * own -- the badge is gone (SPEC_HEADER.md AC 12), and this function stays
    * exactly as it was for its remaining caller. */
@@ -9626,13 +9383,11 @@ body.page-board .back-to-top.visible {
       submitInFlight = false;
       if (result && result.alreadySent) {
         // A 409 stored NOTHING (src/board.mjs refuses the submit outright), so
-        // every queued comment is still unsent -- and the queue used to be
-        // emptied here anyway, alongside the success path, destroying all of
-        // them with no undo and no copy anywhere: pendingComments lives only in
-        // this page's memory. Kept instead, pins and list
-        // entries untouched, and the reviewer told they still have them, so
-        // they go out with the next round rather than having to be retyped from
-        // memory.
+        // every queued comment is still unsent and is KEPT here, pins and list
+        // entries untouched, with the reviewer told they still have them:
+        // pendingComments lives only in this page's memory, so emptying it on a
+        // refusal would destroy every one of them with no undo and no copy
+        // anywhere.
         //
         // The send bar stays disabled, which is the same call the success path
         // makes and for the same reason: this round is out, and re-enabling
@@ -9701,6 +9456,28 @@ body.page-board .back-to-top.visible {
     });
   }
 
+  /** The queue's last chance to leave the tab, called on the transition into
+   * '.expired' and nowhere else. A no-op unless this round actually holds
+   * queued comments, so an expiring page nobody wrote on stays a pure display
+   * change and posts nothing. The submit itself is the ordinary one: it stores
+   * the comments and closes the round, and because the round is no longer
+   * awaited by then, 'drainUndeliveredComments' (src/server.mjs) is what carries
+   * them to the next agent that asks -- AC 12's "ride the thread's next packet",
+   * now that a lapsed round stops swallowing its own comments.
+   *
+   * ponytail: this needs the tab to be open at the deadline. Comments typed into
+   * a tab that is closed (or a laptop asleep) before it passes were never
+   * anywhere but that tab's memory and are gone either way -- this does not make
+   * that worse, and the upgrade path, if it ever bites, is the same flush on
+   * 'beforeunload'/'visibilitychange' rather than a durable client-side queue. */
+  function flushPendingOnExpiry(roundN) {
+    var blocks = blocksOfRound(roundN);
+    if (!isPageRound(blocks)) return;
+    var id = blocks[0].id;
+    if (!pendingComments.some(function (c) { return c.blockId === id; })) return;
+    submitPageRound(roundN, 'send');
+  }
+
   /** SPEC_AWAITED.md ticket 03 (AC 4): the awaited page's own Send/Discuss --
    * submitBoard's analogue for a page round, deliberately never sharing that
    * function's path. submitBoard refuses outright on a page round (ADR.md
@@ -9725,28 +9502,6 @@ body.page-board .back-to-top.visible {
    * left over stays queued, exactly the AC 12 promise ("comments already left
    * stay on screen and ride the thread's next packet") for a comment on some
    * OTHER round that has not gone out yet either. */
-  /** The queue's last chance to leave the tab, called on the transition into
-   * '.expired' and nowhere else. A no-op unless this round actually holds
-   * queued comments, so an expiring page nobody wrote on stays a pure display
-   * change and posts nothing. The submit itself is the ordinary one: it stores
-   * the comments and closes the round, and because the round is no longer
-   * awaited by then, 'drainUndeliveredComments' (src/server.mjs) is what carries
-   * them to the next agent that asks -- AC 12's "ride the thread's next packet",
-   * now that a lapsed round stops swallowing its own comments.
-   *
-   * ponytail: this needs the tab to be open at the deadline. Comments typed into
-   * a tab that is closed (or a laptop asleep) before it passes were never
-   * anywhere but that tab's memory and are gone either way -- this does not make
-   * that worse, and the upgrade path, if it ever bites, is the same flush on
-   * 'beforeunload'/'visibilitychange' rather than a durable client-side queue. */
-  function flushPendingOnExpiry(roundN) {
-    var blocks = blocksOfRound(roundN);
-    if (!isPageRound(blocks)) return;
-    var id = blocks[0].id;
-    if (!pendingComments.some(function (c) { return c.blockId === id; })) return;
-    submitPageRound(roundN, 'send');
-  }
-
   function submitPageRound(roundN, action) {
     if (readonly) return;
     var round = roundEntry(roundN);
@@ -9778,8 +9533,6 @@ body.page-board .back-to-top.visible {
       return r.json();
     }).then(function (result) {
       if (result && result.alreadySent) return;
-      // Only THIS block's comments are cleared -- see this function's own
-      // header comment for why the queue is not simply emptied wholesale.
       pendingComments = pendingComments.filter(function (c) { return c.blockId !== blockId; });
       refreshPins(document);
       clearPendingMark();
@@ -9829,8 +9582,8 @@ body.page-board .back-to-top.visible {
   // Arriving at Send -- on the button itself, on the last question, or on a
   // round with no question blocks at all -- reads outstandingBlocks() and
   // does exactly what a mouse click on Send would do with that same answer:
-  // nothing outstanding sends on that press, no relabel, no second press
-  // (ADR.md entry 29); anything outstanding arms with the click guard's own
+  // nothing outstanding sends on that press, no relabel, no second press;
+  // anything outstanding arms with the click guard's own
   // treatment (armSendGuard below) -- scroll, ring, label, Escape, all
   // identical to a click. The keyboard path never re-derives "outstanding"
   // itself, so it can never disagree with what submitBoard or the click guard
@@ -9847,7 +9600,7 @@ body.page-board .back-to-top.visible {
   // one arm (armSendGuard), one way out (disarmSend), reached from either
   // input. There used to be a second, keyboard-only arm (armSend, "you're
   // done, confirm") that fired unconditionally on arrival regardless of what
-  // was outstanding -- deleted along with its label (ADR.md entry 29):
+  // was outstanding -- deleted along with its label:
   // arriving at Send now always means what a click on Send means.
 
   var sendArmed = false;
@@ -9890,9 +9643,8 @@ body.page-board .back-to-top.visible {
   }
 
   /** Focus a question block's note field and bring it on screen -- the same
-   * guarded scrollIntoView shape highlightAnchor and goToRound above already
-   * use, so a DOM stand-in with no scrollIntoView at all still runs this
-   * without throwing. */
+   * guarded scrollIntoView shape goToRound above already uses, so a DOM
+   * stand-in with no scrollIntoView at all still runs this without throwing. */
   function focusNoteField(block) {
     var el = block && block.querySelector ? block.querySelector('[data-note-for]') : null;
     if (!el) return;
@@ -9924,8 +9676,8 @@ body.page-board .back-to-top.visible {
     if (block.focus) block.focus({ preventScroll: true });
   }
 
-  /** ADR.md entry 27: "the pill's click target is
-   * the send guard's target, not a second notion of 'next question'" -- the exact
+  /** The pill's click target is
+   * the send guard's target, not a second notion of 'next question' -- the exact
    * same outstandingBlocks()[0] armSendGuard flags, but landed on the way
    * goToQuestion above describes rather than armSendGuard's own scroll-and-ring:
    * the pill leaves the guard alone entirely (never touches sendArmed, the
@@ -10016,8 +9768,6 @@ body.page-board .back-to-top.visible {
       var current = target && target.closest ? target.closest('.question-block') : null;
       var idx = current ? blocks.indexOf(current) : -1;
       if (idx === -1) {
-        // Focus is on the body, the header, etc. -- not inside any open
-        // question block. Start the traversal from the top.
         focusNoteField(blocks[0]);
         return;
       }
@@ -10025,15 +9775,8 @@ body.page-board .back-to-top.visible {
         focusNoteField(blocks[idx + 1]);
         return;
       }
-      // idx === blocks.length - 1: traversal reached the last question, which
-      // arrives at Send exactly like being on the button itself or a round
-      // with no question blocks at all -- fall through to the same rule.
+      // The last question falls through to the same "arrived at Send" rule.
     }
-    // Arrived at Send. Read outstandingBlocks() -- the same
-    // rule submitBoard and the click guard use -- and do exactly what a click
-    // on Send would do right now. Nothing outstanding sends on this press, no
-    // relabel, no second press; anything outstanding arms with the click
-    // guard's own treatment (armSendGuard), identical to a click.
     var outstanding = outstandingBlocks();
     if (outstanding.length) {
       armSendGuard(outstanding);
@@ -10090,7 +9833,7 @@ body.page-board .back-to-top.visible {
    * is worth keeping rather than flattening early) drops to 17px. 22 on a 32px
    * tile is deliberately oversized -- the digit has to survive the downsample to
    * 16px, where its stem lands on roughly 1.5 device pixels at 1x. See ADR.md
-   * entry 30, which supersedes entry 12's inverted tile. */
+   * entry 30, which replaced the inverted tile with this numeral. */
   function drawFavicon(n) {
     try {
       var canvas = document.createElement('canvas');
@@ -10173,40 +9916,32 @@ body.page-board .back-to-top.visible {
   // mark has no use for -- losing focus while still visible never means "come
   // back and look", so clearPendingMark stays off it).
   //
-  // 'blur' is not a latency gap, it is the product's main scenario: a board left
-  // open on one screen while the reviewer works in another window or the
-  // terminal is not hidden and not unfocused-via-visibilitychange -- it just
-  // never regains focus again until they come back on their own, so with only
-  // visibilitychange/focus this tab reports 'attended: true' once, at open, and
-  // never again for the rest of the wait. The daemon reads that stale true as
-  // "someone is looking" and raises nothing, for a board sitting in the single
-  // most common posture this product has. 'blur' closes it: the OS handing focus
-  // to another app is exactly the edge visibilitychange/focus cannot see on
-  // their own (document.hidden stays false, and 'focus' only fires on
-  // REGAINING it).
+  // 'blur' is the product's main scenario, not a latency gap: a board left open
+  // on one screen while the reviewer works in another window is neither hidden
+  // nor unfocused-via-visibilitychange, so with only visibilitychange/focus this
+  // tab reports 'attended: true' once, at open, and never again for the rest of
+  // the wait -- the daemon reads that stale true as "someone is looking" and
+  // raises nothing. The OS handing focus to another app is exactly the edge
+  // visibilitychange/focus cannot see on their own (document.hidden stays false,
+  // and 'focus' only fires on REGAINING it).
   var attendedWatcherId = null;
-  // Bumped by every reportAttended() call -- a fresh DOM edge or a fresh
-  // watcher id (a reconnect) alike -- so a POST or a pending retry from an
-  // EARLIER call can tell it has been superseded before it acts. A single
-  // timer handle cannot do this alone: more than one POST can be in flight
-  // at once (a reviewer alt-tabbing across the board -- focus, blur, focus,
-  // blur, all within a couple hundred milliseconds, is the exact edge this
-  // listener exists to catch), and each fires its own reportAttended() before
-  // any of the earlier ones has rejected, so there is nothing yet to clear.
-  // Comparing against a shared, monotonically increasing epoch instead of a
-  // single cleared/not-cleared handle is what lets EVERY stale chain recognise
-  // itself as stale, not just the one a lone handle happened to be tracking.
+  // Bumped by every reportAttended() call -- a fresh DOM edge or a fresh watcher
+  // id (a reconnect) alike -- so a POST or a pending retry from an EARLIER call
+  // can tell it has been superseded before it acts. A single timer handle cannot
+  // do this: more than one POST can be in flight at once (a reviewer alt-tabbing
+  // across the board fires focus, blur, focus, blur within a couple hundred
+  // milliseconds), and each fires its own reportAttended() before any earlier one
+  // has rejected, so there is nothing yet to clear. A shared, monotonically
+  // increasing epoch lets EVERY stale chain recognise itself as stale, not just
+  // the one a lone handle happened to be tracking.
   //
-  // Also sent on the wire as 'seq' (below): ordering held client-side alone is
-  // not enough when two POSTs for the SAME watcher are genuinely in flight at
-  // once (the alt-tab burst above) -- HTTP does not guarantee the second one
-  // sent lands second, and a focus->true then a blur->false racing out of
-  // order at the daemon leaves it holding 'true' with nobody looking, silent
-  // for the rest of the wait. Never reset on reconnect: a fresh watcherId
-  // starts a fresh, seq-less record on the daemon side, so a counter that only
-  // ever grows is what keeps every report this tab EVER sends -- across every
-  // reconnect -- ordered against itself without needing to coordinate a reset
-  // with the server.
+  // Also sent on the wire as 'seq' (below): HTTP does not guarantee the second
+  // POST sent lands second, and a focus->true racing past a blur->false leaves
+  // the daemon holding 'true' with nobody looking, silent for the rest of the
+  // wait. Never reset on reconnect -- a fresh watcherId starts a fresh, seq-less
+  // record on the daemon side, so a counter that only ever grows keeps every
+  // report this tab EVER sends ordered against itself with no reset to
+  // coordinate with the server.
   var attendedEpoch = 0;
 
   function isTabAttended() {
@@ -10330,20 +10065,16 @@ body.page-board .back-to-top.visible {
     // setupSendBarDock right after, so a dock observer never ends up watching a
     // node this just removed.
     // .replaceWith() with no arguments is a real, spec-accurate way to remove a
-    // node (ChildNode.replaceWith("") -- an empty replacement set means "just
-    // take it out"), already implemented by test/dom-stand-in.mjs's Element for
-    // the mermaid-fallback path -- no new stand-in surface needed for this.
+    // node (an empty replacement set means "just take it out"), already
+    // implemented by test/dom-stand-in.mjs's Element for the mermaid-fallback
+    // path -- no new stand-in surface needed for this.
     var rail = section.querySelector('.round-end');
     if (rail) rail.replaceWith();
     // The diagram's expand control is exempt, exactly as it is in the readonly
     // pass at the top of this file, and for the same reason ("the lens is
-    // view-only under body.readonly ... pan and zoom
-    // work"). A round collapsing into history makes its ANSWERS immutable; it
-    // does not make its diagrams unreadable, and a settled round is precisely
-    // where someone re-reads one. The readonly pass was patched for this and
-    // this loop was not, so a diagram went permanently
-    // un-expandable the moment its round was sent -- from a page that had been
-    // showing the control a second earlier.
+    // view-only under body.readonly ... pan and zoom work"). A round collapsing
+    // into history makes its ANSWERS immutable; it does not make its diagrams
+    // unreadable, and a settled round is precisely where someone re-reads one.
     qsa('textarea, input, button', section).forEach(function (el) {
       if (el.classList && el.classList.contains('expand-btn')) return;
       el.disabled = true;
@@ -10392,16 +10123,16 @@ body.page-board .back-to-top.visible {
     // looking at: an amend can add the very question the count was warning
     // about. Leaving it armed lets the button keep saying "1 question
     // unanswered" beside a pill that now reads two, and a press then sends
-    // with no guard at all -- the two controls ADR 27 says can never disagree.
+    // with no guard at all -- the two controls must never disagree.
     disarmSend();
     var patch = computeBoardPatch(board, data.board);
     // Advance the closure's board to the post-push state now, BEFORE any DOM
-    // work below: wireRoot (via wireHtmlStage/wireMermaidBlock) reads
-    // board.comments to place pins on whatever it wires, including the nodes
-    // this very push is about to insert -- if board were only reassigned at the
-    // end (as it originally was here), any pin-layer populated during this call
-    // would render against the board as it was BEFORE this push, one push stale.
-    // computeBoardPatch above is the only thing that needed the old value.
+    // work below: the pin rendering wireRoot and renderMermaidBlocks drive reads
+    // board.comments to place pins on whatever they wire, including the nodes
+    // this very push is about to insert -- reassigning 'board' only at the end
+    // would render any pin-layer populated during this call against the board as
+    // it stood BEFORE this push, one push stale. computeBoardPatch above is the
+    // only thing that needed the old value.
     board = data.board;
     // A block's content genuinely changed (an amend replaced it): whatever the
     // reviewer had typed/selected against the OLD content no longer corresponds
@@ -10450,8 +10181,6 @@ body.page-board .back-to-top.visible {
     var followTheRound = data.mode === 'new-round' && currentRound === newestBefore;
 
     if (data.mode === 'new-round') {
-      // Tag-qualified, same reason as every other id-by-string lookup in
-      // this file -- '## Blocks' slugifies to the same collision shape.
       var container = document.querySelector('div#blocks');
       if (container) {
         var wrap = document.createElement('div');
@@ -10615,9 +10344,6 @@ body.page-board .back-to-top.visible {
     // the dock observer has to re-read the document rather than keep watching a
     // node that may no longer be attached.
     setupSendBarDock();
-    // Same reasoning as applyRoundPush's own call just above it: a plain count
-    // over the document as it now stands, refreshed immediately rather than
-    // waiting on the dock observer's own async report.
     updateQuestionsLeftPill();
     // Same fix as applyRoundPush above -- wireRoot(replacement) ran against
     // a detached node, so any page-scoped pin it drew is positioned wrong now
@@ -10709,8 +10435,7 @@ body.page-board .back-to-top.visible {
     rounds.sort(function (a, b) { return a - b; });
 
     if (!rounds.length) {
-      // Nothing to insert, only status to catch up on (a round went sent while we
-      // were away): advance and collapse it, without pretending a round arrived.
+      // Only status to catch up on -- a round went sent while we were away.
       board = fresh;
       clearFieldState(patch.changedBlockIds);
       patch.roundsNowSent.forEach(markRoundHistory);

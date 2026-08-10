@@ -46,7 +46,7 @@ export function folderName(cwd) {
 const stamp = b => (typeof b?.updatedAt === 'string' ? b.updatedAt : '');
 
 /** A board's rounds that are still open **and still awaited** — a trip back to the
- * board the reviewer genuinely owes (ADR.md entry 25, "Rounds left"; CONTEXT.md
+ * board the reviewer genuinely owes (CONTEXT.md
  * "Awaited"/"Rounds left"). This is the one predicate both the index badge's count
  * and `isLiveBoard` below read, so the two can never disagree: a round nobody is
  * listening on has no gesture that could ever clear it (`POST

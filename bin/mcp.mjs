@@ -34,33 +34,27 @@ import { fileURLToPath } from 'node:url';
 import { readSecret, secretPath, SECRET_HEADER } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 
-// ---------------------------------------------------------------------------
-// Configuration. CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the
-// rest are additive env vars this ticket introduces (documented in
-// PROTOCOL.md "MCP surface"), never repurposing an existing name.
-// ---------------------------------------------------------------------------
+// CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the rest are additive env
+// vars documented in PROTOCOL.md "MCP surface", never repurposing an existing name.
 
 const PORT = Number(process.env.CLAUDE_BOARD_PORT) || 7391;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000; // 40m default (ADR.md entry 47)
-// The shim outlives the daemon's own identical cap by this much, and only this
-// much. Both processes read the same CLAUDE_BOARD_TIMEOUT_MS and default to the
-// same 40m, so before this margin existed the shim's deadline -- computed at
-// blockingWait entry, while the daemon's starts after connect and parse -- always
-// fired first by the request latency. The shim aborted, the daemon saw a dead
-// client and returned early, and its entire timeout branch was unreachable in
-// every shipped install: no `awaitExpired` broadcast, no timeout packet, and the
-// round it had just given up on never got closed. Five seconds is far longer than
-// loopback latency and invisible against a 40 minute cap; the cap the reviewer and
-// the agent are both told about stays TIMEOUT_MS, which is the daemon's.
+// The shim outlives the daemon's own identical cap by this much, and only this much.
+// Both read the same CLAUDE_BOARD_TIMEOUT_MS and default to the same 40m, but the
+// shim's deadline is computed at blockingWait entry while the daemon's starts after
+// connect and parse -- so without a margin the shim always fires first by the request
+// latency, aborts, and the daemon sees a dead client and returns early: its whole
+// timeout branch unreachable, no `awaitExpired` broadcast, no timeout packet, and the
+// round never closed. The cap the reviewer and the agent are told about stays
+// TIMEOUT_MS, the daemon's.
 //
-// Proportional rather than a flat five seconds, because the checks drive the same
-// cap down to a few hundred milliseconds to exercise this path in under a second: a
-// fixed margin would be the entire runtime there. 5% of the cap, capped at the 5s a
-// 40 minute wait wants, and floored at 250ms -- the floor is not about request
-// latency but about the daemon's own resolution: `waitForRound` (src/server.mjs)
-// polls the store every 120ms, so it can only notice its deadline at the next tick
-// after it, and a margin under that lets the shim win again on a short cap.
+// Proportional rather than a flat five seconds, because the checks drive the cap down
+// to a few hundred milliseconds and a fixed margin would be the entire runtime there.
+// 5% of the cap, ceilinged at the 5s a 40 minute wait wants (invisible against it, and
+// far longer than loopback latency) and floored at 250ms -- the floor is about the
+// daemon's resolution, not latency: `waitForRound` (src/server.mjs) polls the store
+// every 120ms, so a margin under that lets the shim win again on a short cap.
 const WAIT_GRACE_MS = Math.min(5_000, Math.max(250, Math.round(TIMEOUT_MS * 0.05)));
 const PROGRESS_MS = Number(process.env.CLAUDE_BOARD_PROGRESS_MS) || 20_000; // ~20s cadence
 const POST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
@@ -129,16 +123,6 @@ function headlessRefusalMessage(reason) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// The third refusal trigger (the VPS case):
-// CLAUDE_CODE_ENTRYPOINT=cli and a reachable daemon both look fine over SSH, but
-// openBoardTab (below) silently no-ops on non-darwin with no CLAUDE_BOARD_OPEN_CMD
-// configured -- there is simply no mechanism on that machine to put a tab in front
-// of anyone. Left unrefused, that posts a board nobody can see and blocks the full
-// wall-clock cap with nothing to report. Refusing it up front is the same shape as
-// the headless refusal just above: loud, before anything is posted.
-// ---------------------------------------------------------------------------
-
 /** Whether this environment could possibly open a tab at all -- independent of
  * whether opening is administratively suppressed (NO_OPEN, used by assertCanOpenTab
  * and openBoardTab below). True on macOS, where the `open` command always exists, or
@@ -147,19 +131,20 @@ function canOpenTab() {
   return ASSUME_PLATFORM === 'darwin' || Boolean(process.env.CLAUDE_BOARD_OPEN_CMD);
 }
 
-/** Deliberately NOT triggered by CLAUDE_BOARD_NO_OPEN=1, and that relationship is the
- * whole design here, not an oversight: NO_OPEN is documented (PROTOCOL.md "MCP shim
- * environment") as "checks only; never set by a user" -- every check in this suite
- * sets it to stand in for a browser that would otherwise really open, i.e. it means
- * "opening is deliberately suppressed for this run," never "no way to open exists."
- * A real caller never sets it, so keying this refusal on NO_OPEN alone is safe: it
- * only ever actually fires in reality (a VPS with no CLAUDE_BOARD_OPEN_CMD configured),
- * and every check that drives the shim headless via NO_OPEN=1 keeps exercising the
- * normal post-and-wait path rather than tripping a refusal that exists for a
- * completely different machine shape. Getting this backwards either way breaks
- * something real: refusing through NO_OPEN=1 fails every check in this suite that
- * never touches a browser; ignoring NO_OPEN entirely would make opening-suppressed
- * checks indistinguishable from a genuinely tab-less VPS. */
+/** The third refusal trigger, the VPS case: CLAUDE_CODE_ENTRYPOINT=cli and a reachable
+ * daemon both look fine over SSH, but `openBoardTab` below silently no-ops on non-darwin
+ * with no CLAUDE_BOARD_OPEN_CMD, so nothing on that machine can put a tab in front of
+ * anyone. Unrefused, that posts a board nobody can see and blocks the full wall-clock cap
+ * with nothing to report; refused here it is loud, before anything is posted, the same
+ * shape as the headless refusal above.
+ *
+ * Deliberately NOT triggered by CLAUDE_BOARD_NO_OPEN=1, and that relationship is the
+ * design rather than an oversight. NO_OPEN is documented (PROTOCOL.md "MCP shim
+ * environment") as "checks only; never set by a user": it means "opening is deliberately
+ * suppressed for this run", never "no way to open exists". Getting it backwards breaks
+ * something real either way -- refusing through NO_OPEN=1 fails every check in this suite
+ * that never touches a browser, while ignoring NO_OPEN entirely would make an
+ * opening-suppressed check indistinguishable from a genuinely tab-less VPS. */
 function assertCanOpenTab() {
   if (NO_OPEN) return;
   if (canOpenTab()) return;
@@ -176,7 +161,8 @@ function assertCanOpenTab() {
 // ---------------------------------------------------------------------------
 // HTTP client to the daemon. Plain node:http, not fetch/undici: undici's
 // default headersTimeout/bodyTimeout (5 minutes) would kill the /wait call
-// long before the 2h wall-clock cap. http.request has no such default.
+// long before the 40m wall-clock cap (TIMEOUT_MS above). http.request has no
+// such default.
 // ---------------------------------------------------------------------------
 
 function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
@@ -230,13 +216,12 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
   });
 }
 
-/** `sent` distinguishes the two cases that used to share one sentence. A connection
- * that never opened really did write nothing. A connection that died
- * AFTER the request body went out may have applied the whole round and lost only the
- * response — the daemon's work is synchronous once the body is read — so claiming
- * "nothing was posted or written" there is a false statement that makes the agent retry
- * into a duplicate round. The retry is safe anyway now, because `ask` carries a
- * requestId the daemon dedupes on, but the message still has to be true. */
+/** `sent` distinguishes two cases the message must not conflate. A connection that never
+ * opened really did write nothing. A connection that died AFTER the request body went
+ * out may have applied the whole round and lost only the response — the daemon's work is
+ * synchronous once the body is read — so "nothing was posted or written" would be false
+ * there. The retry itself is safe either way (`ask` carries a requestId the daemon
+ * dedupes on); the message still has to be true. */
 function daemonUnreachableMessage(err, { sent = false } = {}) {
   return [
     `claude-board daemon is not reachable at ${BASE_URL} (${err.code || err.message}).`,
@@ -325,15 +310,13 @@ function sleep(ms) {
 // should be building a URL from — never mind handing to `open`.
 const BOARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-/** The URL to open/report for `boardId`, rebuilt from THIS process's own base URL
- * rather than taken from the response body.
- *
- * The daemon's `url` field is peer-supplied data: during a restart window any local
- * process can bind the port first and answer `{"url":"/Applications/Evil.app"}`, and
- * `open` would launch it with no prompt (a leading `-` reaches `open`'s own flag
- * parser, too). There is no shell involved — spawn is argv-form, never `shell:true`
- * — but "no injection" is not "safe to launch". Returns null when the board id is
- * not a board id, and the caller then opens nothing. */
+/** The URL to open/report for `boardId`, rebuilt from THIS process's own base URL rather
+ * than taken from the response body, which is peer-supplied data: during a restart
+ * window any local process can bind the port first and answer
+ * `{"url":"/Applications/Evil.app"}`, and `open` would launch it with no prompt (a
+ * leading `-` reaches `open`'s own flag parser, too). There is no shell involved — spawn
+ * is argv-form, never `shell:true` — but "no injection" is not "safe to launch". Returns
+ * null when the board id is not a board id, and the caller then opens nothing. */
 function safeBoardUrl(boardId) {
   if (typeof boardId !== 'string' || !BOARD_ID_RE.test(boardId)) return null;
   return `${BASE_URL}/b/${boardId}`;
@@ -507,10 +490,6 @@ async function blockingWait({ boardId, round, timeoutMs, progressMs, onProgress,
   }
 }
 
-// ---------------------------------------------------------------------------
-// The `ask` tool itself.
-// ---------------------------------------------------------------------------
-
 const ASK_TOOL = {
   name: 'ask',
   description:
@@ -567,9 +546,9 @@ function formatAnchor(anchor) {
   switch (anchor.kind) {
     case 'block': return 'whole block';
     // No `md` case: ADR.md entry 28 deleted that anchor kind along with the
-    // affordance that minted it. An `md` anchor stored on an archived board is
-    // rejected by src/board.mjs's sanitizeAnchor before it can reach a packet, and
-    // one hand-edited into a board file falls through to the default below.
+    // affordance that minted it. `sanitizeAnchor` (src/board.mjs) only runs at submit
+    // time, so an `md` anchor already stored on an archived board still reaches a
+    // packet -- it falls through to the default below and prints as `md:<ref>`.
     case 'dom': return `dom:${anchor.ref}${anchor.hint ? ` ("${anchor.hint}")` : ''}`;
     // A diagram node's anchor carries a hint too (composeHint, the same
     // rule as every other element-level anchor) -- prefer it exactly like `dom`
@@ -627,12 +606,11 @@ function packetResult(text, packet) {
  * pushing a round into it on every later one.
  *
  * Thread creation is guarded by an in-flight promise on `session`, because
- * `session.boardId == null` is read before an await and written after one: two
- * `ask` calls arriving in the same tick would otherwise both see null, both POST a
- * brand-new board and both open a tab, minting two threads for one shim. That
- * breaks "one thread per MCP shim process".
- * The promise is cleared in `finally`, so a failed first post leaves the session
- * clean for the next call to retry rather than wedging the thread forever. */
+ * `session.boardId == null` is read before an await and written after one: two `ask`
+ * calls arriving in the same tick would otherwise both see null, both POST a brand-new
+ * board and both open a tab, breaking "one thread per MCP shim process". The promise is
+ * cleared in `finally`, so a failed first post leaves the session clean for the next
+ * call to retry rather than wedging the thread forever. */
 async function postThisRound(session, title, blocks, wait) {
   if (session.creatingThread) {
     // Someone else is minting the thread. Wait it out — if it succeeded we push a
@@ -663,17 +641,17 @@ async function postThisRound(session, title, blocks, wait) {
 
   // `title` goes on every round, not just the thread's first: `ask` requires a
   // non-empty one on every call and commands/grill.md tells the agent to make it the
-  // branch name, and src/board.mjs now stores it per round for src/render.mjs to label
-  // the round with. Dropping it here left every later round labelled "Round N".
+  // branch name, and src/board.mjs stores it per round for src/render.mjs to label the
+  // round with. Dropped here, every later round reads "Round N".
   //
   // `requestId` is derived from what this round IS, not randomly: an agent retrying a
   // call whose response was lost re-sends the same blocks, so the same id, and the daemon
   // recognises it as the request it already applied instead of appending a second copy of
-  // every question. A genuinely new round differs in its blocks and
-  // so gets a different id. Scoped to the board so two boards cannot collide. `wait` is
-  // folded in too: it changes what round.awaited ends up as (src/board.mjs `mintAwait`),
-  // so a call that only flips `wait` between two otherwise-identical posts is a
-  // different request, not a retry of the first.
+  // every question. A genuinely new round differs in its blocks and so gets a different
+  // id. Scoped to the board so two boards cannot collide. `wait` is folded in too,
+  // because it changes what round.awaited ends up as (src/board.mjs `mintAwait`): a call
+  // that only flips `wait` between two otherwise-identical posts is a different request,
+  // not a retry.
   const requestId = createHash('sha256')
     .update(JSON.stringify([session.boardId, title, blocks, Boolean(wait)]))
     .digest('hex')
@@ -690,11 +668,10 @@ async function postThisRound(session, title, blocks, wait) {
  * anywhere in it: top-level, or nested inside a question's own `context` array or a
  * `compare` block's `left`/`right` side, the same three places src/board.mjs's own
  * traversals (`countersFromBoard`, `idLedgerFromBoard`, `findBlock`, `questionBlocks`)
- * walk on the normalized board — a block is minted in exactly the shape it arrives, so
- * checking the raw input finds the same set an already-posted board would.
- *
- * A round carrying a question always blocks (CONTEXT.md "Awaited"); see `wait` below
- * for the second, declared route in — a page board posted with `wait: true`. */
+ * walk on the normalized board. A block is minted in exactly the shape it arrives, so
+ * checking the raw input finds the same set an already-posted board would. A round
+ * carrying a question always blocks (CONTEXT.md "Awaited"); `wait` below is the second,
+ * declared route in. */
 function hasQuestionBlock(blocks) {
   const found = b => {
     if (!b || typeof b !== 'object') return false;
@@ -731,13 +708,13 @@ function isAwaited(blocks, wait) {
   return hasQuestionBlock(blocks) || (Boolean(wait) && isPageRoundShape(blocks));
 }
 
-/** `session` carries the in-memory, per-shim-process state a live thread needs:
- * the board id to push follow-up rounds into, and the in-flight thread-creation
- * guard. One shim == one Claude session == one thread. Everything belonging to a
- * single call — its progress sink above all — is an argument, never session state:
- * a second `ask` runs concurrently with the first by design, and storing the
- * progress sink on the session redirects call A's notifications to call B's token,
- * leaving A with nothing holding the MCP idle-abort timer off. */
+/** `session` carries the in-memory, per-shim-process state a live thread needs: the
+ * board id to push follow-up rounds into, and the in-flight thread-creation guard. One
+ * shim == one Claude session == one thread. Everything belonging to a single call — its
+ * progress sink above all — is an argument, never session state: a second `ask` runs
+ * concurrently with the first by design, and a session-stored progress sink redirects
+ * call A's notifications to call B's token, leaving A with nothing holding the MCP
+ * idle-abort timer off. */
 async function askTool(args, session, { sendProgress, cancelled }) {
   assertInteractive(); // before anything is posted or written
   assertCanOpenTab(); // the third refusal trigger — see its own comment above
@@ -774,17 +751,15 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // post lands. Opening the tab above stays best-effort either way: the shim spawns
   // the opener detached and never learns whether a tab actually appeared (see
   // openBoardTab), so "the tab opened" was never a state this could return on; "the
-  // post succeeded" is. This is also why it is checked against the round just posted
-  // rather than against `posted` (the daemon's response carries no block list back).
+  // post succeeded" is.
   //
-  // The daemon's own verdict wins when it gives one. `isAwaited` below reads the RAW
-  // blocks and cannot know whether an `html` block's `source` resolved -- so on a
-  // page board with a broken reference the two sides disagreed: the daemon minted the
-  // round not-awaited (its block carries `error`) and never built a packet, while this
-  // side blocked out the full cap on a round nothing would ever answer. `awaited` on
-  // the post response is that same `mintAwait` result, so the shim can simply agree
-  // with it. Optional by design: a daemon from before this field existed returns
-  // `undefined` and the local shape check below is what decides, exactly as it did.
+  // The daemon's own verdict wins when it gives one. `isAwaited` reads the RAW blocks
+  // and cannot know whether an `html` block's `source` resolved, so on a page board with
+  // a broken reference the two sides disagree: the daemon mints the round not-awaited
+  // (its block carries `error`) and never builds a packet, while this side would block
+  // out the full cap on a round nothing will ever answer. `awaited` on the post response
+  // is that same `mintAwait` result. Optional by design: a daemon from before the field
+  // existed returns `undefined`, and the local shape check decides exactly as it did.
   if (posted.awaited === false || !isAwaited(blocks, wait)) {
     const text = `Board posted; no response needed (nothing awaited in this round).\nBoard: ${url}`;
     return packetResult(text, {
@@ -840,12 +815,11 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     return packetResult(text, packet);
   }
 
-  // A `timeout` packet is the DAEMON's cap expiring, not the shim's, so `waited.
-  // timedOut` above is false and this used to fall through to "Board submitted."
-  // -- the agent was told the reviewer had answered when the answers were
-  // all synthesised `unanswered` and the round is still open, so the reviewer's
-  // later Send answers into nothing. Same wording as the shim-side cap, which is
-  // the same event seen from the other side.
+  // A `timeout` packet is the DAEMON's cap expiring, not the shim's, so `waited.timedOut`
+  // above is false and this needs its own branch: falling through to "Board submitted."
+  // tells the agent the reviewer answered when every answer is a synthesised
+  // `unanswered` and the round is still open. Same wording as the shim-side cap, which
+  // is the same event seen from the other side.
   if (packet.status === 'timeout') {
     const text =
       `No response before the daemon's wall-clock cap. Explicit no-response, not a hang. ` +
@@ -895,10 +869,10 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
 // opening a new one. Nothing call-scoped lives here (see askTool's comment).
 const session = { boardId: null, thread: null, url: null, creatingThread: null };
 
-/** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled`
- * has something to cancel. Without it a cancelled call leaks three things at once:
- * the progress interval keeps firing, the client-side wait stays outstanding, and
- * the daemon-side /wait poll loop runs forever on a board nobody is coming back to. */
+/** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has
+ * something to cancel. Without it a cancelled call leaks three things: the progress
+ * interval, the client-side wait, and the daemon-side /wait poll loop, which then runs
+ * on a board nobody is coming back to. */
 const inFlightCalls = new Map();
 
 function cancelCall(requestId, reason) {
@@ -964,7 +938,7 @@ async function handleMessage(msg) {
     case 'notifications/cancelled': {
       // The user pressed escape (or the client gave up). Stop the wait, the
       // progress interval and the daemon-side polling this call is driving —
-      // ignoring this leaves all three running for up to the full 2h cap.
+      // ignoring this leaves all three running for up to the full TIMEOUT_MS cap.
       const requestId = params && params.requestId;
       if (!cancelCall(requestId, params && params.reason)) {
         logErr(`cancellation for unknown or finished request ${requestId}; nothing to stop`);

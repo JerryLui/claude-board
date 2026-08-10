@@ -192,11 +192,6 @@ function anchorTag(c, lost) {
   return 'block';
 }
 
-/** `historical` disables the comment form itself (not the existing comment list,
- * which stays visible either way) once the block's round has been sent — see
- * renderQuestionBlock's doc comment for why: a sent round's whole surface,
- * comments included, renders inert rather than staying a second place to add to
- * an exchange that already went out. */
 /** The `<div class="comment-item">` list, shared by `commentArea` below and the
  * page board's own panel (`renderPageCommentPanel`): one rendering of a block's
  * stored comments, so the two surfaces can never disagree about how a comment's
@@ -267,7 +262,7 @@ function stageWrap(blockId, inner) {
  * rendered kinds can be commented on"): the reviewer comments on rendered output,
  * never on prose, so `markdown` carries neither the button nor the click-to-anchor
  * gesture, wherever it appears — including nested in a question's context or a
- * compare side. Same shape entry 6 already gave `question`/`compare`; an archived
+ * compare side. Same shape entry 28 already gave `question`/`compare`; an archived
  * board carrying a stored comment on this block simply renders without it, since
  * there is no list here to render it into. `block.anchors` and the heading/list-item
  * `id` attributes stay (they are stored state, and the ids are what
@@ -288,8 +283,6 @@ function renderMarkdownBlock(block) {
 </section>`;
 }
 
-// --- answer widgets -----------------------------------------------------------
-//
 // Each widget renders the options/answer surface only; the note field, defer
 // button and status line are shared chrome in renderQuestionBlock below. Every
 // widget sets data-question-id / data-choice (or data-answer-for) so src/ui.mjs can
@@ -300,11 +293,11 @@ function renderMarkdownBlock(block) {
  * a preview is a glance, not a second content block. */
 function renderOptionPreview(preview) {
   const trimmed = String(preview ?? '').trim();
-  // Parsed, not pattern-matched. The old sniff
-  // `^https?://\S+\.(png|...)(\?\S*)?$` let `\S+` and `\S*` compete for a `$` a
-  // trailing newline made unreachable, so a crafted `.png?`-repeated string cost
-  // O(n^2) -- ~46s at 400KB, and paid again on every read because the board is
-  // persisted after the render. URL parsing is linear and answers the same question.
+  // Parsed, not pattern-matched, and not by accident: an extension sniff written
+  // as a regex (`^https?://\S+\.(png|...)(\?\S*)?$`) backtracks quadratically on a
+  // crafted `.png?`-repeated string -- ~46s at 400KB, re-paid on every read, since
+  // the board is persisted after the render. URL parsing is linear and answers the
+  // same question.
   let looksLikeImage = false;
   try {
     const u = new URL(trimmed);
@@ -590,15 +583,15 @@ function renderContextCompareSide(side, board, commentsByBlock, historical) {
 function renderContextItem(block, board, commentsByBlock, historical) {
   const commentable = block.kind === 'html' || block.kind === 'mermaid';
   const kindClass = block.kind === 'html' ? ' html-block' : block.kind === 'mermaid' ? ' mermaid-block' : '';
-  // Mirrors what the two kinds do at top level, which this used to get wrong for
-  // one of them. `mermaid` renders inline in THIS document, so its page layer is
-  // where a `dom` anchor on the block's own chrome belongs and renderMermaidBlock
-  // emits one unconditionally. A healthy `html` stage's anchors all live inside
-  // the frame and are drawn in the layer stageWrap already emits; renderHtmlBlock
-  // therefore emits a page layer only on the error path, and this did it always --
-  // giving a context-nested stage two layers, so wirePageDomPins found the second
-  // one and drew every stage-scoped comment a SECOND time, at a fabricated
-  // position, from refs that cannot resolve outside the frame.
+  // Mirrors what the two kinds do at top level. `mermaid` renders inline in THIS
+  // document, so its page layer is where a `dom` anchor on the block's own chrome
+  // belongs and renderMermaidBlock emits one unconditionally. A healthy `html`
+  // stage's anchors all live inside the frame and are drawn in the layer stageWrap
+  // already emits, so renderHtmlBlock emits a page layer only on the error path --
+  // emitting one unconditionally here would give a context-nested stage TWO
+  // layers, and wirePageDomPins would find the second and draw every stage-scoped
+  // comment a second time, at a fabricated position, from refs that cannot resolve
+  // outside the frame.
   const pinLayer = block.kind === 'mermaid' || block.error ? pageDomPinLayer(block.id) : '';
   const affordance = commentable
     ? `${commentButton(block.id)}${pinLayer}${commentArea(block.id, commentsByBlock, historical)}`
@@ -657,8 +650,6 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
 </section>`;
 }
 
-// --- context / content block kinds ---------------------------------------------
-
 function resolveErrorNote(block) {
   return block.error ? `<p class="resolve-error">Could not resolve: ${escHtml(block.error)}</p>` : '';
 }
@@ -712,9 +703,8 @@ function sourceLabel(source) {
   return label;
 }
 
-// --- syntax highlighting (SPEC_RENDERING.md ticket 02, ADR.md entries 62-63) ------
-//
-// Runs server-side at POST time (renderCodeBlock is called from board.mjs's render
+// Syntax highlighting (SPEC_RENDERING.md ticket 02, ADR.md entry 62-63) runs
+// server-side at POST time (renderCodeBlock is called from board.mjs's render
 // path exactly like every other block), so the served page carries only the emitted
 // `tok-*` spans, never the Prism engine itself, and highlighting emits classes and
 // NEVER an inline colour -- that is the whole trick that lets the theme toggle
@@ -879,10 +869,9 @@ const MAX_HIGHLIGHT_CHARS = 8192;
  * every span self-contained within the one row it is ever wrapped inside. */
 function highlightRows(text, grammar) {
   const leaves = [];
-  // The one extra condition beside "is there a grammar": over MAX_HIGHLIGHT_CHARS
-  // (see its comment for the measurements) the block takes this same fallback
-  // branch. Same code path, same output shape, so everything built on top of
-  // highlightRows -- the gutter, the diff fill, copy fidelity -- is unaffected.
+  // Over MAX_HIGHLIGHT_CHARS (see its comment for the measurements) a block takes
+  // the same fallback branch a missing grammar takes: same code path, same output
+  // shape, so the gutter, the diff fill and copy fidelity are unaffected.
   if (grammar && text && text.length <= MAX_HIGHLIGHT_CHARS) flattenTokens(Prism.tokenize(text, grammar), undefined, leaves);
   else leaves.push([text, undefined]);
 
@@ -1012,8 +1001,6 @@ export function highlightFenceHtml(text, lang) {
   const rows = highlightRows(text, grammarFor(lang));
   const body = lang === 'diff' ? diffCodeBody(rows, classifyDiffLines(text), { gutter: false }) : rows.join('\n');
   const pre = `<pre><code>${body}</code></pre>`;
-  // Same vendored-or-not test highlightRows already made above -- see this
-  // function's own comment for why that reuse is deliberate, not incidental.
   if (!lang || !grammarFor(lang)) return pre;
   return `<div class="fence-lang" data-lang="${escAttr(lang)}">${pre}</div>`;
 }
@@ -1032,23 +1019,12 @@ export function highlightFenceHtml(text, lang) {
  * performs internally, so index i here and row i there always describe the same
  * physical line).
  *
- * Returns one `{ kind, line }` per physical line of `text`:
- *   - 'meta', line: null       -- a hunk header, a file header ('---'/'+++'/
- *                                 'diff --git'/'index ...'), or anything before the
- *                                 first hunk header is ever seen (a malformed or
- *                                 header-less diff never leaves this state, so it
- *                                 degrades to every row reading 'meta' -- no line
- *                                 number is ever invented, and nothing throws).
- *   - 'add', line: newLine     -- an added row, numbered in the NEW file (AC 7).
- *   - 'del', line: oldLine     -- a removed row, numbered in the OLD file -- the
- *                                 "falling back to the old number" AC 7 asks for:
- *                                 a removed row has no new-file line at all, so the
- *                                 old-file number is the only real one it carries.
- *   - 'context', line: newLine -- an unchanged row. Shown in both files, at
- *                                 potentially different numbers; the new-file
- *                                 number is the one convention chosen (matching
- *                                 'add' above, and the only one this renderer has a
- *                                 single gutter column for).
+ * Returns one `{ kind, line }` per physical line of `text`: 'meta' with a null
+ * line for a hunk header, a file header ('---'/'+++'/'diff --git'/'index ...') or
+ * anything outside a hunk; 'add' numbered in the NEW file (AC 7); 'del' numbered
+ * in the OLD file, which is AC 7's "falling back to the old number" -- a removed
+ * row has no new-file line at all; 'context' numbered in the new file too, the one
+ * convention chosen since this renderer has a single gutter column.
  *
  * WHAT COUNTS AS A HEADER is decided by hunk state, never by the line's own first
  * bytes, and that is the whole correctness argument here. A row's '+'/'-' prefix is
@@ -1075,10 +1051,10 @@ export function highlightFenceHtml(text, lang) {
  *
  * A '\' line ('\ No newline at end of file') is meta before any of that: it is a
  * line of neither file -- git's note ABOUT the preceding line -- so it takes no
- * gutter number and spends nothing. It used to fall through to the context branch,
- * where it took a number of its own and advanced both counters, which pushed every
- * row after it in the hunk off by one (canonically: the '+three!' of a last-line
- * edit rendering as line 4 of a three-line file).
+ * gutter number and spends nothing. Treated as context it would take a number of
+ * its own and advance both counters, pushing every row after it in the hunk off by
+ * one (canonically: the '+three!' of a last-line edit rendering as line 4 of a
+ * three-line file).
  *
  * A malformed diff still degrades rather than throwing: counts that overstate the
  * body leave the hunk open to the end of the text (today's behaviour), and a text
@@ -1235,320 +1211,31 @@ function codeBody(block) {
   return `<pre><code${codeClass}>${numbered}${trailingNewline ? '\n' : ''}</code></pre>`;
 }
 
-// --- design: genuine stage isolation via postMessage -----------------
+// --- the stage postMessage channel ------------------------------------
 //
-// "Isolation of hand-mocked HTML is kept": a
-// mock's CSS and markup must never leak into or clash with the board page. Before
-// this ticket that promise was false for SCRIPT: the iframe below carried
-// `sandbox="allow-same-origin allow-scripts"`, and `allow-same-origin` on a
-// `srcdoc` frame keeps the embedder's origin -- so a `<script>` in agent-supplied
-// `block.html` ran as first-party at the daemon's own origin, could read/write
-// the parent document, and could fetch every board on the
-// machine and answer another agent's blocked `ask()` with attacker-chosen text.
-// `allow-same-origin` is DROPPED below: the frame's browsing context now has an
-// OPAQUE origin, `frame.contentDocument`/`frame.contentWindow.document` throw or
-// return null from the parent's side, and a script inside the mock cannot reach
-// the parent's window/document at all (test/check-stage-isolation.mjs proves
-// this directly, and test/dom-stand-in.mjs's StandInWindow models a stage's
-// `window.parent` as an object exposing ONLY `postMessage`, never `.document`,
-// for the same reason).
+// The message tables, origin/identity rules and shape-validation rules are in
+// PROTOCOL.md, "Stage postMessage channel". src/ui.mjs holds the parent half of
+// this channel; STAGE_SCRIPT below is the stage half.
 //
-// That means the parent can no longer reach into the stage to build a step path,
-// read an element's text, or draw a pin from its live layout -- everything
-// src/ui.mjs's old `wireHtmlStage` did directly. So the stage needs its own
-// agent: STAGE_SCRIPT below, inlined into every html block's `srcdoc` (never a
-// URL -- QUIRKS.md "no external assets, ever"), alongside whatever the mock
-// itself supplies. It and the parent (src/ui.mjs's message listener, see that
-// file's own copy of this design comment) talk over `postMessage`, and nothing
-// else.
+// The two rules to know before editing either side:
 //
-// MESSAGES. Every message is a plain object carrying `cb: 'cb-stage'` (a marker
-// namespacing this channel from anything else that might ever postMessage this
-// window -- a browser extension, devtools, a future unrelated feature) and a
-// `type`. Neither side ever trusts a message's SHAPE beyond what it explicitly
-// checks -- the stage document is attacker-controlled, so the parent has to
-// assume the mock's own script sends it hostile messages on the same channel our
-// own agent uses, and validates every field's type before acting on it.
+//   - The frame carries `sandbox="allow-scripts"` and NOT `allow-same-origin`,
+//     so its origin is opaque and the parent cannot reach into it at all. Adding
+//     `allow-same-origin` back to a `srcdoc` frame keeps the embedder's origin,
+//     which would let agent-supplied `block.html` run first-party at the
+//     daemon's origin, read the parent document, and answer another agent's
+//     blocked `ask()`. test/check-stage-isolation.mjs proves it stays opaque.
+//   - Every message is stage-authored input. Both sides validate identity
+//     (`event.source`, which the browser stamps and no script can forge) and
+//     then every field's type, before acting.
 //
-//   STAGE -> PARENT
-//     'ready'                          -- the agent has attached its listeners;
-//                                          sent once, unconditionally, at the end
-//                                          of this script (see below).
-//     'hover'  { ref, tag, text }       -- the innermost element under the cursor
-//                                          (ref = a buildSteps/stepsToPath index
-//                                          chain from `document.body`, or null on
-//                                          mouseout), so the parent CAN show a
-//                                          hint before commit -- the stage still
-//                                          applies its OWN outline locally
-//                                          (ensureHoverStyle/clearHover below),
-//                                          exactly as before this ticket, since
-//                                          that never needed to leave the stage's
-//                                          own document.
-//     'click'  { ref, tag, text }       -- the clicked element's step path plus
-//                                          its RAW tag/text -- never a composed
-//                                          hint. Composing "identity in context"
-//                                          (composeHint, src/anchor.mjs) needs
-//                                          the OUTER document's own knowledge of
-//                                          whether this stage sits inside a
-//                                          compare side, which the stage cannot
-//                                          see -- so the parent, not the stage,
-//                                          calls buildHint on the raw tag/text it
-//                                          receives, through the exact same
-//                                          function every other content kind's
-//                                          click already used. This is also why
-//                                          `composeHint` needs no THIRD copy
-//                                          embedded here alongside src/ui.mjs's
-//                                          own (single-source discipline): only
-//                                          `buildSteps`/`stepsToPath`/
-//                                          `pathToSteps`/`resolveSteps` do, bound
-//                                          below via `.toString()` from
-//                                          src/anchor.mjs exactly like
-//                                          src/ui.mjs's own embedded
-//                                          `composeHint` -- never hand-copied.
-//     'positions' { requestId, positions } -- the response to a 'locate'
-//                                          request: for every requested ref,
-//                                          `{left, top}` relative to this
-//                                          document's own `<body>` (the SAME
-//                                          formula src/ui.mjs's old
-//                                          `renderDomPins` used when it could
-//                                          still read `doc.body` directly), or
-//                                          `null` if that ref no longer
-//                                          resolves. Never anything but numbers
-//                                          and null -- the parent only ever uses
-//                                          this to position a pin it already
-//                                          decided to draw from its own,
-//                                          server-verdict-derived comment list
-//                                          (src/ui.mjs's `commentsWithPending`),
-//                                          never to decide WHETHER a pin exists.
-//     'height' { height }               -- `document.body.scrollHeight`, because
-//                                          this document is the only thing that
-//                                          can ever know its own rendered height
-//                                          (see `reportHeight`, below, for why the
-//                                          FIRST call cannot simply run at script
-//                                          scope: a sandboxed srcdoc frame reads 0
-//                                          at `load` and even a zero-delay
-//                                          `setTimeout`, since there is no
-//                                          external subresource for `load` to wait
-//                                          on -- a double `requestAnimationFrame`
-//                                          is what actually waits for layout).
-//                                          STAGE-AUTHORED input like every other
-//                                          field here, so the parent never trusts
-//                                          it outright: src/ui.mjs clamps between
-//                                          `STAGE_HEIGHT_FLOOR` and
-//                                          `STAGE_HEIGHT_CAP` (320 / 600, ADR 41)
-//                                          before it ever touches a frame's inline
-//                                          style, so neither a hostile report nor
-//                                          one measuring a viewport-sized artifact
-//                                          can grow a card without limit -- and
-//                                          the floor stops a report that measured
-//                                          only a collapsed sliver of chrome from
-//                                          locking the card there forever, since a
-//                                          taller report never arrives from
-//                                          content that isn't reflowing. Applied
-//                                          only to a stage inside a
-//                                          '.choice-variant' card; a standalone
-//                                          stage's height is unaffected.
-//     'scroll' { top }                  -- BOTH DIRECTIONS, the one type on this
-//                                          whole channel that is. Outbound (here)
-//                                          it reports "I am at this offset": ADR.md
-//                                          entry 40's page-board header condenses
-//                                          on the READER'S scroll, but on a page
-//                                          board the document itself never scrolls
-//                                          (the artifact scrolls inside this
-//                                          opaque-origin frame instead), so the
-//                                          parent has no way to observe that short
-//                                          of being told. Deduplicated on the last
-//                                          reported value and aimed at whichever
-//                                          element most recently scrolled, not
-//                                          assumed to be the document -- see this
-//                                          file's own "scroll, the one thing the
-//                                          parent genuinely cannot see" comment,
-//                                          above `reportScroll`, for why that
-//                                          assumption was a real, measured defect.
-//                                          See PARENT -> STAGE, below, for the
-//                                          inbound half of this same type.
-//
-//   PARENT -> STAGE
-//     'mode' { commentMode }            -- comment mode turned on/off. The stage
-//                                          keeps its OWN local `commentMode`
-//                                          flag, read by the same
-//                                          `if (!commentMode) return;` guards
-//                                          `wireHtmlStage`'s old in-parent
-//                                          listeners used, so hover/cursor/click
-//                                          obey the toggle exactly as they did
-//                                          before this ticket -- one
-//                                          gesture, toggle-gated everywhere. The hover
-//                                          stylesheet itself is injected
-//                                          LAZILY, the first time `commentMode`
-//                                          turns true (not at script start) --
-//                                          a read-only archive never sends this
-//                                          message at all (src/ui.mjs's
-//                                          `setCommentMode` refuses to turn
-//                                          comment mode on when `readonly`), so
-//                                          an archived stage's document never
-//                                          gains a hover stylesheet, matching
-//                                          this ticket's unchanged behavioural
-//                                          contract (test/check-archive.mjs).
-//     'locate' { requestId, refs }      -- asks for the current `{left, top}`
-//                                          of every ref in `refs` (the parent
-//                                          draws pins in its OWN layer, over the
-//                                          iframe -- unchanged, see
-//                                          src/render.mjs's `pageDomPinLayer`
-//                                          equivalent for the stage,
-//                                          `pin-layer` in `.stage-wrap` below --
-//                                          so it needs the stage to report
-//                                          geometry rather than ever reaching
-//                                          in for it itself). Sent once a stage
-//                                          announces itself 'ready' (covers the
-//                                          initial paint, including a read-only
-//                                          archive's already-resolved pins) and
-//                                          again whenever src/ui.mjs's
-//                                          `refreshPins` runs (resize, a comment
-//                                          queued, a submit landing).
-//     'band' { top, bottom }            -- the board's own chrome band, top and
-//                                          bottom, right now (ADR.md entry 59):
-//                                          the parent's header/dock/comment rail
-//                                          float OVER this frame rather than
-//                                          pushing it down, so an artifact that
-//                                          pads nothing loses its own opening
-//                                          under them with nothing to warn it. No
-//                                          fixed number is baked in anywhere on
-//                                          either side -- the header's real height
-//                                          moves with the title's wrap and the
-//                                          viewport's width -- so the parent
-//                                          measures its own live chrome
-//                                          (src/ui.mjs's `reportStageBand`) and
-//                                          tells the stage, which tops its own
-//                                          `body` padding up to at least that much
-//                                          (`applyBand`, below) rather than
-//                                          overwriting whatever padding the
-//                                          artifact already had. Parent -> stage
-//                                          only, no outbound half: the stage never
-//                                          reports a band of its own, since
-//                                          reserving space for the board's chrome
-//                                          is the board's decision, never a
-//                                          negotiation. Sent once a stage
-//                                          announces 'ready' and again whenever
-//                                          `reportStageBand` reruns (resize, the
-//                                          comment rail changing size, a round
-//                                          flip).
-//     'scroll' { top }                  -- the inbound half of the one
-//                                          bidirectional type on this channel (see
-//                                          STAGE -> PARENT, above): "put yourself
-//                                          at this offset", read the other way
-//                                          round, since the parent cannot scroll a
-//                                          cross-origin document itself. Sent only
-//                                          as a reset, `top: 0`, by the board's own
-//                                          back-to-top control -- the SAME message
-//                                          shape the stage reports with, aimed at
-//                                          whichever element last identified
-//                                          itself as the scroller (see the
-//                                          outbound entry).
-//
-// NO 'select' MESSAGE, DELIBERATELY (choose-between-rendered-variants). An earlier version of this widget had
-// the stage post an unconditional, content-free 'select' on every click, so
-// clicking the visible mock content of an html-kind OPTION -- not just the
-// card's own chrome outside the iframe -- could pick that option; the parent
-// acted on it whenever the frame sat inside a '.choice-variant' card. Reverted
-// (before this ticket merged): every message on this channel is
-// STAGE-AUTHORED input, no different in kind from the mock's own HTML or the
-// agent's own script inside it -- and unlike 'click'/'hover' (which only ever
-// PROPOSE an anchor a human still has to submit) or 'positions' (pure
-// geometry), a message that could pick an option is the agent handing itself
-// the answer to its own question. Two paths made that concrete: the stage's
-// OWN script could dispatch a click on itself (an autoplaying demo, an
-// animation, a mock that clicks its own button) with no human involved at
-// all, and separately -- since `cb: 'cb-stage'` is a fixed, documented public
-// string and origin/identity validation only prove a message came from SOME
-// live stage, never that a human acted on it -- any stage's own script could
-// call `window.parent.postMessage({cb:'cb-stage', type:'select'}, '*')`
-// directly, skipping stageAgentScript's click handling entirely. Guarding the
-// message (an `ev.isTrusted` check, say) would have closed only the first
-// path; the second forges the message itself, upstream of any such guard.
-// Deleted instead of guarded: an option's stage is a THUMBNAIL to choose
-// between, not a surface to operate, so it is rendered `pointer-events: none`
-// inside a '.choice-variant' card (src/styles.mjs) -- a real, trusted click
-// over the visible mock can then never reach the iframe at all, and lands on
-// the card in the parent document instead, which already handles it (see
-// renderVariantOption's own comment). See test/check-stage-isolation.mjs's
-// own tests for this: a forged 'select'-shaped message from a live,
-// correctly-addressed stage is inert, because there is no handler left to
-// act on it.
-//
-// ORIGIN VALIDATION -- an opaque-origin `srcdoc` frame has no real origin to
-// check against, so "just compare to our own origin" (the usual same-origin
-// check) is meaningless here. What each side actually validates, and why it is
-// correct:
-//
-//   - PARENT reading a STAGE message (src/ui.mjs): `event.origin === 'null'`.
-//     Dropping `allow-same-origin` makes the stage's browsing context opaque,
-//     and the HTML living standard serializes an opaque origin, in a
-//     `postMessage` event, as the literal four-character string `"null"` --
-//     always, regardless of what URL/port the PARENT page itself is served
-//     from (a live `http://127.0.0.1:<port>` or a `file://` archive). That is
-//     not "an origin we happen to trust", it is the ABSENCE of an origin: any
-//     message from anywhere else on the web (a browser extension, devtools, a
-//     same-origin script the reviewer runs in the SAME tab -- which would carry
-//     the page's real origin, not "null") is rejected by this check alone,
-//     before any shape/identity check even runs. It is necessary but not
-//     sufficient on its own (see identity, next) -- there is nothing else in
-//     this browsing context that could ever produce a "null"-origin message
-//     other than one of this page's OWN sandboxed stages, but nothing here yet
-//     says WHICH one.
-//   - PARENT identity check: `event.source` must equal the `contentWindow` of a
-//     currently-mounted `.html-stage` frame -- not just "some opaque-origin
-//     frame", but a SPECIFIC one this page actually rendered.  `event.source`
-//     is a value the browser itself stamps on the event from the calling
-//     script's actual global object; no page script anywhere can forge it (it
-//     is not read off `event.data`, which IS attacker-controlled). Re-deriving
-//     "which stage" by walking the live DOM at message-receive time, rather
-//     than trusting an id the message claims for itself, is what makes this
-//     the frame the parent actually thinks it is.
-//   - STAGE reading a PARENT message (this script, below): `event.source ===
-//     window.parent`. The stage has no reliable way to know the PARENT's real
-//     origin in advance (the page can be served from any port, or opened as
-//     `file://`), so an origin STRING check is not available to it the way it
-//     is to the parent -- but it does not need one: `window.parent` is a
-//     reference the browser hands this script once, at frame-creation time,
-//     and (like `event.source` above) no script running in ANY window can make
-//     `event.source` equal a DIFFERENT window's `window.parent` reference by
-//     forging data. Identity alone is sufficient and correct here; there is no
-//     meaningful second origin string to also check.
-//
-// SHAPE VALIDATION. Every handler on both sides checks every field's type
-// before using it -- `typeof x === 'string'`, `Array.isArray`, `Number.isFinite`
-// -- and drops anything that doesn't match rather than throwing or coercing. In
-// particular the PARENT never evaluates, renders as HTML, or otherwise trusts a
-// string FROM the stage: a hint is composed server-recognisable-safe from
-// `tag`/`text` via the same `buildHint`/`composeHint` every other click already
-// used (never `innerHTML`), and every anchor field lands in the comment form via
-// `setAttribute`/`textContent` (src/ui.mjs's `openCommentForm`, unchanged), never
-// string-concatenated into markup. See test/check-stage-isolation.mjs and
-// test/check-click.mjs's malformed/hostile-message cases for the ablations this
-// reasoning is checked against.
-
-/** The stage-side half of the postMessage protocol above, inlined into every
- * html block's `srcdoc` (see renderHtmlBlock below), alongside whatever the
- * mock itself supplies. `buildSteps`/`stepsToPath`/`pathToSteps`/`resolveSteps`
- * are embedded via `.toString()` -- the exact same binding technique
- * src/ui.mjs already uses for `composeHint` (see that file's own comment on
- * why: dependency-free pure functions can be spliced in verbatim rather than
- * hand-copied a second time, which is what "single-source discipline"
- * requires here). Placed AFTER the mock's own
- * markup in the `srcdoc` string (renderHtmlBlock, below) rather than before
- * it: every listener here is attached to `document.body` itself (delegation),
- * which needs `document.body` to already exist and works regardless of
- * whether the mock's own content was added before or after this script runs --
- * see test/dom-stand-in.mjs's `runInlineScripts` for why this placement
- * matters for a real browser, not just this stand-in. */
-// Exported so test/check-pure.mjs and test/check-stage-isolation.mjs
-// can inspect and execute this exact string -- the same reason `ui` is exported
-// from src/ui.mjs. Behavioural checks (test/check-click.mjs and friends) already
-// run it for real, inside a rendered board's srcdoc, through test/dom-stand-in.mjs;
-// this export is what lets a check assert STRUCTURAL properties of the one real
-// copy (e.g. "the hover style is injected lazily, gated on comment mode actually
-// turning on") without parsing it back out of a rendered page's escaped HTML
-// attribute.
+// And one decision that reads as a gap: there is deliberately NO 'select'
+// message. A message that could pick an option is the agent answering its own
+// question, and it cannot be guarded, only removed -- any stage's script can
+// forge one directly on this channel's fixed public marker. An option's stage
+// is instead `pointer-events: none` inside a '.choice-variant' card, so a real
+// click lands on the card in the parent document. PROTOCOL.md carries the two
+// attack paths in full.
 
 /** The stage's hover-highlight color -- a literal hex, deliberately NOT a CSS
  * custom property. This srcdoc document is sandboxed and its stylesheet
@@ -1594,6 +1281,29 @@ function codeBody(block) {
  * drift guard (equality with --accent's light value) separately, so a palette
  * change that breaks any one of the three fails on the one it broke. */
 export const STAGE_ACCENT_HEX = '#3251c9';
+
+/** The stage-side half of the postMessage protocol above, inlined into every
+ * html block's `srcdoc` (see renderHtmlBlock below), alongside whatever the
+ * mock itself supplies. `buildSteps`/`stepsToPath`/`pathToSteps`/`resolveSteps`
+ * are embedded via `.toString()` -- the exact same binding technique
+ * src/ui.mjs already uses for `composeHint` (see that file's own comment on
+ * why: dependency-free pure functions can be spliced in verbatim rather than
+ * hand-copied a second time, which is what "single-source discipline"
+ * requires here). Placed AFTER the mock's own
+ * markup in the `srcdoc` string (renderHtmlBlock, below) rather than before
+ * it: every listener here is attached to `document.body` itself (delegation),
+ * which needs `document.body` to already exist and works regardless of
+ * whether the mock's own content was added before or after this script runs --
+ * see test/dom-stand-in.mjs's `runInlineScripts` for why this placement
+ * matters for a real browser, not just this stand-in. */
+// Exported so test/check-pure.mjs and test/check-stage-isolation.mjs
+// can inspect and execute this exact string -- the same reason `ui` is exported
+// from src/ui.mjs. Behavioural checks (test/check-click.mjs and friends) already
+// run it for real, inside a rendered board's srcdoc, through test/dom-stand-in.mjs;
+// this export is what lets a check assert STRUCTURAL properties of the one real
+// copy (e.g. "the hover style is injected lazily, gated on comment mode actually
+// turning on") without parsing it back out of a rendered page's escaped HTML
+// attribute.
 
 export function stageAgentScript() {
   return `<script>(function () {
@@ -1750,15 +1460,14 @@ export function stageAgentScript() {
     hovered = el;
     var steps = buildSteps(document.body, el);
     var ref = (steps && steps.length) ? stepsToPath(steps) : null;
-    // An element whose own ref already carries a SENT comment is
-    // de-affordanced (SENT_CLASS) instead of marked as an ordinary target
-    // (HOVER_CLASS). This is the VISIBILITY half only -- the click handler
-    // below still posts 'click' unconditionally, exactly as before; "clicking
-    // it does nothing" is already enforced on the other side of the channel
-    // (src/ui.mjs's handleStageClick calls isSentAnchor before ever opening a
-    // form), which is the side that actually holds board.comments and can
-    // tell a resolved sent comment from a stale ref this document has no way
-    // to distinguish on its own.
+    // The VISIBILITY half only: an element whose own ref already carries a SENT
+    // comment is de-affordanced (SENT_CLASS) rather than marked as an ordinary
+    // target (HOVER_CLASS), while the click handler below still posts 'click'
+    // unconditionally. "Clicking it does nothing" is enforced on the other side
+    // of the channel (src/ui.mjs's handleStageClick calls isSentAnchor before
+    // ever opening a form), which is the side that holds board.comments and can
+    // tell a resolved sent comment from a stale ref this document has no way to
+    // distinguish on its own.
     if (ref !== null && sentRefs.indexOf(ref) !== -1) {
       hovered.classList.add(SENT_CLASS);
     } else {
@@ -1862,8 +1571,8 @@ export function stageAgentScript() {
   // either. 'top' is a plain number in both directions and is validated as one
   // on both sides.
   //
-  // A real scroll listener, deliberately: the no-scroll-handler rule (ADR.md
-  // entry 27, src/badge.mjs) is a rule about the BOARD page, where an
+  // A real scroll listener, deliberately: the no-scroll-handler rule
+  // (src/badge.mjs) is a rule about the BOARD page, where an
   // IntersectionObserver can see everything a scroll handler could. Nothing can
   // observe this document from outside it, so the listener lives here, in the
   // one place that can see the fact. Deduplicated on the last reported value,
@@ -1944,7 +1653,7 @@ export function stageAgentScript() {
     if (scroller) scroller.scrollTop = top;
   }
 
-  // ADR.md entry 39: the board's theme control paints this document too, so a
+  // The board's theme control paints this document too, so a
   // rendered artifact needs none of its own. The parent resolves its own
   // three-state control (light / dark / the attribute's ABSENCE, meaning
   // System) down to a concrete 'light' or 'dark' before sending -- see
@@ -1982,8 +1691,8 @@ export function stageAgentScript() {
         sentRefs = data.sentRefs.filter(function (r) { return typeof r === 'string'; });
       }
       // 'theme' widens this message the same way 'sentRefs' above already does
-      // (ADR.md entry 39 -- "over the channel that already carries comment
-      // mode"), rather than minting a type of its own: same tolerance, same
+      // (over the channel that already carries comment mode), rather than
+      // minting a type of its own: same tolerance, same
       // convention. An absent or unrecognised value leaves this document's
       // theme exactly as it was, so a stage that is never told stays on
       // whatever its own markup chose.
@@ -2036,7 +1745,7 @@ export function stageAgentScript() {
   reportHeightAfterLayout();
   // Keeps the report tracking a mock whose content changes size AFTER first
   // paint (an image loading in, a toggle revealing more copy) -- guarded
-  // exactly the way src/ui.mjs's setupRoundObserver guards
+  // exactly the way src/ui.mjs's setupSendBarDock guards
   // 'IntersectionObserver' (QUIRKS.md "The stand-in has no layout"): this
   // repo's DOM stand-in defines neither this nor requestAnimationFrame, so
   // neither the first, layout-deferred report nor a later resize-driven one
@@ -2064,18 +1773,6 @@ export function stageAgentScript() {
  * assert against this exact string rather than a hand-copied guess at it. */
 export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>';
 
-/** A raw HTML stage, for hand-mocked UI previews with no source file — the one
- * context kind passed by value (see PROTOCOL.md Blocks). Rendered inside a
- * sandboxed iframe so the mock's own markup/CSS/script never leaks into or
- * clashes with the board page — including its SCRIPT, not merely its CSS and
- * markup, since `allow-same-origin` was dropped (see the design comment
- * above): the frame's browsing context is now genuinely cross-origin from the
- * daemon's own, so `contentDocument`/`contentWindow.document` are unreachable
- * from the parent, and element-level click-to-comment goes over the
- * `stageAgentScript` postMessage channel instead. `pin-layer` is an empty,
- * absolutely positioned sibling over the iframe that src/ui.mjs populates with
- * numbered pins for `dom` anchors, positioned from geometry the stage itself
- * reports (never written to here, since that needs a real, live DOM). */
 /** The `srcdoc` every html stage gets, whole-block or nested in a question's
  * context (renderContextInner, below) alike: the margin reset, the mock's own
  * markup, then the stage-side agent script -- one construction, so the two
@@ -2085,7 +1782,7 @@ function buildStageSrcdoc(block) {
 }
 
 /** The awaited page's own send control (SPEC_AWAITED.md ticket 03; ADR.md
- * entries 45, 46, 48, 49). `.page-comments` (renderHtmlBlock's fullpage branch,
+ * entries 45, 46, 40). `.page-comments` (renderHtmlBlock's fullpage branch,
  * below) carries an entirely different surface depending on whether `round` is
  * *awaited* right now (CONTEXT.md), computed by `roundIsCurrentlyAwaited`
  * (src/badge.mjs) against `nowMs` -- the SAME predicate the header pill reads,
@@ -2099,7 +1796,7 @@ function buildStageSrcdoc(block) {
  *     before a wait died has nowhere else to keep rendering ("comments already
  *     left stay on screen", AC 12), and src/ui.mjs's refreshPins looks this id
  *     up by the same convention every block's list uses.
- *   - open and awaited, short of its deadline: the live surface -- the ADR 48
+ *   - open and awaited, short of its deadline: the live surface -- the
  *     hint line while the list is empty (teaching the click-to-comment gesture,
  *     since comment mode already starts ON here and the toggle itself is no
  *     longer what reveals the gesture), the compose form, the list, and the
@@ -2163,7 +1860,21 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
     </div>`;
 }
 
-/** `fullpage`: this stage is the whole board (ADR.md entry 33), so it renders
+/** A raw HTML stage, for hand-mocked UI previews with no source file — the one
+ * context kind passed by value (see PROTOCOL.md Blocks). Rendered inside a
+ * sandboxed iframe so the mock's own markup/CSS/script never leaks into or
+ * clashes with the board page — including its SCRIPT, not merely its CSS and
+ * markup, since `allow-same-origin` was dropped (see the stage-channel comment
+ * above stageAgentScript): the frame's browsing context is genuinely
+ * cross-origin from the daemon's own, so `contentDocument`/
+ * `contentWindow.document` are unreachable from the parent, and element-level
+ * click-to-comment goes over the `stageAgentScript` postMessage channel instead.
+ * `pin-layer` is an empty, absolutely positioned sibling over the iframe that
+ * src/ui.mjs populates with numbered pins for `dom` anchors, positioned from
+ * geometry the stage itself reports (never written to here, since that needs a
+ * real, live DOM).
+ *
+ * `fullpage`: this stage is the whole board (ADR.md entry 33), so it renders
  * with no kicker at all and its comment surface floats over the frame instead of
  * sitting under it. What does NOT change is everything the stage gesture is
  * built on: the same `.block.html-block` section carrying the same
@@ -2178,7 +1889,7 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
  * The kicker's two controls go rather than being hidden, since neither holds any
  * state: the comment button mints a whole-block comment the click gesture inside
  * the frame already covers, and the expand control opens a lens that is a copy
- * of what already fills the viewport (ADR.md entry 43). The send bar is the
+ * of what already fills the viewport. The send bar is the
  * opposite case and is deliberately still emitted — see renderBoardPage. */
 function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = false) {
   // A referenced source can fail to resolve (sliced
@@ -2196,38 +1907,30 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   }
   // A referenced file's resolved text lands in `block.html` exactly where a
   // hand-mocked stage's by-value text always did (src/board.mjs's normalizeBlock),
-  // so the srcdoc built here is the SAME for both -- nothing downstream of
-  // resolution knows or cares whether the markup came from disk or the wire.
+  // so the srcdoc built here is the SAME for both.
   //
-  // STAGE_MARGIN_RESET (below) exists for exactly one reason: a bare fragment
-  // `srcdoc` (no <html>/<head>/<body> of its own) still gets the UA default
-  // `body { margin: 8px }`, which showed the frame's own background
-  // (`--stage-bg`, `.html-stage` in src/styles.mjs) through an 8px gutter on
-  // every side of every hand-authored mock. Its only job is the margin/padding
-  // reset -- no color anywhere in it, so html/body stay transparent and the
-  // parent-controlled `--stage-bg` still shows through wherever the mock
-  // itself paints nothing.
+  // STAGE_MARGIN_RESET carries no colour at all, only the margin/padding reset, so
+  // html/body stay transparent and the parent-controlled `--stage-bg`
+  // (`.html-stage`, src/styles.mjs) still shows through wherever the mock itself
+  // paints nothing -- without the reset the UA default `body { margin: 8px }`
+  // shows that background through an 8px gutter on every side of every
+  // hand-authored mock.
   //
-  // Deliberately a LEADING <style> tag, not an explicit <html><head>...</head>
-  // <body>...</body></html> wrapper: a real browser only hoists a leading run
-  // of head-only elements (HEAD_ONLY_TAGS -- style/script/meta/link/title/base)
-  // out of `document.body` when the srcdoc is parsed as the bare fragment it
-  // actually is (see src/anchor.mjs's own HEAD_ONLY_TAGS comment and the C2 fix
-  // shipped for it). An explicit `<body>` opened before block.html's
-  // own leading `<style>` (the ordinary case for a mock that styles itself --
-  // see this function's own header comment) stops that hoist dead: once body
-  // is genuinely, explicitly open, the HTML parsing algorithm inserts a
-  // subsequent style/script tag as an ordinary CHILD of body instead of
-  // reopening head for it, which shifts every `dom`-anchor ref index by one
-  // and breaks exactly the mocks this exists to support (confirmed
-  // against test/check-click.mjs's own C2 check, which fails hard on an
+  // It is deliberately a LEADING <style> tag, not an explicit <html><head>...
+  // </head><body>...</body></html> wrapper. A real browser only hoists a leading
+  // run of head-only elements (HEAD_ONLY_TAGS -- style/script/meta/link/title/
+  // base) out of `document.body` when the srcdoc is parsed as the bare fragment it
+  // actually is (see src/anchor.mjs's own HEAD_ONLY_TAGS comment). An explicit
+  // `<body>` opened before block.html's own leading `<style>` -- the ordinary case
+  // for a mock that styles itself -- stops that hoist dead: once body is
+  // genuinely, explicitly open, the HTML parsing algorithm inserts a subsequent
+  // style/script tag as an ordinary CHILD of body instead of reopening head for
+  // it, which shifts every `dom`-anchor ref index by one and breaks exactly the
+  // mocks this exists to support (test/check-click.mjs's C2 check fails hard on an
   // explicit-body wrapper here). A leading `<style>` has no such cost: it is
-  // itself just the first element of that same leading head-only run, so it
-  // hoists out of body right alongside a mock's own leading `<style>` (if any),
-  // in encounter order, and a <style> element's rules apply wherever it ends
-  // up in the tree regardless. block.html + stageAgentScript() still land in
-  // exactly the same relative order as before, immediately after the reset --
-  // this only prepends, it never moves the script.
+  // itself the first element of that same head-only run, so it hoists out of body
+  // alongside a mock's own leading `<style>`, in encounter order, and a <style>
+  // element's rules apply wherever it ends up in the tree regardless.
   const srcdocContent = buildStageSrcdoc(block);
   if (fullpage) {
     const round = board.rounds.find(r => r.n === block.round);
@@ -2407,70 +2110,6 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
 </section>`;
 }
 
-/** Render a complete, self-contained HTML page for `board`. Pure function of the
- * board JSON: same input, same output, every time. Blocks are grouped by round
- * (see renderRoundSection) rather than flattened, and each round is a PAGE of
- * this board (ADR.md entry 42): every round is rendered, exactly one carries
- * `round-current` and the stylesheet shows only that one, so a follow-up round
- * is a page flip away rather than a scroll away — "A board is
- * a session-scoped thread with rounds". Every comment is run through
- * resolveComment exactly once here (`resolvedComments`), and that single verdict
- * feeds both the server-rendered per-block comment list AND the `#board-data`
- * payload src/ui.mjs hydrates pins from — one source of truth for "does this
- * anchor still resolve", not two independently-computed ones that could disagree
- * (what went wrong when the client
- * re-derived resolved/lost itself against the live DOM/SVG). src/server.mjs's SSE
- * push payloads build `boardForClient` the same way, for the same reason — see
- * "SSE events" in PROTOCOL.md.
- *
- * The send bar carries BOTH ways out of a round ("Two
- * ways out, plus a wall clock"): `#send-btn` posts `action:'send'`, `#discuss-btn`
- * posts `action:'discuss'` with whatever is filled in right now — partial answers
- * are the point — and tells the agent to stop posting boards. Both live inside the
- * one `.send-bar`, which `body.readonly` hides wholesale (src/styles.mjs), so the
- * standalone file:// archive has neither. `#questions-left-pill` (ADR.md entry 27)
- * is nested inside the same `.send-bar` for exactly that reason: it inherits the
- * bar's readonly hiding for free rather than earning a second CSS rule, and it
- * leaves the bar's own last-child position in `.board-shell` untouched. It is
- * purely informational -- src/ui.mjs is what makes it live and click-navigable;
- * this function only ever renders its first-paint count and label.
- *
- * A page board offers none of THIS bar (ADR.md entry 44: "a page board is
- * never sent" through the ordinary send bar stays a browser rule, unchanged by
- * SPEC_AWAITED.md), and gets there the way body.readonly already does -- one
- * stylesheet rule, `body.page-board .send-bar { display: none; }`, not by
- * dropping the markup. For a board that never becomes awaited, or whose one
- * page round is not the newest, this bar is still the only route a queued
- * comment has off the page: a comment left there rides the next round's
- * submit, and that round arrives over SSE into THIS document as a new page,
- * which the reviewer flips to and sends from. Deleting the markup here would
- * mean a live round landing on a board with nothing to send it with, and the
- * reviewer's queued comments stranded with it. An AWAITED page round
- * (SPEC_AWAITED.md ticket 03) gains its own, second send control instead --
- * `.page-send-bar`, inside `.page-comments` itself (renderPageCommentPanel,
- * below), which posts to its OWN round rather than "the latest unsent one"
- * this bar always means. The two kickers' controls are a third, different
- * case and ARE dropped outright on a page round -- see renderHtmlBlock.
- *
- * A third rule hides it for a third reason: `body.sent-page .send-bar`. A sent
- * round is a page you can still flip back to, and it is read-only there (ADR.md
- * entry 42 -- the guarantee the deleted history rail used to carry). The bar's
- * own buttons sit OUTSIDE any round section, so nothing that disables a sent
- * round's widgets ever reaches them; src/ui.mjs's goToRound disables them too.
- *
- * `#back-to-top` (ADR.md entry 40) sits BESIDE the bar rather than inside it,
- * unlike `#questions-left-pill`: it has to survive `body.readonly .send-bar {
- * display: none }`, since an archived page board is exactly the case where the
- * artifact is still scrolled and still has to be scrollable back. It goes just
- * ABOVE the bar in source order rather than after it, because `.send-bar` being
- * `.board-shell`'s own last element child is what makes the shell's zero bottom
- * padding land the bar's lower edge on the document's (test/check-round-end.mjs
- * pins exactly that). Costs nothing: the control is `position: fixed`, so it is
- * out of flow and its source position decides only tab order. Emitted on every
- * board and turned on by src/ui.mjs's `.visible` class alone, which only ever
- * follows a scroll report from a page board's own stage — its `.back-to-top`
- * rule (src/styles.mjs) is what explains why bottom-RIGHT rather than the pill's
- * bottom-centre. */
 /** Is there a round waiting to be answered? Decides whether the send bar is live at
  * HYDRATE time, which nothing used to: the buttons were rendered
  * enabled unconditionally and only ever disabled by an SSE push handler, so a finished
@@ -2482,8 +2121,8 @@ function hasOpenRound(board) {
   return Boolean(latest && latest.status === 'open');
 }
 
-/** The questions-left pill's own count (ADR.md entry
- * 27): how many of the OPEN round's top-level questions are still outstanding, at
+/** The questions-left pill's own count: how many of the OPEN round's
+ * top-level questions are still outstanding, at
  * the moment this page is rendered. Nothing is answered yet server-side while a
  * round is open -- answers only land in the store on submit ("Send is
  * never gated") -- so at render/reload time every one of the open round's questions
@@ -2518,6 +2157,11 @@ export function isPageBoard(board) {
   return isPageRound((board && board.blocks) || []);
 }
 
+function roundOwesAnswer(board, round) {
+  if (!round || round.status === 'sent') return false;
+  return board.blocks.some(b => b.round === round.n && b.kind === 'question');
+}
+
 /** The board's pages, named, at the bottom of the page (ADR.md entry 42). Three
  * always-present controls, never two alternatives (criterion 26): the two edge
  * chevrons step one round, the pill in the middle names every round and jumps
@@ -2533,14 +2177,9 @@ export function isPageBoard(board) {
  * viewport's edges.
  *
  * "Owes an answer" is a round that is not yet sent AND actually asks something:
- * the same rule the index badge counts by (ADR.md entry 25), so a page-board
+ * the same rule the index badge counts by, so a page-board
  * round -- open forever, since nothing sends it -- is never dotted as though
  * the reviewer were holding it up. */
-function roundOwesAnswer(board, round) {
-  if (!round || round.status === 'sent') return false;
-  return board.blocks.some(b => b.round === round.n && b.kind === 'question');
-}
-
 function roundPagerMarkup(board, currentN) {
   const rounds = board.rounds || [];
   const pages = rounds.map(r => {
@@ -2571,10 +2210,61 @@ function roundPagerMarkup(board, currentN) {
   </div>`;
 }
 
+/** Render a complete, self-contained HTML page for `board`. Pure function of the
+ * board JSON: same input, same output, every time. Blocks are grouped by round
+ * (renderRoundSection) rather than flattened, and each round is a PAGE of this
+ * board (ADR.md entry 42): every round is rendered, exactly one carries
+ * `round-current` and the stylesheet shows only that one, so a follow-up round is
+ * a page flip away rather than a scroll away. Every comment is run through
+ * resolveComment exactly once here (`resolvedComments`), and that single verdict
+ * feeds both the server-rendered per-block comment list AND the `#board-data`
+ * payload src/ui.mjs hydrates pins from — one source of truth for "does this
+ * anchor still resolve", not two independently-computed ones that could disagree.
+ * src/server.mjs's SSE push payloads build `boardForClient` the same way, for the
+ * same reason — see "SSE events" in PROTOCOL.md.
+ *
+ * The send bar carries BOTH ways out of a round: `#send-btn` posts
+ * `action:'send'`, `#discuss-btn` posts `action:'discuss'` with whatever is
+ * filled in right now — partial answers are the point — and tells the agent to
+ * stop posting boards. Both live inside the one `.send-bar`, which
+ * `body.readonly` hides wholesale (src/styles.mjs), so the standalone file://
+ * archive has neither. `#questions-left-pill` is nested inside
+ * that same `.send-bar` so it inherits the readonly hiding for free rather than
+ * earning a second CSS rule, and leaves the bar's own last-child position in
+ * `.board-shell` untouched; this function renders only its first-paint count and
+ * label, and src/ui.mjs is what makes it live and click-navigable.
+ *
+ * Two further stylesheet rules hide the bar rather than this function dropping
+ * its markup. `body.page-board .send-bar { display: none; }` (ADR.md entry 44):
+ * for a board that never becomes awaited, or whose one page round is not the
+ * newest, this bar is still the only route a queued comment has off the page — a
+ * comment left there rides the next round's submit, and that round arrives over
+ * SSE into THIS document as a new page, which the reviewer flips to and sends
+ * from. Deleting the markup would strand both. An AWAITED page round
+ * (SPEC_AWAITED.md ticket 03) gains its own second send control instead,
+ * `.page-send-bar` inside `.page-comments` (renderPageCommentPanel, below), which
+ * posts to its OWN round rather than "the latest unsent one" this bar always
+ * means; the two kickers' controls are a third case and ARE dropped outright on a
+ * page round (renderHtmlBlock). `body.sent-page .send-bar` is the other: a sent
+ * round is a page you can still flip back to, and it is read-only there (ADR.md
+ * entry 42), while the bar's own buttons sit OUTSIDE any round section, so
+ * nothing that disables a sent round's widgets ever reaches them; src/ui.mjs's
+ * goToRound disables them too.
+ *
+ * `#back-to-top` (ADR.md entry 40) sits BESIDE the bar rather than inside it,
+ * unlike `#questions-left-pill`: it has to survive `body.readonly .send-bar {
+ * display: none }`, since an archived page board is exactly the case where the
+ * artifact is still scrolled and still has to be scrollable back. It goes just
+ * ABOVE the bar in source order rather than after it, because `.send-bar` being
+ * `.board-shell`'s own last element child is what makes the shell's zero bottom
+ * padding land the bar's lower edge on the document's (test/check-round-end.mjs
+ * pins exactly that). Costs nothing: the control is `position: fixed`, so it is
+ * out of flow and its source position decides only tab order. Emitted on every
+ * board and turned on by src/ui.mjs's `.visible` class alone. */
 export function renderBoardPage(board) {
   const resolvedComments = resolveComments(board, board.comments);
   const commentsByBlock = groupCommentsByBlock(resolvedComments);
-  // The page-board layout (ADR.md entries 32, 33, 34) is carried two ways: down
+  // The page-board layout (ADR.md entries 32 and 33) is carried two ways: down
   // into the round/block markup (no round label, no kicker -- renderRoundSection
   // decides that per round), and out onto <body> as a single class the whole
   // stylesheet keys off. One class rather than a per-element modifier because
@@ -2619,7 +2309,7 @@ export function renderBoardPage(board) {
   // instant it can measure the real rail.
   const pillCount = openRoundQuestionCount(board);
   const pillLabel = `${pillCount} question${pillCount === 1 ? '' : 's'} left`;
-  // The waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 46, 47, 49):
+  // The waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 46, 47, 40):
   // `#round-meta` (the header's own pill/meta slot, every board since ticket
   // 03) and `#round-countdown` (the ordinary send bar's) are both
   // first-painted from `roundIsAwaitedOpen` alone -- deterministic, no clock --

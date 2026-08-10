@@ -6,7 +6,7 @@
 // (render.mjs imports the client script, so the edge would be circular).
 // See PROTOCOL.md "Board document" for `rounds`.
 //
-// ADR.md entry 61: the header used to carry a `round N of M` badge (`badgeLabel`,
+// ADR.md entry 42: the header used to carry a `round N of M` badge (`badgeLabel`,
 // deleted from here) whose click routed through the same `jumpToOpenRound`
 // (src/ui.mjs) the pager's own chevrons already did -- three doors onto one
 // mechanism, and a round named twice (the pager dock's caption is now the only
@@ -104,7 +104,7 @@ export function questionBlocks(board) {
 // "Awaited")? A round carrying a question always is; a page board is only when
 // the call said `wait: true` (ADR.md entry 45). This is the ONE property behind
 // three surfaces that must never drift apart: sendability (src/server.mjs
-// handleSubmit), the index badge and tab mark (ADR.md entry 25, src/indexpage.mjs
+// handleSubmit), the index badge and tab mark (src/indexpage.mjs
 // openAwaitedRounds), and the arrival notification (src/ui.mjs markPendingRound).
 //
 // `r.awaited` (stamped at mint time by `mintAwait`, src/board.mjs, and cleared
@@ -173,7 +173,7 @@ export function roundWaitLapsed(round, nowMs = Date.now()) {
   return !!round && !!round.awaitDeadline && Date.parse(round.awaitDeadline) <= nowMs;
 }
 
-// --- the waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 45-49) -----
+// --- the waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 45-47) ---
 //
 // Two different questions, two different functions, deliberately never folded
 // into one. `roundIsAwaitedOpen` below is a fact about the STORED board alone --
@@ -230,14 +230,14 @@ export function roundCountdownText(round, nowMs) {
 // something different about the same figure.
 export const ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
 
-// The page board pill's own fallback title (ADR.md entries 46, 49) -- read by
+// The page board pill's own fallback title (ADR.md entries 46, 40) -- read by
 // src/render.mjs for the deterministic (never-awaited) case and by this file's
 // own pageBoardPillMeta for every other closed case, so the two routes to the
 // same word never explain it two different ways. True on a page board
 // specifically: entries 45/46 turn its WHOLE compose/send surface off the
 // moment it stops being awaited, so "commenting is off" is not an
 // exaggeration there -- src/styles.mjs hides that board type's ordinary
-// '.send-bar' outright (ADR.md entry 34), leaving nothing else to send with.
+// '.send-bar' outright, leaving nothing else to send with.
 export const PILL_READONLY_TITLE = 'No agent is listening on this page -- commenting is off.';
 
 // The SAME 'read-only' word's title on an ORDINARY board (SPEC_HEADER.md
@@ -269,7 +269,7 @@ export const PAGE_SEND_EXPIRED_LABEL = 'Goes out with the next round';
 export const PAGE_SEND_EXPIRED_TITLE =
   'This round ended. Comments left here are stored and reach the next agent that asks.';
 
-// The header's own pill/meta slot (ADR.md entry 49, "the pill may hold a
+// The header's own pill/meta slot (ADR.md entry 40, "the pill may hold a
 // label alone"; SPEC_HEADER.md ticket 03 widened it from a page-board-only
 // slot to every board's): the countdown while someone is actually waiting, or
 // the bare word `read-only` the moment nobody is -- never awaited at all

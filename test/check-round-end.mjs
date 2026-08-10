@@ -452,7 +452,7 @@ check('a live board with its round still open keeps the flush bottom -- the send
 });
 
 // =====================================================================================
-// The questions-left pill (round-end decisions / ADR.md entry 27). Its own
+// The questions-left pill (round-end decisions). Its own
 // agreement-with-the-guard case lives in test/check-send-guard.mjs; a
 // regression guard is already pinned above, untouched by this work. A live,
 // additive count of the open round's still-unanswered questions, floating grey

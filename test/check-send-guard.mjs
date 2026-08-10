@@ -187,7 +187,7 @@ check('a second click on the armed button submits, posting exactly what the Cmd+
   // Path B: the SAME partial answers on an independent board, submitted via
   // the Cmd+Enter arm/send pair -- arriving at Send with something
   // outstanding now arms through the identical armSendGuard function the
-  // click path calls (src/ui.mjs, ADR.md entry 29), the ground truth for
+  // click path calls (src/ui.mjs), the ground truth for
   // "exactly the same" (test/check-enter.mjs pins this route's own
   // contract). Proves the guard reuses submitBoard/collectAnswers rather
   // than posting its own, potentially divergent, body.
@@ -270,8 +270,8 @@ check('one shared armed state: arming by Cmd+Enter, then a plain click on Send, 
   assert.equal(calls.length, 1, 'a click on an already Cmd+Enter-armed Send must submit -- the SAME sendArmed flag, not a second arm');
 });
 
-// === the questions-left pill's own round-end agreement rule (ADR.md entry 27 --
-// NOT the read-only-archive case covered just below) ============================================
+// === the questions-left pill's own round-end agreement rule
+// (NOT the read-only-archive case covered just below) ============================================
 // "The count is live... and it reaches zero exactly when the send guard would no
 // longer arm." This file owns the send guard's own outstanding-question rule, so
 // this is where the agreement case belongs: one
@@ -306,7 +306,7 @@ check('the questions-left pill and the send guard read the identical outstanding
   document.body.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
 
   // Defer Q2 -- one left (Q3). The "deferred counts as complete" rule and
-  // the pill's own matching rule (ADR.md entry 27) must
+  // the pill's own matching rule must
   // agree: neither the guard nor the pill count it.
   deferBlock(blocks[1]);
   assert.equal(pill.textContent, '1 question left', 'a deferred question must not count toward the pill\'s own outstanding total, exactly as it does not for the guard');

@@ -60,7 +60,7 @@ const MOCK = '<div class="mock" style="height: 2000px"><button>Send</button>'
 // The second block is load-bearing, not padding: a board whose blocks are ONE
 // html block and nothing else is a page board (src/render.mjs's isPageBoard,
 // ADR.md entry 33), which carries no kicker and therefore no expand control at
-// all (entry 43) -- the lens it would open is a copy of what already fills the
+// all -- the lens it would open is a copy of what already fills the
 // viewport. This file is about the lens on an ORDINARY board's stage, so its
 // fixture has to be an ordinary board. A fixture's shape decides which layout it
 // exercises, the same way QUIRKS.md records it deciding which return path an

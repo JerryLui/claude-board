@@ -252,26 +252,15 @@ export const themeBootScript = `
     else if (systemQuery.addListener) systemQuery.addListener(onSystemPreferenceChange); // Safari < 14
   }
 
-  // A second tab must not silently overwrite what the
-  // reader just chose. 'cb-theme' is one value per origin, but each
-  // document's own cycle position (currentState(), read off ITS OWN
-  // data-theme attribute) is snapshotted at boot and never told about a
-  // write some OTHER tab made -- with the index open in tab A and a board
-  // open in tab B (the ordinary case), choosing Dark in A left B's control
-  // reading a stale "Theme: System", so one click in B walked ITS stale
-  // cycle position System -> Light and overwrote what A had just chosen, and
-  // A reloaded Light. The 'storage' event is the platform's own signal for
-  // "localStorage changed in ANOTHER browsing context sharing this origin"
-  // -- it never fires in the context that made the write, so this can never
-  // double-apply a click setState above already handled. Gated on
-  // 'e.key === KEY' (an explicit light/dark write or an explicit removeItem
-  // back to System) OR 'e.key === null' (what clear() reports, per the DOM
-  // spec -- readStored() re-reads rather than trusting e.newValue, so both
-  // collapse onto the same one-value-per-origin truth this file already
-  // treats as authoritative). Same file:/try-catch gating as every other
-  // storage access in this file (readStored, setState): an archive is
-  // storage-free by decision, and this must never act if that protocol
-  // check somehow lies.
+  // The cross-tab scenario this guards against is job 4 of this file's own
+  // header comment, above 'themeBootScript'. Gated on 'e.key === KEY' (an
+  // explicit light/dark write or an explicit removeItem back to System) OR
+  // 'e.key === null' (what clear() reports, per the DOM spec -- readStored()
+  // re-reads rather than trusting e.newValue, so both collapse onto the same
+  // one-value-per-origin truth this file already treats as authoritative).
+  // Same file:/try-catch gating as every other storage access in this file
+  // (readStored, setState): an archive is storage-free by decision, and this
+  // must never act if that protocol check somehow lies.
   if (location.protocol !== 'file:' && window.addEventListener) {
     window.addEventListener('storage', function (e) {
       if (e.key !== KEY && e.key !== null) return;

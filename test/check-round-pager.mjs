@@ -84,7 +84,7 @@ function twoArtifacts() {
 
 /** A round carrying an artifact AND a question: NOT a page round (isPageRound is
  * "exactly one html block"), so its stage keeps the expand control a page board
- * drops (ADR.md entry 43) and the lens is openable from it. */
+ * drops and the lens is openable from it. */
 function questionThenArtifactWithQuestion() {
   const board = createBoard({ title: 'Mixed', blocks: [Q] });
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);

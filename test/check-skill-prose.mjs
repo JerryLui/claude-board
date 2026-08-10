@@ -89,7 +89,7 @@ check('the section-slug rule is stated with a worked example', () => {
 
 // --- one commenting rule ---------------------------------------------------------
 // ADR.md entry 28 ("Only the rendered kinds can be commented on") supersedes the
-// comment half of entry 26 and narrows entry 6: only `html` and `mermaid` carry the
+// comment half of entry 26 and narrows entry 28: only `html` and `mermaid` carry the
 // comment control and the click-to-anchor gesture, wherever they appear, and
 // `markdown`/`code` carry neither, anywhere. This is the canonical wording that
 // both this manual and PROTOCOL.md are measured against. The source is gitignored
@@ -123,9 +123,9 @@ check('PROTOCOL.md does not promise the wider "anything rendered" commenting rul
 // cite it rather than restating them, so a rule that drifts out of this file is a rule
 // that exists nowhere. Both are mechanism, not taste — a stage renders in an opaque-origin
 // frame and an opaque origin resolves no relative URL (ADR.md entry 32), and outside a page
-// board the frame's height is whatever the stage reports (entries 33, 41). The third entry
-// is the shape rule those two hang off: it is invisible at the call site, so a caller that
-// posts a second block loses the layout with nothing to tell it so.
+// board the frame's height is whatever the stage reports. Entry 33 is the shape rule those
+// two hang off: it is invisible at the call site, so a caller that posts a second block
+// loses the layout with nothing to tell it so.
 const ARTIFACT_RULES = {
   'an artifact is one self-contained file': [
     /self-contained/i, /`data:`/, /opaque-origin/i, /relative URL/i,

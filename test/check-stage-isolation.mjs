@@ -551,7 +551,7 @@ check('A forged "height" message from a live, correctly-addressed stage is clamp
     assert.equal(frame.style.height, '600px', `a malformed height report must be ignored, not applied: ${JSON.stringify(fields)}`);
   }
 
-  // ADR 41: a stage that sizes itself from the viewport rather than its own
+  // A stage that sizes itself from the viewport rather than its own
   // content can report a collapsed height that never grows again -- a
   // sliver of label, nothing else. Unfloored, that report would lock the
   // card there permanently. Ablation: drop handleStageHeight's
@@ -669,7 +669,7 @@ check('The existing element-level comment-anchor gesture into an html option\'s 
 /** Render a one-stage board, run the client script, and open the lens on it.
  * The trailing markdown block keeps this an ORDINARY board: one html block and
  * nothing else is a page board (src/render.mjs's isPageBoard, ADR.md entry 33),
- * and a page board carries no expand control to open the lens with (entry 43). */
+ * and a page board carries no expand control to open the lens with. */
 function openLensOn(mockHtml) {
   const board = createBoard({
     title: 'isolation: the stage lens',
@@ -1118,8 +1118,10 @@ check('The stage lens opens on the exact same srcdoc, reset included -- it is a 
 
 const RENDER_SRC_PATH = fileURLToPath(new URL('../src/render.mjs', import.meta.url));
 const UI_SRC_PATH = fileURLToPath(new URL('../src/ui.mjs', import.meta.url));
+const PROTOCOL_PATH = fileURLToPath(new URL('../PROTOCOL.md', import.meta.url));
 const renderSrcText = readFileSync(RENDER_SRC_PATH, 'utf8');
 const uiSrcText = readFileSync(UI_SRC_PATH, 'utf8');
+const protocolText = readFileSync(PROTOCOL_PATH, 'utf8');
 
 /** Every `type:` string either half of the channel actually sends, read off the
  * real call shapes rather than off any hand-kept list -- `post({ type: 'x', ... })`
@@ -1143,38 +1145,42 @@ function liveMessageTypes(renderSrc, uiSrc) {
   return types;
 }
 
-/** Every `'type'` the design comment documents, read off the comment's own text
- * rather than off a hand-kept list of what it OUGHT to say. The block is found by
- * its banner ("--- design: genuine stage isolation via postMessage ---") and read
- * as every contiguous `//`-prefixed line that follows -- the same "walk until the
- * shape breaks" idiom `parseBlockShapes` (src/prose-check.mjs) already uses on
- * PROTOCOL.md, chosen so the comment can grow (this chunk grows it) without this
- * function's own end marker going stale the same way the count in src/ui.mjs did.
- * A message-type entry always opens its line as `'name' ...` (see the MESSAGES.
- * section's own STAGE -> PARENT / PARENT -> STAGE lists) -- a leading single quote
- * right after the `//` prefix, nothing else in this comment is shaped that way.
- * In particular this is why the "NO 'select' MESSAGE, DELIBERATELY" line is
- * inert here: it opens with `NO`, not a quote, so 'select' is discussed at
- * length without ever registering as documented -- which is correct, since
- * nothing sends it (see liveMessageTypes above) and a check that accepted
- * "mentioned anywhere in prose" as documentation would wave through a stray
- * reference exactly like the deleted type's own name. */
-function documentedMessageTypes(renderSrc) {
-  const banner = '// --- design: genuine stage isolation via postMessage';
-  const bannerIdx = renderSrc.indexOf(banner);
-  assert.ok(bannerIdx >= 0, 'setup failure: design comment banner not found in src/render.mjs');
+/** Every `'type'` PROTOCOL.md documents, read off its own tables rather than off
+ * a hand-kept list of what they OUGHT to say. The two tables live under
+ * "## Stage postMessage channel" and the section is read to the next `## ` -- the
+ * same "walk until the shape breaks" idiom `parseBlockShapes` (src/prose-check.mjs)
+ * already uses on this file, so the section can grow without an end marker here
+ * going stale.
+ *
+ * A message-type entry is a table row whose FIRST cell is a lone backticked name,
+ * nothing else in the section is shaped that way. That is what keeps the
+ * "There is no `select` message" subsection inert: it names 'select' repeatedly in
+ * prose but never as a row's leading cell, so a deleted type is discussed at
+ * length without registering as documented -- correct, since nothing sends it
+ * (liveMessageTypes above), and a check that accepted "mentioned anywhere in
+ * prose" would wave through a stray reference exactly like the deleted type's
+ * own name.
+ *
+ * Reads PROTOCOL.md, not src/render.mjs: the message tables moved there when the
+ * 291-line design comment was replaced by a pointer. The binding is the point --
+ * the tables are only load-bearing for as long as something fails when the code
+ * outgrows them, so the extractor follows the content rather than the file. */
+function documentedMessageTypes(protocolSrc) {
+  const heading = '## Stage postMessage channel';
+  const start = protocolSrc.indexOf(heading);
+  assert.ok(start >= 0, `setup failure: "${heading}" not found in PROTOCOL.md`);
   const types = new Set();
-  for (const line of renderSrc.slice(bannerIdx).split('\n')) {
-    if (!line.startsWith('//')) break; // the comment block ends where the `//` run does
-    const m = /^'(\w+)'/.exec(line.slice(2).trim());
+  for (const line of protocolSrc.slice(start + heading.length).split('\n')) {
+    if (line.startsWith('## ')) break; // the section ends where the next one opens
+    const m = /^\|\s*`(\w+)`\s*\|/.exec(line);
     if (m) types.add(m[1]);
   }
   return types;
 }
 
-check('every live message type (a real post()/postToStage() call site) has an entry in the design comment', () => {
+check('every live message type (a real post()/postToStage() call site) has an entry in PROTOCOL.md', () => {
   const live = liveMessageTypes(renderSrcText, uiSrcText);
-  const documented = documentedMessageTypes(renderSrcText);
+  const documented = documentedMessageTypes(protocolText);
   const missing = [...live].filter(t => !documented.has(t));
   assert.deepEqual(missing, [], `undocumented live message type(s): ${missing.join(', ')}`);
 });
@@ -1197,11 +1203,11 @@ check('the deleted \'select\' type is not live, and is not required to be docume
   // negative: a documented set that DID somehow pick up 'select' would still
   // pass the drift check above (an extra documented entry is harmless), so
   // this is the only place that would notice the parser drifting the wrong way.
-  const documented = documentedMessageTypes(renderSrcText);
+  const documented = documentedMessageTypes(protocolText);
   assert.ok(!documented.has('select'), 'the "NO select MESSAGE" passage must not parse as a documentation entry');
 });
 
-check('the drift check actually fails when a type is added to the code and not to the comment (proved, not assumed)', () => {
+check('the drift check actually fails when a type is added to the code and not to PROTOCOL.md (proved, not assumed)', () => {
   // The regression this whole section exists to catch, reproduced directly:
   // splice in a real-shaped send for a brand new type nowhere in the design
   // comment, and confirm the same comparison the check above runs actually
@@ -1212,7 +1218,7 @@ check('the drift check actually fails when a type is added to the code and not t
   );
   assert.notEqual(mutatedRenderSrc, renderSrcText, 'setup failure: the splice point ("post({ type: \'ready\' });") was not found');
   const live = liveMessageTypes(mutatedRenderSrc, uiSrcText);
-  const documented = documentedMessageTypes(mutatedRenderSrc);
+  const documented = documentedMessageTypes(protocolText);
   const missing = [...live].filter(t => !documented.has(t));
   assert.deepEqual(missing, ['zzzUndocumented'], 'adding an undocumented send did not trip the drift check');
 });

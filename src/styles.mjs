@@ -35,7 +35,6 @@ const mermaidNodeRule = (prefix, suffix = '') =>
 // --muted genuinely sits on both), so it moves to the minimal same-hue lift that
 // clears 4.5:1 everywhere it's used.
 const DARK = {
-  // surfaces: bg is the page, surface climbs toward the viewer
   '--bg': '#0a0e15',
   '--bg-tint': '#101726',
   '--panel': '#131a27',
@@ -53,7 +52,7 @@ const DARK = {
   // restyle changes --scrollbar-hover and leaves the tab mark exactly where it
   // is. The "declared and never wired up" trip-wire (test/check-contrast.mjs)
   // still watches this key because that check learns to scan palette-object
-  // reads, not because the key borrows a CSS reference. See ADR.md entry 31.
+  // reads, not because the key borrows a CSS reference.
   '--mark-rest-tile': '#2c3852',
   // The html stage's artboard ('.html-stage', '.stage-lens-frame'). Neutral and
   // per-palette, and not a page surface: a mock owns its own background, so this
@@ -76,7 +75,6 @@ const DARK = {
   '--bg-fade-0': 'rgba(10, 14, 21, 0)',
   '--bg-fade-80': 'rgba(10, 14, 21, 0.8)',
 
-  // ink
   '--ink': '#eaeef6',
   '--ink-2': '#b6bfd0',
   '--muted': '#8690a2',
@@ -105,7 +103,6 @@ const DARK = {
   '--hairline': 'rgba(255, 255, 255, 0.075)',
   '--hairline-2': 'rgba(255, 255, 255, 0.14)',
 
-  // one accent, plus semantic status colors
   '--accent': '#7c9cff',
   '--accent-hi': '#a5b9ff',
   '--accent-soft': 'rgba(124, 156, 255, 0.13)',
@@ -125,6 +122,12 @@ const DARK = {
   // fill 8.92:1, on --diff-del-fill 9.61:1.
   '--diff-add-fill': 'rgba(86, 214, 138, 0.12)',
   '--warning': '#e5b04d',
+  // The owed-round dot's hue, theme-dependent where every other "waiting on you"
+  // surface is not (ADR.md entry 66). Dark takes the accent: amber sits too close
+  // to the pager's own panel here, while the blue separates from the current
+  // page's chip. Light takes amber, named off DARK because light's own --warning
+  // is #805300 -- the brown entry 30 keeps the tab mark away from.
+  '--owed-dot': 'var(--accent)',
   '--warning-soft': 'rgba(229, 176, 77, 0.12)',
   '--warning-ink': '#f0cd8c',
   '--warning-border': 'rgba(229, 176, 77, 0.35)',
@@ -156,7 +159,6 @@ const DARK = {
 // white left to climb to. Every value here is verified by
 // test/check-contrast.mjs against every surface token it can land on, not by eye.
 const LIGHT = {
-  // surfaces
   '--bg': '#eef1f7',
   '--bg-tint': '#f7f9fc',
   '--panel': '#ffffff',
@@ -182,7 +184,6 @@ const LIGHT = {
   '--bg-fade-0': 'rgba(238, 241, 247, 0)',
   '--bg-fade-80': 'rgba(238, 241, 247, 0.8)',
 
-  // ink
   '--ink': '#171c2a',
   '--ink-2': '#3c4459',
   '--muted': '#515c76',
@@ -235,6 +236,10 @@ const LIGHT = {
   // 6.59:1, on --diff-del-fill 6.40:1.
   '--diff-add-fill': 'rgba(0, 117, 48, 0.12)',
   '--warning': '#805300',
+  // Amber, taken from DARK rather than from this palette's own --warning (ADR.md
+  // entry 66): #805300 is the brown entry 30 already rules out for the tab mark,
+  // and it reads as disabled rather than as owed. See DARK's own comment.
+  '--owed-dot': DARK['--warning'],
   '--warning-soft': 'rgba(128, 83, 0, 0.12)',
   '--warning-ink': '#7a4a00',
   '--warning-border': 'rgba(128, 83, 0, 0.35)',
@@ -316,7 +321,7 @@ export const faviconLink =
 // down, not a different icon.
 //
 // The tile is DARK['--mark-rest-tile'], not DARK['--scrollbar-hover'] -- see
-// that key's own comment, above, and ADR.md entry 31: the colour is
+// that key's own comment, above: the colour is
 // load-bearing for a shipped drawing now, so it gets a name that says so.
 // Picked on chroma, not value: Chrome's tab strip is a neutral grey, so a
 // slate tile close to it in VALUE still separates by chroma, leaving the
@@ -370,7 +375,6 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
   /* non-color tokens: theme-independent, so they live in one shared block rather
      than being duplicated into both DARK and LIGHT */
 
-  /* radii */
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 14px;
@@ -384,7 +388,6 @@ ${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
   --space-5: 24px;
   --space-6: 32px;
 
-  /* motion */
   --dur: 160ms;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -492,12 +495,12 @@ svg { flex: none; }
 body.readonly .back-to-index { display: none; }
 .board-head-actions { flex: none; display: flex; align-items: center; gap: var(--space-3); }
 
-/* AC 6, AC 8, AC 11: the page board's own pill/meta slot (ADR.md entry 49,
+/* AC 6, AC 8, AC 11: the page board's own pill/meta slot (ADR.md entry 40,
    "the pill may hold a label alone"). Sits in '.board-head-actions', which
    entry 40's condensing rule never touches (only 'h1'/'.meta' hide there), so
    ONE element renders in both the expanded header and the condensed pill with
    no second copy and no extra selector -- exactly AC 6's "in both the expanded
-   header and the condensed pill". A muted figure, never a chip: entry 49
+   header and the condensed pill". A muted figure, never a chip: entry 40
    corrects entry 40's assumption that this slot needed a real control, and a
    label alone is what the countdown and 'read-only' both are. Hidden on every
    board that is not laid out as a page board -- src/render.mjs renders it on
@@ -857,7 +860,6 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .answer-textarea:focus, .note-field textarea:focus, .comment-form input[type=text]:focus, .search-input:focus {
   outline: none; border-color: var(--accent); box-shadow: var(--ring); }
 
-/* drag-to-rank */
 .rank-list { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .rank-list li { display: flex; align-items: center; gap: var(--space-3); background: var(--panel-2);
   border: 1px solid var(--hairline); border-radius: var(--r-md); padding: 10px 14px; cursor: grab;
@@ -1088,9 +1090,9 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 
 /* Both stage kinds are clickable at element level, and both read as pictures with no
    built-in cue of their own -- the comment-mode toggle is the one thing on the page
-   that says so now (ADR.md 21 deleted the kicker's own per-stage hint: repeated once
+   that says so now: the kicker's own per-stage hint was deleted for repeating once
    per variant option, in the place vertical space is scarcest, saying what the toggle
-   was already visible chrome to say). A mermaid node highlights under the cursor (the
+   was already visible chrome to say. A mermaid node highlights under the cursor (the
    html stage's equivalent is injected into the iframe's own document by src/ui.mjs,
    since this stylesheet deliberately does not reach inside it). Neither applies in a
    standalone file: archive, where nothing is clickable. One gesture,
@@ -1268,7 +1270,7 @@ body.comment-mode .blocks { cursor: crosshair; }
    gradient scrim above is what separates the bar from the content running on
    underneath it. */
 .send-bar.docked { background: var(--bg); backdrop-filter: none; }
-/* the questions-left pill (ADR.md entry 27): a
+/* the questions-left pill: a
    live, additive count of the open round's still-unanswered questions, floating
    centered above the send bar. Nested INSIDE .send-bar itself rather than beside
    it -- position: absolute against the bar's own sticky positioning is exactly
@@ -1328,14 +1330,11 @@ body.comment-mode .blocks { cursor: crosshair; }
    someone typed once and nobody re-measured.
 
    CSS anchor positioning ('anchor-name'/'anchor()') was tried here first and
-   reverted: it requires the anchor to precede the positioned element in tree
-   order, which '.page-comments' does not (it is nested inside the page
-   board's own '.block.html-block', rendered well before this dock in
-   src/render.mjs), and moving it earlier in the DOM ran into a second,
-   separate containing-block problem on top of that -- confirmed wrong in a
-   real Chrome (getComputedStyle().bottom computed to 'auto', not the
-   anchored value), which this repo's DOM stand-in cannot see at all
-   (QUIRKS.md, "The stand-in has no layout") and did not catch. */
+   reverted: '.page-comments' doesn't precede this dock in tree order (it's
+   nested inside the page board's own '.block.html-block', src/render.mjs),
+   and moving it earlier hit a second, separate containing-block problem --
+   confirmed in a real Chrome, not the DOM stand-in (QUIRKS.md, "The stand-in
+   has no layout"), since getComputedStyle().bottom simply came back 'auto'. */
 .round-pager-dock { position: fixed; z-index: 40; left: 50%; bottom: var(--space-4); transform: translateX(-50%);
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   max-width: min(560px, calc(100vw - 2 * var(--space-6))); }
@@ -1382,10 +1381,11 @@ body.readonly:not(.page-board) .board-shell {
   transition: color var(--dur) var(--ease); }
 .round-page:hover { color: var(--ink); }
 .round-page-current { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
-/* the dot on the round that still owes an answer -- the mark's amber, the hue
-   this board already spends on "waiting on you" (ADR.md entry 12). */
+/* the dot on the round that still owes an answer. Its hue is the one place
+   "waiting on you" is not one colour across both themes -- see '--owed-dot'
+   (ADR.md entry 66) for which each takes and why. */
 .round-page-owed::after { content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px;
-  border-radius: 50%; background: var(--accent); vertical-align: middle; }
+  border-radius: 50%; background: var(--owed-dot); vertical-align: middle; }
 .round-flip { position: fixed; z-index: 40; top: 50%; transform: translateY(-50%);
   width: 32px; height: 64px; display: flex; align-items: center; justify-content: center;
   background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--hairline);
@@ -1636,7 +1636,7 @@ body.readonly:not(.page-board) .board-shell {
   70% { box-shadow: 0 0 0 7px var(--warning-fade); }
   100% { box-shadow: 0 0 0 0 var(--warning-fade); }
 }
-/* Only ever rendered when count > 0 (ADR.md entry 25) -- there is no zero state
+/* Only ever rendered when count > 0 -- there is no zero state
    to style, so the amber "waiting on you" treatment is the whole rule. */
 .rounds-left-badge { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
   color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-border-strong);
@@ -1659,7 +1659,7 @@ body.readonly:not(.page-board) .board-shell {
      document's height is exactly the frame's (ADR.md entry 40, whose condensing
      behaviour lands on top of this).
    - the frame is a CONSTANT 100vh and scrolls its own content; the page itself
-     does not scroll at all (ADR.md entry 34). Not min-height, not a height
+     does not scroll at all. Not min-height, not a height
      grown from what the artifact reports: the rendered templates use
      position: sticky and their own full-viewport <dialog>, and both of those
      mean something only against a viewport-sized box. 'resize: none' drops the
@@ -1724,24 +1724,20 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    (it cannot know the dock's real height either) but wrong on the safe
    side, clear of even a three-line dock.
 
-   Confirmed 2026-08-07 against a real Chrome (127.0.0.1, examples/sample-board.html,
-   not this repo's DOM stand-in, which cannot see any of this -- QUIRKS.md,
-   "The stand-in has no layout"): with the dock actually measured at
-   63.4px tall, '--round-pager-dock-h' resolved to '63.40625px' and this
-   'bottom' computed to '91.4062px' -- exactly var(--space-4) [16px] +
-   that measurement + var(--space-3) [12px], not the fallback. With the
-   panel given real content (0, 4, then 20 queued comments, the last one
-   911px tall and overflowing off the TOP of the viewport) its measured
-   rect bottom stayed exactly 12px above the dock's measured rect top in
-   every case, because the panel grows upward, away from the dock -- the
-   clearance is a property of the DOCK's height alone, not the panel's. */
+   Verified against a real Chrome, which this repo's own DOM stand-in cannot
+   substitute for (QUIRKS.md, "The stand-in has no layout"): 'bottom' resolves
+   to exactly var(--space-4) + the dock's measured height + var(--space-3),
+   not the fallback, and with the panel given real content (growing content,
+   overflowing off the TOP of the viewport) its measured rect bottom stayed
+   exactly var(--space-3) above the dock's measured rect top in every case,
+   because the panel grows upward, away from the dock -- the clearance is a
+   property of the DOCK's height alone, not the panel's. */
 /* SPEC_AWAITED.md ticket 03: the panel used to grow upward with NO ceiling --
    fine while it only ever held the compose form and a short list, wrong the
    moment ticket 03 put a send control inside it (AC 4) that has to stay
-   reachable at every comment count. Measured against the merged branch on a
-   357px-tall viewport before this change: at 12 comments the panel's own TOP
-   edge sat at -338px, at 30 comments -1130px -- reachable at zero comments and
-   unreachable everywhere past a handful. 'max-height' below puts a ceiling on
+   reachable at every comment count: unbounded growth pushed the panel's own
+   top edge off the top of a short viewport well before the list got long,
+   taking the send control with it. 'max-height' below puts a ceiling on
    the panel itself, tied to the SAME '--round-pager-dock-h' the 'bottom' value
    already reads (no second number to keep in sync): whatever the dock's real
    height is, the panel's own height is capped at "the rest of the viewport,
@@ -1782,7 +1778,7 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    inside this box, so they never scroll out of reach regardless of how many
    comments are queued. */
 .comment-list-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-/* ADR.md entry 48: the click-to-comment gesture's own hint, back in exactly
+/* The click-to-comment gesture's own hint, back in exactly
    one place -- the awaited page board's empty comment panel, because comment
    mode already starts ON there (src/ui.mjs), so the mode toggle itself is no
    longer what reveals the gesture the way it is everywhere else.
@@ -1854,7 +1850,7 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
 
    What condenses is the header's IDENTITY TEXT, not its controls. The title and
    the thread/id line go; the mark, the comment-mode toggle, the theme control
-   and the state label stay (ADR.md entry 61 -- the round badge that used to
+   and the state label stay (ADR.md entry 42 -- the round badge that used to
    round out this row is gone, the header names no round at rest or condensed),
    so the pill is never decorative -- entry 40's
    "the pill keeps the comment-mode toggle, so the mode is switched mid-read
@@ -2007,7 +2003,7 @@ body.page-board .back-to-index { width: 22px; height: 22px; }
    intrinsic size unless the box is told otherwise -- without this the 30px
    drawing simply overflows the 22px slot. */
 body.page-board .back-to-index svg { width: 100%; height: 100%; }
-/* ADR.md entry 61 deleted the round badge that used to sit here between the
+/* ADR.md entry 42 deleted the round badge that used to sit here between the
    theme control and the state label -- with it gone, the theme control's own
    .mode-toggle chrome (shared with the comment-mode toggle, unchanged by this
    file) is the last thing before the state label, and a hairline is what
@@ -2021,7 +2017,7 @@ body.page-board .round-meta { border-left: 1px solid var(--hairline); padding-le
    and 24px of air holding the space. */
 body.page-board .round-meta:empty { display: none; }
 
-/* --- SPEC_HEADER.md ticket 03 (ADR.md entry 60): an ordinary board condenses
+/* --- SPEC_HEADER.md ticket 03 (ADR.md entry 40): an ordinary board condenses
    too, into the same pill above -- the two board types stop reading as two
    designs. Every rule below reads the identical '--stage-p'/'--pill-half' the
    page-board rules above do (written here by refreshDocumentScrollChrome,
@@ -2029,7 +2025,7 @@ body.page-board .round-meta:empty { display: none; }
    -- an ordinary board scrolls itself rather than a fixed-height stage frame,
    so only the PROGRESS SOURCE differs), and keeps the expanded header's own
    control order and colour tokens (mark, comment toggle, theme, state label --
-   ADR.md entry 61 already left that the order everywhere else).
+   ADR.md entry 42 already left that the order everywhere else).
 
    AC 8 is why the MECHANISM differs from the page board's, not just the
    source: '.board-head' here is 'position: sticky', still IN normal flow --
@@ -2073,11 +2069,10 @@ body:not(.page-board) { --stage-p: 0; --pill-half: 120px; }
    exactly '2 * pill-half' too, matching the panel's own width bolt for bolt,
    and 'justify-content: space-between' (unchanged, above) has nowhere to put
    the pill-half's baked-in slack except the one gap it controls: between the
-   mark and the actions row. Measured live in Chrome against
-   examples/sample-board.html (coordinator review, 2026-08-09): a 24px hole
-   dead centre in the pill, the mark flush on its left border and the state
-   label flush on its right. Adding '--space-3' here shrinks the padding by
-   that same amount, which shrinks the CONTENT'S width to exactly
+   mark and the actions row -- without this term that slack shows up as a gap
+   dead centre in the pill instead of air on both edges. Adding '--space-3'
+   here shrinks the padding by that same amount, which shrinks the CONTENT'S
+   width to exactly
    'brand + gap + actions' (pill-half's own '- pad' term, undone) -- tight
    against itself, with the panel's unchanged extra width now free to sit as
    symmetric air on both edges instead of a gap in the middle. */
@@ -2094,28 +2089,22 @@ body:not(.page-board) .board-head::after {
 /* the pill itself: a fixed-height band (mark's own 30px plus 6px of air each
    side, the same 6px the page-board pill's own padding-block ramp ends at),
    centred on the CONTROL ROW -- not on '.board-head''s own box, which is a
-   different centre. Measured live in Chrome against examples/sample-board.html
-   (coordinator review, 2026-08-09): a first attempt centred this on the box
-   ('top: 50%; height: 42px; transform: translateY(-50%)') drew a panel
-   40.18px to 82.18px down an 80.376px box -- 3.6px past the box's own bottom
-   edge, with every control (mark 16-68px, actions 28-56px) sitting mostly or
-   entirely ABOVE it. The header's own padding is NOT symmetric ('padding:
+   different centre. The header's own padding is NOT symmetric ('padding:
    var(--space-4) 0 var(--space-3)', 16px over 12px), and 'align-items: center'
    centres each flex child on the CONTENT box (the padding box minus that
    padding), not on the border box -- so the true centreline sits
    '(--space-4 - --space-3) / 2' below the border box's own 50%, which a plain
-   'top: 50%' never accounted for. 'transform: translateY(-50%)' compounded it:
-   a computed-style read (what the coordinator's tooling and this repo's own
-   'resolveComputedProperty' both do -- neither runs layout) reports 'top' and
-   'bottom' from BEFORE the transform is painted, so nothing here could even
-   assert the corrected position without dropping the transform entirely.
-   'top'/'bottom' set together (no 'height', no 'transform') fixes both at
-   once: their SUM is fixed at 42px regardless of the box's own height (so the
-   panel is still exactly 42px tall), and shifting both by the same
-   '(--space-4 - --space-3) / 2' moves the centreline to match the content
-   box's, using the identical tokens '.board-head''s own padding already
-   declares -- so a future change to either token keeps this in step without
-   a second number to maintain. */
+   'top: 50%' would miss. 'top'/'bottom' set together (no 'height', no
+   'transform') fixes both at once: their SUM is fixed at 42px regardless of
+   the box's own height (so the panel is still exactly 42px tall), and
+   shifting both by the same '(--space-4 - --space-3) / 2' moves the
+   centreline to match the content box's, using the identical tokens
+   '.board-head''s own padding already declares -- so a future change to
+   either token keeps this in step without a second number to maintain. A
+   'transform: translateY()' can't do this instead: a computed-style read
+   (what 'resolveComputedProperty' does -- it never runs layout) reports 'top'
+   and 'bottom' from before any transform paints, so nothing here could assert
+   the corrected position without dropping the transform entirely. */
 body:not(.page-board) .board-head::before {
   top: calc(50% + (var(--space-4) - var(--space-3)) / 2 - 21px);
   bottom: calc(50% - (var(--space-4) - var(--space-3)) / 2 - 21px);
@@ -2131,9 +2120,7 @@ body:not(.page-board) .board-head::before {
    column, so 'inset: 0' would size the wash to the COLUMN, not the
    viewport -- a ~1072px rounded blur-plus-gradient rectangle sitting on the
    page's own plain background outside it, with a visible seam at both edges
-   (PM review of a real screenshot, 2026-08-09: "since the header doesn't
-   expand all the way out, you can clearly see the gradient against the
-   plain colour at the edges").
+   against the page background beyond the column.
    'width: 100vw' (the usual full-bleed escape) is unsafe here specifically:
    'vw' units include the scrollbar's own width, and an ordinary board is
    exactly the one surface that always has a real document scrollbar (a page
@@ -2149,10 +2136,7 @@ body:not(.page-board) .board-head::before {
    ('margin: 0 auto') centres the column at every width, including one
    narrower than 1120px where the column simply fills 100% and the centring
    is a no-op -- so this lands flush with both real edges at any viewport,
-   with no vw-based overflow risk. Verified live in Chrome (coordinator
-   review, 2026-08-09) on examples/sample-board.html's ordinary-board round,
-   tall enough to carry a real scrollbar, at 1324px and narrower: no seam,
-   no induced horizontal scrollbar. */
+   with no vw-based overflow risk. */
 body:not(.page-board) .board-head::after {
   top: 0; bottom: 0;
   left: 50%; transform: translateX(-50%);
@@ -2232,13 +2216,10 @@ body.page-board .back-to-top.visible {
      breakpoint rather than taught a second, column-aware shape. '--pill-half'
      is measured as one SINGLE-ROW sum (brand + columnGap + actions,
      src/ui.mjs's measurePillHalf) and describes nothing once the rule two
-     lines up turns '.board-head' into two stacked rows -- measured live in
-     Chrome (coordinator review, 2026-08-09) against
-     examples/sample-board.html: the actions row hugs the pill's left border
-     with ~60px of empty pill to its right, a 42px band drawn across the
-     middle of a two-row ~115px header with the mark above it and the state
-     label below it, neither inside the band. A pill that does not fit its
-     own contents is worse than no pill, and nothing about AC 7 requires one
+     lines up turns '.board-head' into two stacked rows: the fixed-height band
+     it draws no longer matches either row, with the mark sitting above it and
+     the state label below it, neither one inside it. A pill that does not
+     fit its own contents is worse than no pill, and nothing about AC 7 requires one
      at every viewport -- the header just stays exactly as it always has
      below this breakpoint, at every scroll offset.
      '!important' is load-bearing: refreshDocumentScrollChrome (src/ui.mjs)

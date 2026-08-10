@@ -10,7 +10,7 @@
 // is machine state, not daemon state (whatever src/cues.mjs's cueNames() reads
 // off this machine's sound directories), so it belongs here, server-rendered
 // per request -- a reader who drops an .aiff into ~/Library/Sounds gets it in
-// the list on the next page load, since ADR.md entry 23 made that the way to
+// the list on the next page load, since ADR.md entry 20 made that the way to
 // add a cue and cueNames() caches only briefly for it. The SELECTED value is
 // daemon state,
 // so it is never set in this markup at all, exactly like every other settings
@@ -122,14 +122,12 @@ function cueOptionsHtml() {
 export function pomodoroWidget() {
   const cueOptions = cueOptionsHtml();
   // The icon sits in its own slot, not bare, so indexScript's renderPomodoro can
-  // swap the whole glyph (TOMATO_ICON <-> REST_ICON)
-  // by replacing this ONE stable element's innerHTML -- a real markup swap, never
-  // the `hidden` property (this file's own header comment: an author `display`
-  // rule on .pomodoro-icon already beats the UA stylesheet's [hidden], the exact
-  // trap that once left a dead pill stuck in the header). `display: contents`
-  // (src/styles.mjs) is what keeps this wrapper invisible to the flex layout --
-  // the icon still lays out as a direct child of .pomodoro-widget, gap and all,
-  // exactly as when it had no wrapper.
+  // swap the whole glyph (TOMATO_ICON <-> REST_ICON) by replacing this ONE
+  // stable element's innerHTML -- a real markup swap, never the `hidden`
+  // property (see this function's own doc comment above, on the same trap).
+  // `display: contents` (src/styles.mjs) is what keeps this wrapper invisible
+  // to the flex layout -- the icon still lays out as a direct child of
+  // .pomodoro-widget, gap and all, exactly as when it had no wrapper.
   return `<div class="pomodoro-widget" id="pomodoro-widget">
   <span class="pomodoro-icon-slot" id="pomodoro-icon-slot">${TOMATO_ICON}</span>
   <span class="pomodoro-status" id="pomodoro-status">…</span>

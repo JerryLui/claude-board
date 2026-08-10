@@ -266,7 +266,7 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // forwardTimer -- ADR.md entry 24: forward is the boundary made early. It reuses
+  // forwardTimer -- forward is the boundary made early. It reuses
   // settleBoundary's own advance rule at click time rather than a second bookkeeping
   // path, so these checks pin the SAME cycle bookkeeping settleBoundary's own loop
   // check above pins, just triggered by a click instead of a real deadline.

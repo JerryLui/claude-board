@@ -29,7 +29,7 @@
 // there is no daemon in this file, on purpose), then re-rendered, written to disk,
 // and read back for the actual archive pass.
 //
-// ADR.md entry 6 ("Commenting is confined to content blocks", 2026-08-01):
+// ADR.md entry 28 ("Commenting is confined to content blocks", 2026-08-01):
 // `question` and `compare` lost the comment affordance on their own wrapper
 // entirely -- no button, no form, no page-scoped pin-layer of their own. The
 // question fixture below carries a `context` entry precisely so this file still
@@ -213,7 +213,7 @@ const board = createBoard({
       prompt: 'Pick one',
       widget: 'single',
       options: [{ label: 'Yes' }, { label: 'No' }],
-      // ADR.md entry 6 took the affordance off the wrapper; entry 28 decides what
+      // ADR.md entry 28 took the affordance off the wrapper; entry 28 decides what
       // a `context` entry keeps, on its own kind. An html stage here is exactly as
       // commentable as one at the top level -- the nested case this fixture needs.
       context: [{ kind: 'html', html: '<div class="mock"><button>Confirm</button></div>' }],
@@ -667,7 +667,7 @@ check('an archived board carrying stored markdown and code comments renders with
   } finally { restore(); }
 });
 
-// ADR.md entry 6 ("Commenting is confined to content blocks", 2026-08-01): this
+// ADR.md entry 28 ("Commenting is confined to content blocks", 2026-08-01): this
 // used to also assert that clicking the question's own `.choice-single` widget
 // opened no comment form in the archive -- one more case alongside the others
 // above. That assumed a comment-form existed for the question block at all,
@@ -678,7 +678,7 @@ check('an archived board carrying stored markdown and code comments renders with
 // disable") and replaced with the structural assertion it actually reduces to:
 // no comment-form exists for the question wrapper at all, in the archive same
 // as live.
-check('archive: a question wrapper carries no comment-form element at all -- not merely a disabled/closed one (ADR.md entry 6)', () => {
+check('archive: a question wrapper carries no comment-form element at all -- not merely a disabled/closed one (ADR.md entry 28)', () => {
   const { document, restore } = loadArchive();
   try {
     assert.equal(document.getElementById('comment-form-' + questionId), null, 'a question block must render no comment-form of its own, in the archive same as live');

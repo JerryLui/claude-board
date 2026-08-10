@@ -703,7 +703,7 @@ check('composeHint: every block-kind noun, and an unknown kind degrades to "bloc
   assert.equal(composeHint('x', 'span', true, 'A', 'nonsense-kind'), 'x in A block');
 });
 
-// SPEC_HEADER.md AC 12 (ADR.md entry 61) deleted the round badge and its
+// SPEC_HEADER.md AC 12 (ADR.md entry 42) deleted the round badge and its
 // `badgeLabel` formatter along with it -- the checks that used to pin its
 // round-count formatting and its embedded-source went with them. The two
 // checks below pin what replaced them: AC 9's glyph, read off COMMENT_ICON's
@@ -742,7 +742,7 @@ check('AC 9 (SPEC_HEADER.md): the comment-mode toggle wears the exact same glyph
     'the toggle and the whole-block comment button must share the exact same glyph -- one source (COMMENT_ICON), not two spellings of "comment"');
 });
 
-check('AC 12 (SPEC_HEADER.md, ADR.md entry 61): no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and badgeLabel is gone from src/badge.mjs\'s exports', () => {
+check('AC 12 (SPEC_HEADER.md, ADR.md entry 42): no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and badgeLabel is gone from src/badge.mjs\'s exports', () => {
   assert.equal('badgeLabel' in badgeExports, false,
     'src/badge.mjs must no longer export badgeLabel -- AC 12 names this file and this export explicitly');
 
@@ -2032,7 +2032,7 @@ check('renderBoardPage is a pure function that inlines its own board JSON', () =
 
 // --- the page board: inferred from the board's shape, laid out at viewport size ---
 //
-// ADR.md entries 32/33/34/43. The rule is a pure function of the board JSON and
+// ADR.md entries 32/33. The rule is a pure function of the board JSON and
 // the layout is pure markup plus the stylesheet, so both are asserted here, on
 // renderBoardPage's own output -- the cheap seam. The gesture, the sandbox and
 // the live transition need a document and the real client script, and are in
@@ -2160,7 +2160,7 @@ check('criterion 1: a page board renders the stage edge to edge -- no card, no k
   assert.ok(head, 'the header itself stays -- entry 40 changes its position, never its contents');
   assert.ok(document.getElementById('comment-mode-toggle'), 'including the comment-mode toggle');
   assert.ok(document.getElementById('theme-toggle'), 'and the theme control');
-  assert.ok(document.getElementById('round-meta'), 'and the state label (ADR.md entry 61 -- the round badge that used to sit beside it is gone)');
+  assert.ok(document.getElementById('round-meta'), 'and the state label (ADR.md entry 42 -- the round badge that used to sit beside it is gone)');
 
   // the frame is still a frame: same section, same nesting, same sandbox
   assert.equal(section.getAttribute('data-block-kind'), 'html');
@@ -2170,7 +2170,7 @@ check('criterion 1: a page board renders the stage edge to edge -- no card, no k
 
 check('criterion 2: the page board stage is a constant 100vh that scrolls internally, and the page itself does not scroll', () => {
   const { body, frame } = renderedPage(pageBoard());
-  assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '100vh', 'the frame is a constant viewport height (ADR.md entry 34), not a box grown to content');
+  assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '100vh', 'the frame is a constant viewport height, not a box grown to content');
   assert.doesNotMatch(resolveComputedProperty(styles, frame, true, 'height'), /--stage-p/,
     'and constant means constant through the condense ramp too -- a frame sized on the progress reflows the artifact under the reader');
   assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '0', 'the 320px floor is lifted, so the frame is exactly 100vh and nothing else');
@@ -2219,7 +2219,7 @@ check('criterion 11: a page board offers no way to send -- no Send, no Discuss, 
   const { document, sendBar } = renderedPage(pageBoard());
   assert.equal(resolveComputedProperty(styles, sendBar, true, 'display'), 'none',
     'the send bar is hidden the same way body.readonly hides it -- one rule, the whole bar, buttons and pill together');
-  // The pill is nested inside the bar (ADR.md entry 27) so it inherits that, and
+  // The pill is nested inside the bar so it inherits that, and
   // is separately at zero: a page board asks nothing, so there is no count.
   const pill = document.getElementById('questions-left-pill');
   assert.equal(pill.classList.contains('visible'), false, 'the unanswered count is never shown on a board that asks nothing');
@@ -2230,7 +2230,7 @@ check('criterion 11: a page board offers no way to send -- no Send, no Discuss, 
 check('criterion 25: a page board carries no expand control, and every other stage still carries one', () => {
   const { document } = renderedPage(pageBoard());
   assert.equal(document.querySelectorAll('.expand-btn').length, 0,
-    'ADR.md entry 43: the lens a page board would open is a copy of what already fills the viewport');
+    'the lens a page board would open is a copy of what already fills the viewport');
   assert.equal(document.querySelectorAll('.comment-btn').length, 0,
     'and the kicker\'s comment button goes with it -- the click gesture inside the frame is the affordance here');
 
@@ -2636,7 +2636,7 @@ check('a history round\'s comment form is disabled too, on every CONTENT block k
   // divergent from what the client-side collapse (markRoundHistory) already did.
   // Covers both commentable kinds, since renderBlock threads `historical` into
   // each one's commentArea call. `question`/`compare` are deliberately not fixture
-  // blocks (ADR.md entry 6) and neither are `markdown`/`code` any more (entry 28):
+  // blocks (ADR.md entry 28) and neither are `markdown`/`code` any more (entry 28):
   // none of the four carries a commentArea at all, so none would prove anything
   // about historical-threading here.
   const board = createBoard({
@@ -2918,7 +2918,7 @@ check('html and mermaid blocks each render a stage-wrap + pin-layer, the anchor 
 // --- the element-level gesture's discoverability lives in the toggle alone ----
 //
 // The wiring was correct and unusable, so a
-// permanent hint line was added to each stage's kicker. ADR.md 21 deleted it again:
+// permanent hint line was added to each stage's kicker. It was deleted again:
 // a four-option `choose-between-rendered-variants` question repeated that line once
 // per option, in the place vertical space is scarcest, saying what the comment-mode
 // toggle was already made visible chrome to say. Nothing replaces it -- the toggle
@@ -3076,7 +3076,7 @@ check('the parent tells a stage its sentRefs at both the moments that matter: wh
   // The broadcast to every wired stage, which happens on every mode toggle and
   // not just at ready time -- turning mode ON is exactly the moment the stage's
   // hover starts mattering. It lives in broadcastStageMode rather than inline in
-  // setCommentMode because a THEME change (ADR.md entry 39) sends the identical
+  // setCommentMode because a THEME change sends the identical
   // message, and two copies of it could ship different shapes; asserted here
   // through both hops, so neither the payload nor the delegation can be dropped
   // without failing.
@@ -3085,7 +3085,7 @@ check('the parent tells a stage its sentRefs at both the moments that matter: wh
   assert.match(broadcastBody, /sentRefs:\s*blockId \? sentDomRefsForBlock\(blockId\) : \[\]/,
     'the broadcast to every wired stage must carry that stage\'s own sentRefs');
   assert.match(broadcastBody, /theme:\s*activeTheme\(\)/,
-    'and the theme it must now paint itself in (ADR.md entry 39)');
+    'and the theme it must now paint itself in');
   const setModeBody = namedFunctionBody(ui, 'setCommentMode');
   assert.ok(setModeBody, 'setCommentMode not found');
   assert.match(setModeBody, /broadcastStageMode\(\)/,
@@ -5428,7 +5428,7 @@ check('choose-between-rendered-variants: a variant option\'s stage grows to the 
     drain(); // a real browser: waits for the actual rendering opportunity, then runs the queued (nested) rAF callbacks
   });
 
-  // ADR 41: a stage that measures itself from the viewport can report a
+  // A stage that measures itself from the viewport can report a
   // collapsed height (here, 180 -- shorter than the 320px placeholder) that
   // never grows again. Before the floor, this locked the card at 180px
   // forever; now it renders at the placeholder instead.
@@ -7074,8 +7074,7 @@ check('an index row with no open asking round renders no badge element at all --
 });
 
 check('a question left deferred inside an already-SENT round contributes nothing to the count', () => {
-  // A sent round cannot be returned to (ADR.md
-  // entry 25's own stated cost) -- so once `applySubmit` marks a round `sent`,
+  // A sent round cannot be returned to -- so once `applySubmit` marks a round `sent`,
   // whatever any of its questions were left as is no longer an open trip back to
   // the board, `deferred` included.
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'rounds-left-deferred');
@@ -8902,7 +8901,7 @@ check('the mermaid CDN is pinned to one exact version everywhere, because the CS
   // the string: this policy, the board's own loader in src/ui.mjs, and the renderer
   // templates, whose CDN fallback is the ONLY engine that can load inside a stage (an
   // opaque origin resolves the vendored `assets/mermaid.min.js` to nothing -- ADR.md
-  // entries 32 and 37). Those templates live in ~/.claude/skills and are unreachable
+  // entry 32). Those templates live in ~/.claude/skills and are unreachable
   // from this repo, so what is pinned here is the fact they were pinned against: the
   // version this policy names, and that it names exactly one. Widen or bump it and the
   // check goes red at the commit, rather than the diagrams going blank on the next

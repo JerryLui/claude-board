@@ -1,6 +1,6 @@
 // The page board, driven for real: a board whose blocks are one `html` block and
 // nothing else renders that artifact at viewport size (src/render.mjs's
-// isPageBoard -- ADR.md entries 32/33/34/43), and everything the reviewer can do
+// isPageBoard -- ADR.md entries 32/33), and everything the reviewer can do
 // to it still works.
 //
 // The pure half -- the inference rule and the layout as markup plus stylesheet --
@@ -316,10 +316,10 @@ check('criterion 16: the pill wears a corner rather than a capsule, and holds on
   // 'none', not '': the page board's own header rule states it outright (the
   // wash and the pill chrome are separate layers there, so the header's own box
   // must declare it away). On an ordinary board the declaration is simply gone,
-  // which the resolver reports as '' -- both spellings of ADR.md entry 52.
+  // which the resolver reports as '' -- both spellings of the same no-hairline rule.
   assert.equal(computed(head, 'border-bottom'), 'none',
-    'a header that fades draws no hairline under the fade (ADR.md entry 52) -- the gradient is the edge');
-  // ADR.md entry 61 deleted the round badge this check used to pin as "a
+    'a header that fades draws no hairline under the fade -- the gradient is the edge');
+  // ADR.md entry 42 deleted the round badge this check used to pin as "a
   // label, not a chip" (background/border: none) -- there is no chip left to
   // de-chip; the state label alone, with a hairline ahead of it, is what
   // survives.
@@ -355,7 +355,7 @@ check('AC 9 (SPEC_HEADER.md): a page board\'s comment-mode toggle wears COMMENT_
     'condensed, the toggle must still render COMMENT_ICON\'s own path data');
 });
 
-check('AC 12 (SPEC_HEADER.md, ADR.md entry 61): a page board\'s header names no round, at rest or condensed', () => {
+check('AC 12 (SPEC_HEADER.md, ADR.md entry 42): a page board\'s header names no round, at rest or condensed', () => {
   const { document, frame } = openPageBoard();
   assert.equal(document.getElementById('round-badge'), null, 'setup: no #round-badge at rest');
   assert.equal(document.querySelectorAll('.round-badge').length, 0, 'setup: no .round-badge element at rest');
@@ -803,7 +803,7 @@ check('criterion 15: theme rides the message that already carries comment mode, 
   // this awaited page board hydrates that way already), then a mode change
   // with a theme already chosen: whichever fact moved, the stage is told
   // BOTH, so it can never be left holding a stale value of the one the
-  // caller did not care about (ADR.md entry 39: one channel, one message
+  // caller did not care about (one channel, one message
   // shape).
   document.querySelector('button#theme-toggle').dispatchEvent(new StandInEvent('click'));
   document.querySelector('button#comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
@@ -920,7 +920,7 @@ check('criterion 2: a page board\'s frame never takes an inline height from a re
   // A stage that measures itself against the viewport reports a huge height, and
   // stageAgentScript has no way to know which kind of card it is in (its own
   // comment) -- so every stage sends this message and the parent decides. A page
-  // board's frame is a constant 100vh (ADR.md entry 34); a report that moved it
+  // board's frame is a constant 100vh; a report that moved it
   // would reflow a long artifact under the reader mid-read.
   const { frame } = openPageBoard();
   assert.ok(!frame.style.height, 'setup: nothing has set a height yet');
@@ -1275,7 +1275,7 @@ check('an amend push of a page-board block renders it as a PAGE, byte-identical 
     'the amend fragment and the reload must be the same block markup -- one board cannot render two ways');
 
   assert.ok(!payload.html.includes('block-kicker'), 'no kicker over a full-viewport artifact');
-  assert.ok(!payload.html.includes('expand-btn'), 'and no expand control (ADR.md entry 43)');
+  assert.ok(!payload.html.includes('expand-btn'), 'and no expand control');
   assert.ok(payload.html.includes('page-comments'), 'and the comment surface still floats over the frame');
 
   // And the same call for an ORDINARY board's stage is untouched: this derives
@@ -1331,7 +1331,7 @@ check('the seam for ticket 05: a round arriving over SSE ends the page-board lay
 // SPEC_AWAITED.md ticket 03: the page board's two states.
 // =================================================================================
 //
-// Everything above this line predates *awaited* (ADR.md entries 45-49) and now
+// Everything above this line predates *awaited* (ADR.md entries 45-47) and now
 // runs against an AWAITED page board by default (pageBoard()'s own header
 // comment says why). What follows is what ticket 03 itself adds: the send
 // control inside the comment panel (AC 4), the click-to-comment hint (AC 5),

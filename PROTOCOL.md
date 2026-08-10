@@ -33,7 +33,7 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `src/badge.mjs` | pure, DOM-free facts about a round: the badge's label, `isPageRound`/`questionBlocks`, and the whole *Awaited* predicate family (`roundIsAwaited`, `closeLapsedAwaitedRounds`, the countdown and pill text). Imported by the store, the server and the index AND spliced verbatim into `src/ui.mjs`, so both sides answer "is anyone listening" from one definition |
 | `src/lens.mjs` | the diagram lens's view math, pure |
 | `src/prose-check.mjs` | the prose-vs-shim checker (below). Ships from `src/` so a caller outside this repo can import it |
-| `src/cues.mjs` | the cue vocabulary: the closed set of legal cue values, enumerated live from BOTH sound directories (`/System/Library/Sounds` and `~/Library/Sounds`, ADR 23) plus `"None"`, memoised on a 5-second TTL |
+| `src/cues.mjs` | the cue vocabulary: the closed set of legal cue values, enumerated live from BOTH sound directories (`/System/Library/Sounds` and `~/Library/Sounds`, ADR 20) plus `"None"`, memoised on a 5-second TTL |
 | `src/pomodoro.mjs` | the global pomodoro clock: the pure boundary rule, the document's shape on disk, the impure shell the daemon boots. Absolute deadlines, so a restart is invisible and a deadline slept through expires silently |
 | `src/pomodoro-widget.mjs` | the timer's server-rendered markup for the index page; its client half extends `src/indexpage.mjs`'s script by concatenation |
 | `src/notify.mjs` | one native notification per interval boundary, carrying that phase's cue. The bundle's own executable in `--notify` mode inside `claude-board.app` (ADR 19), `osascript` only on the no-launcher clone install; message text and cue both come from closed-set lookups |
@@ -283,7 +283,7 @@ tell. A `source` ref never raises this cap for any kind — the whole file's siz
 **Commentable.** Only the rendered kinds are — `mermaid` and `html` — and they are wherever they
 appear, including inside a question's `context` and inside a `compare` side. `markdown` and `code`
 are not, anywhere. The rule is drawn on kind, never on position (ADR 28, which supersedes the
-comment half of entry 26 and narrows entry 6).
+comment half of entry 26 and narrows entry 28).
 
 ```js
 Answer  = { id, status, choice, note }
@@ -598,7 +598,7 @@ route's own section, below).
 It is additionally accepted on nine pomodoro writes — `ensure`, `pause`, `resume`, `reset`,
 `settings`, `preview`, `notifyTest`, `forward`, `restart` — so the index page's switch and its
 settings popover can drive the clock. That clock never touches a board, never gates an `ask` and
-never reaches a tool, so it costs the cookie nothing it did not already carry (ADR 17, 24). The
+never reaches a tool, so it costs the cookie nothing it did not already carry. The
 list stays a closed, named set: a pomodoro write added later is secret-only until someone
 deliberately names it.
 
@@ -820,7 +820,7 @@ the call returns 200 with a packet whose `status` is `timeout`, carrying whateve
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
 
-### The pomodoro routes (ADR 8, 17, 20, 24)
+### The pomodoro routes (ADR 8, 20)
 
 Everything the table above does not say:
 
@@ -856,7 +856,7 @@ Everything the table above does not say:
 
 ### Marking an already-open tab
 
-Three marks, and no others (ADR 30, 31): the unbadged board mark every page emits in its `<head>`
+Three marks, and no others (ADR 30): the unbadged board mark every page emits in its `<head>`
 (`faviconLink`, `src/styles.mjs`); a **counted** mark drawn over it on a `round` push; and
 `restFaviconHref`, on the index tab only, while the pomodoro is in an unpaused break. A pending
 count outranks the rest mark outright. `document.title` is left alone.
@@ -925,6 +925,151 @@ same apply path as a live push. A first connection with nothing missed diffs to 
 touches no DOM. The re-read is a plain `GET /b/:boardId`, which already inlines both the payload
 (`#board-data`, `resolveComment` already run over it) and the server-rendered markup for every
 round; a dedicated JSON route would be leaner and can be added later without changing this rule.
+
+## Stage postMessage channel
+
+The page's second wire contract, between the board page and an `html` block's sandboxed stage.
+`src/render.mjs`'s `stageAgentScript` is the stage half; `src/ui.mjs`'s message listener is the
+parent half. Rationale for the isolation model lives in `SECURITY.md`; this section owns the
+message tables and the two validation rules.
+
+The frame carries `sandbox="allow-scripts"` and no `allow-same-origin`, so its browsing context
+has an **opaque origin**: `frame.contentDocument` throws or returns null from the parent's side,
+and a script inside the mock cannot reach the parent's window or document at all. The parent
+therefore cannot read an element's text, build a step path, or draw a pin from the stage's live
+layout. Everything it used to do by reaching in now happens over this channel, and nothing else.
+
+Every message is a plain object carrying `cb: 'cb-stage'` — a marker namespacing this channel
+from anything else that might postMessage this window (an extension, devtools, a future feature)
+— and a `type`.
+
+### Stage → parent
+
+| type | payload | meaning |
+| --- | --- | --- |
+| `ready` | — | listeners attached. Sent once, unconditionally, at the end of the agent script |
+| `hover` | `{ ref, tag, text }` | innermost element under the cursor, or `ref: null` on mouseout. The stage also applies its own outline locally |
+| `click` | `{ ref, tag, text }` | step path plus **raw** tag/text, never a composed hint |
+| `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` relative to this document's `<body>`, or `null` if the ref no longer resolves. Numbers and null only |
+| `height` | `{ height }` | `document.body.scrollHeight` |
+| `scroll` | `{ top }` | "I am at this offset". Deduplicated on the last reported value |
+
+`ref` is a `buildSteps`/`stepsToPath` index chain from `document.body`.
+
+`click` carries raw tag/text rather than a hint because composing *identity in context*
+(`composeHint`, `src/anchor.mjs`) needs the outer document's knowledge of whether this stage sits
+inside a compare side, which the stage cannot see. The parent calls `buildHint` on what it
+receives, through the same function every other content kind's click already uses. This is also
+why `composeHint` needs no third copy embedded here: only
+`buildSteps`/`stepsToPath`/`pathToSteps`/`resolveSteps` do, bound via `.toString()` from
+`src/anchor.mjs`, never hand-copied.
+
+`positions` only ever positions a pin the parent already decided to draw from its own
+server-verdict-derived comment list (`commentsWithPending`), never to decide *whether* a pin
+exists.
+
+`height` is stage-authored like every other field, so the parent clamps it between
+`STAGE_HEIGHT_FLOOR` and `STAGE_HEIGHT_CAP` (320 / 600) before it touches a frame's inline
+style. The cap stops a hostile or viewport-sized report growing a card without limit; the floor
+stops a report that measured a collapsed sliver of chrome from locking the card there forever,
+since a taller report never arrives from content that is not reflowing. Applied only to a stage
+inside a `.choice-variant` card.
+
+`scroll` exists because ADR 40's page-board header condenses on the reader's scroll, but on a page
+board the document itself never scrolls — the artifact scrolls inside the opaque-origin frame — so
+the parent cannot observe it short of being told.
+
+### Parent → stage
+
+| type | payload | meaning |
+| --- | --- | --- |
+| `mode` | `{ commentMode }` | comment mode on/off. The stage keeps its own flag, read by the same `if (!commentMode) return;` guards the old in-parent listeners used |
+| `locate` | `{ requestId, refs }` | asks for the current `{left, top}` of every ref |
+| `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
+| `scroll` | `{ top }` | "put yourself at this offset" |
+
+`scroll` is the one bidirectional type on this channel. Inbound it is sent only as a reset,
+`top: 0`, by the board's back-to-top control, since the parent cannot scroll a cross-origin
+document itself. Both directions aim at whichever element most recently identified itself as the
+scroller, never at the document by assumption.
+
+The hover stylesheet is injected lazily, the first time `commentMode` turns true. A read-only
+archive never sends `mode` at all (`setCommentMode` refuses to enable comment mode when
+`readonly`), so an archived stage's document never gains one.
+
+`band` exists because the parent's header, dock and comment rail float **over** the frame rather
+than pushing it down, so an artifact that pads nothing loses its own opening under them. No fixed
+number is baked in on either side — the header's real height moves with the title's wrap and the
+viewport width — so the parent measures its live chrome (`reportStageBand`) and the stage tops its
+own `body` padding up to at least that much, rather than overwriting padding the artifact already
+had. Parent to stage only: reserving space for the board's chrome is the board's decision, never a
+negotiation.
+
+`locate` and `band` are both sent once a stage announces `ready`, and again whenever the parent's
+own refresh runs (resize, a comment queued, a submit landing, a round flip).
+
+### There is no `select` message, deliberately
+
+An earlier version had the stage post a content-free `select` on every click, so clicking the
+visible mock content of an `html`-kind option could pick that option. Reverted before that work
+merged.
+
+Every message on this channel is stage-authored input, no different in kind from the mock's own
+HTML. Unlike `click`/`hover`, which only *propose* an anchor a human still has to submit, or
+`positions`, which is pure geometry, a message that picks an option is the agent handing itself
+the answer to its own question. Two paths made that concrete: the stage's own script could
+dispatch a click on itself with no human involved, and — since `cb: 'cb-stage'` is a fixed public
+string, and the validation below proves only that a message came from *some* live stage, never
+that a human acted — any stage's script could call `postMessage({cb:'cb-stage', type:'select'})`
+directly. An `ev.isTrusted` guard would have closed the first path only; the second forges the
+message upstream of any such guard.
+
+Deleted rather than guarded. An option's stage is a thumbnail to choose between, not a surface to
+operate, so it renders `pointer-events: none` inside a `.choice-variant` card: a real click over
+the visible mock never reaches the iframe and lands on the card in the parent document, which
+already handles it. A forged `select`-shaped message from a live, correctly-addressed stage is
+inert because no handler is left to act on it.
+
+### Origin validation
+
+An opaque-origin `srcdoc` frame has no real origin, so the usual same-origin comparison is
+meaningless here. Each side validates something else.
+
+**Parent reading a stage message** checks `event.origin === 'null'`. The HTML standard serializes
+an opaque origin in a `postMessage` event as the literal four-character string `"null"`, always,
+regardless of what URL or port the parent page is served from. That is not an origin we happen to
+trust, it is the *absence* of one: any message carrying a real origin — an extension, devtools, a
+same-origin script the reviewer runs in the same tab — is rejected before any shape check runs.
+Necessary but not sufficient, since it does not say *which* stage.
+
+**Parent identity check**: `event.source` must equal the `contentWindow` of a currently-mounted
+`.html-stage` frame. The browser stamps `event.source` from the calling script's actual global
+object, so no page script can forge it — it is not read off `event.data`, which is
+attacker-controlled. Re-deriving which stage by walking the live DOM at receive time, rather than
+trusting an id the message claims, is what makes it the frame the parent thinks it is.
+
+**Stage reading a parent message** checks `event.source === window.parent`. The stage cannot know
+the parent's real origin in advance (any port, or `file://`), so an origin string check is not
+available to it — and is not needed. `window.parent` is a reference the browser hands the script
+at frame-creation time, and no script in any window can make `event.source` equal a different
+window's `window.parent`. Identity alone is sufficient here.
+
+### Shape validation
+
+Neither side trusts a message's shape beyond what it explicitly checks. The stage document is
+attacker-controlled, so the parent assumes the mock's own script sends it hostile messages on the
+same channel the agent uses.
+
+Every handler on both sides checks every field's type before using it — `typeof x === 'string'`,
+`Array.isArray`, `Number.isFinite` — and drops what does not match rather than throwing or
+coercing. The parent never evaluates, renders as HTML, or otherwise trusts a string from the
+stage: a hint is composed via the same `buildHint`/`composeHint` every other click uses (never
+`innerHTML`), and every anchor field reaches the comment form through
+`setAttribute`/`textContent`, never string-concatenated into markup.
+
+Checked by `test/check-stage-isolation.mjs` and `test/check-click.mjs`'s malformed and
+hostile-message cases. `test/dom-stand-in.mjs`'s `StandInWindow` models a stage's `window.parent`
+as an object exposing only `postMessage`, never `.document`, for the same reason.
 
 ## MCP surface
 

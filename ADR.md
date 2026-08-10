@@ -7,7 +7,9 @@ An entry is here because reversing it costs something real, a future reader woul
 inexplicable, and a genuine alternative was on the table. All three, or it is not a decision
 record: a small decision is not recorded more briefly, it is not recorded. A superseded entry is
 **deleted** rather than kept with a status — git holds the trail. Numbers are never reused, so
-gaps are normal and every `ADR.md entry N` reference elsewhere in the repo stays good.
+gaps are normal and an `ADR.md entry N` reference can never come to mean a decision other than
+the one it was written against. A reference to a deleted entry is repointed at the entry that
+superseded it, or dropped when nothing did.
 
 Rejected alternatives and the reasoning behind an entry live in `DESIGN.md`, which the entries
 link where it is worth reading.
@@ -30,7 +32,7 @@ link where it is worth reading.
 | 22 | [The stage lens may record a pick](.agents/adr/0022-stage-lens-may-record-a-pick.md) | 2026-08-05 | accepted |
 | 26 | [A question's context is prose under the prompt](.agents/adr/0026-question-s-context-is-prose-under-the-prompt.md) | 2026-08-06 | comment half superseded by 28 |
 | 28 | [Only the rendered kinds can be commented on](.agents/adr/0028-only-the-rendered-kinds-can-be-commented-on.md) | 2026-08-06 | supersedes the comment half of 26 |
-| 30 | [The tab mark stays amber; a numeral replaces the inverted tile](.agents/adr/0030-tab-mark-stays-amber-a-numeral-replaces-the.md) | 2026-08-06 | accepted |
+| 30 | [The tab mark stays amber; a numeral replaces the inverted tile](.agents/adr/0030-tab-mark-stays-amber-a-numeral-replaces-the.md) | 2026-08-06 | narrowed by 66 |
 | 32 | [A rendered page reaches the board as a snapshotted stage, not a framed served file](.agents/adr/0032-rendered-page-reaches-the-board-as-a-snapshotted.md) | 2026-08-07 | accepted |
 | 33 | [Fullpage is inferred from the board's shape, not declared by the caller](.agents/adr/0033-fullpage-is-inferred-from-the-board-s-shape.md) | 2026-08-07 | accepted |
 | 35 | [An undelivered comment rides the thread's next packet](.agents/adr/0035-undelivered-comment-rides-the-thread-s-next-packet.md) | 2026-08-07 | narrowed by 45 and 46 |
@@ -52,3 +54,4 @@ link where it is worth reading.
 | 63 | [Code renders highlighted, six-hue, with the file's own line numbers](.agents/adr/0063-code-renders-highlighted-six-hue-with-the-file.md) | 2026-08-09 | accepted |
 | 64 | [A diff row suppresses syntax colour](.agents/adr/0064-diff-row-suppresses-syntax-colour.md) | 2026-08-09 | narrows 63 |
 | 65 | [One tokenizer serves both a code block and a markdown fence](.agents/adr/0065-one-tokenizer-serves-both-a-code-block-and.md) | 2026-08-09 | accepted |
+| 66 | [The owed-round dot takes a different hue in each theme](.agents/adr/0066-the-owed-round-dot-takes-a-different-hue-in-each.md) | 2026-08-09 | narrows 30 |
