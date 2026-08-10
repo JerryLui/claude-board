@@ -25,7 +25,7 @@
 // too, which is exactly the shape this rule announces.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -1048,7 +1048,7 @@ async function layerOne() {
     // path was inert for the one case it exists for. Asserted against a path of that
     // length rather than against this process's own, which on a short-path install would
     // pass either way and prove nothing.
-    // Two things about this setup are load-bearing, and both were wrong before.
+    // Two things about this setup are load-bearing.
     //
     // The path is NOT shaped `claude-board.app/Contents/MacOS/claude-board`, which is what
     // it used to be. Exec'ing an unsigned binary from inside a bundle makes macOS evaluate
@@ -1058,21 +1058,23 @@ async function layerOne() {
     // fine (QUIRKS.md, "`lsregister` records are permanent"). Only the LENGTH matters
     // here, so this mirrors the real APP_EXEC's depth with no bundle anywhere in it.
     //
-    // And the copied binary is NODE, not `/bin/sleep`. `/bin/sleep` is a platform binary
-    // whose signature is only valid on the SIP volume, so a copy of it is SIGKILLed on
-    // exec wherever it lands -- the bundle shape was what had been suppressing that, by
-    // sending it down Gatekeeper's path instead. `process.execPath` is ordinary signed
-    // code that survives being copied, and is the one binary certain to exist here.
-    // ponytail: that copy is ~120MB per run of this file, against ~150KB before. The
-    // ceiling is one temp-dir write on a suite that already boots daemons; if it ever
-    // matters, compile a two-line C sleeper at check time instead.
+    // And the process at that path is a SYMBOLIC LINK to `process.execPath`, not a copy.
+    // `ps` reports the path a process was started from, not the path a link resolves to,
+    // so the link proves the same fact a copy would -- at no disk cost, with nothing to
+    // clean up but the link itself.
+    //
+    // The link points at NODE, not `/bin/sleep`. A link to `/bin/sleep` would run the real
+    // system binary just fine -- a link carries none of a copy's signature problem -- but
+    // `process.execPath` is the one binary certain to exist here: it's the interpreter
+    // already running this check, which is why the `-e` flag passed to it below means
+    // anything at all.
     const longExec = path.join(workDir, 'launcher-exec-path-over-maxcomlen', 'claude-board');
     mkdirSync(path.dirname(longExec), { recursive: true });
-    copyFileSync(process.execPath, longExec);
+    symlinkSync(process.execPath, longExec);
     assert.ok(longExec.length > 16, 'setup sanity: the path has to exceed MAXCOMLEN to prove anything');
     assert.ok(!longExec.includes('.app/'), 'and must NOT be bundle-shaped: exec\'ing out of one raises the damaged dialog');
     const sleeper = spawn(longExec, ['-e', 'setTimeout(() => {}, 5000)'], { stdio: 'ignore' });
-    // A spawn that fails (noexec TMPDIR, a truncated copy) emits 'error' asynchronously,
+    // A spawn that fails (noexec TMPDIR, a dangling link) emits 'error' asynchronously,
     // and an unhandled one on a ChildProcess throws out of the event loop rather than into
     // the try below -- taking the whole file down instead of failing this one check.
     sleeper.on('error', () => {});

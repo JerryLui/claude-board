@@ -1017,8 +1017,10 @@ now uses a plain deep directory. Two things to know if you touch that setup:
   install. The tell is that it appears while a check suite is running and the board is fine.
 - `/bin/sleep` and friends are platform binaries whose signature is only valid on the SIP
   volume: a copy is SIGKILLed on exec no matter where it lands. The bundle shape had been
-  masking that, since Gatekeeper's path is a different one. Copy `process.execPath` instead
-  when a check needs a throwaway long-lived executable.
+  masking that, since Gatekeeper's path is a different one. When a check needs a throwaway
+  long-lived executable, `symlinkSync` a long path at `process.execPath`: `ps` reports the
+  path a process was started from, not what the link resolves to, so the link proves the
+  same thing a copy would and costs no disk. Do not copy the binary: that is 115 MB a run.
 - `test/check-notify.mjs` cannot take that way out: `importFromFakeBundle` stages a real
   `<name>.app` because `notifyBoundary` spawning the bundle executable is the behaviour
   under test, and one of those is named `claude-board.app` exactly. It withdraws every
