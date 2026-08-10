@@ -130,10 +130,14 @@ the session-start hook then leaves the Timer alone. _Avoid_: headless, print mod
 **Timer**: the daemon's single global clock — one per machine, never per Thread. It is running,
 paused, or absent; there is no third timer anywhere. _Avoid_: pomodoro, countdown, clock.
 
-**Status item**: the macOS menu bar surface — the Timer's phase and remaining time, and a count of
-the Boards waiting for an answer. A pure client: it holds no Timer, no settings and no notification
-of its own, and it is a second process of the same bundle, never a second app. _Avoid_: menu bar
-app, menulet, tray icon, systray.
+**Status item**: the macOS menu bar surface — the Timer's phase, and its remaining time only while
+it is running. A pure client: it holds no Timer, no settings and no notification of its own, and it
+is a second process of the same bundle, never a second app. _Avoid_: menu bar app, menulet, tray
+icon, systray.
+
+**Popover**: the panel a click on the Status item opens — the Timer's phase and controls, the
+Boards waiting for an answer, and a way through to settings. It carries no state of its own: every
+row is a snapshot of the daemon taken when it opened. _Avoid_: menu, dropdown, panel, window.
 
 **Cue**: the sound a boundary's notification carries, chosen per phase — the name of one of the
 sounds macOS ships, or `None`. It rides on the notification rather than being played beside it,

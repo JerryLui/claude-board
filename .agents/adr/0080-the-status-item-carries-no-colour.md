@@ -1,5 +1,5 @@
 # 80. The status item carries no colour
 
-2026-08-10 · relates to 72
+2026-08-10 · relates to 72; narrowed by 83, 84
 
 **Context:** the first build resolved the icon's own colours against its own appearance and read as a flat grey in the menu bar, because a status item's button is composited by ControlCenter rather than by this process, so nothing here can know the ink the menu bar is actually using. **Decision:** the icon is a template image — an alpha-only mask with `template = YES` — and the four states are told apart by shape and weight alone: idle the plain circle, work the depleting arc, a short break the two bars, a long break those bars on a filled circle rather than on a third glyph. **Consequences:** light, dark, the highlighted state, Increase Contrast and Reduce Transparency are all the system's to compute and none of them are this repo's to get wrong, including the dimming of a daemon gone quiet, which is a mask value; in exchange the widget's amber does not cross over, the two surfaces agree on shape and not on hue, and any state added later has only shape and alpha left to spend.
