@@ -55,3 +55,5 @@ link where it is worth reading.
 | 64 | [A diff row suppresses syntax colour](.agents/adr/0064-diff-row-suppresses-syntax-colour.md) | 2026-08-09 | narrows 63 |
 | 65 | [One tokenizer serves both a code block and a markdown fence](.agents/adr/0065-one-tokenizer-serves-both-a-code-block-and.md) | 2026-08-09 | accepted |
 | 66 | [The owed-round dot takes a different hue in each theme](.agents/adr/0066-the-owed-round-dot-takes-a-different-hue-in-each.md) | 2026-08-09 | narrows 30 |
+| 67 | [The pomodoro day runs 05:00 to 05:00, and its rollover ends the loop](.agents/adr/0067-the-pomodoro-day-runs-05-00-to-05-00-and.md) | 2026-08-10 | narrows 8; narrowed by 68 |
+| 68 | [A session that must not start the timer marks itself](.agents/adr/0068-a-session-that-must-not-start-the-timer-marks.md) | 2026-08-10 | narrows 67 |
