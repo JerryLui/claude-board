@@ -12,10 +12,12 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_SETTINGS,
   EXPIRY_GRACE_MS,
+  DAY_START_HOUR,
   defaultDoc,
   localDateStr,
+  pomodoroDay,
   formatCountdown,
-  normalizeCycle,
+  rollDay,
   startWork,
   settleBoundary,
   forwardTimer,
@@ -96,28 +98,77 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // normalizeCycle -- the local-midnight reset, in isolation.
+  // The pomodoro day and its rollover (ADR 67), in isolation. `now` is an argument
+  // everywhere below, so every one of these runs the same at any hour the suite is
+  // started -- including between midnight and 05:00, which is a real pomodoro day
+  // boundary case and not merely an odd time to run tests.
   // -------------------------------------------------------------------------------
 
-  await check('normalizeCycle: same local date is untouched (same reference, no write)', () => {
-    const today = localDateStr(Date.now());
-    const doc = { ...defaultDoc(), cycle: 2, cycleDate: today };
-    assert.equal(normalizeCycle(doc, Date.now()), doc);
+  await check('DAY_START_HOUR: the boundary is 05:00, stated as a constant and not as a setting', () => {
+    assert.equal(DAY_START_HOUR, 5);
+    // The half that matters more than the value: no settings key names it, so there is
+    // nothing to configure and nothing that can change under an already-stamped
+    // cycleDate. mergeSettings drops unknown keys, so a patch trying to set one is
+    // silently ignored rather than stored -- assert the stored settings, not the throw.
+    assert.equal('dayStartHour' in DEFAULT_SETTINGS, false);
+    const patched = mergeSettings(defaultDoc(), { dayStartHour: 9 });
+    assert.equal('dayStartHour' in patched.settings, false, 'the day boundary must not be reachable through the settings route');
   });
 
-  await check('normalizeCycle: a stale cycleDate resets cycle to 0 and bumps cycleDate to today', () => {
-    const now = new Date(2026, 7, 4, 9, 0, 0).getTime(); // 2026-08-04
-    const doc = { ...defaultDoc(), cycle: 3, cycleDate: '2026-08-03' };
-    const next = normalizeCycle(doc, now);
+  await check('pomodoroDay: 05:00 starts the new day; everything before it still belongs to the previous one', () => {
+    assert.equal(pomodoroDay(new Date(2026, 7, 4, 5, 0, 0).getTime()), '2026-08-04', '05:00 exactly is the new day');
+    assert.equal(pomodoroDay(new Date(2026, 7, 4, 4, 59, 59).getTime()), '2026-08-03', 'a second before 05:00 is still yesterday');
+    assert.equal(pomodoroDay(new Date(2026, 7, 4, 23, 0, 0).getTime()), '2026-08-04', 'the evening belongs to the day it is the evening of');
+    assert.equal(pomodoroDay(new Date(2026, 7, 5, 0, 5, 0).getTime()), '2026-08-04', 'past midnight is not past the boundary');
+  });
+
+  await check('pomodoroDay: rolling back across a month and a year boundary, not just a day', () => {
+    // 03:00 on the 1st belongs to the last day of the previous month -- the arithmetic
+    // Date.setDate does for us, and the one an off-by-one would produce '2026-08-00' for.
+    assert.equal(pomodoroDay(new Date(2026, 7, 1, 3, 0, 0).getTime()), '2026-07-31');
+    assert.equal(pomodoroDay(new Date(2026, 0, 1, 3, 0, 0).getTime()), '2025-12-31');
+  });
+
+  await check('rollDay: the same pomodoro day is untouched, by reference (no needless write)', () => {
+    const now = new Date(2026, 7, 4, 14, 0, 0).getTime();
+    const doc = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 60_000, paused: false } };
+    assert.equal(rollDay(doc, now), doc);
+  });
+
+  await check('rollDay: a timer paused at 23:00 is gone the first time the document is rolled after 05:00 the next day, and the cycle is back to zero', () => {
+    // Criteria 1 and 2, at the pure layer: one rule, both halves of the loop.
+    const evening = new Date(2026, 7, 4, 23, 0, 0).getTime();
+    const paused = { ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(evening), timer: { phase: 'work', paused: true, remainingMs: 12 * 60_000 } };
+    const next = rollDay(paused, new Date(2026, 7, 5, 5, 0, 1).getTime());
+    assert.equal(next.timer, null, 'a paused timer never expires on its own -- the day ending is what clears it');
     assert.equal(next.cycle, 0);
-    assert.equal(next.cycleDate, '2026-08-04');
+    assert.equal(next.cycleDate, '2026-08-05');
   });
 
-  await check('normalizeCycle: a missing cycleDate (fresh document) also resets', () => {
+  await check('rollDay: a timer paused at 02:00 is still there at 04:00 -- the previous day has not ended yet', () => {
+    const twoAm = new Date(2026, 7, 5, 2, 0, 0).getTime();
+    const paused = { ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(twoAm), timer: { phase: 'work', paused: true, remainingMs: 8 * 60_000 } };
+    assert.equal(paused.cycleDate, '2026-08-04', 'sanity: a timer paused at 02:00 belongs to the previous date');
+    const atFour = rollDay(paused, new Date(2026, 7, 5, 4, 0, 0).getTime());
+    assert.equal(atFour, paused, 'nothing has crossed, so not even a new object');
+    // ...and the same document one hour later is a different story entirely.
+    assert.equal(rollDay(paused, new Date(2026, 7, 5, 5, 0, 0).getTime()).timer, null);
+  });
+
+  await check('rollDay: a work interval running at 23:55 is unaffected at 00:05 -- midnight is not a boundary', () => {
+    const late = new Date(2026, 7, 4, 23, 55, 0).getTime();
+    const running = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(late), timer: { phase: 'work', deadline: late + 20 * 60_000, paused: false } };
+    const past = rollDay(running, new Date(2026, 7, 5, 0, 5, 0).getTime());
+    assert.equal(past, running, 'the calendar date changed and the pomodoro day did not');
+    assert.equal(past.cycle, 2, 'the cycle count survives midnight');
+  });
+
+  await check('rollDay: a missing cycleDate (a document written before this rule existed) reads as stale', () => {
     const now = Date.now();
-    const next = normalizeCycle(defaultDoc(), now);
+    const next = rollDay({ ...defaultDoc(), cycle: 3, timer: { phase: 'break', deadline: now + 60_000, paused: false } }, now);
     assert.equal(next.cycle, 0);
-    assert.equal(next.cycleDate, localDateStr(now));
+    assert.equal(next.timer, null);
+    assert.equal(next.cycleDate, pomodoroDay(now));
   });
 
   // -------------------------------------------------------------------------------
@@ -127,7 +178,7 @@ async function main() {
 
   await check('settleBoundary: a full work/break loop, every 4th break long, cycle resets after it', () => {
     const t0 = new Date(2026, 7, 4, 9, 0, 0).getTime();
-    let doc = { ...defaultDoc(), cycleDate: localDateStr(t0), timer: { phase: 'work', deadline: t0, paused: false } };
+    let doc = { ...defaultDoc(), cycleDate: pomodoroDay(t0), timer: { phase: 'work', deadline: t0, paused: false } };
 
     // (finishedPhase, expected next phase, expected cycle AFTER the transition)
     const steps = [
@@ -155,39 +206,66 @@ async function main() {
   await check('settleBoundary: durations come from settings (work/break/longBreak minutes all distinct)', () => {
     const t0 = Date.now();
     const settings = { ...DEFAULT_SETTINGS, workMin: 25, breakMin: 5, longBreakMin: 15 };
-    const workDoc = { ...defaultDoc(), settings, cycleDate: localDateStr(t0), timer: { phase: 'work', deadline: t0, paused: false } };
+    const workDoc = { ...defaultDoc(), settings, cycleDate: pomodoroDay(t0), timer: { phase: 'work', deadline: t0, paused: false } };
     const { doc: afterWork } = settleBoundary(workDoc, t0);
     assert.equal(afterWork.timer.deadline - t0, 5 * 60_000); // break
 
-    const longBreakDoc = { ...defaultDoc(), settings, cycle: 3, cycleDate: localDateStr(t0), timer: { phase: 'work', deadline: t0, paused: false } };
+    const longBreakDoc = { ...defaultDoc(), settings, cycle: 3, cycleDate: pomodoroDay(t0), timer: { phase: 'work', deadline: t0, paused: false } };
     const { doc: afterFourth } = settleBoundary(longBreakDoc, t0);
     assert.equal(afterFourth.timer.phase, 'longBreak');
     assert.equal(afterFourth.timer.deadline - t0, 15 * 60_000);
   });
 
-  await check('settleBoundary: normalises the midnight reset BEFORE doing cycle arithmetic', () => {
-    // cycle=3 dated yesterday: if midnight normalisation ran AFTER the arithmetic (or
-    // not at all), breakNumber would be computed as 3+1=4 (a long break, wrong) instead
-    // of the correct 0+1=1 (an ordinary break) once today's reset is accounted for.
-    const now = new Date(2026, 7, 4, 0, 0, 5).getTime(); // just past local midnight
+  await check('settleBoundary: a boundary crossed just past midnight keeps the cycle it was counting -- midnight is not a day boundary', () => {
+    // Criterion 3, at the boundary rather than at rollDay: cycle=3 dated the 3rd, an
+    // interval ending at 00:00:05 on the 4th. The pomodoro day is still the 3rd, so
+    // breakNumber is 3+1=4 and the break that begins is the LONG one. Under the retired
+    // local-midnight rule this reset to 0 first and produced an ordinary break -- i.e.
+    // the reader lost three banked pomodoros mid-stride for working past midnight.
+    const now = new Date(2026, 7, 4, 0, 0, 5).getTime();
     const doc = { ...defaultDoc(), cycle: 3, cycleDate: '2026-08-03', timer: { phase: 'work', deadline: now - 1000, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, now);
-    assert.equal(next.cycleDate, '2026-08-04');
-    assert.deepEqual(boundary, { phase: 'break' }); // NOT longBreak
+    assert.equal(next.cycleDate, '2026-08-03', 'the document still belongs to the day it started in');
+    assert.equal(next.cycle, 3);
+    assert.deepEqual(boundary, { phase: 'longBreak' });
+  });
+
+  await check('settleBoundary: a deadline landing after 05:00 ends the loop instead of advancing it -- no next phase, no boundary reported', () => {
+    // The rollover outranks the advance rule: nothing is promoted to a break at 05:00,
+    // and nothing is notified about, because there is nobody there to take it.
+    const now = new Date(2026, 7, 5, 5, 0, 5).getTime();
+    const doc = { ...defaultDoc(), cycle: 2, cycleDate: '2026-08-04', timer: { phase: 'work', deadline: now - 1_000, paused: false } };
+    const { doc: next, boundary } = settleBoundary(doc, now);
+    assert.equal(next.timer, null);
+    assert.equal(next.cycle, 0);
+    assert.equal(next.cycleDate, '2026-08-05');
+    assert.equal(boundary, null, 'a rollover fires no notification -- it is not a phase change');
+  });
+
+  await check('settleBoundary: a PAUSED timer from a day that has ended is cleared too -- the rollover is checked before the paused guard', () => {
+    // The exact defect ADR 67 names. `paused` returns the document untouched two lines
+    // into this function, and a paused timer has no deadline to expire, so a rollover
+    // checked anywhere after that guard would never reach a paused timer at all.
+    const now = new Date(2026, 7, 5, 9, 0, 0).getTime();
+    const paused = { ...defaultDoc(), cycleDate: '2026-08-04', timer: { phase: 'work', paused: true, remainingMs: 60_000 } };
+    const { doc: next, boundary } = settleBoundary(paused, now);
+    assert.equal(next.timer, null);
+    assert.equal(boundary, null);
   });
 
   await check('settleBoundary: not yet due is a no-op, by reference (no needless write)', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), timer: { phase: 'work', deadline: now + 60_000, paused: false } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 60_000, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, now);
     assert.equal(next, doc);
     assert.equal(boundary, null);
   });
 
-  await check('settleBoundary: no timer, or a paused timer, is a no-op', () => {
+  await check('settleBoundary: no timer, or a paused timer, is a no-op within the same pomodoro day', () => {
     const now = Date.now();
-    assert.equal(settleBoundary(defaultDoc(), now).boundary, null);
-    const paused = { ...defaultDoc(), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 5_000 } };
+    const idle = { ...defaultDoc(), cycleDate: pomodoroDay(now) };
+    assert.equal(settleBoundary(idle, now).doc, idle);
+    const paused = { ...idle, timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 5_000 } };
     const { doc: next, boundary } = settleBoundary(paused, now);
     assert.equal(next, paused);
     assert.equal(boundary, null);
@@ -200,7 +278,7 @@ async function main() {
 
   await check('settleBoundary: a deadline past the grace period expires -- no advance, no boundary', () => {
     const deadline = Date.now() - (EXPIRY_GRACE_MS + 1);
-    const doc = { ...defaultDoc(), cycle: 2, cycleDate: localDateStr(Date.now()), timer: { phase: 'work', deadline, paused: false } };
+    const doc = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(Date.now()), timer: { phase: 'work', deadline, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, Date.now());
     assert.equal(next.timer, null);
     assert.equal(boundary, null);
@@ -211,7 +289,7 @@ async function main() {
   await check('settleBoundary: right at the grace boundary (late === EXPIRY_GRACE_MS exactly) still advances', () => {
     const now = Date.now();
     const deadline = now - EXPIRY_GRACE_MS; // late === grace, not GREATER than it
-    const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline, paused: false } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, now);
     assert.notEqual(next.timer, null);
     assert.notEqual(boundary, null);
@@ -220,7 +298,7 @@ async function main() {
   await check('settleBoundary: a deadline just inside the grace period advances normally', () => {
     const now = Date.now();
     const deadline = now - (EXPIRY_GRACE_MS - 1);
-    const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline, paused: false } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, now);
     assert.notEqual(next.timer, null);
     assert.deepEqual(boundary, { phase: 'break' });
@@ -238,7 +316,7 @@ async function main() {
   await check('settleBoundary: a deadline 4 hours stale (lid closed over lunch) expires -- no advance, no boundary', () => {
     const now = Date.now();
     const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
-    const doc = { ...defaultDoc(), cycle: 2, cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now - FOUR_HOURS_MS, paused: false } };
+    const doc = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - FOUR_HOURS_MS, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, now);
     assert.equal(next.timer, null);
     assert.equal(boundary, null);
@@ -247,7 +325,7 @@ async function main() {
 
   await check('settleBoundary: a deadline 5 seconds stale (an ordinary late timer) advances normally', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now - 5_000, paused: false } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 5_000, paused: false } };
     const { doc: next, boundary } = settleBoundary(doc, now);
     assert.notEqual(next.timer, null);
     assert.deepEqual(boundary, { phase: 'break' });
@@ -279,7 +357,7 @@ async function main() {
 
   await check('forwardTimer: a running work interval ends immediately and begins its break', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
     const next = forwardTimer(doc, now);
     assert.equal(next.timer.phase, 'break');
     assert.equal(next.timer.paused, false, 'the next phase starts running');
@@ -289,7 +367,7 @@ async function main() {
   await check('forwardTimer: forwarding a PAUSED timer advances, and the next phase starts running', () => {
     const now = Date.now();
     // The real shape pauseTimer leaves behind: no deadline, remainingMs instead.
-    const doc = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
     const next = forwardTimer(doc, now);
     assert.equal(next.timer.phase, 'break');
     assert.equal(next.timer.paused, false);
@@ -299,7 +377,7 @@ async function main() {
 
   await check('forwardTimer: long-break cadence intact across a full loop -- forwarded work still earns its break, forwarded break still increments the cycle, forwarded long break resets it', () => {
     const t0 = new Date(2026, 7, 4, 9, 0, 0).getTime();
-    let doc = { ...defaultDoc(), cycleDate: localDateStr(t0), timer: { phase: 'work', deadline: t0 + 999_000, paused: false } };
+    let doc = { ...defaultDoc(), cycleDate: pomodoroDay(t0), timer: { phase: 'work', deadline: t0 + 999_000, paused: false } };
     let now = t0;
 
     // (expected next phase, expected cycle AFTER the click) -- same shape and same
@@ -364,7 +442,7 @@ async function main() {
   await check('restartTimer: a deadline hours stale is simply re-minted, never treated as expired -- restart bypasses settleBoundary\'s grace rule entirely', () => {
     const now = Date.now();
     const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
-    const doc = { ...defaultDoc(), cycle: 1, cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now - FOUR_HOURS_MS, paused: false } };
+    const doc = { ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - FOUR_HOURS_MS, paused: false } };
     const next = restartTimer(doc, now);
     assert.notEqual(next.timer, null, 'restart never discards the timer the way an expired settleBoundary would');
     assert.equal(next.timer.phase, 'work');
@@ -385,20 +463,34 @@ async function main() {
 
   await check('startWork: a running timer is untouched, by reference', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), timer: { phase: 'work', deadline: now + 60_000, paused: false } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 60_000, paused: false } };
     assert.equal(startWork(doc, now), doc);
   });
 
-  await check('startWork: a paused timer is untouched -- starting during a pause does not resume or restart it', () => {
+  await check('startWork: a paused timer from the CURRENT pomodoro day is untouched -- starting during a pause does not resume or restart it', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 12_000 } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 12_000 } };
     assert.equal(startWork(doc, now), doc);
   });
 
   await check('startWork: a timer mid-break is untouched -- starting during a break does not cut it short', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), timer: { phase: 'break', deadline: now + 120_000, paused: false } };
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 120_000, paused: false } };
     assert.equal(startWork(doc, now), doc);
+  });
+
+  await check('startWork: a paused timer from a day that has ended is rolled away AND a fresh work interval started, in one call', () => {
+    // Criterion 6's pure half, and the other side of the check above: "leave whatever is
+    // already there alone" only ever meant a timer from the day being worked. The
+    // morning's first session must not need a second call (nor a click) to get a timer.
+    const morning = new Date(2026, 7, 5, 9, 0, 0).getTime();
+    const lastNight = { ...defaultDoc(), cycle: 3, cycleDate: '2026-08-04', timer: { phase: 'work', paused: true, remainingMs: 12_000 } };
+    const next = startWork(lastNight, morning);
+    assert.equal(next.timer.phase, 'work');
+    assert.equal(next.timer.paused, false, 'the morning\'s first session leaves a timer RUNNING, not a resumed pause');
+    assert.equal(next.timer.deadline, morning + DEFAULT_SETTINGS.workMin * 60_000, 'a full fresh interval, not last night\'s remainder');
+    assert.equal(next.cycle, 0);
+    assert.equal(next.cycleDate, '2026-08-05');
   });
 
   // -------------------------------------------------------------------------------
@@ -552,12 +644,41 @@ async function main() {
   });
 
   await check('writeDoc + readDoc: round-trips exactly, and the file is 0600 / the home dir 0700', () => {
-    const doc = { ...defaultDoc(), cycle: 2, cycleDate: '2026-08-04', timer: { phase: 'break', deadline: 12345, paused: false } };
+    // Stamped with the CURRENT pomodoro day: readDoc rolls what it reads (below), so a
+    // document dated any other day round-trips as an empty one, correctly.
+    const now = Date.now();
+    const doc = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: 12345, paused: false } };
     writeDoc(doc, home);
-    assert.deepEqual(readDoc(home), doc);
+    assert.deepEqual(readDoc(home, now), doc);
     const modeOf = p => statSync(p).mode & 0o777;
     assert.equal(modeOf(home), 0o700);
     assert.equal(modeOf(path.join(home, 'pomodoro.json')), 0o600);
+  });
+
+  await check('readDoc: a timer paused at 23:00 is absent the FIRST time anything reads the document after 05:00 -- and the read writes nothing', () => {
+    // Criteria 1, 2 and the "starts nothing" half of 7, at the layer every other reader
+    // goes through: no session start, no daemon boot, no control pressed, just a read.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-roll-'));
+    try {
+      const evening = new Date(2026, 7, 4, 23, 0, 0).getTime();
+      writeDoc({ ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(evening), timer: { phase: 'work', paused: true, remainingMs: 9 * 60_000 } }, h);
+      const file = path.join(h, 'pomodoro.json');
+      const before = readFileSync(file, 'utf8');
+
+      const morning = readDoc(h, new Date(2026, 7, 5, 5, 0, 1).getTime());
+      assert.equal(morning.timer, null);
+      assert.equal(morning.cycle, 0);
+      assert.equal(morning.cycleDate, '2026-08-05');
+      assert.equal(readFileSync(file, 'utf8'), before, 'a read is a read: the rollover is applied to what the caller gets, never written back by the read itself');
+
+      // The same bytes read one hour EARLIER still carry the timer -- proof this is the
+      // day boundary doing the work and not readDoc dropping paused timers generally.
+      const beforeFive = readDoc(h, new Date(2026, 7, 5, 4, 0, 0).getTime());
+      assert.equal(beforeFive.timer.paused, true);
+      assert.equal(beforeFive.cycle, 3);
+    } finally {
+      rmSync(h, { recursive: true, force: true });
+    }
   });
 
   // -------------------------------------------------------------------------------
@@ -567,27 +688,75 @@ async function main() {
   await check('ensureTimer: no-op against a RUNNING timer', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
-    const running = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
+    const running = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
     writeDoc(running, h);
     const engine = createPomodoro({ home: h });
     try {
       engine.ensureTimer(now);
-      assert.deepEqual(readDoc(h).timer, running.timer);
+      assert.deepEqual(readDoc(h, now).timer, running.timer);
     } finally {
       engine.close();
       rmSync(h, { recursive: true, force: true });
     }
   });
 
-  await check('ensureTimer: no-op against a PAUSED timer', () => {
+  await check('ensureTimer: no-op against a PAUSED timer from the CURRENT pomodoro day', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
-    const paused = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 42_000 } };
+    const paused = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 42_000 } };
     writeDoc(paused, h);
     const engine = createPomodoro({ home: h });
     try {
       engine.ensureTimer(now);
-      assert.deepEqual(readDoc(h).timer, paused.timer);
+      assert.deepEqual(readDoc(h, now).timer, paused.timer);
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('ensureTimer: a PAUSED timer from LAST NIGHT is rolled away and a fresh work interval started, in one call -- the morning\'s first session leaves a timer running', () => {
+    // Criterion 6, end to end through the engine: one call, and it both ends yesterday's
+    // loop and starts today's interval. Nothing else runs in between -- no boot, no
+    // second ensure, no click. The whole defect this ticket exists for is the version
+    // where this leaves last night's pause exactly where it was.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
+    const lastNight = new Date(2026, 7, 4, 23, 0, 0).getTime();
+    const morning = new Date(2026, 7, 5, 9, 12, 0).getTime();
+    writeDoc({ ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(lastNight), timer: { phase: 'work', paused: true, remainingMs: 42_000 } }, h);
+    const engine = createPomodoro({ home: h });
+    try {
+      engine.ensureTimer(morning);
+      const onDisk = readDoc(h, morning);
+      assert.equal(onDisk.timer.phase, 'work');
+      assert.equal(onDisk.timer.paused, false);
+      assert.equal(onDisk.timer.deadline, morning + DEFAULT_SETTINGS.workMin * 60_000);
+      assert.equal(onDisk.cycle, 0, 'yesterday\'s cycle does not carry over into the fresh interval');
+      assert.equal(onDisk.cycleDate, '2026-08-05', 'the rollover was actually persisted, not merely applied to the value returned');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('resume: pausing at 09:00 and resuming at 16:00 the same day continues from the frozen remainder -- the day boundary is the only staleness rule there is', () => {
+    // Criterion 5. Seven hours is far past every OTHER staleness rule in this file
+    // (EXPIRY_GRACE_MS is 30 seconds), so a rule that aged a paused timer by anything
+    // but the day it belongs to would show up right here.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-resume-'));
+    const nineAm = new Date(2026, 7, 5, 9, 0, 0).getTime();
+    const fourPm = new Date(2026, 7, 5, 16, 0, 0).getTime();
+    const engine = createPomodoro({ home: h });
+    try {
+      writeDoc({ ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(nineAm), timer: { phase: 'work', deadline: nineAm + 17 * 60_000, paused: false } }, h);
+      engine.pause(nineAm);
+      assert.equal(readDoc(h, nineAm).timer.remainingMs, 17 * 60_000);
+
+      engine.resume(fourPm);
+      const resumed = readDoc(h, fourPm);
+      assert.equal(resumed.timer.paused, false);
+      assert.equal(resumed.timer.deadline, fourPm + 17 * 60_000, 'the remainder is intact, anchored to the resume');
+      assert.equal(resumed.cycle, 1, 'and the cycle is still the one it was counting');
     } finally {
       engine.close();
       rmSync(h, { recursive: true, force: true });
@@ -597,12 +766,12 @@ async function main() {
   await check('ensureTimer: no-op against a timer MID-BREAK -- a start during a break does not cut it short', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
-    const midBreak = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'break', deadline: now + 90_000, paused: false } };
+    const midBreak = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 90_000, paused: false } };
     writeDoc(midBreak, h);
     const engine = createPomodoro({ home: h });
     try {
       engine.ensureTimer(now);
-      assert.deepEqual(readDoc(h).timer, midBreak.timer);
+      assert.deepEqual(readDoc(h, now).timer, midBreak.timer);
     } finally {
       engine.close();
       rmSync(h, { recursive: true, force: true });
@@ -615,7 +784,7 @@ async function main() {
     const engine = createPomodoro({ home: h });
     try {
       engine.ensureTimer(now);
-      const doc = readDoc(h);
+      const doc = readDoc(h, now);
       assert.equal(doc.timer.phase, 'work');
       assert.equal(doc.timer.deadline, now + DEFAULT_SETTINGS.workMin * 60_000);
     } finally {
@@ -652,7 +821,7 @@ async function main() {
       const now = Date.now();
       const running = {
         ...defaultDoc(),
-        cycleDate: localDateStr(now),
+        cycleDate: pomodoroDay(now),
         cycle: 2,
         timer: { phase: 'work', deadline: now + 10 * 60_000, paused: false }, // 10 min out: not due during this check
       };
@@ -682,7 +851,7 @@ async function main() {
       const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
       const expired = {
         ...defaultDoc(),
-        cycleDate: localDateStr(now),
+        cycleDate: pomodoroDay(now),
         // Genuinely 4 hours stale -- written as an absolute duration, not phrased
         // relative to EXPIRY_GRACE_MS, so this check catches a wrong SCALE (a grace
         // period rescaled to hours) and not only a wrong `>` vs `>=` boundary.
@@ -729,7 +898,7 @@ async function main() {
   await check('POST /api/pomodoro/forward: advances the running timer on disk, same cycle bookkeeping a natural boundary performs', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
-      const running = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
+      const running = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
       writeDoc(running, home);
 
       const res = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } });
@@ -747,7 +916,7 @@ async function main() {
   await check('POST /api/pomodoro/forward: forwarding a PAUSED timer through the route advances it, and the next phase comes back running', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
-      const paused = { ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
+      const paused = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
       writeDoc(paused, home);
 
       const body = await (await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
@@ -783,7 +952,7 @@ async function main() {
         body: JSON.stringify({ breakMin: 9 }),
       });
       const settings = readDoc(home).settings;
-      const midBreak = { ...defaultDoc(), settings, cycle: 3, cycleDate: localDateStr(now), timer: { phase: 'break', deadline: now - 1_000, paused: false } };
+      const midBreak = { ...defaultDoc(), settings, cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now - 1_000, paused: false } };
       writeDoc(midBreak, home);
 
       const body = await (await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
@@ -800,7 +969,7 @@ async function main() {
 
   await check('POST /api/pomodoro/restart: unpauses -- a paused timer restarts running', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
-      const paused = { ...defaultDoc(), timer: { phase: 'work', paused: true, remainingMs: 5_000 } };
+      const paused = { ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), timer: { phase: 'work', paused: true, remainingMs: 5_000 } };
       writeDoc(paused, home);
 
       const body = await (await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
@@ -823,10 +992,33 @@ async function main() {
     });
   });
 
+  await check('GET /api/pomodoro: a document left over from a previous pomodoro day reads as no interval at all -- and the read starts nothing', async () => {
+    // Criterion 7, at the route the page actually opens against. Dated in the past
+    // outright rather than by injecting a clock, because this one cannot inject one:
+    // the daemon's GET reads with its own Date.now(), so "a previous pomodoro day" has
+    // to be a real one -- and any past date is one at every hour the suite might run at.
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      writeDoc({ ...defaultDoc(), cycle: 3, cycleDate: '2020-01-01', timer: { phase: 'work', paused: true, remainingMs: 9 * 60_000 } }, home);
+      const pomodoroFile = path.join(home, 'pomodoro.json');
+      const before = readFileSync(pomodoroFile, 'utf8');
+      const mtimeBefore = statSync(pomodoroFile).mtimeMs;
+
+      const res = await fetch(`http://127.0.0.1:${port}/api/pomodoro`, { headers: { [SECRET_HEADER]: secret } });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.timer, null, 'a plain read must never show an interval the daemon already considers dead');
+      assert.equal(body.cycle, 0);
+      assert.equal(body.cycleDate, pomodoroDay(body.now), 'the response names the pomodoro day it was read on');
+
+      assert.equal(readFileSync(pomodoroFile, 'utf8'), before, 'a read stays a read -- the rollover is not written back by the GET');
+      assert.equal(statSync(pomodoroFile).mtimeMs, mtimeBefore, 'no write syscall happened at all, so nothing was started either');
+    });
+  });
+
   await check('POMODORO: the session cookie alone (no secret) can call both forward and restart', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
-      writeDoc({ ...defaultDoc(), cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } }, home);
+      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } }, home);
       const cookieHeaders = { cookie: `${SESSION_COOKIE}=${sessionToken(secret)}` };
 
       const forwardC = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: cookieHeaders });

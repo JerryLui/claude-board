@@ -21,6 +21,15 @@
 // That install.sh never reads or writes ~/.claude/settings.json is already
 // proved twice in test/check-install.mjs ("mention settings.json only in a comment or
 // an echo" and the byte-identical-survival run) -- not duplicated here.
+//
+// The unattended-session marker (ADR.md entry 68) is bound here for the same reason the
+// route is: the guard is a fragment of the shell command itself, so the only honest way
+// to check it is to run the documented command with and without
+// CLAUDE_BOARD_NO_POMODORO in its environment. Note that runHookAgainstPort STRIPS that
+// variable from the inherited environment rather than merely not setting it -- the whole
+// point of the marker is that a session can carry it, so a suite run from inside such a
+// session would otherwise watch every "starts a work interval" check below pass by doing
+// nothing at all.
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
@@ -118,8 +127,12 @@ process.env.CLAUDE_BOARD_SECRET_FILE = secretFile;
 let server, port;
 
 function runHookAgainstPort(targetPort, extraEnv) {
+  // CLAUDE_BOARD_NO_POMODORO is dropped out of the inherited environment here (see the
+  // header): a check that means "the hook starts an interval" must not be satisfiable by
+  // the hook standing down. Anything wanting it back passes it in extraEnv.
+  const { CLAUDE_BOARD_NO_POMODORO: _unattended, ...inherited } = process.env;
   return execFileP('bash', ['-c', hookEntry.command], {
-    env: { ...process.env, HOME: childHome, CLAUDE_BOARD_PORT: String(targetPort), ...extraEnv },
+    env: { ...inherited, HOME: childHome, CLAUDE_BOARD_PORT: String(targetPort), ...extraEnv },
     timeout: 5000,
   });
 }
@@ -144,6 +157,7 @@ async function main() {
     assert.ok(hookEntry.command.includes('/api/pomodoro/ensure'), 'must call ensure, never pause/resume/reset/settings -- those take the cookie, not the secret, and this is a shell script');
     assert.ok(hookEntry.command.includes('CLAUDE_BOARD_PORT'), 'must respect a CLAUDE_BOARD_PORT override');
     assert.ok(hookEntry.command.includes(String(DEFAULT_PORT)), 'the fallback port must be src/handoff.mjs DEFAULT_PORT (7391), not a value that could drift from it');
+    assert.ok(hookEntry.command.includes('CLAUDE_BOARD_NO_POMODORO'), 'must carry the unattended-session guard (ADR.md entry 68) -- the crontab lines that set it are hand-written against this exact spelling, so a rename here silently un-guards them');
   });
 
   ({ server, port } = await startServer({ home: daemonHome, port: 0 }));
@@ -227,18 +241,69 @@ async function main() {
   await check('running the hook with no secret file at all still exits 0 and prints nothing', async () => {
     // A distinct HOME with no ~/.config/claude-board/secret whatsoever -- the "missing
     // secret file" case, separate from "wrong secret" and separate from "nothing
-    // listening" above.
+    // listening" above. Routed through runHookAgainstPort for its env strip, with HOME
+    // overridden on top of the helper's own: this case is about the missing file, and it
+    // would read as passing for the wrong reason if an inherited marker made the command
+    // exit before it ever looked for one.
     const noSecretHome = mkdtempSync(path.join(tmpdir(), 'claude-board-installdoc-nosecret-'));
     try {
-      const { stdout, stderr } = await execFileP('bash', ['-c', hookEntry.command], {
-        env: { ...process.env, HOME: noSecretHome, CLAUDE_BOARD_PORT: String(port) },
-        timeout: 5000,
-      });
+      const { stdout, stderr } = await runHookAgainstPort(port, { HOME: noSecretHome });
       assert.equal(stdout, '');
       assert.equal(stderr, '');
     } finally {
       rmSync(noSecretHome, { recursive: true, force: true });
     }
+  });
+
+  // Criteria 9 and 10 (SPEC_ROLLOVER.md) as a matched pair: same command, same arranged
+  // state, one environment variable between them. Both arrange a document with NO timer,
+  // because that is the only state in which an unguarded hook provably writes -- against
+  // a running or a mid-break timer `ensure` is already a no-op (the two checks above), so
+  // "nothing moved" there would stay green with the guard deleted outright.
+  const pomodoroFile = path.join(daemonHome, 'pomodoro.json');
+
+  await check('criterion 9: the documented hook, run with CLAUDE_BOARD_NO_POMODORO set, leaves pomodoro.json byte-identical', async () => {
+    writePomodoroDoc({ ...readPomodoroDoc(daemonHome), timer: null }, daemonHome);
+    const before = readFileSync(pomodoroFile);
+
+    const { stdout, stderr } = await runHookAgainstPort(port, { CLAUDE_BOARD_NO_POMODORO: '1' });
+    assert.equal(stdout, '', 'an early exit that echoes anything is still stdout SessionStart turns into additionalContext');
+    assert.equal(stderr, '');
+
+    // Settle-then-sample, for the same reason as the no-op check above: the command
+    // backgrounds and detaches, so a single read taken the instant bash returns is green
+    // whether the guard exists or not. Compared as BYTES, and read straight off disk
+    // rather than through GET /api/pomodoro -- the criterion is that no part of the
+    // document moved, settings and cycle included, and a read through the daemon is
+    // itself a chance for something to rewrite the file.
+    const start = Date.now();
+    let samples = 0;
+    while (Date.now() - start < 1000) {
+      const now = readFileSync(pomodoroFile);
+      assert.ok(now.equals(before), `an unattended session must leave pomodoro.json byte-identical; it became:\n${now}`);
+      samples++;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.ok(samples >= 5, 'sanity: the sampling window must actually have sampled more than once');
+  });
+
+  await check('criterion 10: the same command with the variable unset starts a work interval, exactly as it does today', async () => {
+    writePomodoroDoc({ ...readPomodoroDoc(daemonHome), timer: null }, daemonHome);
+    const before = await pomodoroDoc();
+    assert.equal(before.timer, null, 'the arrangement must be criterion 9\'s to the field, so that the variable is the only difference');
+
+    const { stdout, stderr } = await runHookAgainstPort(port);
+    assert.equal(stdout, '');
+    assert.equal(stderr, '');
+
+    const doc = await waitFor(async () => {
+      const d = await pomodoroDoc();
+      return d.timer ? d : null;
+    }, { timeoutMs: 3000, intervalMs: 50 });
+    assert.ok(doc, 'the guard must cost an ordinary session nothing -- without the marker the hook starts an interval as it always did');
+    assert.equal(doc.timer.phase, 'work');
+    assert.equal(doc.timer.paused, false);
+    assert.ok(Number.isFinite(doc.timer.deadline) && doc.timer.deadline > Date.now(), 'the deadline must be a real point in the future');
   });
 }
 

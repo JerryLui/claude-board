@@ -17,11 +17,11 @@
 // itself. Registered in test/run.mjs's `checks` array.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { startServer } from '../src/server.mjs';
-import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, defaultDoc, localDateStr } from '../src/pomodoro.mjs';
+import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, defaultDoc, pomodoroDay } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
@@ -110,7 +110,7 @@ async function main() {
     // of the status text is actually exercised end to end, not just the countdown --
     // the "Work 3/4 · 12:34" shape rides on these two checks rather than
     // earning new ones.
-    const running = { ...defaultDoc(), cycle: 2, cycleDate: localDateStr(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false } };
+    const running = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false } };
     writePomodoroDoc(running, home);
 
     await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone (no secret header) -- exactly what a browser tab holds, position and all', async () => {
@@ -182,7 +182,7 @@ async function main() {
     // timer it starts has to actually land on disk. test/check-pure.mjs proves the
     // switch posts the right URL; only this proves the daemon accepts it.
     await check('pomodoro widget: flipping the switch on while idle starts a real timer on the daemon, authorised by the session cookie alone', async () => {
-      writePomodoroDoc({ ...defaultDoc(), cycleDate: localDateStr(Date.now()) }, home);
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()) }, home);
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
@@ -247,6 +247,35 @@ async function main() {
       }
     });
 
+    // The rollover, seen from the page (ADR 67, criterion 7). Nothing has started a
+    // session, nothing has pressed anything and no boundary has fired -- the page
+    // simply opens, and what it opens onto is a document belonging to a pomodoro day
+    // that ended. '2020-01-01' rather than an injected clock: the daemon reads with its
+    // own Date.now(), so the stale day has to be a real one, and any past date is stale
+    // at every hour this suite might be run at. test/check-pomodoro.mjs proves the same
+    // rule at readDoc and at the route; this is the only place that proves what the
+    // reader actually sees, which is the whole point of the criterion.
+    await check('pomodoro widget: a document left over from a previous pomodoro day renders as idle -- opening the page shows no interval, and starts none', async () => {
+      const stale = { ...defaultDoc(), cycle: 3, cycleDate: '2020-01-01', timer: { phase: 'work', paused: true, remainingMs: 9 * 60_000 } };
+      writePomodoroDoc(stale, home);
+      const before = readFileSync(path.join(home, 'pomodoro.json'), 'utf8');
+
+      const tab = loadIndexAgainstDaemon(server.port);
+      try {
+        await flush();
+        const status = tab.document.querySelector('span#pomodoro-status');
+        assert.match(status.textContent, /idle/i, `last night's paused timer must not be on the page at all, got: "${status.textContent}"`);
+        assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no countdown -- neither last night\'s remainder nor a fresh interval');
+        assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'and no position either: the cycle went back to zero with the timer');
+        const toggle = tab.document.querySelector('button#pomodoro-toggle');
+        assert.equal(toggle.getAttribute('aria-checked'), 'false');
+        assert.equal(toggle.getAttribute('aria-label'), 'Start pomodoro', 'the control offers to START one, which is the honest state to be in');
+        assert.equal(readFileSync(path.join(home, 'pomodoro.json'), 'utf8'), before, 'opening the page must start nothing -- not a write, let alone an interval');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
     // ---------------------------------------------------------------------------
     // The daemon-restart half. test/check-pomodoro.mjs
     // already proves the DOCUMENT survives a restart; this proves the PAGE reads
@@ -256,7 +285,7 @@ async function main() {
       const now2 = Date.now();
       // cycle: 1 -> position 2/4, so the restart proves the POSITION survives
       // reading `doc.cycle` back off disk, not only the countdown.
-      const stable = { ...defaultDoc(), cycle: 1, cycleDate: localDateStr(now2), timer: { phase: 'break', deadline: now2 + 8 * 60_000, paused: false } };
+      const stable = { ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(now2), timer: { phase: 'break', deadline: now2 + 8 * 60_000, paused: false } };
       writePomodoroDoc(stable, home);
 
       const beforeTab = loadIndexAgainstDaemon(server.port);

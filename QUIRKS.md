@@ -742,6 +742,21 @@ not need daemon state at all, prefer asserting the property structurally —
 `notifyTest.length === 0` says "reads no settings" more directly than seeding a document
 to prove it ignores one.
 
+### A pomodoro fixture dated with `localDateStr` passes all day and fails before dawn
+
+`cycleDate` names the **pomodoro day** (05:00 to 05:00 local, ADR 67), not the calendar
+date, and `readDoc` rolls anything belonging to a day that has ended: timer to `null`,
+cycle to `0`. So a fixture seeded `cycleDate: localDateStr(Date.now())` — the obvious
+spelling, and what every pomodoro check used before that ADR — is a document from
+*yesterday* for the five hours after midnight, and the check that reads it back finds no
+timer. Between 05:00 and midnight it is correct, which is to say the suite is green every
+time anybody looks at it. Seed `cycleDate: pomodoroDay(now)` instead.
+
+The same trap with a longer fuse: a check that seeds a document and then asserts against
+`readDoc` at the real `Date.now()` is fine unless the suite happens to straddle 05:00.
+Anything driving an injected clock should pass it to `readDoc(home, now)` as well —
+that parameter exists so a check's "now" is one value, not two.
+
 ### A mutation helper that restores with `git checkout` eats uncommitted work
 
 Ablation testing means mutate, run, restore — and the obvious restore is

@@ -18,6 +18,12 @@
 // Everything else in this file is a thin, impure shell around it: read the file, call
 // the pure function, write the file, arm a real setTimeout for the next deadline.
 //
+// A second boundary sits above that one and outranks it: the pomodoro day (05:00 local
+// to 05:00 local, ADR 67), whose crossing ends the loop outright rather than advancing
+// it — see rollDay below. It is noticed LAZILY, by whatever next touches the document,
+// reads included, so there is no scheduled job and no second clock to keep in step with
+// this one. The price is that a rollover is invisible until something looks.
+//
 // This module is advisory only. It never touches an agent's request, never gates or
 // delays `ask`, and knows nothing about boards. The one caller outside this file is
 // src/server.mjs's startServer, which boots the clock and closes it on server close.
@@ -89,10 +95,17 @@ export function defaultDoc() {
   return {
     settings: { ...DEFAULT_SETTINGS },
     cycle: 0,
-    // null rather than "today": normalizeCycle below treats absent/mismatched
-    // cycleDate identically (not-today), so a fresh document and a stale one from
-    // yesterday take the exact same reset path with no special-cased default to
-    // keep in sync with it.
+    // The pomodoro day this document belongs to, as a YYYY-MM-DD label (pomodoroDay
+    // below) -- NOT the calendar date it was last written on, which is the same string
+    // for every hour of the day except the ones before 05:00. Field name kept from when
+    // it was the latter: it is part of the document's shape on disk and in
+    // GET /api/pomodoro, and renaming it would silently un-stamp every existing
+    // document (i.e. cost every reader one rollover) to say the same thing.
+    //
+    // null rather than "today": rollDay below treats absent/mismatched cycleDate
+    // identically (not this day), so a fresh document and a stale one from yesterday
+    // take the exact same reset path with no special-cased default to keep in sync
+    // with it.
     cycleDate: null,
     timer: null,
   };
@@ -130,25 +143,64 @@ export function formatCountdown(ms) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-/** The local-midnight reset. Cheap and total: called at
- * the top of every function that is about to do cycle arithmetic, never as a
- * standalone background job — there is nothing to reset ahead of time, since the
- * value only ever matters at the next place that reads it, and every such place
- * calls this first. */
-export function normalizeCycle(doc, now) {
-  const today = localDateStr(now);
-  if (doc.cycleDate === today) return doc;
-  return { ...doc, cycle: 0, cycleDate: today };
+/** The hour the pomodoro day turns over, local time (ADR 67). A constant, deliberately
+ * not a setting: this is the one fact every reader of the document has to agree on, and
+ * a value that can change under an already-stamped `cycleDate` turns "does this timer
+ * belong to the current day" into a question with two answers. 05:00 is late enough
+ * that a session running past midnight still belongs to the day it started on, and
+ * early enough that nobody's morning starts before it. */
+export const DAY_START_HOUR = 5;
+
+/** Which pomodoro day `now` falls in, as the same YYYY-MM-DD label localDateStr
+ * produces — the day's own date, so an interval running at 01:00 is stamped with
+ * yesterday's date, because it belongs to yesterday.
+ *
+ * Written as a comparison on the LOCAL hour rather than by subtracting five hours of
+ * epoch milliseconds. The two agree on every ordinary day and disagree on the two DST
+ * days a year, where subtracting real time puts the edge an hour either side of the
+ * 05:00 the reader actually sees on their own clock. `setDate` handles the month and
+ * year underflow for us (the 1st rolls back to the last day of the previous month). */
+export function pomodoroDay(now) {
+  const d = new Date(now);
+  if (d.getHours() < DAY_START_HOUR) d.setDate(d.getDate() - 1);
+  return localDateStr(d.getTime());
 }
 
-/** The "ensure" half (what a session-start hook —
- * wired by another slice — calls through the impure ensureTimer below). Starts a
- * fresh work interval ONLY when there is no timer at all: a running timer, a paused
- * timer, and a timer mid-break are every one of them left untouched, which is what
- * stops a start during a break from cutting the break short. */
+/** The rollover, and the ONLY staleness rule the timer has (ADR 67): a document whose
+ * stored `cycleDate` names a pomodoro day other than the one `now` falls in belongs to
+ * a day that has already ended, and a day ending takes the whole loop with it —
+ * `timer: null` AND `cycle: 0`, the same clearing the reset control already performs
+ * rather than a fourth kind of clearing. Nothing else ages: a timer paused at 09:00 and
+ * resumed at 16:00 the same day resumes with its remainder intact.
+ *
+ * Cheap, total, and by reference when the day matches, so it is called at the top of
+ * everything that touches the document — reads included (readDoc below). That is what
+ * makes the boundary observable with no scheduled job behind it: whatever looks next is
+ * what notices, and nothing has to run while the machine is asleep.
+ *
+ * An absent `cycleDate` reads as stale, exactly like a mismatched one (see defaultDoc).
+ * The only document that shape describes in practice is one written before this rule
+ * existed, so the upgrade costs at most whichever interval was running at the time. */
+export function rollDay(doc, now) {
+  const today = pomodoroDay(now);
+  if (doc.cycleDate === today) return doc;
+  return { ...doc, cycle: 0, cycleDate: today, timer: null };
+}
+
+/** The "ensure" half (what the session-start hook calls through the impure ensureTimer
+ * below). Starts a fresh work interval ONLY when there is no timer at all: a running
+ * timer, a paused timer, and a timer mid-break are every one of them left untouched,
+ * which is what stops a start during a break from cutting the break short.
+ *
+ * The rollover runs FIRST, which is what makes the morning's first session one call
+ * rather than two: the timer this function declines to touch has to be a timer from the
+ * current pomodoro day, so a session start against a document left over from yesterday
+ * ends yesterday's loop and starts today's work interval together. Reversing the two
+ * lines is the old defect exactly — a timer paused last night that every session start
+ * politely declines to disturb. */
 export function startWork(doc, now) {
-  if (doc.timer) return doc;
-  const base = normalizeCycle(doc, now);
+  const base = rollDay(doc, now);
+  if (base.timer) return base;
   return { ...base, timer: { phase: 'work', deadline: now + base.settings.workMin * 60_000, paused: false } };
 }
 
@@ -165,29 +217,37 @@ export function startWork(doc, now) {
  *  - `late > EXPIRY_GRACE_MS`: EXPIRED. The interval is discarded (`timer: null`),
  *    with no advance and no boundary reported — nothing schedules a notification for
  *    a break that was already over before anyone could take it. `cycle`/`cycleDate`
- *    are carried through normalizeCycle but otherwise untouched: a lunch break must
- *    not cost the two pomodoros already completed today.
+ *    are untouched: a lunch break must not cost the two pomodoros already completed
+ *    today.
  *  - otherwise: advance. A `work` interval ending begins break number `cycle + 1`
  *    (long iff that number is a multiple of `longEvery`); a `break` or `longBreak`
  *    ending begins the next `work` interval, and increments `cycle` — resetting it to
  *    0 if the break that just ended was the long one. No input at either boundary. */
 export function settleBoundary(doc, now) {
+  // The rollover outranks every rule below: a pomodoro day that has ended ends the
+  // loop, so there is no next phase to advance into and nothing to notify about — an
+  // interval that was still running at 05:00 is gone, not promoted to a break nobody
+  // is awake for. Checked BEFORE the paused and not-yet-due guards on purpose: both of
+  // those hand the document straight back, and a paused timer (which never expires, and
+  // so never reaches the rule below) would otherwise stay paused forever.
+  const rolled = rollDay(doc, now);
+  if (rolled !== doc) return { doc: rolled, boundary: null };
+
   if (!doc.timer || doc.timer.paused) return { doc, boundary: null };
   if (now < doc.timer.deadline) return { doc, boundary: null };
 
   const late = now - doc.timer.deadline;
-  const base = normalizeCycle(doc, now);
 
   if (late > EXPIRY_GRACE_MS) {
-    return { doc: { ...base, timer: null }, boundary: null };
+    return { doc: { ...doc, timer: null }, boundary: null };
   }
 
   const finishedPhase = doc.timer.phase;
-  let cycle = base.cycle;
+  let cycle = doc.cycle;
   let nextPhase;
   if (finishedPhase === 'work') {
     const breakNumber = cycle + 1;
-    nextPhase = breakNumber % base.settings.longEvery === 0 ? 'longBreak' : 'break';
+    nextPhase = breakNumber % doc.settings.longEvery === 0 ? 'longBreak' : 'break';
   } else {
     cycle = cycle + 1;
     if (finishedPhase === 'longBreak') cycle = 0;
@@ -195,9 +255,9 @@ export function settleBoundary(doc, now) {
   }
 
   const durationMin =
-    nextPhase === 'work' ? base.settings.workMin : nextPhase === 'longBreak' ? base.settings.longBreakMin : base.settings.breakMin;
+    nextPhase === 'work' ? doc.settings.workMin : nextPhase === 'longBreak' ? doc.settings.longBreakMin : doc.settings.breakMin;
 
-  const nextDoc = { ...base, cycle, timer: { phase: nextPhase, deadline: now + durationMin * 60_000, paused: false } };
+  const nextDoc = { ...doc, cycle, timer: { phase: nextPhase, deadline: now + durationMin * 60_000, paused: false } };
   return { doc: nextDoc, boundary: { phase: nextPhase } };
 }
 
@@ -238,9 +298,9 @@ export function forwardTimer(doc, now) {
  * not whatever was in effect when the interval first started — the same
  * read-at-the-boundary rule mergeSettings' own comment already applies to every OTHER
  * boundary). `phase` and `cycle`/`cycleDate` are carried through untouched, spelled
- * out rather than left to normalizeCycle: restart touches neither, and
- * a midnight rollover crossed by a restart click is still normalizeCycle's job at the
- * next real boundary, not this one's.
+ * out rather than left to rollDay: restart touches neither, and it can never be handed
+ * a timer from a dead day to re-mint — readDoc has already rolled the document by the
+ * time the restart control's own click reaches this function.
  *
  * Builds a fresh `{ phase, deadline, paused: false }` rather than spreading
  * `doc.timer`, which is what drops a stale `remainingMs` left over from a paused timer
@@ -292,8 +352,9 @@ export function resumeTimer(doc, now) {
  * this never needs to inspect `doc` before acting. `now` is accepted and ignored, purely
  * so this has the same `(doc, now)` shape as pauseTimer/resumeTimer/settleBoundary above
  * — a caller wiring up the three boundary-crossing controls never has to remember which
- * one doesn't want a clock. `cycleDate` is left untouched: normalizeCycle already owns
- * deciding when a date rollover means something, and reset is not that. */
+ * one doesn't want a clock. `cycleDate` is left untouched: rollDay already owns deciding
+ * when a day change means something, and reset is not that — it is the same clearing
+ * a rollover performs, asked for by hand and inside the day rather than at its edge. */
 export function resetTimer(doc, _now) {
   return { ...doc, timer: null, cycle: 0 };
 }
@@ -522,14 +583,25 @@ export function normalizeDoc(parsed) {
 /** Never throws — a missing file (first run) and an unparseable one (a write that
  * landed mid-crash, or a hand-edit) both read as the defaults, mirroring how
  * src/store.mjs's listBoards survives a corrupt board file rather than taking the
- * whole daemon down over one bad read. */
-export function readDoc(home = boardHome()) {
+ * whole daemon down over one bad read.
+ *
+ * Every read is rolled (rollDay above), so a document belonging to a pomodoro day that
+ * has ended is never handed to anybody — not to the pure functions above, not to
+ * GET /api/pomodoro, not to a check asserting what is "on disk". This is the read half
+ * of "noticed lazily by whatever next touches the document": opening the page after
+ * 05:00 shows no interval without a session having started first, and starts nothing,
+ * because rolling here writes nothing. The stale bytes stay on disk until the next
+ * write carries the rolled shape back — the same migration discipline normalizeDoc's
+ * own comment describes, and the reason `now` is a parameter rather than a Date.now()
+ * call in here. */
+export function readDoc(home = boardHome(), now = Date.now()) {
+  let doc;
   try {
-    const raw = readFileSync(pomodoroPath(home), 'utf8');
-    return normalizeDoc(JSON.parse(raw));
+    doc = normalizeDoc(JSON.parse(readFileSync(pomodoroPath(home), 'utf8')));
   } catch {
-    return defaultDoc();
+    doc = defaultDoc();
   }
+  return rollDay(doc, now);
 }
 
 export function writeDoc(doc, home = boardHome()) {
@@ -581,7 +653,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
   // src/store.mjs's searchBoards, "no side index that could drift"), and it's cheap:
   // this file is a few hundred bytes next to a board parse.
   function reconcile(now) {
-    const doc = readDoc(home);
+    const doc = readDoc(home, now);
     const { doc: next, boundary } = settleBoundary(doc, now);
     if (next !== doc) writeDoc(next, home);
     arm(next, now);
@@ -612,7 +684,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * on every session start: startWork is a no-op against anything already in
      * `timer`, running, paused or mid-break alike. */
     ensureTimer(now = Date.now()) {
-      const doc = readDoc(home);
+      const doc = readDoc(home, now);
       const next = startWork(doc, now);
       if (next !== doc) {
         writeDoc(next, home);
@@ -628,7 +700,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * this on a no-op (pausing nothing, or pausing an already-paused timer) leaves
      * whatever was already armed exactly as it was. */
     pause(now = Date.now()) {
-      const doc = readDoc(home);
+      const doc = readDoc(home, now);
       const next = pauseTimer(doc, now);
       if (next !== doc) {
         writeDoc(next, home);
@@ -646,7 +718,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * unrelated event (a restart's `boot()`, another pause/resume) happens to
      * reconcile it. */
     resume(now = Date.now()) {
-      const doc = readDoc(home);
+      const doc = readDoc(home, now);
       const next = resumeTimer(doc, now);
       if (next !== doc) {
         writeDoc(next, home);
@@ -662,7 +734,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * `arm` only ever schedules the NEXT natural boundary's setTimeout, it
      * never itself fires notification code, so nothing here can. */
     forward(now = Date.now()) {
-      const doc = readDoc(home);
+      const doc = readDoc(home, now);
       const next = forwardTimer(doc, now);
       if (next !== doc) {
         writeDoc(next, home);
@@ -673,7 +745,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     /** Restart (src/server.mjs POST /api/pomodoro/restart). Same shape as forward
      * above, applying the pure restartTimer instead. */
     restart(now = Date.now()) {
-      const doc = readDoc(home);
+      const doc = readDoc(home, now);
       const next = restartTimer(doc, now);
       if (next !== doc) {
         writeDoc(next, home);
@@ -689,7 +761,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * later, land back on disk (finding `!doc.timer`, a no-op in settleBoundary) but not
      * before wasting a tick pretending the reset never happened. */
     reset(now = Date.now()) {
-      const doc = readDoc(home);
+      const doc = readDoc(home, now);
       const next = resetTimer(doc, now);
       writeDoc(next, home);
       arm(next, now);
@@ -704,7 +776,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * no-op clearTimeout+setTimeout pair that only invites a future reader to wonder
      * why writing settings touches the live clock at all. */
     settings(patch, now = Date.now()) {
-      const doc = readDoc(home);
+      const doc = readDoc(home, now);
       const next = mergeSettings(doc, patch);
       writeDoc(next, home);
       return next;

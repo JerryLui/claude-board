@@ -1851,8 +1851,13 @@ async function handlePomodoro(req, res, parts, pomo, home) {
   // merely convenient — because reconciliation happens SYNCHRONOUSLY in this same
   // single-threaded event loop the instant a deadline is crossed (the armed
   // setTimeout's own callback), so by the time any request handler runs, a deadline
-  // that has already passed has already been settled and written back. There is
-  // nothing left for a GET to reconcile.
+  // that has already passed has already been settled and written back.
+  //
+  // The one boundary no armed setTimeout is watching for is the pomodoro day's own
+  // (ADR 67): nothing is scheduled for 05:00, so the rollover is applied by whatever
+  // reads next — and `readPomodoroDoc` is that, for this route. A page opened after
+  // 05:00 therefore never renders an interval the daemon already considers dead, and
+  // opening it starts nothing, since rolling a read writes nothing.
   if (req.method === 'GET' && parts.length === 2) {
     return sendPomodoro(res, readPomodoroDoc(home));
   }

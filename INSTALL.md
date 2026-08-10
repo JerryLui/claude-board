@@ -42,12 +42,20 @@ it was, so a second session, a `/clear`, or a resume is a no-op (proved in
 ```json
 {
   "type": "command",
-  "command": "(curl -s -m 2 -X POST -H \"x-claude-board-secret: $(cat \"$HOME/.config/claude-board/secret\" 2>/dev/null)\" \"http://127.0.0.1:${CLAUDE_BOARD_PORT:-7391}/api/pomodoro/ensure\" >/dev/null 2>&1 &) ; exit 0"
+  "command": "[ -n \"$CLAUDE_BOARD_NO_POMODORO\" ] && exit 0 ; (curl -s -m 2 -X POST -H \"x-claude-board-secret: $(cat \"$HOME/.config/claude-board/secret\" 2>/dev/null)\" \"http://127.0.0.1:${CLAUDE_BOARD_PORT:-7391}/api/pomodoro/ensure\" >/dev/null 2>&1 &) ; exit 0"
 }
 ```
 
 Keep the shape exactly, every part of it load-bearing:
 
+- `[ -n "$CLAUDE_BOARD_NO_POMODORO" ] && exit 0` first, ahead of the `curl` and ahead of
+  reading the secret, so an unattended session never reaches the daemon at all. Nothing in
+  a `SessionStart` payload gives that session away — `source` is `startup` for a
+  `claude -p` one-liner exactly as for a real one, and TTY detection is no help either
+  since the payload arrives on stdin and stdout is captured, so both are pipes when a
+  person *is* sitting there. So the caller declares itself instead (ADR.md entry 68). An
+  empty value counts as unset, which is how a shell that already exports it opts a single
+  command back in.
 - Secret header from `~/.config/claude-board/secret`. A browser reaches `ensure` on the
   session cookie alone, but this is a shell `curl`, which holds no cookie: the secret is
   the only credential it can present.
@@ -55,6 +63,23 @@ Keep the shape exactly, every part of it load-bearing:
 - `-m 2`, backgrounded `(… &)`, and `; exit 0` so no daemon state — down, wedged, no
   secret file, connection refused — can delay or fail a session start.
 - `>/dev/null 2>&1` because `SessionStart` stdout becomes `additionalContext`.
+
+## Marking a session unattended
+
+The guard does nothing until something sets the variable, and the hook has no way to work
+out for itself which sessions those are. So whatever starts a session with nobody in front
+of it sets the variable in that session's own environment: a cron keepalive, a scheduled
+agent, a script warming a session up. A crontab line takes it as an ordinary command
+prefix:
+
+```sh
+0 5 * * * CLAUDE_BOARD_NO_POMODORO=1 claude -p "Respond with hello"
+```
+
+Left unset, those sessions start a work interval each time they fire. The cost is not the
+stray interval itself but what it does to the real day: `ensure` leaves an existing timer
+alone, so the reader's first actual session finds the 05:00 cron's interval already
+running, most of it spent while they were asleep.
 
 ## Applying it: append, don't replace
 
@@ -96,6 +121,10 @@ curl -s http://127.0.0.1:7391/api/pomodoro | node -e 'process.stdin.once("data",
 secret"). Expect a `work` phase timer with a future `deadline`. A second session or a
 `/clear` must not move that deadline; if it does, something is calling a route other
 than `ensure`.
+
+For the guard, run the command itself rather than starting a session:
+`CLAUDE_BOARD_NO_POMODORO=1 bash -c '<the command above>'` must leave `timer` exactly as
+it found it — `null` if there was none.
 
 ## Removing
 

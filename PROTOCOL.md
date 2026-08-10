@@ -34,7 +34,7 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `src/lens.mjs` | the diagram lens's view math, pure |
 | `src/prose-check.mjs` | the prose-vs-shim checker (below). Ships from `src/` so a caller outside this repo can import it |
 | `src/cues.mjs` | the cue vocabulary: the closed set of legal cue values, enumerated live from BOTH sound directories (`/System/Library/Sounds` and `~/Library/Sounds`, ADR 20) plus `"None"`, memoised on a 5-second TTL |
-| `src/pomodoro.mjs` | the global pomodoro clock: the pure boundary rule, the document's shape on disk, the impure shell the daemon boots. Absolute deadlines, so a restart is invisible and a deadline slept through expires silently |
+| `src/pomodoro.mjs` | the global pomodoro clock: the pure boundary rule, the pomodoro day above it (05:00 to 05:00, ADR 67), the document's shape on disk, the impure shell the daemon boots. Absolute deadlines, so a restart is invisible and a deadline slept through expires silently |
 | `src/pomodoro-widget.mjs` | the timer's server-rendered markup for the index page; its client half extends `src/indexpage.mjs`'s script by concatenation |
 | `src/notify.mjs` | one native notification per interval boundary, carrying that phase's cue. The bundle's own executable in `--notify` mode inside `claude-board.app` (ADR 19), `osascript` only on the no-launcher clone install; message text and cue both come from closed-set lookups |
 | `skills/claude-board/SKILL.md` | the manual for the `ask` tool, and the only prose statement of this protocol a caller reads. `install.sh` copies it to `~/.claude/skills/claude-board/` (ADR 11); `test/check-skill-prose.mjs` binds it to the live shim |
@@ -511,8 +511,13 @@ POST /api/board/:id/attended        { watcher, attended, seq? } -> { ok: true };
                                     durable itself, but a report that ends an absence
                                     retires the stranded banner recorded on that board
 GET  /api/search?q=                 archive search
-GET  /api/pomodoro                  the whole document -> { settings, cycle, cycleDate, timer, now }
-POST /api/pomodoro/ensure           ensure a timer exists; no-op if one already does (any phase)
+GET  /api/pomodoro                  the whole document -> { settings, cycle, cycleDate, timer, now };
+                                    rolled to the current pomodoro day first, so a read
+                                    never shows an interval from a day that has ended
+POST /api/pomodoro/ensure           ensure a timer exists; no-op if one already does (any
+                                    phase) from the CURRENT pomodoro day; against a document
+                                    left over from a previous one it rolls the day and starts
+                                    a fresh work interval, in the one call
 POST /api/pomodoro/pause            freeze the running interval
 POST /api/pomodoro/resume           continue a paused interval from where it froze
 POST /api/pomodoro/reset            end the loop: timer -> null, cycle -> 0
@@ -820,20 +825,33 @@ the call returns 200 with a packet whose `status` is `timeout`, carrying whateve
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
 
-### The pomodoro routes (ADR 8, 20)
+### The pomodoro routes (ADR 8, 20, 67)
 
 Everything the table above does not say:
 
+- **The pomodoro day runs 05:00 to 05:00 local** (ADR 67), and the document's `cycleDate` names
+  which one it belongs to — the day's own date, so an interval running at 01:00 is still stamped
+  with yesterday's. Crossing that boundary is a **rollover**: the whole loop ends, `timer` to
+  `null` and `cycle` to `0`, the same clearing `reset` performs. Midnight is not a boundary, so a
+  session worked past it keeps the pomodoros it has banked; nothing else ages a timer, so a pause
+  at 09:00 resumes intact at 16:00. The hour is a constant in the source, not a setting.
+  The rollover is applied **lazily**, by whatever next touches the document — every read included
+  — so there is no scheduled job and nothing has to run while the machine is asleep. A read
+  applies it to what the caller gets and writes nothing; the next write is what carries the
+  rolled shape back to disk.
 - `GET /api/pomodoro` returns the whole document (`src/pomodoro.mjs` `defaultDoc`) plus `now`, the
   daemon's own `Date.now()` at response time, so the page computes `serverNow - Date.now()` once
   and keeps subtracting that offset rather than trusting the browser's clock against a
   server-minted deadline. Every write route returns the same `{ ...document, now }`, reflecting
   the state immediately after that write — except `preview` and `notifyTest`, which return
   `{ ok: true }`.
-- `ensure` is *ensure*, never *start*: a running, paused or mid-break timer is left untouched, so a
-  second session, a `/clear`, a resume or a session in another project is a no-op and starting
-  mid-break does not cut the break short. It is deliberately callable with **no body at all** —
-  `readJsonBody` is never invoked on it — so a one-line `curl -X POST` from a shell hook works.
+- `ensure` is *ensure*, never *start*: a running, paused or mid-break timer **from the current
+  pomodoro day** is left untouched, so a second session, a `/clear`, a resume or a session in
+  another project is a no-op and starting mid-break does not cut the break short. A timer from a
+  day that has ended is not one of those: the morning's first session rolls the day *and* starts
+  a fresh work interval in the one call, so nobody has to clear last night's pause by hand. It is
+  deliberately callable with **no body at all** — `readJsonBody` is never invoked on it — so a
+  one-line `curl -X POST` from a shell hook works.
 - `pause` converts the running interval's absolute `deadline` into a `remainingMs` snapshot and
   sets `paused: true`; `resume` reverses that (`deadline = now + remainingMs`), so the interval
   continues from where it froze rather than restarting. Both are no-ops where they make no sense.

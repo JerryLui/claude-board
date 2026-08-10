@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { notifyBoundary, notifyTest } from '../src/notify.mjs';
 import { startServer } from '../src/server.mjs';
-import { writeDoc, localDateStr, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
+import { writeDoc, pomodoroDay, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { readSecret, SECRET_HEADER } from '../src/secret.mjs';
 
@@ -280,7 +280,7 @@ async function main() {
     writeDoc({
       settings: { ...DEFAULT_SETTINGS, notify: true, cueWork: CUE_WORK, cueBreak: CUE_BREAK, cueLongBreak: CUE_LONG_BREAK },
       cycle: 0,
-      cycleDate: localDateStr(now),
+      cycleDate: pomodoroDay(now),
       timer: { phase: 'work', deadline: now + 150, paused: false },
     }, home);
 

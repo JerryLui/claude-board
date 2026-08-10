@@ -81,7 +81,9 @@ nothing about what is running; re-run `bash install.sh` to take it.
 
 `install.sh` never touches `~/.claude/settings.json`, so the optional `SessionStart` hook
 that starts a pomodoro work interval with your session is applied by hand:
-[INSTALL.md](INSTALL.md) carries the snippet, and tells an agent to ask you first.
+[INSTALL.md](INSTALL.md) carries the snippet, and tells an agent to ask you first. The
+snippet stands down for any session that sets `CLAUDE_BOARD_NO_POMODORO`, which is how a
+cron keepalive avoids starting an interval nobody is there for.
 
 ### The one click: allowing folder access
 
