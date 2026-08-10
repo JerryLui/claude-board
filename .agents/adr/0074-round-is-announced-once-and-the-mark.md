@@ -1,0 +1,5 @@
+# 74. A round is announced once, and the mark outlives the absence
+
+2026-08-10 · narrows 55
+
+**Context:** entry 55's budget is one banner per board per absence, and the only record that an absence has been spent is a field the daemon erases the moment any tab reports Attended, so a glance at the board, or the banner's own click bringing the tab forward, resets the budget to zero and the same round is announced again fifteen seconds after the reviewer looks away, measured at roughly one banner a minute for one round. **Decision:** the mark is per round and permanent for the life of that round, so a round is announced at most once ever and returning to the board withdraws the banner on screen without erasing the mark, and a board announces a *different* round only after the reviewer has genuinely returned, which means a round becoming the oldest waiting one, by the announced round being answered or lapsing, earns nothing on its own. **Consequences:** a banner missed while the screen was locked is never repeated, which the reviewer accepts explicitly, and "one per absence" stops being the rule the code implements, so entry 55's phrasing is read through this one.

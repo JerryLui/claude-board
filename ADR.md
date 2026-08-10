@@ -44,10 +44,10 @@ link where it is worth reading.
 | 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35 |
 | 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | accepted |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
-| 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58 |
+| 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74 |
 | 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19 |
-| 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 72 |
-| 58 | [One notifier for a round, and it is the daemon's](.agents/adr/0058-one-notifier-for-a-round-and-it-is.md) | 2026-08-09 | widens 55 |
+| 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 72; narrowed by 75 |
+| 58 | [One notifier for a round, and it is the daemon's](.agents/adr/0058-one-notifier-for-a-round-and-it-is.md) | 2026-08-09 | widens 55; narrowed by 73 |
 | 59 | [The board clears its own chrome band, the artifact does not](.agents/adr/0059-board-clears-its-own-chrome-band-the-artifact.md) | 2026-08-09 | narrows 40 |
 | 62 | [Third-party rendering code is vendored, not depended on](.agents/adr/0062-third-party-rendering-code-is-vendored-not-depended.md) | 2026-08-09 | accepted |
 | 63 | [Code renders highlighted, six-hue, with the file's own line numbers](.agents/adr/0063-code-renders-highlighted-six-hue-with-the-file.md) | 2026-08-09 | accepted |
@@ -60,3 +60,8 @@ link where it is worth reading.
 | 70 | [A page references its script and styles, content-addressed and never rewritten](.agents/adr/0070-a-page-references-its-script-and-styles-content-addressed.md) | 2026-08-10 | accepted |
 | 71 | [The store is prunable by hand, and the promise not to prune it is dropped](.agents/adr/0071-the-store-is-prunable-by-hand-and-the-promise-is-dropped.md) | 2026-08-10 | relates to 70 |
 | 72 | [The status item is a second process of the same bundle](.agents/adr/0072-status-item-is-a-second-process-of-the.md) | 2026-08-10 | replaces the deleted 9; narrowed by 57 |
+| 73 | [Attended survives a look-away for two minutes](.agents/adr/0073-attended-survives-a-look-away-for-two.md) | 2026-08-10 | narrows 58 |
+| 74 | [A round is announced once, and the mark outlives the absence](.agents/adr/0074-round-is-announced-once-and-the-mark.md) | 2026-08-10 | narrows 55 |
+| 75 | [The bundle is an agent app, not a background-only one](.agents/adr/0075-bundle-is-an-agent-app-not-background.md) | 2026-08-10 | narrows 57; relates to 72 |
+| 76 | [A launch that did not come from launchd refuses to supervise](.agents/adr/0076-no-argument-launch-refuses-to-supervise.md) | 2026-08-10 | relates to 75 |
+| 77 | [The index polls for its rows](.agents/adr/0077-index-polls-for-its-rows.md) | 2026-08-10 | accepted |

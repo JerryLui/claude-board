@@ -1,0 +1,5 @@
+# 73. Attended survives a look-away for two minutes
+
+2026-08-10 · narrows 58
+
+**Context:** entry 58 made the tab report whether the reviewer is looking at the board and the daemon reads that report as a live fact, so a board tab sitting behind the terminal, which is the ordinary posture of the person this product is for, counts as nobody watching and strands its board within seconds of every glance away. **Decision:** a board stays Attended for two minutes after its tab last had focus, so an open tab keeps its board watched across the constant switching between terminal and browser and a board nobody has looked at for longer than that may strand as before, while a focused tab counts as watched for as long as it stays focused, idle detection having been considered and refused so that nothing here reads the reviewer's keyboard to decide whether they are present. **Consequences:** a round landing on a board the reviewer looked at a minute ago waits silently for them to notice it, which is the point and also the cost, and the daemon now holds a clock where it held a boolean.
