@@ -176,7 +176,16 @@ const resourcesSrc = path.join(appPath, 'Contents', 'Resources', 'src');
 async function runBundledLauncher() {
   const port = await freePort();
   const child = spawn(execPath, [], {
-    env: { PATH: process.env.PATH, CLAUDE_BOARD_PORT: String(port) },
+    env: {
+      PATH: process.env.PATH,
+      CLAUDE_BOARD_PORT: String(port),
+      // ADR.md entry 76 (SPEC_SIGNALS.md ticket 02): the no-argument supervising path
+      // this helper exercises now refuses to fork without this marker, which install.sh
+      // writes into the real plist's EnvironmentVariables dict. This direct hand-launch
+      // stands in for launchd on purpose -- this suite is about the payload the launcher
+      // serves, not about the refusal itself (test/check-launcher-refuses.mjs).
+      CLAUDE_BOARD_LAUNCHD_MARKER: '1',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

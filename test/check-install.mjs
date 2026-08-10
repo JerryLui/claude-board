@@ -559,7 +559,17 @@ async function main() {
     const ran = spawnSync(exec, [], {
       encoding: 'utf8',
       timeout: 5000,
-      env: { ...process.env, CLAUDE_BOARD_PORT: String(healthPort) }, // already bound: the daemon exits, fast
+      env: {
+        ...process.env,
+        CLAUDE_BOARD_PORT: String(healthPort), // already bound: the daemon exits, fast
+        // ADR.md entry 76 (SPEC_SIGNALS.md ticket 02): the no-argument supervising path
+        // now refuses to fork at all without this marker, which install.sh writes into
+        // the real plist's EnvironmentVariables dict (asserted elsewhere in this suite);
+        // this direct hand-launch stands in for launchd here on purpose, since the point
+        // of this particular assertion is still "can it exec node", not the refusal
+        // itself -- that has its own suite, test/check-launcher-refuses.mjs.
+        CLAUDE_BOARD_LAUNCHD_MARKER: '1',
+      },
     });
     assert.doesNotMatch(ran.stderr || '', /cannot exec/, `the launcher must be able to exec its compiled-in node:\n${ran.stderr}`);
   });
@@ -1015,6 +1025,15 @@ async function main() {
     // ECONNREFUSED once the user exports it too.
     assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
     assert.equal(plist.EnvironmentVariables.CLAUDE_BOARD_PORT, String(healthPort));
+  });
+
+  await check('the plist carries the launchd marker the launcher requires before it will supervise (ADR.md entry 76)', async () => {
+    // install.sh writes this into the real EnvironmentVariables dict so that only a real
+    // launchd start of the launcher can ever carry it -- bin/launcher.c refuses to fork
+    // node without it (test/check-launcher-refuses.mjs is the suite for that refusal
+    // itself, compiled and run in isolation rather than through a real installed bundle).
+    assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
+    assert.equal(plist.EnvironmentVariables.CLAUDE_BOARD_LAUNCHD_MARKER, '1');
   });
 
   await check('when a launcher bundle is in use, the plist carries no roots or store at all -- the launcher bakes them in instead', async () => {

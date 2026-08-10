@@ -35,6 +35,14 @@
 #      of this dict — see "the plist stops carrying what the launcher now bakes" at step
 #      2, and SECURITY.md "Known limits of that..." / "Fixed 2026-08-04: the environment
 #      used to be a third route, and the widest one".
+#      It also carries CLAUDE_BOARD_LAUNCHD_MARKER (ADR.md entry 76): the one thing this
+#      dict exists to prove is that launchd, not a stray LaunchServices launch, is what
+#      execed the launcher, and this is the signal launchd itself hands the process for
+#      that -- a value from a job description only launchd ever reads and injects, never
+#      something LaunchServices consults when it opens a bundle by double-click or by a
+#      failed notification activation. bin/launcher.c checks for it, by exact value,
+#      before it forks anything; never copied into the daemon's own environment (it is
+#      not in launcher.c's PASSTHROUGH_NAMES).
 #
 # Plus one file, added in step 6 below: skills/claude-board/SKILL.md, the manual
 # for the `ask` tool, copied to ~/.claude/skills/claude-board/.
@@ -927,6 +935,8 @@ ${PROGRAM_ARGS_XML}
 	<dict>
 		<key>CLAUDE_BOARD_PORT</key>
 		<string>${PORT_X}</string>
+		<key>CLAUDE_BOARD_LAUNCHD_MARKER</key>
+		<string>1</string>
 ${EXTRA_ENV_XML}	</dict>
 </dict>
 </plist>

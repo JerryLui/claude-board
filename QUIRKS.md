@@ -1056,6 +1056,29 @@ Cleaning up after this, on macOS 26:
 - `lsregister -dump` prints `/private/var/...` where `tmpdir()` says `/var/...`; a check
   looking for its own path in that dump has to try both spellings.
 
+### `XPC_SERVICE_NAME` does not tell you a process was started by launchd
+
+The common lore — check `getenv("XPC_SERVICE_NAME")` against the job's `Label` to tell a
+LaunchAgent start apart from a Terminal or Finder one — does not hold on this machine.
+Measured on macOS 26 both ways: an interactive zsh in Terminal.app and a throwaway
+LaunchAgent bootstrapped with `launchctl bootstrap gui/$UID` and a plist naming a real
+`Label`, dumping `env` from inside the job. Both show `XPC_SERVICE_NAME=0` and
+`XPC_FLAGS=0x0`. The variable is apparently only populated to the job's label for
+services with a `MachServices` stanza a process connects to over XPC — an ordinary
+LaunchAgent plist like this repo's, with no `MachServices` key, gets the same `"0"`
+either way. Do not reach for it as a "was I started by launchd" signal without adding
+`MachServices` and paying for the XPC machinery that comes with it.
+
+What ADR.md entry 76 uses instead: an entry in the plist's own `EnvironmentVariables`
+dict (`CLAUDE_BOARD_LAUNCHD_MARKER`), which launchd injects into the process it execs
+because that dict is part of the job description launchd itself reads — and which a
+stray LaunchServices launch of the same bundle can never carry, because that launch path
+never consults `~/Library/LaunchAgents/claude-board.plist` at all. `getppid()` was
+considered and rejected too: on this same machine a Finder double-click and a launchd
+bootstrap both report launchd as the parent, since ordinary app launches also route
+through launchd's own "generic launch" job spawning — so the parent pid does not
+discriminate either.
+
 ---
 
 ## macOS notifications and sound

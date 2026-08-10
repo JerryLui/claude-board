@@ -165,6 +165,14 @@ async function main() {
     // it needs to find (the launcher execs by absolute path), so it is left out on
     // purpose too, to prove PATH is baked in rather than needed from the parent.
     NODE_OPTIONS: `--require ${junkMarkerPath}`,
+    // ADR.md entry 76: since ticket 02 of SPEC_SIGNALS.md, the supervising path this
+    // suite exercises refuses to fork at all unless this exact marker is present --
+    // install.sh writes it into the plist's own EnvironmentVariables dict, standing in
+    // here for "this run came from launchd" the same way the rest of this object stands
+    // in for a poisoned parent shell. test/check-launcher-refuses.mjs is the suite for
+    // the refusal itself; this one is unaffected by it and needs the marker only to keep
+    // reaching the code it already tests.
+    CLAUDE_BOARD_LAUNCHD_MARKER: '1',
     CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'poison-secret'),
     CLAUDE_BOARD_REF_ROOTS: '/',
     // ADR.md entry 38: `/file/` and its allowlist are gone, so this name is neither an
@@ -263,6 +271,7 @@ async function main() {
   await check('a passthrough name absent from the parent stays absent from the child -- it is not defaulted to empty', async () => {
     const runWithoutOnePassthrough = spawnSync(launcherExec, [], {
       env: {
+        CLAUDE_BOARD_LAUNCHD_MARKER: '1', // ADR.md entry 76 -- see the comment above
         CLAUDE_BOARD_PORT: '1',
         CLAUDE_BOARD_SHUTDOWN_MS: '2',
         // CLAUDE_BOARD_SSE_HEARTBEAT_MS deliberately omitted.

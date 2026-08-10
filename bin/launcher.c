@@ -58,6 +58,13 @@
  * just never put there. See OVERRIDE_ENV and PASSTHROUGH_NAMES below, and
  * launcher_paths.h for where the compiled-in values come from.
  *
+ * One entry in that same plist dict is read for a different purpose and never reaches
+ * the daemon at all: CLAUDE_BOARD_LAUNCHD_MARKER (ADR.md entry 76), checked in main()
+ * before the supervising path forks anything, to refuse a no-argument launch that did
+ * not come from launchd -- a stray LaunchServices launch of this bundle, which a click on
+ * a stranded banner that fails to activate it (entry 75) can trigger, must start no
+ * second daemon over the same store. See the check itself for the full reasoning.
+ *
  * One thing this binary does besides supervise node: `claude-board --notify <phase>
  * [arg]` posts a notification and exits, without forking anything. That mode exists
  * here, in the file whose whole subject is not spending the grant, because a
@@ -208,6 +215,15 @@ extern int cb_notify(const char *title, const char *body, const char *cue_name, 
 
 static const char *const NOTIFY_FLAG = "--notify";
 static const char *const NOTIFY_AUTHORIZE_FLAG = "--notify-authorize";
+
+/* ADR.md entry 76: the one entry install.sh writes into the plist's own
+ * EnvironmentVariables dict (install.sh step 2) for a reader that is not the daemon at
+ * all -- it is this binary's own supervising path, below, checking that launchd, and not
+ * a stray LaunchServices launch, is what execed it this time. See main()'s check for the
+ * reasoning; declared here, beside the other two flags this file dispatches argv on, for
+ * the same reason they are file-scope literals rather than something built at runtime. */
+static const char *const LAUNCHD_MARKER_NAME = "CLAUDE_BOARD_LAUNCHD_MARKER";
+static const char *const LAUNCHD_MARKER_VALUE = "1";
 
 /* The cue-name argument's own filter, standing in for a closed table the way MESSAGES
  * stands in for the phase argument below. It cannot be a literal enumeration: the cue
@@ -575,6 +591,56 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "claude-board: unrecognised notify phase\n");
     return 1;
+  }
+
+  /* ADR.md entry 76: past this point is the supervising path -- it is about to fork node
+   * and hold this bundle's Documents grant open for as long as that child runs, which is
+   * the whole reason a launch that did not come from launchd must not reach it. The
+   * click on a stranded banner that fails to activate this bundle (ADR.md entry 75) can
+   * have LaunchServices start it exactly this way -- no arguments, the same as launchd's
+   * own invocation -- and on an install with a non-default port that becomes a second
+   * live daemon racing the real one over one store file until somebody notices and kills
+   * it, rather than dying within a second the way a default-port collision would.
+   *
+   * The check is on CLAUDE_BOARD_LAUNCHD_MARKER (declared above), one exact name checked
+   * for one exact value -- the same posture OVERRIDE_ENV and PASSTHROUGH_NAMES already
+   * take toward a parent environment this binary does not trust, never "any environment
+   * variable at all". It is not argv: nothing here depends on ProgramArguments being
+   * wired correctly, which is the point, since launchd's own invocation is the one call
+   * that must never depend on getting argv right, and a stray LaunchServices launch has
+   * no argv of its own to get wrong either way. What makes this launchd's signal rather
+   * than this launcher's own invention: only launchd ever reads
+   * ~/Library/LaunchAgents/claude-board.plist and injects its EnvironmentVariables dict
+   * into the process it execs (install.sh step 2). A stray LaunchServices launch --
+   * a double-click, or the activation macOS attempts after a notification click finds no
+   * serving process -- opens the bundle by CFBundleIdentifier, never by consulting that
+   * plist, so it can never carry this variable.
+   *
+   * The cost of getting this check wrong runs one direction only, which is why it is
+   * strict rather than lenient: a false negative -- a real launchd start misread as
+   * stray -- silently starts no daemon at all. No board would ever open, no round would
+   * ever be announced, and every `ask` this bundle would have served fails until someone
+   * notices and re-runs install.sh or runs `launchctl kickstart -k` by hand. A false
+   * positive costs nothing new beyond what entry 76 already accepts: the class of local
+   * attacker who can set this exact variable and hand-launch the bundle can already
+   * rewrite the plist to point this binary anywhere, which is the same attacker
+   * OVERRIDE_ENV's whole design already declines to defend against.
+   *
+   * The refusal itself is silent by construction, not by an extra branch bolted on: nothing
+   * has forked, no signal handler is installed, and the stderr line below goes to this
+   * process's own stderr, which for a bundle LaunchServices opened outside launchd is not
+   * attached to anything a reviewer would see on screen -- exactly the posture every
+   * other "unrecognised" branch in this file already takes.
+   *
+   * Known cost, accepted: running this binary by hand with no arguments to supervise a
+   * daemon -- which is how entry 72's menu bar child has been getting exercised from a
+   * shell -- now does nothing unless CLAUDE_BOARD_LAUNCHD_MARKER=1 is set in that shell
+   * first. Supervising has to go through launchd from here on. --notify and --menubar,
+   * both dispatched on argv above this point, are untouched. */
+  const char *launchd_marker = getenv(LAUNCHD_MARKER_NAME);
+  if (launchd_marker == NULL || strcmp(launchd_marker, LAUNCHD_MARKER_VALUE) != 0) {
+    fprintf(stderr, "claude-board: no-argument launch missing the launchd marker -- refusing to supervise\n");
+    return 0;
   }
 
   struct sigaction sa;
