@@ -50,7 +50,9 @@ would take two seconds.
 - macOS
 - Node 22 or newer, at a stable path (`/opt/homebrew/bin/node`); the installer warns if
   the only node it finds is version-managed, because launchd keeps pointing at a path
-  the next upgrade moves
+  the next upgrade moves. Nothing checks the version for you — `npm` never runs, so
+  `package.json`'s `engines` is never consulted, and an older node fails later as a
+  health-check timeout that names the wrong cause
 - Claude Code, with the `claude` CLI on your `PATH`
 - The Xcode Command Line Tools (`xcode-select --install`), for `cc` — used once to build
   the launcher. Optional: without them the installer says so and still gives you a
@@ -59,7 +61,7 @@ would take two seconds.
 
 Nothing is installed: no `npm install`, no `node_modules`, no bundler. Beyond node's own
 built-ins, two rendering engines are vendored as readable source under `src/vendor/` and
-pinned by sha256 (`marked` and `prismjs`, ADR 62); both run server-side when a board is
+pinned by sha256 (`marked` and `prismjs`, `ADR.md` entry 62); both run server-side when a board is
 posted, so the page carries their output and never them. Mermaid is the one thing loaded
 at view time, from jsdelivr when a diagram renders.
 
@@ -71,12 +73,8 @@ cd ~/Documents/claude-board
 bash install.sh
 ```
 
-One idempotent command, and one click. It generates a local secret, builds the signed
-launcher bundle with the daemon's own code staged inside it, installs a launchd job
-running that bundle, waits for the daemon to actually answer before claiming success,
-and registers the MCP server with Claude Code at user scope. Nothing that already
-matches is rebuilt on a second run, which is what keeps the grant below from being
-asked for again.
+One idempotent command, and one click. Nothing that already matches is rebuilt on a
+second run, which is what keeps the grant below from being asked for again.
 
 **The clone is a build input, not what the daemon runs.** A `git pull` alone changes
 nothing about what is running; re-run `bash install.sh` to take it.
@@ -118,20 +116,16 @@ claude-board to **Alerts** under **System Settings → Notifications** to make t
 you — a per-app setting with no API, and the reason a bundle of ours has to be the thing
 posting.
 
-Verify:
+`install.sh` prints these three when it finishes:
 
 ```sh
-curl -s http://127.0.0.1:7391/api/health     # {"ok":true,...}
+curl -s http://127.0.0.1:7391/api/health          # verify:   {"ok":true,...}
+launchctl kickstart -k gui/$(id -u)/claude-board  # revive:   the daemon stopped answering
+node ~/Documents/claude-board/bin/authorize.mjs   # authorize: another browser
 ```
 
 A Claude Code session that was already running when you installed does not have the
 `ask` tool; start a new session.
-
-If the daemon ever stops answering:
-
-```sh
-launchctl kickstart -k gui/$(id -u)/claude-board
-```
 
 ## Use
 
@@ -178,15 +172,10 @@ underneath.
 Boards are served only to a browser claude-board has handed a credential to. The tab a
 session opens is authorized automatically, and the URL it lands on carries no credential,
 so you can reload and bookmark it freely. A browser that holds nothing — cleared cookies,
-a different profile, a different browser — gets a page saying so, printing this command
-with the right absolute path for your machine:
-
-```sh
-node ~/Documents/claude-board/bin/authorize.mjs      # adjust to wherever you cloned it
-```
-
-It opens an authorized tab and touches nothing else. Add `--print` for a link to paste
-into some other browser, or a board id to land on that board rather than the index.
+a different profile, a different browser — gets a page saying so, printing the
+`authorize.mjs` command above with the right absolute path for your machine. It opens an
+authorized tab and touches nothing else. Add `--print` for a link to paste into some
+other browser, or a board id to land on that board rather than the index.
 
 ## How it works
 

@@ -598,8 +598,7 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
    inside it -- it falls through to the card underneath in the parent
    document instead (the same one a click on the option's label already
    selects), which is the ONLY thing that can ever record a pick. See
-   src/render.mjs's stageAgentScript design comment ("NO 'select' MESSAGE,
-   DELIBERATELY") for the two paths this closes and why guarding a message
+   ADR.md entry 78 for the two paths this closes and why guarding a message
    instead of deleting the channel would not have been enough. */
 .choice-variant .html-stage { pointer-events: none; }
 /* a SEPARATE rule from the one immediately
@@ -1012,7 +1011,7 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
    committing the reviewer can see exactly which element will be anchored"). Set
    from JS (src/ui.mjs) on the innermost element under the cursor, never via a
    :hover rule -- that would outline every ancestor in the chain at once. The
-   iframe's own copy of this same outline (wireHtmlStage) is a hardcoded hex
+   iframe's own copy of this same outline (src/render.mjs's stageAgentScript) is a hardcoded hex
    injected into the sandboxed document's own <style>, since this stylesheet
    deliberately does not reach in there -- see QUIRKS.md "two stylesheets, one
    palette". */

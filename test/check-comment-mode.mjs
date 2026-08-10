@@ -827,7 +827,7 @@ check('comment mode: clicking the html-stage iframe element itself (the outer-do
 // --- the whole-block comment button ---------------------------------------------
 //
 // This section used to be about `.comment-btn[data-anchor-kind="md"]` -- the
-// inline control injectAnchorButtons (src/render.mjs) put after every markdown
+// inline control injectAnchorButtons, since deleted with the kind, put after every markdown
 // heading and list item, the ONLY producer of `md` anchors on the page, and the
 // one anchor-minting path that never learned either of two rules
 // (no findPendingCommentForAnchor lookup, no isSentAnchor

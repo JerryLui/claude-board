@@ -1,5 +1,5 @@
 // The prose-vs-shim checker, shipped as a product, generalised out of
-// `test/check-grill.mjs`'s hand-rolled assertions. Every real caller
+// the retired `check-grill` check's hand-rolled assertions. Every real caller
 // of this module lives OUTSIDE this repo, in some `~/.claude/skills/<name>/check.mjs` or a
 // command's own check script — a different git repo that must keep working when this one is
 // not installed at all. This repo only proves the checker itself, against a fixture it owns
@@ -39,8 +39,9 @@
 //
 // Which assertions generalise and which stay caller-specific was a judgement call: grill's
 // "no HTML template of its own", "one question per call is gone" and "revive command" checks
-// were about *that command's* own history and never generalised here. `test/check-grill.mjs`
-// held them until its subject was taken out of this repo entirely; whichever repo now owns
+// were about *that command's* own history and never generalised here. `check-grill` held
+// them until its subject was taken out of this repo entirely -- the check file went with it,
+// so it is named here without a path, having none in this repo; whichever repo now owns
 // `/grill`'s prose is where assertions like those belong.
 //
 // --- Resolution story: how a caller outside this repo finds this file --------------------
@@ -63,7 +64,7 @@
 // the canonical, copy-pasteable bootstrap, kept in sync with the implementation here. Once
 // pasted, using it is the one-liner below:
 //
-//   const checker = await loadClaudeBoardChecker();
+//   const checker = await loadInstalledChecker();
 //   if (!checker) { console.log('skip: claude-board not installed'); process.exit(0); }
 //   await checker.assertProseMatchesShim(new URL('./SKILL.md', import.meta.url).pathname);
 //
@@ -148,7 +149,7 @@ export async function loadInstalledChecker(opts = {}) {
 
 // ---------------------------------------------------------------------------
 // PROTOCOL.md's own vocabulary: the block kinds and widgets under "### Blocks", and the
-// packet statuses under "## Packet". Mined from test/check-grill.mjs's packet-status parse
+// packet statuses under "## Packet". Mined from `check-grill`'s packet-status parse
 // (same technique: read the value out of the doc rather than hardcode a copy here too).
 // ---------------------------------------------------------------------------
 
@@ -180,7 +181,7 @@ export function parseBlockShapes(protocolText) {
 }
 
 /** Every status the Packet can carry, read out of PROTOCOL.md's own `status,` line — the same
- * parse `test/check-grill.mjs` already does inline, generalised here so both share it. */
+ * parse `check-grill` did inline, generalised here so both share it. */
 export function parsePacketStatuses(protocolText) {
   const line = protocolText.split('\n').find(l => /^\s*status,/.test(l));
   if (!line) throw new Error("PROTOCOL.md: expected a 'status,' line documenting the Packet's allowed values");
@@ -336,7 +337,7 @@ export function checkProse({
 
 // ---------------------------------------------------------------------------
 // Getting the shim's live tools/list. A minimal scripted JSON-RPC 2.0 client over a child
-// process's stdio, mined from test/check-grill.mjs's McpClient — same shape, kept local since
+// process's stdio, mined from `check-grill`'s own `McpClient` — same shape, kept local since
 // this only ever needs initialize/tools-list, never a held-open wait.
 // ---------------------------------------------------------------------------
 
@@ -419,7 +420,7 @@ export async function checkProseFile(proseFilePath, options = {}) {
 
   // The daemon's request handler reads CLAUDE_BOARD_SECRET_FILE from THIS process's own env
   // (it runs in-process via startServer, not spawned), so it has to be set here too, not only
-  // in the shim child's env below — same seam test/check-grill.mjs uses. Restored afterwards
+  // in the shim child's env below — same seam `check-grill` used. Restored afterwards
   // so a second call in the same process (this repo's own self-test checks two fixtures) does
   // not leak one fixture's temp secret into the next.
   const prevSecretFile = process.env.CLAUDE_BOARD_SECRET_FILE;
@@ -469,7 +470,7 @@ export function formatFailures(failures) {
 /** The literal one-liner: run the whole check, print each assertion, and throw a single
  * summary error if anything failed (so a caller's own `check.mjs` can do
  * `await assertProseMatchesShim(path)` and let it propagate to a top-level `.catch`, exactly
- * the pattern `test/check-grill.mjs` already uses for its own `main().catch(...)`). The
+ * the pattern `check-grill` used for its own `main().catch(...)`). The
  * thrown Error's own `.message` carries the full readable summary, not just a count — a
  * caller that does the natural thing (`console.error(err.message)`) sees every failure's name
  * and message, never `[object Object]`. */

@@ -16,6 +16,15 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 
 ## The rendered page: stylesheets and client-script literals
 
+- [The stylesheet and the markup are checked against each other](#the-stylesheet-and-the-markup-are-checked-against-each-other)
+- [No external assets, ever](#no-external-assets-ever)
+- [Two stylesheets, one palette](#two-stylesheets-one-palette)
+- [A diagram lens holds a clone, and a theme change replaces what it cloned](#a-diagram-lens-holds-a-clone-and-a-theme-change-replaces-what-it-cloned)
+- [A CSS *comment* is shipped on the index page too, and one check reads its words](#a-css-comment-is-shipped-on-the-index-page-too-and-one-check-reads-its-words)
+- [A backtick inside a template-literal payload ends the whole file](#a-backtick-inside-a-template-literal-payload-ends-the-whole-file)
+- [Readonly is locked twice — CSS and JS — and reusing chrome inherits both](#readonly-is-locked-twice--css-and-js--and-reusing-chrome-inherits-both)
+- [`100vw` is wider than the page whenever the page actually scrolls](#100vw-is-wider-than-the-page-whenever-the-page-actually-scrolls)
+
 ### The stylesheet and the markup are checked against each other
 
 `test/check-pure.mjs` ("every class the stylesheet rules on is a class something
@@ -30,13 +39,11 @@ Several rules are asserted by their exact text, not their effect —
 Keep each of those on one line and keep the wording; reformatting them breaks the
 checks.
 
-Asserting a rule by its text is itself a trap, and the mermaid rules are why: they
-used to be asserted as the literal string `g[id^="flowchart-"]`, which matched the
-stylesheet perfectly while selecting nothing any browser ever rendered (see "Real
-mermaid node ids are prefixed"). Those two rules are now built from
-`MERMAID_NODE_SELECTOR` (`src/anchor.mjs`) and checked by asking whether they would
-select a REAL node id, not by matching their spelling. Prefer that shape for any new
-rule whose whole job is to select something.
+Asserting a rule by its text is itself a trap: it can match a rule that selects
+nothing any browser ever renders (see "Real mermaid node ids are prefixed"). The two
+mermaid rules are built from `MERMAID_NODE_SELECTOR` (`src/anchor.mjs`) and checked
+by asking whether they would select a REAL node id, not by matching their spelling —
+prefer that shape for any new rule whose whole job is to select something.
 
 ### No external assets — except two bare sibling filenames
 
@@ -80,10 +87,10 @@ text. `test/check-pure.mjs` asserts each part separately (the two `--stage-bg` v
 differ; outline >= 3:1 against **each** surface; black text >= 4.5:1 on each;
 equality with the light accent), so a palette change fails on the part it broke.
 
-The stage is the only thing that has ever needed this. "Cannot link the stylesheet"
-is not "cannot read the palette": the self-contained 401 refusal page drifted twice
-from being treated as if it were the stage, and now emits both token blocks from
-`palettes` at render time and paints through `var()`.
+The stage is the only thing that has ever needed this. The self-contained 401
+refusal page is a separate case — "cannot link the stylesheet" is not "cannot read
+the palette" — and emits both token blocks from `palettes` at render time, painting
+through `var()` instead.
 
 ### A diagram lens holds a clone, and a theme change replaces what it cloned
 
@@ -173,34 +180,42 @@ into is narrower by however wide that scrollbar is. A box sized in `vw` therefor
 overflows the true content width by the scrollbar's own width — on a page that had
 no horizontal scrollbar before, this trick is what gives it one.
 
-Hit extending `body.page-board`'s full-bleed header wash (`src/styles.mjs`,
+It presented extending `body.page-board`'s full-bleed header wash (`src/styles.mjs`,
 `body.page-board .board-head::after`, `inset: 0`) to an ORDINARY board's sticky
 header, which sits inside a centred 1120px column rather than covering the whole
-viewport. The page-board version was never at risk: `body.page-board` sets
-`overflow: hidden`, so that surface never has a document scrollbar to be wider than
-in the first place. An ordinary board is exactly the opposite case — it is the
-document itself that scrolls — so `100vw` there is a live bug, not a latent one.
+viewport — a live bug there, since it is the document itself that scrolls.
+`test/dom-stand-in.mjs` cannot catch it at all: it has no layout, so no scrollbar,
+so no width to overflow, which is why the whole suite stayed green while a real
+Chrome, scrolled far enough for a real scrollbar to appear, showed the seam.
 
-The fix is the same "measure it, don't guess it" idiom this file already has several
-of (`--pill-half`, `--round-pager-dock-h`): `document.documentElement.clientWidth`
-excludes the scrollbar by definition, so writing it to a custom property
-(`--doc-w`, `measureDocWidth`, `src/ui.mjs`) and using THAT in place of `100vw` gets
-the full-bleed geometry right without the overflow. Re-measured on `resize` only, not
-on every scroll frame or DOM mutation — a scrollbar that appears mid-session because
-content grew taller (a comment posted while the tab is in the background, say) will
-leave the wash a few pixels short until the next resize, which is an accepted,
-narrow, cosmetic gap rather than a mutation-observed re-measure. Nothing in
-`test/dom-stand-in.mjs` can catch a defect of this shape at all — it has no layout,
-so no scrollbar, so no width to overflow — which is exactly why the whole suite
-stayed green while a real Chrome, scrolled far enough for a real scrollbar to
-appear, showed either the seam (before) or a horizontal scrollbar (a naive `100vw`
-fix). Verify anything using this trick in a real browser, on a page long enough to
-actually need a scrollbar — the one case that matters is also the one no automated
-check here can produce.
+Use `document.documentElement.clientWidth` instead, which excludes the scrollbar by
+definition: write it to a custom property (`--doc-w`, `measureDocWidth`,
+`src/ui.mjs`) and use THAT in place of `100vw` (the re-measure trigger and its
+cosmetic-gap tradeoff are commented at the call site). Verify anything using this
+trick in a real browser, on a page long enough to actually need a scrollbar — the
+one case that matters is also the one no automated check here can produce.
 
 ---
 
 ## The DOM stand-in's ceilings, and what needs a real browser
+
+- [`ResizeObserver` does not necessarily deliver an initial observation](#resizeobserver-does-not-necessarily-deliver-an-initial-observation)
+- [Real mermaid node ids are prefixed, and `^=` will not see them](#real-mermaid-node-ids-are-prefixed-and--will-not-see-them)
+- [`setPointerCapture` on pointerdown steals the click from what you clicked](#setpointercapture-on-pointerdown-steals-the-click-from-what-you-clicked)
+- [The stand-in has no layout: no `IntersectionObserver`](#the-stand-in-has-no-layout-no-intersectionobserver)
+- [The cascade resolver cannot see an interaction pseudo-class](#the-cascade-resolver-cannot-see-an-interaction-pseudo-class)
+- [`scrollHeight` and `clientHeight` model exactly one fact](#scrollheight-and-clientheight-model-exactly-one-fact)
+- [Nothing scrolls, but a `scroll` listener can still be driven](#nothing-scrolls-but-a-scroll-listener-can-still-be-driven)
+- [A sandboxed `srcdoc` frame's own script runs before its first layout — `load` does not help](#a-sandboxed-srcdoc-frames-own-script-runs-before-its-first-layout--load-does-not-help)
+- [A `display:none` iframe keeps its inner scroll offset and fires no event on the way back](#a-displaynone-iframe-keeps-its-inner-scroll-offset-and-fires-no-event-on-the-way-back)
+- [`cloneNode` in the stand-in never hands back an `IframeElement`](#clonenode-in-the-stand-in-never-hands-back-an-iframeelement)
+- [`readyState`'s default is not one fact, it's three, and only one of them should change](#readystates-default-is-not-one-fact-its-three-and-only-one-of-them-should-change)
+- [The thing that scrolls a rendered artifact is often not its document](#the-thing-that-scrolls-a-rendered-artifact-is-often-not-its-document)
+- [Driving the real page in real Chrome](#driving-the-real-page-in-real-chrome)
+- [The `claude-in-chrome` extension's own coordinate system, and its window resize](#the-claude-in-chrome-extensions-own-coordinate-system-and-its-window-resize)
+- [A harness that imports `src/` serves the code as it was at startup](#a-harness-that-imports-src-serves-the-code-as-it-was-at-startup)
+- [Growing the viewport after load mis-positions anchor pins](#growing-the-viewport-after-load-mis-positions-anchor-pins)
+- [Preview harness](#preview-harness)
 
 ### `ResizeObserver` does not necessarily deliver an initial observation
 
@@ -258,89 +273,82 @@ has capture active and targets normally, and a genuine pan is captured before it
 leave the element. `test/check-pure.mjs` pins the shape of that, which is as far as a
 check without a browser can go.
 
-### The stand-in has no layout: no `IntersectionObserver`, no `scrollHeight`, no `clientHeight`
+### The stand-in has no layout: no `IntersectionObserver`
 
-`test/dom-stand-in.mjs` is a DOM, not a browser: nothing in it lays anything out, so an
-API whose whole job is reporting real layout is either absent or permanently zero.
+`test/dom-stand-in.mjs` never defines `IntersectionObserver` at all, so any code built
+on one runs under no check unless a check drives it by hand.
 
-- **`IntersectionObserver` is not defined at all.** Every construction site
-  (`setupSendBarDock`, `src/ui.mjs`) guards on `typeof IntersectionObserver !== 'function'`
-  and returns immediately when it is missing — by design, so the stand-in does not throw.
-  Anything decided *inside* such an observer therefore runs under no check at all unless a
-  check installs `StandInIntersectionObserver` and drives the callback itself.
+It presents as silence, not failure: every construction site (`setupSendBarDock`,
+`src/ui.mjs`) guards on `typeof IntersectionObserver !== 'function'` and returns
+immediately when it's missing — which keeps the stand-in from throwing, but also means
+anything decided *inside* the callback is untested by default.
 
-  This is why the round pager is state-driven rather than scroll-driven. The round badge
-  used to name "the round crossing the sticky header line", decided by an observer over a
-  96px band, and its real defect (a 1px band that a smooth-scrolled section jumps clean
-  over between two consecutive samples) could only be found by recreating the observer in
-  real Chrome. Rounds are pages now (ADR 42): one class, one variable, one function that
-  writes both — all of which this DOM can see, which is how `test/check-round-pager.mjs`
-  asserts what the reviewer would actually be looking at. **Prefer explicit state over
-  measured position for anything that has to be checkable here.**
+Prefer explicit state over measured position for anything that has to be checkable
+here — rounds are pages now (ADR 42), decided by one class and one variable rather
+than an observed scroll position, which is what lets `test/check-round-pager.mjs`
+assert directly. When an observer is unavoidable, install `StandInIntersectionObserver`
+and fire its callback yourself, in both directions.
 
-- **The cascade resolver cannot see an interaction pseudo-class, so a rule gated on one is
-  invisible to every check.** `resolveComputedProperty` deliberately makes any compound it
-  cannot evaluate — `:hover`, `:disabled`, `:focus`, `::-webkit-scrollbar` — never match
-  (its own comment says why: a correct answer beats a guess). The consequence is a blind
-  spot with teeth: adding `.round-flip:disabled { display: none }` hides a chevron on every
-  single-round board and at both ends of every other one, and left the WHOLE suite green
-  (verified). Nothing computes a different value, because the rule never applies here.
+### The cascade resolver cannot see an interaction pseudo-class
 
-  So an invariant of the form *"this control is never taken off the page"* cannot be
-  asserted by computing a property — it needs a **structural scan over the stylesheet's
-  rules**: parse out every rule whose selector mentions the control at all, whatever state
-  it is gated on, and assert none of them sets `display: none` / `visibility: hidden` /
-  `opacity: 0` (`test/check-round-pager.mjs`, "DISABLED is not hidden"). That is the
-  inverse of the trap two entries up and safe for the same reason it is a trap there:
-  asserting a rule EXISTS by its spelling can match a rule that selects nothing, while
-  asserting a class of rule does NOT exist cannot. Keep computing the property as well for
-  the states that DO have a class (`body.readonly`, `body.page-board`, `body.sent-page`) —
-  those the resolver evaluates properly, and a scan keyed on the control's own class name
-  would miss `body.sent-page nav { display: none }`.
+`resolveComputedProperty` (the stand-in's `getComputedStyle` substitute) deliberately
+makes any compound it can't evaluate — `:hover`, `:disabled`, `:focus`,
+`::-webkit-scrollbar` — never match, so a rule gated on one of those is invisible to
+every check that reads a computed value.
 
-- **`scrollHeight` and `clientHeight` model exactly one fact.** They read `0` for a node
-  that is not in a document, and otherwise whatever the fixture declared via
-  `data-standin-client-height` / `data-standin-scroll-height`. Nothing is computed: an
-  undeclared connected element reading `0` means "this stand-in knows no box for this
-  node", never "this node is 0px tall".
+It presented as a chevron that stayed on the page: adding
+`.round-flip:disabled { display: none }` hid it on every single-round board and at
+both ends of every other one, and left the whole suite green (verified) — nothing
+computes a different value, because the rule never applies in the stand-in.
 
-  That one fact is modelled because every push path turns on it. `wireRoot` runs against
-  a **detached** subtree by design on all three of them, and a real browser also reports
-  0/0 there — so anything that measures at wire time measures zero.
-  `unlockCodeCapForDrag` (`src/ui.mjs`) used to claim its one-shot unlock marker *before*
-  the comparison it guards, so the marker was burned with the unlock never having run and
-  the post-attach re-measurement then skipped itself: every code block arriving over SSE
-  was permanently undraggable. Confirmed in Chrome (0/0 detached, 480/4478 attached), and
-  now driven by two checks in `test/check-anchor-push.mjs`. The second of those asserts a
-  SHORT block is left alone, which is what stops the first being satisfied by a version
-  that unlocks everything.
+Assert the invariant structurally instead of by computed value: parse every rule
+whose selector mentions the control at all, whatever state it's gated on, and assert
+none sets `display: none` / `visibility: hidden` / `opacity: 0`
+(`test/check-round-pager.mjs`, "DISABLED is not hidden") — the inverse of asserting a
+rule exists by its spelling, which can match a rule that selects nothing (see the
+mermaid-selector entry above): asserting a class of rule does NOT exist can't be
+fooled the same way. Keep computing the property too for states that DO have a class
+(`body.readonly`, `body.page-board`, `body.sent-page`), which the resolver evaluates
+correctly and a structural scan keyed on the control's class would miss.
 
-  Do not grow this into a layout model. Anything whose answer depends on real layout
-  still belongs in a real browser.
+### `scrollHeight` and `clientHeight` model exactly one fact
 
-- **Nothing scrolls, but a `scroll` LISTENER can still be driven.** There is no
-  `scrollY`, no `scrollTop` that moves, and no gesture — so the page board's
-  condensing header (ADR 40), whose whole trigger is the artifact being scrolled
-  inside its frame, looks untestable. It is not: a check can set
-  `frame.contentWindow.pageYOffset` (or an element's `scrollTop`) by hand and
-  `frame.contentDocument.dispatchEvent({ type: 'scroll', target })`, which runs
-  `stageAgentScript`'s own listener for real and produces the real message.
-  Everything downstream — the shape check, the body class, the control, the frame's
-  height staying put — is then ordinary. `test/check-page-board.mjs` does this.
+The stand-in reads `0` for any node not in a document, and otherwise whatever a
+fixture declared via `data-standin-client-height` / `data-standin-scroll-height`.
+Nothing is computed — an undeclared connected element reading `0` means "this stand-in
+knows no box for this node", never "this node is 0px tall".
 
-  Dispatch on the DOCUMENT with an explicit `target`, not on the window: the real
-  listener is a capture-phase one on `document` (see the scroller entry below), and
-  this stand-in's `dispatchEvent` walks `parentElement` only — it has no capture
-  path and no document in the ancestor chain, so nothing propagates to a document
-  listener on its own. Driving the listener at its registration point is the honest
-  substitute; that a capture listener genuinely sees an inner element's scroll is a
-  browser fact, measured separately.
+It presents as a value that is silently right most of the time: `wireRoot` runs
+against a detached subtree on every push path, and a real browser also reports 0/0
+there — so anything that measures at wire time measures zero, matching the stand-in
+by coincidence. `unlockCodeCapForDrag` (`src/ui.mjs`) once claimed its one-shot unlock
+marker *before* the comparison it guards, so the marker burned with the unlock never
+having run: every code block arriving over SSE was permanently undraggable, and the
+match against real Chrome's own 0/0 detached reading meant nothing here caught it.
 
-  Related trap in the same file, now fixed: `StandInWindow._setSystemPrefersDark`
-  used to update each `MediaQueryList` and fire its `change` inside one loop, so a
-  listener on `(prefers-color-scheme: dark)` that read `(prefers-color-scheme: light)`
-  saw the OLD value and concluded the opposite theme. A real browser has every query
-  consistent before any listener runs. It now updates all of them, then dispatches.
+Don't grow this into a layout model — anything whose answer depends on real layout
+still belongs in a real browser. Pin the fact you found by hand with a check that
+declares both a detached and an attached height, the way
+`test/check-anchor-push.mjs` does (0/0 detached, 480/4478 attached), so a short block
+left alone is what stops a version that "fixes" this by unlocking everything.
+
+### Nothing scrolls, but a `scroll` listener can still be driven
+
+There's no `scrollY`, no `scrollTop` that moves, and no gesture in the stand-in, so
+anything gated on the artifact being scrolled inside its frame — the page board's
+condensing header (ADR 40) — looks untestable.
+
+It is not: a check can set `frame.contentWindow.pageYOffset` (or an element's
+`scrollTop`) by hand and dispatch `{ type: 'scroll', target }` on the frame's
+DOCUMENT, which runs `stageAgentScript`'s own listener for real and produces the real
+message (`test/check-page-board.mjs`). Dispatching on the window instead does
+nothing: the stand-in's `dispatchEvent` walks `parentElement` only, so it has no
+capture path and no document in the ancestor chain to reach a document listener.
+
+Dispatch on the document with an explicit `target`, matching the real listener's own
+registration (a capture-phase one on `document`) — driving the listener at its
+registration point is the honest substitute; that a capture listener genuinely sees
+an inner element's scroll is a browser fact, measured separately.
 
 ### A sandboxed `srcdoc` frame's own script runs before its first layout — `load` does not help
 
@@ -379,9 +387,9 @@ see until then.
 
 Rounds are the board's pages and a page that is not current is `display:none`, not
 removed — so every round's iframe stays mounted and running the whole time. What
-that does to the frame's own scroll position is not guessable, and two independent
-passes stalled on it; it took a real-browser probe to settle. Measured in Chrome 152
-(Blink), against a probe mirroring `.round` / `.round-current` exactly:
+that does to the frame's own scroll position is not guessable from spec reading; it
+needs a real-browser probe. Measured in Chrome 152 (Blink), against a probe
+mirroring `.round` / `.round-current` exactly:
 
     1 after scrollTo(800), visible: pageYOffset=800  innerH=657 contentH=4000 events=[]
     2 while display:none:           pageYOffset=0    innerH=657 contentH=657  events=[]
@@ -417,20 +425,19 @@ message *from the lens frame* is inert.
 
 ### `readyState`'s default is not one fact, it's three, and only one of them should change
 
-`test/dom-stand-in.mjs`'s `StandInDocument` used to hardcode `readyState = 'complete'`
-unconditionally, so `src/theme.mjs`'s `themeBootScript` always took the `else { wire(); }`
-branch — the one branch a real page (where this script runs inline in `<head>`, before
-`<body>` exists) never takes. Fixing the DEFAULT to `'loading'` is one line; the trap is
-that `StandInDocument` backs THREE different documents, only one of which should change:
+`test/dom-stand-in.mjs`'s `StandInDocument` backs THREE different documents, and only
+one of them should default `readyState` to `'loading'` rather than `'complete'`:
 
-- The outer page (`parseHTML`) — the one that needed the fix. A caller now calls
-  `document.finishParsing()` (flips `readyState` to `'complete'`, dispatches a real
-  `DOMContentLoaded`) at the point it wants to simulate the parser reaching the end of
-  the document.
+- The outer page (`parseHTML`) needs to start `'loading'`: a real page (where this
+  script runs inline in `<head>`, before `<body>` exists) never takes the
+  `else { wire(); }` branch `src/theme.mjs`'s `themeBootScript` falls into when
+  `readyState` reads `'complete'` too early. A caller calls `document.finishParsing()`
+  (flips `readyState` to `'complete'`, dispatches a real `DOMContentLoaded`) at the
+  point it wants to simulate the parser reaching the end of the document.
 - The `about:blank` placeholder every `<iframe>` gets the instant it is parsed
   (`aboutBlankDocument`) — genuinely `'complete'` immediately in a real browser, and
-  `test/check-click.mjs` already asserted this. Left at the old value by setting it
-  explicitly after construction, not by leaving the class default alone.
+  `test/check-click.mjs` already asserts this. Set it explicitly to `'complete'`
+  after construction; the class default (`'loading'`) is wrong for this one.
 - An html-stage's real `srcdoc` content once `loadSrcdoc()` "loads" it — nothing reads
   this one's `readyState`, but leaving it `'loading'` forever would be a lie the next
   reader inherits.
@@ -478,80 +485,43 @@ is `HTML`, and read and write agree fine — the problem was never the mode.
 
 **Not every "real browser" is rendering.** A tab driven through the `claude-in-chrome`
 extension reports `document.visibilityState === 'hidden'` and `hasFocus() === false`
-permanently, and taking a screenshot does not change it. In that state Chrome runs no
-rendering updates, so `requestAnimationFrame` never fires (already noted above) **and
-neither do `scroll` events** — the offset changes, the event never dispatches — while
-`setInterval` is clamped to ~1s. Measured that way, a perfectly working page-board
-scroll looked like a total failure: no reports, no condensed header, `scrollTo` an
-apparent no-op, and a `setInterval` probe returning values a second stale. Three
-consecutive "findings" were all this. **Check `visibilityState` and whether a bare
-`requestAnimationFrame` fires before believing any measurement about scrolling,
-animation or timing.** `--headless=new` over CDP reports `visible` and does fire both,
-which is why the driver below is the one to reach for.
+permanently, even after a screenshot. Chrome then runs no rendering updates, so
+`requestAnimationFrame` and `scroll` events never fire and `setInterval` is clamped to
+~1s — a perfectly working page-board scroll then looks like a total failure. **Check
+`visibilityState` and whether a bare `requestAnimationFrame` fires before believing any
+measurement about scrolling, animation or timing.** `--headless=new` over CDP reports
+`visible` and fires both.
 
-To drive the actual page, Chrome is scriptable over the DevTools protocol with no
-dependencies at all — Node 24 has a native `WebSocket`, so `chrome
---headless=new --remote-debugging-port=N` plus `Target.attachToTarget` /
-`Input.dispatchMouseEvent` is enough to hover, click and read back the DOM. Keep such
-a driver OUT of the repo (it is not part of the zero-dependency check suite); a
-throwaway under `/tmp` is the right home.
+Chrome is scriptable over the DevTools protocol with no dependencies — Node 24's native
+`WebSocket` plus `chrome --headless=new --remote-debugging-port=N`,
+`Target.attachToTarget` and `Input.dispatchMouseEvent` is enough to hover, click and
+read the DOM.
 
-One exception, and the test it has to pass to earn the name: `examples/screenshot.mjs`,
-which regenerates the two committed sample-board screenshots. A debug driver is written
-to answer one question and is worthless the moment it is answered — that is what makes
-`/tmp` its home. This one is the only way to reproduce a *committed artifact* after a
-design change, so deleting it would leave the README's images unregenerable and rotting
-within two design changes, which is the failure the sample board exists to avoid. A
-driver earns a place in the repo only on those terms: it regenerates something committed,
-it runs by hand and never from the check suite, and it stays zero-dependency. Anything
-you are writing to see what the page does today still belongs in `/tmp`.
+Once driving it, each of these silently produces a wrong measurement rather than an error:
 
-Things that cost time:
-
-- **Driving the page board's condense from a driver needs a real wheel event over the
-  stage.** The progress comes from the *artifact's* own scroll, reported out of the
-  stage iframe — `window.scrollTo` on the parent moves nothing and `--stage-p` stays
-  `0`, which reads exactly like a broken condense. Reaching in is not the way out
-  either: the stage is sandboxed to an opaque origin, so `frame.contentWindow`
-  throws `SecurityError: Blocked a frame with origin "null"`. A run of
-  `Input.dispatchMouseEvent { type: 'mouseWheel' }` at the frame's centre is what
-  scrolls it, same as a reviewer's wheel.
-- **Scroll-to-bottom measurements land mid-animation.** `<html>` carries
-  `scroll-behavior: smooth`, so a `scrollTo(0, scrollHeight)` followed by a settle
-  delay measures a box still in flight — the reservation this session added read as a
-  105px *overlap* that way, and as the 12px of clearance it actually is once the
-  driver set `documentElement.style.scrollBehavior = 'auto'` first. Assert you are
-  actually at the bottom (`scrollHeight - scrollY - innerHeight < 2`) before believing
-  any number measured there.
-- Measure element coordinates in a *separate* eval from the `scrollIntoView` that
-  precedes it, with a settle delay between. Measuring across a scroll gives stale
-  coordinates and clicks land somewhere unrelated.
-- An iframe stage's mock content usually fills only a slice of the frame. Clicking
-  the frame's empty area correctly anchors nothing, which reads exactly like a dead
-  gesture. Probe several points before believing it.
-- `Input.dispatchMouseEvent` with a `mousePressed`/`mouseReleased` pair does produce a
-  real `click`, but if the page took a pointer capture in between, the `click` you
-  get is not the one you meant — see `setPointerCapture` above.
-- This Chrome version's `/json/new` HTTP endpoint rejects a plain `GET` with "Using
-  unsafe HTTP verb GET to invoke /json/new. This action supports only PUT verb." — a
-  200 response carrying an error STRING, not a 4xx, so a caller doing `resp.json()`
-  unconditionally gets `SyntaxError: Unexpected token 'U', "Using unsa"...` pointing
-  nowhere near the cause. Use `fetch(url, { method: 'PUT' })`.
-- A race that depends on "the initial render is still in flight" needs the render to
-  actually take measurable time. A warm jsdelivr fetch of mermaid finished 6-10 tiny
-  flowcharts in under 100ms total, so a "click again 200ms later" reproduction landed
-  AFTER the page had settled every trial and looked like a fixed bug that had never
-  been exercised. Sample `document.querySelectorAll('pre.mermaid svg').length` every
-  5ms after navigation to confirm the window is wide enough before trusting a "0
-  corrupt" result; widening each diagram (more nodes, so dagre's layout actually costs
-  milliseconds) is more reliable than guessing at a smaller click interval.
+- **The page board's condense needs a real wheel event over the stage**, not
+  `window.scrollTo` on the parent (which moves nothing) — the stage is a sandboxed
+  opaque origin, so `frame.contentWindow` throws. `Input.dispatchMouseEvent { type:
+  'mouseWheel' }` at the frame's centre is what scrolls it.
+- **`<html>` carries `scroll-behavior: smooth`.** Set
+  `documentElement.style.scrollBehavior = 'auto'` before measuring, assert you're
+  actually at the bottom (`scrollHeight - scrollY - innerHeight < 2`), and re-measure
+  coordinates in a separate eval after any `scrollIntoView` settles — a mid-scroll
+  read is stale and the click lands unrelated.
+- An iframe stage's mock content usually fills only a slice of the frame; clicking the
+  empty area anchors nothing and reads like a dead gesture. Probe several points.
+- A pointer capture taken between a dispatched `mousePressed`/`mouseReleased` pair
+  retargets the resulting `click` — see `setPointerCapture` above.
+- `/json/new` rejects a plain `GET` with a 200 response carrying an error STRING, so
+  `resp.json()` fails pointing nowhere near the cause. Use `{ method: 'PUT' }`.
+- A race that only exists "while the render is in flight" needs the render to take
+  measurable time, or the probe lands after the page has settled and reads as a pass.
+  Sample the DOM every few ms after navigation to confirm the window is wide enough first.
 
 ### The `claude-in-chrome` extension's own coordinate system, and its window resize
 
 Driving a page through the `claude-in-chrome` MCP tools (`computer`/`find`/
-`javascript_tool`) rather than a raw CDP driver has two traps of its own,
-found verifying SPEC_AWAITED.md ticket 03's send-control reachability at a
-short viewport.
+`javascript_tool`) rather than a raw CDP driver has two traps of its own.
 
 `resize_window` called on an already-navigated tab changes `outerWidth`/
 `outerHeight` but leaves `window.innerWidth`/`innerHeight` (the CSS viewport
@@ -560,28 +530,28 @@ a freshly created tab; `innerWidth`/`innerHeight` then do reflect the request
 (not always exactly — treat the resulting size as approximate, read it back
 with `javascript_tool` rather than trusting the requested numbers).
 
-`computer`'s `left_click` with a `coordinate: [x, y]` did not reliably land on
-the intended element in this session, in either the raw CSS-pixel coordinate
-space or the screenshot's own (larger, DPR-scaled) pixel space — clicks that
-should have hit a specific button produced no DOM effect and no network
-request at all, silently, with nothing to say the click missed. `find` (which
-returns a `ref_N` against the real accessibility tree) plus `computer`'s own
-`ref` parameter clicked the intended element correctly every time, confirmed
-by a genuine resulting `fetch` showing up in `read_network_requests` — prefer
-`find` + `ref` over raw coordinates for anything where "the click either did
-something or didn't" matters, and treat a coordinate click that doesn't
-error but also doesn't change anything as a probe that missed, not as proof
-of a dead control. `find` does not reach inside a cross-origin sandboxed
-`srcdoc` iframe (an html stage's own content, `allow-scripts` only) — nothing
-in that accessibility tree is reachable, by the same isolation
+`computer`'s `left_click` with a `coordinate: [x, y]` does not reliably land on
+the intended element, in either the raw CSS-pixel coordinate space or the
+screenshot's own (larger, DPR-scaled) pixel space — a click that should have
+hit a specific button can produce no DOM effect and no network request at
+all, silently, with nothing to say the click missed. `find` (which returns a
+`ref_N` against the real accessibility tree) plus `computer`'s own `ref`
+parameter lands correctly instead, confirmed by a genuine resulting `fetch`
+showing up in `read_network_requests` — prefer `find` + `ref` over raw
+coordinates for anything where "the click either did something or didn't"
+matters, and treat a coordinate click that doesn't error but also doesn't
+change anything as a probe that missed, not as proof of a dead control.
+`find` does not reach inside a cross-origin sandboxed `srcdoc` iframe (an
+html stage's own content, `allow-scripts` only) — nothing in that
+accessibility tree is reachable, by the same isolation
 `test/check-stage-isolation.mjs` exists to prove.
 
 ### A harness that imports `src/` serves the code as it was at startup
 
 The throwaway preview server imports `renderBoardPage` once, so `src/ui.mjs`'s
 client-script template literal is captured at boot. Editing `src/` and re-running the CDP
-driver silently re-tests the OLD page — it cost one agent two rounds of "the fix doesn't
-work" against a fix that did. Restart the server after every `src/` edit.
+driver silently re-tests the OLD page, with nothing on screen to say so. Restart the
+server after every `src/` edit.
 
 Related: in headless Chrome a `fetch` from a tab that is not the focused one can stay
 pending indefinitely. A driver that opens and closes several tabs should run any
@@ -627,6 +597,21 @@ shadows the stdlib and breaks `python3 -m http.server`.
 ---
 
 ## The check suite's own shapes
+
+- [A client script that parses is not a client script that is on the page](#a-client-script-that-parses-is-not-a-client-script-that-is-on-the-page)
+- [`test/check-archive.mjs`'s own `loadBoard`/`loadArchive` never run `themeBootScript`](#testcheck-archivemjss-own-loadboardloadarchive-never-run-themebootscript)
+- [Finding the real `<style>` tag in rendered bytes](#finding-the-real-style-tag-in-rendered-bytes)
+- [A block-comment stripper needs to know about regex literals, not just strings](#a-block-comment-stripper-needs-to-know-about-regex-literals-not-just-strings)
+- [A rendered page contains every comment's text twice, so "it must not render" cannot be grepped](#a-rendered-page-contains-every-comments-text-twice-so-it-must-not-render-cannot-be-grepped)
+- [A fixture board holding one `html` block and nothing else is a PAGE board](#a-fixture-board-holding-one-html-block-and-nothing-else-is-a-page-board)
+- [A `check-mcp.mjs` fixture with no question block no longer blocks on `/wait`](#a-check-mcpmjs-fixture-with-no-question-block-no-longer-blocks-on-wait)
+- [Every read is gated, so every HTTP check needs a credential](#every-read-is-gated-so-every-http-check-needs-a-credential)
+- [`execFileSync` deadlocks against an in-process daemon](#execfilesync-deadlocks-against-an-in-process-daemon)
+- [`writeDoc` defaults to the REAL board home, so a check that calls it without one clobbers the reader's pomodoro state](#writedoc-defaults-to-the-real-board-home-so-a-check-that-calls-it-without-one-clobbers-the-readers-pomodoro-state)
+- [A mutation helper that restores with `git checkout` eats uncommitted work](#a-mutation-helper-that-restores-with-git-checkout-eats-uncommitted-work)
+- [A block's id is kind-locked, permanently](#a-blocks-id-is-kind-locked-permanently)
+- [A machine-identity sweep cannot be `includes(os.hostname())`](#a-machine-identity-sweep-cannot-be-includesoshostname)
+- [A comment-only edit to src/ui.mjs can still break check-sample-board.mjs](#a-comment-only-edit-to-srcuimjs-can-still-break-check-sample-boardmjs)
 
 ### A client script that parses is not a client script that is on the page
 
@@ -681,16 +666,18 @@ still emits it; a board page written since entry 70 has no `<style>` block to fi
 
 ### A block-comment stripper needs to know about regex literals, not just strings
 
-`test/check-pure.mjs`'s orphan-class check used to substring-search raw emitter source
-*including comments*, so a class named only in a doc comment satisfied it. The fix strips
-comments first (`stripJsComments`), but a naive `//`/`/* */` scanner is unsafe here for
-two independent reasons. These files ARE the client-script template literals (`ui`,
+`stripJsComments` strips comments from raw emitter source before `test/check-pure.mjs`'s
+orphan-class check runs (a class named only in a doc comment must not satisfy it), but a
+naive `//`/`/* */` scanner is unsafe here for two independent reasons. These files ARE
+the client-script template literals (`ui`,
 `stageAgentScript()`, `themeBootScript`) — real code, not comments, so a scanner blind to
 string/template-literal boundaries could mistake a comment-shaped sequence inside one of
-those strings for an actual comment and eat real code. And separately, `src/markdown.mjs`'s
-bold/italic regex (`.replace(/\*\*([^*]+)\*\*/g, ...)`) has a body which, read blind to
-regex syntax, contains escaped asterisks immediately followed by the regex's closing
-slash: exactly the sequence that closes a block comment. `stripJsComments` tracks
+those strings for an actual comment and eat real code. And separately,
+`test/fixtures/markdown-pre-marked.mjs`'s bold/italic regex
+(`.replace(/\*\*([^*]+)\*\*/g, ...)` — the pre-`marked` scanner this repo used to ship
+in `src/markdown.mjs`, before ADR 62 vendored a real parser) has a body which, read
+blind to regex syntax, contains escaped asterisks immediately followed by the regex's
+closing slash: exactly the sequence that closes a block comment. `stripJsComments` tracks
 string/template-literal boundaries AND uses the standard "does the previous significant
 token complete a value" heuristic to tell a regex literal's opening `/` from division.
 
@@ -713,14 +700,13 @@ board's shape, so the most natural "a board with a stage on it" fixture —
 a column. It renders the artifact at viewport size with no kicker, and therefore with no
 `.comment-btn` and no `.expand-btn` at all, and with the send bar hidden.
 
-That is what it looked like when the rule landed: eleven checks across
-`test/check-stage-lens.mjs` and `test/check-stage-isolation.mjs` failed at
-`document.querySelector('.html-block .expand-btn')` returning null — a null-dereference
-in the *setup* of checks about the lens, pointing nowhere near the layout rule that
-actually caused it. Any check about a stage's kicker, its lens, or the send bar beside it
-needs a SECOND block in the fixture (a one-line `markdown` block is enough) to stay an
-ordinary board. Same class of trap as the `check-mcp.mjs` entry below: a fixture's
-*shape*, not its content, decides which code path it exercises.
+This presents as a null-dereference in the *setup* of checks about the lens
+(`document.querySelector('.html-block .expand-btn')` returning null), pointing nowhere
+near the layout rule that actually causes it. Any check about a stage's kicker, its
+lens, or the send bar beside it needs a SECOND block in the fixture (a one-line
+`markdown` block is enough) to stay an ordinary board. Same class of trap as the
+`check-mcp.mjs` entry below: a fixture's *shape*, not its content, decides which code
+path it exercises.
 
 ### A `check-mcp.mjs` fixture with no question block no longer blocks on `/wait`
 
@@ -729,11 +715,10 @@ carrying a question block blocks until submit, a content-only round returns the 
 post succeeds). So any check meant to exercise `blockingWait` — a timeout path, a
 restart-reattach, a cancellation — MUST include at least one `kind: 'question'` block among
 what it posts, or the call returns immediately with `status: 'posted'` before ever reaching
-`/api/board/:id/wait`. This bit the wall-clock-timeout check directly: it posted
-content-only blocks to prove the call still resolves after `CLAUDE_BOARD_TIMEOUT_MS`, and
-the assertion on `result.status === 'timeout'` then failed for a reason having nothing to
-do with the timeout mechanism. A fixture's *shape*, not just its content, decides which
-return path a check exercises.
+`/api/board/:id/wait`, and an assertion on `result.status === 'timeout'` (or any other
+blocking-path outcome) fails for a reason having nothing to do with the mechanism under
+test. A fixture's *shape*, not just its content, decides which return path a check
+exercises.
 
 ### Every read is gated, so every HTTP check needs a credential
 
@@ -824,8 +809,7 @@ hand — don't fight `amendRound` for it, it will always throw.
 ### A machine-identity sweep cannot be `includes(os.hostname())`
 
 The obvious way to check a committed artifact for leaked machine identity is
-`committedText.includes(os.hostname())`. It fails in both directions at once, and
-`test/check-sample-board.mjs` was written that way first before both showed up.
+`committedText.includes(os.hostname())`. It fails in both directions at once.
 
 False positives: a short hostname is an ordinary word. On a machine whose hostname
 is the macOS default (three characters, vendor-shaped), an html-stage mock's CSS
@@ -866,54 +850,39 @@ confirm the only change is the one you made.
 
 ## launchd, TCC and the app bundle
 
-### `WatchPaths` cannot restart a `KeepAlive` job, and nothing restarts this daemon on a source change
-
-`WatchPaths` tells launchd to *start* a job when a watched path changes; a job already
-running — which `KeepAlive` guarantees — is simply not started again. Measured: 3h40m of
-uptime across an in-place edit to `src/store.mjs`, and neither creating nor deleting a file
-under `src/` moved the pid. `test/check-install.mjs` asserted the plist *contained* the
-`WatchPaths` entries, which was true and beside the point — a green check sitting on a dead
-mechanism.
-
-Its replacement (the daemon watching its own `src/` and exiting on a change) is gone too: a
-save mid-review dropped every open event stream and held-open wait, editor temp files
-tripped it, launchd's 10s restart throttle turned a burst of writes into an outage, and a
-half-written edit took the daemon down for real. `CLAUDE_BOARD_RELOAD_ON_CHANGE` is read
-nowhere now — `test/check-install.mjs` sets it and asserts the daemon survives an edit.
-`./install.sh` is what takes a code change.
+- [macOS TCC gates the daemon by *application*, and launchd's application is not yours](#macos-tcc-gates-the-daemon-by-application-and-launchds-application-is-not-yours)
+- [A missing launcher bundle wedges launchd at `exit 78` and `kickstart` cannot fix it](#a-missing-launcher-bundle-wedges-launchd-at-exit-78-and-kickstart-cannot-fix-it)
+- [A bare `kickstart` no longer picks up a source edit — only `./install.sh` does](#a-bare-kickstart-no-longer-picks-up-a-source-edit--only-installsh-does)
+- [A carried-forward `ref_roots` record widens itself back to today's defaults on every install](#a-carried-forward-ref_roots-record-widens-itself-back-to-todays-defaults-on-every-install)
+- [Where the clone lives silently sets the installer's health budget, and the checks pay it](#where-the-clone-lives-silently-sets-the-installers-health-budget-and-the-checks-pay-it)
+- [`lsregister` records are permanent, share a bundle id, and a dead one is a "damaged app" dialog on repeat](#lsregister-records-are-permanent-share-a-bundle-id-and-a-dead-one-is-a-damaged-app-dialog-on-repeat)
+- [A copied platform binary is SIGKILLed on exec from inside a `.app`, wherever the copy lives](#a-copied-platform-binary-is-sigkilled-on-exec-from-inside-a-app-wherever-the-copy-lives)
 
 ### macOS TCC gates the daemon by *application*, and launchd's application is not yours
 
 A LaunchAgent gets no folder access by inheritance the way a process started from
-Terminal does. If the plist runs `/opt/homebrew/bin/node bin/daemon.mjs`, then the
+Terminal does. If the plist runs `/opt/homebrew/bin/node bin/daemon.mjs`, the
 application macOS is deciding about is **node**, and every read under `~/Documents`,
 `~/Desktop` or `~/Downloads` comes back **EPERM** — which surfaces on the board as
-`cannot read <path>: EPERM` and looks exactly like a missing file. A clone that lives in
-one of those three folders cannot even start: `bin/daemon.mjs` is itself a gated read.
+`cannot read <path>: EPERM` and looks exactly like a missing file. A clone that lives
+in one of those three folders cannot even start: `bin/daemon.mjs` is itself a gated
+read. (`./install.sh` is what takes a code change here, kickstart or no — see "A bare
+`kickstart` no longer picks up a source edit" below.)
 
-Two traps inside the trap:
+Why the daemon runs from a signed app bundle rather than granting node directly, the
+fork-not-exec requirement, and the rebuild-revokes-the-grant trap are all `SECURITY.md`'s
+territory now — "What the launcher bundle is for" through "The code the bundle runs". Read
+those first.
 
-- **Granting node is not a fix.** It is a grant to every node program on the machine,
-  and homebrew's node is ad-hoc signed under a versioned Cellar path, so `brew upgrade
-  node` silently revokes it. Hence `bin/launcher.c` and the app bundle: TCC gets an
-  application of ours to decide about, and the user grants that one folder to that one
-  thing. The launcher must **fork** node, never `exec` it — TCC decides against the
-  *responsible process*, a child inherits its parent's, and an exec would replace this
-  identity with node's in the same pid and undo the entire arrangement.
-- **The grant is pinned to the code signature.** Rebuild the bundle and the user is
-  silently locked out again, with no error but the same EPERM. `install.sh` therefore
-  stamps the inputs (`~/.config/claude-board/launcher.stamp`) and skips the rebuild when
-  nothing that decides the bundle's bytes has changed — a routine `git pull &&
-  ./install.sh` must not cost someone their grant. This is also why the bundle's
-  `CFBundleVersion` is a fixed `1` rather than `package.json`'s version.
+Two probes worth keeping here:
 
-Diagnosing it: run the read from a throwaway LaunchAgent rather than from your shell.
-The same node, the same flags and the same file behave differently under launchd than
-under Terminal, and testing from the shell will tell you everything is fine.
-
-`readdir` on `~/Library/Application Support/com.apple.TCC` is a cheap probe for whether
-a process holds Full Disk Access — it is FDA-only, so EPERM there alongside a successful
-read of `~/Documents` means the narrow folder grant is present and FDA is not.
+- **Diagnose from a throwaway LaunchAgent, not your shell.** The same node, the same
+  flags and the same file behave differently under launchd than under Terminal, and
+  testing from the shell will tell you everything is fine.
+- **`readdir` on `~/Library/Application Support/com.apple.TCC`** is a cheap probe for
+  whether a process holds Full Disk Access — it is FDA-only, so EPERM there alongside
+  a successful read of `~/Documents` means the narrow folder grant is present and FDA
+  is not.
 
 ### A missing launcher bundle wedges launchd at `exit 78` and `kickstart` cannot fix it
 
@@ -925,42 +894,30 @@ exists but that bundle does not, launchd cannot exec anything and parks the job:
     runs = 3
     last exit code = 78: EX_CONFIG
 
-The cause, once: **running the check suite deleted it.** `test/check-install.mjs`
-redirects everything install.sh/uninstall.sh touch into a temp dir through seam env vars,
-and one env object was missing `CLAUDE_BOARD_APP_DIR`. `uninstall.sh` fell back to its
-default, `$HOME/Applications`, and `rm -rf`'d the developer's own launcher bundle, killing
-their daemon and the TCC grant pinned to that bundle's signature. The suite reported all
-green. Fixed by adding the seam, plus a final check that asserts the real
-`~/Applications/claude-board.app`, `~/Library/LaunchAgents/claude-board.plist` and
-`~/.config/claude-board/secret` are exactly as they were before the suite ran — a guard on
-the paths rather than on any one env object.
+`EX_CONFIG` here is launchd's, not the daemon's — do not go looking for it in
+`bin/daemon.mjs`, which never exits 78. The daemon's own logs are no help either: the
+last lines in `~/Library/Logs/claude-board/daemon.err.log` are an ordinary clean
+shutdown from whenever it last ran successfully, which reads like a healthy service
+and is not. Page-side, this presents as a bare **`Error: Failed to fetch`** in the
+board tab and an `ask` call that posts nothing — treat "Failed to fetch" from a board
+as "check the daemon is running" before anything else.
 
-`EX_CONFIG` here is launchd's, not the daemon's. Do not go looking for it in
-`bin/daemon.mjs`: that file never exits 78, and grepping for it wastes a pass. The
-daemon's own logs are no help either — the last lines in
-`~/Library/Logs/claude-board/daemon.err.log` will be an ordinary clean shutdown from
-whenever it last ran successfully, which reads like a healthy service and is not.
-
-`launchctl kickstart -k gui/$(id -u)/claude-board` does **not** revive it, and worse, it
-blocks: it waits for a service that will never come up, so it looks like a hang. `runs`
-does not increment. The fix is to re-run `./install.sh`, which rebuilds and ad-hoc signs
+`launchctl kickstart -k gui/$(id -u)/claude-board` does **not** revive it, and worse,
+it blocks: it waits for a service that will never come up, so it looks like a hang,
+and `runs` does not increment. The fix is `./install.sh`, which rebuilds and re-signs
 the bundle.
 
-Diagnosing it takes three commands, in this order — the third is the one that actually
-names the fault, and the first two only tell you something is wrong:
+Diagnose with three commands, in this order — the third is the one that actually
+names the fault, the first two only tell you something is wrong:
 
     curl -s -m 3 -o /dev/null -w "%{http_code}\n" http://127.0.0.1:7391/   # 000 = nothing listening
     launchctl print gui/$(id -u)/claude-board | grep -E "^\tstate|last exit|runs ="
     ls -la "$(launchctl print gui/$(id -u)/claude-board | grep -A2 'arguments = {' | tail -1 | xargs)"
 
 Read the program path out of `launchctl print` rather than assuming it — the plist is
-rewritten on every install and pointing at a stale path is the same failure with a
-different cause.
-
-Page-side, this presents as a bare **`Error: Failed to fetch`** in the board tab and as
-an `ask` call that posts nothing. There is no clue in either that the problem is a
-LaunchAgent, so treat "Failed to fetch" from a board as "check the daemon is running"
-before anything else.
+rewritten on every install, and a stale path is the same failure with a different
+cause. `test/check-install.mjs` now asserts the real bundle, plist and secret survive
+the check suite untouched, which is what closed the way this used to happen.
 
 ### A bare `kickstart` no longer picks up a source edit — only `./install.sh` does
 
@@ -985,31 +942,13 @@ then reinstalls and asserts the edit only takes effect after that.
 
 ### A carried-forward `ref_roots` record widens itself back to today's defaults on every install
 
-`GET /file/<path>` and its separate `CLAUDE_BOARD_SERVE_ROOTS` allowlist are gone (ADR.md
-entry 38) — a rendered artifact now only ever reaches a reviewer through a block reference,
-`{ kind: 'html', source: { path } }`, resolved against `CLAUDE_BOARD_REF_ROOTS`
-(`src/resolve.mjs`). That used to have a companion trap worth knowing about even though its
-cause is gone: `~/Documents/renders` joined `DEFAULT_REF_ROOTS` after some installs already
-existed, and a carried-forward record predating it stayed short of that default forever,
-silently, on every later `git pull && ./install.sh` — referencing a rendered file produced
-an empty option card (`resolvePath` refuses an absolute path outside every root and
-resolves a relative one against the board's `cwd` only) with nothing to say why.
-
-Fixed by ADR.md entry 36: `install.sh` now checks a carried-forward record against
-`DEFAULT_REF_ROOTS` on every run and adds back whatever current default the record is
-missing, printing the line naming what it widened. The trap this creates in its place —
-worth knowing before relying on the old behaviour — is that narrowing the allowlist with
-`CLAUDE_BOARD_REF_ROOTS= ./install.sh` is no longer a permanent choice: it survives for any
+`install.sh` checks a carried-forward `ref_roots` record against `DEFAULT_REF_ROOTS` on
+every run and adds back whatever current default the record is missing (ADR.md entry 36),
+printing the line naming what it widened. The trap: narrowing the allowlist with
+`CLAUDE_BOARD_REF_ROOTS= ./install.sh` is **not a permanent choice**. It survives for any
 directory the *current* defaults do not name, but the next plain upgrade re-adds every
 directory that IS a current default regardless. A genuinely narrow list has to be
 reasserted with the explicit env var on every run that might otherwise widen it.
-
-If a reference still 404s or comes back as an empty "Could not resolve" card, read the
-posted board's own JSON (`~/Library/Application Support/claude-board/boards/<id>.json`)
-after the round that carried it — the `error: cannot read <name>: no such file` field is
-there, and it is the only place it is. Check the launcher's real environment before
-assuming a root exists — the plist carries only `CLAUDE_BOARD_PORT`, so `strings` on the
-binary named in `ProgramArguments.0` is what actually answers it (ADR.md entry 13).
 
 ### Where the clone lives silently sets the installer's health budget, and the checks pay it
 
@@ -1020,77 +959,60 @@ grant yet, so reading `bin/daemon.mjs` out of a protected directory raises a dia
 the launchd job, and two minutes is a person's budget to notice it and click Allow.
 
 Nothing about that is visible from the check suite, and a clone in `~/Documents` is the
-normal case. `test/check-install.mjs`'s health-gate check points the installer at a port
-nothing will ever bind, so it waited out the whole 480 tries — 133s of a 177s file, against
-`test/run.mjs`'s 180s per-check ceiling, i.e. a suite one slow machine away from a spurious
-timeout, for a wait no human was ever going to answer. `CLAUDE_BOARD_HEALTH_TRIES` overrides
-the resolved count (the check sets it to 4); it is applied after both branches of the
-conditional, so neither real-world default moves. If a check that shells out to `install.sh`
-is inexplicably slow, this is the first thing to measure — and note it will NOT reproduce
-for anyone whose clone lives outside those three directories.
+normal case. A health-gate check that points the installer at a port nothing will ever
+bind could wait out the whole 480 tries — comfortably past `test/run.mjs`'s 180s
+per-check ceiling, for a wait no human was ever going to answer.
+`test/check-install.mjs`'s own health-gate check avoids exactly this with
+`CLAUDE_BOARD_HEALTH_TRIES`, which overrides the resolved count (set to 4 there) after
+both branches of the conditional, so neither real-world default moves. If a check that
+shells out to `install.sh` is inexplicably slow, this is the first thing to measure —
+and note it will NOT reproduce for anyone whose clone lives outside those three
+directories.
 
 ### `lsregister` records are permanent, share a bundle id, and a dead one is a "damaged app" dialog on repeat
 
 `install.sh` registers the bundle with LaunchServices so macOS will let it post a
-notification at all (see the block that runs `lsregister -f`). The check suite installs into
-throwaway temp roots — fakehomes, `CLAUDE_BOARD_APP_DIR` overrides, and fixtures built
-corrupt on purpose (`Applications-tamper`, `Applications-rogue`) — and every one of those
-runs used to hand its own throwaway bundle to that same call. LaunchServices keeps each
-record forever, they all carry the identical real bundle id, and nothing removes one when
-the directory it names is deleted. Measured on this machine after a few weeks: **6908
-records, exactly one of which still existed on disk.** Notification Center resolves a banner
-by bundle id and picks whichever record it likes, so the symptom is macOS raising
-*"claude-board.app is damaged and can't be opened"* over and over while the real install is
-fine and the board is up and serving. `install.sh` now skips registration for a bundle
-staged under a throwaway root, and `test/check-install.mjs` asserts it. That test is
-`is_throwaway_bundle_path`, carried byte-identical in both scripts — the hardcoded roots
-plus, for a developer who exported their own `TMPDIR`, anything under it. The `TMPDIR` arm
-refuses `/`, `$HOME` and empty on purpose: a wrong YES there means the REAL install is
-never registered and never notifies again, with nothing on screen to say why, which is a
-worse bug than the one being prevented.
-`uninstall.sh` now withdraws the record after removing the bundle — after, because under
-`set -e` an rm that fails would otherwise abort with the record already gone, leaving a
-runnable bundle that can never notify, and because the gap between a withdrawal and a
-still-present bundle is a window for a rescan to re-register it. A second check in the same
-file pins that order and asserts the two scripts' temp-root skip lists have not drifted.
+notification at all. LaunchServices keeps every record forever, keyed by bundle id —
+so any throwaway bundle a check builds under the same real bundle id (fakehomes,
+`CLAUDE_BOARD_APP_DIR` overrides, fixtures built corrupt on purpose) leaves behind a
+record indistinguishable from the real install's own. Notification Center resolves a
+banner by bundle id and picks whichever record it likes, so the symptom is macOS
+raising *"claude-board.app is damaged and can't be opened"* over and over while the
+real install is fine and the board is up and serving.
 
-**`lsregister -f` is not the only way a record appears, and the dialog has a second, more
-direct cause.** Exec'ing a binary from inside a `.app` makes macOS evaluate that bundle: no
-`lsregister` call is involved, the bundle is registered anyway and forever, the process is
-SIGKILLed if the binary is not validly signed, and *"X.app is damaged and can't be opened"*
-goes on screen right then — Notification Center never enters into it. So a test that merely
-builds a bundle-shaped path in a temp dir and runs something out of it raises that dialog
-under the real install's name on every run. `test/check-stranded.mjs` did exactly this, to
-get an executable path longer than `MAXCOMLEN` for the `ps -o etime=,comm=` assertion; it
-now uses a plain deep directory. Two things to know if you touch that setup:
+The same dialog has a second, unrelated cause that needs no `lsregister` call at all —
+see the next entry before assuming a stale record is what you are looking at.
 
-- The dialog names the BUNDLE, so it is indistinguishable from a problem with the real
-  install. The tell is that it appears while a check suite is running and the board is fine.
-- `/bin/sleep` and friends are platform binaries whose signature is only valid on the SIP
-  volume: a copy is SIGKILLed on exec no matter where it lands. The bundle shape had been
-  masking that, since Gatekeeper's path is a different one. When a check needs a throwaway
-  long-lived executable, `symlinkSync` a long path at `process.execPath`: `ps` reports the
-  path a process was started from, not what the link resolves to, so the link proves the
-  same thing a copy would and costs no disk. Do not copy the binary: that is 115 MB a run.
-- `test/check-notify.mjs` cannot take that way out: `importFromFakeBundle` stages a real
-  `<name>.app` because `notifyBoundary` spawning the bundle executable is the behaviour
-  under test, and one of those is named `claude-board.app` exactly. It withdraws every
-  bundle it staged before deleting its temp dir. **A new check that stages a bundle owes
-  the same teardown** — measured with `lsregister -dump | grep -c 'claude-board.*\.app'`
-  before and after the file runs, which is the only way any of this is visible.
+`test/check-notify.mjs` cannot take the next entry's way out — `importFromFakeBundle` stages a real
+`<name>.app` because `notifyBoundary` spawning the bundle executable is the behaviour
+under test, and one of those is named `claude-board.app` exactly. So `install.sh` skips
+registration for a bundle staged under a throwaway root (`is_throwaway_bundle_path`,
+carried byte-identical in both scripts — `test/check-install.mjs` asserts they have not
+drifted), and `uninstall.sh` withdraws the record *after* removing the bundle, so a
+failed `rm` under `set -e` cannot leave the record gone and the bundle unable to ever
+notify again. **A check that stages a bundle owes the same teardown**, visible only via
+`lsregister -dump | grep -c 'claude-board.*\.app'` before and after the file runs.
 
-Cleaning up after this, on macOS 26:
+Cleanup on macOS 26: `lsregister -kill -r` **no longer exists** (prints a removal
+notice and exits 0, silently doing nothing — check `Date Initialized` in `-dump` to
+confirm a rebuild happened instead). `lsregister -u <path>` does work, even on a path
+that no longer exists, and takes many paths per invocation — `-dump` piped through
+`xargs -n 200 lsregister -u` clears thousands of records in seconds. `-dump` prints
+`/private/var/...` where `tmpdir()` says `/var/...`; check both spellings.
 
-- `lsregister -kill -r` **no longer exists** — it prints *"The -kill option has been removed
-  because it was dangerous and no longer useful"* and exits 0, so a script that relies on it
-  silently does nothing. `Date Initialized` in `lsregister -dump` is how you tell a rebuild
-  actually happened.
-- `lsregister -u <path>` does work, including on a path that no longer exists, and takes
-  many paths per invocation: `lsregister -dump | grep -oE '^path: +[^(]*name\.app'` piped
-  through `xargs -n 200 lsregister -u` cleared 6907 records in seconds. One at a time would
-  have been thousands of round trips.
-- `lsregister -dump` prints `/private/var/...` where `tmpdir()` says `/var/...`; a check
-  looking for its own path in that dump has to try both spellings.
+### A copied platform binary is SIGKILLed on exec from inside a `.app`, wherever the copy lives
+
+Exec'ing a binary from inside a `.app` makes macOS evaluate that bundle, and an invalidly
+signed binary is SIGKILLed on the spot. `/bin/sleep` and friends are platform binaries whose
+signature is only valid on the SIP volume, so a *copy* of one is always invalid. The symptom is
+the same *"claude-board.app is damaged and can't be opened"* dialog as a stale `lsregister`
+record, but raised immediately by the exec rather than by Notification Center — and moving the
+copy elsewhere does not help, because this is not Gatekeeper's path.
+
+When a check needs a throwaway long-lived executable, `symlinkSync` a long path at
+`process.execPath` rather than copying it: `ps` reports the path a process was started from, not
+what the link resolves to, so the link proves what a copy would, and costs no disk where the copy
+costs 115 MB a run.
 
 ### `XPC_SERVICE_NAME` does not tell you a process was started by launchd
 
@@ -1119,6 +1041,13 @@ discriminate either.
 
 ## macOS notifications and sound
 
+- [The board's banner works; macOS Focus is what hides it](#the-boards-banner-works-macos-focus-is-what-hides-it)
+- [A top-level board field you add is served into the page, so `writeBoard` without `writePage` breaks the archive](#a-top-level-board-field-you-add-is-served-into-the-page-so-writeboard-without-writepage-breaks-the-archive)
+- [Any check that boots a daemon will raise real banners unless the stranded grace is pushed out of reach](#any-check-that-boots-a-daemon-will-raise-real-banners-unless-the-stranded-grace-is-pushed-out-of-reach)
+- [A bundle's notification identity belongs to `CFBundleExecutable`, and to nothing else in it](#a-bundles-notification-identity-belongs-to-cfbundleexecutable-and-to-nothing-else-in-it)
+- [A freshly installed app bundle cannot post a notification until LaunchServices knows about it](#a-freshly-installed-app-bundle-cannot-post-a-notification-until-launchservices-knows-about-it)
+- [`soundNamed:` searches `/System/Library/Sounds` and does NOT search the app bundle — the documented search path is backwards](#soundnamed-searches-systemlibrarysounds-and-does-not-search-the-app-bundle--the-documented-search-path-is-backwards)
+
 ### The board's banner works; macOS Focus is what hides it
 
 `notifyRound` (`src/notify.mjs`) fires on the daemon's own stranded rule: a round left
@@ -1139,8 +1068,8 @@ claude-board's own `CFBundleExecutable` and gets its own row in System Settings 
 Notifications; a daemon running from the clone (no bundle) falls back to `osascript` and
 posts as Script Editor instead (`src/notify.mjs`, `bin/notify.m` — see "A bundle's
 notification identity belongs to `CFBundleExecutable`" below). Allow-listing one does
-nothing for the other, and there is no longer a per-origin or per-browser-profile grant to
-chase — the browser side that used to need one is gone (ADR.md entry 58).
+nothing for the other, and there is no longer a per-origin or per-browser-profile grant
+to chase (ADR.md entry 58).
 
 Verifying it end to end takes a board nobody is Attending: post a round to a board with no tab open
 on it, or close the only tab watching one, then wait past the fifteen-second grace. A board
@@ -1169,7 +1098,7 @@ of reach for every other check, so `npm run check` stays green and only
 
 ### Any check that boots a daemon will raise real banners unless the stranded grace is pushed out of reach
 
-Since the stranded rule landed (`createStrandedWatch`, `src/server.mjs`), a board with an
+Since the stranded rule landed (`createStrandedWatch`, `src/stranded.mjs`), a board with an
 open awaited round and nobody watching it is announced with a real `osascript` banner after
 fifteen seconds — and "post an awaited round, then walk away" is what almost every check
 that boots a daemon does. Measured, not assumed: `node test/check-http.mjs` on its own, with
@@ -1215,11 +1144,10 @@ install can wait for.
 
 `install.sh` runs exactly that, guarded by `[ -x ]` because the path is private, before it
 asks for authorization. **Order matters:** register first, then request. A request that
-reaches a not-yet-registered bundle does not queue, retry or prompt later — and on the
-install where this was found, it left the bundle recorded as *denied*
-(`authorizationStatus == 1`), which no amount of re-running fixes, because macOS prompts once
-per bundle identifier and then answers from its own record. The only way out is
-System Settings > Notifications > claude-board.
+reaches a not-yet-registered bundle does not queue, retry or prompt later — it leaves the
+bundle recorded as *denied* (`authorizationStatus == 1`), which no amount of re-running
+fixes, because macOS prompts once per bundle identifier and then answers from its own
+record. The only way out is System Settings > Notifications > claude-board.
 
 Debugging this at all needs `getNotificationSettingsWithCompletionHandler:`, since
 `requestAuthorization` reports "denied by the user long ago" and "you are not a registered
@@ -1287,6 +1215,13 @@ Visual verification of anything on screen has to go through the window-list geom
 ---
 
 ## Shell, C and the filesystem
+
+- [An apostrophe inside `${VAR:-...}` swallows the rest of a bash script](#an-apostrophe-inside-var--swallows-the-rest-of-a-bash-script)
+- [Sizing a C array from `sizeof(arr)/sizeof(arr[0])` held in `static const int` is a VLA](#sizing-a-c-array-from-sizeofarrsizeofarr0-held-in-static-const-int-is-a-vla)
+- [`DYLD_INSERT_LIBRARIES` (and friends) act on the process being loaded, not on what that process execs](#dyld_insert_libraries-and-friends-act-on-the-process-being-loaded-not-on-what-that-process-execs)
+- [Two open flags macOS will not accept together](#two-open-flags-macos-will-not-accept-together)
+- [A temp dir's spelling is not its realpath, and path confinement compares realpaths](#a-temp-dirs-spelling-is-not-its-realpath-and-path-confinement-compares-realpaths)
+- [Two processes racing the same timeout: the daemon loses by its own poll interval](#two-processes-racing-the-same-timeout-the-daemon-loses-by-its-own-poll-interval)
 
 ### An apostrophe inside `${VAR:-...}` swallows the rest of a bash script
 
@@ -1403,43 +1338,32 @@ shim on one shared cap and asserts the ROUND was closed on disk.
 
 ## Worktrees, the shared checkout, and two files with the same tail
 
+- [The same absolute-looking path can name two different checkouts](#the-same-absolute-looking-path-can-name-two-different-checkouts)
+- [Scratch probe scripts belong in the worktree, not `/tmp`](#scratch-probe-scripts-belong-in-the-worktree-not-tmp)
+
 ### The same absolute-looking path can name two different checkouts
 
-A worktree agent's own tracked files live under
-`.claude/worktrees/<name>/...`, but this repo's `SPEC_*.md`/`TICKETS_*.md` are
-gitignored and only exist in the SHARED checkout
-(`/Users/jerry/Documents/claude-board/SPEC_*.md`), read/edited there on purpose
-(the brief that hands out a worktree says so explicitly). That trains a
-reasonable habit — "this repo's absolute path is
-`/Users/jerry/Documents/claude-board/...`" — that is wrong for every TRACKED
-file: `/Users/jerry/Documents/claude-board/src/styles.mjs` and
-`.claude/worktrees/<name>/src/styles.mjs` are two separate files on disk (two
-git checkouts), and nothing about `Read`ing the former warns you it is not the
-one your `Bash` commands (which default to the worktree's cwd) are operating
-on.
+A worktree agent's own tracked files live under `.claude/worktrees/<name>/...`, but
+this repo's `SPEC_*.md`/`TICKETS_*.md` are gitignored and only exist in the SHARED
+checkout (`/Users/jerry/Documents/claude-board/SPEC_*.md`), read/edited there on
+purpose. That trains a reasonable habit — "this repo's absolute path is
+`/Users/jerry/Documents/claude-board/...`" — that is wrong for every TRACKED file:
+the shared checkout and a worktree are two separate git checkouts, so the same
+filename under each root is two different files, and nothing about `Read`ing the
+former warns you it isn't the one your `Bash` commands (which default to the
+worktree's cwd) are operating on.
 
-Measured cost: after `git merge --no-edit direct/header` in the worktree
-(fast-forward, no conflicts), `Read` on the SHARED checkout's
-`src/styles.mjs`/`src/render.mjs` kept returning `.round-badge`/`badgeLabel` —
-controls a prior ticket's log said were deleted, confirmed gone by `git
-show` on the worktree's own HEAD. It looked exactly like a stale cache (same
-apparent path string typed each time, different tool giving a different
-answer) until reading the SAME line range through the full WORKTREE-prefixed
-path returned the current text immediately — the merge the worktree branch
-had was simply never applied to the shared checkout's own working tree, which
-still sat on whatever commit it last had checked out. Two separate, entirely
-correct answers to two different files.
+It presents as a stale-looking read that is not a cache bug: the shared checkout's
+copy of a tracked file can sit behind whatever commit it last had checked out
+(a merge the worktree branch picked up was never applied to the shared checkout's
+own working tree), indistinguishable from staleness until you check which checkout
+the path you typed actually resolves to.
 
-The fix is not "distrust `Read`" (it was accurate throughout — for the file it
-was actually pointed at). It is: once a task hands you a shared-checkout path
-for the gitignored spec/tickets files, do not let that path's PREFIX leak into
-where you read or edit anything else. Every tracked file's path starts with
-the worktree's own root, spelled out in full, even though it is easy to
-type the shorter shared-checkout-looking one from memory once it is in your
-head for this session. If a `Read` result ever looks implausibly behind what
-`git log`/`grep` say the branch contains, the first thing to check is which
-checkout the path you typed actually resolves to, not whether the tool is
-lying.
+Once a task hands you a shared-checkout path for the gitignored spec/tickets files,
+do not let that path's PREFIX leak into where you read or edit anything else —
+every tracked file's path starts with the worktree's own root, spelled out in full.
+If a `Read` result ever looks implausibly behind what `git log`/`grep` say the
+branch contains, check which checkout the path resolves to before doubting the tool.
 
 ### Scratch probe scripts belong in the worktree, not `/tmp`
 
@@ -1455,113 +1379,69 @@ SHARED checkout's copy of a tracked file (see above).
 
 ## Vendoring a CJS-shaped npm package under `"type": "module"`
 
+- [`prismjs` has no ESM build, and its component files assume a shared global, not a module system](#prismjs-has-no-esm-build-and-its-component-files-assume-a-shared-global-not-a-module-system)
+- [`marked`'s own emphasis/strikethrough tokenizer is quadratic on unclosed delimiter runs](#markeds-own-emphasisstrikethrough-tokenizer-is-quadratic-on-unclosed-delimiter-runs----the-exact-class-of-bug-adr-62s-ceiling-asked-to-close)
+- [No `timeout`/`gtimeout` on a bare macOS box](#no-timeoutgtimeout-on-a-bare-macos-box----use-perl--e-alarm-n-exec-argv-cmd-to-bound-a-hanging-command)
+
 ### `prismjs` has no ESM build, and its component files assume a shared global, not a module system
 
-Vendoring `prismjs@1.30.0` into `src/vendor/prism/` (TICKETS_RENDERING.md ticket
-01) hit a shape mismatch ADR 62's "self-contained ESM" wording glosses over.
-`marked`'s npm package ships `lib/marked.esm.js` with real `export{...}`
-statements — drop it in and `import` just works. `prismjs` ships nothing of the
-kind: `components/prism-core.js` is a UMD script (`var Prism = (function
-(_self) {...})(_self)`, ending in `if (typeof module !== 'undefined' &&
-module.exports) module.exports = Prism; if (typeof global !== 'undefined')
-global.Prism = Prism;`), and every one of the 22 grammar files this repo needs
-(`components/prism-<lang>.js`) references a bare, UNDECLARED `Prism`
-identifier — no `import`, no `require`, just `Prism.languages.python = ...` or
-`(function (Prism) {...}(Prism))` — because the whole ecosystem assumes either
-a `<script>` tag (shared `window.Prism`) or CommonJS `require()` in sequence
-(shared `global.Prism`, since core's unconditional `global.Prism = Prism`
-plants it before any grammar file runs).
+`prismjs` ships no ESM build: `components/prism-core.js` is a UMD script that assigns
+`module.exports` and `global.Prism`, and every one of the 22 grammar files this repo needs
+references a bare, UNDECLARED `Prism`. The ecosystem assumes either a `<script>` tag or
+sequential CJS `require()`, both of which supply that identifier as a shared global.
 
-Under this repo's root `"type": "module"`, a bare `.js` file anywhere under
-`src/` is parsed as an ES module. Copy `prism-core.js` in unmodified and
-`import` it: nothing throws (`typeof module` and `typeof require` just
-evaluate to `'undefined'` inside the `typeof` guards, which is exactly what
-`typeof` is for), but nothing is exported either — nowhere in the file is
-there an `export` statement — and every grammar file that follows fails with
-`ReferenceError: Prism is not defined`, because ESM is always strict mode and
-strict mode does not fall back to an implicit global for an undeclared
-identifier the way a sloppy-mode `<script>` or CJS wrapper does.
+It presents as a silent no-op followed by a `ReferenceError`. Under this repo's root
+`"type": "module"`, importing `prism-core.js` unmodified as a `.js` file parses it as
+an ES module: nothing throws, but nothing is exported either, and every grammar file that
+follows fails with `ReferenceError: Prism is not defined` — ESM is always strict mode, so it
+never falls back to an implicit global the way a sloppy-mode `<script>` or CJS wrapper does.
 
-The fix that needed zero bytes of upstream changed: give every vendored
-prismjs file a `.cjs` extension instead of `.js` (content copied verbatim;
-only the vendor-side filename differs from the npm package's own). Node
-decides a module's type from a `.cjs`/`.mjs` extension outright, ignoring the
-nearest `package.json`'s `"type"` field entirely — so these files run as
-CommonJS here regardless of the rest of the repo. Loaded via
-`createRequire(import.meta.url)` from a hand-written `.mjs` loader
-(`src/vendor/prism/index.mjs`), core's `module.exports = Prism` now fires for
-real, AND its `global.Prism = Prism` still runs too (that branch was never
-conditional on which export path was taken) — so requiring each grammar
-`.cjs` file afterward, in dependency order (bases before what extends them:
-`clike` before `javascript`, `javascript` before `typescript`, `markup` before
-`jsx`/`markdown`, ...), resolves their bare `Prism` reference through the real
-process global exactly the way a browser or a CJS `require()` chain would.
-Verified by actually importing the loader and calling `Prism.tokenize` against
-a real sample in all 20 of `langForPath`'s named languages plus `diff`
-(`test/check-vendor-digest.mjs`) — a grammar file merely existing on disk,
-with the right sha256, is not evidence it loads.
+Give every vendored prismjs file a `.cjs` extension instead of `.js`, and load them with
+`createRequire(import.meta.url)` from an `.mjs` loader (`src/vendor/prism/index.mjs`). Node
+decides a module's type from a `.cjs`/`.mjs` extension outright, ignoring the nearest
+`package.json`'s `"type"`, so the files run as CommonJS regardless of the rest of the repo and
+their global-sharing works as upstream intended — zero bytes of upstream changed, which is what
+keeps the recorded digest meaningful. Require the grammars **in dependency order** (bases before
+what extends them: `clike` before `javascript`, `markup` before `jsx`/`markdown`). A grammar
+file existing on disk with the right sha256 is not evidence it loads, so
+`test/check-vendor-digest.mjs` calls `Prism.tokenize` against a real sample per language.
 
-The one thing this trades away against ADR 62's literal "self-contained ESM":
-the vendored prismjs files are CommonJS-shaped source reached through Node's
-CJS/ESM interop, not `import`/`export` all the way down. `marked` needed none
-of this. Anyone reaching for the same trick on a future vendor drop: check
-whether the package's OWN npm dist already ships an ESM build (as `marked`
-does) before reaching for `.cjs` + `createRequire` — it is the right tool only
-when the upstream source is genuinely CJS/UMD-shaped and rewriting it byte-for-
-byte is off the table (it is, here — a modified vendored file defeats the
-whole point of pinning a recorded digest against unmodified upstream source).
+Check a future vendor drop's own npm dist for an ESM build (as `marked` ships) before reaching
+for `.cjs` + `createRequire`: it is the right tool only when upstream is genuinely CJS/UMD-shaped
+and rewriting it byte-for-byte is off the table.
 
 ### `marked`'s own emphasis/strikethrough tokenizer is quadratic on unclosed delimiter runs -- the exact class of bug ADR 62's ceiling asked to close
 
-Ticket 03 (`src/markdown.mjs`, closing the "no reference-style links, no setext
-headings, ..." ceiling) hit this while porting `test/check-pure.mjs`'s N2 perf
-guards to the vendored engine. `Tokenizer.emStrong` (matches `_.._`, `__.._`,
-`*.._`, `**.._`) and `Tokenizer.del` (GFM `~~.._`) are both called once per
-character position by marked's inline scan loop; on failure to find a closer,
-each rescans forward to the end of the remaining string before giving up. That
-is O(n) work per failed position and O(n) failed positions on content shaped
-like `' _a'.repeat(N)` (never closes) -- O(n^2) overall. Measured directly
-against the vendored bundle: 5000 reps (~15KB) took 935ms, 20000 reps (~60KB)
-did not finish in 10s, and the same shape reproduces identically for `*` and
-`~~`. This is the exact DoS class this repo's OWN pre-marked markdown scanner
-was written to avoid (see that module's `emphasize()`, now removed) -- and the
-whole reason a real parser was vendored in the first place (closing a stated
-correctness ceiling) reintroduced a linear-time regression that the same test
-suite already pins.
+`Tokenizer.emStrong` (matches `_.._`, `__.._`, `*.._`, `**.._`) and `Tokenizer.del`
+(GFM `~~.._`) are both called once per character position by marked's inline scan
+loop; on failure to find a closer, each rescans forward to the end of the remaining
+string before giving up. That's O(n) work per failed position and O(n) failed
+positions on content shaped like `' _a'.repeat(N)` (never closes) -- O(n^2) overall,
+reproducing on board-content scale (an untrusted file, not a hand-typed one) the
+exact DoS class this repo vendored a real parser to close in the first place.
 
 The vendored bytes cannot be patched (ADR 62 pins them to a recorded sha256
-`test/check-vendor-digest.mjs` asserts offline, deliberately so the digest
-check catches drift). The fix is a targeted `marked.use({tokenizer: {emStrong,
-del}})` override with a linear replacement, memoizing "no closing run exists in
-the searched suffix" per delimiter key -- since the scan loop only ever shrinks
-its remaining string as it advances, one failed full-length scan proves every
-shorter (later) suffix closer-less too, for free. `marked.use({tokenizer:{...}})`
-falls back to the ORIGINAL (quadratic) method only when the override returns
-the literal value `false`; returning `undefined` for "no match" is what keeps
-the slow path from ever running. See `src/markdown.mjs`'s own header comment
-and the `fastEmStrong`/`fastDel` functions for the full argument. Anyone adding
-another marked-based inline extension (ticket 04's syntax highlighting is
-fenced-code-only and shouldn't touch this, but a future one might): check
-whether it has the same "rescan to end of string on failure" shape before
-trusting it at board-content scale, an untrusted-file-sized input, not a
-hand-typed one.
+`test/check-vendor-digest.mjs` asserts offline, deliberately, so the digest check
+catches drift). The fix is a targeted `marked.use({tokenizer: {emStrong, del}})`
+override with a linear replacement, memoizing "no closing run exists in the searched
+suffix" per delimiter key -- since the scan loop only ever shrinks its remaining
+string as it advances, one failed full-length scan proves every shorter (later)
+suffix closer-less too, for free. `marked.use({tokenizer:{...}})` falls back to the
+ORIGINAL (quadratic) method only when the override returns the literal value
+`false`; returning `undefined` for "no match" is what keeps the slow path from ever
+running.
 
-The memo's correctness argument is scoped to ONE pass over ONE string, and
-nothing about a module-level `Map` enforces that: a SUCCESSFUL match calls
-`Lexer.lexInline` on the emphasis content, which fires the same `emStrongMask`
-hook, resets the memo and leaves its own bounds in it. The outer scan then
-inherits a bound derived from an unrelated string — which both deletes emphasis
-silently (`*see _the notes*, then read _this_` renders `_this_` as literal text,
-and `_b_ *_aaaa*` vs `*_aaaa* _b_` disagree, so the bug is history-dependent
-within one paragraph) and voids the linear-time bound itself, because every
-successful match wipes what the failing ones learned: `'*x* _a'.repeat(n)`
-measured 18KB 98ms, 36KB 352ms, 72KB 1344ms, quadratic again. Homogeneous perf
-fixtures (`' _a'.repeat(N)`) cannot catch this — they never match, so they never
-nest — so a DoS guard over one repeated shape can pass while the property it
-names is gone; the N2 fixtures now include an INTERLEAVED one. `src/markdown.mjs`
-saves and restores the memo around the nested lex (`lexNested`). Anything else
-that reaches back into marked's inline lexer from inside a tokenizer override
-needs the same treatment.
+The memo's correctness argument is scoped to ONE pass over ONE string, and nothing
+about a module-level `Map` enforces that: a SUCCESSFUL match calls `Lexer.lexInline`
+on the emphasis content, which fires the same hook, resets the memo and leaves its
+own bounds in it. The outer scan then inherits a bound derived from an unrelated
+string -- which both deletes emphasis silently (history-dependent within one
+paragraph) and voids the linear-time bound itself, since every successful match
+wipes what the failing ones learned. A homogeneous perf fixture (never matching)
+can't catch this -- it never nests -- so the N2 fixtures need an INTERLEAVED shape
+too. `src/markdown.mjs` saves and restores the memo around the nested lex
+(`lexNested`); anything else that reaches back into marked's inline lexer from
+inside a tokenizer override needs the same treatment.
 
 ### No `timeout`/`gtimeout` on a bare macOS box -- use `perl -e 'alarm N; exec @ARGV' <cmd>` to bound a hanging command
 
@@ -1580,6 +1460,10 @@ bisecting "how many reps until this blows up" actually wants.
 ---
 
 ## Shapes the page-board stage is pinned to
+
+- [The stage is a constant `100vh` box, not a box that grows to its content](#the-stage-is-a-constant-100vh-box-not-a-box-that-grows-to-its-content)
+- [`handleStageHeight` has a floor as well as a cap](#handlestageheight-has-a-floor-as-well-as-a-cap)
+- [The mermaid CDN fallback is pinned to the version the board CSP names](#the-mermaid-cdn-fallback-is-pinned-to-the-version-the-board-csp-names)
 
 Three constraints that look arbitrary at the call site. Each was settled deliberately; none
 is load-bearing enough for `.agents/adr/`, and all three break silently if changed.

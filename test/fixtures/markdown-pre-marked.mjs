@@ -20,8 +20,8 @@
 // `/* md-render end */` markers) into a real ESM module that runs unchanged in node
 // and the browser. Extended with anchor emission: every heading becomes an anchor at
 // its slug, every top-level list item under that heading becomes `<slug>-liN`
-// (1-based, numbered per heading section). See PROTOCOL.md "Anchors at headings and
-// list items".
+// (1-based, numbered per heading section). See DESIGN.md Decisions -> "Anchors at
+// headings and list items".
 //
 // Ceiling (inherited from the original): no reference-style links, no setext
 // headings, loose lists render as separate lists, pipes inside cell code spans split

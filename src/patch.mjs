@@ -1,9 +1,9 @@
 // Pure diff between two board JSON snapshots -- the seam that proves an SSE push
 // is applied additively (new content only) rather than by wholesale re-render. See
 // PROTOCOL.md "Board document" for the shape being diffed, and DESIGN.md
-// Decisions -> "A board is a session-scoped thread with rounds": the sent round
-// collapses into a history rail with its answers still readable, and an amend to
-// a round still open does not disturb fields already filled in but not yet sent.
+// Decisions -> "A board is a session-scoped thread with rounds": a sent round
+// stays readable on its own page (ADR.md entry 42), and an amend to a round still
+// open does not disturb fields already filled in but not yet sent.
 //
 // No DOM, no I/O, no closures over anything outside its own parameters -- this
 // function runs unmodified in two places: imported directly here for the node

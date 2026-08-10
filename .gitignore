@@ -3,12 +3,14 @@ node_modules/
 *.log
 .claude/worktrees/
 
-# Working documents, kept local: the specs, tickets, design record, session
-# vocabulary and internal audit reports. `git add -f <file>` is the whole reversal.
+# Working documents, kept local: the specs, tickets, the scratch list and internal
+# audit reports. Nothing tracked may cite one of these by name — a pointer into a
+# gitignored file resolves only in the checkout that happens to hold it, which is why
+# `DESIGN.md` and `CONTEXT.md` are NOT here: tracked files cite them from 21 and 16
+# sites respectively, including `ADR.md`, `PROTOCOL.md` and `QUIRKS.md`.
+# `git add -f <file>` is the whole reversal for anything below.
 SPEC_*.md
 TICKETS_*.md
-DESIGN.md
-CONTEXT.md
 TODO.md
 findings/
 

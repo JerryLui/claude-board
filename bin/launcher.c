@@ -75,8 +75,8 @@
  * measurement). The daemon spawns this mode; launchd never does. What argv chooses for
  * the phase is one index into MESSAGES below, never a string that reaches the screen —
  * see NOTIFY_FLAG. Each row carries its own title (SPEC_STRANDED.md: "Pomodoro" beside
- * "Board") rather than this file compiling in one constant the way bin/notify.m's
- * kTitle used to.
+ * "Board") rather than this file compiling in one title constant the way the notifier
+ * once did.
  *
  * The optional third argument, argv[3], means one of two things depending on which row
  * argv[2] selected — a row never uses both. For a fixed-message row (every pomodoro

@@ -38,13 +38,13 @@
 // there is no daemon in this file, on purpose), then re-rendered, written to disk,
 // and read back for the actual archive pass.
 //
-// ADR.md entry 28 ("Commenting is confined to content blocks", 2026-08-01):
+// ADR.md entry 28 ("Only the rendered kinds can be commented on", 2026-08-06):
 // `question` and `compare` lost the comment affordance on their own wrapper
 // entirely -- no button, no form, no page-scoped pin-layer of their own. The
-// question fixture below carries a `context` entry precisely so this file still
-// covers a page-scoped anchor nested one level inside a question -- the block
-// this ADR says stays fully live -- rather than the question's own widget, which
-// no longer has anywhere to mint a comment onto at all.
+// question fixture below carries an `html` `context` entry precisely so this file
+// still covers a page-scoped anchor nested one level inside a question -- the kind
+// this ADR keeps commentable wherever it appears -- rather than the question's own
+// widget, which no longer has anywhere to mint a comment onto at all.
 //
 // Mermaid is a separate territory (wireMermaidBlock, renderMermaidPins,
 // renderMermaidBlocks, the `mermaid` anchor kind, the `body:not(.readonly)
@@ -706,7 +706,7 @@ check('an archived board carrying stored markdown and code comments renders with
   } finally { restore(); }
 });
 
-// ADR.md entry 28 ("Commenting is confined to content blocks", 2026-08-01): this
+// ADR.md entry 28 ("Only the rendered kinds can be commented on", 2026-08-06): this
 // used to also assert that clicking the question's own `.choice-single` widget
 // opened no comment form in the archive -- one more case alongside the others
 // above. That assumed a comment-form existed for the question block at all,

@@ -12,7 +12,7 @@
 // discipline src/ui.mjs's embedded computeBoardPatch/composeHint already use
 // for a server/client pair, applied here to a page/page pair instead.
 //
-// QUIRKS.md "a backtick inside a template-literal client script ends it early"
+// QUIRKS.md "A backtick inside a template-literal payload ends the whole file"
 // applies a third time here (src/ui.mjs's `ui` and src/render.mjs's
 // `stageAgentScript()` are the other two): `themeBootScript` below is one more
 // giant template literal holding real, standalone JavaScript. No literal

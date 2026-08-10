@@ -42,7 +42,8 @@ import { STRANDED_BANNER } from '../src/board.mjs';
 import { roundIsAwaitedOpen } from '../src/badge.mjs';
 import { CLICK_LIFETIME_MAX_MS, notifyRound, withdrawClickChild, parseElapsedTime, mayWithdrawPid } from '../src/notify.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { startServer, createStrandedWatch, strandedTarget, DEFAULT_STRANDED_GRACE_MS } from '../src/server.mjs';
+import { startServer, strandedTarget } from '../src/server.mjs';
+import { createStrandedWatch, DEFAULT_STRANDED_GRACE_MS } from '../src/stranded.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -545,6 +546,113 @@ async function layerOne() {
     assert.equal(banners.length, 2, 'two absent boards, two banners -- they are counted per board');
     watch.close();
     assert.deepEqual(banners.map(b => b.child.killed), [['SIGTERM'], ['SIGTERM']]);
+  });
+
+  // The ABRUPT half of criterion 15's last sentence, which the check above cannot reach:
+  // `close()` is the graceful path, and bin/daemon.mjs's shutdown backstop calls
+  // `process.exit()` outright when a socket refuses to die, so src/stranded.mjs's
+  // module-level `process.on('exit')` hook is the only thing between that and an unref'd
+  // click child serving a banner for up to an hour with no daemon behind it.
+  //
+  // Nothing in-process can observe that hook: by the time it runs, the assertions that
+  // would read it are gone with the process. So the scene is set in a REAL child, which
+  // builds two watches over this same store, lets each raise a banner over a real
+  // detached grandchild, records what it built, and then exits WITHOUT calling `close()`.
+  // Only the parent can ask the question that matters -- are the grandchildren still
+  // there -- and it asks it after reaping the child, by pid.
+  //
+  // Two watches, not one, because `strandedExitHookInstalled` means the listener is
+  // installed once for ALL of them: one watch closing is no evidence the second was
+  // reached, and the suite creates dozens. The latch itself is recorded from inside, where
+  // it is observable, as the number of 'exit' listeners standing after two registrations.
+  //
+  // SIGKILL is deliberately NOT the shape under test. Nothing runs on SIGKILL, src/
+  // stranded.mjs says so, and the child's own deadline is what bounds that case.
+  const ABRUPT_EXIT_CHILD = `// Written by test/check-stranded.mjs; see "the abrupt path" there.
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+const [, , strandedUrl, boardA, boardB, reportPath] = process.argv;
+const { createStrandedWatch } = await import(strandedUrl);
+
+const pids = [];
+const stand = () => createStrandedWatch({
+  home: process.env.CLAUDE_BOARD_HOME,
+  sse: { isAttended: () => false, isConfirmedAttended: () => false },
+  // A real process, detached and unref'd exactly as src/notify.mjs leaves the
+  // click-serving child: it outlives this one unless something kills it, which is the
+  // whole fact under test. Long enough that its own deadline cannot be what ends it.
+  notify: () => {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'],
+      { stdio: 'ignore', detached: true });
+    child.unref();
+    pids.push(child.pid);
+    return child;
+  },
+  withdraw: () => {},
+});
+
+const watches = [stand(), stand()];
+watches[0].evaluate(boardA, { url: 'http://127.0.0.1:7391/b/' + boardA, port: 7391 });
+watches[1].evaluate(boardB, { url: 'http://127.0.0.1:7391/b/' + boardB, port: 7391 });
+await new Promise(r => setTimeout(r, 200));
+
+// Written, not printed: process.exit() below can truncate a pipe mid-write.
+writeFileSync(reportPath, JSON.stringify({ pids, exitListeners: process.listenerCount('exit') }));
+// No close(), on purpose. This is the backstop calling exit outright.
+process.exit(0);
+`;
+
+  /** True once the pid is gone. Bounded polling rather than a fixed sleep: the parent is
+   * dying at the same time, so the grandchild's reparenting-and-reaping is not something
+   * a number of milliseconds can be chosen for. */
+  async function waitForGone(pid, timeoutMs = 5000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try { process.kill(pid, 0); } catch { return true; }
+      await tick(20);
+    }
+    return false;
+  }
+
+  await check('criterion 15: an abrupt process.exit(), with no graceful close, still takes every click-serving child', async () => {
+    const one = seedBoard({ cwd: projectFor('abrupt-one') });
+    const two = seedBoard({ cwd: projectFor('abrupt-two') });
+    const childPath = path.join(workDir, 'abrupt-exit-child.mjs');
+    const reportPath = path.join(workDir, 'abrupt-exit-report.json');
+    writeFileSync(childPath, ABRUPT_EXIT_CHILD);
+
+    const spawned = await new Promise((resolve, reject) => {
+      const kid = spawn(process.execPath, [
+        childPath,
+        new URL('../src/stranded.mjs', import.meta.url).href,
+        one.id,
+        two.id,
+        reportPath,
+      ], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: { ...process.env, CLAUDE_BOARD_STRANDED_GRACE_MS: '1' },
+      });
+      let stderr = '';
+      kid.stderr.on('data', d => { stderr += d; });
+      kid.on('error', reject);
+      kid.on('close', code => resolve({ code, stderr }));
+    });
+    assert.equal(spawned.code, 0, `the abrupt-exit child could not set the scene: ${spawned.stderr}`);
+
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(report.pids.length, 2, 'two absent boards, two real click-serving grandchildren');
+    assert.equal(report.exitListeners, 1,
+      "two watches must share ONE 'exit' listener: the strandedExitHookInstalled latch is what keeps the suite's dozens of watches from piling them up");
+    try {
+      for (const pid of report.pids) {
+        assert.ok(await waitForGone(pid),
+          `the click-serving child ${pid} outlived the daemon that spawned it -- the 'exit' hook did not reach its watch`);
+      }
+    } finally {
+      // Never leave one behind if the assertion above is the thing that failed.
+      for (const pid of report.pids) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+    }
   });
 
   await check('criterion 15: a stop kills every child even when the store cannot be written', async () => {
@@ -1055,7 +1163,10 @@ async function layerOne() {
     // that bundle: it SIGKILLs the process, registers the bundle with LaunchServices
     // permanently, and puts "claude-board.app is damaged and can't be opened" on screen --
     // under the real install's name, from a suite run, with the real install perfectly
-    // fine (QUIRKS.md, "`lsregister` records are permanent"). Only the LENGTH matters
+    // fine (QUIRKS.md, "A copied platform binary is SIGKILLed on exec from inside a
+    // `.app`, wherever the copy lives" for the kill and the symlink remedy below, and
+    // "`lsregister` records are permanent" for the registration that outlives it).
+    // Only the LENGTH matters
     // here, so this mirrors the real APP_EXEC's depth with no bundle anywhere in it.
     //
     // And the process at that path is a SYMBOLIC LINK to `process.execPath`, not a copy.
@@ -1073,13 +1184,31 @@ async function layerOne() {
     symlinkSync(process.execPath, longExec);
     assert.ok(longExec.length > 16, 'setup sanity: the path has to exceed MAXCOMLEN to prove anything');
     assert.ok(!longExec.includes('.app/'), 'and must NOT be bundle-shaped: exec\'ing out of one raises the damaged dialog');
-    const sleeper = spawn(longExec, ['-e', 'setTimeout(() => {}, 5000)'], { stdio: 'ignore' });
+    // 30s, not the 5s this started at: nothing waits for the deadline (the `finally` below
+    // kills the child the moment the measurements are done), so the only thing a short one
+    // bought was a race with `ps` on a machine booting other checks' daemons in parallel.
+    const sleeper = spawn(longExec, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
     // A spawn that fails (noexec TMPDIR, a dangling link) emits 'error' asynchronously,
     // and an unhandled one on a ChildProcess throws out of the event loop rather than into
     // the try below -- taking the whole file down instead of failing this one check.
     sleeper.on('error', () => {});
     try {
       await new Promise(r => setTimeout(r, 300));
+      // Name the child, not `ps`, when setup itself failed: `sleeper.on('error', ...)`
+      // above swallows a failed spawn and leaves `pid` undefined, and the child's own
+      // deadline can lapse before the two `ps` calls below run on a machine already busy
+      // booting daemons in parallel. Either way `ps -p` finds nothing, prints nothing, and
+      // exits 1 -- which execFileAsync turns into a rejected "Command failed: ps" that
+      // names the wrong culprit.
+      //
+      // Asserted before EACH `ps` call rather than once at the top: the second call is two
+      // awaits after the first, and that gap is itself a window the deadline can lapse in,
+      // so a single check at the top leaves the second call able to reject with exactly the
+      // misattributed message the guard exists to remove.
+      assert.ok(Number.isInteger(sleeper.pid), 'setup failure: the long-path sleeper never got a pid -- spawn failed, not a ps problem');
+      const stillAlive = which => assert.doesNotThrow(() => process.kill(sleeper.pid, 0),
+        `setup failure: the long-path sleeper exited before the ${which} ps could measure it -- not a ps problem`);
+      stillAlive('first');
       const both = await execFileAsync('ps', ['-o', 'etime=,comm=', '-p', String(sleeper.pid)]);
       const line = both.stdout.trim();
       const cut = line.indexOf(' ');
@@ -1088,6 +1217,7 @@ async function layerOne() {
       assert.ok(parseElapsedTime(line.slice(0, cut)) !== null,
         'and the first column must still be an etime the parser accepts');
 
+      stillAlive('second');
       const truncated = await execFileAsync('ps', ['-o', 'comm=,etime=', '-p', String(sleeper.pid)]);
       assert.ok(!truncated.stdout.includes(longExec),
         'and the other order really does truncate -- if macOS ever stops doing this, the comment above is what needs correcting, not this check');

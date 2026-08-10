@@ -457,8 +457,7 @@ check('S2: renderBoardPage emits a <meta http-equiv="Content-Security-Policy"> c
 //    card (src/styles.mjs, asserted in test/check-pure.mjs), so a genuine,
 //    trusted click over the visible mock can never reach the iframe at all --
 //    it lands on the card in the parent document instead, which already
-//    handles it. See src/render.mjs's stageAgentScript design comment ("NO
-//    'select' MESSAGE, DELIBERATELY") for the fuller account.
+//    handles it. See ADR.md entry 78 for the fuller account.
 // =================================================================================
 
 function variantsBoard(mocks) {
@@ -1130,7 +1129,7 @@ const protocolText = readFileSync(PROTOCOL_PATH, 'utf8');
  * introduced on either side is caught the same way. Deliberately does NOT match
  * on `data.type === 'x'` (a receive branch): the design comment's own contract is
  * "every message this channel SENDS", and 'select' is discussed at length in
- * prose (the "NO 'select' MESSAGE, DELIBERATELY" passage) without ever being sent
+ * prose (src/render.mjs's no-'select' passage, ADR.md entry 78) without ever being sent
  * by a real `post`/`postToStage` call -- matching receives as well as sends would
  * require this checker to also know that passage is describing a DELETED type
  * rather than a live one, which is exactly the judgment a regex should not need
@@ -1198,13 +1197,14 @@ check('the deleted \'select\' type is not live, and is not required to be docume
   const live = liveMessageTypes(renderSrcText, uiSrcText);
   assert.ok(!live.has('select'), '\'select\' must never be sent by a real post()/postToStage() call');
   // documentedMessageTypes is free to not know about 'select' at all -- the
-  // "NO 'select' MESSAGE" passage does not open a line with `'select'`, so it
+  // "There is no `select` message, deliberately" passage does not open a line
+  // with `'select'` as a table cell, so it
   // never lands in the documented set either. Asserting that here pins the
   // negative: a documented set that DID somehow pick up 'select' would still
   // pass the drift check above (an extra documented entry is harmless), so
   // this is the only place that would notice the parser drifting the wrong way.
   const documented = documentedMessageTypes(protocolText);
-  assert.ok(!documented.has('select'), 'the "NO select MESSAGE" passage must not parse as a documentation entry');
+  assert.ok(!documented.has('select'), 'the "There is no `select` message" passage must not parse as a documentation entry');
 });
 
 check('the drift check actually fails when a type is added to the code and not to PROTOCOL.md (proved, not assumed)', () => {

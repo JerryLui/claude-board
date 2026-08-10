@@ -42,7 +42,7 @@
  * minutes, where every other mode here lives for milliseconds -- which is what makes
  * everything below this line necessary and nothing above it different.
  *
- * AppKit, which ADR.md entry 9 refused for the menu bar item and entry 57 narrows for
+ * AppKit, which ADR.md entry 72 admits for the status item and entry 57 narrows for
  * exactly this: a process that has not become an NSApplication is not a running app as
  * far as the notification service is concerned, so a click would launch a SECOND copy
  * of this binary -- and this binary with no argv is the daemon supervisor, which would

@@ -1365,8 +1365,9 @@ check('mermaidRefResolves runs in linear time even against a large, adversarial-
 });
 
 // --- src/board.mjs resolveComment: the lost-anchor treatment extended to dom and --
-// mermaid anchors (it already covered md and block; see the check above and
-// PROTOCOL.md "Anchors at headings and list items").
+// mermaid anchors (it already covered block, and the `md` kind it also covered then; see
+// the check above. ADR.md entry 28 has since deleted `md` outright -- `ANCHOR_KINDS` is
+// block/dom/mermaid -- so a stored `md` anchor now degrades instead of resolving).
 
 check('resolveComment resolves a dom anchor whose ref+hint are still valid together, and reports lost for one that never matched', () => {
   const board = createBoard({
@@ -1421,7 +1422,7 @@ check('resolveComment resolves a mermaid anchor whose node id is still in the di
 
 // --- resolveMermaidAnchor's precedence -- generic first, node id ---
 // leaned on as a fallback -- "Mermaid stops being the
-// template" -- see src/anchor.mjs's design comment for the full
+// template" -- see DESIGN.md, "### Entry 28 — element anchoring", for the full
 // reasoning. Direct, pure tests over resolveMermaidAnchor itself (not just
 // through resolveComment/board.mjs) so the precedence is checkable and
 // ablatable in one place, plus a resolveComment-level check right after
@@ -4245,10 +4246,12 @@ check('allowlist: an unusable configured root is dropped, never widened and neve
 
 check('S1/S3: an absent CLAUDE_BOARD_REF_ROOTS grants nothing, and the default is three directories rather than all of ~/.claude', () => {
   // S3, the delivery question. Every install predating ADR.md entry 3 has a plist with
-  // no CLAUDE_BOARD_REF_ROOTS key, and the daemon restarts itself whenever src/ changes
-  // (QUIRKS.md, "WatchPaths never restarted the daemon"). A default compiled in HERE
-  // therefore goes live on those machines during a routine `git pull` -- a read boundary
-  // widening with no reinstall, nothing printed and nobody asked. So absent grants
+  // no CLAUDE_BOARD_REF_ROOTS key, and on the degraded, no-launcher path bin/daemon.mjs
+  // runs straight out of the clone (QUIRKS.md "A bare `kickstart` no longer picks up a
+  // source edit — only `./install.sh` does", whose parenthetical carries that exception).
+  // A default compiled in HERE therefore goes live on those machines during a routine
+  // `git pull` -- a read boundary widening with no reinstall, nothing printed and nobody
+  // asked. So absent grants
   // nothing and install.sh writes the default, which makes running the installer the
   // consent event. Ablation: default to ~/.claude (or to DEFAULT_REF_ROOTS) here and
   // this goes red while every existing install silently gains reference roots.
@@ -5502,9 +5505,8 @@ check('choose-between-rendered-variants: an html option\'s iframe is rendered po
   // SECURITY, not polish: without this, a real, trusted
   // click over the visible mock content of an html-kind option would land
   // INSIDE the iframe rather than on the card, and the stage is untrusted,
-  // agent-authored content -- see src/render.mjs's "NO 'select' MESSAGE,
-  // DELIBERATELY" design comment for the two paths that made a stage-
-  // reported click-to-select message unsafe. This is the one half of the fix
+  // agent-authored content -- see ADR.md entry 78 for the two paths that made a
+  // stage-reported click-to-select message unsafe. This is the one half of the fix
   // no DOM stand-in can exercise directly (QUIRKS.md: no real layout, no
   // pointer-events hit-testing); test/check-stage-isolation.mjs proves the
   // other half -- that even a message the stage manages to get out carries

@@ -1,10 +1,10 @@
 // The daemon root: a thread index plus archive search, as a view over the store.
-// See PROTOCOL.md "HTTP surface"; "A thread per session,
-// addressable from an index" and "Archived boards are searchable".
+// See PROTOCOL.md "HTTP surface" for the routes, and DESIGN.md Decisions -> "A thread per
+// session, addressable from an index" and "Archived boards are searchable" for the why.
 //
 // A thread is `board.thread` (one MCP shim process, one Claude session). In the
 // common case a thread has exactly one board doc that accumulates rounds in place
-// (see PROTOCOL.md "A board is a session-scoped thread with rounds"); grouping by
+// (see DESIGN.md Decisions -> "A board is a session-scoped thread with rounds"); grouping by
 // `thread` rather than assuming a 1:1 board:thread mapping keeps this correct even
 // in the edge case where a caller reuses a thread id across board docs. Two threads
 // with the same `cwd` are still two separate rows here, each with its own rounds-left

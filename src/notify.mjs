@@ -160,7 +160,7 @@ export function isBoardUrl(url, port) {
 //
 // Exported in milliseconds because the daemon has to reason about the same ceiling from
 // the other side: past it, the process below has exited and WITHDRAWN its notification,
-// so a board's announced marker no longer stands for anything on screen (src/server.mjs's
+// so a board's announced marker no longer stands for anything on screen (src/stranded.mjs's
 // `standingBanner`). A wait longer than this ceiling is reachable -- CLAUDE_BOARD_TIMEOUT_MS
 // is on the launcher's plist passthrough allowlist -- and without the daemon knowing the
 // number, such a wait loses its banner partway through and never gets a replacement.
@@ -221,7 +221,7 @@ let warnedClickOnce = false;
  * message would otherwise have to be duplicated to stay true. */
 function warnOnFailure(err) {
   // A click-serving child is SUPPOSED to be killed: that is how the daemon withdraws a
-  // delivered banner when the reviewer comes back (src/server.mjs's `terminate`). Node
+  // delivered banner when the reviewer comes back (src/stranded.mjs's `terminate`). Node
   // reports that as an error on this callback -- `killed: true, signal: 'SIGTERM'` -- so
   // without this exemption the happy path printed "notifications may not be appearing"
   // on every single return to a board, AND burned the one-shot warning below, so a

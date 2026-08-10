@@ -24,6 +24,7 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `src/render.mjs` | board JSON -> complete HTML page (pure function) |
 | `src/indexpage.mjs` | daemon root: the thread index and its session filter |
 | `src/server.mjs` | the `node:http` daemon: routes, SSE, the four gates below |
+| `src/stranded.mjs` | the stranded rule: a board with an open, awaited round and no Watcher looking at it gets one banner per absence, after a grace. Persistence, grace timers and the click-serving child's lifecycle, all behind `createStrandedWatch` |
 | `src/secret.mjs` | the two credentials: the local secret and the browser session cookie derived from it, shared by the daemon and the shim |
 | `src/handoff.mjs` | single-use, seconds-lived browser handoffs, and `recoveryCommand()` |
 | `src/ui.mjs` | client-side script for the board page, exported as a string |
@@ -599,7 +600,9 @@ own origin, or when `Sec-Fetch-Site` is present and is not `same-origin`, and ev
 send neither header and are unaffected. Every HTML response also carries `X-Frame-Options: DENY`
 and a `frame-ancestors 'none'` CSP.
 
-### The local secret
+The two credentials and every route with rules of its own carry them in their own sections, below.
+
+## The local secret
 
 ```
 ~/.config/claude-board/secret      0600, in a 0700 directory; 32 random bytes as hex
@@ -621,7 +624,7 @@ reads the secret at startup, sends it on every call, and refuses to post at all 
 `./install.sh`, writing nothing) when it has none or the daemon answers 401. `SECURITY.md` carries
 why a local secret exists at all.
 
-### The browser session cookie
+## The browser session cookie
 
 **Every route but `GET /api/health` and `GET /auth/:token` requires a credential**, reads
 included. The browser cannot read a 0600 file, so it holds this instead:
@@ -632,15 +635,18 @@ Set-Cookie: cb_session=<HMAC-SHA256(secret, "claude-board/session/v1")>;
 ```
 
 Host-only (no `Domain`), `HttpOnly`, `SameSite=Strict`, and **not** a session cookie: a bookmarked
-board opened days later has to work. No `Secure`, and none is possible — the daemon serves plain
-http on loopback, so a `Secure` cookie would never be sent back.
+board opened days later has to work. No `Secure`, and not because it would be ignored: Chrome treats `http://127.0.0.1` as a
+potentially-trustworthy origin and *does* return `Secure` cookies to it. It is omitted because on a
+loopback-only plain-http daemon it buys nothing, and would break any browser that does not
+implement that carve-out (`src/secret.mjs` records the same correction).
 
 **Derived from the secret, not random**, which is what makes it survive a daemon restart: any
 daemon holding the same secret accepts the same cookie, so `launchctl kickstart`, a crash and a
 code reload are all invisible to an open browser. Rotating the secret invalidates every browser at
 once — intended.
 
-Its strength, precisely: "may read every board and answer any open round". It is refused in the
+Its strength over boards, precisely: "may read every board and answer any open round" — plus the
+two additions below, which reach past that. It is refused in the
 `x-claude-board-secret` header, so it can never create a board and therefore never make the daemon
 resolve a file. It is **not** scoped to one board.
 
@@ -651,12 +657,16 @@ route's own section, below).
 
 It is additionally accepted on nine pomodoro writes — `ensure`, `pause`, `resume`, `reset`,
 `settings`, `preview`, `notifyTest`, `forward`, `restart` — so the index page's switch and its
-settings popover can drive the clock. That clock never touches a board, never gates an `ask` and
-never reaches a tool, so it costs the cookie nothing it did not already carry. The
-list stays a closed, named set: a pomodoro write added later is secret-only until someone
-deliberately names it.
+settings popover can drive the clock. The clock itself never gates an `ask` and never reaches a
+tool. **`settings` is the one that reaches past the clock**: `notifyRounds` lives in the same
+document, it is merged in and persisted like any duration, and the Stranded rule reads it back
+before every announcement, so `notifyRounds: false` from a cookie durably suppresses the Stranded
+banner for every board on the machine, across restarts. `SECURITY.md` "What the cookie may write"
+prices that. The list stays a closed, named set: a pomodoro write added later is secret-only until
+someone deliberately names it — and one that reaches a board the way `settings` does needs that
+priced before it is named.
 
-### Authorizing a browser
+## Authorizing a browser
 
 A credential never appears in a URL a bookmark can capture. Instead:
 
@@ -681,7 +691,7 @@ opens the browser. `--print` emits the URL instead, for a second profile or a di
 an optional board id argument lands on that board rather than the index. `src/handoff.mjs`
 `recoveryCommand()` is the single source of that string.
 
-### Refusing a caller with no credential
+## Refusing a caller with no credential
 
 **401, one status code everywhere.** No `WWW-Authenticate` header: it would raise a browser
 password prompt in front of the page that explains the actual fix, and there is no password to
@@ -692,7 +702,7 @@ page naming the recovery command verbatim. Everything else — `/api/*`, the SSE
 shim — gets `{ error, recover }` as JSON and no markup. Neither reveals anything about the store:
 the same page is served whether or not the board exists.
 
-### `POST /api/board`
+## `POST /api/board`
 
 `{ title, blocks, cwd?, thread?, wait? }` starts a new thread; `{ boardId, blocks, title?, wait? }`
 pushes into a live one. `cwd` is only meaningful on the thread-creating form. `title` is meaningful
@@ -730,7 +740,7 @@ A board can consequently hold **two open rounds at once**: an artifact round nob
 and the question round after it. Wherever this protocol says *the open round* — the round a submit
 must name, the round an amend lands on — it means the **latest** open one.
 
-### `POST /api/board/:id/submit`
+## `POST /api/board/:id/submit`
 
 ```js
 {
@@ -763,7 +773,7 @@ second path:
 The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`), which
 `body.readonly` hides wholesale — so the standalone `file:` archive offers neither.
 
-### `POST /api/board/:id/abandon`
+## `POST /api/board/:id/abandon`
 
 ```js
 (no body)  -> { ok: true, board, closed: [1, 2…] }
@@ -791,7 +801,7 @@ write, finds nothing awaited, spends any standing record (withdrawing a banner a
 and cancels a grace still counting down. Nothing can re-arm it, because only a round landing on
 this board could, and none ever will.
 
-### `POST /api/board/:id/attended`
+## `POST /api/board/:id/attended`
 
 ```js
 { watcher: '<id from the stream's own "watcher" event>', attended: true | false, seq?: 0, 1, 2… }
@@ -814,10 +824,9 @@ applied and leaves the counter alone, so a page predating the ordering keeps wor
 malformed is a 400.
 
 Cookie-authenticated exactly like `submit` (see "The browser session cookie" above): a browser
-holding a live stream on this board is the only party that can honestly answer this question, and
-an unauthenticated report is refused rather than believed — accepting one from any local process
-with no credential would let a forged report silence every banner the daemon would otherwise raise
-(ADR.md entry 58).
+holding a live stream on this board is the only party that can honestly answer this question, so an
+unauthenticated report is refused rather than believed. What a forged one would buy an attacker:
+`SECURITY.md` "What the cookie may write".
 
 What it stores is a fact about a live SSE connection and nothing about the board. It is not,
 however, a route with no durable consequence: the stranded rule reads that fact immediately, and a
@@ -843,7 +852,7 @@ asks only whether one has *said* it is looking, so holding `/events` open and sa
 needs only a read credential — cannot mute a board. A tab that drops and reconnects inside the grace
 is silent because it reports, not because its socket exists.
 
-### The stranded banner
+## The stranded banner
 
 The daemon raises one native notification for a board that has an open, awaited round on it and no
 Watcher looking at it (CONTEXT.md "Stranded"; ADR.md entries 55 and 58). It is re-decided after
@@ -895,14 +904,14 @@ the load-bearing one: the same path names every claude-board process, the superv
 included, SIGTERM to that one is relayed to the daemon, and a supervisor started by a restart is
 *newer* than the record, so the start-time test does not exclude it.
 
-### `GET /api/board/:id/wait?round=N`
+## `GET /api/board/:id/wait?round=N`
 
 A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 40m, ADR.md entry 47): when it fires
 the call returns 200 with a packet whose `status` is `timeout`, carrying whatever partial answers
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
 
-### The pomodoro routes (ADR 8, 20, 67)
+## The pomodoro routes (ADR 8, 20, 67)
 
 Everything the table above does not say:
 
@@ -949,7 +958,7 @@ Everything the table above does not say:
   `notifyTest` is the Notify checkbox's equivalent audition, and ignores the stored `notify`
   setting because the tick that triggered it has not been saved yet.
 
-### Marking an already-open tab
+## Marking an already-open tab
 
 Three marks, and no others (ADR 30): the unbadged board mark every page emits in its `<head>`
 (`faviconLink`, `src/styles.mjs`); a **counted** mark drawn over it on a `round` push; and
@@ -957,7 +966,7 @@ Three marks, and no others (ADR 30): the unbadged board mark every page emits in
 count outranks the rest mark outright. `document.title` is left alone.
 
 The favicon mark is the only notice the page itself raises; a round nobody is watching for is the
-daemon's own native banner instead ("The stranded banner", below), which is what a closed or
+daemon's own native banner instead ("The stranded banner", above), which is what a closed or
 buried tab now relies on. Every part of the mark degrades silently: a failure anywhere leaves the
 round pushed and the page working, just unmarked, and all of it is inert in readonly mode. Shim
 side: printing the board URL in chat as the fallback that cannot fail.
@@ -1105,55 +1114,36 @@ own refresh runs (resize, a comment queued, a submit landing, a round flip).
 
 ### There is no `select` message, deliberately
 
-An earlier version had the stage post a content-free `select` on every click, so clicking the
-visible mock content of an `html`-kind option could pick that option. Reverted before that work
-merged.
-
-Every message on this channel is stage-authored input, no different in kind from the mock's own
-HTML. Unlike `click`/`hover`, which only *propose* an anchor a human still has to submit, or
-`positions`, which is pure geometry, a message that picks an option is the agent handing itself
-the answer to its own question. Two paths made that concrete: the stage's own script could
-dispatch a click on itself with no human involved, and — since `cb: 'cb-stage'` is a fixed public
-string, and the validation below proves only that a message came from *some* live stage, never
-that a human acted — any stage's script could call `postMessage({cb:'cb-stage', type:'select'})`
-directly. An `ev.isTrusted` guard would have closed the first path only; the second forges the
-message upstream of any such guard.
-
-Deleted rather than guarded. An option's stage is a thumbnail to choose between, not a surface to
-operate, so it renders `pointer-events: none` inside a `.choice-variant` card: a real click over
-the visible mock never reaches the iframe and lands on the card in the parent document, which
-already handles it. A forged `select`-shaped message from a live, correctly-addressed stage is
-inert because no handler is left to act on it.
+No message on this channel selects an option: a `select`-shaped message from a live,
+correctly-addressed stage is inert because no handler is left to act on it, and an `html` option's
+frame renders `pointer-events: none` inside its `.choice-variant` card so a real click over the
+visible mock lands on the card in the parent document instead. Why the message was deleted rather
+than guarded: `ADR.md` entry 78.
 
 ### Origin validation
 
 An opaque-origin `srcdoc` frame has no real origin, so the usual same-origin comparison is
-meaningless here. Each side validates something else.
+meaningless here. Each side validates something else:
 
-**Parent reading a stage message** checks `event.origin === 'null'`. The HTML standard serializes
-an opaque origin in a `postMessage` event as the literal four-character string `"null"`, always,
-regardless of what URL or port the parent page is served from. That is not an origin we happen to
-trust, it is the *absence* of one: any message carrying a real origin — an extension, devtools, a
-same-origin script the reviewer runs in the same tab — is rejected before any shape check runs.
-Necessary but not sufficient, since it does not say *which* stage.
-
-**Parent identity check**: `event.source` must equal the `contentWindow` of a currently-mounted
-`.html-stage` frame. The browser stamps `event.source` from the calling script's actual global
-object, so no page script can forge it — it is not read off `event.data`, which is
-attacker-controlled. Re-deriving which stage by walking the live DOM at receive time, rather than
-trusting an id the message claims, is what makes it the frame the parent thinks it is.
-
-**Stage reading a parent message** checks `event.source === window.parent`. The stage cannot know
-the parent's real origin in advance (any port, or `file://`), so an origin string check is not
-available to it — and is not needed. `window.parent` is a reference the browser hands the script
-at frame-creation time, and no script in any window can make `event.source` equal a different
-window's `window.parent`. Identity alone is sufficient here.
+- **Parent reading a stage message** checks `event.origin === 'null'` — the HTML standard
+  serializes an opaque origin in a `postMessage` event as that literal four-character string,
+  always, whatever URL or port the parent page is served from. Any message carrying a real origin
+  (an extension, devtools, a same-origin script in the same tab) is rejected before any shape check
+  runs. Necessary but not sufficient: it does not say *which* stage.
+- **Parent identity check**: `event.source` must equal the `contentWindow` of a currently-mounted
+  `.html-stage` frame, re-derived by walking the live DOM at receive time rather than trusting an
+  id the message claims. The browser stamps `event.source` from the calling script's actual global
+  object, so no page script can forge it, and it is never read off the attacker-controlled
+  `event.data`.
+- **Stage reading a parent message** checks `event.source === window.parent`. The stage cannot know
+  the parent's real origin in advance (any port, or `file://`), and no script in any window can
+  make `event.source` equal a different window's `window.parent`, so identity alone is sufficient
+  here.
 
 ### Shape validation
 
-Neither side trusts a message's shape beyond what it explicitly checks. The stage document is
-attacker-controlled, so the parent assumes the mock's own script sends it hostile messages on the
-same channel the agent uses.
+The stage document is attacker-controlled, so the parent assumes the mock's own script sends it
+hostile messages on the same channel the agent uses.
 
 Every handler on both sides checks every field's type before using it — `typeof x === 'string'`,
 `Array.isArray`, `Number.isFinite` — and drops what does not match rather than throwing or

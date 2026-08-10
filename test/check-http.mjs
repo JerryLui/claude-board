@@ -1352,14 +1352,14 @@ async function main() {
             prompt: 'Pick one',
             widget: 'single',
             options: [{ label: 'Yes' }, { label: 'No' }],
-            // ADR.md entry 28 ("Commenting is confined to content blocks",
-            // 2026-08-01): the question wrapper itself (its prompt, its
+            // ADR.md entry 28 ("Only the rendered kinds can be commented on",
+            // 2026-08-06): the question wrapper itself (its prompt, its
             // options, its note field) lost the comment affordance entirely.
-            // Its `context` entries did not -- they render through the same
-            // renderBlock dispatch as any other block, with their own id and
-            // their own comment area, so an anchor rooted here is exactly the
-            // still-live case that still needs covering. Entry 28 then decided WHICH
-            // context entries: an html stage keeps it, the prose beside it does not.
+            // A rendered `context` entry did not -- it goes through the same
+            // renderBlock dispatch as any other block, with its own id and
+            // its own comment area, so an anchor rooted here is exactly the
+            // still-live case that still needs covering. Entry 28 draws that line on
+            // KIND: an html stage keeps it, the prose beside it does not.
             context: [{ kind: 'html', html: '<div class="mock"><button>Confirm</button></div>' }],
           },
         ],
@@ -1426,7 +1426,7 @@ async function main() {
 
     const pairs = [captureAnchor(doc1, compareDiagram, compareLeftId)];
     // The two html stages, still element (2) of the TWO roots documented in
-    // src/anchor.mjs's design comment -- included so this same round trip also
+    // DESIGN.md, "### Entry 28 — element anchoring" -- included so this same round trip also
     // proves block.kind === 'html' resolution is unchanged, not just the
     // page-scoped path, and that it is unchanged inside a question's context too.
     for (const blockId of [compareRightId, questionContextId]) {
@@ -2664,8 +2664,9 @@ async function main() {
   // question-with-map-context board (/wayfind). Same cycle as the round trip above
   // (:284, :325) -- post, render, answer where the shape has one, read the packet back
   // -- against a payload in the exact shape each real caller now posts (PROTOCOL.md's
-  // `choose-between-rendered-variants` section; skills/visualize/SKILL.md's "Post to
-  // the board"; commands/wayfind.md's Mode: Work step 1). Every assertion below is on
+  // `choose-between-rendered-variants` section; the `/visualize` skill's "Post to
+  // the board"; `/wayfind`'s Mode: Work step 1 -- both of those live in ~/.claude, not
+  // here, so neither is written as a path). Every assertion below is on
   // the resolved, rendered, read-back result, never on a bare 200 -- see the next check's
   // own comment for why that distinction is the entire point.
 
@@ -3546,7 +3547,7 @@ async function main() {
     // `commit` captures whole board objects when `buildPacketWithUndelivered` is called,
     // but only runs on the response's own `finish` event (`res.once('finish', commit)` in
     // handleWait) -- a strictly LATER macrotask. In that window the stranded rule's timer
-    // callback (`persist`, src/server.mjs) can land a fresh STRANDED_BANNER record on the
+    // callback (`persist`, src/stranded.mjs) can land a fresh STRANDED_BANNER record on the
     // very same board `commit` is holding a stale copy of. The old `commit` wrote that
     // stale copy back wholesale, silently erasing whatever the second writer had just
     // recorded -- `persist` already defends its own field against exactly this writer, by

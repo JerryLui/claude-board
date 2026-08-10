@@ -214,7 +214,7 @@ await check('comment mode: submitting the opened form drops a numbered, non-lost
 });
 
 // --- domRef precedence, proven by POSITION, not just by which ref -----
-// wins (src/anchor.mjs's design comment: the generic domRef is tried
+// wins (DESIGN.md, "### Entry 28 — element anchoring": the generic domRef is tried
 // FIRST for positioning, against the live SVG; the node-id/[id^="flowchart-"] scan
 // is a fallback). Ordinary fixtures never distinguish the two paths, because a
 // unique id only ever finds one candidate either way -- deleting

@@ -12,9 +12,10 @@
 // own Contents/Resources is in fact the one place soundNamed: does NOT look, which is why
 // entry 20's original staging plan was dropped). So the picker cannot offer a name the
 // notification cannot play. There are still not two lists to keep in sync: there is one
-// enumeration, of the very directories macOS itself searches, read by everybody. Entry 23
-// added the second directory, so a reader can supply a cue macOS does not ship; the paths
-// are stated once, here, and nowhere else in src/.
+// enumeration, of the very directories macOS itself searches, read by everybody. Entry 20
+// is what puts the second directory in it -- `~/Library/Sounds` beside the system one, so a
+// reader can supply a cue macOS does not ship; the paths are stated once, here, and nowhere
+// else in src/.
 //
 // Enumerated rather than hardcoded to a list of 14. A reader whose sound directories have
 // been added to or pruned gets what is actually there. A fixed list would be right about a

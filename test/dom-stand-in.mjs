@@ -1728,7 +1728,7 @@ export class StandInLocalStorage {
 // QUIRKS.md "The stand-in has no layout" already explains why this file never had
 // one: nothing here lays anything out, so there is no real geometry for a real
 // IntersectionObserver to intersect against. The round badge's own
-// setupRoundObserver (src/ui.mjs) ran under no check at all for exactly that
+// setupRoundObserver, deleted since, ran under no check at all for exactly that
 // reason -- it guarded on `typeof IntersectionObserver !== 'function'` and
 // returned, which the stand-in's total absence of the constructor was always
 // enough to exercise. That observer is gone now (ADR.md entry 42: rounds are

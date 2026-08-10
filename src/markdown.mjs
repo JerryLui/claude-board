@@ -3,7 +3,10 @@
 // of the hand-rolled line scanner this module used to carry. Extended with anchor
 // emission: every heading becomes an anchor at its slug, every top-level list item
 // under that heading becomes `<slug>-liN` (1-based, numbered per heading section).
-// See PROTOCOL.md "Anchors at headings and list items". One exception, decided
+// See DESIGN.md Decisions -> "Anchors at headings and list items", which ADR.md entry 28
+// withdrew as a COMMENT target: the slug ids minted here stay, and are what a caller's
+// `#section-slug` reference resolves against, but no `md` anchor kind reaches a comment
+// any more (src/board.mjs `ANCHOR_KINDS`). One exception, decided
 // deliberately: a SETEXT heading renders but mints no anchor -- see isSetextHeading
 // below for why AC 10 outranks anchoring it.
 //
@@ -199,8 +202,8 @@ export const SYNTHETIC_SECTION = '_body';
  * does. List-item refs go through this too: they used to be minted as a bare
  * `<slug>-liN` string that was never registered, so a later `## Risks li1` heading
  * could slugify to `risks-li1` -- the same id a bullet under `## Risks` already
- * carried. Two elements then shared an id, and src/render.mjs's last-wins
- * `labelByRef` map labelled the reviewer's comment on the bullet with the heading's
+ * carried. Two elements then shared an id, and src/render.mjs's last-wins ref-to-label
+ * lookup labelled the reviewer's comment on the bullet with the heading's
  * text. Ids are the join key; they have to be unique across BOTH kinds of anchor. */
 function reserveRef(base, used, ordinals) {
   return disambiguate(base, used, ordinals);

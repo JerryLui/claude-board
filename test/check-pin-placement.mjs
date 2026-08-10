@@ -93,7 +93,7 @@ function clickAndSubmit(document, el, blockId, text) {
 // (button gone, side-level clicks kept)... rejected as the one option
 // inconsistent with every other wrapper". Nothing in the old assertion
 // survives as a positive case, so it is retired outright (same style as
-// ADR.md entry 5's retirement of test/check-grill.mjs's assertions) and
+// ADR.md entry 5's retirement of `check-grill`'s assertions) and
 // replaced below with a check that the new behaviour actually holds, plus a
 // re-pointed case proving the wrapper's own nested content did NOT lose the
 // guarantee this file exists to protect.

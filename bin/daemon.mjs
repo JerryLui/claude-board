@@ -105,5 +105,6 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // and an edit landing mid-write could take the daemon down with a syntax error and leave
 // launchd throttling a crash loop, which is exactly what happened. Updates go through
 // `./install.sh` (or `launchctl kickstart -k gui/$(id -u)/claude-board` for a plain
-// restart), i.e. at a moment somebody chose. See QUIRKS.md "WatchPaths does not restart
-// the daemon" for why the plist-level key is not the answer either.
+// restart), i.e. at a moment somebody chose. A plist-level `WatchPaths` is not the answer
+// either: it only ever *starts* a job that is not running, and `KeepAlive` guarantees this
+// one always already is, so the two fight rather than compose.

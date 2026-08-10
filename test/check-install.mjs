@@ -965,10 +965,10 @@ async function main() {
     // further below, which spawns a real daemon over a temp copy and edits it.
     //
     // (Ablation: reintroducing a `WatchPaths` array here beside `KeepAlive: true` is
-    // a dead-mechanism claim that is forbidden — see QUIRKS.md
-    // "WatchPaths does not restart the daemon" — so this fails on purpose if it comes
-    // back. So does re-adding CLAUDE_BOARD_RELOAD_ON_CHANGE, which is the live
-    // mechanism that WAS shipped and is now deliberately gone.)
+    // inert — the key only *starts* a job that is not running, and `KeepAlive` guarantees
+    // this one always already is — so this fails on purpose if it comes back. So does
+    // re-adding CLAUDE_BOARD_RELOAD_ON_CHANGE, which is the live mechanism that WAS
+    // shipped and is now deliberately gone. `bin/daemon.mjs`'s header carries why.)
     assert.ok(!('WatchPaths' in plist), 'WatchPaths is inert beside KeepAlive and must not be in the generated plist');
     assert.ok(plist.EnvironmentVariables, 'the plist must carry an EnvironmentVariables dict');
     assert.ok(!('CLAUDE_BOARD_RELOAD_ON_CHANGE' in plist.EnvironmentVariables), 'the installed daemon must not be opted into reload-on-change: a restart mid-review drops every SSE stream and every held-open wait');
@@ -1257,9 +1257,11 @@ async function main() {
   await check('the roots install.sh resolves and records confine a RUNNING daemon, not just its own printout', async () => {
     // The check above this one asserts the plist does NOT contain the key any more,
     // and the migration check proves the record file gets the right bytes -- both are
-    // structurally the same shape as the WatchPaths assertion QUIRKS.md records as "a
-    // green check sitting on top of a dead mechanism" if nothing then reads that record
-    // file back and enforces it. So this one runs install.sh for real, reads back
+    // structurally the same shape as the old WatchPaths assertion: a green check sitting
+    // on top of a dead mechanism, if nothing then reads that record file back and
+    // enforces it. (Stated here rather than cited: the WatchPaths QUIRKS.md entry that
+    // carried that phrase went when the mechanism did, and has no successor.)
+    // So this one runs install.sh for real, reads back
     // exactly what it persisted into the record file (the plist no longer carries this
     // value at all -- see above), and hands THAT to a real bin/daemon.mjs, asking it to
     // resolve two references over its own gated HTTP route: one inside the configured

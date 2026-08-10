@@ -172,10 +172,11 @@ round of content only returns the instant it lands.
 - **`discuss`**: the reviewer chose Discuss in chat. Post no more boards this session and
   pick the remaining branches up in chat, using the partial answers.
 - **`timeout`**: an explicit no-response, not a hang. Say so, then either wait for the
-  reviewer to reopen `url` or move on in chat. Never silently retry the round. A round that
-  times out is over: re-posting the identical board opens a **new** round rather than
-  resuming it, and anything the reviewer had typed on the old one arrives as an ordinary
-  comment on your next packet.
+  reviewer to reopen `url` or move on in chat. **Never silently retry the round.** A round
+  that timed out is not closed — it stays open, so a re-post amends that same dead round in
+  place rather than opening a fresh one: the blocks land on a round with no live deadline and
+  nothing waiting on it, and you get `posted` straight back instead of an answer. Anything the
+  reviewer had typed on it arrives as an ordinary comment on your next packet.
 - **`error`**: posted, but the wait did not complete, so nothing was answered and nothing
   about intent can be inferred. Report the message verbatim, name `url`, and stop rather
   than re-posting into a board that may already hold the round.
@@ -184,7 +185,7 @@ round of content only returns the instant it lands.
 
 - `answered`: `choice` holds the answer.
 - `deferred`: `choice` may hold a selection *too*. A lean is not a decision, so track it as
-  an open branch rather than re-asking now, and never record it.
+  an open branch rather than re-asking now.
 - `unanswered`: `choice` is `null`. Blank is a signal, not a default. Say so, and decide
   with the reviewer whether to proceed without it or drop the branch.
 

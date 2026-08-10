@@ -248,7 +248,8 @@ function commentArea(blockId, commentsByBlock, historical) {
 
 /** The generic element-level pin overlay for a block whose content lives in the
  * board's OWN document (as opposed to html/mermaid's stage-scoped one inside
- * `.stage-wrap` -- see src/anchor.mjs's design comment for the two roots). A
+ * `.stage-wrap` -- see DESIGN.md, "### Entry 28 — element anchoring", for the two
+ * roots). A
  * direct child of the `.block` section itself, `inset: 0` over the whole section
  * (the same `.pin-layer`/`.anchor-pin` rules already used for the stage case,
  * reused as-is -- `.block` is already `position: relative`), so a pin's position
@@ -412,8 +413,7 @@ function renderRankWidget(block, answer, historical) {
  *
  * An `html` option's iframe is rendered `pointer-events: none` inside a
  * `.choice-variant` card (src/styles.mjs) -- deliberately, not an oversight:
- * see stageAgentScript's own design comment ("NO 'select' MESSAGE,
- * DELIBERATELY") for why the stage must never be able to influence its own
+ * see ADR.md entry 78 for why the stage must never be able to influence its own
  * selection. The option's block is untrusted, agent-authored content, same as
  * any other block on the page; unlike everywhere else that content renders,
  * here a click deciding WHICH option gets picked is a decision only the
@@ -564,7 +564,7 @@ function renderContextInner(block, board, commentsByBlock, historical) {
       // applySubmit backfilled `unanswered` and the packet told the agent the reviewer
       // left blank a question they were never shown -- the same outcome src/board.mjs
       // refuses an unknown widget for. Worse, bin/mcp.mjs counts it as a question and
-      // blocks the ask on /wait, so the call sat for the full two-hour cap on something
+      // blocks the ask on /wait, so the call sat for the full 40-minute cap on something
       // the page could not draw. The identical block under a stage-free question always
       // rendered fine; only this fork dropped it.
       return renderBlock(block, board, commentsByBlock, historical);
@@ -1186,9 +1186,10 @@ function diffCodeBody(rows, info, { gutter = true } = {}) {
  * reviewer citing a gutter number was five off). It is read off the BLOCK rather
  * than off `block.source` deliberately: src/board.mjs builds a code block from an
  * explicit field list, so a normalised block field cannot be forged by a caller the
- * way anything under `source` can. src/resolve.mjs does not report it yet -- see
- * sliceSection's `startIdx`, which already computes it -- so today only a caller of
- * renderBlock supplies one; the same integer check guards it regardless. */
+ * way anything under `source` can. src/resolve.mjs reports it on every successful
+ * resolution (`sliceSection` returns `startLine`, 1-based, and `resolveRef` passes it
+ * on) and src/board.mjs copies it onto the block; a caller of renderBlock may also
+ * supply one directly, and the same integer check guards it either way. */
 function gutterStart(block) {
   const ranged = block.source && Array.isArray(block.source.lines) && Number.isInteger(block.source.lines[0]);
   if (ranged) return { start: block.source.lines[0], hasExplicitRange: true };
@@ -1252,7 +1253,7 @@ function codeBody(block) {
 // question, and it cannot be guarded, only removed -- any stage's script can
 // forge one directly on this channel's fixed public marker. An option's stage
 // is instead `pointer-events: none` inside a '.choice-variant' card, so a real
-// click lands on the card in the parent document. PROTOCOL.md carries the two
+// click lands on the card in the parent document. ADR.md entry 78 carries the two
 // attack paths in full.
 
 /** The stage's hover-highlight color -- a literal hex, deliberately NOT a CSS
@@ -1516,8 +1517,9 @@ export function stageAgentScript() {
 
   // This document is the only thing that can
   // ever know its own rendered height -- the parent cannot reach
-  // 'contentDocument' at all (see this file's own "ORIGIN VALIDATION" design
-  // comment, above stageAgentScript, for why the frame is opaque by design),
+  // 'contentDocument' at all (PROTOCOL.md "Stage postMessage channel" for why the
+  // frame is opaque by design, and "Origin validation" for what each side checks
+  // instead),
   // so the stage measures and reports over this same channel, the same shape
   // as 'hover'/'positions' already use, rather than the parent ever trying to
   // reach in for it. Every html stage sends this, standalone or nested inside
@@ -1691,9 +1693,9 @@ export function stageAgentScript() {
   }
 
   window.addEventListener('message', function (ev) {
-    // See this file's design comment above ("ORIGIN VALIDATION") for why
-    // identity, not an origin string, is the correct and sufficient check on
-    // this side of the channel.
+    // See PROTOCOL.md "Origin validation", last bullet, for why identity and not
+    // an origin string is the correct and sufficient check on this side of the
+    // channel.
     if (ev.source !== window.parent) return;
     var data = ev.data;
     if (!data || typeof data !== 'object' || data.cb !== CB || typeof data.type !== 'string') return;

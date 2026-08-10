@@ -1528,8 +1528,8 @@
   // long afterward -- there is no "wire this root's stages" step left to run
   // at all, since nothing here reaches into a frame until IT speaks first).
   window.addEventListener('message', function (ev) {
-    // Origin, then identity, then shape -- see src/render.mjs's design comment
-    // ("ORIGIN VALIDATION") for why "null" is the correct and complete check
+    // Origin, then identity, then shape -- see PROTOCOL.md "Origin validation"
+    // for why "null" is the correct and complete check
     // for an opaque-origin srcdoc frame's reported origin, and why re-deriving
     // the sending frame from the live DOM (rather than trusting anything the
     // message claims about itself) is what "the frame we think it is" means.
@@ -2809,7 +2809,8 @@
   }
 
   // The nearest block section a click/hover target lives in -- the root a page-
-  // scoped dom anchor's path is measured from (src/anchor.mjs's design comment).
+  // scoped dom anchor's path is measured from (DESIGN.md, "### Entry 28 -- element
+  // anchoring").
   // Self-inclusive, matching real closest(); returns null for anything outside
   // .blocks entirely (the header, the mode toggle, the send bar), which is what
   // keeps this gesture from ever reaching page chrome without an explicit
@@ -3341,9 +3342,12 @@
         // -- and they run in the BOARD PAGE'S OWN ORIGIN, alongside #board-data and under
         // connect-src 'self', so a bad publish could read every answer and submit as the
         // reviewer. Dynamic import() cannot carry an SRI hash, so the version is the only
-        // pin available. Bumping it is deliberate work: change it here and in the two
-        // script-src allowlists (src/render.mjs, src/server.mjs), which name this exact
-        // path so a compromised jsdelivr cannot serve a DIFFERENT file from the same host.
+        // pin available. Bumping it is deliberate work: change it here and in the one
+        // allowlist, src/render.mjs's CSP_CLAUSES (both CSP and INDEX_CSP build from it,
+        // and its script-src and font-src carry the version) -- which pins the VERSION,
+        // not the file: a CSP source expression ending in / is a prefix match, so every
+        // file under this package version is in policy, and a compromised jsdelivr could
+        // still serve a different one of them. See SECURITY.md on what that leaves open.
         mermaidMod = window.mermaid
           || (await import('https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.esm.min.mjs')).default;
       }
@@ -4207,7 +4211,7 @@
       // for. This is the same predicate the countdown and the send surface read
       // (roundIsAwaitedOpen plus a live deadline), so the page cannot disagree
       // with itself about which round is waiting; and it is what the daemon's own
-      // stillWaiting (src/server.mjs) asks, so the click lands on the round the
+      // stillWaiting (src/stranded.mjs) asks, so the click lands on the round the
       // banner was raised about rather than on some earlier one.
       if (roundIsCurrentlyAwaited(rounds[i], now)) return rounds[i].n;
     }

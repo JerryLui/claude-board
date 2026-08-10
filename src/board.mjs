@@ -1021,8 +1021,9 @@ export function resolveComment(board, comment, blockCache = new Map()) {
     // An 'html' block has TWO client-
     // side roots but this branch used to assume only one. `.html-stage` (the
     // iframe) is chrome (ANCHOR_CHROME_SELECTOR) and its OWN content is
-    // reached only through wireHtmlStage's dedicated listener, which mints a
-    // ref rooted at the iframe's `contentDocument.body` -- the common case,
+    // reached only through the stage's own script (src/render.mjs's
+    // `stageAgentScript`), which mints a ref rooted at the stage document's
+    // own `document.body` -- the common case,
     // tried first. But `.stage-wrap` (the div wrapping the iframe) is NOT
     // chrome, so a click on ITS own boundary (padding around the iframe,
     // never landing inside the sandboxed document) is caught by the generic
@@ -1106,7 +1107,7 @@ export function buildPacket(board, round, url) {
 
 // --- fields the daemon keeps on the board but never shows a client -------------
 //
-// The stranded rule (src/server.mjs's createStrandedWatch, SPEC_STRANDED.md) records on
+// The stranded rule (src/stranded.mjs's createStrandedWatch, SPEC_STRANDED.md) records on
 // the board itself the banner it currently has standing for it, because the thing that
 // record defends against is a daemon RESTART and an in-memory one is empty in exactly
 // that case. One field holding one record rather than three parallel ones that must be

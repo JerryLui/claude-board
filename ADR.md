@@ -21,7 +21,7 @@ link where it is worth reading.
 | 4 | [Every command falls back off the board, `/grill` included](.agents/adr/0004-every-command-falls-back-off-the-board-grill.md) | 2026-07-31 | narrowed by 55 |
 | 5 | [This repo ships the protocol, not its callers](.agents/adr/0005-this-repo-ships-the-protocol-not-its-callers.md) | 2026-07-31 | accepted |
 | 7 | [An `html` block may name a file, but only a whole one](.agents/adr/0007-html-block-may-name-a-file-but-only.md) | 2026-08-04 | accepted |
-| 8 | [The daemon owns the pomodoro clock](.agents/adr/0008-daemon-owns-the-pomodoro-clock.md) | 2026-08-04 | accepted |
+| 8 | [The daemon owns the pomodoro clock](.agents/adr/0008-daemon-owns-the-pomodoro-clock.md) | 2026-08-04 | narrowed by 67 |
 | 11 | [The repo ships one caller-facing file: the manual](.agents/adr/0011-repo-ships-one-caller-facing-file-the-manual.md) | 2026-08-04 | accepted |
 | 13 | [The daemon's environment is baked into the launcher, not the plist](.agents/adr/0013-daemon-s-environment-is-baked-into-the-launcher.md) | 2026-08-04 | accepted |
 | 14 | [The launcher is compiled from a staged copy; the stamp covers the binary](.agents/adr/0014-launcher-is-compiled-from-a-staged-copy-the.md) | 2026-08-04 | accepted |
@@ -39,8 +39,8 @@ link where it is worth reading.
 | 38 | [`/file/` is deleted; the board is the only way to see a rendered page](.agents/adr/0038-file-is-deleted-the-board-is-the-only.md) | 2026-08-07 | accepted |
 | 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59 |
 | 42 | [Rounds are the board's pages, flipped left and right](.agents/adr/0042-rounds-are-the-board-s-pages-flipped-left.md) | 2026-08-07 | accepted |
-| 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | accepted |
-| 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35; completed by 50 |
+| 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
+| 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
 | 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35 |
 | 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | accepted |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
@@ -50,7 +50,7 @@ link where it is worth reading.
 | 58 | [One notifier for a round, and it is the daemon's](.agents/adr/0058-one-notifier-for-a-round-and-it-is.md) | 2026-08-09 | widens 55; narrowed by 73 |
 | 59 | [The board clears its own chrome band, the artifact does not](.agents/adr/0059-board-clears-its-own-chrome-band-the-artifact.md) | 2026-08-09 | narrows 40 |
 | 62 | [Third-party rendering code is vendored, not depended on](.agents/adr/0062-third-party-rendering-code-is-vendored-not-depended.md) | 2026-08-09 | accepted |
-| 63 | [Code renders highlighted, six-hue, with the file's own line numbers](.agents/adr/0063-code-renders-highlighted-six-hue-with-the-file.md) | 2026-08-09 | accepted |
+| 63 | [Code renders highlighted, six-hue, with the file's own line numbers](.agents/adr/0063-code-renders-highlighted-six-hue-with-the-file.md) | 2026-08-09 | narrowed by 64 |
 | 64 | [A diff row suppresses syntax colour](.agents/adr/0064-diff-row-suppresses-syntax-colour.md) | 2026-08-09 | narrows 63 |
 | 65 | [One tokenizer serves both a code block and a markdown fence](.agents/adr/0065-one-tokenizer-serves-both-a-code-block-and.md) | 2026-08-09 | accepted |
 | 66 | [The owed-round dot takes a different hue in each theme](.agents/adr/0066-the-owed-round-dot-takes-a-different-hue-in-each.md) | 2026-08-09 | narrows 30 |
@@ -65,3 +65,4 @@ link where it is worth reading.
 | 75 | [The bundle is an agent app, not a background-only one](.agents/adr/0075-bundle-is-an-agent-app-not-background.md) | 2026-08-10 | narrows 57; relates to 72 |
 | 76 | [A launch that did not come from launchd refuses to supervise](.agents/adr/0076-no-argument-launch-refuses-to-supervise.md) | 2026-08-10 | relates to 75 |
 | 77 | [The index polls for its rows](.agents/adr/0077-index-polls-for-its-rows.md) | 2026-08-10 | accepted |
+| 78 | [The `select` message is deleted; a stage may propose, never decide](.agents/adr/0078-select-message-is-deleted-a-stage-may-propose.md) | 2026-08-01 | accepted |

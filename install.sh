@@ -25,8 +25,7 @@
 #      so a running review is never interrupted by somebody's save. (A
 #      plist-level WatchPaths could not have done it anyway — it only ever
 #      *starts* a job that isn't running, and KeepAlive guarantees this one
-#      always already is, so the two fight rather than compose; see QUIRKS.md
-#      "WatchPaths does not restart the daemon".)
+#      always already is, so the two fight rather than compose.)
 #      The dict carries CLAUDE_BOARD_PORT and, on the DEGRADED (no-launcher) path only,
 #      CLAUDE_BOARD_REF_ROOTS/HOME too: a launchd job inherits nothing from
 #      your shell, so any knob the daemon reads from the environment has to be written

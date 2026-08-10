@@ -110,7 +110,7 @@ const PORT = 7391; // the daemon's own bound port, which every URL below is chec
 // the `#open-round` sentinel src/indexpage.mjs already appends to a live row's href.
 // Paired with the port the daemon would have been listening on when it built it.
 const ACCEPTED = [
-  // The one the daemon actually sends (src/server.mjs's announce), first because a
+  // The one the daemon actually sends (src/stranded.mjs's announce), first because a
   // fixture list that never carries the shipping fragment proves the filter against
   // everything except the traffic.
   [`http://localhost:7391/b/${GOOD_ID}#stranded-round`, PORT],

@@ -6,7 +6,7 @@
 // the name is missing or unsafe (ADR.md entry 56) rather than losing the banner.
 //
 // The daemon now calls notifyRound on its own, from the stranded rule
-// (createStrandedWatch, src/server.mjs) -- that path is test/check-stranded.mjs's to
+// (createStrandedWatch, src/stranded.mjs) -- that path is test/check-stranded.mjs's to
 // cover end to end. This file stays scoped to what ticket 01 actually owns, the message
 // shape and the folder-name filter, so every check here still calls notifyRound
 // directly, the same way test/check-notify.mjs's checks call notifyBoundary/notifyTest
