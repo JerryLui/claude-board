@@ -211,7 +211,12 @@ function addAwaitedRound(boardId, prompt, awaitTimeoutMs = AWAIT_MS) {
  * that has said it is looking). The middle state is the one the rule has to treat as
  * neither, so a stand-in that only had a boolean could not fail the way the real hub
  * can. */
-function stand() {
+/** `sse` and `notify` are overridable so the two error-handler cases below can hand
+ * `createStrandedWatch` a double that throws, without touching what a bare `stand()`
+ * gives every other check in this file -- the default hub and notifier are exactly what
+ * they were before this parameter existed. Nobody but this function may add another
+ * knob here; every other check in the file calls `stand()` with no arguments at all. */
+function stand({ notify, sse } = {}) {
   const withdrawn = [];
   const looking = new Map();
   // Per board, the instant a look-away window ENDS (ADR 73) -- an absolute stamp, not a
@@ -227,7 +232,7 @@ function stand() {
   const banners = [];
   const watch = createStrandedWatch({
     home,
-    sse: {
+    sse: sse || {
       // DERIVED from `attendedRemainingMs`, exactly as the real hub derives it
       // (src/server.mjs: `remainingMs(boardId) > 0`). Spelling it `looking.get(id) === true`
       // instead is the drift that hid a defect: the rule reads this boolean in one place
@@ -242,7 +247,7 @@ function stand() {
       // window; 0 is nobody watching.
       attendedRemainingMs: remaining,
     },
-    notify: (folder, opts) => {
+    notify: notify || ((folder, opts) => {
       // A stand-in ChildProcess, down to the one event the rule subscribes to: `exit`,
       // which is how it stops holding a handle to a reaped pid. `die()` is the check's
       // way of saying "this one exited on its own".
@@ -256,7 +261,7 @@ function stand() {
       };
       banners.push({ folder, ...opts, child });
       return child;
-    },
+    }),
     // The pid path: only reached when this daemon has no handle of its own, i.e. after an
     // unclean restart. Recorded rather than performed, because the real one sends SIGTERM.
     withdraw: (pid, startedAtMs) => withdrawn.push({ pid, startedAtMs }),
@@ -574,6 +579,89 @@ async function layerOne() {
         watch.close();
       }
     });
+  });
+
+  await check('a Watcher that becomes Attended between arming and firing gets no Banner, and the countdown is re-armed rather than dropped', async () => {
+    // The second Attended test: `announce` re-asks `attendedRemainingMs`
+    // at fire time rather than trusting what was true when the grace was armed, and this
+    // is the branch for a look-away window that is still running when it does. No race is
+    // needed to reach it -- the "same instant" is just this double answering 0 when
+    // `evaluate` arms the grace and something other than 0 when `announce` re-checks it,
+    // and nothing in between has to call anything for that to happen: `windowUntil`
+    // decays on the real clock, exactly like the hub it stands in for (ADR 73).
+    //
+    // No `withGrace` here: the file-wide grace set at the top of `layerOne` is already
+    // one millisecond, which is the grace this case needs too.
+    const { lookAway, banners, watch } = stand();
+    const board = seedBoard({ cwd: projectFor('attended-between-arm-and-fire') });
+    try {
+      watch.evaluate(board.id, target(board.id)); // nobody looking: arms the bare grace, unwindowed
+      // The double changes with NO call to evaluate -- a look-away window opens on the
+      // board between the countdown being armed and the timer firing, which is exactly
+      // what a report landing in that gap would produce.
+      lookAway(board.id, 80);
+      await tick(40); // past the 1ms grace: announce() has re-asked and found attendedFor > 0
+      assert.equal(banners.length, 0,
+        'a Watcher attended at fire time must get no Banner, even though none was attended when the grace was armed');
+
+      // THE LOAD-BEARING HALF: nothing further is called from here on -- no evaluate, no
+      // report, nothing. If `announce` had returned bare instead of re-arming on the
+      // window's remainder (the bug this branch exists to prevent), the window would now
+      // expire against nothing, because no event fires when a look-away window expires,
+      // and the round would be lost for good rather than merely delayed.
+      await tick(80); // comfortably past the 80ms window, with no further event of any kind
+      assert.equal(banners.length, 1,
+        'the round is not lost: the re-armed countdown must still fire when the window expires on its own');
+      assert.equal(bannerOn(board.id).round, 1);
+    } finally {
+      watch.close();
+    }
+  });
+
+  await check('a Watcher reported as Attended indefinitely gets no Banner and no re-arm', async () => {
+    // The inverse of the case above, and the other half of the same re-ask in `announce`:
+    // `if (attendedFor === Infinity) return;` -- nothing armed, because a tab focused
+    // RIGHT NOW is guaranteed to produce a blur, a close or an answer eventually, and each
+    // of those is an event that will call `evaluate` on its own.
+    const { looking, lookAway, banners, watch } = stand();
+    const board = seedBoard({ cwd: projectFor('attended-indefinitely-at-fire') });
+    try {
+      watch.evaluate(board.id, target(board.id)); // nobody looking yet: arms the bare grace
+      // Flipped directly, with no further evaluate() call -- same insight as above, the
+      // Infinity branch instead of a window's remainder.
+      looking.set(board.id, true);
+      await tick(40); // past the 1ms grace: announce() has re-asked and found Infinity
+      assert.equal(banners.length, 0, 'a Watcher attended indefinitely at fire time must get no Banner');
+
+      // THE "NO RE-ARM" HALF, proved through a LATER event rather than a long wait -- a
+      // wait alone cannot tell "nothing armed" apart from "something armed ~25 days out",
+      // which is exactly what a missing Infinity branch leaves behind, not a fast failure.
+      //
+      // `announce`'s first line is `pending.delete(boardId)`, so the correct branch --
+      // returning bare -- leaves `pending` EMPTY. A missing branch does not merely skip a
+      // `return`: `attendedFor > 0` is true for Infinity too, so execution falls into the
+      // OTHER branch and calls `arm(boardId, target, Infinity, true)`, which clamps to
+      // node's own ~25-day timer ceiling and puts a STALE windowed entry back in `pending`.
+      // No wait of any practical length observes that timer firing, but the entry it left
+      // behind is not invisible to the next real event. `evaluate`'s own re-arm guard --
+      //   const armed = pending.get(boardId);
+      //   if (armed && !(attendedFor === 0 && armed.windowed)) return;
+      // -- reads whatever is sitting in `pending`, and a stale windowed entry combined with
+      // a non-zero `attendedFor` (the finite window opened below) satisfies that guard and
+      // returns WITHOUT arming anything for the window that just opened. The window then
+      // expires against nothing -- no banner, ever -- which is the same permanent loss the
+      // re-arm case above exists to prevent. So "no re-arm" is proved here as "a later
+      // event can still arm": exactly what the Infinity branch's own justification claims,
+      // that a focused tab is guaranteed to produce one.
+      looking.delete(board.id);     // the tab is no longer focused...
+      lookAway(board.id, 40);       // ...but hasn't closed either -- a plain blur, buried briefly
+      watch.evaluate(board.id, target(board.id)); // the ordinary event a blur produces
+      await tick(80); // comfortably past grace + the 40ms window
+      assert.equal(banners.length, 1,
+        'a later event must still be able to arm: a stale entry left behind by a missing Infinity branch blocks it forever, and the round is never announced');
+    } finally {
+      watch.close();
+    }
   });
 
   await check('criterion 3: returning kills the click-serving process with SIGTERM and leaves the mark standing', async () => {
@@ -1297,6 +1385,139 @@ process.exit(0);
     }
   });
 
+  await check('when the Board is deleted before persist re-reads it, the write reports failure, no Banner is claimed as recorded, and nothing throws', async () => {
+    // `persist`'s other failure branch, never exercised until now: `const fresh =
+    // readBoard(board.id, home); if (!fresh) return false;`. The failed-write check above
+    // breaks the STORE (chmod on boards/), which fails `writeBoard` from inside persist's
+    // own try/catch; this breaks the BOARD instead, so `readBoard` returns null cleanly
+    // (ENOENT) and `!fresh` returns false with nothing thrown at all.
+    //
+    // `announce` reads the board once (`boardOf`, from the timer callback) and hands that
+    // object to `persist`, which reads it AGAIN before writing -- both inside the same
+    // synchronous callback, with `notify` the only call in between the two reads. Deleting
+    // the board is therefore sequenced through `notify`: `stand()`'s own notify pushes the
+    // fake banner onto `banners` before handing back the fake child, so overriding just
+    // that array's `push` -- not `stand()` itself, which stays exactly as the next owner
+    // needs it -- lands the delete precisely between announce's read and persist's re-read.
+    // Ordering chosen, not a race provoked.
+    const { banners, watch } = stand();
+    const board = seedBoard({ cwd: projectFor('deleted-before-persist') });
+    const boardFile = path.join(home, 'boards', `${board.id}.json`);
+    const originalPush = banners.push.bind(banners);
+    banners.push = (...args) => {
+      rmSync(boardFile, { force: true });
+      return originalPush(...args);
+    };
+
+    // Nothing may throw here: `announce` runs from a timer callback with no
+    // caller's `try` left around it (see `persist`'s own comment on exactly this), so an
+    // uncaught throw there is an uncaught exception at the top of the event loop -- the
+    // thing that would take bin/daemon.mjs down. Asserted never to fire, and the listener
+    // comes off again in the `finally` so it does not linger for the rest of this file.
+    let uncaught = null;
+    const onUncaught = err => { uncaught = err; };
+    process.on('uncaughtException', onUncaught);
+    // The load-bearing capture. `persist`'s own `catch` is a backstop that ALSO returns
+    // `false` -- for a THROWN failure, not a clean give-up -- so the return value, the
+    // `unpersisted` fallback and the disk read the same whether the `!fresh` guard runs
+    // or the guard is gone and `fresh[STRANDED_BANNER] = ...` throws a TypeError on
+    // `null` that the same `catch` swallows. Silence is the only thing that tells the two
+    // apart: the guard's own comment calls a deleted board an ordinary outcome ("there is
+    // nothing to record on"), while the `catch` path always prints `could not record the
+    // stranded banner`. Without this capture, every assertion above still holds with the
+    // guard deleted outright, and the case stays green for the wrong reason.
+    const said = [];
+    const realError = console.error;
+    console.error = (...args) => said.push(args.join(' '));
+    try {
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+      assert.equal(banners.length, 1, 'the banner still fires: notify runs before the write is even attempted');
+      assert.ok(!existsSync(boardFile), 'the board really is gone by the time persist re-reads it');
+      assert.equal(uncaught, null, 'nothing throws when the write finds no document left to write to');
+      assert.ok(!said.some(line => line.includes(board.id)),
+        `a board deleted before persist re-reads it is handled silently, not logged as a failure -- got: ${JSON.stringify(said)}`);
+
+      // "no Banner is claimed as recorded": there is no document, so nothing on disk can
+      // say so. Restore the file as a recovery would leave it -- the original board, no
+      // banner on it, exactly what `writeBoard(board, home)` here recreates -- and show
+      // that THIS daemon still remembers announcing anyway, via the `unpersisted`
+      // fallback that took the record's place when the document could not. Further
+      // events are further chances to announce the same absence again if that memory
+      // were not held -- the same reasoning that keeps rounds piling up behind an
+      // announced one silent, applied to a board that came back.
+      writeBoard(board, home);
+      for (let i = 0; i < 2; i++) watch.evaluate(board.id, target(board.id));
+      await tick();
+      assert.equal(banners.length, 1, 'the daemon still remembers it announced, though the document holds nothing');
+      assert.equal(bannerOn(board.id), null, 'and the restored document really does hold nothing: the write never landed');
+    } finally {
+      // The board goes back here too, and not only on the success path above: this
+      // scenario deletes a real file out from under the store, and an assertion failing
+      // before line 1435 would otherwise leave it deleted for the rest of the run. Same
+      // reasoning as `withGrace`'s own comment -- a restore that only runs when nothing
+      // went wrong turns one red check into several.
+      writeBoard(board, home);
+      console.error = realError;
+      process.off('uncaughtException', onUncaught);
+      watch.close();
+    }
+  });
+
+  await check('a return that could not be written restores the in-memory record byte for byte, not half-mutated with the gate open on a write that never landed', async () => {
+    // The restore line (`board[STRANDED_BANNER] = saved;`) puts the object `returned` was
+    // holding back to exactly what it was before the gate was opened on it. The check
+    // above this one already proves the DOCUMENT is untouched by a failed write; this one
+    // is about the in-memory copy the rule was holding when the write failed -- that it
+    // goes back rather than being left as `{ ...saved, returned: true, pid: null }` on a
+    // gate that was never recorded anywhere.
+    //
+    // `board` is `returned`'s own local variable, discarded the moment the function
+    // returns, and nothing the watch exposes -- the document, `banners`, `withdrawn` --
+    // can tell "restored" from "half-mutated" apart from the outside: both paths return
+    // before touching any of those again, so both leave the whole watch looking
+    // identical. The only honest way to see it is to hold the SAME object `readBoard`
+    // hands `returned`, since a mutation in place is visible through any reference to it,
+    // discarded or not -- so this spies on `JSON.parse`, the one synchronous seam every
+    // `readBoard` call passes through, for the single parse of this board's own file.
+    // That changes no behaviour of `stranded.mjs` or `stand()`; it is restored in the
+    // `finally` either way, exactly like the chmod it runs alongside.
+    const { looking, banners, watch } = stand();
+    const board = seedBoard({ cwd: projectFor('half-mutated-return') });
+    const boardsDir = path.join(home, 'boards');
+    const mode = statSync(boardsDir).mode;
+    const originalParse = JSON.parse;
+    let captured = null;
+    try {
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+      assert.equal(banners.length, 1);
+      const before = bannerOn(board.id);
+
+      chmodSync(boardsDir, 0o500);
+      JSON.parse = function (text, ...rest) {
+        const result = originalParse.call(this, text, ...rest);
+        // The one parse of THIS board's file triggered by the evaluate below is
+        // `returned`'s own `boardOf` read -- the exact object it goes on to mutate and,
+        // on a failed write, restore.
+        if (result && result.id === board.id && captured === null) captured = result;
+        return result;
+      };
+      looking.set(board.id, true); // the reviewer comes back, but the gate cannot be written
+      watch.evaluate(board.id, target(board.id)); // synchronous straight through to `returned`
+      JSON.parse = originalParse;
+      await tick();
+
+      assert.ok(captured, 'the rule never read the board through JSON.parse, so this check proves nothing');
+      assert.deepEqual(captured[STRANDED_BANNER], before,
+        'the in-memory record goes back byte for byte -- pid and returned and all -- rather than staying half-mutated with the gate open on a write that never landed');
+    } finally {
+      JSON.parse = originalParse;
+      chmodSync(boardsDir, mode);
+      watch.close();
+    }
+  });
+
   await check('a child that exits on its own is let go of, rather than kept as a reaped pid', async () => {
     const { banners, withdrawn, watch } = stand();
     const board = seedBoard();
@@ -1538,6 +1759,142 @@ process.exit(0);
     // The guards refuse rather than throw, on a path where throwing would reach a timer.
     for (const args of [[0, Date.now()], [-1, Date.now()], [1, Date.now()], [12345, NaN], [12345, undefined]]) {
       assert.doesNotThrow(() => withdrawClickChild(...args), `withdrawClickChild(${args}) must be a silent no-op`);
+    }
+  });
+
+  await check('when raising a Banner throws, announce contains it: no uncaught exception, the failure is reported, the watch stays usable, and a later round on another board still announces', async () => {
+    // `announce` is a timer callback (see its own header comment): by the time it runs,
+    // the request handler's try/catch that used to surround this code is long gone, so an
+    // uncaught throw here is an uncaught exception at the top of the event loop -- and
+    // bin/daemon.mjs answers one of those by exiting, taking every blocked `ask` on the
+    // machine with it. This is "raising a Banner throws" specifically (the notifier, not
+    // readPomodoroDoc or the write beside it), which is why the double throws only from
+    // `notify` and lets everything else `announce` does run normally.
+    const prevListeners = process.listeners('uncaughtException');
+    process.removeAllListeners('uncaughtException');
+    let uncaught = null;
+    process.on('uncaughtException', err => { uncaught = err; });
+    const said = [];
+    const realError = console.error;
+    console.error = (...args) => said.push(args.join(' '));
+    let watch;
+    try {
+      const brokenBoard = seedBoard({ cwd: projectFor('poison-notify') });
+      const okBoard = seedBoard({ cwd: projectFor('poison-notify-recovers') });
+      const banners = [];
+      // Throws only for the poisoned board's own folder, so the SAME double can also
+      // prove the third observation: a genuinely different board, raised through the
+      // same watch, still gets a real banner rather than being wedged by the first one's
+      // failure. A double that always throws could not tell "the watch survived" apart
+      // from "nothing downstream of it ever runs again".
+      const notify = (folder, opts) => {
+        if (folder === 'poison-notify') throw new Error('notifier is on fire');
+        const child = {
+          pid: 4242, killed: [], onExit: null,
+          kill(sig) { this.killed.push(sig); },
+          once(event, fn) { if (event === 'exit') this.onExit = fn; },
+          die() { this.onExit && this.onExit(); },
+        };
+        banners.push({ folder, ...opts, child });
+        return child;
+      };
+      ({ watch } = stand({ notify }));
+
+      watch.evaluate(brokenBoard.id, target(brokenBoard.id));
+      await tick();
+
+      assert.equal(uncaught, null, 'a throwing notifier must not surface as an uncaught exception');
+      assert.ok(said.some(s => s.includes('stranded banner') && s.includes(brokenBoard.id)),
+        `the failure must be REPORTED via console.error, not silently swallowed -- a handler that says nothing is a different defect than one that rethrows: ${JSON.stringify(said)}`);
+
+      // The watch stays usable. `evaluate` only ARMS a timer -- the throw lives in
+      // `announce`, on that timer's own callback -- so a synchronous doesNotThrow around
+      // `evaluate` alone would pass whether or not `announce` still catches anything and
+      // prove nothing. Re-entering `announce` on the SAME poisoned board is what actually
+      // observes containment a second time: the failed notify above never got as far as
+      // writing `board[STRANDED_BANNER]`, so nothing here suppresses a second attempt --
+      // `evaluate` re-arms, the grace elapses, `announce` runs and throws again, and
+      // `uncaught` staying null across BOTH throws is the genuine proof that the watch
+      // survived the first one rather than merely not exploding synchronously.
+      watch.evaluate(brokenBoard.id, target(brokenBoard.id));
+      await tick();
+      assert.equal(uncaught, null, 'the watch stays usable: a second announce on the same poisoned board must not surface as an uncaught exception either');
+      assert.ok(said.filter(s => s.includes('stranded banner') && s.includes(brokenBoard.id)).length >= 2,
+        'and the second failure is reported too, not silently swallowed once the first one has already fired');
+
+      // A later round on ANOTHER board -- its own project directory, its own banner --
+      // still announces, proving the throw did not wedge the watch for every board
+      // sharing it.
+      watch.evaluate(okBoard.id, target(okBoard.id));
+      await tick();
+      assert.equal(banners.length, 1, 'a later round on another board still announces');
+      assert.equal(banners[0].folder, 'poison-notify-recovers', 'and it is a genuinely different board, not the same one retried');
+    } finally {
+      watch?.close();
+      console.error = realError;
+      process.removeAllListeners('uncaughtException');
+      for (const l of prevListeners) process.on('uncaughtException', l);
+    }
+  });
+
+  await check('when the socket close path throws, evaluate contains it: no uncaught exception, the failure is reported, the watch stays usable, and a later round on another board still announces', async () => {
+    // `evaluate` is what a socket's own close handler calls (src/server.mjs's `cleanup`),
+    // with no request frame and no caller's try left around it -- same consequence as
+    // `announce` above if it ever rethrows. `evaluate` is the entry point, so the throw
+    // has to come from something it calls directly rather than from `boardOf`, which
+    // already has its own catch: `sse.attendedRemainingMs` is the very first thing it
+    // reads, which is exactly what a hub gone bad would fail on.
+    const prevListeners = process.listeners('uncaughtException');
+    process.removeAllListeners('uncaughtException');
+    let uncaught = null;
+    process.on('uncaughtException', err => { uncaught = err; });
+    const said = [];
+    const realError = console.error;
+    console.error = (...args) => said.push(args.join(' '));
+    let watch;
+    try {
+      const brokenBoard = seedBoard({ cwd: projectFor('poison-hub') });
+      const okBoard = seedBoard({ cwd: projectFor('poison-hub-recovers') });
+      // Throws only for the poisoned board's id, so the same hub double can also answer
+      // truthfully -- "nobody attending" -- for any other board, which is what lets the
+      // third observation be a real announce rather than a second throw.
+      const sse = {
+        attendedRemainingMs: id => {
+          if (id === brokenBoard.id) throw new Error('hub is on fire');
+          return 0;
+        },
+      };
+      let banners;
+      ({ banners, watch } = stand({ sse }));
+
+      // A bare `evaluate(boardId)`, the way the close handler in src/server.mjs's
+      // `cleanup` drives it. `evaluate` reads `sse.attendedRemainingMs` synchronously as
+      // its very first act, so -- unlike the announce case above -- this doesNotThrow
+      // really does reach the throw and observe it contained, with no timer in between.
+      assert.doesNotThrow(() => watch.evaluate(brokenBoard.id),
+        'evaluate must never rethrow -- it runs from a socket close handler with no caller\'s try left, and an uncaught throw there is an uncaught exception at the top of the event loop');
+      await tick();
+
+      assert.equal(uncaught, null, 'a throwing hub must not surface as an uncaught exception');
+      assert.ok(said.some(s => s.includes('stranded rule') && s.includes(brokenBoard.id)),
+        `the failure must be REPORTED via console.error, not silently swallowed -- a handler that says nothing is a different defect than one that rethrows: ${JSON.stringify(said)}`);
+
+      // The watch stays usable: asking it about the very board whose hub just threw does
+      // not itself throw. Genuinely reached, for the same reason as above -- no timer
+      // sits between this call and `sse.attendedRemainingMs` throwing again.
+      assert.doesNotThrow(() => watch.evaluate(brokenBoard.id), 'the watch stays usable after the throw');
+
+      // A later round on ANOTHER board -- its own project directory, its own banner --
+      // still announces.
+      watch.evaluate(okBoard.id, target(okBoard.id));
+      await tick();
+      assert.equal(banners.length, 1, 'a later round on another board still announces');
+      assert.equal(banners[0].folder, 'poison-hub-recovers', 'and it is a genuinely different board, not the same one retried');
+    } finally {
+      watch?.close();
+      console.error = realError;
+      process.removeAllListeners('uncaughtException');
+      for (const l of prevListeners) process.on('uncaughtException', l);
     }
   });
 
