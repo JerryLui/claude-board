@@ -3694,6 +3694,126 @@ async function main() {
     assert.equal(mode(path.join(home, 'pages', `${boardId}.html`)), 0o600);
   });
 
+  // --- GET /api/waiting: the boards waiting for an answer ---------------
+  //
+  // The one route a client with no DOM has for "which boards owe the reviewer a trip"
+  // (SPEC_MENUBAR.md). "Waiting" is `roundIsAwaitedOpen` -- the round has an OPEN WAIT --
+  // and the three checks below are the three ways that differs from the readings next to
+  // it: an answered round drops out, a round whose wait LAPSED drops out while staying
+  // open, and neither depends on anyone being attached to the board.
+  //
+  // Every assertion is scoped to a board this section posted itself, never to `total` or
+  // to the length of the list: this file runs one daemon over one store for its whole
+  // length, and a good half of the checks above leave awaited rounds behind in it.
+
+  await check('WAITING: GET /api/waiting is gated exactly like every other read, and answers the secret and the cookie alike', async () => {
+    // It hands back a title and a project folder for every live thread in the store,
+    // which is the same harvest the read gate exists to refuse -- so `isOpenRoute` must
+    // not grow an entry for it. (Ablation: add `/api/waiting` to isOpenRoute and the
+    // first assertion here fails while nothing else in the suite notices.)
+    const none = await rawRequest(port, 'GET', '/api/waiting', `127.0.0.1:${port}`);
+    assert.equal(none.status, 401, 'the waiting list must not answer a caller holding nothing');
+    assert.ok(!none.body.includes('boardId'), 'and the refusal must not leak a single entry');
+
+    const withSecret = await rawRequest(port, 'GET', '/api/waiting', `127.0.0.1:${port}`, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.equal(withSecret.status, 200, 'the secret header alone is enough -- what a native client sends');
+    assert.match(withSecret.headers['content-type'] || '', /application\/json/);
+
+    // The browser's own credential works too, so the index page could read this route
+    // without a second kind of authorization being invented for it.
+    const withCookie = await rawRequest(port, 'GET', '/api/waiting', `127.0.0.1:${port}`, { headers: { cookie: sessionCookieHeader() } });
+    assert.equal(withCookie.status, 200, 'the session cookie alone must read it, same as every other GET');
+  });
+
+  await check('WAITING: a round with an open wait is listed by board, thread, title and round number -- and answering it takes it off the list', async () => {
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'WAITING_FIXTURE',
+        cwd: projectDir('waiting-titled'),
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+
+    // A second board with NO title at all: what the entry falls back to is decided here
+    // rather than by each client, because the only other candidate -- the folder name --
+    // would mean handing out an absolute path from the reader's machine to derive it.
+    const folder = 'waiting-untitled';
+    const untitled = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        cwd: projectDir(folder),
+        blocks: [{ kind: 'question', prompt: 'And this one?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+
+    const before = Date.now();
+    const body = await (await fetch(`${base}/api/waiting`)).json();
+    const after = Date.now();
+
+    // Same clock-offset contract GET /api/pomodoro carries, for the same reason: a client
+    // computing "how long is left" must not be doing it against its own wall clock.
+    assert.ok(typeof body.now === 'number' && body.now >= before && body.now <= after, `now (${body.now}) must be the server's own clock, taken at response time (window ${before}-${after})`);
+    assert.equal(body.total, body.waiting.length, 'total describes what was actually sent -- the route caps nothing, so the two can never differ');
+
+    const entry = body.waiting.find(e => e.boardId === posted.boardId);
+    assert.ok(entry, 'a question round posted seconds ago is waiting for an answer by construction');
+    assert.equal(entry.thread, posted.thread, 'the thread, so a client can group a session\'s boards the way the index does');
+    assert.equal(entry.title, 'WAITING_FIXTURE');
+    assert.equal(entry.round, 1, 'the round NUMBER -- what "thread title, round N" is rendered from');
+    assert.equal(entry.url, `http://127.0.0.1:${port}/b/${posted.boardId}`, 'and a URL that opens the board, so no client has to know how to build one');
+
+    const untitledEntry = body.waiting.find(e => e.boardId === untitled.boardId);
+    assert.ok(untitledEntry, 'a title-less board is still waiting for an answer');
+    assert.equal(untitledEntry.title, folder, 'a board with no title falls back to its project folder, exactly as the index row does');
+
+    // Answered: the round closes, and a closed round is not waiting for anything. No
+    // /wait is connected here on purpose -- whether an agent is listening is not what
+    // this list is about.
+    const q = readBoard(posted.boardId, home).blocks.find(b => b.kind === 'question').id;
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+
+    const afterAnswer = await (await fetch(`${base}/api/waiting`)).json();
+    assert.ok(!afterAnswer.waiting.some(e => e.boardId === posted.boardId), 'an answered round must leave the list');
+    assert.ok(afterAnswer.waiting.some(e => e.boardId === untitled.boardId), 'and the board nobody answered must still be on it');
+  });
+
+  await check('WAITING: a round whose wait has LAPSED is off the list, even though the round is still open', async () => {
+    // The distinction that makes this list worth having: "waiting" is an open WAIT, not
+    // an unanswered round. A lapsed round is still `status: 'open'` on disk forever -- it
+    // is `readBoard`'s sweep (closeLapsedAwaitedRounds) that clears `awaited`, which is
+    // why the route needs no clock of its own. (Ablation: filter on `status === 'open'`
+    // instead of roundIsAwaitedOpen and only this check fails.)
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'WAITING_LAPSED',
+        blocks: [{ kind: 'question', prompt: 'Too late?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+
+    const listedWhileAlive = await (await fetch(`${base}/api/waiting`)).json();
+    assert.ok(listedWhileAlive.waiting.some(e => e.boardId === posted.boardId), 'setup: it has to be on the list before the deadline is moved, or this proves nothing');
+
+    // Rewind the deadline past now, straight to disk -- the same way the lapsed-wait
+    // checks above reach a state that would otherwise cost a real 40-minute wait.
+    const boardFile = path.join(home, 'boards', `${posted.boardId}.json`);
+    const raw = JSON.parse(readFileSync(boardFile, 'utf8'));
+    raw.rounds[0].awaitDeadline = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(boardFile, JSON.stringify(raw, null, 2));
+
+    const afterLapse = await (await fetch(`${base}/api/waiting`)).json();
+    assert.ok(!afterLapse.waiting.some(e => e.boardId === posted.boardId), 'a wait that has died is not something the reviewer can still answer');
+    assert.equal(readBoard(posted.boardId, home).rounds[0].status, 'open', 'and it left the list without the round being closed -- an open, unanswered round it is simply too late to answer');
+  });
+
   // --- the pomodoro HTTP surface ---------------------------------------
   //
   // GET /api/pomodoro, POST /api/pomodoro/{ensure,pause,resume,reset,settings}. See

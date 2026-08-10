@@ -65,6 +65,29 @@
  * a stranded banner that fails to activate it (entry 75) can trigger, must start no
  * second daemon over the same store. See the check itself for the full reasoning.
  *
+ * The daemon is not the only thing supervised here. `claude-board --menubar` — this same
+ * bundle executable, forked and exec'd a SECOND time — is the macOS status item (ADR 72,
+ * bin/menubar.m). It is a second child rather than a second bundle because a second bundle
+ * costs a second permanent LaunchServices record, and a second PROCESS rather than a run
+ * loop in this one because this process forks node and blocks in waitpid, which is close
+ * to uncrashable, and menu bar code is not. The same fork-and-exec rule the daemon gets
+ * applies, for a second reason on top of the TCC one: CoreFoundation and the Objective-C
+ * runtime are documented-unsafe in a forked child that has not exec'd, and the status item
+ * is AppKit. Exec'ing THIS binary is not the thing the TCC rule forbids — the rule is
+ * about exec'ing node, which would replace this bundle's code identity with node's inside
+ * the same pid; exec'ing the bundle's own executable arrives at the identity it started
+ * with. The path for it comes from _NSGetExecutablePath(), never from argv[0], for the
+ * same reason CLAUDE_BOARD_NODE is compiled in rather than read: a caller must not get to
+ * choose what runs under an identity the reader granted their Documents folder to.
+ *
+ * The two children are supervised differently, on purpose. node dying is the job failing,
+ * so its exit status is this process's exit status and launchd's KeepAlive decides what
+ * happens next. A --menubar child dying is the menu bar failing: it is reaped and NOT
+ * restarted (ADR 72 — a crash in menu bar code kills the menu bar alone), and this process
+ * carries on supervising node as if nothing happened. The one thing it must not do is
+ * outlive this process, so it is killed on the way out and a `bootout` leaves nothing
+ * behind.
+ *
  * One thing this binary does besides supervise node: `claude-board --notify <phase>
  * [arg]` posts a notification and exits, without forking anything. That mode exists
  * here, in the file whose whole subject is not spending the grant, because a
@@ -100,7 +123,7 @@
  * from fire-and-exit into something that lives for minutes: argv[4] is the board URL a
  * click opens, argv[5] is the daemon's own bound port, which that URL must name, and
  * argv[6] is how many seconds this process may wait for that click (ADR.md entry 57).
- * All three are filtered here — is_board_url, parse_port and click_seconds_from —
+ * All three are filtered here — cb_is_board_url, parse_port and click_seconds_from —
  * before any of them reaches bin/notify.m, and none carries a credential: the URL is a
  * plain board URL and the browser's own session is what authorizes it, which is the
  * whole reason a click minutes later is servable at all without putting a secret on a
@@ -108,11 +131,15 @@
  */
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
+#include <mach-o/dyld.h>  /* _NSGetExecutablePath: the --menubar child execs THIS binary */
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Generated into the build directory by install.sh: CLAUDE_BOARD_NODE and
@@ -209,7 +236,7 @@ static int build_passthrough_entry(const char *name, char **out) {
  * `board_url` non-NULL is what turns this from fire-and-exit into the click-serving mode
  * of ADR.md entry 57: the notification carries an action category, this process stays
  * alive to serve one click, and `click_seconds` bounds how long it will wait (ignored
- * when `board_url` is NULL). It has already passed is_board_url below -- notify.m does
+ * when `board_url` is NULL). It has already passed cb_is_board_url below -- notify.m does
  * no filtering of its own. Returns 0 on success. */
 extern int cb_notify(const char *title, const char *body, const char *cue_name, int use_default_sound,
                      const char *board_url, int click_seconds);
@@ -225,6 +252,51 @@ static const char *const NOTIFY_AUTHORIZE_FLAG = "--notify-authorize";
  * the same reason they are file-scope literals rather than something built at runtime. */
 static const char *const LAUNCHD_MARKER_NAME = "CLAUDE_BOARD_LAUNCHD_MARKER";
 static const char *const LAUNCHD_MARKER_VALUE = "1";
+
+/* --- The --menubar mode ---------------------------------------------------------
+ *
+ * Implemented in bin/menubar.m, compiled into this same binary and declared here for the
+ * same reasons cb_notify is: one caller, one definition, one build. Unlike the notify
+ * modes it takes nothing from argv at all — the flag IS the whole argument — because
+ * everything the status item needs it reads from the daemon over loopback, and the two
+ * things it needs to get there (HOME, for the local secret, and CLAUDE_BOARD_PORT) reach
+ * it through the same envp the daemon is handed below.
+ *
+ * Returns 0 on a clean stop, so a `bootout` that kills this child does not look like a
+ * crash in the log. It runs a run loop and does not return until it is signalled, which
+ * is why it is only ever entered in a child of the fork below, never here.
+ *
+ * cb_menubar_probe is that mode's test seam, and it is the ONE thing the flag takes
+ * arguments for: `--menubar --probe` does a single fetch, prints the display state it
+ * derives and the popover's own rows, and exits without drawing anything. It exists
+ * because the drawing half has no headless check available to it (SPEC_MENUBAR.md,
+ * Testing), so everything interesting is kept in pure functions and this is how a node
+ * check reaches them. Gated on a SECOND argv word specifically so the supervised path
+ * cannot reach it: the fork below execs this binary with exactly one argument, and there
+ * is nowhere else `--probe` could come from.
+ *
+ * The two optional words after it are that seam's two shapes, and neither is reachable
+ * without `--probe`:
+ *
+ *   --menubar --probe <action>     perform ONE of the popover's own actions and then
+ *                                  report, which is how criterion 4 ("every one takes
+ *                                  effect") is checkable at all. bin/menubar.m matches
+ *                                  the word against its own closed table and posts a
+ *                                  compiled-in route literal, so no argv byte reaches a
+ *                                  URL -- the same discipline MESSAGES applies above.
+ *   --menubar --probe url <candidate>  print whether cb_is_board_url would let the
+ *                                  popover open that URL. The one way to check
+ *                                  criterion 6's refusal without a real daemon that can
+ *                                  be made to emit a bad URL.
+ *
+ * Passed straight through as `argc`-guarded pointers rather than parsed here: this file
+ * knows neither vocabulary, and splitting the validation across two files is how one of
+ * the two halves ends up trusting the other's. */
+extern int cb_menubar(void);
+extern int cb_menubar_probe(const char *word, const char *argument);
+
+static const char *const MENUBAR_FLAG = "--menubar";
+static const char *const MENUBAR_PROBE_FLAG = "--probe";
 
 /* The cue-name argument's own filter, standing in for a closed table the way MESSAGES
  * stands in for the phase argument below. It cannot be a literal enumeration: the cue
@@ -305,7 +377,16 @@ static int is_safe_folder_name(const char *s) {
  * genuine claude-board banner open somebody else's page. The daemon knows the port it
  * bound and already fills this argv, so there is nothing to read out of the environment
  * for it -- which matters, since the environment is the one place a rewritable plist
- * reaches and this file therefore never trusts. */
+ * reaches and this file therefore never trusts.
+ *
+ * NOT static, and the `cb_` prefix says why: bin/menubar.m's popover opens a board URL
+ * too (SPEC_MENUBAR.md criterion 6), against a URL it read out of `GET /api/waiting`
+ * rather than out of argv, and it calls THIS function to decide whether it may. There is
+ * one board-URL pattern in the product and it is here -- a second one in Objective-C
+ * would be a second opinion about what `/b/../../etc` means, and the two would drift on
+ * the first day one of them was tightened. Declared `extern` at the top of bin/menubar.m
+ * on the same footing as cb_notify and cb_menubar: one definition, one build, a
+ * two-argument signature checkable against the other file by eye. */
 #define MAX_BOARD_URL_LEN 200
 
 /* Case-insensitive compare of a bounded span against a lowercase literal. Host names
@@ -339,7 +420,7 @@ static int is_loopback_host(const char *host, size_t len) {
 }
 
 /* The daemon's own bound port, from argv. 0 for anything that is not a port, which
- * is_board_url below then refuses every URL against -- a malformed port must cost the
+ * cb_is_board_url below then refuses every URL against -- a malformed port must cost the
  * click rather than skip the check it exists to make. */
 static int parse_port(const char *s) {
   if (s == NULL) return 0;
@@ -354,7 +435,7 @@ static int parse_port(const char *s) {
   return value;
 }
 
-static int is_board_url(const char *s, int expected_port) {
+int cb_is_board_url(const char *s, int expected_port) {
   if (expected_port < 1 || expected_port > 65535) return 0;
   size_t len = strlen(s);
   if (len == 0 || len >= MAX_BOARD_URL_LEN) return 0;
@@ -519,26 +600,85 @@ static const int FORWARDED[] = { SIGTERM, SIGINT, SIGHUP, SIGQUIT };
 static const int FORWARDED_N = (int)(sizeof(FORWARDED) / sizeof(FORWARDED[0]));
 
 static volatile sig_atomic_t child_pid = 0;
+/* The --menubar child, or 0 for "there is not one" — which is the state before the fork,
+ * after that child has been reaped (it is not restarted, see main()), and permanently on
+ * any machine where this process could not learn its own path. Cleared on reap rather than
+ * left stale, because pids are recycled and a stale one is a kill aimed at a stranger. */
+static volatile sig_atomic_t menubar_pid = 0;
 
-/* launchd signals the job; the job is this process, not the node it is holding open. Left
- * unforwarded, `launchctl bootout` would reap the launcher and leave the daemon running
- * with the port still bound — and the next bootstrap would fail on a port in use by a
- * process nothing is supervising any more. */
+/* launchd signals the job; the job is this process, not the children it is holding open.
+ * Left unforwarded, `launchctl bootout` would reap the launcher and leave the daemon
+ * running with the port still bound — and the next bootstrap would fail on a port in use
+ * by a process nothing is supervising any more. The status item is forwarded the same
+ * signal for the tidier half of the same reason: an item left on the menu bar with no
+ * supervisor behind it is a control that no longer drives anything. */
 static void forward(int sig) {
+  /* Nothing to do about a failure here: a child is either already gone (ESRCH, which is
+   * the outcome we wanted) or this process is about to die anyway. */
   if (child_pid > 0) {
-    /* Nothing to do about a failure here: the child is either already gone (ESRCH, which
-     * is the outcome we wanted) or this process is about to die anyway. */
     (void)kill((pid_t)child_pid, sig);
   }
+  if (menubar_pid > 0) {
+    (void)kill((pid_t)menubar_pid, sig);
+  }
+}
+
+/* Run in a child between fork() and execve(), for both children. A child must face
+ * launchd's signals with its own dispositions, not this launcher's: a node that inherited
+ * a blocked SIGTERM would ignore the stop it is being asked to perform, and KeepAlive
+ * would then be restarting a daemon that never shuts down cleanly. The same is true of the
+ * status item, which installs handlers of its own the moment it starts (bin/menubar.m) and
+ * would never see them fire through an inherited block. Reset first, unblock second —
+ * dispositions do not survive execve anyway, but the mask does, and the reset also covers
+ * the window before the exec and the case where the exec fails. */
+static void reset_signals_for_child(const sigset_t *previous) {
+  struct sigaction dfl;
+  memset(&dfl, 0, sizeof(dfl));
+  dfl.sa_handler = SIG_DFL;
+  sigemptyset(&dfl.sa_mask);
+  for (int i = 0; i < FORWARDED_N; i++) {
+    (void)sigaction(FORWARDED[i], &dfl, NULL);
+  }
+  (void)sigprocmask(SIG_SETMASK, previous, NULL);
+}
+
+/* Stop the status item and reap it, on the way out of main(). Not optional tidiness: this
+ * process exiting reparents anything it left running to launchd, so a --menubar child that
+ * outlived a `bootout` would be an item on the menu bar with nothing behind it and no job
+ * to boot out a second time.
+ *
+ * Bounded, then SIGKILL, rather than a plain blocking waitpid. The daemon's own restart is
+ * on the other side of this call — node exiting is what brings main() here, and launchd's
+ * KeepAlive cannot bring it back until this process has actually exited — so a status item
+ * wedged in AppKit would otherwise hold the daemon down with it, which is the exact
+ * coupling ADR 72 exists to prevent. Two seconds is far longer than a run loop needs to
+ * notice a flag and far shorter than launchd's own exit timeout. */
+static void stop_menubar_child(void) {
+  if (menubar_pid <= 0) return;
+  pid_t mb = (pid_t)menubar_pid;
+  (void)kill(mb, SIGTERM);
+  for (int i = 0; i < 40; i++) {
+    if (waitpid(mb, NULL, WNOHANG) == mb) {
+      menubar_pid = 0;
+      return;
+    }
+    struct timespec nap = { 0, 50 * 1000 * 1000 };  /* 50ms */
+    (void)nanosleep(&nap, NULL);
+  }
+  (void)kill(mb, SIGKILL);
+  (void)waitpid(mb, NULL, 0);
+  menubar_pid = 0;
 }
 
 int main(int argc, char **argv) {
   /* Before anything else, and before a single line of the supervising path below runs:
-   * the notify modes fork nothing, exec nothing, and install no handlers. They are also
-   * the only reason this binary reads argv at all — everything the supervising path uses
-   * is compiled in, which is the point of the whole file. An unrecognised argument falls
-   * through to supervising node, exactly as an argv-less invocation always has, because
-   * launchd's invocation is the one that must never depend on getting argv right. */
+   * the notify modes fork nothing, exec nothing, and install no handlers, and --menubar
+   * forks and execs nothing either — it installs its own handlers and becomes a run loop.
+   * They are also the only reason this binary reads argv at all — everything the
+   * supervising path uses is compiled in, which is the point of the whole file. An
+   * unrecognised argument falls through to supervising node, exactly as an argv-less
+   * invocation always has, because launchd's invocation is the one that must never depend
+   * on getting argv right. */
   if (argc >= 2 && strcmp(argv[1], NOTIFY_AUTHORIZE_FLAG) == 0) {
     /* Unaffected by any of the above -- no phase, so no row and no title to pick, and
      * nothing to click either. */
@@ -570,14 +710,14 @@ int main(int argc, char **argv) {
          * must name, and the lifetime that bounds serving it (ADR.md entry 57) -- read
          * here rather than beside the cue above because a fixed-message row has nothing
          * to open: a pomodoro boundary is an event, not a place. A URL that fails
-         * is_board_url is treated as absent, so the banner still fires and simply cannot
+         * cb_is_board_url is treated as absent, so the banner still fires and simply cannot
          * be clicked -- the same degradation the clone install lives with permanently
          * (criterion 19), and the same shape is_safe_folder_name already applies to the
          * name. The port is required and the lifetime is not: without a port there is
          * nothing to check the URL against, while without a lifetime there is a
          * compiled-in default that is still bounded. */
         const char *board_url =
-            (argc >= 6 && is_board_url(argv[4], parse_port(argv[5]))) ? argv[4] : NULL;
+            (argc >= 6 && cb_is_board_url(argv[4], parse_port(argv[5]))) ? argv[4] : NULL;
         int click_seconds = click_seconds_from(argc >= 7 ? argv[6] : NULL);
         return cb_notify(MESSAGES[i].title, body, NULL, 1, board_url, click_seconds);
       }
@@ -592,6 +732,41 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "claude-board: unrecognised notify phase\n");
     return 1;
+  }
+  if (argc >= 2 && strcmp(argv[1], MENUBAR_FLAG) == 0) {
+    /* The status item (ADR 72, bin/menubar.m). Reached only as the second child of the
+     * fork below, which execs this binary with exactly this one argument -- but it is
+     * checked here rather than smuggled through some private channel because the identity
+     * that matters is the bundle's, and a mode of the bundle executable is the only shape
+     * that keeps it. Nothing is read from argv beyond the flag itself, and the one word
+     * that may follow it is the probe seam described above — never anything launchd or
+     * the fork below could supply. */
+    if (argc >= 3 && strcmp(argv[2], MENUBAR_PROBE_FLAG) == 0) {
+      return cb_menubar_probe(argc >= 4 ? argv[3] : NULL, argc >= 5 ? argv[4] : NULL);
+    }
+    return cb_menubar();
+  }
+
+  /* This binary's own path, which the --menubar child below execs. From dyld, not from
+   * argv[0]: argv[0] is whatever the caller felt like putting there, and this file's whole
+   * subject is that nothing a caller can write gets to choose what runs under an identity
+   * the reader granted their Documents folder to.
+   *
+   * Taken as dyld hands it over, with no realpath(): launchd invokes this by the absolute
+   * path in the plist, which is the spelling macOS made its TCC decision about, and this
+   * OS has several equally canonical spellings of any path under a home directory (APFS
+   * firmlinks — QUIRKS.md). Canonicalising would be trading a path known to work for one
+   * nobody has measured. A relative spelling, which only a hand-run launcher can produce,
+   * still execs correctly because nothing here ever chdir()s.
+   *
+   * Failing is not fatal and must not be: an install with no status item is the same
+   * install a machine with no compiler gets, and the daemon is the part that matters. */
+  char self_path[PATH_MAX];
+  uint32_t self_path_size = (uint32_t)sizeof(self_path);
+  int have_self_path = (_NSGetExecutablePath(self_path, &self_path_size) == 0);
+  if (!have_self_path) {
+    fprintf(stderr, "claude-board: cannot determine this executable's own path — "
+                    "running without the menu bar item\n");
   }
 
   /* ADR.md entry 76: past this point is the supervising path -- it is about to fork node
@@ -661,11 +836,12 @@ int main(int argc, char **argv) {
     sigaddset(&forwarded_set, FORWARDED[i]);
   }
 
-  /* Handlers are installed BEFORE the fork and the forwarded signals blocked ACROSS it,
-   * which closes a window that is small and entirely real: a SIGTERM landing after the
-   * fork but before `child_pid` is assigned would run the handler against a child_pid of
-   * 0, forward nothing, and orphan a daemon that still holds the port. Blocked, the
-   * signal waits until the assignment is done and the mask is restored. */
+  /* Handlers are installed BEFORE the forks and the forwarded signals blocked ACROSS both
+   * of them, which closes a window that is small and entirely real: a SIGTERM landing
+   * after a fork but before that child's pid is assigned would run the handler against a
+   * pid of 0, forward nothing, and orphan a daemon that still holds the port — or, for the
+   * second child, a status item nothing will ever stop. Blocked, the signal waits until
+   * both assignments are done and the mask is restored. */
   if (sigprocmask(SIG_BLOCK, &forwarded_set, &previous) != 0) {
     fprintf(stderr, "claude-board: cannot block signals: %s\n", strerror(errno));
     return 1;
@@ -705,18 +881,9 @@ int main(int argc, char **argv) {
   }
 
   if (pid == 0) {
-    /* The child must face launchd's signals with node's own dispositions, not this
-     * launcher's: a node that inherited a blocked SIGTERM would ignore the stop it is
-     * being asked to perform, and KeepAlive would then be restarting a daemon that never
-     * shuts down cleanly. Reset first, unblock second. */
-    struct sigaction dfl;
-    memset(&dfl, 0, sizeof(dfl));
-    dfl.sa_handler = SIG_DFL;
-    sigemptyset(&dfl.sa_mask);
-    for (int i = 0; i < FORWARDED_N; i++) {
-      (void)sigaction(FORWARDED[i], &dfl, NULL);
-    }
-    (void)sigprocmask(SIG_SETMASK, &previous, NULL);
+    /* See reset_signals_for_child: node must face launchd's signals with its own
+     * dispositions, not this launcher's. */
+    reset_signals_for_child(&previous);
 
     /* child_argv, not argv: main() now takes an argv of its own (the notify modes at the
      * top read it), and what the child execs must stay compiled-in — this array shadowing
@@ -735,25 +902,76 @@ int main(int argc, char **argv) {
   }
 
   child_pid = pid;
+
+  /* The second child: the status item (ADR 72). Inside the same blocked window as the
+   * first, and assigned to menubar_pid before the mask is restored, for the reason stated
+   * above the sigprocmask.
+   *
+   * Everything about it that could fail is survivable and none of it is fatal: no
+   * self path, a refused fork, or an exec that cannot find this binary all leave a running
+   * daemon and no menu bar item, which is exactly the shape of install a machine with no
+   * compiler gets (SPEC criterion 13). The daemon is never made to wait on any of it. */
+  if (have_self_path) {
+    pid_t menubar = fork();
+    if (menubar < 0) {
+      fprintf(stderr, "claude-board: cannot fork the menu bar item: %s\n", strerror(errno));
+    } else if (menubar == 0) {
+      reset_signals_for_child(&previous);
+      /* self_path, not argv[0], and the same envp node gets: HOME is what makes the local
+       * secret findable and CLAUDE_BOARD_PORT is what names the daemon, and neither should
+       * come from a parent environment this file refuses to trust for the daemon. */
+      char *const menubar_argv[] = { self_path, (char *)MENUBAR_FLAG, NULL };
+      execve(self_path, menubar_argv, envp);
+      fprintf(stderr, "claude-board: cannot exec %s %s: %s\n", self_path, MENUBAR_FLAG,
+              strerror(errno));
+      _exit(127);
+    } else {
+      menubar_pid = menubar;
+    }
+  }
+
   if (sigprocmask(SIG_SETMASK, &previous, NULL) != 0) {
     fprintf(stderr, "claude-board: cannot restore the signal mask: %s\n", strerror(errno));
     /* Not fatal: the daemon is up and serving. Losing signal forwarding costs a clean
      * bootout, which is worth strictly less than the running daemon it would kill. */
   }
 
+  /* waitpid(-1), not waitpid(pid): with two children, waiting on the daemon alone would
+   * leave a dead status item unreaped as a zombie for as long as this job runs. What is
+   * waited FOR is still the daemon — a --menubar child that dies is reaped and forgotten,
+   * never restarted (ADR 72: a crash in menu bar code kills the menu bar alone), and this
+   * loop goes back to waiting for node as if nothing happened. */
   int status = 0;
-  while (waitpid(pid, &status, 0) < 0) {
-    /* SA_RESTART does not cover waitpid on every path, and a handler firing mid-wait is
-     * the normal case here rather than an exotic one. */
-    if (errno != EINTR) {
+  for (;;) {
+    int reaped_status = 0;
+    pid_t reaped = waitpid(-1, &reaped_status, 0);
+    if (reaped < 0) {
+      /* SA_RESTART does not cover waitpid on every path, and a handler firing mid-wait is
+       * the normal case here rather than an exotic one. */
+      if (errno == EINTR) continue;
       fprintf(stderr, "claude-board: waitpid failed: %s\n", strerror(errno));
+      stop_menubar_child();
       return 1;
+    }
+    if (reaped == pid) {
+      status = reaped_status;
+      break;
+    }
+    if (menubar_pid > 0 && reaped == (pid_t)menubar_pid) {
+      /* Cleared so nothing later signals a recycled pid, and left at 0 so it is never
+       * started again for the life of this job. */
+      menubar_pid = 0;
+      fprintf(stderr, "claude-board: the menu bar item exited; the daemon is unaffected\n");
     }
   }
 
+  stop_menubar_child();
+
   /* launchd reads the exit status, and the daemon can exit deliberately: a clean
    * shutdown on SIGTERM is a 0 it chose, not a crash. Reporting the child's status
-   * rather than a flat 0 is what keeps that decision the daemon's to make. */
+   * rather than a flat 0 is what keeps that decision the daemon's to make — the DAEMON's,
+   * specifically: the status item's exit code never reaches here, or a menu bar crash
+   * would be indistinguishable to launchd from the daemon failing. */
   if (WIFSIGNALED(status)) {
     return 128 + WTERMSIG(status);
   }

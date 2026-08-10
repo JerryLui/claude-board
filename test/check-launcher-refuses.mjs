@@ -27,6 +27,10 @@ import { spawnSync } from 'node:child_process';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const launcherSrc = path.join(repoRoot, 'bin', 'launcher.c');
 const notifySrc = path.join(repoRoot, 'bin', 'notify.m');
+// The launcher is one binary out of three sources since ADR.md entry 72 put the status
+// item in it, so a check that links only two gets an undefined cb_menubar and fails at
+// the build rather than at the thing it is about.
+const menubarSrc = path.join(repoRoot, 'bin', 'menubar.m');
 const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
 
 if (spawnSync(ccCmd, ['--version']).error) {
@@ -89,10 +93,13 @@ writeFileSync(headerPath, [
 
 const launcherExec = path.join(workDir, 'launcher');
 const notifyObj = path.join(workDir, 'notify.o');
+const menubarObj = path.join(workDir, 'menubar.o');
 const notifyBuild = spawnSync(ccCmd,
   ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', notifyObj, notifySrc], { encoding: 'utf8' });
-const build = notifyBuild.status !== 0 ? notifyBuild : spawnSync(ccCmd,
-  ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj,
+const menubarBuild = notifyBuild.status !== 0 ? notifyBuild : spawnSync(ccCmd,
+  ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', menubarObj, menubarSrc], { encoding: 'utf8' });
+const build = menubarBuild.status !== 0 ? menubarBuild : spawnSync(ccCmd,
+  ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj, menubarObj,
    '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' });
 
 async function main() {

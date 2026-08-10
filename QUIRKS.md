@@ -743,6 +743,28 @@ event loop the daemon needs to answer, so the child times out and the check fail
 `promisify(execFile)` and `await` it. `test/check-install.mjs` gets away with
 `spawnSync` because its daemon is a separate process.
 
+### An orphaned grandchild holding a `spawn`'s pipes makes the whole check file hang, silently
+
+A check that `spawn`s a process which itself forks children — `test/check-launcher-menubar.mjs`
+runs `bin/launcher.c`, which forks node and the `--menubar` item — has to kill the
+grandchildren, and has to enumerate them BEFORE killing their parent. SIGKILL is the one
+stop the launcher cannot clean up after, so anything still listed as its child a moment
+later has already been reparented to launchd and is unfindable by `pgrep -P`.
+
+The symptom is not a stray process, which would at least be visible. It is node itself
+refusing to exit: the orphans still hold the stdout/stderr pipes the `spawn` created, so
+those streams never see EOF, they stay as active handles, and the check file hangs after its
+last assertion — under `test/run.mjs` that is a 180s timeout, and run alone with output
+piped anywhere it is a command that produces **no output at all**, because the pipe never
+closes. Nothing in that presentation points at processes. Enumerate, kill the parent, kill
+the enumerated strays, and `destroy()` both streams for good measure.
+
+`kill(pid, 0)` cannot help here either: it answers "still there" for a zombie as happily as
+for a live process, so a check asserting that a child was *reaped* has to ask `ps -o stat=`
+and compare against `''`, not `'Z'`. (Ablation, measured: revert `bin/launcher.c`'s
+`waitpid(-1, …)` to `waitpid(pid, …)`, kill the item, and `ps` reports `Z` for as long as the
+job runs.)
+
 ### `writeDoc` defaults to the REAL board home, so a check that calls it without one clobbers the reader's pomodoro state
 
 `writeDoc(doc, home = boardHome())` (`src/pomodoro.mjs`). The second parameter is where the
@@ -1260,6 +1282,38 @@ makes the item appear. Also: `-[NSApp setActivationPolicy:]` returns `NO` when t
 already matches, because the BOOL means "did it change", not "did it succeed". Do not
 error-check on it.
 
+### Becoming an `NSApplication` inside a bundle registers that bundle with LaunchServices
+
+Measured while landing `bin/menubar.m`: `+[NSApplication sharedApplication]` (plus
+`setActivationPolicy:` / `finishLaunching`) from a process inside a `.app` adds an
+`lsregister` record for that bundle **on the spot** — no window, no status item, no
+daemon, nothing on screen. Withdraw with `lsregister -u`, re-run, and it comes straight
+back.
+
+That is correct and wanted for the real install, which `install.sh` registers deliberately
+anyway. It is a slow disaster for a THROWAWAY bundle, and the check suite stages and runs
+those: records are permanent, share the one bundle id, and a stale one naming a deleted
+path is the "damaged and can't be opened" dialog (see "`lsregister` records are permanent"
+above — 6908 of them once). `install.sh`'s `is_throwaway_bundle_path` guard does not help,
+because macOS is doing the registering, not the installer.
+
+Two things keep it closed, and they cover different cases:
+
+- `bin/menubar.m` does not become an application until the daemon has answered once
+  (`cb_ensure_item`), so a bundle whose daemon never answers registers nothing. That is
+  what `test/check-install.mjs` relies on: it runs the launcher against an already-bound
+  port, so the daemon exits and the item child never reaches AppKit at all. Structural —
+  moving those three AppKit calls back to the top of `cb_menubar` re-opens it silently.
+- `test/check-install-payload.mjs` boots a *working* install from a temp root, so its item
+  really does appear and really does register. It withdraws the record itself, after its
+  own `rm` and **in both spellings**: LaunchServices stores `/private/var/…` where
+  `tmpdir()` says `/var/…`, and `lsregister -u` given only the second one silently does
+  nothing (measured — the record survived).
+
+`uninstall.sh` skips the withdrawal for a throwaway root, and its stated reason ("install.sh
+skips REGISTERING one there") is now only half the story: it is true of the installer and
+not of macOS. It is still correct in practice only because of the first bullet.
+
 ### A main-queue `dispatch_after` never fires while a status item menu is tracking
 
 Menu tracking runs the loop in `NSEventTrackingRunLoopMode`, which a plain main-queue block
@@ -1267,10 +1321,51 @@ does not reach — a watchdog scheduled that way hangs past any timeout you gave
 in the menu bar process must be scheduled in the tracking mode too, or live off the main
 thread. This is the trap waiting for the once-a-second countdown tick.
 
+### Activating an accessory app for a popover: every obvious call is deprecated or too new
+
+A status item's `NSPopover` cannot become key — so it cannot be driven from the keyboard at
+all — unless the app is active. The two calls that come to hand both fail this repo's
+warning-free build check (`test/check-launcher-menubar.mjs` asserts empty compiler stderr):
+`-[NSApplication activateIgnoringOtherApps:]` is `API_DEPRECATED(macos(10.0, 14.0))`, and its
+named replacement `-[NSApplication activate]` does not exist before macOS 14, so an unguarded
+call to it will not build on an older SDK.
+
+What compiles clean on both: `[[NSRunningApplication currentApplication]
+activateWithOptions:NSApplicationActivateAllWindows]`. Only the *option*
+`NSApplicationActivateIgnoringOtherApps` was deprecated in 14; the method was not.
+
+### The once-a-second tick really does survive a popover being open
+
+Measured while landing ticket 05, as the positive control for the trap above: with the tick
+registered in `NSRunLoopCommonModes` and the popover shown, the countdown kept advancing
+(`Work · 24:57` → `24:56` with `popover.shown == 1`), and an action dispatched onto the poll
+queue from a button landed and repainted the popover's own line inside one second. The
+registration is what buys that; a default-mode timer would have frozen there.
+
 ### `screencapture` is unavailable from an agent process tree
 
 "could not create image from rect", sandboxed or not, for want of a Screen Recording grant.
 Visual verification of anything on screen has to go through the window-list geometry above.
+
+### A run loop with no input source does not wait — `runMode:beforeDate:` returns instantly
+
+`-[NSRunLoop runMode:beforeDate:]` returns `NO` **immediately** when the loop has no input
+source or timer attached, whatever date you hand it. The obvious long-lived idiom —
+`while (!stop_requested) [[NSRunLoop currentRunLoop] runMode:… beforeDate:now+0.25]` — is
+therefore not a quarter-second wait but a spin that burns a core until the signal arrives,
+and nothing on screen or in the logs says so. `bin/notify.m`'s `flush_run_loop` has the same
+shape and gets away with it because it runs for 0.25s total; `bin/menubar.m` lives for a
+login session and cannot.
+
+The fix is one line — `[[NSRunLoop currentRunLoop] addPort:[NSPort port]
+forMode:NSDefaultRunLoopMode]`, a Mach port nothing ever sends to — and it is worth keeping
+even once the status item installs sources of its own, so the loop's correctness does not
+depend on which AppKit object happens to be alive. Measured after: 0.0% CPU, `0:00.00` of
+CPU time across three seconds.
+
+Pace the loop with `beforeDate:` rather than with whatever the source is, too: a timer-paced
+loop notices a stop only when the timer next fires, which couples "how fast does this shut
+down" to a number chosen for something else entirely.
 
 ---
 
@@ -1424,6 +1519,27 @@ do not let that path's PREFIX leak into where you read or edit anything else —
 every tracked file's path starts with the worktree's own root, spelled out in full.
 If a `Read` result ever looks implausibly behind what `git log`/`grep` say the
 branch contains, check which checkout the path resolves to before doubting the tool.
+
+### A worktree can already hold ANOTHER ticket's uncommitted work, so a red suite is not necessarily yours
+
+Two slices of one spec handed out at the same time can land in the SAME worktree
+directory — the second brief says "your own worktree" and means it, but the path it
+resolves to is one another agent is already editing. Nothing announces this: `git status`
+is the only tell, and it reads like your own mess until you notice the modified files have
+nothing to do with your ticket.
+
+Measured: `npm run check` on ticket 01's finished work came back with four red files, three
+of them (`check-launcher-env`, `check-notify-click`, `check-install`) failing on
+`Undefined symbols: _cb_menubar` — ticket 03's half-wired `bin/menubar.m`, uncommitted in
+the shared tree. Every minute spent reading those is spent on someone else's in-flight
+edit.
+
+What settles it in one step, and is worth doing before touching anything on a suite you
+did not expect to be red: `git worktree add --detach <path> <branch>`, apply ONLY your own
+files' diff there (`git diff -- <your files> > p && git apply p`), and run the suite in
+that. It answers "is this mine" and "is the branch itself red" at once. Then
+`git worktree remove --force` it. The same tree-sharing also means `git commit -a` sweeps
+up the other agent's work: name your files explicitly on `git add`, every time.
 
 ### Scratch probe scripts belong in the worktree, not `/tmp`
 

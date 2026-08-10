@@ -110,7 +110,7 @@ function isSafeFolderName(name) {
     && SAFE_FOLDER_NAME.test(name);
 }
 
-// The click target's filter, mirroring bin/launcher.c's `is_board_url` the same way
+// The click target's filter, mirroring bin/launcher.c's `cb_is_board_url` the same way
 // isSafeFolderName mirrors its `is_safe_folder_name` (ADR.md entry 57). The C side is
 // the load-bearing one -- it is what stands between argv and LaunchServices, and it
 // runs whatever this file sends -- so this is not the boundary; it is what keeps the
@@ -283,7 +283,7 @@ export function notifyBoundary(phase, settings) {
  * answered, and when the daemon itself stops (criterion 15).
  *
  * `port` is the port the daemon ACTUALLY BOUND -- `server.address().port`, never the
- * `Host` header's idea of it. bin/launcher.c's `is_board_url` takes it as a separate
+ * `Host` header's idea of it. bin/launcher.c's `cb_is_board_url` takes it as a separate
  * argument and refuses any URL whose port disagrees, which is what stops a poisoned
  * `Host` from steering a click: the header can say anything, and the one number the
  * daemon knows from its own socket is what the filter compares it against. It fails
@@ -465,7 +465,7 @@ function fire(phase, cue, name, url = null, port = null, deadlineAt = null) {
     // A URL with no lifetime is not "a click with no deadline", it is a click bounded by
     // the launcher's own compiled-in forty minutes -- a promise this side cannot keep for
     // a round whose deadline it could not read. And a URL with no port is one the
-    // launcher's `is_board_url` cannot check against the socket the daemon actually
+    // launcher's `cb_is_board_url` cannot check against the socket the daemon actually
     // bound, which is the whole defence against a poisoned `Host` steering the click.
     // Either missing means no click: the banner still fires and still says which project
     // wants the reviewer, exactly as the clone install's does permanently (criterion 19).

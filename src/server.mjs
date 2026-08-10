@@ -53,11 +53,11 @@ import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatch
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
-import { buildThreadIndex, renderIndexPage, renderThreadRows } from './indexpage.mjs';
+import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
-import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, closeLapsedAwaitedRounds } from './badge.mjs';
+import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, closeLapsedAwaitedRounds, waitingRounds } from './badge.mjs';
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
@@ -649,7 +649,7 @@ function boardUrl(req, id) {
  * kernel rather than from anything a caller can write, and the host is the literal
  * 127.0.0.1 that `startServer` binds. The port is returned alongside the URL and not
  * merely embedded in it, because `notifyRound` passes it to the launcher as its own
- * argument: bin/launcher.c's `is_board_url` compares the two and refuses a URL whose port
+ * argument: bin/launcher.c's `cb_is_board_url` compares the two and refuses a URL whose port
  * disagrees, so the number has to come from one read of one authoritative source rather
  * than being derived twice and hoped to agree. */
 export function strandedTarget(req, id) {
@@ -1544,6 +1544,67 @@ function playPreview(cue) {
   }
 }
 
+/** `GET /api/waiting` -- every round in the store still waiting for an answer, as JSON.
+ *
+ * It exists because the thread index is HTML and nothing else answers this question: the
+ * status item (SPEC_MENUBAR.md) is a native client with no DOM to scrape, and the only
+ * other surface that knows which boards owe the reviewer a trip is a rendered page.
+ *
+ * Gated like every other read -- deliberately NOT on `isOpenRoute`'s list. What it hands
+ * back is a board's title and its project folder for every live thread in the store,
+ * which is precisely the "questions and answers of every board" the read gate was added
+ * to stop a local process from harvesting; there is no bootstrap reason for an exception
+ * here the way there is for `/api/health` and `/auth/:token`.
+ *
+ * The whole list, with a `total`, never a truncated one. The popover's "at most five,
+ * then an overflow row" is a rule about a popover's maximum height, so it belongs to
+ * whoever is drawing the popover -- a cap applied here would silently be the cap for
+ * every future client, and a client that wanted to say "and 7 more" would then have no
+ * number to say it with.
+ *
+ * `now` is the server's own clock, for the same reason `sendPomodoro` below sends it: a
+ * client's wall clock is not the daemon's, and one that computes an offset once from a
+ * response it already had to make can then reason about every deadline the daemon mints
+ * without ever trusting its own `Date.now()`. */
+function handleWaiting(req, res, home) {
+  // One walk of the store, and every board read through `readBoard` -- which is what
+  // applies `closeLapsedAwaitedRounds` (src/store.mjs's own comment), so a round whose
+  // wait died is already un-flagged before `waitingRounds` ever sees it. That is the
+  // whole handling of the lapsed case: no clock here, and no second sweep.
+  const boards = listBoards(home);
+  // Newest board first, matching how the thread index orders its own live rows, so a
+  // client that shows the first few and links the rest to `/` shows the same few the
+  // index puts at the top. `stamp` and not `String(...)`: an `updatedAt` that is missing
+  // stringifies to "undefined", which collates ABOVE every ISO timestamp and would put a
+  // hand-edited board at the head of the list forever (the same trap buildThreadIndex
+  // documents in src/indexpage.mjs).
+  const stamp = b => (typeof b.updatedAt === 'string' ? b.updatedAt : '');
+  boards.sort((a, b) => stamp(b).localeCompare(stamp(a)));
+  const waiting = [];
+  for (const board of boards) {
+    for (const round of waitingRounds(board)) {
+      waiting.push({
+        boardId: board.id,
+        // The thread, so a client can group two board docs of one session the way the
+        // index does rather than presenting them as two unrelated rows.
+        thread: board.thread,
+        // The same headline the index row uses, resolved HERE rather than left to the
+        // client: title, else the project's folder name, else a plain label. A client
+        // that had to fall back for itself would need `cwd` -- an absolute path from the
+        // reader's machine -- to do it, and this route has no reason to hand that out.
+        title: board.title || folderName(board.cwd) || '(untitled)',
+        round: round.n,
+        // Built off the `Host` this request arrived with (see `boardUrl`), which is right
+        // for a URL handed straight back to the caller that sent it: it keeps a browser
+        // on the origin it already holds a session cookie for, and a native client opens
+        // whatever it asked through.
+        url: boardUrl(req, board.id),
+      });
+    }
+  }
+  return sendJson(res, 200, { waiting, total: waiting.length, now: Date.now() });
+}
+
 /** `{ ...doc, now: Date.now() }` for every pomodoro response, write or read alike. The
  * page renders a countdown by subtracting a deadline from a clock, and the client's
  * clock is not the daemon's (a laptop's wall clock can be minutes off, and even a
@@ -1861,6 +1922,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return sendJson(res, 200, { html: rowsCache.html });
       }
 
+      // Beside `/api/search` because it is the same kind of thing: one walk of the store,
+      // answered as JSON to a client with no page. See handleWaiting for why it is not on
+      // `isOpenRoute` and why it returns everything rather than a client's first few.
+      if (req.method === 'GET' && url.pathname === '/api/waiting') {
+        return handleWaiting(req, res, home);
+      }
+
       if (req.method === 'GET' && url.pathname === '/api/search') {
         const query = url.searchParams.get('q') || '';
         const results = searchBoards(query, home).map(r => ({ ...r, url: boardUrl(req, r.boardId) }));
@@ -1941,7 +2009,7 @@ export function startServer({ home = boardHome(), port = Number(process.env.CLAU
   // restart against the same home (as the checks do) never runs two live clocks
   // against one file at once.
   //
-  // `onBoundary` fires the native notification (src/notify.mjs, ADR.md entry 72). That
+  // `onBoundary` fires the native notification (src/notify.mjs, ADR.md entry 19). That
   // module is async and swallows every failure itself, so a reader's Notification
   // Center settings can never be a reason this callback misbehaves or the clock
   // stalls. Dropping this argument is the one edit that would leave the daemon

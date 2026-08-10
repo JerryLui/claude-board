@@ -34,7 +34,7 @@
 //      read-modify-write invariant that nothing but prose protects.
 //
 // Restored the seven real pointers finding 4 left behind (`git show 603f203`), the rules catch
-// five: `standingBanner` and `terminate` in src/notify.mjs, `stillWaiting` in src/ui.mjs and
+// five: `standingBanner` and `terminate` in src/notify.mjs, `waitingRounds` in src/ui.mjs and
 // `persist` in test/check-http.mjs on rule 3, and the "its own `persist`, above" inside
 // src/server.mjs's own `commit` on rule 4. (Writing that last one out as an attribution here
 // made rule 3 report this very header, which is the check auditing itself working correctly.)
@@ -176,7 +176,7 @@ const NAME = String.raw`[A-Za-z_$][\w$]*`;
  * taken when its shape settles it: an internal camel hump or an underscore. That is what keeps
  * `src/badge.mjs's doc` and `src/theme.mjs's three` out, and it is also the one place src/ui.mjs
  * can be reached at all -- it is a template literal, so it carries no backticks anywhere in its
- * 2,976 comment lines, and `stillWaiting (src/stranded.mjs)` is the form it has to use. The
+ * 2,976 comment lines, and `waitingRounds (src/badge.mjs)` is the form it has to use. The
  * cost, stated rather than hidden: a bare lowercase single word (`persist`, `announce`) is not
  * a subject unless it is backticked. */
 const identifierShaped = name => /[a-z][A-Z]/.test(name) || name.includes('_');
@@ -455,9 +455,9 @@ check('rule 3 reports a symbol attributed to the wrong file, and passes the righ
   // RESTORED, src/ui.mjs at 603f203. The bare form, which is the only one src/ui.mjs can use: no
   // backticks in a template literal, so a rule that required them could never read the file this
   // check exists for.
-  const bare = withPlantedComment('src/ui.mjs', 'stillWaiting (src/server.mjs) asks, so the click lands on the round the');
+  const bare = withPlantedComment('src/ui.mjs', 'waitingRounds (src/theme.mjs) asks, so the click lands on the round the');
   assert.deepEqual(misattributedSymbols(bare.files).wrong,
-    [`${bare.at} attributes \`stillWaiting\` to src/server.mjs, whose code does not contain it`]);
+    [`${bare.at} attributes \`waitingRounds\` to src/theme.mjs, whose code does not contain it`]);
   // The same three sentences as they read now: silent. The first names a different symbol
   // than its ablation above, because `standingBanner` did not just move -- ADR.md entry 74
   // deleted it, and the repair for a symbol that is gone everywhere is to attribute a
@@ -465,7 +465,7 @@ check('rule 3 reports a symbol attributed to the wrong file, and passes the righ
   for (const fixed of [
     ["so a board's announced marker no longer stands for anything on screen (src/stranded.mjs's", '`nextToAnnounce`).'],
     "delivered banner when the reviewer comes back (src/stranded.mjs's `terminate`). Node",
-    'stillWaiting (src/stranded.mjs) asks, so the click lands on the round the',
+    'waitingRounds (src/badge.mjs) asks, so the click lands on the round the',
   ]) {
     assert.deepEqual(misattributedSymbols(withPlantedComment('src/notify.mjs', fixed).files).wrong, [],
       `a correct attribution must stay silent: ${JSON.stringify(fixed)}`);

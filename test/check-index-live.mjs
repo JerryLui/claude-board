@@ -115,10 +115,16 @@ function openIndexTab(port, { threads = [], query = '' } = {}) {
     const headers = { ...(opts && opts.headers), cookie: sessionCookieHeader() };
     return REAL_FETCH(target, { ...opts, headers });
   };
-  new Function('document', 'setInterval', indexScript)(document, (fn, ms) => {
+  // 'window'/'location' ride along for the same reason test/check-pomodoro-page.mjs
+  // passes them: indexScript registers a 'hashchange' listener for the settings
+  // panel the menu bar item opens, and a stand-in one parameter short of the real
+  // page throws on load rather than failing the thing under test. The window is the
+  // parsed document's own defaultView; location is a plain { hash }, empty because
+  // no check here is about the fragment.
+  new Function('document', 'setInterval', 'window', 'location', indexScript)(document, (fn, ms) => {
     intervals.push({ fn, ms });
     return intervals.length;
-  });
+  }, document.defaultView, { hash: '' });
   const poll = intervals.find(i => i.ms === 15000);
   assert.ok(poll, 'setup failure: the index must register a fifteen-second tick');
   return {

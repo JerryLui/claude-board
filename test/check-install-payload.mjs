@@ -199,14 +199,32 @@ async function runBundledLauncher() {
   }
   return {
     port,
+    pid: child.pid,
     cleanup() {
-      // Graceful first: the launcher forwards SIGTERM to the node it forked
-      // (bin/launcher.c), and both exit within bin/daemon.mjs's default 2s shutdown
-      // grace. A backstop SIGKILL after that catches anything that doesn't -- fired
-      // without waiting for it, since every port this suite uses afterward is a fresh
-      // ephemeral one rather than a reused fixed port.
+      // Graceful first: the launcher forwards SIGTERM to BOTH children it forked
+      // (bin/launcher.c -- node, and the `--menubar` item since ADR.md entry 72), and
+      // they exit within bin/daemon.mjs's default 2s shutdown grace. A backstop SIGKILL
+      // after that catches anything that doesn't -- fired without waiting for it, since
+      // every port this suite uses afterward is a fresh ephemeral one rather than a
+      // reused fixed port.
+      //
+      // The stray sweep is why this is not just two kills. Both children inherit the
+      // `pipe` stdio opened for the launcher above, so one that outlives its parent holds
+      // this check's stdout open and the process never exits -- and there are two of them
+      // to outlive it now, where the shape below was written when there was one. Enumerate
+      // the launcher's children BEFORE killing it, since a reaped parent leaves nothing to
+      // enumerate from, then kill the strays and destroy the streams.
+      let strays = [];
+      try {
+        strays = spawnSync('pgrep', ['-P', String(child.pid)], { encoding: 'utf8' })
+          .stdout.split('\n').map(s => Number(s.trim())).filter(Boolean);
+      } catch { /* pgrep absent or no children: the kills below are still correct */ }
       try { child.kill('SIGTERM'); } catch { /* already gone */ }
-      const backstop = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, 3000);
+      const backstop = setTimeout(() => {
+        for (const pid of strays) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        try { child.stdout.destroy(); child.stderr.destroy(); } catch { /* already closed */ }
+      }, 3000);
       backstop.unref();
     },
   };
@@ -257,6 +275,28 @@ async function main() {
       launcher.includes(Buffer.from(`${cloneDir}\0`, 'utf8')),
       'CLAUDE_BOARD_REPO_ROOT must carry the clone path -- src/handoff.mjs recoveryCommand() needs it to name bin/authorize.mjs correctly (see below)',
     );
+  });
+
+  await check('SPEC_MENUBAR criterion 10: the INSTALLED bundle, run the way launchd runs it, forks the status item beside the daemon', async () => {
+    // The closest this suite gets to a login: a real bundle, built and signed by
+    // install.sh, exec'd with no arguments at all -- which is exactly the invocation the
+    // plist makes, and the plist already carries RunAtLoad. What a login would add is the
+    // launchd session, and nothing in bin/launcher.c's fork path reads it.
+    // test/check-launcher-menubar.mjs owns the supervision behaviour; this one owns the
+    // claim that a real INSTALL produces it, which no compile-it-yourself check can make.
+    const d = await runBundledLauncher();
+    try {
+      const listed = spawnSync('pgrep', ['-P', String(d.pid)], { encoding: 'utf8' });
+      const kids = (listed.stdout || '').split('\n').map(s => s.trim()).filter(Boolean)
+        .map(pid => (spawnSync('ps', ['-o', 'args=', '-p', pid], { encoding: 'utf8' }).stdout || '').trim());
+      // `ps -o args=` reports what a process was EXEC'd with, so this also says the item
+      // is the bundle's own executable re-run -- not a fork that stayed in the launcher's
+      // image, which is what CoreFoundation and the ObjC runtime refuse to be used from.
+      assert.ok(kids.includes(`${execPath} --menubar`), `no --menubar child of the installed bundle; children were: ${JSON.stringify(kids)}`);
+      assert.equal(kids.length, 2, `the bundle must run exactly the daemon and the item: ${JSON.stringify(kids)}`);
+    } finally {
+      d.cleanup();
+    }
   });
 
   // --- an edit to the clone does not change what runs ----------------------------------
@@ -320,6 +360,30 @@ async function main() {
     } finally {
       d.cleanup();
     }
+  });
+
+  await check('the launcher stamp covers bin/menubar.m: editing it, and nothing else, forces a rebuild', async () => {
+    // A source left out of install.sh's LAUNCHER_STAMP is a source whose edits never
+    // rebuild the bundle -- silently, on every later `git pull && ./install.sh` -- and the
+    // reader's only symptom is a status item that stays whatever it was. The stamp exists
+    // because the OPPOSITE mistake is expensive too: a needless rebuild re-signs the
+    // bundle and silently revokes the Documents grant pinned to the old signature. So both
+    // directions are asserted here, in order: unchanged is "already current", and the one
+    // edit is a rebuild.
+    const noop = runInstall();
+    assert.equal(noop.status, 0, `stdout:\n${noop.stdout}\nstderr:\n${noop.stderr}`);
+    assert.match(noop.stdout, /already current/, 'nothing changed since the last run, so nothing may be rebuilt');
+
+    const menubarInClone = path.join(cloneDir, 'bin', 'menubar.m');
+    // A comment, so the edited source still compiles: what is under test is whether the
+    // stamp NOTICES the file, not what happens when it will not build (that is
+    // test/check-install.mjs's degraded-compile check).
+    writeFileSync(menubarInClone, `${readFileSync(menubarInClone, 'utf8')}\n/* an edit the stamp has to notice */\n`);
+
+    const after = runInstall();
+    assert.equal(after.status, 0, `stdout:\n${after.stdout}\nstderr:\n${after.stderr}`);
+    assert.match(after.stdout, /built and signed/, 'an edited bin/menubar.m must force a rebuild');
+    assert.doesNotMatch(after.stdout, /already current/, 'and must not be reported as unchanged');
   });
 
   // --- the payload digest itself: deterministic, independent of mtime and walk order ---
@@ -394,7 +458,36 @@ main()
   })
   .finally(() => {
     healthProc.kill();
+    // Withdraw the LaunchServices record this file's own runs create, before the path it
+    // names is deleted a line below. install.sh refuses to REGISTER a bundle under a
+    // throwaway root (is_throwaway_bundle_path, and test/check-install.mjs asserts it) —
+    // but macOS registers one itself the moment a process inside it becomes an
+    // NSApplication, and since ADR 72 the launcher's --menubar child does exactly that
+    // once its daemon answers. This file is the one place in the suite where that daemon
+    // really does answer from a temp root, so this is the one place that has to take the
+    // record back. Left behind it is permanent, shares the real bundle id, and names a
+    // path that is about to stop existing — which is the "claude-board.app is damaged and
+    // can't be opened" dialog arriving weeks later (QUIRKS.md, "`lsregister` records are
+    // permanent"). Best-effort by design: a machine where Apple has moved lsregister has
+    // no record to withdraw either.
+    //
+    // AFTER the rm, and in BOTH spellings, both borrowed from code that already learned
+    // this the hard way. After, for uninstall.sh's own reason for withdrawing after its
+    // rm: while the bundle is still on disk, any LaunchServices rescan in the window
+    // re-registers exactly the record being removed, and `-u` works fine on a path that
+    // no longer exists. Both spellings, because LaunchServices records `/private/var/...`
+    // where `tmpdir()` says `/var/...` — the same two test/check-install.mjs's own
+    // assertion searches for, and a withdrawal naming only one of them silently does
+    // nothing at all. Measured: naming only the `/var/...` spelling left the record in
+    // place.
+    const lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
+    const registeredApp = path.join(fakeHome, 'Applications', 'claude-board.app');
     rmSync(workDir, { recursive: true, force: true });
+    if (existsSync(lsregister)) {
+      for (const spelling of [registeredApp, path.join('/private', registeredApp)]) {
+        spawnSync(lsregister, ['-u', spelling], { timeout: 30_000 });
+      }
+    }
     if (failures) {
       console.error(`\n${failures} check(s) failed`);
       process.exit(1);

@@ -62,6 +62,30 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // default, so a reader who has never opened settings still gets round banners. See
   // roundBannersEnabled below for the read side a later chunk consults.
   notifyRounds: true,
+  // The macOS status item's two preferences (SPEC_MENUBAR.md; the item is a second
+  // process of the same bundle, ADR 72). They live in the DAEMON's document rather than
+  // in the item's own defaults for the same reason every other preference here does: the
+  // item owns no state at all -- it reads GET /api/pomodoro and drives the routes the
+  // index widget already drives -- so a preference kept on its side would be a second
+  // store, invisible to the settings panel that is the only place either of these is
+  // edited. That is also what makes "hiding the item survives a logout, and the settings
+  // panel brings it back" a property of this file and not of the item: an item that has
+  // hidden itself cannot offer a control to unhide.
+  //
+  // Two booleans and not one tri-state: a reader who hides the item keeps whichever
+  // countdown preference they had for when they bring it back. What lands in THIS file is
+  // only the storage, the validation and the round trip through the HTTP surface -- the
+  // two readers are bin/menubar.m, which polls them, and the settings panel
+  // (src/pomodoro-widget.mjs, filled by src/indexpage.mjs), which writes them.
+  //
+  // `menubarCountdown` -- does the item show the remaining time as text beside its icon.
+  // On by default: the digits are most of why the item exists, and the icon's depleting
+  // arc is what makes turning them off survivable rather than gutting.
+  menubarCountdown: true,
+  // `menubarHidden` -- has the reader hidden the item from the item's own popover. Off
+  // by default for the obvious reason, and a stale document with no key at all reads as
+  // off (normalizeDoc below), so an upgrade never starts out with a missing status item.
+  menubarHidden: false,
   // Three DIFFERENT cues -- one per phase, so the reader tells
   // work/short-break/long-break apart by ear without looking at the screen.
   cueWork: pickCue('Hero'),
@@ -367,12 +391,17 @@ export function resetTimer(doc, _now) {
 // ---------------------------------------------------------------------------------
 
 const DURATION_KEYS = ['workMin', 'breakMin', 'longBreakMin'];
-// `notify` gates a pomodoro boundary's banner; `notifyRounds` gates a Stranded round's
-// (roundBannersEnabled above) -- two independent booleans validated identically, which
-// is what "silencing one leaves the other alone" (criterion 17) comes down to at this
-// layer: neither key's presence or absence in a patch ever touches the other's stored
-// value, the same as any two unrelated keys in this loop.
-const TOGGLE_KEYS = ['notify', 'notifyRounds'];
+// Every boolean setting, validated identically and independently: `notify` gates a
+// pomodoro boundary's banner, `notifyRounds` gates a Stranded round's
+// (roundBannersEnabled above), and the two `menubar*` keys are the status item's own
+// pair. Independence is the property that matters and it is structural here, not
+// argued -- neither key's presence or absence in a patch ever touches another's stored
+// value, the same as any two unrelated keys in this loop, which is what "silencing one
+// leaves the other alone" (criterion 17) comes down to at this layer. Adding a key to
+// this list is the whole of teaching both boundaries about it: mergeSettings refuses a
+// non-boolean by name below, and normalizeDoc fills a missing or hand-mangled one in
+// from DEFAULT_SETTINGS.
+const TOGGLE_KEYS = ['notify', 'notifyRounds', 'menubarCountdown', 'menubarHidden'];
 // The three per-phase cue settings -- validated against
 // src/cues.mjs's isCue, the one place the closed set of legal values (the 14 sounds
 // macOS ships, plus `None`) is enumerated. Not re-enumerated here on purpose (this
@@ -553,10 +582,14 @@ export function normalizeDoc(parsed) {
   for (const key of ['workMin', 'breakMin', 'longBreakMin', 'longEvery']) {
     if (!isPositiveFinite(settings[key])) settings[key] = DEFAULT_SETTINGS[key];
   }
-  // Both toggles (TOGGLE_KEYS above), not just `notify` -- an older document with no
-  // `notifyRounds` key at all is exactly the "settings file written before this work
-  // existed" case the constraint names, and this loop is what makes it read as on
-  // rather than as a validation failure that would otherwise fall through to `undefined`.
+  // Every toggle (TOGGLE_KEYS above), not just `notify` -- an older document with no
+  // `notifyRounds` and no `menubar*` keys at all is exactly the "settings file written
+  // before this work existed" case the constraint names, and this loop is what makes each
+  // of them read as its own default rather than as a validation failure that would
+  // otherwise fall through to `undefined`. `undefined` is not a harmless spelling of
+  // "off" here either: it is what a client's `if (settings.menubarHidden)` reads the same
+  // as `false` and what `JSON.stringify` drops from the response entirely, so a native
+  // client asking for a key it can see in the defaults would get nothing back.
   for (const key of TOGGLE_KEYS) {
     if (typeof settings[key] !== 'boolean') settings[key] = DEFAULT_SETTINGS[key];
   }

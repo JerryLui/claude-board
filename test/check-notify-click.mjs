@@ -68,6 +68,11 @@ int cb_notify(const char *title, const char *body, const char *cue_name, int use
          use_default_sound, board_url ? board_url : "(null)", click_seconds);
   return 0;
 }
+/* The launcher's other two externs (ADR 72, bin/menubar.m), stubbed for the same reason
+   cb_notify is: launcher.c does not link without them, and nothing on the --notify branch
+   this file exercises ever calls either. */
+int cb_menubar(void) { return 0; }
+int cb_menubar_probe(void) { return 0; }
 `);
 
 const headerDir = path.join(workDir, 'header');
@@ -485,11 +490,21 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
       'install.sh builds the shipped binary; a missing framework here is a link error at install time');
   });
 
-  await check('the board-URL pattern lives in C, beside the other two argv filters', async () => {
+  await check('the board-URL pattern lives in C, beside the other two argv filters, and there is exactly one of it', async () => {
     const c = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
-    assert.match(c, /static int is_board_url\(/, 'the pattern is checked in C (ADR.md entry 57)');
+    // Not `static`, as of the menu bar item (SPEC_MENUBAR.md criterion 6): the popover's
+    // rows open a board URL too, over a URL read from GET /api/waiting rather than from
+    // argv, and they call THIS function to decide whether they may. The `cb_` prefix is
+    // what the other cross-file symbols in this binary carry (cb_notify, cb_menubar).
+    assert.match(c, /^int cb_is_board_url\(/m, 'the pattern is checked in C (ADR.md entry 57)');
     assert.match(c, /is_safe_cue_name/, 'beside the cue filter');
     assert.match(c, /is_safe_folder_name/, 'and the folder filter');
+    // One definition, and no second opinion in Objective-C: two scanners for "is this a
+    // board URL" would drift the first time either was tightened, and the one that drifted
+    // would be the one that hands a URL to LaunchServices.
+    const m = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    assert.match(m, /extern int cb_is_board_url\(/, 'the menu bar client declares it rather than reimplementing it');
+    assert.ok(!/^int cb_is_board_url\(/m.test(m), 'and does not define a second one');
   });
 
   rmSync(workDir, { recursive: true, force: true });

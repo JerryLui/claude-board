@@ -16,6 +16,7 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `bin/authorize.mjs` | the recovery command: mint a handoff and open the browser |
 | `bin/launcher.c` | launchd entry point, compiled by `install.sh` into a signed app bundle that forks the daemon, so macOS TCC has an application of ours to attribute its file reads to |
 | `bin/notify.m` | the bundle's `--notify` mode: one native notification, no `osascript` |
+| `bin/menubar.m` | the bundle's `--menubar` mode: the macOS status item, forked beside the daemon as a second child of the launcher (ADR 72) |
 | `src/store.mjs` | board JSON persistence: read, write, list, search |
 | `src/board.mjs` | the model: id minting, block normalisation, rounds, packet assembly |
 | `src/markdown.mjs` | markdown -> HTML + anchor extraction; runs in node and in the browser |
@@ -559,6 +560,11 @@ GET  /api/index/rows?q=             -> { html }: the index's thread rows, filter
                                     (ADR 77); the rows are rendered by the same function
                                     `GET /` uses, so the two cannot drift
 GET  /api/search?q=                 archive search
+GET  /api/waiting                   every round in the store with an OPEN WAIT (not merely
+                                    unanswered, and not "stranded") ->
+                                    { waiting: [{ boardId, thread, title, round, url }],
+                                      total, now }; newest board first, uncapped -- a client
+                                    showing only its first few owns that cap
 GET  /api/pomodoro                  the whole document -> { settings, cycle, cycleDate, timer, now };
                                     rolled to the current pomodoro day first, so a read
                                     never shows an interval from a day that has ended
@@ -576,7 +582,8 @@ POST /api/pomodoro/restart          re-mint the current interval's deadline to a
                                     duration (current settings); phase/cycle untouched;
                                     no-op while idle; fires no notification and no cue
 POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEvery?, notify?,
-                                    notifyRounds?, cueWork?, cueBreak?, cueLongBreak? }
+                                    notifyRounds?, menubarCountdown?, menubarHidden?,
+                                    cueWork?, cueBreak?, cueLongBreak? }
                                     merged into the stored settings, not replaced
 POST /api/pomodoro/preview          { cue } -> { ok: true }; plays a cue immediately, reads
                                     and writes nothing

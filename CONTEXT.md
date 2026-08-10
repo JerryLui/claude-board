@@ -22,7 +22,13 @@ Round 6 does not redeliver rounds 1-5. _Avoid_: turn, batch, post.
 **Awaited**: of a round, that the `ask` call which posted it is still blocked on it, so a submit
 reaches a listening agent. The property behind three surfaces — the sendable badge, the Banner,
 and the index's per-Thread count of rounds still open — until the round is sent or its wait ends.
-_Avoid_: waiting, blocking, live, pending, rounds left, outstanding.
+_Avoid_: waiting (of a round — a round is Awaited, a Board is Waiting), blocking, live, pending,
+rounds left, outstanding.
+
+**Waiting**: of a Board, that it holds at least one Awaited round still open, so an agent is
+blocked on it. The board-level counterpart of Awaited, and the unit the Status item lists and
+counts. Deliberately not Stranded: a board with a tab open in front of it is still Waiting, while
+Stranded is the narrower thing a Banner fires on. _Avoid_: unanswered, pending, open, blocked.
 
 **Lapsed**: of a round, that its wait deadline passed before an answer arrived, rather than the
 round being answered. A lapsed round is no longer Awaited and is never resumed by a repeat post.

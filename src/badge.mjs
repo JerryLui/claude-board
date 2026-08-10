@@ -205,6 +205,26 @@ export function roundIsAwaitedOpen(round) {
   return !!round && round.status === 'open' && round.awaited === true;
 }
 
+// The rounds on one board that are still waiting for an answer, in stored order.
+// ONE spelling of that question in the product, read by two unrelated callers: the
+// stranded rule (src/stranded.mjs), whose subject is a board with something waiting
+// on it and nobody looking, and `GET /api/waiting` (src/server.mjs), which is the
+// same question asked across the store for a client that wants to list them.
+//
+// It sits beside roundIsAwaitedOpen rather than in either caller because that
+// predicate is the load-bearing part: "waiting" means the round has an OPEN WAIT.
+// Not "unanswered" -- a round nobody ever waited on is settled the moment it is
+// posted and would otherwise sit in the list for days. Not "stranded" either, which
+// is this plus an absent reviewer, and would make anything built on the list a
+// second view of the banner rather than an independent one. And the third state it
+// does not have to test for is the lapsed wait: `readBoard` (src/store.mjs) runs
+// closeLapsedAwaitedRounds on every read, so a round whose deadline has passed
+// arrives carrying `awaited: false` and drops out with no clock of its own -- which
+// is why this stays a pure, `now`-free filter.
+export function waitingRounds(board) {
+  return ((board && board.rounds) || []).filter(roundIsAwaitedOpen);
+}
+
 // Everything roundIsAwaitedOpen asks, PLUS the one fact only a wall clock can
 // answer: has `awaitDeadline` already passed. This is what actually decides
 // whether a countdown may show right now (AC 6, AC 11) and whether the awaited

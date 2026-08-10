@@ -66,3 +66,5 @@ link where it is worth reading.
 | 76 | [A launch that did not come from launchd refuses to supervise](.agents/adr/0076-no-argument-launch-refuses-to-supervise.md) | 2026-08-10 | relates to 75 |
 | 77 | [The index polls for its rows](.agents/adr/0077-index-polls-for-its-rows.md) | 2026-08-10 | accepted |
 | 78 | [The `select` message is deleted; a stage may propose, never decide](.agents/adr/0078-select-message-is-deleted-a-stage-may-propose.md) | 2026-08-01 | accepted |
+| 79 | [The status item polls at the widget's cadence](.agents/adr/0079-status-item-polls-at-the-widget-s-cadence.md) | 2026-08-10 | relates to 77; relates to 72 |
+| 80 | [The status item carries no colour](.agents/adr/0080-the-status-item-carries-no-colour.md) | 2026-08-10 | relates to 72 |

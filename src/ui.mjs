@@ -4110,7 +4110,7 @@ export const ui = `
       // for. This is the same predicate the countdown and the send surface read
       // (roundIsAwaitedOpen plus a live deadline), so the page cannot disagree
       // with itself about which round is waiting; and it is what the daemon's own
-      // stillWaiting (src/stranded.mjs) asks, so the click lands on the round the
+      // waitingRounds (src/badge.mjs) asks, so the click lands on the round the
       // banner was raised about rather than on some earlier one.
       if (roundIsCurrentlyAwaited(rounds[i], now)) return rounds[i].n;
     }

@@ -54,6 +54,10 @@ const launcherSrc = path.join(repoRoot, 'bin', 'launcher.c');
 // compiles it -- separately, because -fobjc-arc is an Objective-C flag and clang says so
 // when it is handed a .c file alongside.
 const notifySrc = path.join(repoRoot, 'bin', 'notify.m');
+// The third half (ADR 72): launcher.c calls cb_menubar, so a build without this does not
+// link either. It also means every launcher run below really does fork a second child --
+// which is the point, since this suite's whole subject is what the launcher hands a child.
+const menubarSrc = path.join(repoRoot, 'bin', 'menubar.m');
 const ccCmd = process.env.CLAUDE_BOARD_CC || 'cc';
 
 if (spawnSync(ccCmd, ['--version']).error) {
@@ -133,20 +137,29 @@ writeFileSync(headerPath, [
 
 const launcherExec = path.join(workDir, 'launcher');
 const notifyObj = path.join(workDir, 'notify.o');
-const notifyBuild = spawnSync(ccCmd,
-  ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', notifyObj, notifySrc], { encoding: 'utf8' });
-const build = notifyBuild.status !== 0 ? notifyBuild : spawnSync(ccCmd,
-  ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj,
+const menubarObj = path.join(workDir, 'menubar.o');
+const objBuilds = [[notifySrc, notifyObj], [menubarSrc, menubarObj]]
+  .map(([src, obj]) => spawnSync(ccCmd,
+    ['-O2', '-Wall', '-Wextra', '-fobjc-arc', '-c', '-o', obj, src], { encoding: 'utf8' }));
+// Only linked if both objects compiled: a link attempted on top of a failed compile
+// reports a missing symbol, which names the wrong problem.
+const builds = objBuilds.some(b => b.status !== 0) ? objBuilds : [...objBuilds, spawnSync(ccCmd,
+  ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir, launcherSrc, notifyObj, menubarObj,
    // AppKit joins the two frameworks UNUserNotificationCenter needs because the click
    // -serving mode becomes an NSApplication to receive its own notification's response
    // (ADR.md entry 57, bin/notify.m). install.sh links the same three.
-   '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' });
+   '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' })];
 
 async function main() {
-  await check('the launcher compiles clean against the generated header (no warnings, same flags install.sh uses plus -Wextra)', async () => {
-    assert.equal(build.status, 0, `stdout:\n${build.stdout}\nstderr:\n${build.stderr}`);
-    assert.equal(build.stdout.trim(), '', `unexpected compiler output:\n${build.stdout}`);
-    assert.equal(build.stderr.trim(), '', `unexpected compiler warning:\n${build.stderr}`);
+  await check('every half of the launcher compiles clean against the generated header (no warnings, same flags install.sh uses plus -Wextra)', async () => {
+    // All three invocations, not just the link: a warning in notify.m or menubar.m is a
+    // warning install.sh's own -Wall build would carry forever, and checking only the
+    // last command run would never see it.
+    for (const build of builds) {
+      assert.equal(build.status, 0, `stdout:\n${build.stdout}\nstderr:\n${build.stderr}`);
+      assert.equal(build.stdout.trim(), '', `unexpected compiler output:\n${build.stdout}`);
+      assert.equal(build.stderr.trim(), '', `unexpected compiler warning:\n${build.stderr}`);
+    }
     assert.ok(existsSync(launcherExec), 'the launcher binary must exist after a clean build');
   });
   chmodSync(launcherExec, 0o755);

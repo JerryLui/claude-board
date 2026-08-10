@@ -660,7 +660,7 @@ export function amendRound(board, { blocks, cwd, title }) {
  * `openAwaitedRounds` in src/indexpage.mjs, `hasOpenRound` in src/render.mjs), so all of
  * them drop an abandoned round with no code of their own — including the stranded rule,
  * which is the load-bearing one: a round nobody is listening for is exactly what its
- * Banner exists to announce, and `stillWaiting` must stop finding this one.
+ * Banner exists to announce, and `waitingRounds` must stop finding this one.
  *
  * `awaited: false` is set here rather than left for a clock, because the wait did not
  * lapse — it was abandoned, now. `awaitDeadline` is left exactly as minted, the same way

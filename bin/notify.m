@@ -164,7 +164,7 @@ static void withdraw_own_notification(UNUserNotificationCenter *center, NSString
                  || [response.actionIdentifier isEqualToString:kOpenBoardAction];
   NSURL *url = wantsBoard ? [NSURL URLWithString:self.boardURL] : nil;
   if (url == nil) {
-    /* A dismiss, or a URL NSURL will not parse at all -- bin/launcher.c's is_board_url
+    /* A dismiss, or a URL NSURL will not parse at all -- bin/launcher.c's cb_is_board_url
      * has already refused everything that could make the second case interesting. Either
      * way the errand is over. */
     self.served = YES;
@@ -233,7 +233,7 @@ static void withdraw_own_notification(UNUserNotificationCenter *center, NSString
  * `board_url` non-NULL selects the click-serving mode described above: the notification
  * carries an action category, this process stays alive until the reviewer clicks, a
  * signal arrives, or `click_seconds` elapses, and it withdraws its own delivered
- * notification on the way out. Already filtered by bin/launcher.c's is_board_url --
+ * notification on the way out. Already filtered by bin/launcher.c's cb_is_board_url --
  * nothing here re-derives what a board URL is, so there is one such pattern in the
  * product and it is in C. NULL restores the fire-and-exit behaviour every other mode
  * has, and `click_seconds` is then unused.

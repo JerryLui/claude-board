@@ -9,7 +9,7 @@
 
 import { readBoard, writeBoard, boardHome } from './store.mjs';
 import { STRANDED_BANNER } from './board.mjs';
-import { roundIsAwaitedOpen } from './badge.mjs';
+import { roundIsAwaitedOpen, waitingRounds } from './badge.mjs';
 import { notifyRound, withdrawClickChild, CLICK_LIFETIME_MAX_MS } from './notify.mjs';
 import { readDoc as readPomodoroDoc, roundBannersEnabled } from './pomodoro.mjs';
 import { folderName } from './indexpage.mjs';
@@ -181,14 +181,12 @@ export function createStrandedWatch({
   }
 
   // CONTEXT.md's Stranded is "Awaited while its board is not Attended", so this is the
-  // Awaited half, per round: open AND minted awaited. `roundIsAwaitedOpen` (src/badge.mjs)
+  // Awaited half, per round, is exactly `waitingRounds` (src/badge.mjs), which is why
+  // this rule calls it rather than keeping a filter of its own. `roundIsAwaitedOpen`
   // is the same predicate the countdown and the read-only downgrade already read, which
   // is what makes criterion 8 hold with no code of its own -- a round that was never
   // awaited carries `awaited: false`, one already answered is no longer `open`, and one
   // whose wait lapsed was swept back to `awaited: false` by `readBoard` itself.
-  function stillWaiting(board) {
-    return ((board && board.rounds) || []).filter(roundIsAwaitedOpen);
-  }
 
   /** The record for this board, wherever it is: the board document normally, and the
    * in-memory fallback below only when the durable write failed. The document is the
@@ -208,13 +206,13 @@ export function createStrandedWatch({
    * are appended, and a round that has been answered, abandoned or lapsed never becomes
    * awaited again -- so nothing below the mark can come back needing a banner of its own.
    *
-   * `roundIsAwaitedOpen` (via `stillWaiting`) is the same predicate the countdown and the
+   * `roundIsAwaitedOpen` (via `waitingRounds`) is the same predicate the countdown and the
    * read-only downgrade already read, so "the wait ended" arrives here as a fact
    * `readBoard` has already swept, with no timer of this rule's own. */
   function nextToAnnounce(board) {
     const rec = recordOn(board);
     const mark = (rec && Number.isInteger(rec.round)) ? rec.round : 0;
-    return stillWaiting(board).find(r => r.n > mark) || null;
+    return waitingRounds(board).find(r => r.n > mark) || null;
   }
 
   /** Is there something to announce about this board, and may it be announced?

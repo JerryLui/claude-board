@@ -7983,20 +7983,40 @@ const CUE_A = ALL_CUES[1] || NO_CUE;
 const CUE_B = ALL_CUES[2] || NO_CUE;
 const CUE_C = ALL_CUES[3] || NO_CUE;
 
-const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, notifyRounds: true, cueWork: CUE_A, cueBreak: CUE_B, cueLongBreak: NO_CUE };
+// The two menubar keys ride along at their DEFAULTS here (SPEC_MENUBAR.md), so
+// every check using this fixture reads a document shaped exactly like the one the
+// daemon actually serves; the checks that are about those two keys set their own
+// values rather than leaning on these.
+const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, notifyRounds: true, cueWork: CUE_A, cueBreak: CUE_B, cueLongBreak: NO_CUE, menubarCountdown: true, menubarHidden: false };
 
 /** Parse the real renderIndexPage() output and run the real indexScript against
  * it, capturing every setInterval registration by hand (there are three: refresh's
  * own 15s poll, tickPomodoro's 1s local repaint, and fetchPomodoro's own poll) so
  * a check can fire any one of them without a real timer. Must run with
  * globalThis.fetch already stubbed (initPomodoroWidget's own fetchPomodoro() call
- * fires synchronously as part of loading). */
-function loadIndexWithPomodoro() {
+ * fires synchronously as part of loading).
+ *
+ * `window`/`location` join the two parameters this already passed, matching the
+ * `new Function('document', 'window', 'location', ui)` contract every check that
+ * drives `ui` already uses -- indexScript reads both for the settings panel's
+ * `#pomodoro-settings` fragment. The window is the document's OWN defaultView
+ * (test/dom-stand-in.mjs wires one per parsed document), so a 'hashchange' a
+ * check dispatches on `loaded.window` reaches the listener the real script
+ * registered, rather than a throwaway stub nothing is attached to. `location` is
+ * a plain `{ hash }`, the same shape this suite's other location stand-ins take;
+ * `hash` defaults to none, which is what every check that is not about the
+ * fragment wants. */
+function loadIndexWithPomodoro({ hash = '' } = {}) {
   const document = parseHTML(renderIndexPage({ threads: [] }));
   const intervals = [];
   const fakeSetInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
-  new Function('document', 'setInterval', indexScript)(document, fakeSetInterval);
-  return { document, intervals };
+  const location = { hash, pathname: '/', search: '' };
+  // A history stand-in that RECORDS rather than one that merely absorbs the call: the
+  // fragment being spent after it has been acted on is a behaviour with a consequence
+  // (the popover's second 'Settings...' works), so a check has to be able to see it.
+  const history = { calls: [], replaceState(state, title, url) { this.calls.push(url); location.hash = ''; } };
+  new Function('document', 'setInterval', 'window', 'location', 'history', indexScript)(document, fakeSetInterval, document.defaultView, location, history);
+  return { document, intervals, window: document.defaultView, location, history };
 }
 
 function pomodoroTickFn(intervals) {
@@ -8016,7 +8036,7 @@ function fetchPomodoroFn(intervals) {
   return matches[matches.length - 1].fn;
 }
 
-check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all nine settings fields present', () => {
+check('pomodoro widget: the markup is emitted in index-head-actions, beside themeToggle(), with all eleven settings fields present', () => {
   const html = renderIndexPage({ threads: [] });
   assert.match(html, /<div class="pomodoro-widget" id="pomodoro-widget">/);
   assert.match(html, /<span class="pomodoro-status" id="pomodoro-status">/);
@@ -8029,7 +8049,13 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   assert.match(html, /id="pomodoro-toggle"[^>]*aria-label="Start pomodoro"/, 'an icon-only control must name the action it performs');
   assert.match(html, /<details class="pomodoro-settings" id="pomodoro-settings">/, 'the settings panel must be a <details> -- collapsed by default with no JS required to open it');
   assert.match(html, /<form class="pomodoro-settings-form" id="pomodoro-settings-form">/);
-  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'notifyRounds', 'cueWork', 'cueBreak', 'cueLongBreak']) {
+  // One control per settings key, and the control's `name` IS the key -- which is
+  // what lets pomodoroSyncForm and onPomodoroSettingsSubmit look every field up by
+  // the same spelling the daemon stores. The two menubar keys (SPEC_MENUBAR.md)
+  // are on this list for that reason even though one of them renders as its own
+  // negation ("Show in menu bar"): the inversion is in the ticked STATE, never in
+  // the name.
+  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'notifyRounds', 'cueWork', 'cueBreak', 'cueLongBreak', 'menubarCountdown', 'menubarHidden']) {
     assert.match(html, new RegExp(`name="${field}"`), `settings form must carry a ${field} field`);
   }
   // The retired boolean ("not kept as a master mute") must be
@@ -8424,6 +8450,33 @@ await checkAsync('a running, unpaused break or long break swaps the index tab to
   }
 });
 
+// Criterion 14 (SPEC_MENUBAR.md) as its own line, not as one row of the table
+// above: the criterion is a REGRESSION line, and a table row is easy to edit away
+// while the table still passes. The spec's own Open Questions record why it costs
+// nothing to satisfy -- renderPomodoroGlyph only ever mounts REST_ICON under
+// pomodoroIsResting, which idle (timer === null) cannot satisfy, so idle has
+// always drawn the muted tomato and the menu bar item is the surface that has to
+// come to it. What this pins is that it STAYS that way while the item is built
+// against it: both surfaces read idle as one shape.
+await checkAsync('criterion 14 (SPEC_MENUBAR.md): idle draws the muted tomato and never the rest glyph, in the server-rendered markup and after the first fetch alike', async () => {
+  const nowMs = Date.now();
+  const idle = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  // The server-rendered slot first: no script has run at all here, and this is
+  // what a reader sees for the whole first round trip.
+  const served = parseHTML(renderIndexPage({ threads: [] }));
+  assert.deepEqual(pomodoroGlyphPaths(served), TOMATO_PATHS, 'the slot must be server-rendered with the tomato -- the first paint is idle too');
+  let document;
+  await withPomodoroFetch(() => idle, async () => {
+    ({ document } = loadIndexWithPomodoro());
+    await flushPomodoro();
+  });
+  const paths = pomodoroGlyphPaths(document);
+  assert.deepEqual(paths, TOMATO_PATHS, 'idle must draw the tomato');
+  assert.notDeepEqual(paths, REST_PATHS, 'and specifically NOT the rest glyph -- the two bars mean "a break is running", which idle is not');
+  const icon = document.querySelector('span#pomodoro-icon-slot .pomodoro-icon');
+  assert.equal(icon.classList.contains('pomodoro-icon-amber'), false, 'muted, not amber: idle has nothing to turn up for');
+});
+
 await checkAsync('before the first pomodoro fetch resolves, the tab and the header stay exactly as server-rendered -- never flicker through the rest mark even though the (stubbed, not-yet-answered) daemon reports a break the moment it does answer', async () => {
   const nowMs = Date.now();
   const restingDoc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
@@ -8625,7 +8678,7 @@ await checkAsync('pomodoro widget: reset needs two clicks -- the first only rela
   }
 });
 
-await checkAsync('pomodoro widget: submitting the settings form posts all nine fields to /api/pomodoro/settings, and the response is applied back into the form', async () => {
+await checkAsync('pomodoro widget: submitting the settings form posts all eleven fields to /api/pomodoro/settings, and the response is applied back into the form', async () => {
   const nowMs = Date.now();
   const initial = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   // Rotated relative to POMODORO_SETTINGS (CUE_A/CUE_B/None), not just three
@@ -8634,7 +8687,11 @@ await checkAsync('pomodoro widget: submitting the settings form posts all nine f
   // flipped to false OPPOSITE notify (which goes false too here) so a bug that wired
   // the two checkboxes to the same underlying value, rather than two independent ones,
   // would still show up as a mismatch against POMODORO_SETTINGS' own notifyRounds: true.
-  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, notifyRounds: false, cueWork: CUE_B, cueBreak: NO_CUE, cueLongBreak: CUE_C };
+  // Both menubar keys leave their defaults too (SPEC_MENUBAR.md), and in OPPOSITE
+  // directions: the countdown goes off, the item stays shown. A patch that dropped
+  // either -- or that wired the pair to one underlying value -- fails the deepEqual
+  // below rather than passing on a coincidence.
+  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, notifyRounds: false, cueWork: CUE_B, cueBreak: NO_CUE, cueLongBreak: CUE_C, menubarCountdown: false, menubarHidden: false };
   const saved = { ...initial, settings: savedSettings };
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? saved : initial), async () => {
@@ -8650,13 +8707,17 @@ await checkAsync('pomodoro widget: submitting the settings form posts all nine f
     form.querySelector('select[name="cueWork"]').value = CUE_B;
     form.querySelector('select[name="cueBreak"]').value = NO_CUE;
     form.querySelector('select[name="cueLongBreak"]').value = CUE_C;
+    form.querySelector('input[name="menubarCountdown"]').checked = false;
+    // TICKED, and the expectation above is menubarHidden: false -- the control is
+    // "Show in menu bar", the key is the negation of it.
+    form.querySelector('input[name="menubarHidden"]').checked = true;
     form.dispatchEvent(new StandInEvent('submit'));
     await flushPomodoro();
   });
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'submitting must POST');
   assert.equal(post.url, '/api/pomodoro/settings');
-  assert.deepEqual(post.body, savedSettings, 'all nine settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, notifyRounds, cueWork, cueBreak, cueLongBreak');
+  assert.deepEqual(post.body, savedSettings, 'all eleven settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, notifyRounds, cueWork, cueBreak, cueLongBreak, menubarCountdown, menubarHidden');
   // Applied back, not merely echoed: re-reading the form after the response
   // shows the daemon's own saved value, proving the round trip is real -- for
   // both a duration field and one cue field (each picker is its
@@ -8939,6 +9000,171 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
   });
 });
 
+// =================================================================================
+// SPEC_MENUBAR.md ticket 02 -- the settings panel's two menu bar controls, and the
+// fragment the item's "Settings..." row opens the panel on. Criterion 14's own
+// regression line sits with the other glyph checks further up, beside the states
+// it is about.
+// =================================================================================
+
+check('the settings panel carries its own captioned group for the menu bar, in the same hairline + caption idiom every other section uses', () => {
+  const html = renderIndexPage({ threads: [] });
+  // One hairline per section boundary. The absolute count belongs to the panel's own
+  // shape check below (SPEC_BOUNDARY.md's captioned-sections assertion), which is what
+  // fails if a section is added or dropped; what this line is about is that the menu bar
+  // group did not invent a second idiom to separate itself with.
+  assert.equal((html.match(/<hr class="pomodoro-settings-divider">/g) || []).length, 4, 'the menu bar group needs a hairline like every other section -- no fold, no tab, no new idiom');
+  assert.match(html, /<div class="pomodoro-settings-caption">Menu bar<\/div>/);
+  // The exact visible labels, and that each wraps the field it names. Not an
+  // attribute-agnostic substring: which control the reader is ticking is the
+  // whole of what these two rows have to get right.
+  assert.match(html, /<label class="pomodoro-field pomodoro-field-check">Countdown<input type="checkbox" name="menubarCountdown"[ >]/, 'the countdown control must be labelled by what the reader sees in the menu bar, not by its key name');
+  assert.match(html, /<label class="pomodoro-field pomodoro-field-check">Show in menu bar<input type="checkbox" name="menubarHidden"[ >]/, 'the hide preference must render as a POSITIVE -- a box labelled "Hidden" that you tick to make something appear is backwards, and this row is the only way back once the item is gone');
+  assert.doesNotMatch(html, /pomodoro-field[^>]*">Hidden</, 'no negative spelling of the same control may render alongside or instead of it');
+  // Reuses the classes the existing checkboxes already carry -- no new class, and
+  // therefore no new CSS rule for the orphan-class check above to fail on.
+  const menubarRows = [...html.matchAll(/<label class="([^"]*)">[^<]*<input type="checkbox" name="menubar[A-Za-z]+"/g)].map(m => m[1]);
+  assert.equal(menubarRows.length, 2, 'setup failure: expected exactly two menubar rows');
+  for (const cls of menubarRows) assert.equal(cls, 'pomodoro-field pomodoro-field-check', 'both rows must wear the same classes the Notify checkboxes already do');
+  // The group sits inside the panel, and Reset stays where it was: criterion 8
+  // says the panel is where Reset lives, and this slice does not move it.
+  const captionIdx = html.indexOf('<div class="pomodoro-settings-caption">Menu bar</div>');
+  const actionsIdx = html.indexOf('<div class="pomodoro-settings-actions">');
+  const resetIdx = html.indexOf('id="pomodoro-reset"');
+  assert.ok(captionIdx > -1 && actionsIdx > captionIdx && resetIdx > actionsIdx, 'the menu bar group must sit inside the panel, above the Save/Reset row -- and Reset must still be in the panel at all');
+});
+
+await checkAsync('pomodoro widget: both menu bar controls sync from the daemon\'s stored settings, and the "Show in menu bar" box is the INVERSE of menubarHidden', async () => {
+  const nowMs = Date.now();
+  // The state a reader who hid the item from its own popover is in: hidden true,
+  // countdown false. A sync that read the stored value straight through would tick
+  // "Show in menu bar" for a HIDDEN item -- the reader would then untick it to try
+  // to bring it back and store hidden: true a second time.
+  const hidden = { settings: { ...POMODORO_SETTINGS, menubarCountdown: false, menubarHidden: true }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => hidden, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const form = document.querySelector('form#pomodoro-settings-form');
+    assert.equal(form.querySelector('input[name="menubarCountdown"]').checked, false, 'the countdown box must sync to its own stored value');
+    assert.equal(form.querySelector('input[name="menubarHidden"]').checked, false, 'a HIDDEN item must show "Show in menu bar" UNTICKED -- ticked means shown');
+  });
+  // ...and the ordinary state, so this cannot pass by both boxes being stuck off.
+  const shown = { settings: { ...POMODORO_SETTINGS, menubarCountdown: true, menubarHidden: false }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => shown, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const form = document.querySelector('form#pomodoro-settings-form');
+    assert.equal(form.querySelector('input[name="menubarCountdown"]').checked, true);
+    assert.equal(form.querySelector('input[name="menubarHidden"]').checked, true, 'a SHOWN item must show the box ticked');
+  });
+});
+
+await checkAsync('pomodoro widget: unticking "Show in menu bar" saves menubarHidden: true through the same settings patch every other field uses -- no second save path', async () => {
+  const nowMs = Date.now();
+  const initial = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const calls = await withPomodoroFetch(() => initial, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const form = document.querySelector('form#pomodoro-settings-form');
+    // The opposite arrangement to the eleven-field check above, which ticks it:
+    // between the two, both directions of the one inversion in this form are
+    // pinned, which is the half most likely to be got backwards.
+    form.querySelector('input[name="menubarHidden"]').checked = false;
+    form.querySelector('input[name="menubarCountdown"]').checked = true;
+    form.dispatchEvent(new StandInEvent('submit'));
+    await flushPomodoro();
+  });
+  const posts = calls.filter(c => c.method === 'POST');
+  assert.equal(posts.length, 1, 'exactly one write, and it is the settings patch -- not a second route of its own');
+  assert.equal(posts[0].url, '/api/pomodoro/settings');
+  assert.equal(posts[0].body.menubarHidden, true, 'unticking "Show in menu bar" must store hidden: TRUE');
+  assert.equal(posts[0].body.menubarCountdown, true, 'and the countdown box must carry its own value straight through, uninverted');
+});
+
+// Criterion 7 (SPEC_MENUBAR.md): "A 'Settings...' item opens the index page's
+// existing pomodoro panel." The item navigates the browser to
+// http://127.0.0.1:7391/#pomodoro-settings, so the panel has to open itself --
+// deliberately NOT left to the browser's own fragment-auto-expand for a closed
+// <details>, which is recent and unevenly shipped.
+await checkAsync('criterion 7 (SPEC_MENUBAR.md): loading the index page on the #pomodoro-settings fragment opens the panel, filled, and brings it into view', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro({ hash: '#pomodoro-settings' });
+    const panel = document.querySelector('details#pomodoro-settings');
+    // Not yet: the opening fetch has not settled, and pomodoroSyncForm never
+    // writes into an OPEN panel -- opening it here would strand the reader in
+    // front of a panel whose every field is blank until they close it again.
+    assert.notEqual(panel.open, true, 'the panel must not open before the first fetch has filled the form');
+    await flushPomodoro();
+    assert.equal(panel.open, true, 'the fragment must open the panel once the values are in it');
+    assert.equal(String(document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value), '25', 'and it must open onto the daemon\'s actual values, not a blank form');
+    assert.equal(panel.scrollIntoViewCallCount, 1, 'a panel that opened offscreen is indistinguishable from one that did not open');
+  });
+});
+
+await checkAsync('pomodoro widget: an ordinary index load opens nothing -- only the fragment does', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = document.querySelector('details#pomodoro-settings');
+    assert.notEqual(panel.open, true, 'the settings panel stays collapsed by default -- the fragment is the only thing that opens it');
+    assert.equal(panel.scrollIntoViewCallCount, 0, 'and nothing scrolls the page on an ordinary load');
+  });
+});
+
+await checkAsync('criterion 7 (SPEC_MENUBAR.md): the fragment arriving in a tab already open on the index -- a hashchange, never a load -- opens the panel too', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const loaded = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = loaded.document.querySelector('details#pomodoro-settings');
+    assert.notEqual(panel.open, true, 'setup failure: expected a closed panel before the fragment arrives');
+    // A real browser updates location first, then fires the event.
+    loaded.location.hash = '#pomodoro-settings';
+    loaded.window.dispatchEvent(new StandInEvent('hashchange'));
+    assert.equal(panel.open, true, 'a tab already on this page sees only the hash change, so that alone has to open the panel');
+    // The panel has been syncing all along while closed, so it opens on current
+    // values with no extra fetch of its own.
+    assert.equal(String(loaded.document.querySelector('form#pomodoro-settings-form input[name="workMin"]').value), '25');
+  });
+});
+
+await checkAsync('criterion 7 (SPEC_MENUBAR.md): the fragment is SPENT once it has opened the panel, so a second `Settings...` into the same tab still works', async () => {
+  // The failure this pins is silent and second-use-only: a browser handed a URL a tab is
+  // already parked on surfaces that tab and fires no 'hashchange', so a reader who opened
+  // Settings, closed the panel, and clicked Settings again would get nothing at all. Only
+  // reachable through a real browser's tab reuse, which is why the fix is asserted here as
+  // "the hash was cleared" rather than by driving the browser behaviour that needs it.
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const loaded = loadIndexWithPomodoro({ hash: '#pomodoro-settings' });
+    await flushPomodoro();
+    const panel = loaded.document.querySelector('details#pomodoro-settings');
+    assert.equal(panel.open, true, 'setup failure: the fragment must have opened the panel');
+    assert.deepEqual(loaded.history.calls, ['/'],
+      'the fragment must be replaced (never pushed, and never by assigning location.hash, which would fire the event this handler stands in for)');
+    assert.equal(loaded.location.hash, '', 'and the tab must no longer be parked on the fragment it has already acted on');
+  });
+});
+
+await checkAsync('pomodoro widget: a hashchange to any OTHER fragment leaves the panel alone', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async () => {
+    const loaded = loadIndexWithPomodoro();
+    await flushPomodoro();
+    const panel = loaded.document.querySelector('details#pomodoro-settings');
+    loaded.location.hash = '#something-else';
+    loaded.window.dispatchEvent(new StandInEvent('hashchange'));
+    assert.notEqual(panel.open, true, 'only this page\'s own fragment may open the panel');
+  });
+});
+
 // --- the settings panel is general now, and holds the store control (ADR 71) ------
 // SPEC_BOUNDARY.md AC 14 ("reachable from the settings panel on the index, takes the
 // window as an input, and deletes on a single click") and AC 15 ("reads as general
@@ -8946,10 +9172,10 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
 // section"). What the prune actually DOES to the store is test/check-prune.mjs's job;
 // these two are about the surface that fires it.
 
-check('settings panel: reads as general settings -- four captioned sections in order, and the store control sits in its own', () => {
+check('settings panel: reads as general settings -- five captioned sections in order, and the store control sits in its own', () => {
   const html = renderIndexPage({ threads: [] });
   const captions = [...html.matchAll(/<div class="pomodoro-settings-caption">([^<]*)<\/div>/g)].map(m => m[1]);
-  assert.deepEqual(captions, ['Pomodoro', 'Banners', 'Cues', 'Store'],
+  assert.deepEqual(captions, ['Pomodoro', 'Banners', 'Cues', 'Menu bar', 'Store'],
     'the panel must name every section it holds -- a panel where only Cues is captioned reads as the pomodoro\'s with an unlabelled top half');
   // The device is the one the panel already had: a hairline BETWEEN sections, so one
   // fewer than there are captions (nothing sits above the first).

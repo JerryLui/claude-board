@@ -622,6 +622,91 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
+  // menubarCountdown / menubarHidden -- the status item's two preferences
+  // (SPEC_MENUBAR.md). Nothing reads them yet: the item and the settings panel are
+  // later slices, so what is provable here is exactly what those slices will rest on --
+  // the defaults, an older document that predates both keys, and the merge boundary.
+  // The round trip through the HTTP surface is at the bottom of this file, against a
+  // real daemon.
+  // -------------------------------------------------------------------------------
+
+  await check('DEFAULT_SETTINGS: the countdown shows by default and the item is not hidden', () => {
+    assert.equal(DEFAULT_SETTINGS.menubarCountdown, true, 'the digits are most of why the item exists');
+    assert.equal(DEFAULT_SETTINGS.menubarHidden, false, 'nobody has hidden anything on a fresh machine');
+  });
+
+  await check('normalizeDoc: a document written before either menu bar key existed normalises to the defaults, not to undefined', () => {
+    // The upgrade case, and the one that matters: every settings file on disk today was
+    // written without these two keys. `undefined` would read the same as `false` in a
+    // client's `if (settings.menubarHidden)` AND be dropped from the JSON response
+    // entirely by JSON.stringify -- so the failure would be a status item that never
+    // shows its countdown, with nothing in the response to explain why.
+    const settings = normalizeDoc({ settings: { workMin: 40, notify: false } }).settings;
+    assert.equal(settings.menubarCountdown, true);
+    assert.equal(settings.menubarHidden, false);
+    assert.ok('menubarCountdown' in settings && 'menubarHidden' in settings, 'both keys must be PRESENT, not merely falsy-by-absence');
+  });
+
+  await check('normalizeDoc: explicit menu bar values survive untouched, and hand-edited garbage falls back to the default', () => {
+    const chosen = normalizeDoc({ settings: { menubarCountdown: false, menubarHidden: true } }).settings;
+    assert.equal(chosen.menubarCountdown, false, 'a reader who turned the countdown off keeps it off across a read');
+    assert.equal(chosen.menubarHidden, true, 'and a hidden item stays hidden -- this is what survives a logout');
+
+    const garbage = normalizeDoc({ settings: { menubarCountdown: 'yes', menubarHidden: 1 } }).settings;
+    assert.equal(garbage.menubarCountdown, true, 'same coercion every other toggle gets');
+    assert.equal(garbage.menubarHidden, false, '1 is not a boolean -- truthy is not the test here');
+  });
+
+  await check('readDoc: a pomodoro.json on disk with no menu bar keys reads them back as the defaults', () => {
+    // The same upgrade case one layer out: real bytes on disk, written the way a version
+    // before this work would have written them, read back through the function every
+    // caller in the daemon actually uses. Its own temp home -- writing this shape into
+    // the reader's real board home is the trap QUIRKS.md documents against `writeDoc`,
+    // and it applies just as much to a raw writeFileSync of the same filename.
+    const oldHome = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-old-'));
+    try {
+      const now = Date.now();
+      writeFileSync(path.join(oldHome, 'pomodoro.json'), JSON.stringify({
+        settings: { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, notifyRounds: true, cueWork: NO_CUE, cueBreak: NO_CUE, cueLongBreak: NO_CUE },
+        cycle: 1,
+        // pomodoroDay, never localDateStr: the latter is yesterday's label for the five
+        // hours after midnight, so the document would roll and this check would fail
+        // before dawn and pass all day (QUIRKS.md).
+        cycleDate: pomodoroDay(now),
+        timer: null,
+      }, null, 2), { mode: 0o600 });
+
+      const doc = readDoc(oldHome, now);
+      assert.equal(doc.settings.menubarCountdown, true);
+      assert.equal(doc.settings.menubarHidden, false);
+      assert.equal(doc.cycle, 1, 'and the rest of the document is untouched by the fill-in');
+    } finally {
+      rmSync(oldHome, { recursive: true, force: true });
+    }
+  });
+
+  await check('mergeSettings: each menu bar key is patchable alone, leaving the other three toggles exactly as they were', () => {
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false, notifyRounds: false } };
+    const hidden = mergeSettings(doc, { menubarHidden: true });
+    assert.equal(hidden.settings.menubarHidden, true);
+    assert.equal(hidden.settings.menubarCountdown, true, 'hiding the item must not silently reset the countdown preference');
+    assert.equal(hidden.settings.notify, false, 'and it touches neither banner toggle');
+    assert.equal(hidden.settings.notifyRounds, false);
+
+    const quiet = mergeSettings(doc, { menubarCountdown: false });
+    assert.equal(quiet.settings.menubarCountdown, false);
+    assert.equal(quiet.settings.menubarHidden, false);
+  });
+
+  await check('mergeSettings: a non-boolean menu bar value is refused by name, the same way every other toggle is', () => {
+    assert.throws(() => mergeSettings(defaultDoc(), { menubarCountdown: 'off' }), /menubarCountdown/);
+    assert.throws(() => mergeSettings(defaultDoc(), { menubarHidden: 1 }), /menubarHidden/);
+    // A refusal is total: nothing from a rejected patch is applied, so a valid key
+    // riding alongside a bad one does not land either.
+    assert.throws(() => mergeSettings(defaultDoc(), { menubarHidden: true, menubarCountdown: null }), /menubarCountdown/);
+  });
+
+  // -------------------------------------------------------------------------------
   // readDoc / writeDoc -- persistence, defaults, and the impure ensureTimer wrapper.
   // -------------------------------------------------------------------------------
 
@@ -1033,6 +1118,46 @@ async function main() {
       assert.equal(none.status, 401);
       const noneRestart = await fetch(pomodoroUrl(port, 'restart'), { method: 'POST' });
       assert.equal(noneRestart.status, 401);
+    });
+  });
+
+  await check('POST /api/pomodoro/settings + GET: both menu bar preferences round-trip through the HTTP surface and land on disk', async () => {
+    await withPomodoroServer(async ({ home, port, secret }) => {
+      // The surface the settings panel and the status item both go through. The pure
+      // checks above prove the validator and the defaults; this proves the two keys
+      // actually cross the route in both directions -- a key missing from TOGGLE_KEYS
+      // would be silently DROPPED here (mergeSettings drops unknown keys rather than
+      // refusing them, on purpose), so a 200 alone proves nothing and every assertion
+      // below is on what came back.
+      const fresh = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, { headers: { [SECRET_HEADER]: secret } })).json();
+      assert.equal(fresh.settings.menubarCountdown, true, 'a daemon with no document yet still answers with both keys');
+      assert.equal(fresh.settings.menubarHidden, false);
+
+      const res = await fetch(pomodoroUrl(port, 'settings'), {
+        method: 'POST',
+        headers: { [SECRET_HEADER]: secret, 'content-type': 'application/json' },
+        body: JSON.stringify({ menubarCountdown: false, menubarHidden: true }),
+      });
+      assert.equal(res.status, 200);
+      const saved = await res.json();
+      assert.equal(saved.settings.menubarCountdown, false, 'the write must be reflected in its own response, not only on the next read');
+      assert.equal(saved.settings.menubarHidden, true);
+
+      const reread = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, { headers: { [SECRET_HEADER]: secret } })).json();
+      assert.equal(reread.settings.menubarCountdown, false);
+      assert.equal(reread.settings.menubarHidden, true);
+      assert.equal(readDoc(home).settings.menubarHidden, true, 'and on disk -- this is what has to survive a logout');
+
+      // Refused by name, through the route, as a 400 and not a 500: the panel shows the
+      // message, so it has to name the field the reader's control writes.
+      const bad = await fetch(pomodoroUrl(port, 'settings'), {
+        method: 'POST',
+        headers: { [SECRET_HEADER]: secret, 'content-type': 'application/json' },
+        body: JSON.stringify({ menubarHidden: 'yes' }),
+      });
+      assert.equal(bad.status, 400);
+      assert.match((await bad.json()).error, /menubarHidden/);
+      assert.equal(readDoc(home).settings.menubarHidden, true, 'a refused patch changes nothing at all');
     });
   });
 }

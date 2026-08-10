@@ -270,6 +270,15 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
  * `Date.now()`) rather than reading the clock itself, so that technique can pin
  * fixed-timestamp behaviour deterministically instead of racing the wall clock.
  *
+ * Four globals a real page always has are what this needs in scope: `document`,
+ * `setInterval`, and — since the settings panel answers a URL fragment
+ * (`openPomodoroSettingsFromFragment` below) — `window` and `location`, exactly
+ * the pair `ui` already takes as `new Function('document', 'window', 'location',
+ * ui)`. A check driving the REAL page markup has to supply all four; the
+ * function-extraction stand-ins above never reach the two new ones, because
+ * `initPomodoroWidget` bails on a document with no `div#pomodoro-widget` in it
+ * long before either is read.
+ *
  * This is its own top-level template literal, not inlined into renderIndexPage's
  * returned markup, for the same reason src/ui.mjs is its own export: a stray
  * literal backtick anywhere in here would terminate the OUTER string early and
@@ -688,6 +697,12 @@ function pomodoroSyncForm() {
   var cueWork = form.querySelector('select[name="cueWork"]');
   var cueBreak = form.querySelector('select[name="cueBreak"]');
   var cueLongBreak = form.querySelector('select[name="cueLongBreak"]');
+  // The status item's two preferences, synced on the same condition as every
+  // field above -- this panel is the only place either is editable, so a reader
+  // who hid the item from its own popover finds the box that brings it back
+  // already showing the truth rather than a default.
+  var menubarCountdown = form.querySelector('input[name="menubarCountdown"]');
+  var menubarHidden = form.querySelector('input[name="menubarHidden"]');
   if (workMin && active !== workMin) workMin.value = s.workMin;
   if (breakMin && active !== breakMin) breakMin.value = s.breakMin;
   if (longBreakMin && active !== longBreakMin) longBreakMin.value = s.longBreakMin;
@@ -697,6 +712,13 @@ function pomodoroSyncForm() {
   if (cueWork && active !== cueWork) cueWork.value = s.cueWork;
   if (cueBreak && active !== cueBreak) cueBreak.value = s.cueBreak;
   if (cueLongBreak && active !== cueLongBreak) cueLongBreak.value = s.cueLongBreak;
+  if (menubarCountdown && active !== menubarCountdown) menubarCountdown.checked = !!s.menubarCountdown;
+  // The one inversion in this form, and one of only two places it exists (the
+  // other is onPomodoroSettingsSubmit below): the CONTROL is 'Show in menu bar'
+  // and the KEY is 'menubarHidden', so ticked is stored-false. See the checkbox's
+  // own comment in src/pomodoro-widget.mjs for why the control is the positive
+  // one rather than the key being renamed.
+  if (menubarHidden && active !== menubarHidden) menubarHidden.checked = !s.menubarHidden;
 }
 
 // fetch/credentials: 'same-origin', matching src/ui.mjs's own submitBoard --
@@ -840,6 +862,13 @@ function onPomodoroSettingsSubmit(ev) {
     cueWork: form.querySelector('select[name="cueWork"]').value,
     cueBreak: form.querySelector('select[name="cueBreak"]').value,
     cueLongBreak: form.querySelector('select[name="cueLongBreak"]').value,
+    menubarCountdown: !!form.querySelector('input[name="menubarCountdown"]').checked,
+    // Negated, the second and last place this form inverts anything: the row
+    // reads 'Show in menu bar', the key it writes is 'menubarHidden'. Ticked ->
+    // hidden false -> the item comes back. Posted through the same
+    // /api/pomodoro/settings patch as every other field here, never a second
+    // save path of its own.
+    menubarHidden: !form.querySelector('input[name="menubarHidden"]').checked,
   }).then(closePomodoroSettings);
 }
 
@@ -984,6 +1013,41 @@ function onDocumentClickClosePomodoroSettings(ev) {
   closePomodoroSettings();
 }
 
+// The fragment the menu bar item's 'Settings...' row navigates to
+// (SPEC_MENUBAR.md: no setting is editable from the menu bar, so the item sends
+// the reader here instead of growing a second panel). Handled explicitly rather
+// than left to the browser's own fragment-auto-expand for a closed 'details' --
+// that behaviour is recent and unevenly shipped, and nothing here gets to pick
+// the reader's browser.
+//
+// Named as one constant used by both callers below, so the string the item
+// opens and the string this recognises cannot drift apart.
+var POMODORO_SETTINGS_FRAGMENT = '#pomodoro-settings';
+function openPomodoroSettingsFromFragment() {
+  // 'location' is whatever scope this script runs in supplies, read defensively
+  // exactly as src/ui.mjs reads it for its own '#open-round' sentinel -- a
+  // hash-less stand-in must not throw here.
+  if (!location || location.hash !== POMODORO_SETTINGS_FRAGMENT) return;
+  var panel = document.querySelector('details#pomodoro-settings');
+  if (!panel) return;
+  panel.open = true;
+  // The widget sits in the page header, so this is only ever a no-op or a scroll
+  // back UP -- but the reader arriving from the menu bar may well have left this
+  // tab scrolled halfway down a long thread list, and a panel that opened
+  // offscreen is indistinguishable from one that did not open.
+  panel.scrollIntoView();
+  // Spend the fragment once it has been acted on, so the NEXT 'Settings...' from the
+  // popover works too. Without this, a browser handed the same URL again surfaces the
+  // tab already parked on it and fires no 'hashchange' -- and the reader, who may well
+  // have closed the panel since, gets a row that silently does nothing on second use.
+  // replaceState rather than assigning location.hash: assigning it would push a history
+  // entry and fire the very event this handler is standing in for. Guarded because the
+  // stand-ins this script runs under do not all carry a history object.
+  if (typeof history !== 'undefined' && history && history.replaceState) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+}
+
 function initPomodoroWidget() {
   var widget = document.querySelector('div#pomodoro-widget');
   if (!widget) return;
@@ -1008,7 +1072,19 @@ function initPomodoroWidget() {
   // notify checkbox here) and they share nothing but the event.
   if (form) form.addEventListener('change', onPomodoroNotifyChange);
   document.addEventListener('click', onDocumentClickClosePomodoroSettings);
-  fetchPomodoro();
+  // The other half of the fragment: a tab already sitting on this page when the
+  // menu bar item asks for the panel only ever sees the hash change, never a
+  // load. There the doc has long since been fetched and the (closed) panel has
+  // been syncing all along, so opening it is all there is to do.
+  window.addEventListener('hashchange', openPomodoroSettingsFromFragment);
+  // Opened only once the OPENING fetch has settled, never inline beside this
+  // call: pomodoroSyncForm deliberately never writes into an open panel (its own
+  // comment), so a panel opened before the first fetch resolved would sit there
+  // with every field blank until the reader closed it again. Settled, not
+  // fulfilled -- a daemon that refuses the read still owes the reader the panel
+  // they asked for, empty or not, and handling the rejection here is also what
+  // keeps this call's own failure from surfacing as an unhandled one.
+  fetchPomodoro().then(openPomodoroSettingsFromFragment, openPomodoroSettingsFromFragment);
   // Local repaint (no fetch): recomputes the countdown text from the already-
   // cached doc + offset every second, so the widget visibly ticks between
   // polls. Also the trigger for the single zero-crossing re-fetch above --

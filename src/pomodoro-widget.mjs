@@ -185,6 +185,35 @@ export function pomodoroWidget() {
       <label class="pomodoro-field">Work<select name="cueWork" aria-label="Work cue">${cueOptions}</select></label>
       <label class="pomodoro-field">Short break<select name="cueBreak" aria-label="Short break cue">${cueOptions}</select></label>
       <label class="pomodoro-field">Long break<select name="cueLongBreak" aria-label="Long break cue">${cueOptions}</select></label>
+      <!-- The macOS status item's two preferences (SPEC_MENUBAR.md; the item is a
+           second process of the same bundle, ADR 72). They are edited HERE and
+           nowhere else -- the item owns no state of its own, it reads and writes
+           the same daemon document this form does, and no setting is editable
+           from the menu bar at all. A third captioned group in the existing
+           hairline + caption idiom, not a fold and not a new one: everything the
+           panel can do stays visible the moment it opens, exactly as when Cues
+           above earned the first divider. -->
+      <hr class="pomodoro-settings-divider">
+      <div class="pomodoro-settings-caption">Menu bar</div>
+      <!-- aria-label carrying the caption's own word, for the same reason every
+           cue picker above carries one: the caption is announced in browse mode
+           but NOT while tabbing control to control, and tabbing is how this panel
+           is operated -- "Countdown, tick box" alone never says WHERE the
+           countdown is. The visible text stays inside the spoken name (WCAG 2.5.3
+           label-in-name), so a voice-control "click Countdown" still matches. -->
+      <label class="pomodoro-field pomodoro-field-check">Countdown<input type="checkbox" name="menubarCountdown" aria-label="Countdown in menu bar"></label>
+      <!-- Stated as a POSITIVE, and so the one control in this form whose ticked
+           state is the NEGATION of the settings key behind it: ticked means
+           'menubarHidden' is false. A box labelled "Hidden" that you tick to make
+           something appear is the wrong way round, and this control's entire job
+           is bringing back an item the reader hid from the item's own popover --
+           at which point the popover carrying that control is gone, and this row
+           is the only way back. The inversion lives in exactly two places, both
+           in src/indexpage.mjs: pomodoroSyncForm fills it in as '!menubarHidden',
+           onPomodoroSettingsSubmit posts it back the same way. It needs no
+           aria-label of its own, unlike the row above -- its visible text already
+           carries the group's word. -->
+      <label class="pomodoro-field pomodoro-field-check">Show in menu bar<input type="checkbox" name="menubarHidden"></label>
       <div class="pomodoro-settings-actions">
         <button type="submit" class="pomodoro-btn pomodoro-btn-primary">Save</button>
         <!-- Reset ends the whole loop (src/pomodoro.mjs resetTimer), not just the

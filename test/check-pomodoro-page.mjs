@@ -80,7 +80,15 @@ function loadIndexAgainstDaemon(port) {
     const headers = { ...(opts && opts.headers), cookie: sessionCookieHeader() };
     return REAL_FETCH(target, { ...opts, headers });
   };
-  new Function('document', 'setInterval', indexScript)(document, fakeSetInterval);
+  // 'window'/'location' join the two parameters this already passed: indexScript
+  // reads both for the settings panel's '#pomodoro-settings' fragment (the one
+  // the menu bar item's Settings row opens), the same
+  // new Function('document', 'window', 'location', ui) contract every check that
+  // drives src/ui.mjs already uses. The window is the parsed document's OWN
+  // defaultView, so a listener the script registers is reachable from a check;
+  // location is a plain { hash }, empty here because nothing in this file is
+  // about the fragment -- test/check-pure.mjs owns that half.
+  new Function('document', 'setInterval', 'window', 'location', indexScript)(document, fakeSetInterval, document.defaultView, { hash: '' });
   return {
     document,
     intervals,
@@ -213,7 +221,7 @@ async function main() {
     // the machine it runs on. notify and notifyRounds are set OPPOSITE each other below
     // for the same reason as check-pure.mjs's own arrangement: a bug that wired the two
     // checkboxes together would show up as a mismatch, not a coincidental pass.
-    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all ten fields, the three cues and the two notify toggles independently', async () => {
+    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all eleven fields, the three cues, the two notify toggles and the two menu bar preferences independently', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
@@ -232,10 +240,20 @@ async function main() {
         form.querySelector('select[name="cueWork"]').value = cueWork;
         form.querySelector('select[name="cueBreak"]').value = cueBreak;
         form.querySelector('select[name="cueLongBreak"]').value = cueLongBreak;
+        // The two menu bar preferences (SPEC_MENUBAR.md), both moved OFF their
+        // defaults so this proves a real write rather than agreeing with what was
+        // already stored -- and in opposite directions to each other, the same
+        // reason notify and notifyRounds are set opposite above. "Show in menu bar"
+        // is the one control in this form whose ticked state is the negation of the
+        // key behind it: unticked here, so menubarHidden must land TRUE on disk.
+        form.querySelector('input[name="menubarCountdown"]').checked = false;
+        form.querySelector('input[name="menubarHidden"]').checked = false;
         form.dispatchEvent(new StandInEvent('submit'));
         await flush();
         const onDisk = readPomodoroDoc(home);
-        assert.deepEqual(onDisk.settings, { workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, notifyRounds: true, cueWork, cueBreak, cueLongBreak }, 'all ten fields must actually persist on disk, exactly as entered');
+        // Still a WHOLE-object comparison, deliberately: it is what catches a form that
+        // drops a stored setting it never displayed.
+        assert.deepEqual(onDisk.settings, { workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, notifyRounds: true, cueWork, cueBreak, cueLongBreak, menubarCountdown: false, menubarHidden: true }, 'all eleven fields must actually persist on disk, exactly as entered');
         // Restated as its own assertion rather than left implicit in the deepEqual
         // above: the deepEqual would still pass if the three cues happened to be equal
         // AND the arrangement above had picked three equal names, so this pins the

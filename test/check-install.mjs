@@ -806,11 +806,13 @@ async function main() {
       mkdirSync(path.join(rogueDir, 'src'), { recursive: true });
       writeFileSync(path.join(rogueDir, 'src', 'stub.mjs'), '// stub\n');
       writeFileSync(path.join(rogueDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
-      // The launcher's other half (ADR.md entry 19), a build input on the same footing as
-      // launcher.c: install.sh copies both into its staging directory unconditionally, and
-      // launcher.c does not link without it. The icns is deliberately NOT copied here --
-      // it is the optional input, and a clone without one must still build a bundle.
+      // The launcher's other two halves (ADR.md entry 19, ADR 72), build inputs on the
+      // same footing as launcher.c: install.sh copies all three into its staging directory
+      // unconditionally, and launcher.c does not link without either of them. The icns is
+      // deliberately NOT copied here -- it is the optional input, and a clone without one
+      // must still build a bundle.
       writeFileSync(path.join(rogueDir, 'bin', 'notify.m'), readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8'));
+      writeFileSync(path.join(rogueDir, 'bin', 'menubar.m'), readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8'));
       writeFileSync(path.join(rogueDir, 'install.sh'), readFileSync(installScript, 'utf8'));
 
       const rogueNodePath = '/tmp/rogue-node-must-never-be-baked-in';
@@ -960,6 +962,58 @@ async function main() {
     // ADR.md entry 38: `/file/` and CLAUDE_BOARD_SERVE_ROOTS are deleted outright, not
     // merely defaulted -- so no plist, degraded or otherwise, ever carries this key again.
     assert.ok(!('CLAUDE_BOARD_SERVE_ROOTS' in fallbackPlist.EnvironmentVariables), 'the daemon serves boards and nothing else: no serve-roots key, ever');
+  });
+
+  await check('a launcher half that will not compile degrades the install rather than aborting it (SPEC_MENUBAR criterion 13)', async () => {
+    // The same guarantee the missing-compiler check above makes, against the other way the
+    // build can fail now that the launcher has three sources: one of them not compiling.
+    // The whole build runs inside install.sh's `elif ! { ... }` condition, which is what
+    // keeps `set -euo pipefail` from turning a broken bin/menubar.m into an install that
+    // exits non-zero with no daemon and no plist. (Ablation: move any of the three `cc`
+    // invocations out of that condition and this check's exit status becomes 1.)
+    //
+    // menubar.m is the one broken here because it is the newest and the likeliest to be
+    // edited; what is being proved is the shape of the branch, which is shared by all
+    // three.
+    const brokenDir = path.join(workDir, 'clone-with-broken-menubar');
+    const brokenAppDir = path.join(workDir, 'Applications-broken-menubar');
+    try {
+      mkdirSync(path.join(brokenDir, 'bin'), { recursive: true });
+      mkdirSync(path.join(brokenDir, 'src'), { recursive: true });
+      writeFileSync(path.join(brokenDir, 'bin', 'daemon.mjs'), '// stub, never executed by install.sh itself\n');
+      writeFileSync(path.join(brokenDir, 'bin', 'mcp.mjs'), '// stub\n');
+      writeFileSync(path.join(brokenDir, 'src', 'stub.mjs'), '// stub\n');
+      writeFileSync(path.join(brokenDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
+      writeFileSync(path.join(brokenDir, 'bin', 'notify.m'), readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8'));
+      writeFileSync(path.join(brokenDir, 'bin', 'menubar.m'), 'this is not Objective-C, and clang will say so;\n');
+      writeFileSync(path.join(brokenDir, 'install.sh'), readFileSync(installScript, 'utf8'));
+
+      const r = spawnSync('bash', [path.join(brokenDir, 'install.sh')], {
+        env: {
+          ...env,
+          CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(workDir, 'LaunchAgents-broken-menubar'),
+          CLAUDE_BOARD_LOG_DIR: path.join(workDir, 'Logs-broken-menubar'),
+          CLAUDE_BOARD_SECRET_FILE: path.join(workDir, 'config-broken-menubar', 'claude-board', 'secret'),
+          CLAUDE_BOARD_APP_DIR: brokenAppDir,
+          ...quietStubs('broken-menubar'),
+        },
+        encoding: 'utf8',
+      });
+      assert.equal(r.status, 0, `a launcher that will not compile must not fail the install:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+      assert.match(r.stdout, /warning: the launcher failed to compile/, 'it must say why, in as many words');
+      assert.ok(!existsSync(path.join(brokenAppDir, 'claude-board.app')), 'a half-built bundle must not be installed');
+
+      // ...and the daemon still runs, which is the whole of criterion 13: the fallback
+      // plist runs node directly, exactly as it does on a machine with no compiler.
+      const fallback = spawnSync('plutil', ['-convert', 'json', '-o', '-',
+        path.join(workDir, 'LaunchAgents-broken-menubar', 'claude-board.plist')], { encoding: 'utf8' });
+      assert.equal(fallback.status, 0, fallback.stderr);
+      const args = JSON.parse(fallback.stdout).ProgramArguments;
+      assert.equal(args.length, 2, 'the fallback plist runs node with the daemon script');
+      assert.equal(args[1], path.join(brokenDir, 'bin', 'daemon.mjs'));
+    } finally {
+      rmSync(brokenDir, { recursive: true, force: true });
+    }
   });
 
   await check('RunAtLoad and KeepAlive are set', async () => {
@@ -1767,9 +1821,11 @@ async function main() {
     // it is also the case that proves c_escape holds up where xml_escape does -- the
     // same bytes have to survive into a C string literal and compile.
     writeFileSync(path.join(oddDir, 'bin', 'launcher.c'), readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8'));
-    // Both halves of the binary, since launcher.c calls into this one (ADR.md entry 19).
-    // The icns is left out on purpose here too: this clone builds a bundle without one.
+    // All three halves of the binary, since launcher.c calls into both of these (ADR.md
+    // entry 19, ADR 72). The icns is left out on purpose here too: this clone builds a
+    // bundle without one.
     writeFileSync(path.join(oddDir, 'bin', 'notify.m'), readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8'));
+    writeFileSync(path.join(oddDir, 'bin', 'menubar.m'), readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8'));
     writeFileSync(path.join(oddDir, 'install.sh'), readFileSync(installScript, 'utf8'));
 
     const oddAgents = path.join(workDir, 'LaunchAgents-odd');

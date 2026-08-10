@@ -98,6 +98,35 @@ launcher bundle is in use, since a copy there would read as though rewriting the
 could still move the boundary; a customised value is carried across reinstalls through a
 record file in the 0700 directory beside the secret.
 
+#### A second process of the bundle, holding the same credential
+
+The launcher forks a
+second child beside node — `claude-board --menubar`, the macOS status item (`ADR.md` entry
+72, `bin/menubar.m`). It is the same `CFBundleExecutable`, so it runs under the same
+signature, the same bundle identifier and the same TCC identity as the daemon, and it
+reads the same 0600 secret and sends it in the same `x-claude-board-secret` header to
+`127.0.0.1:<port>`. That makes it the second holder of the credential after the MCP shim,
+and worth stating on its own terms.
+
+What it does *not* widen. It is a client and only a client: it binds no port, listens on
+nothing, and is unreachable from the network, from a web page and from another local
+process. It resolves no path and creates no board, which is the one route that spends the
+Documents grant, so nothing it can do reaches the grant it inherits. Every route it uses
+is one the browser cookie already reaches (`POMODORO_COOKIE_ACTIONS`, plus the reads),
+which is why the feature added no API for it. And its secret path is derived from `HOME`
+rather than read from `CLAUDE_BOARD_SECRET_FILE` — that variable is kept out of this
+child's environment exactly as it is kept out of the daemon's, so the property above
+("with `HOME` baked, `~/.config/claude-board/secret` is the only secret path the process
+can reach") holds for both children and not just one.
+
+What it does cost, precisely: one more process holding the secret in memory, and one more
+process presenting it to whatever holds `127.0.0.1:<port>` without authenticating the peer
+first — the same port-squatting window the shim already lives with, now entered every 15
+seconds for the length of a login session rather than once per session start. The
+credential is re-read from disk after any failed request rather than cached for the
+process's life, so rotating the secret file takes effect on the next poll instead of
+requiring a logout.
+
 #### The build
 
 `install.sh` compiles a *staged copy* of `bin/launcher.c` with `-iquote`,

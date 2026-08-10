@@ -421,7 +421,7 @@ function oldestAwaitedNotNewestBoard() {
  * true for a round the reviewer has already dealt with. Every board past its
  * first exchange has this shape -- which is every board this feature exists for
  * -- and reading the flag alone resolved the banner's click onto that answered
- * round while the daemon's own `stillWaiting` (roundIsAwaitedOpen) named the
+ * round while the daemon's own `waitingRounds` (roundIsAwaitedOpen) named the
  * live one. The two have to ask the same question or the click lands on the
  * wrong round on the mainline path rather than on an edge. */
 function answeredThenAwaitedBoard() {
