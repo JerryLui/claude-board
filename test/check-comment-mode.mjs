@@ -150,7 +150,7 @@ function enableCommentMode(document) {
 function loadSoloStageBoard() {
   // A trailing markdown block keeps this an ORDINARY board (isPageRound
   // false): a lone `html` block is a page round (ADR.md entry 33) whose
-  // comment gesture SPEC_AWAITED.md ticket 03 gates on being *awaited* (ADR.md
+  // comment gesture gates on being *awaited* (ADR.md
   // entry 46) -- and this file's own "comment mode off" checks specifically
   // need the gesture to be gateable by the TOGGLE alone, which an awaited page
   // round's AC 5 ("opens with comment mode on") would fight with. Staying
@@ -707,7 +707,7 @@ check('comment mode: the toggle\'s aria-pressed attribute and .active class both
   const label = toggle.querySelector('.mode-toggle-label');
   assert.ok(label, 'setup failure: no .mode-toggle-label rendered');
 
-  // SPEC_HEADER.md AC 10: on/off is carried by `.active` and `aria-pressed`
+  // On/off is carried by `.active` and `aria-pressed`
   // alone -- the label is the static word `Comment` and must never change,
   // in either direction, so a reader mid-toggle sees the control's own chrome
   // move rather than reading two different sentences.

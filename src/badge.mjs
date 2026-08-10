@@ -173,7 +173,7 @@ export function roundWaitLapsed(round, nowMs = Date.now()) {
   return !!round && !!round.awaitDeadline && Date.parse(round.awaitDeadline) <= nowMs;
 }
 
-// --- the waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 45-47) ---
+// --- the waiting signal (ADR.md entries 45-47) ---
 //
 // Two different questions, two different functions, deliberately never folded
 // into one. `roundIsAwaitedOpen` below is a fact about the STORED board alone --
@@ -260,9 +260,9 @@ export const ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
 // '.send-bar' outright, leaving nothing else to send with.
 export const PILL_READONLY_TITLE = 'No agent is listening on this page -- commenting is off.';
 
-// The SAME 'read-only' word's title on an ORDINARY board (SPEC_HEADER.md
-// ticket 01, PM follow-up after ticket 03 put the state label there too,
-// src/styles.mjs:464): PILL_READONLY_TITLE's "commenting is off" is simply
+// The SAME 'read-only' word's title on an ORDINARY board (a PM follow-up,
+// once ADR.md entry 40 put the state label on every board, not just a page
+// board's, src/styles.mjs:464): PILL_READONLY_TITLE's "commenting is off" is simply
 // false on that surface. `roundIsAwaited` (CONTEXT.md "Awaited") is about
 // whether an `ask` call is still blocked waiting on this exact round -- a
 // plain `ask` with no `wait: true` is never awaited, but its round is `open`
@@ -290,8 +290,8 @@ export const PAGE_SEND_EXPIRED_TITLE =
   'This round ended. Comments left here are stored and reach the next agent that asks.';
 
 // The header's own pill/meta slot (ADR.md entry 40, "the pill may hold a
-// label alone"; SPEC_HEADER.md ticket 03 widened it from a page-board-only
-// slot to every board's): the countdown while someone is actually waiting, or
+// label alone", on every board's condensed header, not only a page board's):
+// the countdown while someone is actually waiting, or
 // the bare word `read-only` the moment nobody is -- never awaited at all
 // (AC 8), sent, timed out, or archived (AC 11's fallback). Client-only (see
 // this section's header comment); src/render.mjs's own first-paint fallback

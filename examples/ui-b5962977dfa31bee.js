@@ -276,8 +276,7 @@
   // Same technique a third time: whether a round is *awaited* (CONTEXT.md
   // "Awaited") is what markPendingRound below gates the tab mark on, and what
   // the banner's own click target (oldestAwaitedRoundNumber) reads to find the
-  // oldest one still waiting (AC 9, SPEC_AWAITED.md ticket 04; SPEC_STRANDED.md
-  // criterion 12) -- the exact same
+  // oldest one still waiting -- the exact same
   // predicate src/indexpage.mjs's badge count and src/server.mjs's
   // drainUndeliveredComments read, spliced in rather than hand-copied so a legacy
   // round (minted before ADR.md entry 45, carrying neither an awaited flag nor an
@@ -313,7 +312,7 @@
   return questionBlocks(board).some(q => q.round === r.n);
 };
 
-  // The waiting signal (SPEC_AWAITED.md ticket 03), spliced the same way and in
+  // The waiting signal, spliced the same way and in
   // dependency order (each one calls only a name already assigned above it --
   // 'var' hoisting makes the DECLARATION order irrelevant, but the ASSIGNMENT
   // still has to run top to bottom before any of these is ever CALLED, which it
@@ -876,7 +875,7 @@
   //
   // 140px is a bit over one scroll notch, so an accidental nudge barely stains
   // the header while a deliberate read completes it. Shared, unchanged, by
-  // refreshDocumentScrollChrome (SPEC_HEADER.md ticket 03): the same "one
+  // refreshDocumentScrollChrome: the same "one
   // notch is a nudge, past it is a read" fact holds for a reader scrolling an
   // ordinary board's own document, not just a page board's stage.
   var STAGE_SCROLL_CONDENSE_PX = 140;
@@ -929,7 +928,7 @@
     }
   }
 
-  /** SPEC_AWAITED.md ticket 03, AC 8/AC 12: is the click-to-anchor gesture even
+  /** Is the click-to-anchor gesture even
    * on offer for 'section' (a '.html-block')? 'true' for every stage that is
    * NOT a page board's own -- ADR.md entry 28's rule stays kind-based
    * everywhere else, unchanged by this ticket -- and for a page board's stage
@@ -1044,14 +1043,14 @@
     // a stage that has just announced itself has to be painted in the reader's
     // theme before its first frame is looked at, not at the next toggle.
     //
-    // SPEC_AWAITED.md ticket 03, AC 8: gated exactly like broadcastStageMode
+    // Gated exactly like broadcastStageMode
     // (pageRoundCommentsAllowed, above) -- a stage that announces itself for
     // the FIRST time is otherwise the one path that never went through that
     // function at all, and would hand a non-awaited (or since-expired) page
     // round's stage 'commentMode: true' straight from the global toggle with
     // no gate in the way.
     postToStage(frame, { type: 'mode', commentMode: commentMode && pageRoundCommentsAllowed(section), sentRefs: sentDomRefsForBlock(blockId), theme: activeTheme() });
-    // SPEC_HEADER.md criterion 1: a stage that has just announced itself is
+    // A stage that has just announced itself is
     // exactly the moment its own padding is still whatever its markup alone
     // gave it -- the first (and often only) chance to top it up before the
     // reader ever sees it unpadded. reportStageBand re-derives the CURRENT
@@ -1062,7 +1061,7 @@
 
   function handleStageClick(data, section, blockId) {
     if (readonly || !commentMode) return;
-    // SPEC_AWAITED.md ticket 03, AC 8/AC 12: broadcastStageMode already tells a
+    // broadcastStageMode already tells a
     // gated stage 'commentMode: false', which stops the hover/click gesture at
     // its source -- this is the second, independent gate (QUIRKS.md "Readonly
     // is locked twice"), for a click message that beat that broadcast across
@@ -1267,7 +1266,7 @@
    * than at a threshold, and the control is fully transparent there
    * (src/styles.mjs), so nothing appears until the fade actually starts. */
   function refreshStageChrome() {
-    // SPEC_HEADER.md ticket 03 (ADR.md entry 40): an ordinary board's own
+    // ADR.md entry 40: an ordinary board's own
     // header condenses off this DOCUMENT's scroll instead
     // (refreshDocumentScrollChrome, below). Returning here rather than
     // forcing '--stage-p' to 0 is what keeps the two writers from fighting --
@@ -1283,7 +1282,7 @@
     if (backToTopBtn) backToTopBtn.classList.toggle('visible', p > 0);
   }
 
-  /** SPEC_HEADER.md ADR 59: the board clears its own chrome band, the artifact
+  /** ADR.md entry 59: the board clears its own chrome band, the artifact
    * does not. This measures the two bands the board's own floating chrome
    * occupies on a page board -- the header at rest, and the round pager dock
    * plus its own clearance -- and hands them to the CURRENT round's stage over
@@ -1312,7 +1311,7 @@
    * height on top of it, when the rail is actually carrying chrome. The dock
    * term alone is only "clear of the dock" -- '.page-comments' floats ABOVE
    * that offset and is 'position: fixed' with a 'max-height' that can run to
-   * nearly the full viewport (SPEC_HEADER.md criterion 3: the rail is named
+   * nearly the full viewport (the rail is named
    * separately from the dock precisely because it is not bounded by the
    * dock's own size), so an artifact's last element sits under the rail
    * whenever the rail holds a form, a comment or the send bar --
@@ -1381,7 +1380,7 @@
     postToStage(frame, { type: 'band', top: lastTopBand, bottom: bottom });
   }
 
-  /** SPEC_HEADER.md ticket 03 (ADR.md entry 40): an ordinary board's own
+  /** ADR.md entry 40: an ordinary board's own
    * sticky header condenses on THIS document's scroll, off the identical
    * '--stage-p' the stylesheet ramps every page-board rule on -- just
    * written from a plain scroll offset instead of a stage's postMessage'd
@@ -1487,7 +1486,7 @@
     if (typeof ResizeObserver === 'function') new ResizeObserver(measurePillHalf).observe(actions);
   }());
 
-  /** SPEC_HEADER.md ticket 03: how far an ordinary board's condensed wash
+  /** How far an ordinary board's condensed wash
    * (body:not(.page-board) .board-head::after, src/styles.mjs) reaches to go
    * full-bleed without a 'vw' unit -- 'vw' includes the scrollbar's own
    * width, and an ordinary board is exactly the surface that always has a
@@ -2548,7 +2547,7 @@
     });
   }
 
-  /** SPEC_AWAITED.md ticket 03 (AC 4, AC 5): keeps every page round's own send
+  /** Keeps every page round's own send
    * control and hint honest as pendingComments changes -- called from
    * refreshPins (queue/edit/delete, a submit landing, a resize -- see that
    * function's own comment for why this belongs beside
@@ -2732,7 +2731,7 @@
   function setCommentMode(on) {
     commentMode = !!on && !readonly;
     if (modeToggleBtn) {
-      // SPEC_HEADER.md AC 10: the label is the static word 'Comment' (see
+      // The label is the static word 'Comment' (see
       // src/render.mjs's commentModeToggle) -- on/off is carried by .active
       // and aria-pressed alone, so there is no label text to rewrite here.
       modeToggleBtn.classList.toggle('active', commentMode);
@@ -3497,7 +3496,7 @@
   // Cheap, partial mitigation for pin drift: reposition every pin on a window
   // resize. Does not track an iframe's own internal scroll or its resize-drag
   // handle -- a known, accepted gap rather than full continuous tracking.
-  // SPEC_HEADER.md criterion 5: resizing the viewport is what makes the header
+  // Resizing the viewport is what makes the header
   // wrap its title differently and change height, so this is also where the band
   // gets re-measured and re-sent.
   window.addEventListener('resize', function () { refreshPins(document); reportStageBand(); });
@@ -3699,7 +3698,7 @@
     return (board.blocks || []).some(function (b) { return b.round === r.n && b.kind === 'question'; });
   }
 
-  /** SPEC_AWAITED.md ticket 03 (AC 6, AC 8, AC 11, AC 12): repaint every place a
+  /** Repaint every place a
    * round's countdown or read-only state shows, from 'board.rounds' and this
    * reader's own clock -- '#round-meta' (the page board's own pill/meta slot,
    * for whichever round is CURRENT) and '#round-countdown' (the ordinary send
@@ -3910,8 +3909,8 @@
     // under a reviewer who was still scrolled into the artifact and had not
     // flipped anywhere.
     //
-    // refreshCondenseChrome, not refreshStageChrome directly (SPEC_HEADER.md
-    // ticket 03): a flip can land on either board type, and refreshStageChrome
+    // refreshCondenseChrome, not refreshStageChrome directly: a flip can land
+    // on either board type, and refreshStageChrome
     // alone now only ever answers for a page board -- it deliberately leaves an
     // ordinary board's own '--stage-p' untouched (see its own comment) so a
     // stray stage message cannot fight the document-scroll-driven value. Landing
@@ -4049,7 +4048,7 @@
     // 63.4px. Not a crash: a too-large fallback over-reserves rather than
     // overlapping, so it reads as slightly loose spacing.
     // reportStageBand reads the dock's own box again rather than this property
-    // (SPEC_HEADER.md: the stand-in's getComputedStyle cannot see a runtime
+    // (the stand-in's getComputedStyle cannot see a runtime
     // .style.setProperty write, only a static stylesheet, so the bottom band is
     // measured straight off the element every time, same as write() does here),
     // and is called alongside write() so the two never drift apart on which dock
@@ -4093,7 +4092,7 @@
   if (isPageRound(blocksOfRound(currentRound)) && roundIsCurrentlyAwaited(roundEntry(currentRound), Date.now())) {
     setCommentMode(true);
   }
-  // SPEC_AWAITED.md ticket 03 (AC 6, AC 11, AC 12): a round left open on screen
+  // A round left open on screen
   // has to count down and can revert to read-only entirely on its own, with
   // nobody touching anything -- the periodic half of refreshAwaitDisplay,
   // beside the flip-triggered call in refreshPager and the 'awaitExpired' SSE
@@ -4142,7 +4141,7 @@
    *
    * ADR.md entry 42: the header's own round badge used to be a third caller,
    * deferring to this same function on click rather than navigating on its
-   * own -- the badge is gone (SPEC_HEADER.md AC 12), and this function stays
+   * own -- the badge is gone, and this function stays
    * exactly as it was for its remaining caller. */
   function jumpToOpenRound() {
     var target = openRoundNumber();
@@ -4184,9 +4183,8 @@
     else window.addEventListener('load', jumpToOpenRoundAfterPaint);
   }
 
-  /** The banner's own click target (SPEC_STRANDED.md criterion 12, Decisions:
-   * "the click resolves to the oldest round still waiting at the moment it is
-   * clicked"). Deliberately NOT openRoundNumber() -- that names the LATEST
+  /** The banner's own click target -- by design it resolves to the oldest
+   * round still waiting at the moment it is clicked. Deliberately NOT openRoundNumber() -- that names the LATEST
    * unsent round, which is right for '#open-round' (arriving from the index)
    * and for what this page can still submit, but wrong here: a lapsed round
    * must never outrank an older one still genuinely awaited, and 'sent' vs
@@ -4433,7 +4431,7 @@
     submitPageRound(roundN, 'send');
   }
 
-  /** SPEC_AWAITED.md ticket 03 (AC 4): the awaited page's own Send/Discuss --
+  /** The awaited page's own Send/Discuss --
    * submitBoard's analogue for a page round, deliberately never sharing that
    * function's path. submitBoard refuses outright on a page round (ADR.md
    * entry 35: "a page board is not sendable" through the ordinary send bar)
@@ -5026,8 +5024,7 @@
 
   // Coming back to the tab is the acknowledgement: the mark clears the moment the
   // document becomes visible/focused again, so a stale numeral never outlives
-  // the rounds it counted. The attended report rides the same edges (AC 16's
-  // daemon-side accessor; see SPEC_STRANDED.md) PLUS 'blur', which has nothing
+  // the rounds it counted. The attended report rides the same edges PLUS 'blur', which has nothing
   // to say to the favicon or the banner's click sentinel (losing focus while
   // still visible is not "come back and look", nor is it an arrival) but
   // everything to say to the daemon (see attendedWatcherId's own comment above

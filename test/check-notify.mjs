@@ -443,7 +443,7 @@ process.exit(0);
     // only, which is the drift this exists to catch.
     const js = readFileSync(path.join(repoRoot, 'src', 'notify.mjs'), 'utf8');
     const jsTable = js.slice(js.indexOf('const MESSAGES = {'), js.indexOf('const CUE_KEYS'));
-    // Each row is `phase: { ... }` since SPEC_STRANDED.md generalised MESSAGES to carry
+    // Each row is `phase: { ... }` since ADR.md entry 58 generalised MESSAGES to carry
     // a per-row title -- was `phase: 'message'` before.
     const phases = [...jsTable.matchAll(/^\s{2}(\w+):\s*\{/gm)].map(m => m[1]);
     assert.ok(phases.length >= 5, `expected to parse src/notify.mjs's MESSAGES keys, got ${JSON.stringify(phases)}`);

@@ -13,9 +13,8 @@
 // every question widget, each answered, reading as the follow-up discussion
 // about round 1's artifact. The round 2 markdown block also carries a fenced
 // ```json snippet, exercising the fence-highlights-through-the-same-tokenizer
-// path ticket 04/ADR.md entry 65 added -- SPEC_RENDERING.md ticket 06 is what
-// this file exists to satisfy, and a sample that never highlighted a diff or
-// a markdown fence would regenerate clean without ever showing either half of
+// path ADR.md entry 65 added: a sample that never highlighted a diff or a
+// markdown fence would regenerate clean without ever showing either half of
 // the feature it is meant to demonstrate. The board opens on round 2 (its
 // newest round), one chevron ahead of the artifact that started the thread.
 //

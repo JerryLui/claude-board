@@ -295,7 +295,7 @@ body.readonly .back-to-index { display: none; }
 .round-meta { display: none; flex: none; font: inherit; color: var(--muted); font-size: 11.5px;
   font-weight: 550; letter-spacing: 0.02em; white-space: nowrap; }
 body.page-board .round-meta { display: inline; }
-/* SPEC_HEADER.md ticket 03 (AC 7): an ordinary board's pill carries the same
+/* ADR.md entry 40: an ordinary board's pill carries the same
    state label a page board's does -- the element and its text are already
    rendered/kept current for every board (src/render.mjs, src/ui.mjs's
    refreshAwaitDisplay), so this is the one CSS rule standing between it and
@@ -437,8 +437,7 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
   border-radius: var(--r-md); overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
 .md-content pre code { background: none; padding: 0; font-size: inherit; }
 
-/* SPEC_RENDERING.md's markdown-fence language label (spec contract edit,
- * 2026-08-09) -- src/render.mjs's highlightFenceHtml wraps a fence in this div
+/* The markdown-fence language label -- src/render.mjs's highlightFenceHtml wraps a fence in this div
  * only when 'lang' names a grammar this build vendored, never for a lang-less or
  * unrecognised fence. 'position: relative' is the div's whole job: it gives the
  * '::before' below a containing block that is NOT '.md-content pre' itself, which
@@ -763,7 +762,7 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
  * it is a distinct token from the one .md-content's inline code still uses). */
 .code-block pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; color: var(--code-base); }
 
-/* SPEC_RENDERING.md ticket 02, AC 7/8: one row per source line, each carrying its
+/* ADR.md entry 63: one row per source line, each carrying its
  * own real line number in a fixed left gutter column that is never a text node --
  * a 'data-line' attribute plus a "content: attr(...)" ::before, never a <span> of
  * literal digits. Generated content is not selectable and is never included in a
@@ -817,7 +816,7 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .tok-number { color: var(--code-number); }
 .tok-comment { color: var(--code-comment); font-style: italic; }
 
-/* SPEC_RENDERING.md ticket 05, ADR.md entry 64: inside a diff block the six-hue
+/* ADR.md entry 64: inside a diff block the six-hue
  * palette above never applies at all -- src/render.mjs's TOKEN_CLASS has no diff
  * token mapped to a tok-* name, so a diff row carries none of the rules above by
  * construction, not by overriding them here. Syntax colour instead "drops to
@@ -1111,7 +1110,7 @@ body.comment-mode .blocks { cursor: crosshair; }
    fixed column is what holds that with no measured offset between them.
 
    Its real rendered height also drives '--round-pager-dock-h' (see
-   '.page-comments' below, ticket 02 SPEC_AWAITED.md): setupPagerDockHeightTracking
+   '.page-comments' below, ADR.md entry 42): setupPagerDockHeightTracking
    (src/ui.mjs) measures this box with a ResizeObserver and writes that
    custom property, so a panel that has to clear the dock reads its actual
    height off the browser's own layout -- whatever that ends up being, one
@@ -1505,8 +1504,8 @@ body.page-board .send-bar { display: none; }
 body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom: var(--space-5);
   z-index: 30; margin-bottom: 0; max-width: 320px; }
 /* Raised clear of the round pager, which owns the bottom-centre strip on every
-   page (ADR.md entry 42). Ticket 03 (SPEC_AWAITED.md) puts a send control
-   inside this panel at every comment count, so it can no longer be sized by
+   page (ADR.md entry 42). A send control now sits inside this panel at every
+   comment count (ADR.md entry 45), so it can no longer be sized by
    a number picked to fit today's content -- '2379f12' already broke exactly
    that once, when the pager grew a caption row above its pill and this
    panel's hardcoded '44px' (sized for the old single-row pill) started
@@ -1533,10 +1532,10 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    exactly var(--space-3) above the dock's measured rect top in every case,
    because the panel grows upward, away from the dock -- the clearance is a
    property of the DOCK's height alone, not the panel's. */
-/* SPEC_AWAITED.md ticket 03: the panel used to grow upward with NO ceiling --
+/* The panel used to grow upward with NO ceiling --
    fine while it only ever held the compose form and a short list, wrong the
-   moment ticket 03 put a send control inside it (AC 4) that has to stay
-   reachable at every comment count: unbounded growth pushed the panel's own
+   moment a send control landed inside it (ADR.md entry 45, AC 4) that has to
+   stay reachable at every comment count: unbounded growth pushed the panel's own
    top edge off the top of a short viewport well before the list got long,
    taking the send control with it. 'max-height' below puts a ceiling on
    the panel itself, tied to the SAME '--round-pager-dock-h' the 'bottom' value
@@ -1818,7 +1817,7 @@ body.page-board .round-meta { border-left: 1px solid var(--hairline); padding-le
    and 24px of air holding the space. */
 body.page-board .round-meta:empty { display: none; }
 
-/* --- SPEC_HEADER.md ticket 03 (ADR.md entry 40): an ordinary board condenses
+/* --- ADR.md entry 40: an ordinary board condenses
    too, into the same pill above -- the two board types stop reading as two
    designs. Every rule below reads the identical '--stage-p'/'--pill-half' the
    page-board rules above do (written here by refreshDocumentScrollChrome,
@@ -2013,7 +2012,7 @@ body.page-board .back-to-top.visible {
   .send-status { width: 100%; margin-bottom: var(--space-2); }
   .btn-send, .btn-discuss { flex: 1; }
   .search-form { flex-wrap: wrap; }
-  /* SPEC_HEADER.md ticket 03: the condense is suppressed below this
+  /* The condense is suppressed below this
      breakpoint rather than taught a second, column-aware shape. '--pill-half'
      is measured as one SINGLE-ROW sum (brand + columnGap + actions,
      src/ui.mjs's measurePillHalf) and describes nothing once the rule two

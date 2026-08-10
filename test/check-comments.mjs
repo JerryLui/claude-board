@@ -12,7 +12,7 @@
 // same class (four test files needed the same fix), which is why test/ is audited here and not
 // merely read.
 //
-// FOUR RULES. Each one is (a) a pure function of the file list, so that (b) a floor can assert
+// FIVE RULES. Each one is (a) a pure function of the file list, so that (b) a floor can assert
 // it has a subject at all, and (c) an ablation can plant a defect of its class and prove the
 // rule reports that exact site. All three parts matter together: a rule whose extractor stops
 // matching passes silently, which is worth less than no rule. Replacing every `/**` with `/*`
@@ -74,6 +74,7 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -563,6 +564,67 @@ check('rule 4 still resolves a documented field against its own run, but only on
   ]);
   assert.deepEqual(unresolvedLocalReferences(symbol.files).lost,
     [`${symbol.at} points at \`createStrandedWatch\` in this file, which is not here`]);
+});
+
+// --- rule 5: nothing tracked names a local-only document ------------------------
+//
+// .gitignore keeps the working documents local -- the specs, the ticket lists, the
+// scratch list, the audit reports under the findings directory -- and states the rule
+// this check enforces: nothing tracked may cite one of them by name, because the
+// pointer resolves only in the checkout that happens to hold the file. 250-odd such
+// citations were swept out of this tree in one pass; this rule is what keeps the next
+// spec from depositing more.
+//
+// The subject is the TRACKED tree, not FILES above: the rule is about what a clone
+// receives, so it reads the tracked list from git and scans whole files rather than
+// comment runs -- a test name is a string, not a comment, and dangled just the same.
+// The pattern is concatenated from pieces so this file's own source stays out of its
+// verdict.
+const LOCAL_ONLY = new RegExp(
+  String.raw`\b(?:SPEC|TICKETS)_[A-Z_]+\.md` + '|' +
+  String.raw`\bTODO\.md` + '|' +
+  String.raw`\bfindings\/[\w.-]+`, 'g');
+
+function localDocCitations(entries) {
+  const cited = [];
+  for (const { rel, text } of entries) {
+    text.split('\n').forEach((line, i) => {
+      for (const m of line.matchAll(LOCAL_ONLY)) cited.push(`${rel}:${i + 1} names ${m[0]}`);
+    });
+  }
+  return cited;
+}
+
+// .gitignore is exempt: it declares the patterns this rule enforces. Binary files are
+// skipped as noise; a file tracked but absent on disk (mid-operation) is skipped
+// rather than crashing the run.
+const TRACKED = execSync('git ls-files', { cwd: ROOT, encoding: 'utf8' })
+  .split('\n').filter(Boolean)
+  .filter(rel => rel !== '.gitignore' && !/\.(?:png|icns)$/.test(rel) && existsSync(join(ROOT, rel)))
+  .map(rel => ({ rel, text: readFileSync(join(ROOT, rel), 'utf8') }));
+
+check('rule 5 has a subject: the tracked tree is listed and read', () => {
+  assert.ok(TRACKED.length >= 60, `expected at least 60 tracked files, found ${TRACKED.length} -- the tracked list stopped answering, so rule 5 is inert`);
+  for (const must of ['src/ui.mjs', 'README.md', 'skills/claude-board/SKILL.md']) {
+    assert.ok(TRACKED.some(f => f.rel === must), `${must} is not in the tracked list rule 5 reads`);
+  }
+});
+
+check('no tracked file names a local-only document', () => {
+  const cited = localDocCitations(TRACKED);
+  assert.deepEqual(cited, [], `\n     ${cited.join('\n     ')}\n     The named file is gitignored: a clone cannot follow the pointer. Cite an ADR.md entry or state the fact in place (.gitignore, "Working documents, kept local").`);
+});
+
+check('rule 5 reports each local-only name, and stays silent on tracked ones', () => {
+  const planted = [{
+    rel: 'src/x.mjs',
+    text: 'per SPEC' + '_HEADER.md ticket 3, see findings' + '/audit.md\nADR.md entry 45 and DESIGN.md stay.\nTODO' + '.md too',
+  }];
+  assert.deepEqual(localDocCitations(planted), [
+    'src/x.mjs:1 names SPEC' + '_HEADER.md',
+    'src/x.mjs:1 names findings' + '/audit.md',
+    'src/x.mjs:3 names TODO' + '.md',
+  ], 'the two dangling names and the scratch list must be reported; the ADR and DESIGN citations must not');
 });
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall comment checks ok');

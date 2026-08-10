@@ -1,5 +1,4 @@
-// TICKETS_RENDERING.md ticket 01 ("The engines arrive, pinned and guarded"), AC 15:
-// every file under src/vendor/ matches a recorded sha256, asserted with NO network --
+// ADR.md entry 62: every file under src/vendor/ matches a recorded sha256, asserted with NO network --
 // patterned on install.sh's `payload_digest` (install.sh:467) and
 // test/check-install-payload.mjs's proof of it, but per-file rather than one folded
 // digest, because AC 15 asks "each file... matches a recorded sha256", not "the tree

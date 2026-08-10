@@ -136,7 +136,7 @@ check('a brand-new round pushed over SSE (mode: new-round) is genuinely anchorab
 
   // A trailing markdown block keeps round 2 an ORDINARY round (isPageRound
   // false): a lone `html` block is a page round (ADR.md entry 33) whose
-  // comment gesture SPEC_AWAITED.md ticket 03 (ADR.md entry 46) gates on
+  // comment gesture (ADR.md entry 46) gates on
   // being *awaited*, and this file is about SSE push anchoring, not
   // awaited-ness -- test/check-click.mjs's own identical fix has the fuller
   // reasoning. `.find()` below still finds the html block: it is first.
@@ -208,7 +208,7 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
   const board = freshBoard();
   // A trailing markdown block, same reasoning as this file's other two
   // fixtures above: round 2 stays an ORDINARY round, not a page round whose
-  // comment gesture SPEC_AWAITED.md ticket 03 gates on being *awaited* -- and
+  // comment gesture (ADR.md entry 46) gates on being *awaited* -- and
   // here it matters doubly, since round 2 IS the round in view when `mintDoc`
   // below hydrates: a page round that were also awaited would hydrate with
   // comment mode already ON (AC 5), and the very next line's enableCommentMode
@@ -350,7 +350,7 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   assert.equal(pins[0].style.top, expectedTop + 'px', `expected the pin positioned at the ATTACHED .resolve-error note (${expectedTop}px), got ${JSON.stringify(pins[0].style.top)} -- computed while wireRoot(replacement) still had the section detached under a bare wrapper div`);
 });
 
-// SPEC_HEADER.md AC 12 (ADR.md entry 42) deleted the round badge this section
+// ADR.md entry 42 deleted the round badge this section
 // used to drive live over SSE -- the header names no round at all now, at rest
 // or condensed, so there is nothing left here for a round push to update.
 

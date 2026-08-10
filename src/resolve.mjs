@@ -497,7 +497,7 @@ function sliceLines(text, lines) {
  * it does END the section above it, because it is a heading on the page.
  *
  * `startLine` comes back with the text: 1-based, the line of the file the slice
- * begins on, for a caller that has to number a gutter (SPEC_RENDERING.md AC 7). */
+ * begins on, for a caller that has to number a gutter. */
 function sliceSection(text, section) {
   // Both from one call, so the line numbers and the lines they index cannot
   // disagree: markdown.mjs normalises `\r\n` and a lone `\r` to `\n` (marked's own
@@ -586,7 +586,7 @@ export function resolveRef(ref, { cwd, roots } = {}) {
   // `startLine` is TOTAL -- every successful resolution reports one (1 for a whole
   // file) -- so a caller never has to work out which selector it got before it can
   // number a gutter. src/render.mjs renders each code row with its file's real line
-  // number (SPEC_RENDERING.md AC 7); a section-sliced block had no way to know its
+  // number; a section-sliced block had no way to know its
   // own offset and numbered from 1, because this function knew and did not say.
   return { text: sliced.text, sha: sha256(sliced.text), startLine: sliced.startLine };
 }
@@ -603,7 +603,7 @@ const EXT_LANG = {
   sh: 'bash', bash: 'bash', zsh: 'bash',
   json: 'json', yaml: 'yaml', yml: 'yaml', md: 'markdown',
   html: 'html', css: 'css', sql: 'sql', swift: 'swift', kt: 'kotlin',
-  // SPEC_RENDERING.md ticket 05, AC 3: a referenced .diff/.patch file resolves
+  // A referenced .diff/.patch file resolves
   // to the vendored 'diff' grammar (ADR.md entry 64) with no new concept --
   // same EXT_LANG table, same langForPath caller in src/board.mjs.
   diff: 'diff', patch: 'diff',

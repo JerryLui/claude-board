@@ -76,7 +76,7 @@ const ARTIFACT = '<style>.doc{font:14px system-ui}</style>'
   + '});'
   + '</script>';
 
-// `wait: true` (SPEC_AWAITED.md ticket 03): every existing check in this file
+// `wait: true` (ADR.md entry 45): every existing check in this file
 // predates *awaited* and exercises the page board's commenting/click-to-anchor
 // surface, which ADR.md entry 46 now gates on the round actually being
 // awaited -- so the default fixture here has to declare it, or every one of
@@ -139,10 +139,10 @@ function withFetchCapture(fn) {
   return calls;
 }
 
-// Idempotent (SPEC_AWAITED.md ticket 03, AC 5): an awaited page board now
-// hydrates with comment mode already ON, so a bare unconditional click here
-// would toggle it straight back OFF on exactly the fixture this file's checks
-// mostly use. Only clicks when it still needs to.
+// Idempotent: an awaited page board now hydrates with comment mode already ON,
+// so a bare unconditional click here would toggle it straight back OFF on
+// exactly the fixture this file's checks mostly use. Only clicks when it
+// still needs to.
 function enableCommentMode(document) {
   const toggle = document.getElementById('comment-mode-toggle');
   assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
@@ -335,7 +335,7 @@ check('criterion 16: the pill wears a corner rather than a capsule, and holds on
     'the divider must not be drawn while the slot is still empty');
 });
 
-check('AC 9 (SPEC_HEADER.md): a page board\'s comment-mode toggle wears COMMENT_ICON\'s own glyph, at rest and condensed alike -- the same node, never redrawn or swapped', () => {
+check('a page board\'s comment-mode toggle wears COMMENT_ICON\'s own glyph, at rest and condensed alike -- the same node, never redrawn or swapped', () => {
   const { document, frame } = openPageBoard();
   const commentPaths = [...COMMENT_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
   const toggle = document.getElementById('comment-mode-toggle');
@@ -355,7 +355,7 @@ check('AC 9 (SPEC_HEADER.md): a page board\'s comment-mode toggle wears COMMENT_
     'condensed, the toggle must still render COMMENT_ICON\'s own path data');
 });
 
-check('AC 12 (SPEC_HEADER.md, ADR.md entry 42): a page board\'s header names no round, at rest or condensed', () => {
+check('ADR.md entry 42: a page board\'s header names no round, at rest or condensed', () => {
   const { document, frame } = openPageBoard();
   assert.equal(document.getElementById('round-badge'), null, 'setup: no #round-badge at rest');
   assert.equal(document.querySelectorAll('.round-badge').length, 0, 'setup: no .round-badge element at rest');
@@ -541,9 +541,9 @@ check('criterion 17: comment mode can be switched on AND off while condensed, wi
   reportScroll(frame, 800);
   const toggle = document.querySelector('button#comment-mode-toggle');
 
-  // SPEC_AWAITED.md ticket 03, AC 5: this awaited page board hydrates with
-  // comment mode already ON -- that is itself the starting state under test
-  // here, not something this check has to switch on first.
+  // An awaited page board hydrates with comment mode already ON -- that is
+  // itself the starting state under test here, not something this check has
+  // to switch on first.
   assert.equal(toggle.classList.contains('active'), true, 'setup: an awaited page board opens with comment mode on (AC 5)');
   assert.equal(condensed(document), true, 'setup: the header is condensed');
 
@@ -634,7 +634,7 @@ check('the INBOUND half of the channel is shape-checked too -- the stage refuses
 
   const themeBefore = root.getAttribute('data-theme');
   assert.equal(themeBefore, 'dark', 'setup: the stage starts painted in the board\'s theme');
-  // SPEC_HEADER.md ADR 59: the 'band' handler's own guards (applyBand's
+  // ADR.md entry 59: the 'band' handler's own guards (applyBand's
   // Math.max is never reached at all unless both fields pass the same
   // finite/non-negative shape check 'scroll''s top does) had never run under a
   // check either -- everything below asserts padding stays exactly where
@@ -799,9 +799,9 @@ check('criterion 15: theme rides the message that already carries comment mode, 
     if (ev.data && ev.data.cb === 'cb-stage' && ev.data.type === 'mode') heard.push(ev.data);
   });
 
-  // A theme change with comment mode ON (SPEC_AWAITED.md ticket 03, AC 5:
-  // this awaited page board hydrates that way already), then a mode change
-  // with a theme already chosen: whichever fact moved, the stage is told
+  // A theme change with comment mode ON (this awaited page board hydrates
+  // that way already), then a mode change with a theme already chosen:
+  // whichever fact moved, the stage is told
   // BOTH, so it can never be left holding a stale value of the one the
   // caller did not care about (one channel, one message
   // shape).
@@ -935,16 +935,12 @@ check('criterion 2: a page board\'s frame never takes an inline height from a re
 });
 
 // =================================================================================
-// SPEC_HEADER.md, criteria 1-6: the board clears its own chrome band, the artifact
-// does not (ADR.md entry 59). src/ui.mjs's reportStageBand measures the header's
-// band at rest and the round pager dock's band, and posts them to the CURRENT
-// page board's stage over the same channel 'mode'/'scroll'/'height' already use;
-// src/render.mjs's stageAgentScript tops its own body padding up to whichever is
-// larger of that report and whatever the artifact's own markup already gave it.
-//
-// Numbered distinctly from this file's own "criterion 2"/"criterion 3"/etc. above
-// -- those are SPEC_AWAITED.md's numbering; every check below is prefixed
-// "SPEC_HEADER.md criterion N" to keep the two specs' numbers from colliding.
+// The board clears its own chrome band, the artifact does not (ADR.md entry 59).
+// src/ui.mjs's reportStageBand measures the header's band at rest and the round
+// pager dock's band, and posts them to the CURRENT page board's stage over the
+// same channel 'mode'/'scroll'/'height' already use; src/render.mjs's
+// stageAgentScript tops its own body padding up to whichever is larger of that
+// report and whatever the artifact's own markup already gave it.
 //
 // What no check here can prove: the artifact's OWN declared padding, read via
 // applyBand's `getComputedStyle(document.body)` (src/render.mjs). test/dom-stand-in.mjs
@@ -956,16 +952,15 @@ check('criterion 2: a page board\'s frame never takes an inline height from a re
 // baseline-capture branch never runs here and the artifact's own baseline is
 // always 0 in this suite, same as it would genuinely be for an artifact that
 // really pads nothing. What every check below CAN and does prove: the band is
-// applied as padding and nothing else (criterion 4), a fresh artifact gets
-// exactly the reported band (criterion 1, the same scenario the stand-in's
-// baseline-of-0 happens to model correctly), the bottom band clears the dock
-// (criterion 3), a repeated report never stacks a second band on top of the
-// first (the half of criterion 2 that does not depend on cascade CSS), and a
-// resize re-measures and re-sends (criterion 5).
+// applied as padding and nothing else, a fresh artifact gets exactly the
+// reported band (the same scenario the stand-in's baseline-of-0 happens to
+// model correctly), the bottom band clears the dock, a repeated report never
+// stacks a second band on top of the first (the half of that guarantee that
+// does not depend on cascade CSS), and a resize re-measures and re-sends.
 
 const stageBody = (frame) => frame.contentDocument.body;
 
-check('SPEC_HEADER.md criterion 1: a page board whose artifact pads nothing is topped up to exactly the header\'s own band, so its first element renders in full at scroll top', () => {
+check('a page board whose artifact pads nothing is topped up to exactly the header\'s own band, so its first element renders in full at scroll top', () => {
   const { document, frame } = openPageBoard();
   const head = document.querySelector('.board-head');
   const expectedTop = head.getBoundingClientRect().height;
@@ -974,7 +969,7 @@ check('SPEC_HEADER.md criterion 1: a page board whose artifact pads nothing is t
     'an artifact with no padding of its own must be topped up to exactly the header\'s own band -- never left at zero');
 });
 
-check('SPEC_HEADER.md criterion 3: the bottom edge is topped up to clear the round pager dock, with its own breathing room beyond the bare dock height', () => {
+check('the bottom edge is topped up to clear the round pager dock, with its own breathing room beyond the bare dock height', () => {
   const { document, frame } = openPageBoard();
   const dock = document.querySelector('.round-pager-dock');
   const dockHeight = dock.getBoundingClientRect().height;
@@ -992,21 +987,21 @@ check('SPEC_HEADER.md criterion 3: the bottom edge is topped up to clear the rou
     'a dock that grows 40px taller must grow the bottom band by exactly 40px -- the extra clearance beyond the dock is a constant, not a second measurement that also moved');
 });
 
-check('SPEC_HEADER.md criterion 3 (the comment rail): a rail carrying chrome is cleared on top of the dock, not merely the gap the dock alone leaves', () => {
-  // openPageBoard's default fixture is awaited (SPEC_AWAITED.md ticket 03: a
-  // send control at every comment count), so '.page-comments' carries real
-  // chrome -- a '.page-send-bar' -- from the very first paint, with zero
-  // comments queued. '.page-comments' is 'position: fixed' with its own
-  // 'max-height' (src/styles.mjs), floating ABOVE the dock's own offset --
-  // the dock-only figure clears the GAP below the rail, never the rail
-  // itself, so an artifact's last element sits under the rail whenever the
-  // rail holds anything at all.
+check('the comment rail: a rail carrying chrome is cleared on top of the dock, not merely the gap the dock alone leaves', () => {
+  // openPageBoard's default fixture is awaited (ADR.md entry 45: an awaited
+  // page board carries Send), so '.page-comments' carries real chrome -- a
+  // '.page-send-bar' -- from the very first paint, with zero comments queued.
+  // '.page-comments' is 'position: fixed' with its own 'max-height'
+  // (src/styles.mjs), floating ABOVE the dock's own offset -- the dock-only
+  // figure clears the GAP below the rail, never the rail itself, so an
+  // artifact's last element sits under the rail whenever the rail holds
+  // anything at all.
   const { document, frame } = openPageBoard();
   const dock = document.querySelector('.round-pager-dock');
   const rail = document.querySelector('.round-current .page-comments');
   assert.ok(rail, 'setup: the page board must render its comment rail');
   assert.ok(rail.querySelector('.page-send-bar'),
-    'setup: an awaited page board\'s rail carries a send control at every comment count (SPEC_AWAITED.md ticket 03), so it has real chrome from the first paint');
+    'setup: an awaited page board\'s rail carries a send control at every comment count (ADR.md entry 45), so it has real chrome from the first paint');
 
   // The same fallback space4/space3 this whole section's other checks rely on
   // (this suite's bare, unqualified `getComputedStyle` is never a function in
@@ -1020,7 +1015,7 @@ check('SPEC_HEADER.md criterion 3 (the comment rail): a rail carrying chrome is 
     'the bottom band must clear the rail\'s own height ON TOP OF the dock\'s clearance -- clearing only the dock leaves the rail itself floating over the artifact');
 });
 
-check('SPEC_HEADER.md criterion 3 (the comment rail): a rail carrying nothing adds no extra clearance -- only the dock\'s own applies', () => {
+check('the comment rail: a rail carrying nothing adds no extra clearance -- only the dock\'s own applies', () => {
   // The "never awaited" branch of renderPageCommentPanel (src/render.mjs):
   // no compose form, no hint, no send control, and an empty comment-list --
   // '.page-comments' is still emitted (so a later push can still find it) but
@@ -1039,7 +1034,7 @@ check('SPEC_HEADER.md criterion 3 (the comment rail): a rail carrying nothing ad
     'a rail carrying nothing must not widen the bottom band -- only the dock\'s own clearance applies, exactly as before the rail was ever considered');
 });
 
-check('SPEC_HEADER.md criterion 4: the clearance is padding only -- no background, colour or border ever reaches the stage from the board', () => {
+check('the clearance is padding only -- no background, colour or border ever reaches the stage from the board', () => {
   const { frame } = openPageBoard();
   const body = stageBody(frame);
   assert.ok(body.style.paddingTop, 'setup: the band mechanism did run');
@@ -1060,7 +1055,7 @@ check('SPEC_HEADER.md criterion 4: the clearance is padding only -- no backgroun
     'applyBand must only ever write paddingTop/paddingBottom -- any other style property is exactly the wash entry 40 already ruled out');
 });
 
-check('SPEC_HEADER.md criterion 2: a repeated band report never stacks a second band on top of the first', () => {
+check('a repeated band report never stacks a second band on top of the first', () => {
   const { frame } = openPageBoard();
   const body = stageBody(frame);
   const before = body.style.paddingTop;
@@ -1082,7 +1077,7 @@ check('SPEC_HEADER.md criterion 2: a repeated band report never stacks a second 
     'the baseline in this suite is always 0 (see this section\'s own header comment), so a smaller report must be honoured, not floored at the earlier, larger one');
 });
 
-check('SPEC_HEADER.md criterion 5: resizing the viewport re-measures the header and the artifact\'s clearance follows it, up or down', () => {
+check('resizing the viewport re-measures the header and the artifact\'s clearance follows it, up or down', () => {
   const { document, frame } = openPageBoard();
   const head = document.querySelector('.board-head');
 
@@ -1113,7 +1108,7 @@ check('the top band is measured only while the header is genuinely at rest -- a 
     'the artifact\'s clearance must not follow a height change caused by condensing -- ADR.md entry 40 chose an overlay specifically so nothing reflows mid-scroll, and a shrinking padding here would be exactly that');
 });
 
-check('SPEC_HEADER.md criteria 1 and 5: a genuine resize taken WHILE condensed still re-measures the header once the reader returns to rest', () => {
+check('a genuine resize taken WHILE condensed still re-measures the header once the reader returns to rest', () => {
   // The gate the check just above this one pins ("skip the header's box while
   // condensed") is correct and stays -- src/styles.mjs really does shrink
   // '.board-head''s own box as it condenses, so measuring mid-scroll would
@@ -1150,7 +1145,7 @@ check('SPEC_HEADER.md criteria 1 and 5: a genuine resize taken WHILE condensed s
     'returning to rest must re-measure the header and thaw the artifact\'s clearance -- staying at the stale pre-scroll value is 24px of the artifact\'s own first element left under the header, for the rest of the session');
 });
 
-check('SPEC_HEADER.md criterion 5: the band is re-sent when a round is flipped to, so a page board arrived at over the pager is topped up too', () => {
+check('the band is re-sent when a round is flipped to, so a page board arrived at over the pager is topped up too', () => {
   // Round 2, not round 1, renders '.round-current' at hydrate (renderRoundSection:
   // "const current = lastRound.n === roundN") -- so the page board has to be round
   // 1 here for "not current yet" to be the genuine starting state this checks.
@@ -1328,7 +1323,7 @@ check('the seam for ticket 05: a round arriving over SSE ends the page-board lay
 });
 
 // =================================================================================
-// SPEC_AWAITED.md ticket 03: the page board's two states.
+// The page board's two states.
 // =================================================================================
 //
 // Everything above this line predates *awaited* (ADR.md entries 45-47) and now

@@ -68,8 +68,8 @@ static NSString *const kOpenBoardAction = @"claude-board.open-board";
  *
  * The fire-and-exit modes never needed this: they live for milliseconds and default
  * dispositions are correct for them. A process that lives for the length of a round's
- * wait is one the daemon must be able to stop cleanly -- SPEC_STRANDED.md criterion 15
- * -- and one launchd will signal when the whole job goes down. */
+ * wait is one the daemon must be able to stop cleanly, and one launchd will signal
+ * when the whole job goes down. */
 static volatile sig_atomic_t stop_requested = 0;
 
 static void cb_stop(int sig) {
@@ -203,7 +203,7 @@ static void withdraw_own_notification(UNUserNotificationCenter *center, NSString
  * than at the first boundary of a work interval hours later.
  *
  * `title` names the kind of thing that happened -- "Pomodoro" beside "Board"
- * (SPEC_STRANDED.md) -- and, like `body`, always crosses here as one of
+ * (ADR.md entry 58) -- and, like `body`, always crosses here as one of
  * bin/launcher.c's own MESSAGES literals: never a byte of argv reaches this function
  * unrouted through that table. Unused in the authorize-only call (`body == NULL`),
  * where there is nothing yet to title.
@@ -224,8 +224,8 @@ static void withdraw_own_notification(UNUserNotificationCenter *center, NSString
  *
  * `use_default_sound`, nonzero, plays the system default sound regardless of `cue_name`
  * (bin/launcher.c always pairs it with a NULL `cue_name` -- there is no cue picker for a
- * row that sets this, per SPEC_STRANDED.md's Out of Scope: "a choosable sound for the
- * board banner"). Kept as its own argument rather than folded into `cue_name`: NULL
+ * row that sets this; a choosable sound for the board banner was never in scope). Kept
+ * as its own argument rather than folded into `cue_name`: NULL
  * already means "no sound property at all", the silence a phase set to `None` needs, and
  * that has to stay reachable alongside "play the default" rather than the two sharing one
  * meaning for NULL.
@@ -408,9 +408,9 @@ int cb_notify(const char *title, const char *body, const char *cue_name, int use
 
     /* --- Serving the click ------------------------------------------------------
      *
-     * Three ways this ends, and the daemon owns two of them (SPEC_STRANDED.md criterion
-     * 15). It kills this process when the reviewer comes back to the board or the round
-     * is answered, which arrives here as `stop_requested`; and it dies with the job when
+     * Three ways this ends, and the daemon owns two of them. It kills this process
+     * when the reviewer comes back to the board or the round is answered, which
+     * arrives here as `stop_requested`; and it dies with the job when
      * launchd stops the daemon, which arrives the same way. The third is this process's
      * own: `click_seconds` is the round's remaining wait, after which there is nothing
      * left to open, and a lapsing wait fires no event a child could have been told to

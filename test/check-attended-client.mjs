@@ -1,12 +1,12 @@
-// The CLIENT half of the attended report and the banner's click sentinel
-// (SPEC_STRANDED.md tickets 02/06, ADR.md entry 58), driven for real: the real
+// The CLIENT half of the attended report (ADR.md entry 58) and the banner's click
+// sentinel (ADR.md entry 55), driven for real: the real
 // `ui` script running against test/dom-stand-in.mjs, exactly as
 // test/check-round-pager.mjs and four other check files already do, with
 // `globalThis.fetch` stubbed to capture what reportAttended actually posts and
 // `StandInEventSource.dispatch` standing in for the daemon's own SSE pushes.
 //
-// A six-pass audit of SPEC_STRANDED.md found reportAttended and isTabAttended
-// were never EXECUTED by any check -- test/check-pure.mjs only pattern-matches
+// A six-pass audit found reportAttended and isTabAttended were never EXECUTED
+// by any check -- test/check-pure.mjs only pattern-matches
 // their source text -- and the 'watcher' SSE event was never dispatched either,
 // though the machinery for it (StandInEventSource.dispatch) was already
 // established elsewhere in the suite. That gap is exactly why a missing 'blur'
@@ -89,7 +89,7 @@ await check('the watcher id arriving over SSE fires an immediate report, before 
   } finally { restore(); }
 });
 
-await check("blur -- the tab stays VISIBLE, only loses focus to another window -- reports attended: false; this is the product's main stranded scenario (SPEC_STRANDED.md criterion 3), and before the fix, nothing reported it at all", async () => {
+await check("blur -- the tab stays VISIBLE, only loses focus to another window -- reports attended: false; this is the product's main stranded scenario, and before the fix, nothing reported it at all", async () => {
   const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
   const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
   let focused = true;
@@ -355,7 +355,7 @@ await check("an alt-tab burst -- focus, blur, focus, blur, all within millisecon
     // ANY of the four fetch()es it starts has had a chance to reject, so at
     // the moment each one starts there is nothing yet for a single timer
     // handle to have "already armed" -- the alt-tab burst this listener
-    // exists to catch in the first place (SPEC_STRANDED.md criterion 3).
+    // exists to catch in the first place.
     es.dispatch('watcher', JSON.stringify({ id: 'w1' }));
     focused = false; window.dispatchEvent(new StandInEvent('blur'));
     focused = true; window.dispatchEvent(new StandInEvent('focus'));

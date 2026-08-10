@@ -121,7 +121,7 @@ function safeJson(value) {
  * standalone archive needs.
  *
  * Shared by the whole-block comment button below AND the comment-mode toggle
- * (commentModeToggle) -- SPEC_HEADER.md AC 9. The toggle used to carry its own
+ * (commentModeToggle). The toggle used to carry its own
  * icon (a crosshair) precisely so the two didn't read as the same affordance;
  * that reasoning no longer holds now that the toggle names no round and holds
  * only what it does, "comment" -- one glyph for one idea, not two glyphs for two
@@ -148,7 +148,7 @@ const EXPAND_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none"
  * its own click never anchors anything (excluded from the click-to-anchor
  * gesture by class, same as the comment infrastructure it sits beside).
  *
- * The label is the static word `Comment` (SPEC_HEADER.md AC 10), never
+ * The label is the static word `Comment`, never
  * `Comment mode: on`/`off` -- on/off is carried by `.active` and `aria-pressed`
  * alone, so src/ui.mjs's setCommentMode never has to rewrite it. */
 function commentModeToggle() {
@@ -721,7 +721,7 @@ function sourceLabel(source) {
   return label;
 }
 
-// Syntax highlighting (SPEC_RENDERING.md ticket 02, ADR.md entry 62-63) runs
+// Syntax highlighting (ADR.md entry 62-63) runs
 // server-side at POST time (renderCodeBlock is called from board.mjs's render
 // path exactly like every other block), so the served page carries only the emitted
 // `tok-*` spans, never the Prism engine itself, and highlighting emits classes and
@@ -751,7 +751,7 @@ const TOKEN_CLASS = {
   function: 'tok-function', 'function-variable': 'tok-function', method: 'tok-function',
   number: 'tok-number',
   comment: 'tok-comment', prolog: 'tok-comment', doctype: 'tok-comment', cdata: 'tok-comment',
-  // SPEC_RENDERING.md ticket 05, ADR.md entry 64: the vendored 'diff' grammar's own
+  // ADR.md entry 64: the vendored 'diff' grammar's own
   // token vocabulary (coord/deleted-sign/inserted-sign/unchanged/line/prefix, see
   // src/vendor/prism/components/prism-diff.cjs) shares NONE of the names above --
   // that is what makes "a diff row never carries a six-hue tok-* class" true by
@@ -828,9 +828,9 @@ function flattenTokens(tokens, cls, out) {
 
 /** The size above which a code block is rendered plain instead of tokenized.
  *
- * SPEC_RENDERING.md's Decisions section says "No size cutoff on highlighting.
- * Measured: Prism tokenizes 512 KB -- the maximum a reference can be
- * (MAX_REF_BYTES) -- in 15 ms." That measurement is real and reproduces here (512KB
+ * An earlier decision set no size cutoff on highlighting at all, backed by a
+ * measurement that Prism tokenizes 512 KB -- the maximum a reference can be
+ * (MAX_REF_BYTES) -- in 15 ms. That measurement is real and reproduces here (512KB
  * of this repo's own source: 20 ms). It is also measured on BENIGN input, and the
  * decision does not survive an adversarial one. Prism's grammars are ordinary
  * backtracking regexes, and several are quadratic on content that merely fails to
@@ -951,7 +951,7 @@ function renderCodeBlock(block) {
 </section>`;
 }
 
-/** The seam ticket 04 (SPEC_RENDERING.md AC 14) hooks markdown into: given a fenced
+/** The seam (ADR.md entry 65) hooks markdown into: given a fenced
  * block's raw text and its `lang` string, tokenize it through the exact same
  * highlightRows/TOKEN_CLASS a `kind: 'code'` block's body uses and return the
  * fence's whole `<pre><code>...</code></pre>` markup -- NEVER wrapped in a gutter
@@ -1023,8 +1023,7 @@ export function highlightFenceHtml(text, lang) {
   return `<div class="fence-lang" data-lang="${escAttr(lang)}">${pre}</div>`;
 }
 
-/** SPEC_RENDERING.md ticket 05, "A diff reads as a diff" (ADR.md entry 64). AC 7's
- * diff half: a diff row's gutter number is never `block.source.lines` arithmetic
+/** AC 7's diff half: a diff row's gutter number is never `block.source.lines` arithmetic
  * (that describes a byte range of the .diff FILE ITSELF, if the reference sliced
  * one -- meaningless as a line number in either file the diff *describes*). It
  * comes from walking the diff's own `@@ -oldStart,oldCount +newStart,newCount @@`
@@ -1358,14 +1357,14 @@ export function stageAgentScript() {
     } catch (e) { /* no parent reachable -- nothing to anchor to */ }
   }
 
-  /** Top-up, not add (SPEC_HEADER.md Decisions): 'top'/'bottom' are the
+  /** Top-up, not add (ADR.md entry 59): 'top'/'bottom' are the
    * board's OWN chrome bands, never simply written -- padding-top/-bottom
    * become the LARGER of this document's own CURRENT cascade padding and
    * whatever the board just reported, so an artifact that already cleared the
-   * band on its own keeps its own number untouched (criterion 2) and one that
-   * pads nothing gets exactly the band (criterion 1). Padding only, on
+   * band on its own keeps its own number untouched and one that
+   * pads nothing gets exactly the band. Padding only, on
    * 'document.body' itself -- no background, colour or border is ever set
-   * here (criterion 4).
+   * here.
    *
    * "Own" is read FRESH on every call, never cached from the first one --
    * clear this document's own previous inline write before measuring, so the
@@ -1375,7 +1374,7 @@ export function stageAgentScript() {
    * padding is RESPONSIVE (a media query, say: 12px narrow, 64px past
    * 900px) -- a baseline captured narrow stays 12 forever even once the
    * reader widens past 900px and the artifact's own CSS asks for 64
-   * (criterion 2 silently violated, the artifact under-cleared), and a
+   * (silently under-cleared), and a
    * baseline captured wide pins the artifact at 64px on a phone width where
    * its own CSS asks for 12 (over-cleared, permanently, for the rest of the
    * session). Clearing before every read is what keeps the artifact's own
@@ -1732,8 +1731,8 @@ export function stageAgentScript() {
     }
     if (data.type === 'band') {
       // Parent -> stage only, no outbound half: the board telling this
-      // document how tall its own chrome bands are right now (SPEC_HEADER.md
-      // ADR 59). Shape-checked the same way every other inbound number on
+      // document how tall its own chrome bands are right now (ADR 59).
+      // Shape-checked the same way every other inbound number on
       // this channel is -- a non-finite or negative value never reaches
       // applyBand, which would otherwise hand it straight to a style
       // property.
@@ -1801,7 +1800,7 @@ function buildStageSrcdoc(block) {
   return STAGE_MARGIN_RESET + block.html + stageAgentScript();
 }
 
-/** The awaited page's own send control (SPEC_AWAITED.md ticket 03; ADR.md
+/** The awaited page's own send control (ADR.md
  * entries 45, 46, 40). `.page-comments` (renderHtmlBlock's fullpage branch,
  * below) carries an entirely different surface depending on whether `round` is
  * *awaited* right now (CONTEXT.md), computed by `roundIsCurrentlyAwaited`
@@ -2271,7 +2270,7 @@ function roundPagerMarkup(board, currentN) {
  * comment left there rides the next round's submit, and that round arrives over
  * SSE into THIS document as a new page, which the reviewer flips to and sends
  * from. Deleting the markup would strand both. An AWAITED page round
- * (SPEC_AWAITED.md ticket 03) gains its own second send control instead,
+ * (ADR.md entry 45) gains its own second send control instead,
  * `.page-send-bar` inside `.page-comments` (renderPageCommentPanel, below), which
  * posts to its OWN round rather than "the latest unsent one" this bar always
  * means; the two kickers' controls are a third case and ARE dropped outright on a
@@ -2339,7 +2338,7 @@ export function renderBoardPage(board) {
   // instant it can measure the real rail.
   const pillCount = openRoundQuestionCount(board);
   const pillLabel = `${pillCount} question${pillCount === 1 ? '' : 's'} left`;
-  // The waiting signal (SPEC_AWAITED.md ticket 03, ADR.md entries 46, 47, 40):
+  // The waiting signal (ADR.md entries 46, 47, 40):
   // `#round-meta` (the header's own pill/meta slot, every board since ticket
   // 03) and `#round-countdown` (the ordinary send bar's) are both
   // first-painted from `roundIsAwaitedOpen` alone -- deterministic, no clock --

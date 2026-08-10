@@ -57,7 +57,7 @@ once.
 ```js
 // lines is [from, to], 1-based inclusive; section is a heading slug; omit both for the whole file
 { kind: 'code',     source: { path: 'src/server.mjs', lines: [40, 72] } }
-{ kind: 'markdown', source: { path: 'SPEC_AUTH.md', section: 'acceptance-criteria' } }
+{ kind: 'markdown', source: { path: 'docs/notes.md', section: 'acceptance-criteria' } }
 { kind: 'mermaid',  source: { path: 'docs/flow.mmd' } }
 { kind: 'html',     source: { path: 'render.html' } }   // whole file only: lines/section are refused
 { kind: 'compare',  left: { label, block }, right: { label, block } }   // two content blocks, side by side

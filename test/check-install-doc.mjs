@@ -255,14 +255,15 @@ async function main() {
     }
   });
 
-  // Criteria 9 and 10 (SPEC_ROLLOVER.md) as a matched pair: same command, same arranged
-  // state, one environment variable between them. Both arrange a document with NO timer,
-  // because that is the only state in which an unguarded hook provably writes -- against
-  // a running or a mid-break timer `ensure` is already a no-op (the two checks above), so
-  // "nothing moved" there would stay green with the guard deleted outright.
+  // The documented hook, run with and without its guard (INSTALL.md "The entry"), as a
+  // matched pair: same command, same arranged state, one environment variable between
+  // them. Both arrange a document with NO timer, because that is the only state in
+  // which an unguarded hook provably writes -- against a running or a mid-break timer
+  // `ensure` is already a no-op (the two checks above), so "nothing moved" there would
+  // stay green with the guard deleted outright.
   const pomodoroFile = path.join(daemonHome, 'pomodoro.json');
 
-  await check('criterion 9: the documented hook, run with CLAUDE_BOARD_NO_POMODORO set, leaves pomodoro.json byte-identical', async () => {
+  await check('the documented hook, run with CLAUDE_BOARD_NO_POMODORO set, leaves pomodoro.json byte-identical', async () => {
     writePomodoroDoc({ ...readPomodoroDoc(daemonHome), timer: null }, daemonHome);
     const before = readFileSync(pomodoroFile);
 
@@ -287,10 +288,10 @@ async function main() {
     assert.ok(samples >= 5, 'sanity: the sampling window must actually have sampled more than once');
   });
 
-  await check('criterion 10: the same command with the variable unset starts a work interval, exactly as it does today', async () => {
+  await check('the same command with the variable unset starts a work interval, exactly as it does today', async () => {
     writePomodoroDoc({ ...readPomodoroDoc(daemonHome), timer: null }, daemonHome);
     const before = await pomodoroDoc();
-    assert.equal(before.timer, null, 'the arrangement must be criterion 9\'s to the field, so that the variable is the only difference');
+    assert.equal(before.timer, null, 'the arrangement must match the check above\'s, field for field, so that the variable is the only difference');
 
     const { stdout, stderr } = await runHookAgainstPort(port);
     assert.equal(stdout, '');

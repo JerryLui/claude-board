@@ -1188,9 +1188,9 @@ async function main() {
 
     assert.ok(markup.includes('some supporting prose'));
     assert.ok(markup.includes('class="block code-block"'));
-    // SPEC_RENDERING.md ticket 02: javascript is a vendored grammar, so `const`
-    // and `42` are now wrapped in their own tok-* spans rather than sitting in one
-    // literal run -- assert the pieces highlighting actually leaves intact.
+    // javascript is a vendored grammar (ADR.md entry 62), so `const` and `42` are
+    // now wrapped in their own tok-* spans rather than sitting in one literal run --
+    // assert the pieces highlighting actually leaves intact.
     assert.ok(markup.includes('<span class="tok-keyword">const</span> answer = <span class="tok-number">42</span>;'));
     assert.ok(markup.includes('class="block mermaid-block"'));
     assert.ok(markup.includes('<pre class="mermaid">flowchart LR'));
@@ -2810,9 +2810,9 @@ async function main() {
     // was written for an agent still assembling a round the reviewer has not
     // answered. An artifact round is open forever, so that rule swallowed every
     // later ask -- the question landed INSIDE the artifact's round, the artifact
-    // stopped being a page round, and "one flip apart" (SPEC_PAGEBOARD.md) was
-    // unreachable through the shipped tool. There is no client involved in this
-    // at all: it is the daemon's own routing.
+    // stopped being a page round, and the two rounds a reviewer flips between
+    // (ADR.md entry 42) were unreachable through the shipped tool. There is no
+    // client involved in this at all: it is the daemon's own routing.
     const artifact = '<!doctype html><html><body><h1>TWO_ASK_ARTIFACT</h1></body></html>';
     const first = await (await fetch(`${base}/api/board`, {
       method: 'POST',
@@ -2913,13 +2913,13 @@ async function main() {
 
   await check('ADR 35: a comment left on a round that is NOT AWAITED rides the next packet the same thread returns, resolved against its OWN board, and comes back only once', async () => {
     // Round 1: a page board posted WITHOUT `wait: true` -- same shape as the
-    // artifact-only check above -- so `round.awaited` is `false` (SPEC_AWAITED.md
-    // ticket 01: `drainUndeliveredComments` now keys on that flag, not on "no
-    // question block", but an unawaited page board is exactly the shape that still
-    // makes it false either way). A real caller's ask() would never call /wait at
-    // all (bin/mcp.mjs). This check submits it anyway, to model the comment landing
-    // in the store with nobody ever polling for its packet -- exactly the case ADR
-    // 35 exists for.
+    // artifact-only check above -- so `round.awaited` is `false`
+    // (`drainUndeliveredComments` keys on that flag, not on "no question block",
+    // but an unawaited page board is exactly the shape that still makes it false
+    // either way). A real caller's ask() would never call /wait at all
+    // (bin/mcp.mjs). This check submits it anyway, to model the comment landing in
+    // the store with nobody ever polling for its packet -- exactly the case ADR 35
+    // exists for.
     //
     // That the submit SUCCEEDS is deliberate: ADR.md entry 44 keeps "a page board is
     // never sent" in the browser and leaves the daemon accepting any open round. This
@@ -3008,12 +3008,11 @@ async function main() {
     assert.equal(packet2.comments.length, 0, 'a comment already collected must not come back a second time');
   });
 
-  // --- SPEC_AWAITED.md ticket 01: AC 1-3 and AC 11 (first half) -------------------
-  // `wait: true` on a page board round (ADR.md entry 45): the round is minted
-  // `awaited`, its own submit carries its own comments back in ITS OWN packet
-  // (never through the ADR 35 undelivered path), and the default clock is 40
-  // minutes. Driven at the HTTP layer (no shim) the way the rest of this file
-  // proves the daemon's own contract.
+  // --- `wait: true` on a page board round (ADR.md entry 45) --------------------
+  // the round is minted `awaited`, its own submit carries its own comments back
+  // in ITS OWN packet (never through the ADR 35 undelivered path), and the
+  // default clock is 40 minutes. Driven at the HTTP layer (no shim) the way the
+  // rest of this file proves the daemon's own contract.
 
   await check('AC 1/2/11: a page board posted with wait: true is minted awaited, with a 40-minute deadline off its own postedAt', async () => {
     const html = '<!doctype html><html><body><h1>AWAITED_HTTP_MARKER</h1></body></html>';
@@ -3167,11 +3166,11 @@ async function main() {
   });
 
   await check('an awaited page round still receives its own submit even after a second round opens beside it (concurrent asks can post one before the first is answered)', async () => {
-    // SPEC_AWAITED.md ticket 01 names this scenario explicitly: handleSubmit used
-    // to target only the LATEST open round, which is exactly right while a board
-    // holds one round anyone can submit -- but an awaited page round (round 1) can
-    // now be posted, still open and unsubmitted, while a SECOND ask() call (the
-    // shim explicitly supports concurrent calls) posts a question round beside it.
+    // handleSubmit used to target only the LATEST open round, which is exactly
+    // right while a board holds one round anyone can submit -- but an awaited
+    // page round (round 1) can now be posted, still open and unsubmitted, while a
+    // SECOND ask() call (the shim explicitly supports concurrent calls) posts a
+    // question round beside it.
     // Round 1 must still be submittable; the old "must be the single latest open
     // round" gate 409'd it forever, leaving the first call's /wait to time out
     // with the reviewer's answer sitting right there in the request it refused.

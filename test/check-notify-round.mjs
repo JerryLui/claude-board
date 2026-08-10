@@ -1,16 +1,15 @@
 // The notification path generalised from "pomodoro boundary" to "the product's
-// notifications" (SPEC_STRANDED.md, ticket 01 in TICKETS_STRANDED.md). This file covers
-// what that ticket owns: each MESSAGES row in src/notify.mjs (and its mirror in
+// notifications" (ADR.md entry 58). This file covers the row shape and the
+// folder-name filter: each MESSAGES row in src/notify.mjs (and its mirror in
 // bin/launcher.c) now carries its own title, and a new 'round' row formats a project
 // folder name behind a strict character filter, degrading to an unnamed sentence when
 // the name is missing or unsafe (ADR.md entry 56) rather than losing the banner.
 //
 // The daemon now calls notifyRound on its own, from the stranded rule
 // (createStrandedWatch, src/stranded.mjs) -- that path is test/check-stranded.mjs's to
-// cover end to end. This file stays scoped to what ticket 01 actually owns, the message
-// shape and the folder-name filter, so every check here still calls notifyRound
-// directly, the same way test/check-notify.mjs's checks call notifyBoundary/notifyTest
-// directly.
+// cover end to end. This file stays scoped to the message shape and the folder-name
+// filter, so every check here still calls notifyRound directly, the same way
+// test/check-notify.mjs's checks call notifyBoundary/notifyTest directly.
 //
 // NO REAL NOTIFICATION MAY EVER FIRE FROM THIS SUITE, exactly as check-notify.mjs states
 // of itself: osascript and the bundle executable are both stubs on PATH here too, never

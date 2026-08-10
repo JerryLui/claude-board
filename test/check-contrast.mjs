@@ -124,7 +124,7 @@ const TEXT_SITES = [
   ['--accent-hi', '--history-bg'],
   // `.md-content code`, its own --panel-3 background.
   ['--code-ink', '--panel-3'],
-  // SPEC_RENDERING.md ticket 05, ADR.md entry 64: `.code-block pre code.code-diff`
+  // ADR.md entry 64: `.code-block pre code.code-diff`
   // (a diff block's own text colour, unfilled rows -- 'meta'/'context') puts
   // --code-ink back on --panel-2, the pairing ticket 02 dropped from this list
   // because nothing rendered there any more. The FILLED-row half of this pairing
@@ -134,12 +134,12 @@ const TEXT_SITES = [
   // a fill that sits on the code block's own --panel-2 -- so that half gets its own
   // check below instead, built directly from this file's own compositeOver.
   ['--code-ink', '--panel-2'],
-  // SPEC_RENDERING.md ticket 02, AC 4: the six-hue syntax palette (ADR.md entry
+  // The six-hue syntax palette (ADR.md entry
   // 63), each against `.code-block pre`'s own --panel-2 (background: none, so
   // `.code-block pre code`/`.tok-*` render straight on it). `--code-base` is the
   // sixth hue -- the default colour of an uncoloured token, `.code-block pre
   // code`'s own `color:`, distinct from `--code-ink` (still the inline-code/
-  // markdown token, unaffected by this ticket).
+  // markdown token, unaffected by this palette).
   ['--code-keyword', '--panel-2'],
   ['--code-string', '--panel-2'],
   ['--code-function', '--panel-2'],
@@ -186,8 +186,7 @@ for (const [themeName, palette] of Object.entries(palettes)) {
     assertClears(themeName, palette, '--accent-ink', '--accent');
   });
 
-  // SPEC_RENDERING.md ticket 05, ADR.md entry 64, the spec's own Testing section:
-  // "the diff fill composite". An added/removed diff row's real background is
+  // ADR.md entry 64: an added/removed diff row's real background is
   // --diff-add-fill/--diff-del-fill (alpha 0.12) painted OVER `.code-block pre`'s
   // own --panel-2, not over the page's --bg -- resolveSurface's default composite
   // (used by every pair above, through assertClears) picks the wrong base for this

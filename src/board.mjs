@@ -13,11 +13,11 @@ import { resolveAtRoot, sectionRootFrom, resolveMermaidAnchorAtRoot, htmlBodyRoo
 // markdown.mjs's mdToHtmlAndAnchors below rather than imported there directly, for
 // the same reason: markdown.mjs is upstream of render.mjs through this exact
 // circular edge, so a markdown.mjs -> render.mjs import would close a SECOND cycle
-// (ADR.md entry 65, SPEC_RENDERING.md AC 14 "one renderer, not two").
+// (ADR.md entry 65 -- one tokenizer, not two).
 import { renderBlock, highlightFenceHtml } from './render.mjs';
 // badge.mjs is pure and imports nothing, so this edge is safe in both directions
 // (render.mjs and ui.mjs also import it -- see its own header comment).
-// `questionBlocks` itself moved to badge.mjs (ticket 04 of SPEC_AWAITED.md, so
+// `questionBlocks` itself moved to badge.mjs (so
 // its "question block anywhere in the round" walk could be shared by
 // roundIsAwaited's legacy fallback there too) and is re-exported below so every
 // existing `from './board.mjs'` import keeps working unchanged.
@@ -1107,7 +1107,7 @@ export function buildPacket(board, round, url) {
 
 // --- fields the daemon keeps on the board but never shows a client -------------
 //
-// The stranded rule (src/stranded.mjs's createStrandedWatch, SPEC_STRANDED.md) records on
+// The stranded rule (src/stranded.mjs's createStrandedWatch) records on
 // the board itself the banner it currently has standing for it, because the thing that
 // record defends against is a daemon RESTART and an in-memory one is empty in exactly
 // that case. One field holding one record rather than three parallel ones that must be

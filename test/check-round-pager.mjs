@@ -761,7 +761,7 @@ check('criterion 26: the two controls are two positions -- the dock bottom-centr
   assert.equal(next.closest('.round-pager-dock'), null);
 });
 
-check('AC 7 (SPEC_AWAITED.md ticket 02): the page board\'s comment panel clears the round pager by reading its REAL measured height, not a guessed number -- SOURCE ONLY, see note below', () => {
+check('the page board\'s comment panel clears the round pager by reading its REAL measured height, not a guessed number -- SOURCE ONLY, see note below', () => {
   // 2379f12 turned the dock into a two-row box (a caption line above the
   // pill), and .page-comments went on clearing a hardcoded '44px' sized for
   // the old one-row pill -- so the panel started sitting under the dock
@@ -794,8 +794,7 @@ check('AC 7 (SPEC_AWAITED.md ticket 02): the page board\'s comment panel clears 
   // (QUIRKS.md, "The stand-in has no layout"), so nothing here runs the
   // observer or reads a real pixel gap -- that half was verified by hand
   // against a real Chrome (see this file's own header comment on what no
-  // check here can prove, and the ticket's Log in TICKETS_AWAITED.md for the
-  // actual numbers measured).
+  // check here can prove).
   const board = createBoard({ title: 'Rendered artifact', blocks: [{ kind: 'html', html: '<p>hello</p>' }] });
   const document = parseHTML(renderBoardPage(board));
   const dock = document.querySelector('.round-pager-dock');

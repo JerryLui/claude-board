@@ -583,7 +583,7 @@ async function main() {
     }
   });
 
-  // --- SPEC_AWAITED.md AC 1-3: `wait: true` on a page board blocks and returns the
+  // --- ADR.md entry 45: `wait: true` on a page board blocks and returns the
   // round's own comments, not through the ADR 35 undelivered path -----------------
 
   await check('wait: true on a page board (one html block) blocks until the reviewer submits, and the packet carries that round\'s own comments', async () => {

@@ -24,6 +24,6 @@
   "prism/components/prism-tsx.cjs": "9f022f13072288931b8ce4f811fe26f1b276307ad7ee235049b19a8c608c494e",
   "prism/components/prism-typescript.cjs": "9a5181760da3863cb8d414bc756f48853320df224c16bf9f5af2541131bc9412",
   "prism/components/prism-yaml.cjs": "907706b6b1ca4790755c50ca60f82f0273da640f8dacee5666099ba0bf91b038",
-  "prism/index.mjs": "08aeacbdc6b516f2f4db64a72ffd295d3845685f0b2b06081e662efe6ebd5597",
+  "prism/index.mjs": "a97538e4da43c53507e8df45a92aa1777021b4da670747e48caa6738ea17adb1",
   "prism/prism-core.cjs": "6fe39cc3a95b3da596218fbca3acf03f1208bc936f9fb84d08a2b4a61e2b9af7"
 }

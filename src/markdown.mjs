@@ -50,8 +50,7 @@
 // renderBlock from render.mjs, so a markdown.mjs -> render.mjs import would close
 // a cycle through board.mjs). board.mjs passes its own `highlightFenceHtml` import
 // in as `opts.highlight`; every other caller (every check in test/check-pure.mjs)
-// omits it and gets today's plain-escaped fallback, unchanged (SPEC_RENDERING.md
-// AC 14, ADR.md entry 65).
+// omits it and gets today's plain-escaped fallback, unchanged (ADR.md entry 65).
 
 import { marked, Lexer } from './vendor/marked/marked.esm.js';
 
@@ -333,8 +332,7 @@ const countNewlines = s => {
  * end is the whole test -- no re-derivation of CommonMark's underline rules, which is
  * exactly the kind of second opinion this module is trying not to hold.
  *
- * Setext headings RENDER (SPEC_RENDERING.md AC 11 names them as one of the four gaps
- * marked closes) but mint NO anchor, which is a product decision, not an oversight:
+ * Setext headings RENDER but mint NO anchor, which is a product decision, not an oversight:
  * AC 10 requires slugs byte-identical to the pre-marked parser so archived `section:`
  * refs keep resolving, and that parser had no setext headings at all. Anchoring one
  * would consume a slug and an ordinal it never consumed, so a document mixing a

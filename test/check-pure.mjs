@@ -16,8 +16,8 @@ import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
-// The pre-marked (edb611b) markdown module, frozen as a fixture: SPEC_RENDERING.md
-// AC 10 ("slugs byte-identical to today's output, so every archived section: ref
+// The pre-marked (edb611b) markdown module, frozen as a fixture: AC 10
+// ("slugs byte-identical to today's output, so every archived section: ref
 // still resolves") is asserted by running BOTH implementations over one corpus, not
 // by golden strings re-derived from the current source. See the fixture's header.
 import { mdToHtmlAndAnchors as legacyMdToHtmlAndAnchors } from './fixtures/markdown-pre-marked.mjs';
@@ -355,7 +355,7 @@ check('AC 11: reference-style links resolve through a [ref]: definition, not jus
 });
 
 check('AC 11: setext headings (Title\\n===) RENDER as headings at the right level, but mint no anchor -- AC 10 outranks anchoring them', () => {
-  // The product call (SPEC_RENDERING.md AC 11 closes the setext gap; AC 10 requires
+  // The product call (AC 11 closes the setext gap; AC 10 requires
   // slugs byte-identical to the pre-marked parser, which had no setext at all):
   // setext headings render, and are skipped by the anchor minter. Anchoring them
   // would consume slug ordinals the old parser never consumed, so a document mixing
@@ -703,7 +703,7 @@ check('composeHint: every block-kind noun, and an unknown kind degrades to "bloc
   assert.equal(composeHint('x', 'span', true, 'A', 'nonsense-kind'), 'x in A block');
 });
 
-// SPEC_HEADER.md AC 12 (ADR.md entry 42) deleted the round badge and its
+// ADR.md entry 42 deleted the round badge and its
 // `badgeLabel` formatter along with it -- the checks that used to pin its
 // round-count formatting and its embedded-source went with them. The two
 // checks below pin what replaced them: AC 9's glyph, read off COMMENT_ICON's
@@ -714,7 +714,7 @@ check('composeHint: every block-kind noun, and an unknown kind degrades to "bloc
 const COMMENT_PATHS = [...COMMENT_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
 assert.equal(COMMENT_PATHS.length, 1, 'setup sanity: COMMENT_ICON is a single <path>');
 
-check('AC 9 (SPEC_HEADER.md): the comment-mode toggle wears the exact same glyph as the whole-block comment button -- COMMENT_ICON\'s own path data, not a second, re-drawn copy', () => {
+check('the comment-mode toggle wears the exact same glyph as the whole-block comment button -- COMMENT_ICON\'s own path data, not a second, re-drawn copy', () => {
   // Two blocks, neither a page board, so both controls exist on the same
   // page: an html block earns a .comment-btn (ADR.md entry 28), and the
   // second block is what keeps this from being inferred as a page board
@@ -742,7 +742,7 @@ check('AC 9 (SPEC_HEADER.md): the comment-mode toggle wears the exact same glyph
     'the toggle and the whole-block comment button must share the exact same glyph -- one source (COMMENT_ICON), not two spellings of "comment"');
 });
 
-check('AC 12 (SPEC_HEADER.md, ADR.md entry 42): no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and badgeLabel is gone from src/badge.mjs\'s exports', () => {
+check('ADR.md entry 42: no #round-badge/.round-badge element renders anywhere, on an ordinary board or a page board, and badgeLabel is gone from src/badge.mjs\'s exports', () => {
   assert.equal('badgeLabel' in badgeExports, false,
     'src/badge.mjs must no longer export badgeLabel -- AC 12 names this file and this export explicitly');
 
@@ -776,7 +776,7 @@ check('AC 12 (SPEC_HEADER.md, ADR.md entry 42): no #round-badge/.round-badge ele
     'the pager dock\'s own caption must still name the round -- proving the naming moved to the dock rather than disappearing entirely');
 });
 
-// SPEC_AWAITED.md ticket 03 -- the waiting signal, src/badge.mjs's own two-
+// The waiting signal, src/badge.mjs's own two-
 // function split (render-time, no clock, vs. client-time, wall-clock aware).
 // See that file's header comment for why the split exists at all.
 
@@ -2714,7 +2714,7 @@ check('all five context kinds render into the page: markdown, code, mermaid, htm
   assert.ok(markup.includes('some text'));
 
   assert.ok(markup.includes('class="block code-block"'));
-  // SPEC_RENDERING.md ticket 02 brought the per-row wrapping back, but for a
+  // ADR.md entry 63 brought the per-row wrapping back, but for a
   // different reason than ADR.md entry 28 deleted the old `.code-line` anchor
   // spans for: `.code-row` carries the AC 7 gutter number (a `data-line`
   // attribute, never a text node -- see test/check-pure.mjs's own dedicated
@@ -3479,12 +3479,12 @@ check('mode detection is synchronous, from the document\'s own protocol -- never
   assert.ok(/var readonly\s*=\s*\(location\.protocol === 'file:'\)/.test(ui));
   // Exactly four fetches, all accounted for: the ordinary send bar's submit,
   // the resync that catches this client up on anything broadcast while it was
-  // disconnected, (SPEC_AWAITED.md ticket 03) submitPageRound's own submit --
-  // a second POST to the same route, since an awaited page round's Send
-  // control names its OWN round rather than sharing submitBoard's
-  // openRoundNumber()-targeted path (ticket 01's own note left for this one) --
-  // and (SPEC_STRANDED.md ticket 02) reportAttended's POST to /attended, the
-  // tab telling the daemon whether it is being looked at. Any fifth is a
+  // disconnected, submitPageRound's own submit -- a second POST to the same
+  // route, since an awaited page round's Send control names its OWN round
+  // rather than sharing submitBoard's openRoundNumber()-targeted path (ticket
+  // 01's own note left for this one) -- and (ADR.md entry 58) reportAttended's
+  // POST to /attended, the tab telling the daemon whether it is being looked
+  // at. Any fifth is a
   // network call nobody has justified -- in particular, mode detection must
   // never become a probe to the daemon.
   const fetchCalls = [...ui.matchAll(/fetch\(([^)]*)/g)].map(m => m[1]);
@@ -4947,7 +4947,7 @@ check('N6: fenced "#" lines do not shift heading ordinals, so a -2 slug names th
   assert.ok(r.text.includes('second real one'));
 });
 
-// --- SPEC_RENDERING.md ticket 05, revised: a setext heading mints NO anchor (see
+// --- A setext heading mints NO anchor (see
 // the AC 10/11 checks near the top of this file), so `sliceSection` must not resolve
 // one either -- an unresolvable ref is an error the agent sees, where a resolvable
 // one nobody minted is content substitution. It still ENDS an enclosing section,
@@ -5170,8 +5170,8 @@ check('S1: the anchor set and the resolvable-section set are the same set, and e
 });
 
 check('S1/render: a resolved reference reports the 1-based source line its text starts on, so a sliced code block can number its gutter from the file', () => {
-  // Exposed for src/render.mjs's gutter (SPEC_RENDERING.md AC 7: "every code row
-  // carries its file's real line number"). A section-sliced block used to number
+  // Exposed for src/render.mjs's gutter (ADR.md entry 63: every code row
+  // carries its file's real line number). A section-sliced block used to number
   // from 1 because sliceSection knew the start line and did not report it.
   const md = ['# Top', '', 'intro', '', '## Middle', '', 'middle body', '', '## End', '', 'tail'].join('\n');
   writeFileSync(path.join(fixturesDir, 'startline.md'), md, 'utf8');
@@ -6227,8 +6227,8 @@ check('Discuss posts the same body as Send through one shared submit path, diffe
   // hand-copied fetch in there is how Discuss would quietly come to collect
   // less than Send does (it returns "whatever is filled in" -- partial
   // answers are the point). Scoped to submitBoard's own body, not the whole
-  // file -- SPEC_AWAITED.md ticket 03 added a SECOND, independent /submit
-  // fetch inside submitPageRound (the awaited page round's own Send/Discuss,
+  // file -- submitPageRound carries a SECOND, independent /submit
+  // fetch (the awaited page round's own Send/Discuss,
   // which never shares this path -- see that function's own header comment
   // for why), and that one is no more a "divergent copy" of this one than
   // resync's own fetch is.
@@ -6442,7 +6442,7 @@ check('an SSE round push marks the tab: favicon mark, no title write, no notific
   assert.ok(!/notifyRound\(/.test(mark), 'markPendingRound must no longer call a browser notifyRound -- ADR.md entry 58 moved that job to the daemon');
   assert.ok(!/setTitleBadge/.test(mark), 'marking a round pending must no longer touch the title');
   assert.match(mark, /if \(readonly\) return;/, 'marking must be inert in readonly mode');
-  // AC 9 (SPEC_AWAITED.md ticket 04): the tab mark gates on whether the round
+  // The tab mark gates on whether the round
   // is genuinely awaited -- reads roundIsAwaited off the SAME board this
   // function's caller already advanced to the post-push state (applyRoundPush's
   // own comment on why 'board' is reassigned before markPendingRound runs).
@@ -7192,7 +7192,7 @@ check('a round that asks nothing contributes nothing to the count, and the badge
   assert.equal(closedThread.roundsLeft, 0, 'the wrap-up round asks nothing, so it must not re-arm the badge either');
 });
 
-check('AC 9 (SPEC_AWAITED.md ticket 04): an awaited page board (posted with wait: true) counts toward the badge and the live dot; the identical shape posted without wait counts toward neither', () => {
+check('an awaited page board (posted with wait: true) counts toward the badge and the live dot; the identical shape posted without wait counts toward neither', () => {
   const dir = path.join(fixturesDir, 'indexpage-fixtures', 'awaited-page-round');
   mkdirSync(dir, { recursive: true });
   const html = '<div class="mock"><button>Send</button></div>';
@@ -8150,10 +8150,10 @@ check('pomodoro widget: the settings control is an icon, and the icon carries a 
   const html = renderIndexPage({ threads: [] });
   const summary = html.match(/<summary class="pomodoro-settings-summary"[^>]*>([\s\S]*?)<\/summary>/);
   assert.ok(summary, 'setup failure: no settings <summary> rendered');
-  // "Settings", not "Pomodoro settings" (SPEC_BOUNDARY.md AC 15, ADR 71): the panel
-  // behind this cogwheel is the index's general settings panel now -- the pomodoro is
-  // one captioned section in it, beside Banners, Cues and Store -- and the one name the
-  // panel has must not claim it is the pomodoro's.
+  // "Settings", not "Pomodoro settings": the panel behind this cogwheel is the
+  // index's general settings panel now -- the pomodoro is one captioned section in
+  // it, beside Banners, Cues and Store -- and the one name the panel has must not
+  // claim it is the pomodoro's.
   assert.match(summary[0], /aria-label="Settings"/, 'an icon-only control must be named for a screen reader (ui-ux-pro-max accessibility priority 1)');
   assert.match(summary[0], /title="Settings"/, 'and named on hover for everyone else');
   assert.match(summary[1], /^<svg\b/, 'the summary\'s content must be the cogwheel glyph itself');
@@ -9009,8 +9009,8 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
 check('the settings panel carries its own captioned group for the menu bar, in the same hairline + caption idiom every other section uses', () => {
   const html = renderIndexPage({ threads: [] });
   // One hairline per section boundary. The absolute count belongs to the panel's own
-  // shape check below (SPEC_BOUNDARY.md's captioned-sections assertion), which is what
-  // fails if a section is added or dropped; what this line is about is that the menu bar
+  // shape check below, which is what fails if a section is added or dropped; what
+  // this line is about is that the menu bar
   // group did not invent a second idiom to separate itself with.
   assert.equal((html.match(/<hr class="pomodoro-settings-divider">/g) || []).length, 4, 'the menu bar group needs a hairline like every other section -- no fold, no tab, no new idiom');
   assert.match(html, /<div class="pomodoro-settings-caption">Menu bar<\/div>/);
@@ -9165,10 +9165,10 @@ await checkAsync('pomodoro widget: a hashchange to any OTHER fragment leaves the
 });
 
 // --- the settings panel is general now, and holds the store control (ADR 71) ------
-// SPEC_BOUNDARY.md AC 14 ("reachable from the settings panel on the index, takes the
-// window as an input, and deletes on a single click") and AC 15 ("reads as general
+// AC 14 (ADR.md entry 71: reachable from the settings panel on the index, takes the
+// window as an input, and deletes on a single click) and AC 15: reads as general
 // settings rather than the pomodoro's, with the store control in its own captioned
-// section"). What the prune actually DOES to the store is test/check-prune.mjs's job;
+// section. What the prune actually DOES to the store is test/check-prune.mjs's job;
 // these two are about the surface that fires it.
 
 check('settings panel: reads as general settings -- five captioned sections in order, and the store control sits in its own', () => {
@@ -9292,7 +9292,7 @@ check('the mermaid CDN is pinned to one exact version everywhere, because the CS
 });
 
 // =================================================================================
-// SPEC_RENDERING.md ticket 02, "Code renders as code" -- renderCodeBlock's syntax
+// ADR.md entry 63 -- renderCodeBlock's syntax
 // highlighting, six-hue palette wiring, real-line-number gutter and copy fidelity.
 // AC 1, 4 (contrast half lives in test/check-contrast.mjs), 6, 7 (non-diff half --
 // ticket 05 owns a diff row's new/old fallback), 8. One contiguous block, appended
@@ -9471,11 +9471,11 @@ check('every vendored language src/resolve.mjs\'s langForPath can name actually 
 });
 
 // =================================================================================
-// SPEC_RENDERING.md ticket 04, "One renderer, both places" -- AC 14: a fenced code
+// ADR.md entry 65: a fenced code
 // block inside markdown highlights through the SAME tokenizer a `kind: 'code'`
 // block uses (src/render.mjs's highlightRows/TOKEN_CLASS, reached here through the
 // exported highlightFenceHtml and, in the real render path, src/board.mjs's
-// dependency injection into mdToHtmlAndAnchors -- see ADR.md entry 65 for why an
+// dependency injection into mdToHtmlAndAnchors -- see that entry for why an
 // injected argument stands in for an import neither module can carry directly).
 // =================================================================================
 
@@ -9597,9 +9597,9 @@ check('every other markdown check (no highlight option passed) keeps rendering a
 });
 
 // =================================================================================
-// SPEC_RENDERING.md ticket 05, "A diff reads as a diff" -- AC 3 (.diff/.patch ->
-// lang: 'diff'), AC 5 (add/remove fill, six-hue colour suppressed by construction),
-// the diff half of AC 7 (new/old line numbers from the diff's own hunk headers),
+// A diff reads as a diff -- AC 3 (.diff/.patch ->
+// lang: 'diff'), AC 5 (add/remove fill, six-hue colour suppressed by construction,
+// ADR.md entry 64), the diff half of AC 7 (new/old line numbers from the diff's own hunk headers),
 // and AC 8 through the diff path (copy fidelity, '+'/'-' signs included since they
 // are the diff file's own bytes, never anything this renderer invented).
 // =================================================================================
@@ -9828,7 +9828,7 @@ check('a markdown \'diff\' fence: the kind: "code" diff block path is unaffected
 });
 
 // =================================================================================
-// SPEC_RENDERING.md audit follow-up -- defects found in src/render.mjs after the
+// Defects found in src/render.mjs after the
 // rendering feature landed. One contiguous block, appended last, same convention as
 // the ticket sections above. Each check below went red against the code as shipped.
 // =================================================================================

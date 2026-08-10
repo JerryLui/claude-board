@@ -1,6 +1,7 @@
 // The stranded rule: a board with an open, awaited round and no Watcher looking at it is
-// Stranded, and after a grace it gets one banner per absence (SPEC_STRANDED.md; ADR.md
-// entries 55 and 58). `createStrandedWatch` is a factory, not a singleton -- call it
+// Stranded, and after a grace its oldest never-announced round gets one banner, once ever
+// (ADR.md entries 55, 58 and 74).
+// `createStrandedWatch` is a factory, not a singleton -- call it
 // exactly ONCE PER REQUEST HANDLER, the same way src/server.mjs's `createRequestHandler`
 // builds a fresh SSE hub and handoff store on every call, so that two daemons sharing one
 // process (as the checks spin up) never announce a Stranded absence for each other's
@@ -66,7 +67,7 @@ function registerStrandedWatch(watch) {
   });
 }
 
-/** The stranded rule (SPEC_STRANDED.md; ADR.md entries 55 and 58). Reads
+/** The stranded rule (ADR.md entries 55 and 58). Reads
  * `sse.attendedRemainingMs` and nothing else the daemon does not already know. It asked
  * `sse.isConfirmedAttended` until ADR.md entry 73 gave the hub a clock: a boolean cannot
  * say WHEN a board stops being attended, and this rule has to arm a timer for that

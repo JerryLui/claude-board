@@ -43,7 +43,7 @@ function check(name, fn) {
 // one seam this ticket is about (see test/dom-stand-in.mjs's file comment for what
 // it does and deliberately does not implement).
 // A trailing markdown block, deliberately: a LONE `html` block is a page round
-// (ADR.md entry 33) whose comment gesture SPEC_AWAITED.md ticket 03 (ADR.md
+// (ADR.md entry 33) whose comment gesture (ADR.md
 // entry 46) gates on being *awaited* -- this file is about the click-to-anchor
 // gesture itself, not about awaited-ness or page-board layout, so it stays an
 // ORDINARY board (isPageRound false), where that gate never applies and

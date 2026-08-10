@@ -1,6 +1,6 @@
-// Criterion 21 (SPEC_STRANDED.md): "Exactly one code path in the product raises a
-// notification. Searching the tree for the browser notification API returns nothing,
-// in shipped code, in checks, and in the committed sample board."
+// Exactly one code path in the product raises a notification. Searching the tree for
+// the browser notification API returns nothing, in shipped code, in checks, and in the
+// committed sample board.
 //
 // This is that search, run for real rather than asserted by name: a tree-wide grep for
 // the browser Notification constructor and its permission dance, over src/, bin/,
@@ -8,15 +8,15 @@
 // would false-positive on every legitimate mention of macOS "Notification Center" and
 // the UserNotifications framework scattered through src/notify.mjs, bin/notify.m and
 // their own checks (test/check-notify.mjs, test/check-notify-click.mjs,
-// test/check-launcher-env.mjs) -- none of that is the BROWSER api this criterion is
-// about. Same reason the daemon's own `notifyRound` (src/notify.mjs, added by
-// SPEC_STRANDED.md chunk 01, the surviving notifier per ADR.md entry 58) must sail
-// through untouched: these patterns match the browser constructor and its
-// permission surface by punctuation, never the identifier `notifyRound` by name.
+// test/check-launcher-env.mjs) -- none of that is the BROWSER api this check is
+// about. Same reason the daemon's own `notifyRound` (src/notify.mjs, the surviving
+// notifier per ADR.md entry 58) must sail through untouched: these patterns match the
+// browser constructor and its permission surface by punctuation, never the identifier
+// `notifyRound` by name.
 //
-// "It must not find itself" (SPEC_STRANDED.md ticket 06): this file's own path is
-// excluded from the walk, since a grep for these patterns necessarily contains them
-// as string/regex literals to define the search.
+// This file must not find itself: its own path is excluded from the walk, since a grep
+// for these patterns necessarily contains them as string/regex literals to define the
+// search.
 
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -101,12 +101,12 @@ check('criterion 21: the browser notification API appears nowhere in shipped cod
   assert.deepEqual(hits, [], `the browser notification API must appear nowhere in the tree:\n${hits.join('\n')}`);
 });
 
-// Criterion 25 (SPEC_STRANDED.md): "No document describes a browser notification, its
-// permission grant, or a tab that reopens itself as current behaviour." The decision
-// record is explicitly exempt -- it is the record of why they went, so it is SUPPOSED to
-// still name them. Its entries live in `.agents/adr/`, which nothing below walks, and its
-// index `ADR.md` is excluded from DOC_FILES rather than merely left unwalked, so a rename
-// of this list can never silently start scanning either.
+// No document describes a browser notification, its permission grant, or a tab that
+// reopens itself as current behaviour. The decision record is explicitly exempt -- it
+// is the record of why they went, so it is SUPPOSED to still name them. Its entries
+// live in `.agents/adr/`, which nothing below walks, and its index `ADR.md` is
+// excluded from DOC_FILES rather than merely left unwalked, so a rename of this list
+// can never silently start scanning either.
 //
 // This is deliberately narrower than a prose sweep for words like "notification" or
 // "permission" on their own: both remain completely legitimate throughout these docs for
@@ -121,8 +121,8 @@ check('criterion 21: the browser notification API appears nowhere in shipped cod
 // criterion 21's code grep, matching only the dead API surface and the three symbol names
 // a doc could only contain by quoting the deleted code (`requestNotifyPermissionFromSend`,
 // `reopenIfNoClient`, `connectedClientCount`) -- unambiguous either way, never triggered by
-// prose correctly describing their absence. The prose itself was swept by hand
-// (SPEC_STRANDED.md ticket 08) and is not re-verified mechanically here.
+// prose correctly describing their absence. The prose itself was swept by hand and is
+// not re-verified mechanically here.
 const DEAD_DOC_MARKERS = [
   ...BROWSER_NOTIFICATION_API,
   [/\brequestNotifyPermissionFromSend\b/, 'requestNotifyPermissionFromSend (deleted, src/ui.mjs)'],

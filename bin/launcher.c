@@ -97,7 +97,7 @@
  * beside this one could not do it (bin/notify.m's header, and QUIRKS.md, record the
  * measurement). The daemon spawns this mode; launchd never does. What argv chooses for
  * the phase is one index into MESSAGES below, never a string that reaches the screen —
- * see NOTIFY_FLAG. Each row carries its own title (SPEC_STRANDED.md: "Pomodoro" beside
+ * see NOTIFY_FLAG. Each row carries its own title (ADR.md entry 58: "Pomodoro" beside
  * "Board") rather than this file compiling in one title constant the way the notifier
  * once did.
  *
@@ -525,9 +525,9 @@ int cb_is_board_url(const char *s, int expected_port) {
  *
  * The daemon sends the round's own remaining wait, because that is the moment after
  * which a click has nothing left to open (ADR.md entry 50: the deadline passing clears
- * `awaited`). It is a backstop and not the mechanism -- SPEC_STRANDED.md criterion 15
- * makes the daemon the owner that kills this process when the reviewer comes back or
- * the round is answered -- but it has to exist, because a wait that simply lapses fires
+ * `awaited`). It is a backstop and not the mechanism -- ADR.md entry 57 makes the
+ * daemon the owner that kills this process when the reviewer comes back or the round
+ * is answered -- but it has to exist, because a wait that simply lapses fires
  * no event a child could be waiting for.
  *
  * Clamped rather than rejected, and defaulted when absent or unparseable: a missing or
@@ -584,9 +584,9 @@ static const struct {
    * and shows nothing, which is the same failure mode as any unrecognised phase --
    * re-run install.sh to recompile this binary. */
   { "test",      "Pomodoro", "Notifications are working", NULL, NULL },
-  /* SPEC_STRANDED.md: the daemon's own banner for a round nobody is watching. No cue of
-   * its own (Out of Scope: "a choosable sound for the board banner" -- the cue pickers
-   * stay the pomodoro clock's), so this row always plays the system default sound
+  /* The daemon's own banner for a round nobody is watching. No cue of its own -- a
+   * choosable sound for the board banner was never in scope, the cue pickers stay the
+   * pomodoro clock's -- so this row always plays the system default sound
    * instead (main()'s dispatch below passes use_default_sound=1, cue_name=NULL for it).
    * The folder is what src/indexpage.mjs's `folderName` derives from a board's cwd,
    * crossing here exactly as a cue name always has: as argv[3], filtered before it

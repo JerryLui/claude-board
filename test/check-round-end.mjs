@@ -672,8 +672,7 @@ check('the pill never appears in a read-only (file://) archive -- structurally p
   assert.equal(document.activeElement, activeBefore, 'a click in a read-only archive must never move focus anywhere -- the pill\'s own readonly guard must hold, belt-and-suspenders alongside the disabled attribute (QUIRKS.md: a stand-in dispatchEvent does not model native click-suppression on a disabled element, so the guard is what actually earns this)');
 });
 
-// === SPEC_AWAITED.md ticket 03: a sent awaited page round is read-only like
-// any other sent round (this file's own Testing note in the spec). ==========
+// === A sent awaited page round is read-only like any other sent round. ==========
 
 check('an awaited page round that has been sent renders its comment surface exactly like any other sent round -- disabled, not dropped, and the pill reads "read-only"', () => {
   const board = createBoard({ title: 'Sent page round', blocks: [{ kind: 'html', html: '<div class="mock"></div>' }], wait: true });

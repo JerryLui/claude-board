@@ -1,4 +1,4 @@
-// The stranded rule end to end (SPEC_STRANDED.md ticket 05; ADR.md entries 55 and 58):
+// The stranded rule end to end (ADR.md entries 55 and 58):
 // the daemon deciding that a round is Awaited while nobody is looking at its board, and
 // raising exactly one Banner for it, per board, per absence.
 //
@@ -13,10 +13,9 @@
 //    the hub closure" is the whole point of that half, and a restart is checked by
 //    building a SECOND watch over the same home.
 //  - a real daemon on an ephemeral port with a fake notifier ahead of the real one on
-//    PATH, opening and dropping real event streams against it, exactly as the spec's
-//    Testing section describes. Whether the reviewer is looking is a report the tab
-//    sends, so these drive `POST /api/board/:id/attended` directly rather than needing a
-//    browser.
+//    PATH, opening and dropping real event streams against it. Whether the reviewer is
+//    looking is a report the tab sends, so these drive `POST /api/board/:id/attended`
+//    directly rather than needing a browser.
 //
 // NO REAL NOTIFICATION MAY EVER FIRE FROM THIS SUITE. `osascript` is a stub on PATH here
 // from the first line of this file, and the grace is a few milliseconds throughout rather

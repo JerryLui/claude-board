@@ -1,5 +1,5 @@
-// The banner a stranded round raises can be clicked (SPEC_STRANDED.md, ticket 04 in
-// TICKETS_STRANDED.md; ADR.md entry 57). This file covers what that ticket owns:
+// The banner a stranded round raises can be clicked (ADR.md entry 57). This file
+// covers:
 //
 //   - AC 14, the load-bearing half: the board-URL pattern lives in C, beside
 //     is_safe_cue_name and is_safe_folder_name, and a URL that is not a board URL for

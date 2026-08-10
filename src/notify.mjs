@@ -1,5 +1,5 @@
 // Native notification, at each pomodoro boundary and at a stranded round
-// (SPEC_STRANDED.md, ADR.md entries 56 and 58).
+// (ADR.md entries 56 and 58).
 //
 // Two ways out, and which one is used is decided by where THIS FILE is running from, not
 // by configuration. A daemon running out of claude-board.app/Contents/Resources spawns
@@ -55,7 +55,7 @@ const MESSAGES = {
   // file can put on screen -- and adding a row is the sanctioned way to extend it. The
   // rule the header states still holds: no entry, no notification, and never a template.
   test: { title: 'Pomodoro', message: 'Notifications are working' },
-  // SPEC_STRANDED.md: the daemon's own banner for a round nobody is watching. The name
+  // The daemon's own banner for a round nobody is watching. The name
   // is whatever src/indexpage.mjs's `folderName` derived for the session -- see
   // notifyRound below for why filtering it is this file's job, not the caller's. No cue
   // of its own (Out of Scope: "a choosable sound for the board banner" -- the cue
@@ -120,7 +120,7 @@ function isSafeFolderName(name) {
 // The shape both sides accept is exactly what src/server.mjs's boardUrl() builds:
 // `http://<loopback host>[:port]/b/<board id>` plus the board page's `#stranded-round`
 // sentinel. Notably NOT `/auth/<token>`: a handoff URL carries a credential, and no
-// credential goes on a command line at any point (SPEC_STRANDED.md criterion 13) -- the
+// credential goes on a command line at any point (ADR.md entry 57) -- the
 // browser's own session is what authorizes the page, and a browser holding none gets
 // the refusal page that already exists.
 //
@@ -256,8 +256,8 @@ export function notifyBoundary(phase, settings) {
   fire(phase, cueFor(phase, settings));
 }
 
-/** Fire the daemon's own banner for a round nobody is watching (SPEC_STRANDED.md;
- * CONTEXT.md's Stranded/Banner). `folder` is whatever src/indexpage.mjs's `folderName`
+/** Fire the daemon's own banner for a round nobody is watching (CONTEXT.md's
+ * Stranded/Banner). `folder` is whatever src/indexpage.mjs's `folderName`
  * derived for the board's session, passed straight through unfiltered -- filtering it is
  * this function's job (isSafeFolderName above), the same division of labour cueFor
  * already has for a cue: the caller hands over what it has, this file decides what is

@@ -1,11 +1,11 @@
-// Service-level check for the attended report (SPEC_STRANDED.md ticket 02): a board
-// tab telling the daemon whether it is being looked at, and the daemon recording that
-// per board. Two layers:
+// Service-level check for the attended report (ADR.md entry 58): a board tab telling
+// the daemon whether it is being looked at, and the daemon recording that per board.
+// Two layers:
 //
 //  - `createSseHub` directly, with no HTTP at all, for the OR-across-Watchers rule and
-//    the "gone means gone" rule -- nothing over HTTP surfaces those yet (nothing
-//    consumes `isAttended` until SPEC_STRANDED.md ticket 05), so a unit-shaped check
-//    against the hub itself is the only seam that can prove them.
+//    the "gone means gone" rule -- nothing over HTTP surfaces those yet (`isAttended`
+//    has no production caller at all), so a unit-shaped check against the hub itself
+//    is the only seam that can prove them.
 //  - a real daemon on an ephemeral port, opening and dropping a board's `/events`
 //    stream exactly as test/check-http.mjs's own SSE checks do, to prove AC 16: the
 //    report is authenticated exactly like the board's other cookie writes, and an

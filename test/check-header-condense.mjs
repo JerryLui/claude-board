@@ -1,4 +1,4 @@
-// SPEC_HEADER.md ticket 03: an ordinary board's header condenses into the same
+// ADR.md entry 40: an ordinary board's header condenses into the same
 // pill a page board's already does (AC 7), and doing so never reflows the
 // column underneath it (AC 8). test/check-page-board.mjs already covers the
 // page-board half of this mechanism ("criterion 16" there); this file covers
@@ -364,8 +364,7 @@ check('AC 7: the header\'s wash reaches the real viewport edges, not the 1120px 
 // and the pill's opacity to '0' under them, with a screenshot showing the
 // plain, uncondensed, two-row header and no pill artifact. AC 8 (the header's
 // own height never moving) was reconfirmed live across a full scroll cycle
-// on the fixed geometry too. TICKETS_HEADER.md's own log for this ticket
-// records the exact numbers.
+// on the fixed geometry too.
 
 // =================================================================================
 // AC 8: condensing an ordinary board never moves its content.

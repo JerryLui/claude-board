@@ -273,9 +273,9 @@ async function main() {
     assert.equal(childEnv.CLAUDE_BOARD_PORT, '48123');
     assert.equal(childEnv.CLAUDE_BOARD_SHUTDOWN_MS, '4242');
     assert.equal(childEnv.CLAUDE_BOARD_SSE_HEARTBEAT_MS, '5353');
-    // The stranded grace (SPEC_STRANDED.md criterion 4, "overridable by environment
-    // variable, as the other timings are"): a bundled install that dropped it here would
-    // leave the shipped fifteen seconds the only value reachable under a real install.
+    // The stranded grace (PROTOCOL.md's "The stranded banner" documents it as an
+    // override): a bundled install that dropped it here would leave the shipped fifteen
+    // seconds the only value reachable under a real install.
     assert.equal(childEnv.CLAUDE_BOARD_STRANDED_GRACE_MS, '8686');
     // The look-away window (ADR.md entry 73), for the same reason as the grace beside it:
     // PROTOCOL.md documents it as an override, and a bundled install that dropped it here

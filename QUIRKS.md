@@ -203,6 +203,8 @@ one case that matters is also the one no automated check here can produce.
 - [Real mermaid node ids are prefixed, and `^=` will not see them](#real-mermaid-node-ids-are-prefixed-and--will-not-see-them)
 - [`setPointerCapture` on pointerdown steals the click from what you clicked](#setpointercapture-on-pointerdown-steals-the-click-from-what-you-clicked)
 - [The stand-in has no layout: no `IntersectionObserver`](#the-stand-in-has-no-layout-no-intersectionobserver)
+- [`.code-row` is an inline box, and `display: block` double-spaces the copy](#code-row-is-an-inline-box-and-display-block-double-spaces-the-copy)
+- [CSS `anchor()` needs its anchor earlier in the DOM, and failure computes `bottom: auto`](#css-anchor-needs-its-anchor-earlier-in-the-dom-and-failure-computes-bottom-auto)
 - [The cascade resolver cannot see an interaction pseudo-class](#the-cascade-resolver-cannot-see-an-interaction-pseudo-class)
 - [`scrollHeight` and `clientHeight` model exactly one fact](#scrollheight-and-clientheight-model-exactly-one-fact)
 - [Nothing scrolls, but a `scroll` listener can still be driven](#nothing-scrolls-but-a-scroll-listener-can-still-be-driven)
@@ -288,6 +290,39 @@ here — rounds are pages now (ADR 42), decided by one class and one variable ra
 than an observed scroll position, which is what lets `test/check-round-pager.mjs`
 assert directly. When an observer is unavoidable, install `StandInIntersectionObserver`
 and fire its callback yourself, in both directions.
+
+### `.code-row` is an inline box, and `display: block` double-spaces the copy
+
+A gutter-numbered code block joins its rows on the newline bytes already in the
+text, under `white-space: pre` -- each of those newlines is a real line break in
+its own right. Make the row `display: block` as well (the road taken by an
+absolutely positioned gutter, which needs the row as its containing block) and
+every line breaks twice: the row's own block break, plus the newline between two
+rows forming an anonymous block. Measured in Chrome against
+`examples/sample-board.html`: a 19.38px row box on a 41.77px row-to-row delta,
+and a selection read back over a five-line block returning 8 newlines for the 4
+in its text. Every gutter-numbered block rendered and copied double-spaced alike.
+
+The suite cannot see it: the copy promise is about what the browser's selection
+yields, and the checks assert `textContent` -- a different string, correct
+throughout. Keep the row inline, keep exactly one line-break mechanism, and
+reserve the gutter with an in-flow `inline-block` `::before`; the full trade-off
+is written above the `.code-row` rules in `src/styles.mjs`.
+
+### CSS `anchor()` needs its anchor earlier in the DOM, and failure computes `bottom: auto`
+
+`anchor()` positioning requires the anchor to precede the positioned element in
+DOM order. The round pager's dock renders after `.blocks`, and the floating
+comment panel is nested inside a block within `.blocks`, so the panel can never
+anchor to the dock -- and with that worked around it still failed on a separate
+containing-block requirement, the computed value quietly falling back to
+`bottom: auto`. Confirmed in a real browser; the stand-in has no layout, so
+every check stays green while the panel sits in the wrong place.
+
+The shape that survives is the `ResizeObserver` entry above, applied: measure
+the dock's real box yourself, write it to `--round-pager-dock-h`, and let the
+live custom property recompute `bottom` (`setupPagerDockHeightTracking`,
+`src/ui.mjs`).
 
 ### The cascade resolver cannot see an interaction pseudo-class
 

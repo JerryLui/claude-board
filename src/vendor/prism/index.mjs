@@ -1,7 +1,7 @@
 // A hand-written loader over vendored, byte-for-byte prismjs 1.30.0 source -- this
 // file is the only non-upstream code under src/vendor/prism/, and it exists because
 // prismjs does not ship an ESM build (ADR 62 says "self-contained ESM"; here is
-// exactly where that needed care, promised in TICKETS_RENDERING.md's ticket 01).
+// exactly where that needed care).
 //
 // What prismjs actually ships: `prism-core.js` and one file per grammar
 // (`prism-<lang>.js`), each written for a `<script>` tag or a bundler's CommonJS
@@ -72,12 +72,10 @@ for (const name of GRAMMAR_LOAD_ORDER) {
 Prism.languages.html = Prism.languages.markup;
 
 // The names `langForPath` (src/resolve.mjs) can produce, plus `diff` (needed by
-// a referenced `.patch`/`.diff` file or a fenced `diff` block, chunk 05) -- the
-// fixed set this vendoring drop is required to cover (TICKETS_RENDERING.md ticket
-// 01, AC 2). AC 2's prose says "19 languages" but its own list enumerates 20 names
-// (including html); this follows the list. Exported so a check can assert every one
-// of these actually resolves to a loaded grammar, offline, without hand-copying this
-// list a second time.
+// a referenced `.patch`/`.diff` file or a fenced `diff` block) -- the fixed set
+// this vendoring drop is required to cover. Exported so a check can assert every
+// one of these actually resolves to a loaded grammar, offline, without hand-copying
+// this list a second time.
 export const SUPPORTED_LANGUAGES = Object.freeze([
   'javascript', 'typescript', 'tsx', 'jsx', 'python', 'ruby', 'go', 'rust',
   'java', 'c', 'cpp', 'bash', 'json', 'yaml', 'markdown', 'html', 'css', 'sql',
@@ -86,7 +84,7 @@ export const SUPPORTED_LANGUAGES = Object.freeze([
 
 /** Look up a grammar by the language name `langForPath` produces (or `'diff'`).
  * Returns `undefined` for anything not vendored -- callers fall back to plain
- * escaped text (AC 1), never throw, exactly like today's behaviour for a lang
+ * escaped text, never throw, exactly like today's behaviour for a lang
  * with no highlighting support. */
 export function grammarFor(lang) {
   return Object.prototype.hasOwnProperty.call(Prism.languages, lang)

@@ -1,6 +1,6 @@
 // GOLDEN REFERENCE, NOT PRODUCT CODE. This is `git show edb611b:src/markdown.mjs`
 // verbatim (the hand-rolled line scanner src/markdown.mjs used before ADR 62
-// vendored `marked`), kept here so SPEC_RENDERING.md AC 10 -- "heading and list-item
+// vendored `marked`), kept here so AC 10 -- "heading and list-item
 // slugs are byte-identical to today's slugify output, so every archived `section:`
 // reference still resolves" -- can be asserted by RUNNING the old implementation
 // against the new one on a shared corpus, rather than by hand-copied golden strings

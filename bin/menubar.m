@@ -1436,10 +1436,11 @@ static void cb_ensure_item(void) {
   /* Accessory, matching bin/notify.m's click-serving mode. The return value is NOT
    * checked, and that is deliberate: the BOOL means "did the policy change", not "did this
    * succeed", so it comes back NO whenever the policy already matches. QUIRKS.md measured
-   * that the status item is visible with this call omitted entirely, under today's
-   * LSBackgroundOnly plist, from a shell and from launchd alike — nothing rests on it, and
-   * Info.plist is not touched by this feature for the same reason a rebuild is not free (a
-   * changed plist is a changed bundle is a re-prompt for the Documents grant). */
+   * that the status item is visible with this call omitted entirely, under the
+   * LSBackgroundOnly plist that predates ADR.md entry 75's switch to LSUIElement, from a
+   * shell and from launchd alike -- nothing rests on it, and Info.plist is not touched by
+   * this feature for the same reason a rebuild is not free (a changed plist is a changed
+   * bundle is a re-prompt for the Documents grant). */
   [NSApplication sharedApplication];
   (void)[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
   [NSApp finishLaunching];

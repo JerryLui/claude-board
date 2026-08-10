@@ -256,7 +256,7 @@ export function createSseHub() {
      * so this is false through the reconnect and true again a round trip later if the tab
      * really is in front of the reviewer -- which is what keeps a hidden tab's reconnect
      * (a dropped socket, a laptop wake, a daemon restart) from reading as the reviewer
-     * returning (SPEC_STRANDED.md criterion 7).
+     * returning (PROTOCOL.md, `POST /api/board/:id/attended`: "unknown, not attended").
      *
      * The window (ADR.md entry 73) is why a tab buried behind the terminal -- the ordinary
      * working posture -- does not strand its board the moment focus moves: it goes on
@@ -453,10 +453,11 @@ function isPomodoroCookieWrite(parts) {
  * round, carries no answer, and touches nothing durable, only the in-memory SSE
  * hub's per-Watcher flag (`createSseHub`'s `setAttended`, above) that a restart
  * clears for free. Leaving it off this list, requiring the local secret instead,
- * would make it unreachable from the one place it has to be reachable from — see
- * SPEC_STRANDED.md's Next Steps item 3, which is explicit that skipping this
- * would either 403 every report or, if left ungated entirely, let a forged report
- * from any local process silence every banner on the machine. */
+ * would make it unreachable from the one place it has to be reachable from -- a
+ * browser holding only the cookie (SECURITY.md "What the cookie may write"):
+ * gating it behind the secret would 403 every genuine report, and no gate at all
+ * would let any local process forge one and silence a board's Stranded banner
+ * until the next restart. */
 const BOARD_COOKIE_ACTIONS = new Set(['submit', 'attended']);
 
 function isBoardCookieWrite(parts) {
@@ -1184,12 +1185,12 @@ async function handleWait(req, res, id, url, home, sse) {
     // status PROTOCOL.md "Packet" already defines, carrying whatever partial answers
     // the store holds.
     //
-    // SPEC_AWAITED.md ticket 03, AC 12: "when a wait dies while the page is
-    // open, the page is told over SSE". This IS the moment a wait dies -- the
-    // wall clock this same call has been enforcing the whole time just fired
-    // -- so the board's own open tab(s) are nudged to repaint right now rather
-    // than only ever noticing on their own next periodic check (src/ui.mjs's
-    // refreshAwaitDisplay). No payload beyond the round number: everything a
+    // When a wait dies while the page is open, the page is told over SSE. This
+    // IS the moment a wait dies -- the wall clock this same call has been
+    // enforcing the whole time just fired -- so the board's own open tab(s)
+    // are nudged to repaint right now rather than only ever noticing on their
+    // own next periodic check (src/ui.mjs's refreshAwaitDisplay). No payload
+    // beyond the round number: everything a
     // tab needs to decide "read-only now" is already in `board.rounds` and its
     // own clock (badge.mjs's roundIsCurrentlyAwaited, the same predicate this
     // very call enforced server-side), so the event is a wake-up nudge, not a
@@ -1391,8 +1392,8 @@ async function handleSubmit(req, res, id, home, sse, stranded) {
  * `BOARD_COOKIE_ACTIONS` above -- because a browser holding that cookie is the only
  * party that can honestly answer this question, and it is the security-relevant part of
  * this route: off every list it would 403 every report a real tab sends, and ungated it
- * would accept a forged report from any local process, silencing every banner on the
- * machine (SPEC_STRANDED.md's Next Steps item 3; ADR.md entry 58).
+ * would accept a forged report from any local process and silence a board's Stranded
+ * banner until the next restart (SECURITY.md "What the cookie may write").
  *
  * What it STORES is a fact about a live SSE connection (`sse.setAttended`, in
  * `createSseHub` above) and nothing about the board -- but it is not free of durable

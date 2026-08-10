@@ -33,7 +33,7 @@ function check(name, fn) {
 
 // A trailing markdown block keeps this an ORDINARY board (isPageRound false):
 // a lone `html` block is a page round (ADR.md entry 33) whose comment gesture
-// SPEC_AWAITED.md ticket 03 (ADR.md entry 46) gates on being *awaited*, and
+// (ADR.md entry 46) gates on being *awaited*, and
 // this file is about pin placement, not awaited-ness -- see test/check-click.mjs's
 // own identical fix for the fuller reasoning.
 const board = createBoard({
