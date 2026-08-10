@@ -12,7 +12,7 @@
 // of keying by project directory instead.
 
 import path from 'node:path';
-import { styles, faviconLink, restFaviconHref, markSvg } from './styles.mjs';
+import { styles, faviconLink, markSvg } from './styles.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { roundIsAwaited } from './badge.mjs';
 // formatCountdown only -- src/pomodoro.mjs's document shape, HTTP surface and
@@ -441,14 +441,12 @@ setInterval(tick, 15000);
 //    pause, paused -> resume -- so it always has something to do and never has
 //    to hide (the old hidden-button shape did not actually hide; see
 //    src/pomodoro-widget.mjs's own comment for why).
-//  - The tab favicon and the header glyph both read the
-//    SAME running-unpaused-break predicate -- pomodoroIsResting below, defined
-//    once and called from both renderPomodoroFavicon and renderPomodoroGlyph --
-//    so the tab and the header can never disagree about which phase counts as
-//    "resting". A null phase (pomodoroDoc still null, before the first fetch
-//    resolves) is not a break: the predicate requires a real timer object, so a
-//    slow first load renders the ordinary mark and glyph, never flickers
-//    through rest.
+//  - The header glyph alone reads pomodoroIsResting below to decide whether
+//    it shows the plain tomato or the rest mark. A null phase (pomodoroDoc
+//    still null, before the first fetch resolves) is not a break: the
+//    predicate requires a real timer object, so a slow first load renders
+//    the ordinary glyph, never flickers through rest. The tab's own favicon
+//    is fixed and carries no phase at all (ADR 85).
 
 var POMODORO_POLL_MS = 15000; // same order of magnitude as refresh's own poll above
 var pomodoroDoc = null; // last-fetched { settings, cycle, cycleDate, timer, now }
@@ -524,26 +522,23 @@ function pomodoroSwitchLabel(action) {
   return 'Pause pomodoro';
 }
 ` + '\n' +
-'var REST_FAVICON_HREF = ' + JSON.stringify(restFaviconHref) + ';\n' +
 'var TOMATO_ICON = ' + JSON.stringify(TOMATO_ICON) + ';\n' +
 'var REST_ICON = ' + JSON.stringify(REST_ICON) + ';\n'
 + `
-// Real values spliced in from src/pomodoro-widget.mjs
-// and src/styles.mjs (JSON.stringify, the same "embed the real source, never a
-// hand copy" discipline formatCountdown.toString() already uses just above) --
-// TOMATO_ICON/REST_ICON/REST_FAVICON_HREF above are literally
-// src/pomodoro-widget.mjs's and src/styles.mjs's own exports, not a second
-// drawing that could drift from either.
+// Real values spliced in from src/pomodoro-widget.mjs (JSON.stringify, the
+// same "embed the real source, never a hand copy" discipline
+// formatCountdown.toString() already uses just above) --
+// TOMATO_ICON/REST_ICON above are literally src/pomodoro-widget.mjs's own
+// exports, not a second drawing that could drift from it.
 
-// The one predicate both the tab mark and the header glyph read: true only for a REAL timer, RUNNING (not paused), on a break or long
-// break. Idle, paused -- in ANY phase, including mid-break -- and work all read
-// false, and so does a timer pomodoroDoc has not been fetched yet (timer is
-// null/undefined then, same as genuinely idle): "no poll has returned" and
-// "idle" are indistinguishable on purpose, since a phase this is at most one
-// poll interval stale about is not evidence of a break ("a null
-// phase means no mark change, never on break"). Exported to neither the tab nor
-// the glyph individually -- both call this SAME function, so they cannot render
-// two different opinions about which phase counts as "resting".
+// The header glyph's rest predicate: true only for a REAL timer, RUNNING
+// (not paused), on a break or long break. Idle, paused -- in ANY phase,
+// including mid-break -- and work all read false, and so does a timer
+// pomodoroDoc has not been fetched yet (timer is null/undefined then, same
+// as genuinely idle): "no poll has returned" and "idle" are
+// indistinguishable on purpose, since a phase this is at most one poll
+// interval stale about is not evidence of a break ("a null phase means no
+// glyph change, never on break").
 function pomodoroIsResting(timer) {
   return !!timer && !timer.paused && (timer.phase === 'break' || timer.phase === 'longBreak');
 }
@@ -556,32 +551,6 @@ function pomodoroIsResting(timer) {
 // would erase.
 function pomodoroIsActiveWork(timer) {
   return !!timer && !timer.paused && timer.phase === 'work';
-}
-
-// The index tab's own favicon swap. Same base-href capture/restore SHAPE as src/ui.mjs's
-// setFaviconBadge -- captured lazily on first call, from whatever the page's
-// own <link rel="icon"> (faviconLink, src/styles.mjs) already carries, and
-// restored exactly rather than hardcoded, so this still does the right thing
-// if the link's initial href is ever something other than the plain mark.
-// Deliberately NOT a shared module with setFaviconBadge (this section's own
-// header comment) -- the two pages have nothing else in common to justify one.
-var pomodoroFaviconLink = null;
-var pomodoroBaseFaviconHref = null;
-function renderPomodoroFavicon(timer) {
-  if (!pomodoroFaviconLink) {
-    pomodoroFaviconLink = document.querySelector('link[rel="icon"]');
-    if (pomodoroFaviconLink) pomodoroBaseFaviconHref = pomodoroFaviconLink.getAttribute('href');
-  }
-  if (!pomodoroFaviconLink) return; // faviconLink is always server-rendered; nothing to degrade to if it is somehow absent
-  // A pending count wins outright: the index page owns no
-  // pending-count favicon state of its own -- that is src/ui.mjs's
-  // setFaviconBadge, reachable only from a BOARD tab ("the
-  // rest mark is index-only"), so there is nothing on THIS page that could ever
-  // need to outrank the rest mark. The precedence still belongs here, not only
-  // in this comment: pomodoroIsResting is the ONLY thing that may pick
-  // REST_FAVICON_HREF, so nothing else this script does -- now or if a pending
-  // signal is ever added to this page later -- can set it by accident.
-  pomodoroFaviconLink.setAttribute('href', pomodoroIsResting(timer) ? REST_FAVICON_HREF : pomodoroBaseFaviconHref);
 }
 
 // The header glyph swap. Swaps the glyph's MARKUP, never the
@@ -622,10 +591,10 @@ function renderPomodoro() {
   var statusEl = document.querySelector('span#pomodoro-status');
   var toggleBtn = document.querySelector('button#pomodoro-toggle');
   // The null-doc guard: before the first fetch resolves there is
-  // no timer to read at all, and the server-rendered markup (the plain tomato,
-  // the plain mark) is already the correct anti-flicker default -- so this
-  // returns before touching the favicon or the glyph, exactly as it already did
-  // before either existed.
+  // no timer to read at all, and the server-rendered markup (the plain
+  // tomato) is already the correct anti-flicker default -- so this returns
+  // before touching the glyph, exactly as it already did before the glyph
+  // existed.
   if (!pomodoroDoc) return;
   var timer = pomodoroDoc.timer;
   if (!timer) {
@@ -650,7 +619,6 @@ function renderPomodoro() {
     toggleBtn.setAttribute('aria-label', label);
     toggleBtn.setAttribute('title', label);
   }
-  renderPomodoroFavicon(timer);
   renderPomodoroGlyph(timer);
   pomodoroSyncForm();
 }
@@ -698,9 +666,9 @@ function pomodoroSyncForm() {
   var cueBreak = form.querySelector('select[name="cueBreak"]');
   var cueLongBreak = form.querySelector('select[name="cueLongBreak"]');
   // The status item's two preferences, synced on the same condition as every
-  // field above -- this panel is the only place either is editable, so a reader
-  // who hid the item from its own popover finds the box that brings it back
-  // already showing the truth rather than a default.
+  // field above -- this panel is the only place either is editable OR reachable
+  // (the popover carries no hide row), so a reader who hid the item finds the box
+  // that brings it back already showing the truth rather than a default.
   var menubarCountdown = form.querySelector('input[name="menubarCountdown"]');
   var menubarHidden = form.querySelector('input[name="menubarHidden"]');
   if (workMin && active !== workMin) workMin.value = s.workMin;
@@ -1013,9 +981,9 @@ function onDocumentClickClosePomodoroSettings(ev) {
   closePomodoroSettings();
 }
 
-// The fragment the menu bar item's 'Settings...' row navigates to
-// (no setting is editable from the menu bar, so the item sends
-// the reader here instead of growing a second panel). Handled explicitly rather
+// The fragment the menu bar popover's gear navigates to -- a glyph with no text
+// and no ellipsis, not a row (no setting is editable from the menu bar, so the
+// item sends the reader here instead of growing a second panel). Handled explicitly rather
 // than left to the browser's own fragment-auto-expand for a closed 'details' --
 // that behaviour is recent and unevenly shipped, and nothing here gets to pick
 // the reader's browser.
@@ -1036,8 +1004,8 @@ function openPomodoroSettingsFromFragment() {
   // tab scrolled halfway down a long thread list, and a panel that opened
   // offscreen is indistinguishable from one that did not open.
   panel.scrollIntoView();
-  // Spend the fragment once it has been acted on, so the NEXT 'Settings...' from the
-  // popover works too. Without this, a browser handed the same URL again surfaces the
+  // Spend the fragment once it has been acted on, so the NEXT press of the popover's
+  // gear works too. Without this, a browser handed the same URL again surfaces the
   // tab already parked on it and fires no 'hashchange' -- and the reader, who may well
   // have closed the panel since, gets a row that silently does nothing on second use.
   // replaceState rather than assigning location.hash: assigning it would push a history

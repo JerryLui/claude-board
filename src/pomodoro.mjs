@@ -82,9 +82,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // On by default: the digits are most of why the item exists, and the icon's depleting
   // arc is what makes turning them off survivable rather than gutting.
   menubarCountdown: true,
-  // `menubarHidden` -- has the reader hidden the item from the item's own popover. Off
-  // by default for the obvious reason, and a stale document with no key at all reads as
-  // off (normalizeDoc below), so an upgrade never starts out with a missing status item.
+  // `menubarHidden` -- has the reader hidden the item from the index page's pomodoro
+  // settings, which is the only surface that writes this (ADR 85's neighbour decision: the
+  // popover carries no hide row, that row having been a one-way door out of the surface you
+  // would use to undo it). Off by default for the obvious reason, and a stale document with
+  // no key at all reads as off (normalizeDoc below), so an upgrade never starts out with a
+  // missing status item.
   menubarHidden: false,
   // Three DIFFERENT cues -- one per phase, so the reader tells
   // work/short-break/long-break apart by ear without looking at the screen.
@@ -228,6 +231,29 @@ export function startWork(doc, now) {
   return { ...base, timer: { phase: 'work', deadline: now + base.settings.workMin * 60_000, paused: false } };
 }
 
+/** The cycle arithmetic a phase ending performs, whether that ending is a real deadline
+ * (settleBoundary below) or a Forward click landed against a paused timer (forwardTimer
+ * further down, which cannot route through settleBoundary at all — see its own
+ * comment). One function so the two callers can never compute a different next phase
+ * for the same (phase, cycle) pair: a work interval ending begins break number `cycle +
+ * 1` (long iff that number is a multiple of `longEvery`); a break or long break ending
+ * begins the next work interval and increments `cycle`, resetting it to 0 if the break
+ * that just ended was the long one. */
+function advancePhase(finishedPhase, cycle, settings) {
+  if (finishedPhase === 'work') {
+    const breakNumber = cycle + 1;
+    return { nextPhase: breakNumber % settings.longEvery === 0 ? 'longBreak' : 'break', nextCycle: cycle };
+  }
+  return { nextPhase: 'work', nextCycle: finishedPhase === 'longBreak' ? 0 : cycle + 1 };
+}
+
+/** The duration, in minutes, a fresh interval of `phase` runs for. Shared by
+ * settleBoundary, forwardTimer and restartTimer below so "how long is a phase" is
+ * answered in exactly one place. */
+function phaseDurationMin(phase, settings) {
+  return phase === 'work' ? settings.workMin : phase === 'longBreak' ? settings.longBreakMin : settings.breakMin;
+}
+
 /** The loop's one boundary-crossing rule, and the seam a notification hangs
  * off: this function only REPORTS that a boundary occurred
  * ({ phase }); it fires nothing itself.
@@ -266,22 +292,10 @@ export function settleBoundary(doc, now) {
     return { doc: { ...doc, timer: null }, boundary: null };
   }
 
-  const finishedPhase = doc.timer.phase;
-  let cycle = doc.cycle;
-  let nextPhase;
-  if (finishedPhase === 'work') {
-    const breakNumber = cycle + 1;
-    nextPhase = breakNumber % doc.settings.longEvery === 0 ? 'longBreak' : 'break';
-  } else {
-    cycle = cycle + 1;
-    if (finishedPhase === 'longBreak') cycle = 0;
-    nextPhase = 'work';
-  }
+  const { nextPhase, nextCycle } = advancePhase(doc.timer.phase, doc.cycle, doc.settings);
+  const durationMin = phaseDurationMin(nextPhase, doc.settings);
 
-  const durationMin =
-    nextPhase === 'work' ? doc.settings.workMin : nextPhase === 'longBreak' ? doc.settings.longBreakMin : doc.settings.breakMin;
-
-  const nextDoc = { ...doc, cycle, timer: { phase: nextPhase, deadline: now + durationMin * 60_000, paused: false } };
+  const nextDoc = { ...doc, cycle: nextCycle, timer: { phase: nextPhase, deadline: now + durationMin * 60_000, paused: false } };
   return { doc: nextDoc, boundary: { phase: nextPhase } };
 }
 
@@ -290,26 +304,43 @@ export function settleBoundary(doc, now) {
  * interval to end early, and inventing one here would be `startWork`'s
  * job, not this one's.
  *
- * Otherwise this reuses `settleBoundary` itself rather than re-deriving its cycle
- * bookkeeping: it forges a doc whose timer already looks like
- * it hit its deadline exactly now — `paused: false` (forwarding a paused
- * timer both advances AND leaves the next phase running, so the paused flag a real
- * boundary would never see is cleared before settleBoundary ever looks at it) and
- * `deadline: now` (so `late === 0`, comfortably inside EXPIRY_GRACE_MS — a forward is
- * never the EXPIRED path; that path is what happens when nobody was there to press
- * anything). `settleBoundary` then computes the exact same next phase and cycle
- * arithmetic a natural boundary would have: a forwarded
- * work interval still earns its break, a forwarded break still increments the cycle, a
- * forwarded long break still resets it.
+ * A RUNNING timer reuses `settleBoundary` itself rather than re-deriving its cycle
+ * bookkeeping: it forges a doc whose timer already looks like it hit its deadline
+ * exactly now — `deadline: now`, so `late === 0`, comfortably inside EXPIRY_GRACE_MS (a
+ * forward is never the EXPIRED path; that path is what happens when nobody was there to
+ * press anything). `settleBoundary` then computes the exact same next phase and cycle
+ * arithmetic a natural boundary would have: a forwarded work interval still earns its
+ * break, a forwarded break still increments the cycle, a forwarded long break still
+ * resets it. The forge spreads `...doc.timer`, which drags along nothing extra here — a
+ * running timer's shape carries no `remainingMs` to begin with, and the timer object
+ * settleBoundary builds is a fresh one that never spreads the old one either way.
  *
- * The `boundary` half of settleBoundary's return is deliberately discarded: that value
- * is what src/pomodoro.mjs's own reconcile() feeds to `onBoundary` (the notification
- * seam), and forward's caller (createPomodoro.forward below) never sees it, which is
- * what makes "no notification, no cue" true by construction rather than by
- * a caller remembering to suppress it. */
+ * A PAUSED timer cannot take that shortcut (ADR 82). `settleBoundary` assumes a running
+ * timer it can hand a just-expired deadline to — a paused timer carries `remainingMs`
+ * rather than a `deadline`, and settleBoundary's own guard (`doc.timer.paused`) hands a
+ * paused doc straight back rather than advancing it. This function used to force
+ * `paused: false` into the forge to dodge that guard, which both advanced the phase AND
+ * left it running — pause was a state Forward could silently end. ADR 82 reverses that:
+ * pause is left only by the control that owns it, so a paused timer instead re-mints the
+ * next phase's remaining time directly, sharing `advancePhase`/`phaseDurationMin` with
+ * settleBoundary so the two paths can never compute a different next phase for the same
+ * (phase, cycle), and lands paused, carrying that phase's FULL duration in `remainingMs`
+ * rather than a `deadline`.
+ *
+ * The `boundary` half of settleBoundary's return is deliberately discarded on the running
+ * path: that value is what this file's own reconcile() feeds to `onBoundary` (the
+ * notification seam), and forward's caller (createPomodoro.forward below) never sees it,
+ * which is what makes "no notification, no cue" true by construction rather than by a
+ * caller remembering to suppress it. The paused path has no boundary to discard — it
+ * never calls settleBoundary at all. */
 export function forwardTimer(doc, now) {
   if (!doc.timer) return doc;
-  const forced = { ...doc, timer: { ...doc.timer, paused: false, deadline: now } };
+  if (doc.timer.paused) {
+    const { nextPhase, nextCycle } = advancePhase(doc.timer.phase, doc.cycle, doc.settings);
+    const remainingMs = phaseDurationMin(nextPhase, doc.settings) * 60_000;
+    return { ...doc, cycle: nextCycle, timer: { phase: nextPhase, paused: true, remainingMs } };
+  }
+  const forced = { ...doc, timer: { ...doc.timer, deadline: now } };
   const { doc: next } = settleBoundary(forced, now);
   return next;
 }
@@ -317,24 +348,31 @@ export function forwardTimer(doc, now) {
 /** Restart. No-op — returns `doc` UNCHANGED, by reference —
  * against no timer at all, same reasoning as forwardTimer above.
  *
- * Otherwise re-mints `deadline` to a FULL interval of whatever phase is already
- * running, read from `doc.settings` at call time ("the current settings",
- * not whatever was in effect when the interval first started — the same
- * read-at-the-boundary rule mergeSettings' own comment already applies to every OTHER
- * boundary). `phase` and `cycle`/`cycleDate` are carried through untouched, spelled
- * out rather than left to rollDay: restart touches neither, and it can never be handed
- * a timer from a dead day to re-mint — readDoc has already rolled the document by the
- * time the restart control's own click reaches this function.
+ * Otherwise re-mints a FULL interval of whatever phase is already running, its length
+ * read from `doc.settings` at call time ("the current settings", not whatever was in
+ * effect when the interval first started — the same read-at-the-boundary rule
+ * mergeSettings' own comment already applies to every OTHER boundary) via the same
+ * `phaseDurationMin` helper settleBoundary and forwardTimer share, so all three can
+ * never disagree about how long a phase is. `phase` and `cycle`/`cycleDate` are carried
+ * through untouched, spelled out rather than left to rollDay: restart touches neither,
+ * and it can never be handed a timer from a dead day to re-mint — readDoc has already
+ * rolled the document by the time the restart control's own click reaches this
+ * function.
  *
- * Builds a fresh `{ phase, deadline, paused: false }` rather than spreading
- * `doc.timer`, which is what drops a stale `remainingMs` left over from a paused timer
- * (restart unpauses) instead of leaving it beside a `deadline` a future
- * reader could mistake for still meaning something — the same shape pauseTimer/
- * resumeTimer already keep exactly one of `deadline` or `remainingMs` for. */
+ * PAUSED stays paused (ADR 82): restarting is not a way to leave pause any more than
+ * forwarding is, and restarting a paused timer used to leave it running only because
+ * this function forced `paused: false` unconditionally, not because re-minting a phase
+ * means anything about running it. A running timer re-mints a `deadline`; a paused one
+ * re-mints `remainingMs` to that same full duration and stays paused. Either branch builds a fresh
+ * `{ phase, ... }` rather than spreading `doc.timer`, which is what drops whichever of
+ * `deadline`/`remainingMs` belonged to the OLD interval instead of leaving it beside the
+ * new one for a future reader to mistake for still meaning something — the same shape
+ * pauseTimer/resumeTimer already keep exactly one of `deadline` or `remainingMs` for. */
 export function restartTimer(doc, now) {
   if (!doc.timer) return doc;
-  const { phase } = doc.timer;
-  const durationMin = phase === 'work' ? doc.settings.workMin : phase === 'longBreak' ? doc.settings.longBreakMin : doc.settings.breakMin;
+  const { phase, paused } = doc.timer;
+  const durationMin = phaseDurationMin(phase, doc.settings);
+  if (paused) return { ...doc, timer: { phase, paused: true, remainingMs: durationMin * 60_000 } };
   return { ...doc, timer: { phase, deadline: now + durationMin * 60_000, paused: false } };
 }
 
@@ -763,6 +801,10 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * exactly the way it does after resume: forwardTimer mints a brand-new
      * absolute deadline for the next phase, and only a live
      * setTimeout counting down to THAT deadline turns it into a real boundary later.
+     * Unless the timer was PAUSED, in which case forwardTimer lands the next phase paused
+     * too (ADR 82) with a `remainingMs` and no deadline at all — and `arm` reads
+     * `doc.timer.paused` and schedules nothing, which is the right answer: a paused
+     * interval has no wall-clock boundary to arm until the switch resumes it.
      * Deliberately does not pass an `onBoundary` callback anywhere in this path —
      * `arm` only ever schedules the NEXT natural boundary's setTimeout, it
      * never itself fires notification code, so nothing here can. */

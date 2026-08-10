@@ -15,15 +15,17 @@
 // everything below drives the SAME code the menu bar draws from, over the same loopback
 // GET, authorized by the same secret file, and the only thing left untested is the paint.
 //
-// Ticket 05 widened that seam rather than opening a second one. `--menubar --probe
-// <action>` performs ONE of the popover's six actions through the same cb_perform its
-// buttons call and then reports, which is what makes criterion 4 ("every one takes
-// effect") checkable at all; `--menubar --probe url <candidate>` runs the board-URL
-// validator alone. The popover's rows are printed by the plain probe, because the rules
-// that decide them — five at most, the overflow's arithmetic, the row's wording, which
-// action the one button performs — are pure C functions sitting next to cb_derive for
-// exactly this reason. What is NOT covered, and cannot be: whether any of it is on screen,
-// legible, keyboard-reachable or correct in dark mode. No assertion below would survive
+// The popover widened that seam rather than opening a second one. `--menubar --probe
+// <action>` performs ONE of the popover's five actions through the same cb_perform its
+// controls call and then reports, which is what makes "every one takes effect" checkable
+// at all; `--menubar --probe url <candidate>` runs the board-URL validator alone; and
+// `--menubar --probe icons` reports the bounding box of each icon the popover draws, which
+// is the one observable the SVG path-data walker has. The popover's rows are printed by the
+// plain probe, because the rules that decide them — five at most, the overflow's
+// arithmetic, the row's wording, which action the switch performs and which word sits
+// beside it — are pure C functions sitting next to cb_derive for exactly this reason. What
+// is NOT covered, and cannot be: whether any of it is on screen, legible,
+// keyboard-reachable or correct in dark mode. No assertion below would survive
 // bin/menubar.m's popover being deleted wholesale, and none pretends to.
 //
 // The acceptance criteria this file exists for:
@@ -31,13 +33,12 @@
 //   - 1, "shows the current phase and the remaining time, and both track the daemon within
 //     one second of the widget": the countdown the probe derives is compared against the
 //     one node computes from the same daemon's own response.
-//   - 2, "the phase is legible ... in all four states": the four states are what the
-//     derivation has to tell apart before anything can draw them differently, and the
-//     shape and weight flags are derived from the phase alone. The icon is a template
-//     image, so there is no colour in it to check at all and the system owns the ink in
-//     both appearances. All four states, plus paused, are pinned here; whether they LOOK
-//     different is the half no check can reach.
-//   - 3, "how much of the interval is left": the arc's fraction at a known remaining time.
+//   - 2, "the phase is legible": what the derivation tells apart is what anything can draw
+//     differently, so the phase, the ring and the centre mark are all pinned here. The icon
+//     is a template image, so there is no colour in it to check at all and the system owns
+//     the ink in both appearances. Whether the states LOOK different is the half no check
+//     can reach.
+//   - 3, "how much of the interval is left": the ring's fraction at a known remaining time.
 //   - 9, "does not appear until the daemon has answered once, and dims rather than
 //     disappearing": an absent daemon, a wrong secret and a missing secret all report
 //     `answered=no` rather than crashing or hanging.
@@ -50,8 +51,22 @@
 //     structurally against this file's own bytes as well as behaviourally through the
 //     seam. Driving a UI cannot prove a button is missing.
 //   - 11, "turning the countdown setting off leaves the icon and removes the text".
-//   - 12, "hiding the item from its own popover survives a logout": the hide is a POST to
-//     the settings route, so what survives a logout is what the daemon persisted.
+//
+// Two later decisions are pinned here as well, and both are about the glyph rather than the
+// HTTP. ADR 83, paused says so with shape and not a number: the menu bar title is empty and
+// the status line names the phase alone. ADR 84, one signal one dimension: the tomato
+// silhouette in every state, a ring for time remaining, one flat bar for a break, two
+// vertical bars for paused, and opacity meaning only that the daemon has gone quiet. Those
+// live on `cb_display` as `ring` and `mark` FOR THIS REASON -- a decision the derivation
+// records is checkable, and a condition rediscovered inside the drawing code is not.
+//
+// The popover's own row set is the same story one step further. Its words are all reported
+// (`status`, `stateword`, `caption`, `row`), so "the word paused appears exactly once in
+// the whole popover" is a behavioural assertion rather than a screenshot; and every glyph
+// it draws is a byte copy of src/pomodoro-widget.mjs's, so "no glyph is invented for this
+// surface" is a comparison of two files rather than a promise. What remains uncheckable is
+// everything about the arrangement: which row is above which, that the gear is on the
+// right, that a waiting row has no bezel.
 //
 // Pattern-matched off test/check-pomodoro.mjs (a live daemon on a temp home via
 // startServer) and test/check-launcher-menubar.mjs (compiles bin/launcher.c from node and
@@ -179,7 +194,7 @@ async function probe({ home, port, args = [] }) {
     signal = err.signal ?? null;
   }
   const lines = stdout.split('\n').map(s => s.trim()).filter(Boolean);
-  const state = { elapsedMs: Date.now() - started, code, signal, stderr, stdout, rows: [] };
+  const state = { elapsedMs: Date.now() - started, code, signal, stderr, stdout, rows: [], icons: [] };
   // Two line shapes on purpose (bin/menubar.m says why): the first line is bare
   // `key=value` words, and every line after it is one `key=` followed by the rest of the
   // line verbatim, because a row label carries spaces and a middle dot.
@@ -196,6 +211,17 @@ async function probe({ home, port, args = [] }) {
         const at = pair.indexOf('=');
         if (at > 0) state[pair.slice(0, at)] = pair.slice(at + 1);
       }
+      continue;
+    }
+    // `icons` prints one bare-word line per icon, so it parses like the first line does --
+    // one entry per icon rather than keys on the report, there being three of them.
+    if (line.startsWith('icon=')) {
+      const icon = {};
+      for (const pair of line.split(' ')) {
+        const at = pair.indexOf('=');
+        if (at > 0) icon[pair.slice(0, at)] = pair.slice(at + 1);
+      }
+      state.icons.push(icon);
       continue;
     }
     if (line.startsWith('row=')) state.rows.push(line.slice(4));
@@ -290,10 +316,10 @@ async function main() {
   });
 
   await check('criterion 2, short break vs long break: the two break phases are told apart, not collapsed into one', async () => {
-    // ADR.md entry 80 is why two glyph
-    // shapes have to cover four states. If the derivation collapsed `break` and `longBreak` into one
-    // phase there would be nothing left for the renderer to draw differently, and
-    // criterion 2 would be unmeetable regardless of how the drawing was done.
+    // The two breaks DRAW the same glyph (ADR 84 spent the last dimension that told them
+    // apart), but they are still two phases on the wire and the popover still names them in
+    // words. A derivation that collapsed them here would take that away too, and the
+    // boundary logic would have nothing to say which break just ended.
     const now = Date.now();
     await withDaemon(runningDoc({ phase: 'break', deadline: now + 3 * 60_000, paused: false }),
       async ({ probeHome, port }) => {
@@ -464,6 +490,68 @@ async function main() {
     });
   });
 
+  await check('the switch says the state it is IN, where its accessible name says what a press DOES -- and the two are never the same word', async () => {
+    // A switch needs both, and they answer different questions. `primary` is the action
+    // ("Pause"), which is what a screen reader hears and what the widget's aria-label says;
+    // `stateword` is the state ("Running"), which is what the reader sees beside the knob.
+    // A control whose only word is an instruction leaves the state to be read off the knob
+    // alone, and one whose only word is a state cannot be operated by voice.
+    //
+    // "Off" and not "Idle" while there is no timer: the status line beside it already says
+    // Idle, and a row that says the same word twice is a row that has said nothing twice.
+    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
+      const idle = await probe({ home: probeHome, port });
+      assert.equal(idle.stateword, 'Off', 'idle');
+      assert.equal(idle.status, 'Idle', 'and the line above it is the one that says Idle');
+      assert.notEqual(idle.stateword, idle.primary, 'the state and the action are two words, never one');
+
+      await probe({ home: probeHome, port, args: ['start'] });
+      const running = await probe({ home: probeHome, port });
+      assert.equal(running.stateword, 'Running');
+      assert.equal(running.primary, 'Pause', 'the action a press performs is the OTHER word');
+
+      await probe({ home: probeHome, port, args: ['pause'] });
+      const paused = await probe({ home: probeHome, port });
+      assert.equal(paused.stateword, 'Paused');
+      assert.equal(paused.primary, 'Resume');
+    });
+  });
+
+  await check('ADR 83: the word "paused" appears EXACTLY ONCE in the whole popover, beside the switch -- in every phase, and nowhere at all otherwise', async () => {
+    // Every word the popover shows is reported by the probe: the status line, the switch's
+    // state word, the waiting caption and each waiting row. So "exactly once" is countable
+    // rather than a thing to eyeball, which is the only reason it is a check at all.
+    //
+    // It is a real constraint in both directions. Once it is said beside the switch, the
+    // status line must not repeat it (ADR 83's own point: a fact stated twice); and if a
+    // later edit dropped it from the switch to "tidy up", a paused Timer would say so
+    // nowhere in words at all, the countdown having gone with it.
+    // Occurrences of the WORD, not rows containing it: "exactly once" is a claim about how
+    // many times a reader's eye lands on it, and a row that said it twice would be the same
+    // duplication read in one line instead of two.
+    const wordsOf = state => [state.status, state.stateword, state.caption, ...state.rows];
+    const countPaused = state => (wordsOf(state).join(' ').match(/paused/gi) || []).length;
+
+    for (const phase of ['work', 'break', 'longBreak']) {
+      await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }),
+        async ({ probeHome, port }) => {
+          const state = await probe({ home: probeHome, port });
+          assert.equal(state.stateword, 'Paused', `a paused ${phase} says so beside the switch`);
+          assert.equal(countPaused(state), 1,
+            `and exactly once in the whole popover: ${JSON.stringify(wordsOf(state))}`);
+        });
+    }
+    // And never at all when nothing is paused -- which is what makes the count above a
+    // count of one thing rather than of a word that is simply always there.
+    for (const timer of [null, { phase: 'work', deadline: Date.now() + 5 * 60_000, paused: false }]) {
+      await withDaemon(runningDoc(timer), async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port });
+        assert.equal(countPaused(state), 0,
+          `nothing that is not paused may say so: ${JSON.stringify(wordsOf(state))}`);
+      });
+    }
+  });
+
   await check('criterion 4: the popover\'s one line of text names the phase, the pause and the countdown', async () => {
     // The digits beside the icon say how long; this line says what OF. It is the only text
     // the popover retitles on the tick, and it is derived by a pure function next to
@@ -474,14 +562,221 @@ async function main() {
     });
     await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }),
       async ({ probeHome, port }) => {
-        // "Long break", not the wire's `longBreak`: the two break phases are told apart in
-        // words here, where the icon has only a filled circle to do it with.
+        // "Long break", not the wire's `longBreak` -- and this line is now the ONLY place
+        // the two breaks are told apart at all, the glyph having stopped trying (ADR 84).
         assert.match((await probe({ home: probeHome, port })).status, /^Long break · \d{2}:\d{2}$/);
       });
-    await withDaemon(runningDoc({ phase: 'work', paused: true, remainingMs: 90_000 }),
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Paused says so with SHAPE, not a number (ADR 83).
+  // -------------------------------------------------------------------------------------
+
+  await check('paused: no time in the status line and no title on the menu bar button -- the phase name alone, and not the word "paused" either', async () => {
+    // A frozen countdown reads as a clock that has stopped working rather than one
+    // deliberately stopped, and it states twice what the two bars in the glyph already say.
+    // So the menu bar title goes (`countdown=no`, which is what empties it) and the status
+    // line keeps the phase and drops the clock.
+    //
+    // The word "paused" is NOT here on purpose: the switch beside this line carries it, and
+    // the popover says it exactly once. A status line that said it too would be the second
+    // time, which is the thing ADR 83 is about.
+    for (const [phase, expected] of [['work', 'Work'], ['break', 'Short break'], ['longBreak', 'Long break']]) {
+      await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }),
+        async ({ probeHome, port }) => {
+          const state = await probe({ home: probeHome, port });
+          assert.equal(state.status, expected, `a paused ${phase} names its phase and stops there`);
+          assert.ok(!/paused/i.test(state.status), `and never says "paused" itself: ${state.status}`);
+          assert.equal(state.countdown, 'no', 'and no digits reach the menu bar button');
+          // Still DERIVED, though -- the suppression is a display decision, which is what
+          // lets resume put the digits straight back with no refetch.
+          assert.equal(state.text, '01:30');
+        });
+    }
+    // The countdown comes back the moment it is running again, so the check above is
+    // pinning "paused" rather than a countdown that quietly stopped being computed.
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 90_000, paused: false }),
       async ({ probeHome, port }) => {
-        assert.equal((await probe({ home: probeHome, port })).status, 'Work · paused · 01:30');
+        const state = await probe({ home: probeHome, port });
+        assert.equal(state.countdown, 'yes');
+        assert.match(state.status, /^Work · \d{2}:\d{2}$/, 'a running phase keeps its time');
       });
+  });
+
+  // -------------------------------------------------------------------------------------
+  // The glyph vocabulary: one signal, one dimension (ADR 84).
+  //
+  // The paint is not checkable and never will be, so the DECISION is: cb_derive sets `ring`
+  // and `mark` on the display struct and cb_draw is a switch over them, which is what makes
+  // "a paused Timer draws two bars and no ring" an assertion instead of a screenshot. What
+  // is still uncovered is whether the two fields reach pixels that look like anything.
+  // -------------------------------------------------------------------------------------
+
+  await check('the glyph vocabulary, state by state: the silhouette always, a ring only while running, and one centre mark at a time', async () => {
+    const now = Date.now();
+    // Every state the item can be in, and what each one draws. The silhouette is not in
+    // this table because it has no field: it is drawn unconditionally, which is the whole
+    // point of it -- there is no state in which the tomato is not a tomato.
+    const cases = [
+      { name: 'idle', timer: null, ring: 'no', mark: 'none' },
+      { name: 'running work', timer: { phase: 'work', deadline: now + 5 * 60_000, paused: false }, ring: 'yes', mark: 'none' },
+      { name: 'paused work', timer: { phase: 'work', paused: true, remainingMs: 90_000 }, ring: 'no', mark: 'paused' },
+      { name: 'running short break', timer: { phase: 'break', deadline: now + 3 * 60_000, paused: false }, ring: 'yes', mark: 'rest' },
+      { name: 'running long break', timer: { phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }, ring: 'yes', mark: 'rest' },
+      { name: 'paused short break', timer: { phase: 'break', paused: true, remainingMs: 60_000 }, ring: 'no', mark: 'paused' },
+      { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 60_000 }, ring: 'no', mark: 'paused' },
+    ];
+    for (const c of cases) {
+      await withDaemon(runningDoc(c.timer), async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port });
+        assert.equal(state.ring, c.ring, `${c.name}: ring`);
+        assert.equal(state.mark, c.mark, `${c.name}: centre mark`);
+      });
+    }
+    // And the daemon that has gone quiet, which is not a timer state at all: no ring and no
+    // mark, because there is nothing to say. The dimming is the only thing that changes,
+    // and the dimming is alpha -- asserted structurally below, there being no pixel here.
+    const dead = await (async () => {
+      const { createServer } = await import('node:net');
+      return new Promise((resolve, reject) => {
+        const socket = createServer();
+        socket.on('error', reject);
+        socket.listen(0, '127.0.0.1', () => {
+          const bound = socket.address().port;
+          socket.close(() => resolve(bound));
+        });
+      });
+    })();
+    const stale = await probe({ home: makeProbeHome(randomBytes(32).toString('hex')), port: dead });
+    assert.equal(stale.answered, 'no');
+    assert.equal(stale.ring, 'no', 'a silent daemon draws no ring -- there is no live fraction to draw');
+    assert.equal(stale.mark, 'none', 'nor a centre mark: silence is not a phase and it is not paused');
+  });
+
+  await check('the two vertical bars mean PAUSED and nothing else, and short break and long break draw one identical glyph', async () => {
+    // Two claims that are each an absence-shaped thing, and both are what ADR 84 bought by
+    // giving every signal one dimension. If a later edit gave the bars back to `break` --
+    // the meaning they carried before -- a paused break and a running break would draw the
+    // same picture again, and the first assertion is what notices.
+    const now = Date.now();
+    const marks = {};
+    const runningTimers = {
+      idle: null,
+      work: { phase: 'work', deadline: now + 5 * 60_000, paused: false },
+      break: { phase: 'break', deadline: now + 3 * 60_000, paused: false },
+      longBreak: { phase: 'longBreak', deadline: now + 9 * 60_000, paused: false },
+    };
+    for (const [name, timer] of Object.entries(runningTimers)) {
+      await withDaemon(runningDoc(timer), async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port });
+        marks[name] = `${state.ring}/${state.mark}`;
+        assert.notEqual(state.mark, 'paused', `nothing that is not paused may draw the paused bars: ${name} did`);
+      });
+    }
+    assert.equal(marks.break, marks.longBreak,
+      `a short break and a long break are ONE glyph now -- the long break's filled disc is retired: ${marks.break} vs ${marks.longBreak}`);
+    assert.notEqual(marks.work, marks.break, 'a running break is still not a running work interval');
+    assert.notEqual(marks.idle, marks.work, 'and idle is still not a running work interval');
+  });
+
+  await check('opacity carries exactly one fact -- the daemon has stopped answering -- and the file has no second weight left to spend', async () => {
+    // Structural, and it has to be: alpha is a pixel value, the paint has no headless
+    // observer, and "varies for one reason only" is a claim about what the code CAN do
+    // rather than about one observed frame. Same technique as the reset-route check below.
+    //
+    // Two things pin it. cb_ink_alpha may branch on `answered` and on nothing else, and the
+    // set of alpha constants is closed at two: full, and the dimmed one. The muted weight
+    // that idle and paused used to draw at is gone, and so is the long break's part-alpha
+    // disc -- both were alpha saying a second thing, and both are shapes now.
+    const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    const constants = [...source.matchAll(/^static const CGFloat (CB_ALPHA_[A-Z_]+)/gm)].map(m => m[1]).sort();
+    assert.deepEqual(constants, ['CB_ALPHA_FULL', 'CB_ALPHA_STALE'],
+      'a third alpha constant is a second meaning for opacity, which is the thing ADR 84 forbids');
+    const body = source.match(/static CGFloat cb_ink_alpha\(cb_display d\) \{([\s\S]*?)\n\}/);
+    assert.ok(body, 'cb_ink_alpha must still be the one place an alpha is chosen');
+    const fields = [...new Set([...body[1].matchAll(/\bd\.([a-z_]+)/g)].map(m => m[1]))];
+    assert.deepEqual(fields, ['answered'],
+      `the ink's weight may read one field and it is \`answered\`; it read ${JSON.stringify(fields)}`);
+  });
+
+  // -------------------------------------------------------------------------------------
+  // The popover's icons: the widget's own, byte for byte.
+  //
+  // "Every glyph in the popover is one the index page already draws, and none is invented
+  // for this surface" is a claim about two files agreeing. Objective-C cannot import a
+  // JavaScript string, so bin/menubar.m holds a COPY -- and a copy that nothing compares is
+  // a copy that drifts on the first widget edit. These two checks are the comparison and
+  // the proof that the copy is actually drawn: one reads both files, the other walks the
+  // path data in the built binary and looks at what came out.
+  // -------------------------------------------------------------------------------------
+
+  await check('every icon the popover draws is src/pomodoro-widget.mjs\'s own path data, copied verbatim rather than transcribed', async () => {
+    // The widget's three module-private icons, and the menu bar's copies of them. A
+    // transcription into NSBezierPath calls could not be compared at all -- which is the
+    // reason bin/menubar.m walks the `d` string itself, and the reason this check can be
+    // this blunt: the strings are either identical or they are not.
+    const widget = readFileSync(path.join(repoRoot, 'src', 'pomodoro-widget.mjs'), 'utf8');
+    const menubar = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    const attr = (icon, name) => {
+      const declaration = widget.match(new RegExp(`const ${icon} = '([^']*)'`));
+      assert.ok(declaration, `src/pomodoro-widget.mjs must still declare ${icon}`);
+      const found = [...declaration[1].matchAll(new RegExp(`${name}="([^"]+)"`, 'g'))].map(m => m[1]);
+      assert.ok(found.length > 0, `${icon} must still carry a ${name}`);
+      return found;
+    };
+    // The gear is the one that matters most: a dozen elliptical arcs nobody can check by
+    // eye, and the whole reason the copy is a byte copy.
+    for (const [icon, name] of [['GEAR_ICON', 'd'], ['RESTART_ICON', 'd'], ['RESTART_ICON', 'points'],
+                                ['FORWARD_ICON', 'points']]) {
+      for (const value of attr(icon, name)) {
+        assert.ok(menubar.includes(`"${value}"`),
+          `bin/menubar.m must carry ${icon}'s ${name} verbatim -- missing:\n${value}`);
+      }
+    }
+    // The tomato and the rest bar are the OTHER discipline, quoted in a comment beside the
+    // AppKit calls that draw them, because ADR 84's glyph is a composition (silhouette,
+    // ring, centre mark) rather than any one of the widget's strings. Pinned here so the
+    // two disciplines cannot both quietly lapse at once.
+    for (const fragment of ['M12 7.8V4.6', 'M9.4 14.6h5.2']) {
+      assert.ok(menubar.includes(fragment), `bin/menubar.m must still quote ${fragment}`);
+      assert.ok(widget.includes(fragment), `and src/pomodoro-widget.mjs must still draw it`);
+    }
+  });
+
+  await check('the path-data walker actually draws them: each icon\'s ink lands where the widget\'s viewBox says it should', async () => {
+    // The one observable a drawing has without a screen. Both realistic failures of an SVG
+    // arc converter show up here: a command the walker does not understand drops a subpath
+    // and shrinks the box, and a missing radius correction (the gear's `a2 2 0 1 1-2.83
+    // 2.83` asks a radius-2 circle to span 4.002 units) puts a NaN in it.
+    //
+    // The numbers are read off the icons themselves, in SVG units: Feather draws to a
+    // 24-unit box with the ink inset by one, the rotate-ccw arc is a radius-9 circle
+    // centred at 12, and skip-forward is a triangle from x 5 to 15 with its bar at 19.
+    const state = await probe({ home: makeProbeHome(null), port: 1, args: ['icons'] });
+    assert.equal(state.code, 0, `the icons report must exit 0: ${state.stderr}`);
+    const boxes = Object.fromEntries(state.icons.map(i => [i.icon, i]));
+    assert.deepEqual(Object.keys(boxes).sort(), ['forward', 'gear', 'restart'],
+      'three icons, and the popover draws no fourth of its own');
+    for (const [name, box] of Object.entries(boxes)) {
+      for (const key of ['x', 'y', 'w', 'h']) {
+        assert.ok(Number.isFinite(Number(box[key])),
+          `${name}: ${key} is ${box[key]} -- a NaN here is an arc the converter could not solve`);
+      }
+      assert.ok(Number(box.elements) > 0, `${name}: the walk produced no path at all`);
+      assert.ok(Number(box.x) >= 0 && Number(box.y) >= 0, `${name}: ink outside the viewBox`);
+      assert.ok(Number(box.x) + Number(box.w) <= 24 && Number(box.y) + Number(box.h) <= 24,
+        `${name}: ink outside the viewBox`);
+    }
+    const near = (actual, expected, what) =>
+      assert.ok(Math.abs(Number(actual) - expected) < 0.1, `${what}: expected ~${expected}, got ${actual}`);
+    // The gear fills the box symmetrically: x and y both run 1..23.
+    near(boxes.gear.x, 1, 'gear x'); near(boxes.gear.y, 1, 'gear y');
+    near(boxes.gear.w, 22, 'gear width'); near(boxes.gear.h, 22, 'gear height');
+    // Restart: the polyline starts at x 1, and the radius-9 arc reaches x 21.
+    near(boxes.restart.x, 1, 'restart x'); near(boxes.restart.w, 20, 'restart width');
+    // Forward: the polygon's 5..15 plus the bar at 19, and the polygon's own 4..20.
+    near(boxes.forward.x, 5, 'forward x'); near(boxes.forward.w, 14, 'forward width');
+    near(boxes.forward.h, 16, 'forward height');
   });
 
   // -------------------------------------------------------------------------------------
@@ -518,12 +813,17 @@ async function main() {
   await check('criterion 8, structurally: /api/pomodoro/reset appears nowhere in bin/menubar.m, and the routes it CAN reach are a closed set', async () => {
     // The honest form of "reset is not reachable from the popover": the popover can only
     // post what the file names, so what the file names is the assertion. This is also the
-    // check that catches the plausible future edit -- a seventh row added to
+    // check that catches the plausible future edit -- a sixth row added to
     // CB_ACTION_PATHS "for symmetry with the widget" -- which no behavioural check would
     // notice until somebody's cycle was zeroed.
     // Quoted STRING LITERALS, not the raw text: a comment naming the route it must not
     // reach is exactly what that file should say, and an assertion that forbade the words
     // would forbid the explanation too.
+    //
+    // /api/pomodoro/settings left this list with the popover's "Hide from menu bar" row.
+    // Hiding the item is the index page's to do now, so the menu bar posts no SETTING at
+    // all -- which is a stronger form of "nothing is editable from the menu bar" than the
+    // row set alone, and one this assertion is what keeps.
     const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
     const routes = [...new Set([...source.matchAll(/"(\/api\/[a-zA-Z/]*)"/g)].map(m => m[1]))].sort();
     assert.ok(!routes.includes('/api/pomodoro/reset'), 'the reset route must not be a string this client can post to');
@@ -534,9 +834,8 @@ async function main() {
       '/api/pomodoro/pause',
       '/api/pomodoro/restart',
       '/api/pomodoro/resume',
-      '/api/pomodoro/settings',   // criterion 12's hide, and nothing else
-      '/api/waiting',             // criterion 6's rows
-    ], 'every route this process can reach, and reset is not among them');
+      '/api/waiting',             // the waiting rows
+    ], 'every route this process can reach: the five Timer actions, and two reads');
   });
 
   // -------------------------------------------------------------------------------------
@@ -696,10 +995,12 @@ async function main() {
   });
 
   await check('menubarHidden is reported to the item, both ways round', async () => {
-    // Ticket 05 hides the item from its own popover and the index page brings it back, and
-    // both halves of that are this one boolean arriving on every poll. Reported, never
-    // acted on by exiting: an item that exited when hidden would leave nothing for the
-    // settings panel to reach.
+    // The index page's pomodoro settings hide the item and bring it back, and both halves
+    // of that are this one boolean arriving on every poll. Reported, never acted on by
+    // exiting: an item that exited when hidden would leave nothing for the settings panel
+    // to reach. The item itself never WRITES this key -- there is no route to it from
+    // bin/menubar.m at all (see the closed route set above), which is why the popover has
+    // no "Hide from menu bar" row and the way back is never behind the door it closed.
     await withDaemon(runningDoc(null, { menubarHidden: true }), async ({ probeHome, port }) => {
       assert.equal((await probe({ home: probeHome, port })).hidden, 'yes');
     });
@@ -708,16 +1009,15 @@ async function main() {
     });
   });
 
-  await check('criterion 12: the popover\'s Hide writes menubarHidden through the settings route, and the index page\'s panel brings it back', async () => {
-    // "Survives a logout" is a claim about where the boolean LIVES, and the honest form of
-    // it is that the daemon persisted it: this process holds no state of its own and needs
-    // no restart machinery, because every poll reads settings.menubarHidden back and the
-    // process never exits when hidden. So a logout takes the item away and a login brings
-    // back a process that reads `true` and stays off the bar.
+  await check('the item can no longer hide itself: `hide` is refused like any other word this file does not know', async () => {
+    // The popover used to carry a "Hide from menu bar" row, which was a one-way door: it
+    // removed the only surface a reader could use to undo it. The row is gone, and so is
+    // the action behind it -- and this is the assertion that the DELETION is real rather
+    // than a row that stopped being built while the code that hid the item stayed one
+    // caller away from coming back.
     //
-    // This is also the one write in the whole popover, and it is a COMMAND rather than a
-    // settings form -- which is what keeps it beside criterion 7's "no setting is editable
-    // from the menu bar" rather than in breach of it.
+    // Same shape as the reset refusal above, and for the same reason: an absence cannot be
+    // checked by driving a UI.
     await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 10 * 60_000, paused: false }),
       async ({ probeHome, port, secret }) => {
         const doc = async () => (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
@@ -725,24 +1025,24 @@ async function main() {
         })).json();
         assert.equal((await doc()).settings.menubarHidden, false, 'setup: visible to begin with');
 
-        const hidden = await probe({ home: probeHome, port, args: ['hide'] });
-        assert.equal(hidden.code, 0, `hide must be accepted: ${hidden.stderr}`);
-        assert.equal(hidden.hidden, 'yes', 'and the item knows it in the same breath');
+        const refused = await probe({ home: probeHome, port, args: ['hide'] });
+        assert.notEqual(refused.code, 0, 'an action this file cannot perform must not exit 0');
+        assert.equal(refused.signal, null, 'and must be a refusal rather than a crash');
+        assert.match(refused.stderr, /unrecognised menu bar action/);
 
         const after = await doc();
-        assert.equal(after.settings.menubarHidden, true, 'persisted by the daemon -- which is the whole of surviving a logout');
-        assert.equal(after.timer.phase, 'work', 'and hiding the ITEM does not touch the timer');
-        assert.equal(after.settings.menubarCountdown, true, 'nor any other setting: the hide patches one key');
+        assert.equal(after.settings.menubarHidden, false, 'and nothing was written: the item is still on the bar');
+        assert.equal(after.timer.phase, 'work', 'nor was the timer touched');
 
-        // The way back, and it is the index page's existing panel rather than anything
-        // native: the same route with the boolean the other way round, which is exactly
-        // what the widget's "Show in menu bar" checkbox posts.
+        // The way to hide it is the index page's own panel, and it still works -- which is
+        // the half that had to survive this deletion. It is exactly what the widget's
+        // "Show in menu bar" checkbox posts, inverted.
         await fetch(`http://127.0.0.1:${port}/api/pomodoro/settings`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
-          body: JSON.stringify({ menubarHidden: false }),
+          body: JSON.stringify({ menubarHidden: true }),
         });
-        assert.equal((await probe({ home: probeHome, port })).hidden, 'no',
+        assert.equal((await probe({ home: probeHome, port })).hidden, 'yes',
           'and the running item picks that up on its next poll, with no restart');
       });
   });
@@ -793,7 +1093,7 @@ async function main() {
         probeSocket.close(() => resolve(bound));
       });
     });
-    for (const action of ['start', 'pause', 'resume', 'forward', 'restart', 'hide']) {
+    for (const action of ['start', 'pause', 'resume', 'forward', 'restart']) {
       const state = await probe({ home, port, args: [action] });
       assert.equal(state.signal, null, `${action} must not crash against an absent daemon`);
       assert.notEqual(state.code, 0, `${action} must report that it did not land`);

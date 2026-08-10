@@ -35,7 +35,7 @@ import { SUPPORTED_LANGUAGES } from '../src/vendor/prism/index.mjs';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { ui } from '../src/ui.mjs';
-import { styles, palettes, faviconLink, restFaviconHref } from '../src/styles.mjs';
+import { styles, palettes, faviconLink } from '../src/styles.mjs';
 import { indexScript, buildThreadIndex, renderIndexPage, folderName, roundCount } from '../src/indexpage.mjs';
 import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
 import { TOMATO_ICON, REST_ICON } from '../src/pomodoro-widget.mjs';
@@ -8013,7 +8013,7 @@ function loadIndexWithPomodoro({ hash = '' } = {}) {
   const location = { hash, pathname: '/', search: '' };
   // A history stand-in that RECORDS rather than one that merely absorbs the call: the
   // fragment being spent after it has been acted on is a behaviour with a consequence
-  // (the popover's second 'Settings...' works), so a check has to be able to see it.
+  // (a second press of the popover's gear works), so a check has to be able to see it.
   const history = { calls: [], replaceState(state, title, url) { this.calls.push(url); location.hash = ''; } };
   new Function('document', 'setInterval', 'window', 'location', 'history', indexScript)(document, fakeSetInterval, document.defaultView, location, history);
   return { document, intervals, window: document.defaultView, location, history };
@@ -8371,12 +8371,13 @@ await checkAsync('pomodoro widget: a paused timer renders the frozen remainingMs
   assert.equal(status.textContent, before, 'a paused timer must render identical text after a tick -- ticking it would silently un-freeze the countdown');
 });
 
-// The phase -> mark mapping (favicon + header glyph)
-// and the null-phase guard. The pure predicates are extracted and driven
-// directly first (the non-trivial logic the spec names as needing a runnable
-// check), then the same states are driven end to end through the real
-// indexScript + renderIndexPage markup, the same DOM-stand-in shape every
-// other pomodoro widget check above already uses.
+// The phase -> mark mapping (header glyph only -- the tab's own favicon is
+// fixed and carries no phase at all, ADR 85) and the null-phase guard. The
+// pure predicates are extracted and driven directly first (the non-trivial
+// logic the spec names as needing a runnable check), then the same states
+// are driven end to end through the real indexScript + renderIndexPage
+// markup, the same DOM-stand-in shape every other pomodoro widget check
+// above already uses.
 
 check('pomodoroIsResting: only a RUNNING, UNPAUSED break or long break counts as resting -- work, idle, a paused timer in ANY phase (including mid-break), and a phase the daemon has never reported all read false', () => {
   const isResting = extractIndexScriptFn('pomodoroIsResting');
@@ -8402,33 +8403,39 @@ check('pomodoroIsActiveWork: only a RUNNING, UNPAUSED work interval turns the gl
 
 // The two glyphs told apart by their <path> count/geometry, read off the REAL
 // TOMATO_ICON/REST_ICON exports (src/pomodoro-widget.mjs) rather than a
-// hand-typed expectation that could drift from the actual drawings --
-// TOMATO_ICON carries the stem-and-leaves pair (two <path>s), REST_ICON is
-// "stemless" (one <path>, the two vertical stems as two subpaths of it).
+// hand-typed expectation that could drift from the actual drawings. Both carry
+// the same silhouette -- the stem-and-leaves pair, two <path>s -- and REST_ICON
+// adds a third, the one flat bar across the middle that ADR 84 made the rest
+// mark. Not "stemless": the break glyph gained the silhouette when the
+// silhouette became the thing every state draws.
 const TOMATO_PATHS = [...TOMATO_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
 const REST_PATHS = [...REST_ICON.matchAll(/<path d="([^"]+)"/g)].map(m => m[1]);
 assert.equal(TOMATO_PATHS.length, 2, 'setup sanity: TOMATO_ICON must carry the stem/leaves pair as two <path>s');
-assert.equal(REST_PATHS.length, 1, 'setup sanity: REST_ICON must be stemless -- one <path> for both stems');
+assert.deepEqual(REST_PATHS, [...TOMATO_PATHS, 'M9.4 14.6h5.2'],
+  'setup sanity: REST_ICON must be the tomato silhouette plus the one flat rest bar (ADR 84)');
 
-const BASE_FAVICON_HREF = faviconLink.match(/href="([^"]+)"/)[1];
+// The one favicon href the page ever carries -- ADR 85 deleted the swap, so
+// every case below is checked against this SAME value rather than a
+// per-case expectation.
+const FAVICON_HREF = faviconLink.match(/href="([^"]+)"/)[1];
 
 function pomodoroGlyphPaths(document) {
   const slot = document.querySelector('span#pomodoro-icon-slot');
   return [...slot.querySelectorAll('path')].map(p => p.getAttribute('d'));
 }
 
-await checkAsync('a running, unpaused break or long break swaps the index tab to the rest mark and the header glyph to the pause glyph, both muted; work alone turns the glyph amber; idle, paused, and a paused break all keep the ordinary mark', async () => {
+await checkAsync('a running, unpaused break or long break swaps the header glyph to the rest glyph, muted; work alone turns the glyph amber; idle, paused, and a paused break all keep the ordinary tomato -- the tab favicon never moves off its one href in any of these states', async () => {
   const nowMs = Date.now();
   const cases = [
-    { name: 'idle', timer: null, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
-    { name: 'running work', timer: { phase: 'work', deadline: nowMs + 5 * 60_000, paused: false }, favicon: 'base', paths: TOMATO_PATHS, amber: true, restStatus: false },
-    { name: 'paused work', timer: { phase: 'work', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
-    { name: 'running short break', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, favicon: 'rest', paths: REST_PATHS, amber: false, restStatus: true },
-    { name: 'running long break', timer: { phase: 'longBreak', deadline: nowMs + 15 * 60_000, paused: false }, favicon: 'rest', paths: REST_PATHS, amber: false, restStatus: true },
+    { name: 'idle', timer: null, paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'running work', timer: { phase: 'work', deadline: nowMs + 5 * 60_000, paused: false }, paths: TOMATO_PATHS, amber: true, restStatus: false },
+    { name: 'paused work', timer: { phase: 'work', paused: true, remainingMs: 90_000 }, paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'running short break', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, paths: REST_PATHS, amber: false, restStatus: true },
+    { name: 'running long break', timer: { phase: 'longBreak', deadline: nowMs + 15 * 60_000, paused: false }, paths: REST_PATHS, amber: false, restStatus: true },
     // "Idle and paused keep the muted tomato" applies even mid-break:
     // pausing never hands the rest mark to a phase that would otherwise earn it.
-    { name: 'paused short break', timer: { phase: 'break', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
-    { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 90_000 }, favicon: 'base', paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'paused short break', timer: { phase: 'break', paused: true, remainingMs: 90_000 }, paths: TOMATO_PATHS, amber: false, restStatus: false },
+    { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 90_000 }, paths: TOMATO_PATHS, amber: false, restStatus: false },
   ];
   for (const c of cases) {
     const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: c.timer, now: nowMs };
@@ -8437,9 +8444,9 @@ await checkAsync('a running, unpaused break or long break swaps the index tab to
       ({ document } = loadIndexWithPomodoro());
       await flushPomodoro();
     });
+    // Pins ADR 85: no Timer state ever moves the tab's favicon off its one href.
     const favicon = document.querySelector('link[rel="icon"]');
-    assert.equal(favicon.getAttribute('href'), c.favicon === 'rest' ? restFaviconHref : BASE_FAVICON_HREF,
-      `${c.name}: expected the ${c.favicon} favicon href`);
+    assert.equal(favicon.getAttribute('href'), FAVICON_HREF, `${c.name}: the favicon must never move off its one href`);
     assert.deepEqual(pomodoroGlyphPaths(document), c.paths, `${c.name}: expected the ${c.paths === REST_PATHS ? 'rest' : 'tomato'} glyph`);
     const icon = document.querySelector('span#pomodoro-icon-slot .pomodoro-icon');
     assert.equal(icon.classList.contains('pomodoro-icon-amber'), c.amber, `${c.name}: amber class mismatch`);
@@ -8476,21 +8483,19 @@ await checkAsync('idle draws the muted tomato and never the rest glyph, in the s
   assert.equal(icon.classList.contains('pomodoro-icon-amber'), false, 'muted, not amber: idle has nothing to turn up for');
 });
 
-await checkAsync('before the first pomodoro fetch resolves, the tab and the header stay exactly as server-rendered -- never flicker through the rest mark even though the (stubbed, not-yet-answered) daemon reports a break the moment it does answer', async () => {
+await checkAsync('before the first pomodoro fetch resolves, the header glyph stays exactly as server-rendered -- never flickers through the rest mark even though the (stubbed, not-yet-answered) daemon reports a break the moment it does answer', async () => {
   const nowMs = Date.now();
   const restingDoc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
   await withPomodoroFetch(() => restingDoc, async () => {
     const { document } = loadIndexWithPomodoro();
     // Deliberately NO flushPomodoro() -- the opening fetch has been ISSUED but
     // has not resolved, so pomodoroDoc is still null and nothing has run
-    // renderPomodoro (or its new favicon/glyph logic) even once yet.
-    const favicon = document.querySelector('link[rel="icon"]');
-    assert.equal(favicon.getAttribute('href'), BASE_FAVICON_HREF, 'the favicon must still read the plain server-rendered mark before any poll has returned');
+    // renderPomodoro (or its glyph logic) even once yet.
     assert.deepEqual(pomodoroGlyphPaths(document), TOMATO_PATHS, 'the glyph must still be the plain tomato before any poll has returned');
   });
 });
 
-await checkAsync('the mark returns to the ordinary tile within one poll interval of a break ending, with no reload', async () => {
+await checkAsync('the header glyph returns to the tomato within one poll interval of a break ending, with no reload', async () => {
   const nowMs = Date.now();
   const resting = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: '2020-01-01', timer: { phase: 'break', deadline: nowMs + 5 * 60_000, paused: false }, now: nowMs };
   const backToWork = { ...resting, cycle: 1, timer: { phase: 'work', deadline: nowMs + 25 * 60_000, paused: false } };
@@ -8498,7 +8503,6 @@ await checkAsync('the mark returns to the ordinary tile within one poll interval
   await withPomodoroFetch(() => current, async () => {
     ({ document, intervals } = loadIndexWithPomodoro());
     await flushPomodoro();
-    assert.equal(document.querySelector('link[rel="icon"]').getAttribute('href'), restFaviconHref, 'setup failure: expected the rest mark while the break is still running');
     assert.deepEqual(pomodoroGlyphPaths(document), REST_PATHS, 'setup failure: expected the rest glyph while the break is still running');
 
     // The break ends on the DAEMON's own clock, never client-side (this
@@ -8510,7 +8514,6 @@ await checkAsync('the mark returns to the ordinary tile within one poll interval
     fetchPomodoroFn(intervals)();
     await flushPomodoro();
   });
-  assert.equal(document.querySelector('link[rel="icon"]').getAttribute('href'), BASE_FAVICON_HREF, 'the favicon must revert to the ordinary mark within one poll of the break ending');
   assert.deepEqual(pomodoroGlyphPaths(document), TOMATO_PATHS, 'the glyph must revert to the tomato within one poll of the break ending');
 });
 
@@ -9001,7 +9004,7 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
 
 // =================================================================================
 // The settings panel's two menu bar controls, and the
-// fragment the item's "Settings..." row opens the panel on. The idle-tomato
+// fragment the popover's gear opens the panel on. The idle-tomato
 // regression line sits with the other glyph checks further up, beside the states
 // it is about.
 // =================================================================================
@@ -9035,7 +9038,7 @@ check('the settings panel carries its own captioned group for the menu bar, in t
 
 await checkAsync('pomodoro widget: both menu bar controls sync from the daemon\'s stored settings, and the "Show in menu bar" box is the INVERSE of menubarHidden', async () => {
   const nowMs = Date.now();
-  // The state a reader who hid the item from its own popover is in: hidden true,
+  // The state a reader who hid the item from this very panel is in: hidden true,
   // countdown false. A sync that read the stored value straight through would tick
   // "Show in menu bar" for a HIDDEN item -- the reader would then untick it to try
   // to bring it back and store hidden: true a second time.
@@ -9080,7 +9083,7 @@ await checkAsync('pomodoro widget: unticking "Show in menu bar" saves menubarHid
   assert.equal(posts[0].body.menubarCountdown, true, 'and the countdown box must carry its own value straight through, uninverted');
 });
 
-// The menu bar's "Settings..." item opens the index page's existing pomodoro
+// The menu bar popover's gear opens the index page's existing pomodoro
 // panel by navigating the browser to http://127.0.0.1:7391/#pomodoro-settings, so
 // the panel has to open itself -- deliberately NOT left to the browser's own
 // fragment-auto-expand for a closed <details>, which is recent and unevenly
@@ -9132,7 +9135,7 @@ await checkAsync('the fragment arriving in a tab already open on the index -- a 
   });
 });
 
-await checkAsync('the fragment is SPENT once it has opened the panel, so a second `Settings...` into the same tab still works', async () => {
+await checkAsync('the fragment is SPENT once it has opened the panel, so a second press of the gear into the same tab still works', async () => {
   // The failure this pins is silent and second-use-only: a browser handed a URL a tab is
   // already parked on surfaces that tab and fires no 'hashchange', so a reader who opened
   // Settings, closed the panel, and clicked Settings again would get nothing at all. Only

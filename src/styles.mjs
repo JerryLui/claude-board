@@ -42,18 +42,6 @@ const DARK = {
   '--panel-3': '#1e2839',
   '--scrollbar-hover': '#2c3852',
   '--history-bg': 'rgba(19, 26, 39, 0.55)',
-  // The tab mark's own rest-tile colour (src/styles.mjs's REST_SHAPES, below).
-  // Not a page surface -- nothing in this file's CSS ever paints with it, and
-  // it is read by name from the palette object in JS, the same way MARK_SHAPES
-  // reads --warning and --accent-ink by name a little further down. Today's
-  // value is byte-identical to --scrollbar-hover above, which is the color a
-  // slate tile picked on chroma (not value) against Chrome's tab strip happens
-  // to land on -- but the mark owns this name, not that one: a scrollbar
-  // restyle changes --scrollbar-hover and leaves the tab mark exactly where it
-  // is. The "declared and never wired up" trip-wire (test/check-contrast.mjs)
-  // still watches this key because that check learns to scan palette-object
-  // reads, not because the key borrows a CSS reference.
-  '--mark-rest-tile': '#2c3852',
   // The html stage's artboard ('.html-stage', '.stage-lens-frame'). Neutral and
   // per-palette, and not a page surface: a mock owns its own background, so this
   // is only ever what shows through one that paints none. Two constraints decide
@@ -166,14 +154,6 @@ const LIGHT = {
   '--panel-3': '#e2e6f0',
   '--scrollbar-hover': '#c9d0e2',
   '--history-bg': 'rgba(255, 255, 255, 0.55)',
-  // The key set must match DARK's (test/check-contrast.mjs), but the mark has
-  // no light variant and never reads this
-  // value -- it names DARK's '--mark-rest-tile' explicitly, exactly as it
-  // names DARK's '--warning' rather than following prefers-color-scheme. Given
-  // a light-theme reader anyway: LIGHT's own slate, the scrollbar-hover value
-  // two lines up, so a light rest tile would separate from a light tab strip
-  // by the same chroma logic DARK's does, if this ever grows a caller.
-  '--mark-rest-tile': '#c9d0e2',
   // the artboard, one step BELOW --panel-2 (1.14:1) rather than at/near white,
   // so a mock that paints nothing reads as a recessed stage and not as another
   // card. Black srcdoc text 17.14:1, stage hover outline 5.43:1 -- DARK's own
@@ -312,42 +292,6 @@ export const markSvg = (size) =>
  * href off at the first colour. */
 export const faviconLink =
   `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}">`;
-
-// The rest mark: the board's own rows, stood up. On a break the index tab has
-// nothing to ask for, so the three ink rows above collapse to two -- taller,
-// upright, at rest -- on a tile that stops alerting. Same geometry as
-// MARK_SHAPES (32x32, rx 9) and the same corner, so swapping one href for the
-// other (a later ticket's job, not this one's) reads as the SAME mark turned
-// down, not a different icon.
-//
-// The tile is DARK['--mark-rest-tile'], not DARK['--scrollbar-hover'] -- see
-// that key's own comment, above: the colour is
-// load-bearing for a shipped drawing now, so it gets a name that says so.
-// Picked on chroma, not value: Chrome's tab strip is a neutral grey, so a
-// slate tile close to it in VALUE still separates by chroma, leaving the
-// amber bars to supply the tile's value contrast from inside it rather than
-// around it. No light variant, same reasoning as MARK_SHAPES above -- this
-// names DARK explicitly and reads no CSS var().
-//
-// Bars, not rows: two vertical amber bars at 86% opacity read as a pause
-// glyph, the same family as the work mark's ink rows, one register down. Two,
-// not one -- a single rest bar at 16px is indistinguishable from a tile that
-// failed to load after the browser's downsample; two survive the squint as
-// something specific. Geometry is the design's own: x 10.4 and 17.2, y 8.6,
-// 4.4 wide by 14.8 tall, rx 2.2.
-const REST_SHAPES =
-  `<rect width="32" height="32" rx="9" fill="${DARK['--mark-rest-tile']}"/>`
-  + `<rect x="10.4" y="8.6" width="4.4" height="14.8" rx="2.2" fill="${DARK['--warning']}" opacity=".86"/>`
-  + `<rect x="17.2" y="8.6" width="4.4" height="14.8" rx="2.2" fill="${DARK['--warning']}" opacity=".86"/>`;
-
-const REST_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">${REST_SHAPES}</svg>`;
-
-/** The rest mark's href alone, not a whole `<link>` -- the page that wants it
- * already carries `faviconLink`'s tag and swaps this in as its `href`
- * (inline data URI, no asset file, no network fetch, no
- * canvas). `encodeURIComponent` for the same reason as `faviconLink`'s own:
- * a hand-escaped `#` would cut the href off at the first colour. */
-export const restFaviconHref = `data:image/svg+xml,${encodeURIComponent(REST_FAVICON_SVG)}`;
 
 /** Render a palette object as one `selector { ... }` rule's custom-property
  * declarations, plus `color-scheme` so the browser's own chrome (native form

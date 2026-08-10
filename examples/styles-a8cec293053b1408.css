@@ -8,7 +8,6 @@
   --panel-3: #1e2839;
   --scrollbar-hover: #2c3852;
   --history-bg: rgba(19, 26, 39, 0.55);
-  --mark-rest-tile: #2c3852;
   --stage-bg: #c3c6cd;
   --bg-fade-0: rgba(10, 14, 21, 0);
   --bg-fade-80: rgba(10, 14, 21, 0.8);
@@ -61,7 +60,6 @@
   --panel-3: #e2e6f0;
   --scrollbar-hover: #c9d0e2;
   --history-bg: rgba(255, 255, 255, 0.55);
-  --mark-rest-tile: #c9d0e2;
   --stage-bg: #e6e8ee;
   --bg-fade-0: rgba(238, 241, 247, 0);
   --bg-fade-80: rgba(238, 241, 247, 0.8);
@@ -114,7 +112,6 @@
   --panel-3: #e2e6f0;
   --scrollbar-hover: #c9d0e2;
   --history-bg: rgba(255, 255, 255, 0.55);
-  --mark-rest-tile: #c9d0e2;
   --stage-bg: #e6e8ee;
   --bg-fade-0: rgba(238, 241, 247, 0);
   --bg-fade-80: rgba(238, 241, 247, 0.8);

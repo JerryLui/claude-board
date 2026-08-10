@@ -146,8 +146,9 @@ notification sound.
 
 **Forward**: the control that ends the current interval now — the boundary happening early, taking
 the exact advance rule a natural end takes (credit and long-break cadence intact), silently. A
-forward unpauses; against no timer it is a no-op. _Avoid_: skip, next, advance.
+forward preserves paused, landing at the start of the next phase with that phase's full duration
+still to run (ADR 82); against no timer it is a no-op. _Avoid_: skip, next, advance.
 
-**Restart**: the control that starts the current interval over — a fresh full-length deadline read
-from the current settings, phase and cycle untouched. Same edge rules as Forward: silent, unpauses,
-no-op when idle. _Avoid_: reset (that ends the whole loop), redo, replay.
+**Restart**: the control that starts the current interval over — a fresh full-length interval read
+from the current settings, phase and cycle untouched. Same edge rules as Forward: silent, preserves
+paused, no-op when idle. _Avoid_: reset (that ends the whole loop), redo, replay.

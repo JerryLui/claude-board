@@ -228,7 +228,7 @@ check('every palette token is referenced somewhere in the stylesheet, or by anot
       for (const m of String(value).matchAll(/var\((--[\w-]+)/g)) varRefs.add(m[1]);
     }
   }
-  // The tab mark (src/styles.mjs, beside MARK_SHAPES/REST_SHAPES) draws
+  // The tab mark (src/styles.mjs, MARK_SHAPES) draws
   // straight from the DARK object in JS -- a favicon gets no CSS, so it can
   // carry no var() -- so a token read as DARK['--x'] there looks orphaned to
   // the scan above even though it is wired up, just not through CSS. Scanning

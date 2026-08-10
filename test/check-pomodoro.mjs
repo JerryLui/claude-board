@@ -364,15 +364,19 @@ async function main() {
     assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
   });
 
-  await check('forwardTimer: forwarding a PAUSED timer advances, and the next phase starts running', () => {
+  // Criterion 11 (ADR 82): forwarding a paused Timer must land paused at the start of
+  // the next phase, with that phase's FULL duration remaining -- not the runnable
+  // interval the old code produced, and not whatever sliver of `remainingMs` the paused
+  // timer happened to be carrying (30s here, deliberately far from a full break).
+  await check('forwardTimer: forwarding a PAUSED timer lands PAUSED at the next phase, with its full duration in remainingMs (ADR 82)', () => {
     const now = Date.now();
     // The real shape pauseTimer leaves behind: no deadline, remainingMs instead.
     const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
     const next = forwardTimer(doc, now);
     assert.equal(next.timer.phase, 'break');
-    assert.equal(next.timer.paused, false);
-    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
-    assert.equal('remainingMs' in next.timer, false);
+    assert.equal(next.timer.paused, true, 'forward must not un-pause');
+    assert.equal(next.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000, 'the FULL next phase, not the stale remainder');
+    assert.equal('deadline' in next.timer, false, 'a paused timer has no deadline, same shape pauseTimer leaves');
   });
 
   await check('forwardTimer: long-break cadence intact across a full loop -- forwarded work still earns its break, forwarded break still increments the cycle, forwarded long break resets it', () => {
@@ -405,6 +409,35 @@ async function main() {
     }
   });
 
+  await check('forwardTimer: the same cadence holds PAUSED -- a paused loop advances phase and cycle exactly like the running one, and never un-pauses along the way', () => {
+    const t0 = new Date(2026, 7, 4, 9, 0, 0).getTime();
+    // Starts paused, with a deliberately odd remainingMs -- proof each step re-mints
+    // a FULL duration rather than carrying the previous step's number forward.
+    let doc = { ...defaultDoc(), cycleDate: pomodoroDay(t0), timer: { phase: 'work', paused: true, remainingMs: 7_000 } };
+    let now = t0;
+
+    const steps = [
+      ['break', 0, DEFAULT_SETTINGS.breakMin],
+      ['work', 1, DEFAULT_SETTINGS.workMin],
+      ['break', 1, DEFAULT_SETTINGS.breakMin],
+      ['work', 2, DEFAULT_SETTINGS.workMin],
+      ['break', 2, DEFAULT_SETTINGS.breakMin],
+      ['work', 3, DEFAULT_SETTINGS.workMin],
+      ['longBreak', 3, DEFAULT_SETTINGS.longBreakMin],
+      ['work', 0, DEFAULT_SETTINGS.workMin],
+    ];
+
+    for (const [expectPhase, expectCycle, expectMin] of steps) {
+      now += 1_000;
+      const next = forwardTimer(doc, now);
+      assert.equal(next.timer.phase, expectPhase);
+      assert.equal(next.cycle, expectCycle);
+      assert.equal(next.timer.paused, true, `${expectPhase}: still paused`);
+      assert.equal(next.timer.remainingMs, expectMin * 60_000, `${expectPhase}: full duration, not carried over`);
+      doc = next;
+    }
+  });
+
   // -------------------------------------------------------------------------------
   // restartTimer -- re-mints the CURRENT interval's deadline to a full phase
   // duration; phase and cycle are untouched, and it shares forward's
@@ -430,13 +463,33 @@ async function main() {
     }
   });
 
-  await check('restartTimer: unpauses -- a paused timer restarts running, with a fresh deadline instead of remainingMs', () => {
+  // Criterion 12 (ADR 82): restarting a paused Timer re-mints the CURRENT phase and
+  // stays paused -- it re-mints `remainingMs`, not a `deadline`, and to the phase's
+  // FULL duration rather than whatever sliver (4s here) the paused timer was carrying.
+  await check('restartTimer: a PAUSED timer re-mints remainingMs to a full interval of the CURRENT phase and stays paused (ADR 82)', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), timer: { phase: 'break', paused: true, remainingMs: 4_000 } };
+    const doc = { ...defaultDoc(), cycle: 2, cycleDate: '2026-08-01', timer: { phase: 'break', paused: true, remainingMs: 4_000 } };
     const next = restartTimer(doc, now);
-    assert.equal(next.timer.paused, false);
-    assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.breakMin * 60_000);
-    assert.equal('remainingMs' in next.timer, false);
+    assert.equal(next.timer.phase, 'break', 'phase untouched');
+    assert.equal(next.timer.paused, true, 'restart must not un-pause');
+    assert.equal(next.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000, 'the FULL phase, not the stale remainder');
+    assert.equal('deadline' in next.timer, false, 'a paused timer has no deadline, same shape pauseTimer leaves');
+    assert.equal(next.cycle, 2, 'cycle untouched');
+    assert.equal(next.cycleDate, '2026-08-01', 'cycleDate untouched');
+  });
+
+  await check('restartTimer: PAUSED holds across every phase and custom settings, same as the running case above', () => {
+    const now = Date.now();
+    const settings = { ...DEFAULT_SETTINGS, workMin: 11, breakMin: 3, longBreakMin: 22 };
+    for (const [phase, key] of [['work', 'workMin'], ['break', 'breakMin'], ['longBreak', 'longBreakMin']]) {
+      const doc = { ...defaultDoc(), settings, cycle: 2, cycleDate: '2026-08-01', timer: { phase, paused: true, remainingMs: 500 } };
+      const next = restartTimer(doc, now);
+      assert.equal(next.timer.phase, phase, 'phase untouched');
+      assert.equal(next.timer.paused, true);
+      assert.equal(next.timer.remainingMs, settings[key] * 60_000, `remainingMs re-minted to a full ${key}`);
+      assert.equal('deadline' in next.timer, false);
+      assert.equal(next.cycle, 2, 'cycle untouched');
+    }
   });
 
   await check('restartTimer: a deadline hours stale is simply re-minted, never treated as expired -- restart bypasses settleBoundary\'s grace rule entirely', () => {
@@ -848,6 +901,48 @@ async function main() {
     }
   });
 
+  // Criteria 11/12 through the whole engine, not just the pure reducer: pause, then
+  // forward or restart, and confirm what actually lands on disk. `arm` (private to
+  // createPomodoro) already bails on `doc.timer.paused` before scheduling anything, so a
+  // forward/restart that lands paused leaves nothing armed with no code change needed
+  // here -- these two pin the persisted document, which is the only thing a client
+  // (Popover or index page) ever reads back.
+  await check('engine.forward: forwarding a PAUSED timer persists PAUSED at the next phase, full duration remaining', () => {
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-forward-'));
+    const now = Date.now();
+    const engine = createPomodoro({ home: h });
+    try {
+      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } }, h);
+      engine.pause(now);
+      const forwarded = engine.forward(now + 1_000);
+      assert.equal(forwarded.timer.phase, 'break');
+      assert.equal(forwarded.timer.paused, true);
+      assert.equal(forwarded.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000);
+      assert.deepEqual(readDoc(h, now + 1_000).timer, forwarded.timer, 'persisted, not just returned');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('engine.restart: restarting a PAUSED timer persists PAUSED at the same phase, full duration remaining', () => {
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-restart-'));
+    const now = Date.now();
+    const engine = createPomodoro({ home: h });
+    try {
+      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
+      engine.pause(now);
+      const restarted = engine.restart(now + 1_000);
+      assert.equal(restarted.timer.phase, 'break');
+      assert.equal(restarted.timer.paused, true);
+      assert.equal(restarted.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000);
+      assert.deepEqual(readDoc(h, now + 1_000).timer, restarted.timer, 'persisted, not just returned');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
   await check('ensureTimer: no-op against a timer MID-BREAK -- a start during a break does not cut it short', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
@@ -998,7 +1093,7 @@ async function main() {
     });
   });
 
-  await check('POST /api/pomodoro/forward: forwarding a PAUSED timer through the route advances it, and the next phase comes back running', async () => {
+  await check('POST /api/pomodoro/forward: forwarding a PAUSED timer through the route lands PAUSED at the next phase, full duration remaining (ADR 82)', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
       const paused = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
@@ -1006,8 +1101,9 @@ async function main() {
 
       const body = await (await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
       assert.equal(body.timer.phase, 'break');
-      assert.equal(body.timer.paused, false);
-      assert.equal(readDoc(home).timer.paused, false);
+      assert.equal(body.timer.paused, true, 'forward must not un-pause');
+      assert.equal(body.timer.remainingMs, DEFAULT_SETTINGS.breakMin * 60_000, 'the FULL next phase, not the stale remainder');
+      assert.equal(readDoc(home).timer.paused, true, 'landed on disk, not just in the response');
     });
   });
 
@@ -1052,14 +1148,16 @@ async function main() {
     });
   });
 
-  await check('POST /api/pomodoro/restart: unpauses -- a paused timer restarts running', async () => {
+  await check('POST /api/pomodoro/restart: a paused timer through the route stays PAUSED, re-minted to a full interval of the same phase (ADR 82)', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const paused = { ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), timer: { phase: 'work', paused: true, remainingMs: 5_000 } };
       writeDoc(paused, home);
 
       const body = await (await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
-      assert.equal(body.timer.paused, false);
-      assert.equal(readDoc(home).timer.paused, false);
+      assert.equal(body.timer.phase, 'work', 'restart must not un-pause');
+      assert.equal(body.timer.paused, true);
+      assert.equal(body.timer.remainingMs, DEFAULT_SETTINGS.workMin * 60_000, 'the FULL phase, not the stale remainder');
+      assert.equal(readDoc(home).timer.paused, true, 'landed on disk, not just in the response');
     });
   });
 

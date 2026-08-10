@@ -51,26 +51,34 @@ import { cueNames } from './cues.mjs';
 // the status span itself only ever says the phase and the clock.
 export const TOMATO_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pomodoro"><title>Pomodoro</title><circle cx="12" cy="14.6" r="6.8"/><path d="M12 7.8V4.6"/><path d="M12 7.8 8.2 5.9M12 7.8l3.8-1.9"/></svg>';
 
-/** The break glyph: the SAME circle as
- * TOMATO_ICON above -- identical cx/cy/r, identical outer <svg> attributes
- * (viewBox, size, stroke, role, aria-label, the "Pomodoro" title) -- so the
- * accessible name never changes and the swap reads as the same glyph turned
- * down, not a different icon. Two differences only: the stem
- * and leaves on top are gone ("a stemless circle"), and two short vertical
- * stems sit inside it where they were -- the pause-glyph family, and the same
- * "two bars, not one" call src/styles.mjs's REST_SHAPES already made for the
- * tab mark (a single rest stroke reads as a rendering failure at this size;
- * two read as deliberate). Exported alongside TOMATO_ICON so indexpage.mjs's
- * indexScript can splice both in as real values (JSON.stringify, the same
- * "real value, not a hand-copy" discipline formatCountdown.toString() already
- * gets there) rather than owning a second copy of either drawing.
+/** The break glyph: TOMATO_ICON's WHOLE SILHOUETTE -- identical outer <svg>
+ * attributes (viewBox, size, stroke, role, aria-label, the "Pomodoro" title),
+ * identical circle, identical stem and leaves -- with one flat bar added in the
+ * middle of it. So the accessible name never changes and the swap reads as the
+ * same glyph resting, not a different icon.
  *
- * Colour is NOT baked in here: idle and paused keep this exact glyph but at
- * TOMATO_ICON's own muted weight (spec decision: "idle has nothing to turn up
- * for"), so the amber-vs-muted choice is a CSS class indexScript toggles on
- * whichever glyph is currently mounted (.pomodoro-icon-amber, src/styles.mjs),
- * never a colour attribute drawn into either string. */
-export const REST_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pomodoro"><title>Pomodoro</title><circle cx="12" cy="14.6" r="6.8"/><path d="M10 11v7.2M14 11v7.2"/></svg>';
+ * ADR 84 is why it looks like this. The break glyph used to be stemless, and it
+ * used to carry two vertical bars; both were spent on other signals when the
+ * menu bar's vocabulary was redrawn to give every signal exactly one dimension.
+ * The silhouette is now drawn in every state, so it can no longer say "break" --
+ * and the two vertical bars now mean PAUSED and nothing else, everywhere, so the
+ * rest mark had to become the one horizontal bar it is here. It is stroke-width
+ * 2.2 against the silhouette's 2 because a short stroke alone in the middle of a
+ * circle reads as a scratch at the outline's own weight.
+ *
+ * bin/menubar.m's cb_draw copies these numbers -- the Popover is Objective-C and
+ * cannot import this string -- so the two surfaces are edited in one commit or
+ * they drift. Exported alongside TOMATO_ICON so indexpage.mjs's indexScript can
+ * splice both in as real values (JSON.stringify, the same "real value, not a
+ * hand-copy" discipline formatCountdown.toString() already gets there) rather
+ * than owning a second copy of either drawing.
+ *
+ * Colour is NOT baked in here: idle and paused keep the tomato at its own muted
+ * weight (spec decision: "idle has nothing to turn up for"), so the amber-vs-
+ * muted choice is a CSS class indexScript toggles on whichever glyph is
+ * currently mounted (.pomodoro-icon-amber, src/styles.mjs), never a colour
+ * attribute drawn into either string. */
+export const REST_ICON = '<svg class="pomodoro-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pomodoro"><title>Pomodoro</title><circle cx="12" cy="14.6" r="6.8"/><path d="M12 7.8V4.6"/><path d="M12 7.8 8.2 5.9M12 7.8l3.8-1.9"/><path d="M9.4 14.6h5.2" stroke-width="2.2"/></svg>';
 
 const GEAR_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.47V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9.1 19.4a1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 1-1.47V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>';
 
@@ -187,8 +195,8 @@ export function pomodoroWidget() {
       <label class="pomodoro-field">Long break<select name="cueLongBreak" aria-label="Long break cue">${cueOptions}</select></label>
       <!-- The macOS status item's two preferences (the item is a second process
            of the same bundle, ADR 72). They are edited HERE and
-           nowhere else -- the item owns no state of its own, it reads and writes
-           the same daemon document this form does, and no setting is editable
+           nowhere else -- the item owns no state of its own, it only READS the
+           same daemon document this form writes, and no setting is editable
            from the menu bar at all. A third captioned group in the existing
            hairline + caption idiom, not a fold and not a new one: everything the
            panel can do stays visible the moment it opens, exactly as when Cues
@@ -205,10 +213,13 @@ export function pomodoroWidget() {
       <!-- Stated as a POSITIVE, and so the one control in this form whose ticked
            state is the NEGATION of the settings key behind it: ticked means
            'menubarHidden' is false. A box labelled "Hidden" that you tick to make
-           something appear is the wrong way round, and this control's entire job
-           is bringing back an item the reader hid from the item's own popover --
-           at which point the popover carrying that control is gone, and this row
-           is the only way back. The inversion lives in exactly two places, both
+           something appear is the wrong way round.
+           This is the ONLY control anywhere that hides the status item or brings
+           it back: the item's own popover carries no such row, deliberately, a
+           row that removes the surface you would use to undo it being a one-way
+           door -- and bin/menubar.m can post no setting at all, so this checkbox
+           is both directions of the switch rather than just the way back.
+           The inversion lives in exactly two places, both
            in src/indexpage.mjs: pomodoroSyncForm fills it in as '!menubarHidden',
            onPomodoroSettingsSubmit posts it back the same way. It needs no
            aria-label of its own, unlike the row above -- its visible text already

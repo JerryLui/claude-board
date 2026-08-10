@@ -11,7 +11,7 @@
  * close to uncrashable, and it stays that way only if nothing that draws is running in it.
  *
  * What this file owns, and what it deliberately does not. It owns a picture: which glyph,
- * how much of the arc is left, whether digits show. It owns NO clock, NO settings and NO
+ * how much of the ring is left, whether digits show. It owns NO clock, NO settings and NO
  * notifications — every one of those already lives in the daemon behind
  * `GET /api/pomodoro`, and the whole reason the feature is ~500 lines rather than the
  * ~800 a self-contained menu bar timer costs is that this end of it only reads. Nothing
@@ -60,6 +60,7 @@
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Set from a signal handler, read only by the run loop below — a `sig_atomic_t` and a
@@ -179,7 +180,8 @@ typedef struct {
 } cb_timer;
 
 /* The `settings` fields this file reads, and only those. The four durations are what turn
- * a remaining time into the arc's fraction; the two booleans are ticket 01's additions. */
+ * a remaining time into the ring's fraction; the two booleans are the item's own
+ * preferences, edited on the index page and read here. */
 typedef struct {
   double work_ms;
   double break_ms;
@@ -188,18 +190,31 @@ typedef struct {
   int hidden;     /* settings.menubarHidden */
 } cb_settings;
 
+/* What sits in the middle of the silhouette, and only one thing ever can. The rest bar and
+ * the paused bars are mutually exclusive by construction rather than by two booleans that
+ * could both be set: a paused break draws the paused bars and nothing else. */
+typedef enum {
+  CB_MARK_NONE = 0,   /* idle, and a running work interval */
+  CB_MARK_REST,       /* a running break, short or long alike */
+  CB_MARK_PAUSED,     /* paused, in every phase */
+} cb_mark;
+
 /* What the item looks like. Deliberately flat and copyable: it crosses into a drawing
  * block by value, which is what keeps the renderer from reaching back for anything the
- * derivation did not decide for it. */
+ * derivation did not decide for it.
+ *
+ * `ring` and `mark` are the whole of the glyph decision, and they are FIELDS rather than
+ * conditions the drawing code rediscovers from `phase` and `paused` for one reason: the
+ * drawing cannot be checked and these can. test/check-menubar-client.mjs reads them off
+ * `--menubar --probe` and asserts the vocabulary state by state without a window server. */
 typedef struct {
   int answered;       /* has the daemon answered inside CB_STALE_AFTER_MS */
   int hidden;         /* settings.menubarHidden — the item exists but is not visible */
   cb_phase phase;
   int paused;
-  int arc;            /* draw the circle as a depleting arc rather than whole */
-  int filled;         /* the long break's heavier circle */
-  int muted;          /* idle and paused: the widget's own turned-down weight */
-  double fraction;    /* 0..1 of the interval still to run — the arc's sweep */
+  int ring;           /* draw the progress ring inside the outline */
+  cb_mark mark;       /* what is drawn in the centre, if anything */
+  double fraction;    /* 0..1 of the interval still to run — the ring's sweep */
   long remaining_s;   /* rounded the way formatCountdown rounds */
   int countdown;      /* would the digits be on screen */
   char text[16];      /* "MM:SS", or "" when there is no interval to count */
@@ -223,55 +238,64 @@ static double cb_phase_length_ms(cb_phase phase, const cb_settings *settings) {
  * the real one.
  *
  * `answered = 0` is the stale case, and the caller freezes `now_ms` at the last answer's
- * own `now` when it passes it — so a daemon that went quiet leaves the arc stopped where
+ * own `now` when it passes it — so a daemon that went quiet leaves the ring stopped where
  * it was rather than draining to empty against a document nothing is refreshing. That
  * one line of policy is the caller's; everything else about staleness is here: the digits
  * go, the shape stays.
  *
- * Four appearances out of the widget's two shapes (ADR 80), and NOT ONE OF THEM IS A
- * COLOUR: idle is the tomato with a plain undepleted circle and no arc; work is the
- * tomato with the depleting arc; a short break is the bars glyph with the depleting arc;
- * a long break is the bars glyph with that arc on a FILLED circle. The icon is a template
- * image (see cb_image below), so the system owns the hue and this function has only shape
- * and weight to spend — which is what these four were picked against. Paused draws the
- * glyph its phase would draw, at the muted weight, with the arc frozen — which is also
- * the only thing separating idle from paused-in-work, since both are the muted tomato:
- * idle has no arc at all, paused has a stopped one. */
+ * ONE SIGNAL, ONE DIMENSION (ADR 84), and not one of them is a colour. The tomato
+ * silhouette is drawn in every state, so it says nothing and never has to; what varies is
+ * two fields and no more. `ring` is time remaining, and it is the only thing that carries
+ * it. `mark` is the phase-or-paused mark in the centre, and it is the only thing that
+ * carries that. Alpha is left to say one thing alone — the daemon has stopped answering —
+ * which is why idle and paused derive at full weight here and are told apart by shape.
+ *
+ * So: idle is the silhouette alone; running work is the silhouette and the ring; a running
+ * break is the silhouette, the ring and the rest bar, SHORT AND LONG ALIKE (the long
+ * break's filled disc is retired — the two breaks have no dimension left to spend on being
+ * told apart, and the popover says which one in words); and paused, in every phase, is the
+ * silhouette and the two bars with no ring at all. A paused Timer therefore no longer says
+ * which phase it is paused in, which is accepted: it has nothing to be late for. */
 static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settings *settings,
                             double now_ms) {
   cb_display d;
   memset(&d, 0, sizeof(d));
   d.answered = answered ? 1 : 0;
   d.hidden = settings->hidden ? 1 : 0;
-  /* A full circle, so the idle glyph below is the widget's plain one rather than a
-   * zero-length arc that would read as an interval about to expire. */
+  /* A full sweep, so a state that draws no ring never leaves a stale fraction behind for
+   * one that does. */
   d.fraction = 1.0;
 
   if (!timer->running) {
-    /* Idle. Muted, and no countdown at all — countdown text appears only while a timer
-     * exists, so an idle item is the icon alone whatever menubarCountdown says. The
-     * widget's own idle row says the same thing differently ("Idle (25 min)"); there is
-     * no room for that in a menu bar, and a duration that is not counting down would read
-     * as one that is. */
+    /* Idle: the silhouette alone, no ring and no centre mark, and no countdown at all —
+     * countdown text appears only while a timer exists, so an idle item is the icon alone
+     * whatever menubarCountdown says. The widget's own idle row says the same thing
+     * differently ("Idle (25 min)"); there is no room for that in a menu bar, and a
+     * duration that is not counting down would read as one that is. */
     d.phase = CB_IDLE;
-    d.muted = 1;
     return d;
   }
 
   d.phase = timer->phase;
   d.paused = timer->paused ? 1 : 0;
-  d.arc = 1;
-  d.filled = (timer->phase == CB_LONG_BREAK) ? 1 : 0;
-  d.muted = d.paused;
+  /* Paused takes the centre and gives up the ring: a stopped ring and a running one differ
+   * only by not moving, which a glance at a menu bar cannot see. Two bars can be seen. */
+  d.ring = d.paused ? 0 : 1;
+  if (d.paused) d.mark = CB_MARK_PAUSED;
+  else if (timer->phase == CB_BREAK || timer->phase == CB_LONG_BREAK) d.mark = CB_MARK_REST;
+  else d.mark = CB_MARK_NONE;
 
   double remaining = timer->paused ? timer->remaining_ms : timer->deadline_ms - now_ms;
   if (remaining < 0.0) remaining = 0.0;
 
-  /* The arc is remaining-over-configured, not remaining-over-elapsed: the denominator is
+  /* The ring is remaining-over-configured, not remaining-over-elapsed: the denominator is
    * the phase's CURRENT setting, which is the same number restartTimer mints a deadline
-   * from. A reader who shortens the work interval mid-interval therefore sees an arc that
+   * from. A reader who shortens the work interval mid-interval therefore sees a ring that
    * is already past where it would have been, which is honest — the interval they are in
-   * is longer than the one they just configured, and the digits say so too. */
+   * is longer than the one they just configured, and the digits say so too.
+   *
+   * Derived while paused too, though nothing draws it then: it is what the ring comes back
+   * to on resume, and the probe reports it either way. */
   double total = cb_phase_length_ms(timer->phase, settings);
   d.fraction = total > 0.0 ? remaining / total : 0.0;
   if (d.fraction > 1.0) d.fraction = 1.0;
@@ -283,12 +307,18 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
   d.remaining_s = (long)llround(remaining / 1000.0);
   snprintf(d.text, sizeof(d.text), "%02ld:%02ld", d.remaining_s / 60, d.remaining_s % 60);
 
-  /* Criterion 11: turning the setting off leaves the icon and removes the text. The text
-   * is derived either way above — this flag alone decides whether it reaches the button,
-   * so the switch costs a redraw and never a restart. A silent daemon drops it too
-   * (criterion 9): digits from a document nothing is refreshing are the one part of the
-   * picture that would be actively wrong rather than merely stale. */
-  d.countdown = (settings->countdown && answered) ? 1 : 0;
+  /* Whether the digits reach the button, and there are three ways for the answer to be no.
+   * The text is derived either way above — this flag alone decides, so the setting costs a
+   * redraw and never a restart.
+   *
+   *   - the reader turned menubarCountdown off, which leaves the icon and removes the text.
+   *   - the daemon has gone quiet: digits from a document nothing is refreshing are the one
+   *     part of the picture that would be actively wrong rather than merely stale.
+   *   - the Timer is PAUSED (ADR 83). A frozen countdown reads as a clock that has stopped
+   *     working rather than one deliberately stopped, and it says a second time what the
+   *     two bars in the glyph already say. The menu bar title is empty while paused; the
+   *     index page's dial keeps its number, having room for it. */
+  d.countdown = (settings->countdown && answered && !d.paused) ? 1 : 0;
   return d;
 }
 
@@ -397,9 +427,9 @@ static void cb_waiting_caption(int total, char *out, size_t out_len) {
 /* The popover's one line of text about the Timer. The item's own icon and digits are
  * beside it on the menu bar, so this says the thing the icon cannot: the phase in words.
  *
- * "Short break" and "Long break" rather than the wire's `break`/`longBreak`, and a
- * separate `paused` word rather than a fourth phase name, because paused is a state of a
- * phase and not a phase — the same distinction cb_derive keeps. */
+ * "Short break" and "Long break" rather than the wire's `break`/`longBreak`, and never a
+ * fourth phase name for paused, because paused is a state of a phase and not a phase — the
+ * same distinction cb_derive keeps. */
 static void cb_status_label(cb_display d, char *out, size_t out_len) {
   if (!d.answered) {
     /* Criterion 9 in words. The buttons below stay live: a daemon that has stopped
@@ -414,32 +444,43 @@ static void cb_status_label(cb_display d, char *out, size_t out_len) {
     return;
   }
   const char *phase = d.phase == CB_WORK ? "Work" : (d.phase == CB_BREAK ? "Short break" : "Long break");
-  if (d.paused) snprintf(out, out_len, "%s · paused · %s", phase, d.text);
+  /* Paused is the PHASE NAME ALONE, and both halves of that are deliberate (ADR 83).
+   *
+   * No time, because a frozen countdown reads as a broken clock rather than a stopped one,
+   * and the menu bar title is empty for the same reason. No "paused" word either: the
+   * switch beside this line already carries it, and the popover says it exactly once. This
+   * line is the one place that still names the phase a paused Timer is in, the glyph having
+   * given that up when paused took the centre. */
+  if (d.paused) snprintf(out, out_len, "%s", phase);
   else snprintf(out, out_len, "%s · %s", phase, d.text);
 }
 
 /* --- What the buttons do --------------------------------------------------------------
  *
- * Six actions, and the table below is the whole vocabulary: every POST this process can
- * make is one of these six route literals, chosen by an enum value, never by a string
- * anything outside this file supplied.
+ * Five actions, and the table below is the whole vocabulary: every POST this process can
+ * make is one of these five route literals, chosen by an enum value, never by a string
+ * anything outside this file supplied. All five drive the Timer and nothing else — this
+ * process writes no setting at all, which is a stronger form of "no setting is editable
+ * from the menu bar" than a rule about which rows exist. The sixth entry that used to sit
+ * here posted `menubarHidden` for a "Hide from menu bar" row that no longer exists: hiding
+ * the item is reachable only from the index page's own pomodoro settings, because a row
+ * that removes the surface you would use to undo it is a one-way door.
  *
- * RESET IS NOT HERE, AND ITS ABSENCE IS THE FEATURE (criterion 8). Reset ends the whole
- * loop and zeroes the cycle; the index widget already made the call to bury it inside the
- * settings panel, and a popover is not the place to hand that a second front door — a
- * menu bar item is clicked by accident in a way a collapsed settings panel is not.
- * Forward and Restart stay, because neither destroys anything: forward advances the
- * boundary the daemon was going to cross anyway, restart re-mints the interval that is
- * already running. If a future reader adds a seventh row here, `/api/pomodoro/reset` is
- * still the one route that must not appear in this array, and
- * test/check-menubar-client.mjs asserts exactly that against this file's own bytes. */
+ * RESET IS NOT HERE, AND ITS ABSENCE IS THE FEATURE. Reset ends the whole loop and zeroes
+ * the cycle; the index widget already made the call to bury it inside the settings panel,
+ * and a popover is not the place to hand that a second front door — a menu bar item is
+ * clicked by accident in a way a collapsed settings panel is not. Forward and Restart
+ * stay, because neither destroys anything: forward advances the boundary the daemon was
+ * going to cross anyway, restart re-mints the interval that is already running. If a
+ * future reader adds a sixth row here, `/api/pomodoro/reset` is still the one route that
+ * must not appear in this array, and test/check-menubar-client.mjs asserts exactly that
+ * against this file's own bytes. */
 typedef enum {
   CB_ACTION_START = 0,
   CB_ACTION_PAUSE,
   CB_ACTION_RESUME,
   CB_ACTION_FORWARD,
   CB_ACTION_RESTART,
-  CB_ACTION_HIDE,
 } cb_action;
 
 static const char *const CB_ACTION_PATHS[] = {
@@ -448,7 +489,6 @@ static const char *const CB_ACTION_PATHS[] = {
   "/api/pomodoro/resume",
   "/api/pomodoro/forward",
   "/api/pomodoro/restart",
-  "/api/pomodoro/settings",
 };
 
 /* Which action the ONE primary button performs, and it is src/indexpage.mjs's
@@ -464,14 +504,38 @@ static cb_action cb_switch_action(cb_display d) {
   return d.paused ? CB_ACTION_RESUME : CB_ACTION_PAUSE;
 }
 
-/* One word, where the widget's aria-label says "Start pomodoro". The popover's line above
- * the button already names the phase, so the sentence would be said twice — but the
- * accessibility label DOES take the widget's full spelling (see the popover below), since
- * a screen reader reads the button without the line above it. */
+/* One word, where the widget's aria-label says "Start pomodoro". This names the ACTION a
+ * press performs, and it is what the switch reports to a screen reader — in the widget's
+ * full spelling (see the popover below), since a screen reader reads a control without the
+ * line above it. It is NOT what the reader sees beside the switch; that is the word below,
+ * and the two are different words on purpose. */
 static const char *cb_switch_label(cb_action action) {
   if (action == CB_ACTION_START) return "Start";
   if (action == CB_ACTION_RESUME) return "Resume";
   return "Pause";
+}
+
+/* The switch's position, and the index page widget's own rule rewritten in C rather than a
+ * second opinion: on exactly when a timer is running unpaused, so idle and paused both read
+ * as off and both turn back on — one 'ensure', the other 'resume'. */
+static BOOL cb_switch_on(cb_display d) {
+  return d.phase != CB_IDLE && !d.paused;
+}
+
+/* The word beside the switch, which is the state the switch is IN — where cb_switch_label
+ * above is the action a press performs. A switch needs both: "Pause" on a control that is
+ * currently running is an instruction, not a report, and a control whose only word is an
+ * instruction leaves the reader working out the state from the knob alone.
+ *
+ * This is the one place in the whole popover that says "paused", which is the other half
+ * of why cb_status_label drops the word (ADR 83): said in two rows it is a fact stated
+ * twice, and here it sits against the control that undoes it.
+ *
+ * "Off" rather than "Idle" while there is no timer: the status line beside it already says
+ * Idle, and a switch that is off says off. */
+static const char *cb_switch_state_word(cb_display d) {
+  if (d.phase == CB_IDLE) return "Off";
+  return d.paused ? "Paused" : "Running";
 }
 
 /* --- The HTTP client ------------------------------------------------------------------
@@ -525,7 +589,7 @@ static double cb_now_ms(void) { return [[NSDate date] timeIntervalSince1970] * 1
 
 /* DEFAULT_SETTINGS (src/pomodoro.mjs), duplicated here for exactly one purpose: a probe
  * or a tick that has no answer yet still derives a well-formed display rather than one
- * built on zeroes, where a zero denominator would make every arc empty. Nothing on the
+ * built on zeroes, where a zero denominator would make every ring empty. Nothing on the
  * ordinary path ever draws these — the item is not created until a real response has
  * replaced them (criterion 9). */
 static void cb_defaults(cb_timer *timer, cb_settings *settings) {
@@ -539,7 +603,7 @@ static void cb_defaults(cb_timer *timer, cb_settings *settings) {
 
 /* The protocol's three phase spellings and nothing else. An unrecognised one — a future
  * daemon that grew a fourth phase talking to an install that predates it — is reported as
- * "no timer", which draws the calm idle glyph rather than an arc against a length this
+ * "no timer", which draws the calm idle glyph rather than a ring against a length this
  * build cannot know. The same shape bin/launcher.c's MESSAGES lookup already takes for an
  * unrecognised notify phase. */
 static int cb_phase_from(NSString *name, cb_phase *out) {
@@ -732,27 +796,16 @@ static BOOL cb_fetch_waiting(cb_waiting *out) {
   return YES;
 }
 
-/* One of the six actions, posted. Bodyless for the five Timer controls — src/server.mjs
- * reads no body on those branches at all, which is what makes a native client with
- * nothing to say a first-class caller of them — and one compiled-in JSON literal for the
- * hide.
+/* One of the five actions, posted, and every one of them is bodyless: src/server.mjs reads
+ * no body on those branches at all, which is what makes a native client with nothing to
+ * say a first-class caller of them. This process therefore sends no JSON anywhere — it
+ * asks the daemon to do one of five things and reads the result back on the next poll.
  *
  * No new API was added for any of this: a native client sends no `Origin` header, which
  * the same-origin gate already treats as same-origin, and the local secret already
- * authorizes every write in the pomodoro set.
- *
- * Criterion 12's hide is a COMMAND rather than a settings form, and that distinction is
- * the whole of why it is allowed to exist beside "no setting is editable from the menu
- * bar": it writes one boolean that only this surface has an opinion about, it is
- * reversible from the index page's own panel, and it needs no restart machinery — the
- * poll already honours `settings.menubarHidden` on every pass, and this process never
- * exits when hidden, so there is always something left for the setting to reach. */
+ * authorizes every write in the pomodoro set. */
 static BOOL cb_perform(cb_action action) {
-  NSData *body = nil;
-  if (action == CB_ACTION_HIDE) {
-    body = [@"{\"menubarHidden\":true}" dataUsingEncoding:NSUTF8StringEncoding];
-  }
-  NSData *reply = cb_request(@"POST", CB_ACTION_PATHS[action], body);
+  NSData *reply = cb_request(@"POST", CB_ACTION_PATHS[action], nil);
   return reply != nil;
 }
 
@@ -760,8 +813,8 @@ static BOOL cb_perform(cb_action action) {
  *
  * Written by the poll queue, read by the main thread's tick. A lock rather than a hop
  * onto the main queue, because a main-queue block is exactly what QUIRKS.md measured does
- * not run while a status item's menu or popover is tracking — and ticket 05 adds the
- * popover that makes that bite. Nothing here is held across a call that can block. */
+ * not run while a status item's menu or popover is tracking — and the popover is what
+ * makes that bite. Nothing here is held across a call that can block. */
 static NSLock *cb_state_lock = nil;
 static cb_timer cb_state_timer;
 static cb_settings cb_state_settings;
@@ -842,7 +895,7 @@ static int cb_current_display(cb_display *out, int *zero_fetched_out) {
   double local_now = cb_now_ms();
   int answered = (local_now - answered_at) <= CB_STALE_AFTER_MS;
   /* The one line of staleness policy that is not inside cb_derive: a daemon that has gone
-   * quiet leaves the arc frozen at the last answer rather than draining against a document
+   * quiet leaves the ring frozen at the last answer rather than draining against a document
    * nothing is refreshing. */
   double now_ms = answered ? local_now + offset : daemon_now;
   *out = cb_derive(answered, &timer, &settings, now_ms);
@@ -867,16 +920,17 @@ static void cb_dispatch_action(cb_action action) {
 
 /* --- The drawing ----------------------------------------------------------------------
  *
- * The widget's own geometry, redrawn in AppKit rather than parsed out of the SVG:
- * src/pomodoro-widget.mjs's TOMATO_ICON and REST_ICON are a 24-unit viewBox with a shared
- * `circle cx=12 cy=14.6 r=6.8`, stroke-width 2, round caps and joins; the tomato adds a
- * stem and two leaves above it, the bars glyph replaces those with two vertical strokes
- * inside it. Every number below is lifted from those two strings.
+ * The widget's own geometry, redrawn in AppKit rather than parsed out of the SVG: a
+ * 24-unit viewBox, round caps and joins, and src/pomodoro-widget.mjs's TOMATO_ICON is the
+ * silhouette every state here starts from — `circle cx=12 cy=14.6 r=6.8` at stroke-width
+ * 2, a stem and two leaves above it. The ring and the two centre marks are the rest of
+ * ADR 84's vocabulary, and each one's `d` attribute is quoted beside the code that draws
+ * it, below. Every number here is lifted from one of those strings.
  *
  * SVG's y grows downward and AppKit's grows up, so each y is mirrored through
  * `CB_SVG_Y(y)` once, here, and every coordinate after that is ordinary y-up AppKit. That
  * is one conversion in one place instead of a flipped CTM whose sign then has to be
- * carried into the arc's direction as well. */
+ * carried into the ring's direction as well. */
 #define CB_SVG_Y(y) (24.0 - (y))
 
 static const double CB_CIRCLE_X = 12.0;
@@ -884,15 +938,33 @@ static const double CB_CIRCLE_Y = 9.4;   /* CB_SVG_Y(14.6) */
 static const double CB_CIRCLE_R = 6.8;
 static const double CB_STROKE = 2.0;
 
+/* The ring rides JUST INSIDE the outline and is thinner than it, so the two read as one
+ * glyph with a gauge on it rather than as two circles. r 4.9 against the outline's 6.8
+ * leaves a clear 1.9 units of gap at stroke-width 1.5, and — the point of the whole move —
+ * an interior the centre marks below have entirely to themselves. */
+static const double CB_RING_R = 4.9;
+static const double CB_RING_STROKE = 1.5;
+
+/* The rest bar is HEAVIER than the outline (2.2 against 2.0), because it is short and sits
+ * alone in the middle of a lot of white; at the outline's own weight it read as a scratch. */
+static const double CB_REST_STROKE = 2.2;
+
 /* The item's image, in points. 18 tall is the most a 22pt menu bar takes without crowding
- * it; the width is trimmed to what the glyph actually needs so the countdown text sits
- * beside the icon rather than across a gap. CB_SCALE maps the 24-unit box into that
- * height: the ink spans y 4.6..21.4 in SVG units plus half a stroke either side, i.e.
- * 18.8 units, and 0.82 leaves a hair of margin inside 18pt. CB_INK_CENTER_Y is where that
- * ink is centred (y-up), and it is the TOMATO's centre for both glyphs on purpose — the
- * bars glyph is shorter, and centring each one on its own ink would make the icon jump
- * half a point up the menu bar every time a work interval became a break. */
-static const double CB_ICON_W = 15.0;
+ * it. CB_SCALE maps the 24-unit box into that height: the ink spans y 4.6..21.4 in SVG
+ * units plus half a stroke either side, i.e. 18.8 units, and 0.82 leaves a hair of margin
+ * inside 18pt. CB_INK_CENTER_Y is where that ink is centred (y-up), and every state draws
+ * the same silhouette now, so it is the one centre for all of them.
+ *
+ * The width is the glyph's own CB_GLYPH_W plus 3pt of EMPTY IMAGE to the right of it, and
+ * that 3pt is the space between the icon and the countdown (criterion 10, ADR 83). Buying
+ * it here rather than by padding the title is what keeps it out of the button: an
+ * NSImageLeft button abuts image and title with nothing between them, a leading space in
+ * the title would be trimmed by the monospaced-digit layout it is measured with, and an
+ * attributed title would be reaching back for the styling this file spends its whole
+ * appearance story avoiding. The ink is centred in CB_GLYPH_W rather than in CB_ICON_W, so
+ * the extra width lands entirely on the countdown's side. */
+static const double CB_GLYPH_W = 15.0;
+static const double CB_ICON_W = 18.0;    /* CB_GLYPH_W + 3pt of space before the digits */
 static const double CB_ICON_H = 18.0;
 static const double CB_SCALE = 0.82;
 static const double CB_INK_CENTER_Y = 11.0;
@@ -906,29 +978,19 @@ static const double CB_INK_CENTER_Y = 11.0;
  * right appearance — is a fixed grey the moment the system's own ink is not the grey you
  * picked, and that is exactly how it looked.
  *
- * So there is no amber for work here, and no labelColor/secondaryLabelColor either. The
- * four states are told apart by SHAPE and WEIGHT alone (ADR 80), which is what they were
- * chosen for in the first place: the thing that distinguishes the breaks is weight rather
- * than colour, so it survives Increase Contrast, and it would survive being made a
- * template image later. It has been.
+ * So there is no amber for work here, and no labelColor/secondaryLabelColor either. Every
+ * state is told apart by SHAPE alone (ADR 80, narrowed by 84), which is what they were
+ * drawn for: shape survives Increase Contrast, and it survives being a template image.
  *
- * Alpha is the one channel that survives templating, because alpha IS the mask, so the
- * two weight distinctions the widget already draws are spelled in it:
- *
- *   - idle and paused at CB_ALPHA_MUTED — the widget's "turned down" weight, a tomato
- *     that has nothing to count reading as off rather than as broken.
- *   - a daemon that has gone quiet at CB_ALPHA_STALE, one step further down again. This
- *     is criterion 9's "dims rather than disappearing", and it is a mask value rather
- *     than a colour precisely so the system still owns the hue underneath it.
- *   - the long break's disc at CB_ALPHA_FILL of whatever the ink is. This one is the
- *     tuned number: it is now the ONLY thing separating a short break from a long one, so
- *     it has to read unmistakably as filled at a ~12pt circle, while still leaving the
- *     arc and the two bars legible at full weight on top of it. 0.4 is a clear half tone
- *     against a 1.0 stroke; 0.28 was tried first and disappeared into the menu bar. */
+ * Alpha is the one channel that survives templating, because alpha IS the mask — and
+ * after ADR 84 it carries EXACTLY ONE FACT, that the daemon has stopped answering. There
+ * are two values here and there is no third. Idle and paused are drawn at full weight
+ * like everything else and told apart by what is or is not in the middle of them, because
+ * a second meaning for alpha is a reader having to tell 0.62 from 0.35 at a glance in a
+ * menu bar whose ink they do not control. If a future state seems to want a third weight,
+ * it wants a shape instead. */
 static const CGFloat CB_ALPHA_FULL = 1.0;
-static const CGFloat CB_ALPHA_MUTED = 0.62;
 static const CGFloat CB_ALPHA_STALE = 0.35;
-static const CGFloat CB_ALPHA_FILL = 0.4;
 
 /* Black is arbitrary and unused: only the alpha reaches the screen. Spelled explicitly
  * rather than as `[NSColor blackColor]` so nobody later "fixes" it to a semantic colour
@@ -938,9 +1000,7 @@ static NSColor *cb_mask(CGFloat alpha) {
 }
 
 static CGFloat cb_ink_alpha(cb_display d) {
-  if (!d.answered) return CB_ALPHA_STALE;
-  if (d.muted) return CB_ALPHA_MUTED;
-  return CB_ALPHA_FULL;
+  return d.answered ? CB_ALPHA_FULL : CB_ALPHA_STALE;
 }
 
 static NSBezierPath *cb_path(void) {
@@ -960,58 +1020,61 @@ static void cb_line(NSBezierPath *path, double x1, double y1, double x2, double 
  * Called only from the drawing handler below, which has already established the transform.
  * Every `set` here is a mask value, never a colour — see cb_mask above. */
 static void cb_draw(cb_display d) {
-  CGFloat alpha = cb_ink_alpha(d);
+  [cb_mask(cb_ink_alpha(d)) setStroke];
 
-  /* The long break's circle is filled rather than outlined — the one thing that tells the
-   * two breaks apart, and it is WEIGHT rather than hue on purpose, which is what lets the
-   * whole icon be a template image. */
-  if (d.filled) {
-    NSRect disc = NSMakeRect(CB_CIRCLE_X - CB_CIRCLE_R, CB_CIRCLE_Y - CB_CIRCLE_R,
-                             CB_CIRCLE_R * 2.0, CB_CIRCLE_R * 2.0);
-    [cb_mask(alpha * CB_ALPHA_FILL) setFill];
-    [[NSBezierPath bezierPathWithOvalInRect:disc] fill];
+  /* The silhouette, and it is drawn in EVERY state including the breaks (ADR 84) — the
+   * break glyph's old stemlessness is gone, and with it the moment where the menu bar
+   * appeared to swap in a different icon every twenty-five minutes. TOMATO_ICON's own
+   * `<circle cx="12" cy="14.6" r="6.8"/>`, its `M12 7.8V4.6` stem and its two leaves
+   * `M12 7.8 8.2 5.9M12 7.8l3.8-1.9`. */
+  NSBezierPath *outline = cb_path();
+  [outline appendBezierPathWithOvalInRect:NSMakeRect(CB_CIRCLE_X - CB_CIRCLE_R,
+                                                     CB_CIRCLE_Y - CB_CIRCLE_R,
+                                                     CB_CIRCLE_R * 2.0, CB_CIRCLE_R * 2.0)];
+  cb_line(outline, 12.0, 7.8, 12.0, 4.6);
+  cb_line(outline, 12.0, 7.8, 8.2, 5.9);
+  cb_line(outline, 12.0, 7.8, 15.8, 5.9);
+  [outline stroke];
+
+  /* Time remaining, and the only thing that carries it: a thin ring just inside the
+   * outline, `<circle cx="12" cy="14.6" r="4.9"/>` at stroke-width 1.5, drawn as a real
+   * arc rather than the render's dasharray. No track behind it — the ring simply gets
+   * shorter, which is what makes "how much is left" readable with the digits switched off.
+   * Twelve o'clock is 90 degrees in a y-up space and the sweep runs clockwise from there,
+   * the direction every dial in the world runs.
+   *
+   * Nothing draws inside r 4.9, so the centre is free for the mark below; a fill here — the
+   * shape this used to take — would have occluded it. */
+  if (d.ring && d.fraction > 0.0) {
+    NSBezierPath *ring = cb_path();
+    ring.lineWidth = CB_RING_STROKE;
+    [ring appendBezierPathWithArcWithCenter:NSMakePoint(CB_CIRCLE_X, CB_CIRCLE_Y)
+                                     radius:CB_RING_R
+                                 startAngle:90.0
+                                   endAngle:90.0 - 360.0 * d.fraction
+                                  clockwise:YES];
+    [ring stroke];
   }
 
-  [cb_mask(alpha) setStroke];
-
-  /* Criterion 3: the circle the glyphs already share IS the progress indicator. There is
-   * no track drawn behind it — the arc simply gets shorter, which is what makes "how much
-   * is left" readable at a glance with the digits switched off. Twelve o'clock is 90
-   * degrees in a y-up space, and the sweep runs clockwise from there, the direction every
-   * dial in the world runs. Idle is the one state that draws the whole circle instead:
-   * a glyph with no interval behind it should look like the widget's plain tomato, not
-   * like an interval that just ran out. */
-  NSBezierPath *circle = cb_path();
-  if (!d.arc) {
-    [circle appendBezierPathWithOvalInRect:NSMakeRect(CB_CIRCLE_X - CB_CIRCLE_R,
-                                                      CB_CIRCLE_Y - CB_CIRCLE_R,
-                                                      CB_CIRCLE_R * 2.0, CB_CIRCLE_R * 2.0)];
-  } else if (d.fraction > 0.0) {
-    [circle appendBezierPathWithArcWithCenter:NSMakePoint(CB_CIRCLE_X, CB_CIRCLE_Y)
-                                       radius:CB_CIRCLE_R
-                                   startAngle:90.0
-                                     endAngle:90.0 - 360.0 * d.fraction
-                                    clockwise:YES];
+  if (d.mark == CB_MARK_REST) {
+    /* REST_ICON's `M9.4 14.6h5.2` at stroke-width 2.2 — ONE flat bar, and the same one for
+     * a short break and a long break alike. */
+    NSBezierPath *bar = cb_path();
+    bar.lineWidth = CB_REST_STROKE;
+    cb_line(bar, 9.4, 14.6, 14.6, 14.6);
+    [bar stroke];
+  } else if (d.mark == CB_MARK_PAUSED) {
+    /* `M10.4 12.2v4.8M13.6 12.2v4.8` — the pause glyph everyone already knows, and the one
+     * pair of vertical bars in this whole vocabulary. Nothing else may draw them: they are
+     * what "paused" means here now that the countdown beside them is empty. */
+    NSBezierPath *bars = cb_path();
+    cb_line(bars, 10.4, 12.2, 10.4, 17.0);
+    cb_line(bars, 13.6, 12.2, 13.6, 17.0);
+    [bars stroke];
   }
-  [circle stroke];
-
-  NSBezierPath *marks = cb_path();
-  if (d.phase == CB_BREAK || d.phase == CB_LONG_BREAK) {
-    /* REST_ICON's `M10 11v7.2M14 11v7.2` — two bars, not one. src/styles.mjs already made
-     * that call for the tab mark: a single rest stroke at this size reads as a rendering
-     * failure, two read as deliberate. */
-    cb_line(marks, 10.0, 11.0, 10.0, 18.2);
-    cb_line(marks, 14.0, 11.0, 14.0, 18.2);
-  } else {
-    /* TOMATO_ICON's `M12 7.8V4.6` stem and its two leaves. */
-    cb_line(marks, 12.0, 7.8, 12.0, 4.6);
-    cb_line(marks, 12.0, 7.8, 8.2, 5.9);
-    cb_line(marks, 12.0, 7.8, 15.8, 5.9);
-  }
-  [marks stroke];
 }
 
-/* A fresh image per tick — the arc and the digits need one anyway — marked as a template
+/* A fresh image per tick — the ring and the digits need one anyway — marked as a template
  * on the way out.
  *
  * `template = YES` is the entire appearance story of this file, and it is one line
@@ -1031,8 +1094,286 @@ static NSImage *cb_image(cb_display d) {
                            drawingHandler:^BOOL(NSRect rect) {
                              (void)rect;
                              NSAffineTransform *fit = [NSAffineTransform transform];
-                             [fit translateXBy:CB_ICON_W / 2.0 yBy:CB_ICON_H / 2.0];
+                             /* CB_GLYPH_W, not CB_ICON_W: the ink is centred in the
+                              * glyph's own share of the box and the remainder is left
+                              * empty on the right, which is criterion 10's gap. */
+                             [fit translateXBy:CB_GLYPH_W / 2.0 yBy:CB_ICON_H / 2.0];
                              [fit scaleBy:CB_SCALE];
+                             [fit translateXBy:-CB_CIRCLE_X yBy:-CB_INK_CENTER_Y];
+                             [fit concat];
+                             cb_draw(d);
+                             return YES;
+                           }];
+  image.template = YES;
+  return image;
+}
+
+/* --- The widget's icons, from their own path data --------------------------------------
+ *
+ * The popover draws four glyphs and invents none of them: the phase glyph above (cb_draw,
+ * the same drawing the status item makes) plus a gear, a restart and a forward, which are
+ * src/pomodoro-widget.mjs's GEAR_ICON, RESTART_ICON and FORWARD_ICON. Objective-C cannot
+ * import those strings, so the alternative was to copy each one's numbers into AppKit calls
+ * by hand — which is what cb_draw does above, correctly, for shapes made of lines and one
+ * circle. The gear is not that shape: it is a dozen elliptical-arc commands, and
+ * hand-converting each of them to a centre, a radius and two angles is both the fiddliest
+ * work in this file and the kind that drifts silently the day somebody nudges the widget.
+ *
+ * So this walks the `d` string ITSELF, verbatim, exactly as the widget writes it. The copy
+ * is a byte copy rather than a transcription, which is what makes "the two surfaces draw
+ * the same glyph" a thing test/check-menubar-client.mjs can assert by comparing the two
+ * files' bytes instead of a promise nobody can check. The parser is deliberately narrow:
+ * the commands these three icons use and no others (M/m, L/l, H/h, V/v, A/a, Z/z — there
+ * is not one curve among them), no exponent notation, and circular arcs only. Anything
+ * else stops the walk rather than guessing, and the icons are pinned so that a future
+ * widget edit reaching for a `C` fails a check rather than dropping half a glyph.
+ *
+ * SVG's y grows downward, so every point goes through CB_SVG_Y once on the way in, the
+ * same single conversion cb_draw makes. */
+
+/* One number out of a path-data string, in the grammar SVG actually uses rather than the
+ * one a naive split on spaces assumes: `-` both negates and separates (`l-.06-.06` is two
+ * numbers), `.32` may have no leading zero, and commas are whitespace. Returns 0 when the
+ * next token is not a number, which is how every caller below learns the run has ended. */
+static int cb_svg_number(const char **p, double *out) {
+  const char *s = *p;
+  while (*s == ' ' || *s == ',' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+  const char *start = s;
+  if (*s == '-' || *s == '+') s++;
+  int digits = 0;
+  while (*s >= '0' && *s <= '9') { s++; digits++; }
+  if (*s == '.') {
+    s++;
+    while (*s >= '0' && *s <= '9') { s++; digits++; }
+  }
+  if (digits == 0) return 0;
+  *out = strtod(start, NULL);
+  *p = s;
+  return 1;
+}
+
+/* One `A`/`a` segment, endpoint form in, centre form out — the conversion SVG's own
+ * appendix F.6.5 specifies, restricted to the circular case (rx == ry, no x-rotation),
+ * which is every arc in these three icons.
+ *
+ * Two details that are not decoration. The radius is scaled up when it is too small to
+ * span the two endpoints, which the spec requires and which is not hypothetical here: the
+ * gear's `a2 2 0 1 1-2.83 2.83` asks a radius-2 circle to cover 4.002 units, and without
+ * the correction the term under the square root is negative — a NaN centre if it were
+ * taken, and an arc drawn at a radius that does not reach its own endpoints once the clamp
+ * below has caught it. And the sweep flag survives the flip to AppKit's y-up space
+ * unchanged: the mirror turns the arc's angles around, so a sweep the SVG draws clockwise
+ * on screen is still drawn clockwise on screen, which is what `clockwise:` means here.
+ *
+ * The clamp is float noise insurance rather than the correction's understudy: after the
+ * scale-up the term is zero at worst, and zero is a legitimate half-circle. */
+static void cb_svg_arc(NSBezierPath *path, double x0, double y0, double rx, double ry,
+                       double large, double sweep, double x1, double y1) {
+  double dx = x1 - x0, dy = y1 - y0;
+  double span = sqrt(dx * dx + dy * dy);
+  if (span == 0.0) return;                       /* the spec: a zero-length arc is omitted */
+  double r = fabs(rx) > fabs(ry) ? fabs(rx) : fabs(ry);
+  if (r * 2.0 < span) r = span / 2.0;
+  double half = span / 2.0;
+  double h2 = r * r - half * half;
+  double h = h2 > 0.0 ? sqrt(h2) : 0.0;
+  double ux = dx / span, uy = dy / span;
+  /* Which side of the chord the centre falls on: the spec's ± is + when exactly one of the
+   * two flags is set. */
+  double side = (large != 0.0) != (sweep != 0.0) ? 1.0 : -1.0;
+  double cx = (x0 + x1) / 2.0 + side * h * -uy;
+  double cy = (y0 + y1) / 2.0 + side * h * ux;
+  double start = atan2(y0 - cy, x0 - cx) * 180.0 / M_PI;
+  double end = atan2(y1 - cy, x1 - cx) * 180.0 / M_PI;
+  [path appendBezierPathWithArcWithCenter:NSMakePoint(cx, CB_SVG_Y(cy))
+                                   radius:r
+                               startAngle:-start
+                                 endAngle:-end
+                                clockwise:sweep != 0.0];
+}
+
+/* The walk itself. `command` persists across coordinate sets, which is the implicit-repeat
+ * rule every one of these icons leans on (`a1.6 1.6 0 0 0 .32 1.77 1.6 1.6 0 0 0-1 1.47`
+ * is two arcs and one letter); the one exception is a moveto, whose repeats are linetos. */
+static void cb_svg_path(NSBezierPath *path, const char *d) {
+  double x = 0.0, y = 0.0, sx = 0.0, sy = 0.0;
+  char command = 0;
+  const char *p = d;
+  while (*p != '\0') {
+    while (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p == '\0') break;
+    BOOL letter = strchr("MmLlHhVvAaZz", *p) != NULL;
+    if (letter) command = *p++;
+    else if (command == 0) return;               /* data before any command: not ours */
+    double a = 0.0, b = 0.0, rx = 0.0, ry = 0.0, large = 0.0, sweep = 0.0;
+    switch (command) {
+      case 'Z':
+      case 'z':
+        [path closePath];
+        x = sx;
+        y = sy;
+        command = 0;
+        continue;
+      case 'M':
+      case 'm':
+        if (!cb_svg_number(&p, &a) || !cb_svg_number(&p, &b)) return;
+        if (command == 'm') { a += x; b += y; }
+        if (letter) {
+          [path moveToPoint:NSMakePoint(a, CB_SVG_Y(b))];
+          sx = a;
+          sy = b;
+        } else {
+          [path lineToPoint:NSMakePoint(a, CB_SVG_Y(b))];
+        }
+        x = a;
+        y = b;
+        break;
+      case 'L':
+      case 'l':
+        if (!cb_svg_number(&p, &a) || !cb_svg_number(&p, &b)) return;
+        if (command == 'l') { a += x; b += y; }
+        [path lineToPoint:NSMakePoint(a, CB_SVG_Y(b))];
+        x = a;
+        y = b;
+        break;
+      case 'H':
+      case 'h':
+        if (!cb_svg_number(&p, &a)) return;
+        if (command == 'h') a += x;
+        [path lineToPoint:NSMakePoint(a, CB_SVG_Y(y))];
+        x = a;
+        break;
+      case 'V':
+      case 'v':
+        if (!cb_svg_number(&p, &b)) return;
+        if (command == 'v') b += y;
+        [path lineToPoint:NSMakePoint(x, CB_SVG_Y(b))];
+        y = b;
+        break;
+      case 'A':
+      case 'a':
+        /* Seven numbers: rx, ry, the x-rotation (read into `a` and discarded — every arc
+         * in these icons is circular, so there is nothing for a rotation to do), the two
+         * flags, and the endpoint. */
+        if (!cb_svg_number(&p, &rx) || !cb_svg_number(&p, &ry) || !cb_svg_number(&p, &a) ||
+            !cb_svg_number(&p, &large) || !cb_svg_number(&p, &sweep) ||
+            !cb_svg_number(&p, &a) || !cb_svg_number(&p, &b)) return;
+        if (command == 'a') { a += x; b += y; }
+        cb_svg_arc(path, x, y, rx, ry, large, sweep, a, b);
+        x = a;
+        y = b;
+        break;
+      default:
+        return;
+    }
+  }
+}
+
+/* A `points` list, which is what `<polyline>` and `<polygon>` carry instead of a `d` — the
+ * same verbatim copy, so the restart icon's `1 4 1 10 7 10` is the widget's own string and
+ * not three pairs retyped. `close` is the only difference between the two elements. */
+static void cb_svg_points(NSBezierPath *path, const char *points, BOOL close) {
+  const char *p = points;
+  double px = 0.0, py = 0.0;
+  BOOL first = YES;
+  while (cb_svg_number(&p, &px) && cb_svg_number(&p, &py)) {
+    NSPoint point = NSMakePoint(px, CB_SVG_Y(py));
+    if (first) {
+      [path moveToPoint:point];
+      first = NO;
+    } else {
+      [path lineToPoint:point];
+    }
+  }
+  if (close && !first) [path closePath];
+}
+
+/* The three icons, each one nothing but its own element list read off
+ * src/pomodoro-widget.mjs. The strings are quoted here as literals rather than described in
+ * a comment beside hand-converted numbers, which is the whole point: this IS the copy. */
+
+/* GEAR_ICON: a `<circle cx="12" cy="12" r="3.2"/>` and one path, at stroke-width 2.2. */
+static const double CB_GEAR_STROKE = 2.2;
+static const double CB_GEAR_CIRCLE_R = 3.2;
+static const char *const CB_GEAR_PATH =
+    "M19.4 15a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.47V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9.1 19.4a1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 1-1.47V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z";
+
+/* RESTART_ICON: rotate-ccw, a `<polyline>` and a path. */
+static const char *const CB_RESTART_POINTS = "1 4 1 10 7 10";
+static const char *const CB_RESTART_PATH = "M3.51 15a9 9 0 1 0 2.13-9.36L1 10";
+
+/* FORWARD_ICON: skip-forward, a `<polygon>` and a `<line x1="19" y1="5" x2="19" y2="19"/>`.
+ * The line is two endpoints rather than a string, cb_line being what this file already
+ * uses for exactly that. */
+static const char *const CB_FORWARD_POINTS = "5 4 15 12 5 20";
+
+static NSBezierPath *cb_gear_path(void) {
+  NSBezierPath *path = cb_path();
+  path.lineWidth = CB_GEAR_STROKE;
+  [path appendBezierPathWithOvalInRect:NSMakeRect(12.0 - CB_GEAR_CIRCLE_R,
+                                                  CB_SVG_Y(12.0) - CB_GEAR_CIRCLE_R,
+                                                  CB_GEAR_CIRCLE_R * 2.0, CB_GEAR_CIRCLE_R * 2.0)];
+  cb_svg_path(path, CB_GEAR_PATH);
+  return path;
+}
+
+static NSBezierPath *cb_restart_path(void) {
+  NSBezierPath *path = cb_path();
+  cb_svg_points(path, CB_RESTART_POINTS, NO);
+  cb_svg_path(path, CB_RESTART_PATH);
+  return path;
+}
+
+static NSBezierPath *cb_forward_path(void) {
+  NSBezierPath *path = cb_path();
+  cb_svg_points(path, CB_FORWARD_POINTS, YES);
+  cb_line(path, 19.0, 5.0, 19.0, 19.0);
+  return path;
+}
+
+/* The widget draws these three at 12 points square and the phase glyph at 13, and both
+ * numbers are kept: an icon that matched the browser's on one surface and not the other
+ * would be the drift this whole section exists to prevent. The two points of padding are
+ * image, not ink — a stroke centred on the viewBox edge spills half its width past it, and
+ * the gear's teeth sit on that edge. */
+static const CGFloat CB_ICON_INK_PT = 12.0;
+static const CGFloat CB_ICON_PT = 14.0;
+static const CGFloat CB_GLYPH_PT = 13.0;
+
+/* Template images again, and for the same reason the status item's is one (see cb_image):
+ * an NSButton hands a template image to AppKit, which tints it with the button's own text
+ * colour in whatever appearance the popover is being drawn in. The alpha is the whole
+ * picture, so cb_mask's black is a mask here exactly as it is up there, and no colour is
+ * named. */
+static NSImage *cb_icon_image(NSBezierPath *path) {
+  NSImage *image = [NSImage imageWithSize:NSMakeSize(CB_ICON_PT, CB_ICON_PT)
+                                  flipped:NO
+                           drawingHandler:^BOOL(NSRect rect) {
+                             (void)rect;
+                             NSAffineTransform *fit = [NSAffineTransform transform];
+                             [fit translateXBy:(CB_ICON_PT - CB_ICON_INK_PT) / 2.0
+                                           yBy:(CB_ICON_PT - CB_ICON_INK_PT) / 2.0];
+                             [fit scaleBy:CB_ICON_INK_PT / 24.0];
+                             [fit concat];
+                             [cb_mask(CB_ALPHA_FULL) setStroke];
+                             [path stroke];
+                             return YES;
+                           }];
+  image.template = YES;
+  return image;
+}
+
+/* The popover's phase glyph: cb_draw, unchanged, at the size TOMATO_ICON is drawn in the
+ * browser. Not a second drawing of the same idea — the ring drains and the centre mark
+ * changes here on the same tick they do in the menu bar, because it is one function. */
+static NSImage *cb_glyph_image(cb_display d) {
+  NSImage *image = [NSImage imageWithSize:NSMakeSize(CB_GLYPH_PT, CB_GLYPH_PT)
+                                  flipped:NO
+                           drawingHandler:^BOOL(NSRect rect) {
+                             (void)rect;
+                             NSAffineTransform *fit = [NSAffineTransform transform];
+                             [fit translateXBy:CB_GLYPH_PT / 2.0 yBy:CB_GLYPH_PT / 2.0];
+                             [fit scaleBy:CB_GLYPH_PT / 24.0];
                              [fit translateXBy:-CB_CIRCLE_X yBy:-CB_INK_CENTER_Y];
                              [fit concat];
                              cb_draw(d);
@@ -1048,16 +1389,16 @@ static NSImage *cb_image(cb_display d) {
  * and what it costs. It buys two things a menu cannot have: the countdown keeps ticking
  * while the reader is looking straight at it (which is why the tick lives in
  * NSRunLoopCommonModes — QUIRKS.md measured that a main-queue block never runs while a
- * status item is tracking, and that trap is exactly this one), and the primary control is
- * a real button rather than a menu row pretending to be one. It costs roughly double the
- * line count, and it makes light and dark, Reduce Transparency, Increase Contrast, focus
- * rings and full keyboard access this repo's problem rather than NSMenu's.
+ * status item is tracking, and that trap is exactly this one), and a switch and two buttons
+ * that are real controls rather than menu rows pretending to be some. It costs roughly
+ * double the line count, and it makes light and dark, Reduce Transparency, Increase
+ * Contrast, focus rings and full keyboard access this repo's problem rather than NSMenu's.
  *
  * The whole strategy against that bill is: DO NOT STYLE ANYTHING. Every control here is a
  * stock AppKit one at its default appearance, the popover keeps its own material and
- * background, and the only colour named in the whole section is `secondaryLabelColor` —
- * a SEMANTIC name the system resolves per appearance, not a value. An NSButton nobody
- * touched is already right
+ * background, and the only two colours named in the whole section are `secondaryLabelColor`
+ * on the captions and `labelColor` on the phase glyph — SEMANTIC names the system resolves
+ * per appearance, never values. An NSButton or an NSSwitch nobody touched is already right
  * in every appearance and every accessibility setting, has a focus ring, is reachable
  * under Full Keyboard Access and reports itself to VoiceOver; a hand-drawn row is none of
  * those, for each of which this file would then own a bug. It is the same call the
@@ -1066,69 +1407,140 @@ static NSImage *cb_image(cb_display d) {
  *
  * The layout, top to bottom, and the exact words:
  *
- *     Work · 12:34                     (one line, retitled every tick)
- *     [ Pause ] [ Forward ] [ Restart ]
+ *     [glyph] Work · 12:34        [gear]   status line: phase glyph, phase, gear at the right
+ *     [switch] Running  [restart] [fwd]    control row: switch, the state it is IN, restart, forward
  *     ─────────────────────────────
- *     3 waiting for an answer          (caption, carrying the count; "Nothing waiting" at zero)
- *     [ claude-board · round 2 ]       (at most five, newest board first)
- *     [ 3 more waiting ]               (only when there are more; opens the index)
- *     ─────────────────────────────
- *     [ Settings… ]
- *     [ Hide from menu bar ]
+ *     3 waiting for an answer              caption, carrying the count; "Nothing waiting" at zero
+ *     • claude-board · round 2             at most five, newest board first
+ *     • 3 more waiting                     only when there are more; opens the index
  *
- * Criterion 8 is enforced by CB_ACTION_PATHS above rather than by this layout: there is no
- * Reset row here because there is no reset route reachable from this file at all.
- * Criterion 7 is the Settings… row, which opens the index page on its existing panel — no
- * setting is editable here, and the one thing that writes anything (Hide) is a command
- * with one outcome rather than a form. */
+ * Five things about that list are decisions rather than arrangement.
+ *
+ * The SWITCH is what the index page's widget already uses (`role="switch"`), and it is
+ * here for a reason that is not consistency: a switch has ONE design in both of its
+ * states, so no control in this popover can render as a filled primary button while its
+ * neighbours do not — the complaint is removed by construction rather than styled around.
+ * NSSwitch is AppKit's stock spelling of it.
+ *
+ * The WORD BESIDE IT is the state the switch is in (cb_switch_state_word), where its
+ * accessibility label is the action a press performs (cb_switch_label). Both are wanted,
+ * and they are different words: a screen reader hears the widget's own sentence, and the
+ * reader sees the state nothing else in the popover reports. It is also the one place
+ * "paused" is written (ADR 83).
+ *
+ * The GEAR is the settings row, retired as a row: a glyph with no text and no ellipsis,
+ * accessible name "Settings", pinned to the right of the line that names the phase. It
+ * opens the index page's own panel, and nothing here is editable — re-implementing four
+ * duration fields, two notify toggles and three cue pickers natively is the most expensive
+ * part of this feature and buys a panel opened once a month.
+ *
+ * THERE IS NO "HIDE FROM MENU BAR" ROW, and the absence is the decision: hiding the item
+ * is reachable only from the index page's pomodoro settings, because a row that removes
+ * the surface you would use to undo it is a one-way door. This process now posts no
+ * setting at all (see CB_ACTION_PATHS).
+ *
+ * A WAITING BOARD is a dot and its label, not a bordered button — but still a real
+ * NSButton, with `bordered` off and nothing else touched, because the bezel is the only
+ * part the layout drops. A hand-drawn row would lose the focus ring, the keyboard reach and
+ * the VoiceOver report along with it. The dot is a typographic bullet in the title rather
+ * than a drawn circle, which is what keeps the popover's glyph set exactly equal to the
+ * widget's: nothing here is invented for this surface.
+ *
+ * Reset is absent for a reason that is not about layout at all: there is no reset route
+ * reachable from this file (CB_ACTION_PATHS above). */
 
 /* Wide enough for the waiting caption plus a comfortable row, narrow enough that the
  * popover reads as an accessory rather than a window. The row labels are elided to
  * CB_TITLE_MAX above rather than being allowed to widen this. */
 static const CGFloat CB_POPOVER_W = 264.0;
 
+/* The floor under -presentRelativeToButton:'s wait for activation to land — see there.
+ * Long enough that the notification wins outright in the overwhelmingly common case, short
+ * enough that a reader who hits the floor instead reads it as instant rather than as a
+ * hang. Not measured against a real deadline (nothing in this repo can watch the window
+ * server from a headless run); picked as a value nobody perceives as latency. */
+static const double CB_ACTIVATION_FLOOR_S = 0.3;
+
 @interface CBPopover : NSObject
 @property(nonatomic, strong) NSPopover *popover;
-/* Retitled by the tick while the popover is open, which is the whole reason this is a
- * popover: `NSTextField` for the phase line, and the primary button whose meaning changes
- * the instant the daemon's state does. */
+/* Refreshed by the tick while the popover is open, which is the whole reason this is a
+ * popover rather than a menu: the four things whose meaning changes the instant the
+ * daemon's state does. Everything else in the row set is a snapshot — see -rebuild. */
+@property(nonatomic, strong) NSImageView *glyphView;
 @property(nonatomic, strong) NSTextField *statusLine;
-@property(nonatomic, strong) NSButton *primary;
+@property(nonatomic, strong) NSSwitch *toggle;
+@property(nonatomic, strong) NSTextField *stateWord;
 /* Parallel to the row buttons' `tag`s. An NSString rather than an NSURL because the
  * validator that decides whether it may be opened is a C function taking a C string. */
 @property(nonatomic, strong) NSArray<NSString *> *rowURLs;
+/* Non-nil only between requesting activation and the popover actually showing — see
+ * -presentRelativeToButton:. Held so a second click arriving in that window replaces the
+ * wait rather than stacking a second observer behind it. */
+@property(nonatomic, strong) id activationObserver;
 @end
 
-/* A stock push button, titled and labelled. `accessibility` is a full sentence where the
- * title is a word: a screen reader reads the button on its own, without the line above it
- * that gives a bare "Pause" its subject. Nothing here sets a colour, a font, a bezel or a
- * background — see the section comment. */
-static NSButton *cb_button(NSString *title, NSString *accessibility, id target, SEL action, NSInteger tag) {
-  NSButton *button = [NSButton buttonWithTitle:title target:target action:action];
-  button.tag = tag;
+/* A stock push button carrying one of the widget's icons and no text at all. The
+ * accessibility label is therefore the ONLY name the control has, which is why an
+ * icon-only control must carry one — the same rule src/pomodoro-widget.mjs's own comment
+ * states for the three it draws. Nothing here sets a colour, a font, a bezel or a
+ * background: a template image inside an untouched NSButton is tinted by AppKit with the
+ * button's own text colour, in whatever appearance it is drawn in. */
+static NSButton *cb_icon_button(NSImage *image, NSString *accessibility, id target, SEL action) {
+  NSButton *button = [NSButton buttonWithImage:image target:target action:action];
   [button setAccessibilityLabel:accessibility];
+  button.toolTip = accessibility;
   return button;
 }
 
-/* A row that names a thing rather than an action gets its title on the left, because a
- * centred board title reads as a label and truncates from the middle. That is alignment,
- * not styling: the bezel, the ink and the focus ring are still the system's. */
+/* A waiting row: a dot, then the label, left-aligned, and no bezel. All three are the
+ * layout the popover was redrawn to (see the section comment) rather than styling — the
+ * ink, the focus ring, the highlight and the VoiceOver report are still the system's, and
+ * `accessibility` replaces the title outright for a screen reader, so the bullet is never
+ * spoken.
+ *
+ * Left-aligned because a centred board title reads as a label and truncates from the
+ * middle; the labels themselves are already elided to CB_TITLE_MAX above. */
 static NSButton *cb_row_button(NSString *title, NSString *accessibility, id target, SEL action, NSInteger tag) {
-  NSButton *button = cb_button(title, accessibility, target, action, tag);
+  NSButton *button = [NSButton buttonWithTitle:[@"• " stringByAppendingString:title]
+                                        target:target
+                                        action:action];
+  button.tag = tag;
+  [button setAccessibilityLabel:accessibility];
   button.alignment = NSTextAlignmentLeft;
+  button.bordered = NO;
   return button;
 }
 
 static NSTextField *cb_caption(NSString *text, BOOL secondary) {
   NSTextField *label = [NSTextField labelWithString:text];
-  /* The one appearance decision in the whole popover, and it is a SEMANTIC colour rather
-   * than a value: `secondaryLabelColor` is what the system means by "this is a caption",
-   * and it resolves itself in light, in dark and under Increase Contrast. */
+  /* One of the two appearance decisions in the whole popover, and it is a SEMANTIC colour
+   * rather than a value: `secondaryLabelColor` is what the system means by "this is a
+   * caption", and it resolves itself in light, in dark and under Increase Contrast. */
   if (secondary) label.textColor = [NSColor secondaryLabelColor];
   return label;
 }
 
-/* The index page, and the fragment ticket 02 wired to open the pomodoro panel explicitly.
+/* A row that has to hold a control at each end and text in the middle: the text takes the
+ * slack and truncates, so nothing on the right is ever pushed off the popover by a long
+ * phase name or a wide state word. Layout, not styling. */
+static void cb_fill_with(NSTextField *label) {
+  label.lineBreakMode = NSLineBreakByTruncatingTail;
+  label.maximumNumberOfLines = 1;
+  [label setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                  forOrientation:NSLayoutConstraintOrientationHorizontal];
+}
+
+static NSStackView *cb_row(NSArray<NSView *> *views) {
+  NSStackView *row = [NSStackView stackViewWithViews:views];
+  row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  row.distribution = NSStackViewDistributionFill;
+  row.spacing = 7.0;
+  return row;
+}
+
+/* The index page, and the fragment that opens its pomodoro panel explicitly.
  * Built from this process's own port rather than from anything on the wire — unlike a
  * board URL, which is always the one `GET /api/waiting` handed over (that route builds it
  * from the request's own Host, so there is exactly one place in the product that knows
@@ -1157,6 +1569,32 @@ static void cb_open_url(NSURL *url) {
 
 @implementation CBPopover
 
+/* ADR 81: the popover takes focus, and closes when it loses it. `-[NSNotificationCenter
+ * addObserver:selector:...]` rather than the block form, because this one lives for the
+ * whole process (cb_popover is never deallocated) and never needs removing — see
+ * -applicationDidResignActive:. */
+- (instancetype)init {
+  self = [super init];
+  if (self != nil) {
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                              selector:@selector(applicationDidResignActive:)
+                                                  name:NSApplicationDidResignActiveNotification
+                                                object:nil];
+  }
+  return self;
+}
+
+/* The other half of ADR 81. A transient NSPopover already closes on an outside click; it
+ * does not close on Cmd-Tab or a click that lands on another app's Dock icon, neither of
+ * which is a click inside THIS app for the popover's own event monitor to catch — both
+ * are exactly "resigning active" instead, so that is the signal this file watches for.
+ * `performClose:` is a no-op when nothing is shown, which covers every resignation that
+ * has nothing to do with an open popover. */
+- (void)applicationDidResignActive:(NSNotification *)note {
+  (void)note;
+  [self.popover performClose:nil];
+}
+
 /* Criterion 5, and it is a rule about the GESTURE rather than a feature: one click, one
  * outcome, always. There is no shortcut where a waiting board makes the click open that
  * board, and no state in which the click toggles the timer instead — a menu bar item
@@ -1176,20 +1614,104 @@ static void cb_open_url(NSURL *url) {
     return;
   }
   [self rebuild];
-  /* Without an active app the popover's window cannot become key, and a popover that
-   * cannot become key cannot be driven from the keyboard at all — which would make every
-   * row below mouse-only. `activateWithOptions:` rather than
-   * -[NSApplication activateIgnoringOtherApps:], which is deprecated as of macOS 14 and
-   * would fail the build's own warning-free check, and rather than -[NSApplication
-   * activate], which does not exist before it. */
-  [[NSRunningApplication currentApplication] activateWithOptions:NSApplicationActivateAllWindows];
-  [self.popover showRelativeToRect:button.bounds ofView:button preferredEdge:NSRectEdgeMinY];
-  /* The primary control takes focus, so Tab walks the rows from the top and Space presses
-   * whatever it reached. Escape closes a transient popover with no help from here. */
-  [self.popover.contentViewController.view.window makeFirstResponder:self.primary];
+  [self presentRelativeToButton:button];
   /* And a fresh poll behind the open, so the rows the NEXT open draws are current even if
    * this one caught the list a moment before a round was answered. */
   if (cb_poll_queue != nil) dispatch_async(cb_poll_queue, ^{ cb_poll_once(); });
+}
+
+/* `activateWithOptions:` — rather than -[NSApplication activateIgnoringOtherApps:], which
+ * is deprecated as of macOS 14 and would fail the build's own warning-free check, and
+ * rather than -[NSApplication activate], which does not exist before it — is also
+ * ASYNCHRONOUS: it requests activation and returns before the window server has actually
+ * handed this accessory app the active slot. Calling it and showing the popover in the
+ * same breath, which this file used to do, raced that: the window came up before
+ * activation had landed, so it opened neither key nor active — desaturated material
+ * (criterion 1) and deaf to the outside click and the resign-active notification above
+ * (criterion 2), because both are properties of a window that is actually key. Waiting for
+ * `NSApplicationDidBecomeActiveNotification` is what makes activation land BEFORE the
+ * popover shows, rather than racing it; when the app is already active (every open after
+ * the first, since nothing here deactivates it again) the notification would never arrive,
+ * so that case shows immediately instead of waiting on an event nobody is going to send.
+ *
+ * That wait has no floor of its own, and a wait with no floor is a hazard the fix it buys
+ * does not cover: if activation is ever refused, swallowed, or merely slow, the status
+ * item would eat the click and show nothing at all — trading a desaturated popover (the
+ * bug ADR 81 fixes) for a dead control, which is worse. CB_ACTIVATION_FLOOR_S is that
+ * floor: -showIfWaitingOn:relativeToButton: also runs from a timer, and shows on whichever
+ * of the two arrives first. Both close over the SAME token (the notification observer this
+ * call is about to register) rather than reading `self.activationObserver` directly at
+ * schedule time, so a second click that supersedes this wait — which nils the property out
+ * from under the first token below before installing its own — leaves both of this call's
+ * paths finding a mismatch and doing nothing, rather than showing a stale button. */
+- (void)presentRelativeToButton:(NSStatusBarButton *)button {
+  if (self.activationObserver != nil) {
+    [[NSNotificationCenter defaultCenter] removeObserver:self.activationObserver];
+    self.activationObserver = nil;
+  }
+  if ([NSApp isActive]) {
+    [self showRelativeToButton:button];
+    return;
+  }
+  __weak CBPopover *weakSelf = self;
+  __block id token = nil;
+  token = [[NSNotificationCenter defaultCenter]
+      addObserverForName:NSApplicationDidBecomeActiveNotification
+                  object:nil
+                   queue:[NSOperationQueue mainQueue]
+              usingBlock:^(NSNotification *note) {
+                (void)note;
+                [weakSelf showIfWaitingOn:token relativeToButton:button];
+              }];
+  self.activationObserver = token;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(CB_ACTIVATION_FLOOR_S * (double)NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   [weakSelf showIfWaitingOn:token relativeToButton:button];
+                 });
+  [[NSRunningApplication currentApplication] activateWithOptions:NSApplicationActivateAllWindows];
+}
+
+/* The single door both of -presentRelativeToButton:'s paths call through. `token` is an
+ * identity check, not a value read for its own sake: it is only ever this popover's
+ * CURRENT wait if `self.activationObserver` still equals it, which is false the instant
+ * either path has already fired (the first thing each does is nil the property out) or a
+ * later click has superseded this one entirely. Whichever of the notification and the
+ * floor arrives first wins and the other becomes a no-op against a property that has moved
+ * on — which is also what makes the floor safe to leave scheduled rather than cancelled: a
+ * `dispatch_after` block cannot be cancelled once queued, so letting the stale ones run and
+ * fizzle here is cheaper than building a cancellation path for a check this short. */
+- (void)showIfWaitingOn:(id)token relativeToButton:(NSStatusBarButton *)button {
+  if (self.activationObserver != token) return;
+  [[NSNotificationCenter defaultCenter] removeObserver:token];
+  self.activationObserver = nil;
+  [self showRelativeToButton:button];
+}
+
+/* Criterion 4's policy: nothing here calls -makeFirstResponder:. A stock NSButton that
+ * AppKit is told is first responder draws itself filled, exactly as if it were the
+ * window's default button — that is the "filled primary button" criterion 4 refuses, and
+ * it does not matter which control it would have been, which is why the fix is to pick
+ * none rather than to pick a different one. Left alone, the window's first responder stays
+ * the window itself until the reader presses Tab, at which point AppKit hands focus to the
+ * first control in the key view loop — which is criterion 3, satisfied by not fighting the
+ * default. Showing the popover only after activation has actually landed (see
+ * -presentRelativeToButton:) is what lets AppKit make this window key at all; a key-less
+ * window has no key view loop to walk.
+ *
+ * A ceiling this policy does not touch and must not try to: Tab only reaches a BUTTON at
+ * all when the reader has Full Keyboard Access turned on (System Settings › Keyboard);
+ * with it off — the default — Tab still walks text fields and lists but skips buttons
+ * entirely, which is macOS's own key-view-loop behaviour and not something this file
+ * decides. A reviewer checking criterion 3 with Full Keyboard Access off will see Tab do
+ * nothing here, and that is not this policy's bug to fix. */
+- (void)showRelativeToButton:(NSStatusBarButton *)button {
+  [self.popover showRelativeToRect:button.bounds ofView:button preferredEdge:NSRectEdgeMinY];
+  /* Explicit, though NSPopover already makes its own window key on show once the app is
+   * genuinely active (which -presentRelativeToButton: now guarantees it is by this point):
+   * naming the decision rather than leaning on it as a side effect. Key, not first
+   * responder — the window itself stays first responder, which is the other half of
+   * criterion 4. */
+  [self.popover.contentViewController.view.window makeKeyWindow];
 }
 
 /* Rebuilt from scratch on every open rather than mutated in place: the row set changes
@@ -1217,27 +1739,44 @@ static void cb_open_url(NSURL *url) {
   NSMutableArray<NSView *> *rows = [NSMutableArray array];
   NSMutableArray<NSString *> *urls = [NSMutableArray array];
 
+  /* The status line: the phase glyph the menu bar is drawing at this same instant, the
+   * phase in words, and the gear pinned right. The glyph is an NSImageView rather than a
+   * button because it is not a control — and it is the one place a colour is named beyond
+   * the captions: an image view has no text colour of its own for a template image to
+   * inherit, so `labelColor` says out loud that this glyph belongs to the line beside it.
+   * A semantic name, resolved by the system per appearance, never a value. */
+  self.glyphView = [NSImageView imageViewWithImage:cb_glyph_image(display)];
+  self.glyphView.contentTintColor = [NSColor labelColor];
+  [self.glyphView setAccessibilityElement:NO];
+
   char status[64];
   cb_status_label(display, status, sizeof(status));
   self.statusLine = cb_caption([NSString stringWithUTF8String:status], NO);
-  [rows addObject:self.statusLine];
+  cb_fill_with(self.statusLine);
 
-  cb_action switch_action = cb_switch_action(display);
-  /* The widget's own aria-label spelling ("Start pomodoro" / "Pause pomodoro" / "Resume
-   * pomodoro"), so the two surfaces say the same sentence to a screen reader even though
-   * the visible titles differ in length. */
-  NSString *switch_word = [NSString stringWithUTF8String:cb_switch_label(switch_action)];
-  self.primary = cb_button(switch_word, [switch_word stringByAppendingString:@" pomodoro"],
-                           self, @selector(pressPrimary:), 0);
-  NSButton *forward = cb_button(@"Forward", @"Forward to the next interval", self,
-                                @selector(pressForward:), 0);
-  NSButton *restart = cb_button(@"Restart", @"Restart this interval", self,
-                                @selector(pressRestart:), 0);
-  NSStackView *controls = [NSStackView stackViewWithViews:@[ self.primary, forward, restart ]];
-  controls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-  controls.distribution = NSStackViewDistributionFillEqually;
-  controls.spacing = 6.0;
-  [rows addObject:controls];
+  NSButton *gear = cb_icon_button(cb_icon_image(cb_gear_path()), @"Settings", self,
+                                  @selector(pressSettings:));
+  [rows addObject:cb_row(@[ self.glyphView, self.statusLine, gear ])];
+
+  /* The control row. The switch's POSITION and the word beside it both report the STATE;
+   * its accessibility label is the ACTION a press performs, in the widget's own spelling
+   * ("Start pomodoro" / "Pause pomodoro" / "Resume pomodoro"), so the two surfaces say the
+   * same sentence to a screen reader. */
+  self.toggle = [[NSSwitch alloc] init];
+  self.toggle.target = self;
+  self.toggle.action = @selector(pressPrimary:);
+  self.toggle.state = cb_switch_on(display) ? NSControlStateValueOn : NSControlStateValueOff;
+  NSString *switch_word = [NSString stringWithUTF8String:cb_switch_label(cb_switch_action(display))];
+  [self.toggle setAccessibilityLabel:[switch_word stringByAppendingString:@" pomodoro"]];
+
+  self.stateWord = cb_caption([NSString stringWithUTF8String:cb_switch_state_word(display)], YES);
+  cb_fill_with(self.stateWord);
+
+  NSButton *restart = cb_icon_button(cb_icon_image(cb_restart_path()), @"Restart interval",
+                                     self, @selector(pressRestart:));
+  NSButton *forward = cb_icon_button(cb_icon_image(cb_forward_path()), @"Forward to next interval",
+                                     self, @selector(pressForward:));
+  [rows addObject:cb_row(@[ self.toggle, self.stateWord, restart, forward ])];
 
   [rows addObject:[self separator]];
 
@@ -1260,13 +1799,6 @@ static void cb_open_url(NSURL *url) {
                                   self, @selector(pressIndex:), 0)];
   }
   self.rowURLs = urls;
-
-  [rows addObject:[self separator]];
-  [rows addObject:cb_row_button(@"Settings…", @"Open the pomodoro settings on the index page",
-                                self, @selector(pressSettings:), 0)];
-  [rows addObject:cb_row_button(@"Hide from menu bar",
-                                @"Hide the status item; the index page's pomodoro settings bring it back",
-                                self, @selector(pressHide:), 0)];
 
   NSStackView *stack = [NSStackView stackViewWithViews:rows];
   stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -1312,28 +1844,47 @@ static void cb_open_url(NSURL *url) {
   return box;
 }
 
-/* The tick's half of the popover: two strings, and nothing else. Called once a second
- * from cb_tick — including while the popover is TRACKING, which is the property the tick's
- * NSRunLoopCommonModes registration exists to buy. Rebuilding rows here is deliberately
- * not done; see -rebuild. */
+/* The tick's half of the popover: the glyph, two strings and the switch's position, and
+ * nothing else. Called once a second from cb_tick — including while the popover is
+ * TRACKING, which is the property the tick's NSRunLoopCommonModes registration exists to
+ * buy. Rebuilding rows here is deliberately not done; see -rebuild.
+ *
+ * Every write is guarded by a comparison, which is not micro-optimisation: NSSwitch
+ * ANIMATES a state change, so assigning the same state once a second would leave a control
+ * that twitches at 1Hz, and re-assigning an identical string would fight a reader who has
+ * the row selected. */
 - (void)refresh:(cb_display)display {
   if (!self.popover.shown) return;
+  self.glyphView.image = cb_glyph_image(display);
+
   char status[64];
   cb_status_label(display, status, sizeof(status));
   NSString *line = [NSString stringWithUTF8String:status];
-  if (line != nil) self.statusLine.stringValue = line;
-  NSString *word = [NSString stringWithUTF8String:cb_switch_label(cb_switch_action(display))];
-  if (word != nil && ![self.primary.title isEqualToString:word]) {
-    self.primary.title = word;
-    [self.primary setAccessibilityLabel:[word stringByAppendingString:@" pomodoro"]];
+  if (line != nil && ![self.statusLine.stringValue isEqualToString:line]) {
+    self.statusLine.stringValue = line;
   }
+
+  NSString *state = [NSString stringWithUTF8String:cb_switch_state_word(display)];
+  if (state != nil && ![self.stateWord.stringValue isEqualToString:state]) {
+    self.stateWord.stringValue = state;
+  }
+
+  NSControlStateValue on = cb_switch_on(display) ? NSControlStateValueOn : NSControlStateValueOff;
+  if (self.toggle.state != on) self.toggle.state = on;
+  NSString *word = [NSString stringWithUTF8String:cb_switch_label(cb_switch_action(display))];
+  if (word != nil) [self.toggle setAccessibilityLabel:[word stringByAppendingString:@" pomodoro"]];
 }
 
-/* Derived at the moment of the press rather than read off the button's own title: the
- * title is at most one tick old, and "at most one second stale" is not a thing to be about
- * a control that starts or stops a timer. Mirrors src/indexpage.mjs's own
+/* Derived at the moment of the press rather than read off the switch's own position: the
+ * position is at most one tick old, and "at most one second stale" is not a thing to be
+ * about a control that starts or stops a timer. Mirrors src/indexpage.mjs's own
  * `postPomodoro(pomodoroSwitchAction(pomodoroDoc.timer))`, which reads its cached document
- * for the same reason rather than its own button's label. */
+ * for the same reason rather than its own control's state.
+ *
+ * The switch has already moved itself by the time this runs, and it is left alone: the
+ * POST goes out on the poll queue with a fresh poll behind it, so the next tick either
+ * confirms the new position or puts it back — which is the honest outcome when the daemon
+ * refused, and the same arrangement the index page's widget has. */
 - (void)pressPrimary:(id)sender {
   (void)sender;
   cb_display display;
@@ -1350,17 +1901,6 @@ static void cb_open_url(NSURL *url) {
 - (void)pressRestart:(id)sender {
   (void)sender;
   cb_dispatch_action(CB_ACTION_RESTART);
-}
-
-/* Criterion 12. The popover closes first — a popover hanging off an item that is about to
- * leave the menu bar has nothing to hang from — and then the POST goes out. Nothing is
- * torn down and no state is persisted here: the setting is the daemon's, every poll reads
- * it back, and this process stays alive and hidden precisely so the index page's own
- * settings panel has something to bring back. */
-- (void)pressHide:(id)sender {
-  (void)sender;
-  [self.popover performClose:nil];
-  cb_dispatch_action(CB_ACTION_HIDE);
 }
 
 - (void)pressRow:(id)sender {
@@ -1383,8 +1923,8 @@ static void cb_open_url(NSURL *url) {
   cb_open_url(cb_index_url(@""));
 }
 
-/* Criterion 7, and the whole of this file's settings story: the index page's existing
- * panel, opened on the fragment ticket 02 wired up for exactly this. Nothing is editable
+/* The gear's errand, and the whole of this file's settings story: the index page's
+ * existing panel, opened on the fragment that scrolls it into view. Nothing is editable
  * from the menu bar — re-implementing four duration fields, two notify toggles and three
  * cue pickers (the last of which is read by scanning the system sounds at call time)
  * natively is the most expensive part of this feature and buys a panel opened once a
@@ -1485,8 +2025,9 @@ static void cb_tick(void) {
 
   cb_ensure_item();
   /* menubarHidden: the item still exists, it is just not on the bar. Never an exit —
-   * ticket 05's "bring it back from the index page" has to work with no restart, and a
-   * process that exited when hidden would leave nothing for the setting to reach. */
+   * bringing it back from the index page's settings has to work with no restart, and a
+   * process that exited when hidden would leave nothing for the setting to reach. That
+   * panel is the ONLY place this boolean is written now; this process only reads it. */
   cb_item.visible = d.hidden ? NO : YES;
   cb_item.button.image = cb_image(d);
   cb_item.button.title = d.countdown ? [NSString stringWithUTF8String:d.text] : @"";
@@ -1496,7 +2037,7 @@ static void cb_tick(void) {
   /* The boundary re-fetch, and it is not optional: criterion 1 pins this item to within a
    * second of the index widget, and the widget re-fetches the moment its own countdown
    * reaches zero (tickPomodoro). Without this, an interval that ended would sit at 00:00
-   * with an empty arc for up to CB_POLL_S while the widget had already moved on. Debounced
+   * with an empty ring for up to CB_POLL_S while the widget had already moved on. Debounced
    * to one fetch per crossing, the poll being the backstop if that one is lost.
    *
    * `d.phase != CB_IDLE` is cb_derive's spelling of "there is a timer": the protocol has
@@ -1531,10 +2072,10 @@ int cb_menubar(void) {
      * either alone would be enough: a synchronous loopback GET on the main thread would
      * stall the repaint for as long as the daemon took to answer, and a main-queue timer
      * does not fire at all while a status item's menu or popover is tracking (QUIRKS.md,
-     * measured) — which would silently stop the poll for as long as the reader kept
-     * ticket 05's popover open. DISPATCH_TIME_NOW as the start, so the first fetch goes
-     * out immediately and the item can appear as soon as the daemon is up; a one-second
-     * leeway, because nothing here needs the wakeup to be punctual.
+     * measured) — which would silently stop the poll for as long as the reader kept the
+     * popover open. DISPATCH_TIME_NOW as the start, so the first fetch goes out immediately
+     * and the item can appear as soon as the daemon is up; a one-second leeway, because
+     * nothing here needs the wakeup to be punctual.
      *
      * The popover's actions go out on this SAME queue (cb_dispatch_action), which is why
      * it is file-scope and why it is serial: a POST and the poll that reads its effect
@@ -1551,8 +2092,8 @@ int cb_menubar(void) {
     /* NSRunLoopCommonModes, not the default mode, and this is the trap QUIRKS.md wrote
      * down after measuring it: menu and popover tracking run the loop in
      * NSEventTrackingRunLoopMode, which a default-mode timer never reaches. A countdown
-     * that froze the moment ticket 05's popover opened — the one moment a reader is
-     * looking straight at it — would be the most visible bug this file could ship. */
+     * that froze the moment the popover opened — the one moment a reader is looking
+     * straight at it — would be the most visible bug this file could ship. */
     NSTimer *tick = [NSTimer timerWithTimeInterval:CB_TICK_S
                                            repeats:YES
                                              block:^(NSTimer *timer) {
@@ -1575,7 +2116,7 @@ int cb_menubar(void) {
      * reach AppKit and a dummy event posted after it; polling a sig_atomic_t is the whole
      * of what a handler may do, and this shape needs nothing more. The events matter as
      * much as the wait does — a bare NSRunLoop would service the timers above but never
-     * DISPATCH an event, so the item would draw and ticket 05's clicks would go nowhere.
+     * DISPATCH an event, so the item would draw and the popover's clicks would go nowhere.
      * A quarter second is far inside launchd's exit timeout and invisible to a reader; the
      * pool is INSIDE the loop, because one pool wrapping a loop that runs for the length of
      * a login session is a leak that grows all day.
@@ -1619,16 +2160,15 @@ int cb_menubar(void) {
  * lookup takes for the notify phase, and for the same reason: this binary carries the
  * reader's Documents grant, so "argv can be nothing but an index" is the goal.
  *
- * `reset` IS NOT HERE, and its absence is criterion 8 (see CB_ACTION_PATHS). The word is
- * refused like any other unrecognised one, which is what lets a check assert the refusal
- * behaviourally as well as by reading this file. */
+ * `reset` IS NOT HERE, and neither is anything that writes a setting (see
+ * CB_ACTION_PATHS). Both are refused like any other unrecognised word, which is what lets
+ * a check assert the refusal behaviourally as well as by reading this file. */
 static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] = {
   { "start", CB_ACTION_START },
   { "pause", CB_ACTION_PAUSE },
   { "resume", CB_ACTION_RESUME },
   { "forward", CB_ACTION_FORWARD },
   { "restart", CB_ACTION_RESTART },
-  { "hide", CB_ACTION_HIDE },
 };
 
 /* A TEST SEAM, and nothing else. `claude-board --menubar --probe` performs exactly one
@@ -1649,18 +2189,27 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  * Gated on a second argv word so the supervised path cannot reach it: bin/launcher.c execs
  * this binary with exactly `--menubar` and nothing after it.
  *
- * Two optional words follow, and they are the seam's two shapes:
+ * Three optional words follow, and they are the seam's three shapes:
  *
  *   <action>            one of CB_PROBE_ACTIONS, POSTed before the report. This is what
- *                       makes criterion 4 checkable at all: a check can start, pause,
- *                       resume, forward and restart the daemon's real timer through the
- *                       same cb_perform the popover's buttons call, and read the daemon's
- *                       own state back afterwards. An unrecognised word — the reset
- *                       action most of all — is refused with a nonzero exit and posts
+ *                       makes "every control takes effect" checkable at all: a check can
+ *                       start, pause, resume, forward and restart the daemon's real timer
+ *                       through the same cb_perform the popover's controls call, and read
+ *                       the daemon's own state back afterwards. An unrecognised word — the
+ *                       reset action most of all — is refused with a nonzero exit and posts
  *                       nothing.
  *   url <candidate>     print whether cb_is_board_url would let a row open that URL, and
- *                       exit. The one way to check criterion 6's refusal without a daemon
- *                       that can be made to emit a bad URL.
+ *                       exit. The one way to check the refusal without a daemon that can be
+ *                       made to emit a bad URL.
+ *   icons               print each popover icon's bounding box in the SVG's own 24-unit
+ *                       space, and exit. The path-data walker above turns a dozen
+ *                       elliptical arcs into a drawing nothing headless can look at, and
+ *                       its realistic failures are all visible in a bounding box: a command
+ *                       it does not understand drops a subpath and shrinks the box, and an
+ *                       arc solved on the wrong side or swept the wrong way round moves the
+ *                       ink somewhere it does not belong (measured: either one takes the
+ *                       restart icon's width from 20 units to 6). Paths only: no image, no
+ *                       view, no application.
  *
  * Output. The first line is space-separated `key=value` with every value a bare word, so a
  * check can split it without a parser; `text` is the countdown the derivation produced
@@ -1676,6 +2225,25 @@ int cb_menubar_probe(const char *word, const char *argument) {
       /* The validator, alone, against one candidate — no request, no daemon, no state. */
       int ok = argument != NULL && cb_is_board_url(argument, cb_port());
       printf("url=%s\n", ok ? "ok" : "refused");
+      fflush(stdout);
+      return 0;
+    }
+    if (word != NULL && strcmp(word, "icons") == 0) {
+      /* Reported in SVG units rather than points, so the numbers a check asserts are the
+       * ones a reader can measure off src/pomodoro-widget.mjs's own viewBox. `%.2f` and not
+       * more: a NaN prints as `nan` at any precision, and nothing here is asserted tighter
+       * than a tenth of a unit. */
+      const struct { const char *name; NSBezierPath *path; } icons[] = {
+        { "gear", cb_gear_path() },
+        { "restart", cb_restart_path() },
+        { "forward", cb_forward_path() },
+      };
+      for (size_t i = 0; i < sizeof(icons) / sizeof(icons[0]); i++) {
+        NSRect box = [icons[i].path bounds];
+        printf("icon=%s elements=%ld x=%.2f y=%.2f w=%.2f h=%.2f\n", icons[i].name,
+               (long)[icons[i].path elementCount], box.origin.x, box.origin.y,
+               box.size.width, box.size.height);
+      }
       fflush(stdout);
       return 0;
     }
@@ -1705,11 +2273,21 @@ int cb_menubar_probe(const char *word, const char *argument) {
     cb_display d = cb_derive(answered, &timer, &settings, daemon_now);
 
     static const char *const PHASES[] = { "idle", "work", "break", "longBreak" };
+    /* `ring` and `mark` are the GLYPH, reported rather than drawn. The paint cannot be
+     * checked, so ADR 84's vocabulary is asserted here instead: that a paused Timer draws
+     * two bars and no ring in every phase, that nothing else draws those bars, and that a
+     * short break and a long break report the same pair. */
+    static const char *const MARKS[] = { "none", "rest", "paused" };
+    /* `primary` is the ACTION word (the switch's accessibility label), `stateword` is the
+     * state the switch is IN (what the reader sees beside it). Both are printed because
+     * they are different words on purpose, and because "the popover says paused exactly
+     * once" is only checkable if every word the popover shows is reported somewhere. */
     printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s "
-           "answered=%s primary=%s\n",
+           "answered=%s primary=%s stateword=%s ring=%s mark=%s\n",
            PHASES[d.phase], d.paused ? "yes" : "no", d.remaining_s, d.fraction,
            d.countdown ? "yes" : "no", d.text[0] ? d.text : "none", d.hidden ? "yes" : "no",
-           d.answered ? "yes" : "no", cb_switch_label(cb_switch_action(d)));
+           d.answered ? "yes" : "no", cb_switch_label(cb_switch_action(d)),
+           cb_switch_state_word(d), d.ring ? "yes" : "no", MARKS[d.mark]);
 
     char status[64];
     cb_status_label(d, status, sizeof(status));
