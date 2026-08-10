@@ -565,6 +565,10 @@ GET  /api/waiting                   every round in the store with an OPEN WAIT (
                                     { waiting: [{ boardId, thread, title, round, url }],
                                       total, now }; newest board first, uncapped -- a client
                                     showing only its first few owns that cap
+GET  /api/events                    SSE: the daemon-wide stream -- timer, settings and
+                                    waiting-count changes, for a process with no board id
+                                    to subscribe under `/api/board/:id/events` with
+                                    (bin/menubar.m). See "SSE events" below
 GET  /api/pomodoro                  the whole document -> { settings, cycle, cycleDate, timer, now };
                                     rolled to the current pomodoro day first, so a read
                                     never shows an interval from a day that has ended
@@ -1077,6 +1081,27 @@ same apply path as a live push. A first connection with nothing missed diffs to 
 touches no DOM. The re-read is a plain `GET /b/:boardId`, which already inlines both the payload
 (`#board-data`, `resolveComment` already run over it) and the server-rendered markup for every
 round; a dedicated JSON route would be leaner and can be added later without changing this rule.
+
+### The daemon-wide stream
+
+`GET /api/events`: the same `text/event-stream` shape as `/api/board/:id/events` above — the
+`: connected` comment, the heartbeat cadence, the close/error cleanup — but not scoped to a board
+and never 404s, because there is no id to fail to find. It exists for a process with no board to
+open one under: `bin/menubar.m`, which has no `:id` at all. Every subscriber gets every event —
+there is nothing to key subscribers by, unlike the per-board stream. No `watcher` event either:
+nothing published here is per-connection.
+
+```js
+event: pomodoro   data: { settings, cycle, cycleDate, timer, now }   // same shape as GET /api/pomodoro
+event: waiting    data: { total, now }                               // same total as GET /api/waiting
+```
+
+`pomodoro` fires after every write under `/api/pomodoro/*` (ensure, pause, resume, reset, forward,
+restart, settings) and, independently of any request, the instant a running interval crosses a
+phase boundary on its own — the daemon's internal clock reconciling with nobody polling. `waiting`
+fires whenever a round could plausibly have entered or left the waiting set: a round posted or
+amended into an awaited state, a submit, an abandon, or a wait's wall clock lapsing. It carries
+only the count, not the rows — a client that wants the rows still asks `GET /api/waiting` for them.
 
 ## Stage postMessage channel
 

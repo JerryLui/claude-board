@@ -285,6 +285,41 @@ export function createSseHub() {
   };
 }
 
+/** SSE subscriber registry for the daemon-wide stream (`GET /api/events`) -- a channel a
+ * process with no board can subscribe on. `createSseHub` above cannot serve this: it is
+ * keyed by board id, and a process with no board (bin/menubar.m, which has no board to
+ * open) has no key to subscribe under. This hub is the opposite shape on purpose -- one
+ * flat set of subscribers, because there is nothing to key them BY: every subscriber wants
+ * every event (a timer tick matters to a menu bar regardless of which board is on screen),
+ * unlike a board stream where a Watcher only ever wants its own board's events. No
+ * per-Watcher Attended bookkeeping either, for the same reason: Attended is a fact about a
+ * board tab, and nothing here is about a board. */
+export function createStreamHub() {
+  const subs = new Map(); // subscriberId -> res
+
+  return {
+    subscribe(res) {
+      const id = randomBytes(16).toString('hex');
+      subs.set(id, res);
+      return id;
+    },
+    unsubscribe(id) {
+      subs.delete(id);
+    },
+    /** Same wire shape as `createSseHub.broadcast` (`event: <name>\ndata: <json>\n\n`),
+     * deliberately: a client that already knows how to parse one SSE stream needs no
+     * second parser for the other. Every live subscriber gets every event -- see this
+     * function's own header for why there is no narrower audience to pick from. */
+    broadcast(eventName, data) {
+      if (subs.size === 0) return;
+      const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+      for (const res of subs.values()) {
+        try { res.write(payload); } catch { /* dead connection; the 'close' handler cleans it up */ }
+      }
+    },
+  };
+}
+
 function readPkgVersion() {
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
@@ -764,7 +799,7 @@ function boundCwdForThread(thread, home) {
   return inThread.length ? inThread[0].cwd : null;
 }
 
-async function handlePostBoard(req, res, home, sse, stranded) {
+async function handlePostBoard(req, res, home, sse, stranded, stream) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -903,6 +938,14 @@ async function handlePostBoard(req, res, home, sse, stranded) {
   writeBoard(board, home);
   writePage(board.id, html, home);
   if (pushMode) sse.broadcast(board.id, 'round', buildRoundPushPayload(board, round, pushMode, touchedBlockIds));
+  // Unconditionally, unlike the board-scoped push above: `pushMode` is only set when
+  // appending to a board that already exists (a second round in a thread), but a BRAND
+  // NEW board's first round is the commonest way the waiting count moves at all -- every
+  // plain `ask()` mints one. A new or amended round can be the one that makes this board
+  // newly awaited (ADR 45) either way, so the daemon-wide count may have just changed
+  // regardless of which branch above ran; see `broadcastWaiting`'s own comment for why
+  // this fires on every post rather than only the ones that provably changed it.
+  broadcastWaiting(stream, home);
   // A round has just landed: if nobody is looking at this board, it is Stranded and the
   // daemon says so after the grace (criteria 1 and 3). After the persist and the push,
   // deliberately -- the rule reads the board back off disk, and the banner it may raise
@@ -1162,7 +1205,7 @@ export function buildPacketWithUndelivered(board, round, url, home) {
   return { packet, commit };
 }
 
-async function handleWait(req, res, id, url, home, sse) {
+async function handleWait(req, res, id, url, home, sse, stream) {
   const roundParam = url.searchParams.get('round');
   const round = roundParam ? parseInt(roundParam, 10) : 1;
   const initial = readBoard(id, home);
@@ -1213,6 +1256,8 @@ async function handleWait(req, res, id, url, home, sse) {
     closeLapsedAwaitedRounds(result.board);
     writeBoard(result.board, home);
     sse.broadcast(id, 'awaitExpired', { round });
+    // A wait dying is a round leaving the waiting count exactly as surely as an answer is.
+    broadcastWaiting(stream, home);
     const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
     // Committed only once the response has actually left this process (see
     // drainUndeliveredComments): if the socket died in the window between
@@ -1267,7 +1312,7 @@ async function handleWait(req, res, id, url, home, sse) {
  *
  * Deliberately NOT `stranded.answered`: nobody answered anything, and that path is scoped
  * to one round number where this is about every open round at once. */
-function handleAbandon(req, res, id, home, sse, stranded) {
+function handleAbandon(req, res, id, home, sse, stranded, stream) {
   req.resume();
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
@@ -1280,12 +1325,15 @@ function handleAbandon(req, res, id, home, sse, stranded) {
     // still-open tab's point of view this IS its round's wait ending. No payload beyond
     // the round number, for the reason given there.
     for (const n of closed) sse.broadcast(id, 'awaitExpired', { round: n });
+    // Every closed round here was open, and an open round can be an awaited one -- the
+    // same reasoning `broadcastWaiting`'s other call sites carry.
+    broadcastWaiting(stream, home);
   }
   stranded.abandoned(id);
   return sendJson(res, 200, { ok: true, board: board.id, closed });
 }
 
-async function handleSubmit(req, res, id, home, sse, stranded) {
+async function handleSubmit(req, res, id, home, sse, stranded, stream) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -1369,6 +1417,9 @@ async function handleSubmit(req, res, id, home, sse, stranded) {
   const { commentsByBlock, boardForClient } = resolveBoardComments(board);
   const html = renderRoundSection(board, round, commentsByBlock);
   sse.broadcast(id, 'submitted', { round, board: boardForClient, html });
+  // Answered is the other way off the waiting list -- an open round this same call just
+  // closed, mirroring `handleWait`'s timeout branch and `handleAbandon` above.
+  broadcastWaiting(stream, home);
   // Criterion 15: the daemon owns the click-serving process and terminates it "once the
   // reviewer returns to the board OR the round is answered". This is the second half --
   // a banner still on screen pointing at a round that has just been answered has nothing
@@ -1505,6 +1556,37 @@ function handleEvents(req, res, id, home, sse, stranded) {
   res.on('error', cleanup);
 }
 
+/** `GET /api/events`: the daemon-wide stream (`createStreamHub` above), for a process with
+ * no board to subscribe on -- bin/menubar.m today, and the reason this ticket exists.
+ * Shaped exactly like `handleEvents` above (the same `: connected` line, the same
+ * heartbeat, the same close/error cleanup) because a caller that already knows how to hold
+ * a `text/event-stream` connection open needs no second set of rules to learn. No
+ * `watcher` event, unlike the board stream: nothing here is per-Watcher, so there is no id
+ * for a later request to name. Never resolves on its own -- the response stays open until
+ * the client disconnects. */
+function handleStream(req, res, stream) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    'connection': 'keep-alive',
+  });
+  res.write(': connected\n\n');
+  const subId = stream.subscribe(res);
+
+  const heartbeat = setInterval(() => {
+    try { res.write(': heartbeat\n\n'); } catch { /* connection is gone; cleanup below handles it */ }
+  }, sseHeartbeatMs());
+  heartbeat.unref?.();
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    stream.unsubscribe(subId);
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+}
+
 // The one in-flight preview child, module scope rather than per-request: there is one
 // daemon and one reader, and "a rapid series of changes never overlaps
 // into a chorus" means the SECOND picker change must kill the FIRST preview, which is
@@ -1606,6 +1688,28 @@ function handleWaiting(req, res, home) {
   return sendJson(res, 200, { waiting, total: waiting.length, now: Date.now() });
 }
 
+/** The count half of `handleWaiting` above, without the per-round rows: one walk of the
+ * store, summed rather than collected. This is what `broadcastWaiting` below publishes on
+ * the daemon-wide stream -- "waiting-count changes", in the Solution's own words, not the
+ * row set `GET /api/waiting` hands a poll. Whichever surface wants the actual rows (a
+ * later ticket's Popover) still asks that route for them; this is only the number that
+ * says something is worth asking about. */
+function waitingTotal(home) {
+  let total = 0;
+  for (const board of listBoards(home)) total += waitingRounds(board).length;
+  return total;
+}
+
+/** Publish the current waiting count on the daemon-wide stream. Called from every route
+ * that could plausibly have moved it -- a round newly awaited, a round answered, a wait
+ * expiring, a board abandoned -- rather than only where it provably did: recomputing the
+ * total is one cheap walk of the store (`waitingTotal` above), and a push that happens to
+ * repeat the same number is indistinguishable from silence to anything downstream. Safe
+ * to call with no subscribers; `createStreamHub.broadcast` is a no-op then. */
+function broadcastWaiting(stream, home) {
+  stream.broadcast('waiting', { total: waitingTotal(home), now: Date.now() });
+}
+
 /** `{ ...doc, now: Date.now() }` for every pomodoro response, write or read alike. The
  * page renders a countdown by subtracting a deadline from a clock, and the client's
  * clock is not the daemon's (a laptop's wall clock can be minutes off, and even a
@@ -1617,13 +1721,25 @@ function sendPomodoro(res, doc) {
   return sendJson(res, 200, { ...doc, now: Date.now() });
 }
 
+/** The other half of every pomodoro write: `sendPomodoro` answers the caller that made it,
+ * this publishes the same document -- same shape, same `now` discipline -- to whoever else
+ * is subscribed to the daemon-wide stream (ticket 01's whole reason to exist). Called from
+ * two places: every mutating branch below, and `startServer`'s `onBoundary` hook, for the
+ * boundary crossings that happen with no request behind them at all -- a work interval
+ * ending while nobody is looking is exactly the case a poll-only client shows late, and
+ * the case this stream exists to fix. */
+function broadcastPomodoro(stream, doc) {
+  stream.broadcast('pomodoro', { ...doc, now: Date.now() });
+}
+
 /** Every `/api/pomodoro*` route. `pomo` is the ONE createPomodoro instance for this
  * daemon (see createRequestHandler) — every write below goes through it rather than a
  * bare readDoc/writeDoc pair, specifically so the live setTimeout it owns gets
  * re-armed (or cleared) as part of the same call, never as an afterthought a route
  * handler could forget. See PROTOCOL.md "HTTP surface" for the route table this
- * implements. */
-async function handlePomodoro(req, res, parts, pomo, home) {
+ * implements. `stream` is the daemon-wide hub (`createStreamHub`) every write below
+ * publishes its resulting document to, alongside answering the caller that made it. */
+async function handlePomodoro(req, res, parts, pomo, home, stream) {
   // GET /api/pomodoro: read straight off disk, not through `pomo`. This is safe — not
   // merely convenient — because reconciliation happens SYNCHRONOUSLY in this same
   // single-threaded event loop the instant a deadline is crossed (the armed
@@ -1640,19 +1756,25 @@ async function handlePomodoro(req, res, parts, pomo, home) {
   }
   if (req.method === 'POST' && parts.length === 3) {
     const action = parts[2];
+    // Every mutation answers its own caller AND publishes the result on the daemon-wide
+    // stream in the same breath -- `sendPomodoro` and `broadcastPomodoro` share the exact
+    // shape (`{ ...doc, now: Date.now() }`), computed at two slightly different instants
+    // rather than once, which is fine: both are "now" to within a function call, and
+    // nothing downstream compares them against each other.
+    const respond = doc => { broadcastPomodoro(stream, doc); return sendPomodoro(res, doc); };
     // Bodyless by design: `readJsonBody` is never called on this branch, which is what
     // makes a curl-shaped `POST /api/pomodoro/ensure` with no body and no
     // `content-type` succeed rather than 415 — the session-start hook is a
     // one-line shell `curl`, and it must not have to construct or parse anything.
-    if (action === 'ensure') return sendPomodoro(res, pomo.ensureTimer());
-    if (action === 'pause') return sendPomodoro(res, pomo.pause());
-    if (action === 'resume') return sendPomodoro(res, pomo.resume());
-    if (action === 'reset') return sendPomodoro(res, pomo.reset());
+    if (action === 'ensure') return respond(pomo.ensureTimer());
+    if (action === 'pause') return respond(pomo.pause());
+    if (action === 'resume') return respond(pomo.resume());
+    if (action === 'reset') return respond(pomo.reset());
     // Bodyless like ensure/pause/resume/reset above -- neither control's caller (the
     // pomodoro widget's own two buttons) has anything to say beyond "now", and
     // src/pomodoro.mjs's forwardTimer/restartTimer take only `(doc, now)`.
-    if (action === 'forward') return sendPomodoro(res, pomo.forward());
-    if (action === 'restart') return sendPomodoro(res, pomo.restart());
+    if (action === 'forward') return respond(pomo.forward());
+    if (action === 'restart') return respond(pomo.restart());
     if (action === 'settings') {
       let body;
       try {
@@ -1661,7 +1783,7 @@ async function handlePomodoro(req, res, parts, pomo, home) {
         return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
       }
       try {
-        return sendPomodoro(res, pomo.settings(body));
+        return respond(pomo.settings(body));
       } catch (err) {
         // mergeSettings (src/pomodoro.mjs) throws naming the offending field; a rejected
         // body is a 400 with that message, never a silent partial write — nothing in
@@ -1771,12 +1893,20 @@ function nextLapseAt(boards) {
  * here rather than at module scope, so two independent daemons in one process (as the
  * checks spin up) never share subscribers, announce for each other's boards, or redeem
  * each other's handoffs. */
-export function createRequestHandler({ home = boardHome(), secret: pinnedSecret, pomodoro } = {}) {
+export function createRequestHandler({ home = boardHome(), secret: pinnedSecret, pomodoro, stream } = {}) {
   const sse = createSseHub();
   // Built here rather than passed in because it reads THIS handler's hub.
   // `requestHandler.close` below is how startServer hands it its own shutdown --
   // criterion 15's "stopping the daemon leaves none of them running".
   const stranded = createStrandedWatch({ home, sse });
+  // The daemon-wide stream (`createStreamHub`, ticket 01). Defaulted exactly like `pomo`
+  // below and for the identical reason: `startServer` has to hand the SAME instance to
+  // both this handler (whose `/api/events` route is what a client subscribes to) and the
+  // pomodoro clock's `onBoundary` hook (which publishes a boundary crossing nobody
+  // requested), so it is built there and passed in -- but a caller that never wires a
+  // boundary notifier (every check that calls `createRequestHandler` directly) still gets
+  // a working, if unshared, hub for free.
+  const streamHub = stream || createStreamHub();
   // `GET /api/index/rows`'s one-entry cache: `{ print, query, html, lapseAt }`, or null
   // before the first poll. Per handler, like everything else here, so two daemons in one
   // process never serve each other's rows -- and dropped with the handler, so nothing here
@@ -1930,6 +2060,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return handleWaiting(req, res, home);
       }
 
+      // The daemon-wide stream (ticket 01): timer, settings and waiting-count changes, for
+      // a process with no board id to subscribe under `/api/board/:id/events` with. Gated
+      // like every other read here -- there is nothing board-scoped about it to exempt.
+      if (req.method === 'GET' && url.pathname === '/api/events') {
+        return handleStream(req, res, streamHub);
+      }
+
       if (req.method === 'GET' && url.pathname === '/api/search') {
         const query = url.searchParams.get('q') || '';
         const results = searchBoards(query, home).map(r => ({ ...r, url: boardUrl(req, r.boardId) }));
@@ -1937,7 +2074,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'POST' && url.pathname === '/api/board') {
-        return await handlePostBoard(req, res, home, sse, stranded);
+        return await handlePostBoard(req, res, home, sse, stranded, streamHub);
       }
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
@@ -1951,16 +2088,16 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         const boardId = parts[2];
         const action = parts[3];
         if (req.method === 'GET' && action === 'wait') {
-          return await handleWait(req, res, boardId, url, home, sse);
+          return await handleWait(req, res, boardId, url, home, sse, streamHub);
         }
         if (req.method === 'GET' && action === 'events') {
           return handleEvents(req, res, boardId, home, sse, stranded);
         }
         if (req.method === 'POST' && action === 'submit') {
-          return await handleSubmit(req, res, boardId, home, sse, stranded);
+          return await handleSubmit(req, res, boardId, home, sse, stranded, streamHub);
         }
         if (req.method === 'POST' && action === 'abandon') {
-          return handleAbandon(req, res, boardId, home, sse, stranded);
+          return handleAbandon(req, res, boardId, home, sse, stranded, streamHub);
         }
         if (req.method === 'POST' && action === 'attended') {
           return await handleAttended(req, res, boardId, sse, stranded);
@@ -1968,7 +2105,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (parts[0] === 'api' && parts[1] === 'pomodoro') {
-        return await handlePomodoro(req, res, parts, pomo, home);
+        return await handlePomodoro(req, res, parts, pomo, home, streamHub);
       }
 
       if (req.method === 'POST' && url.pathname === '/api/store/prune') {
@@ -1999,6 +2136,13 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 /** Start listening on 127.0.0.1. Resolves once bound, with the actual port (useful
  * for `port: 0` ephemeral binding in checks). */
 export function startServer({ home = boardHome(), port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT, secret } = {}) {
+  // The daemon-wide stream (ticket 01). Created here, once, for the same reason the
+  // pomodoro clock below is: `onBoundary` fires with no HTTP request behind it at all
+  // (a work interval reaching its own deadline while nobody is polling), and only an
+  // instance shared with `createRequestHandler`'s `/api/events` route can publish that
+  // crossing to whoever is already subscribed there.
+  const stream = createStreamHub();
+
   // ADR.md entry 8: the daemon owns the pomodoro clock. Created here, once, and
   // threaded into createRequestHandler below rather than each side minting its own:
   // this is the ONE instance that owns the live setTimeout for this daemon, and the
@@ -2010,18 +2154,26 @@ export function startServer({ home = boardHome(), port = Number(process.env.CLAU
   // restart against the same home (as the checks do) never runs two live clocks
   // against one file at once.
   //
-  // `onBoundary` fires the native notification (src/notify.mjs, ADR.md entry 19). That
-  // module is async and swallows every failure itself, so a reader's Notification
-  // Center settings can never be a reason this callback misbehaves or the clock
-  // stalls. Dropping this argument is the one edit that would leave the daemon
-  // crossing every boundary in silence with the rest of the suite still green, which
-  // is why test/check-notify.mjs pins it through startServer specifically.
-  const pomodoro = createPomodoro({ home, onBoundary: ({ phase, settings }) => notifyBoundary(phase, settings) });
+  // `onBoundary` fires the native notification (src/notify.mjs, ADR.md entry 19) AND
+  // publishes the crossing on the stream above -- the two are independent readers of the
+  // same event, and neither's failure can touch the other: notifyBoundary swallows its
+  // own errors (see its own module header) and `broadcastPomodoro` only ever writes to
+  // already-open sockets. Dropping either call is the one edit that would leave the
+  // daemon crossing every boundary in silence -- to Notification Center for one, to every
+  // stream subscriber for the other -- with the rest of the suite still green, which is
+  // why test/check-notify.mjs pins the first through startServer specifically.
+  const pomodoro = createPomodoro({
+    home,
+    onBoundary: ({ phase, settings }) => {
+      notifyBoundary(phase, settings);
+      broadcastPomodoro(stream, readPomodoroDoc(home));
+    },
+  });
 
   // `secret` is passed through UNRESOLVED on purpose: defaulting it to readSecret() here
   // would pin the value for the life of the process and undo S4's fix one layer down,
   // where it would be much harder to notice. Absent means "read it per request".
-  const handler = createRequestHandler({ home, secret, pomodoro });
+  const handler = createRequestHandler({ home, secret, pomodoro, stream });
   const server = http.createServer(handler);
 
   pomodoro.boot();

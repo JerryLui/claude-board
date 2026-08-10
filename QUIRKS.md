@@ -1402,6 +1402,24 @@ Pace the loop with `beforeDate:` rather than with whatever the source is, too: a
 loop notices a stop only when the timer next fires, which couples "how fast does this shut
 down" to a number chosen for something else entirely.
 
+### `NSURLSession` makes more than one raw TCP connection per logical attempt against a peer that resets instantly
+
+Measured while landing ticket 03's reconnect-with-backoff: pointed a plain
+`net.createServer` stand-in at the stream client, destroying every socket the instant it
+accepted one (no HTTP response at all), and counted **three** separate `connection` events
+per single call to `cb_stream_start` — not one. The three always land within a couple of
+milliseconds of each other, and the gap to the NEXT group matches the backoff schedule
+exactly (measured: groups at +270ms, +1339ms, +3467ms — the ~1s and ~2s doublings this
+file's own code produces). So the multiplier is the platform's own low-level connection
+handling underneath a single `NSURLSessionTask`, not a bug in the retry loop above it.
+
+A check asserting an exact attempt COUNT against a raw connection log will therefore see
+3x whatever the application-level retry count actually is, and a tight upper bound written
+against "one attempt per retry" fails against correct code. Fold attempts closer together
+than ~200ms into one cluster (cluster START timestamps, not the raw list) before asserting
+anything about a backoff schedule's own timing — see the cluster-based check in
+`test/check-menubar-client.mjs` ("a stream that cannot connect backs off").
+
 ---
 
 ## Shell, C and the filesystem

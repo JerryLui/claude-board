@@ -83,8 +83,9 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync, execFile } from 'node:child_process';
+import { spawnSync, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import http from 'node:http';
 import { defaultDoc, writeDoc, pomodoroDay, formatCountdown } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
 import { SECRET_HEADER } from '../src/secret.mjs';
@@ -229,6 +230,16 @@ async function probe({ home, port, args = [] }) {
     else if (line.startsWith('caption=')) state.caption = line.slice(8);
     else if (line.startsWith('status=')) state.status = line.slice(7);
     else if (line.startsWith('url=')) state.url = line.slice(4);
+    // `--menubar --probe stream` (ticket 01): `stream=connected|refused` first, then
+    // `event=<name>|timeout` once the wait is over -- see cb_stream_probe's own comment.
+    else if (line.startsWith('stream=')) state.stream = line.slice(7);
+    else if (line.startsWith('event=')) state.event = line.slice(6);
+    // `--menubar --probe live` (ticket 02): `stream=` as above, then `live=pushed|timeout`
+    // -- see cb_menubar_probe_live's own comment.
+    else if (line.startsWith('live=')) state.live = line.slice(5);
+    // `--menubar --probe run` (ticket 03): `run=polled|timeout` first, no `stream=` line --
+    // see cb_menubar_probe_run's own comment for why.
+    else if (line.startsWith('run=')) state.run = line.slice(4);
   }
   return state;
 }
@@ -247,7 +258,10 @@ async function withDaemon(doc, fn) {
   const { server, port } = await startServer({ home: daemonHome, port: 0, secret });
   const probeHome = makeProbeHome(secret);
   try {
-    await fn({ daemonHome, probeHome, port, secret });
+    // `server` is exposed for ticket 03's own checks, which need to kill this daemon out
+    // from under a live client and restart one on the same port -- every other caller here
+    // only ever reads daemonHome/probeHome/port/secret and can go on ignoring it.
+    await fn({ daemonHome, probeHome, port, secret, server });
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
@@ -828,6 +842,7 @@ async function main() {
     const routes = [...new Set([...source.matchAll(/"(\/api\/[a-zA-Z/]*)"/g)].map(m => m[1]))].sort();
     assert.ok(!routes.includes('/api/pomodoro/reset'), 'the reset route must not be a string this client can post to');
     assert.deepEqual(routes, [
+      '/api/events',              // ticket 01's stream probe -- --menubar --probe stream
       '/api/pomodoro',            // the poll
       '/api/pomodoro/ensure',     // start
       '/api/pomodoro/forward',
@@ -1123,6 +1138,479 @@ async function main() {
       assert.equal(state.answered, 'no');
       assert.ok(state.elapsedMs < 10_000, `a missing credential must be reported at once: took ${state.elapsedMs}ms`);
     });
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Ticket 01: the daemon-wide stream, and the probe seam widened to hold
+  // it open. No acceptance criterion of its own -- it is the prefactor tickets 02 and 03
+  // build on -- so what is pinned here is narrower than the criterion-numbered checks
+  // above: the stream exists, is reachable from this exact seam, carries a real push
+  // across real loopback, and reports honestly when nothing arrives or nothing answers.
+  // -------------------------------------------------------------------------------------
+
+  /** Spawn `--menubar --probe <args>` and resolve as soon as its FIRST line lands, never
+   * on a sleep: `execFileAsync` (the `probe()` helper above) cannot be used for the
+   * positive-push checks below, because it does not resolve until the child EXITS, and
+   * this child deliberately stays alive, mid-report, until a push arrives or the window
+   * closes. Resolves with the accumulated stdout/stderr (kept live) and a `waitForExit()`
+   * the caller awaits once it has done whatever it wanted the still-open stream to
+   * observe. Shared by `openStreamProbe` (ticket 01, `stream <seconds>`) and
+   * `openLiveProbe` (ticket 02, `live <seconds>`) below -- both modes' first fflush is
+   * always `stream=connected` or `stream=refused`, so both resolve on the same signal. */
+  function spawnHeldProbe(args, { home, port }) {
+    const child = spawn(launcherExec, ['--menubar', '--probe', ...args], {
+      env: { PATH: process.env.PATH, HOME: home, CLAUDE_BOARD_PORT: String(port) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const state = { stdout: '', stderr: '' };
+    child.stdout.on('data', c => { state.stdout += c; });
+    child.stderr.on('data', c => { state.stderr += c; });
+    const exited = new Promise(resolve => child.on('exit', (code, signal) => resolve({ code, signal })));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.stdout.removeListener('data', onData);
+        reject(new Error(`the probe never printed a first line within 5s:\nstdout: ${state.stdout}\nstderr: ${state.stderr}`));
+      }, 5000);
+      const onData = () => {
+        if (!state.stdout.includes('\n')) return;
+        child.stdout.removeListener('data', onData);
+        clearTimeout(timer);
+        resolve({ ...state, waitForExit: async () => ({ ...(await exited), stdout: state.stdout, stderr: state.stderr }) });
+      };
+      child.stdout.on('data', onData);
+    });
+  }
+
+  function openStreamProbe({ home, port, seconds = 5 }) {
+    return spawnHeldProbe(['stream', String(seconds)], { home, port });
+  }
+
+  /** Ticket 02's own held probe: `--menubar --probe live <seconds>` (`cb_menubar_probe_live`).
+   * Same shape as `openStreamProbe` -- resolves once `stream=connected` or `stream=refused`
+   * lands, leaving the child alive to observe whatever the caller triggers next. */
+  function openLiveProbe({ home, port, seconds = 5 }) {
+    return spawnHeldProbe(['live', String(seconds)], { home, port });
+  }
+
+  await check("ticket 01: the stream probe holds GET /api/events open and reports a pomodoro settings write pushed while it waits -- not a poll picking it up later", async () => {
+    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+      const opened = await openStreamProbe({ home: probeHome, port, seconds: 5 });
+      assert.equal(opened.stdout.trim(), 'stream=connected', `setup: the probe must connect before this check can mean anything:\n${opened.stdout}\n${opened.stderr}`);
+
+      // The daemon-side change, straight over HTTP and never through the probe itself --
+      // the probe's one thread is busy holding the stream open on the very connection
+      // that has to observe this write.
+      const res = await fetch(`http://127.0.0.1:${port}/api/pomodoro/settings`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+        body: JSON.stringify({ workMin: 42 }),
+      });
+      assert.equal(res.status, 200, 'setup: the settings write must land');
+
+      const { code, signal, stdout, stderr } = await opened.waitForExit();
+      assert.equal(signal, null, `the probe must exit on its own, never be signalled: ${stderr}`);
+      assert.equal(code, 0, `the probe must report success:\n${stdout}\n${stderr}`);
+      assert.match(stdout, /^event=pomodoro$/m, `a settings write must reach this probe as a 'pomodoro' event on the stream it already had open, not a timeout:\n${stdout}`);
+    });
+  });
+
+  await check('ticket 01: a board becoming newly awaited pushes a \'waiting\' event to the same stream', async () => {
+    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+      const opened = await openStreamProbe({ home: probeHome, port, seconds: 5 });
+      assert.equal(opened.stdout.trim(), 'stream=connected');
+
+      await fetch(`http://127.0.0.1:${port}/api/board`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+        body: JSON.stringify({
+          title: 'ticket 01 waiting push',
+          blocks: [{ kind: 'question', prompt: 'Waiting?', widget: 'single', options: [{ label: 'Yes' }] }],
+        }),
+      });
+
+      const { code, stdout, stderr } = await opened.waitForExit();
+      assert.equal(code, 0, `the probe must report success:\n${stdout}\n${stderr}`);
+      assert.match(stdout, /^event=waiting$/m, `a newly-awaited board must reach this probe as a 'waiting' event:\n${stdout}`);
+    });
+  });
+
+  await check('ticket 01: with nothing pushed, the probe reports a timeout rather than hanging or inventing an event -- the ablation for the two checks above', async () => {
+    // Without this, the two checks above could pass for the wrong reason: a probe that
+    // printed `event=pomodoro` unconditionally, having never actually parsed the stream,
+    // would satisfy both. This is what proves `event=` is read off the wire and not
+    // fabricated -- the same reasoning criterion 9's negative cases carry for the poll.
+    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
+      const started = Date.now();
+      const state = await probe({ home: probeHome, port, args: ['stream', '1'] });
+      assert.equal(state.code, 0, `a timeout is a reported outcome, not a failure: ${state.stderr}`);
+      assert.equal(state.stream, 'connected');
+      assert.equal(state.event, 'timeout');
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed >= 900, `must actually wait out the window, not return early: ${elapsed}ms`);
+      assert.ok(elapsed < 10_000, `must not overrun the window it was given: ${elapsed}ms`);
+    });
+  });
+
+  await check('ticket 01: an absent daemon is `stream=refused`, promptly, with no event line and no hang', async () => {
+    const home = makeProbeHome(randomBytes(32).toString('hex'));
+    const { createServer } = await import('node:net');
+    const port = await new Promise((resolve, reject) => {
+      const probeSocket = createServer();
+      probeSocket.on('error', reject);
+      probeSocket.listen(0, '127.0.0.1', () => {
+        const bound = probeSocket.address().port;
+        probeSocket.close(() => resolve(bound));
+      });
+    });
+    const started = Date.now();
+    const state = await probe({ home, port, args: ['stream', '5'] });
+    assert.equal(state.code, 0);
+    assert.equal(state.stream, 'refused');
+    assert.equal(state.event, undefined, 'no wait was ever entered, so there is nothing to report about one');
+    assert.ok(Date.now() - started < 10_000, 'a connection nothing answers must not be waited out to the stream window');
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Ticket 02, criteria 1-3: a push reaches the exact state cb_tick draws from and
+  // -rebuild lists -- not merely the wire, which ticket 01's checks above already pin.
+  // `--menubar --probe live` (cb_menubar_probe_live) exercises the SAME cb_stream_start /
+  // cb_poll_once pair the real run loop wires together, with no periodic poll armed in
+  // this mode: nothing else could have moved cb_state_*, so a report that differs from
+  // the unanswered defaults is proof the push -- and only the push -- did it.
+  // -------------------------------------------------------------------------------------
+
+  await check("ticket 02, criterion 1: a pomodoro settings write changes the item's derived state through the stream alone, with no periodic poll armed to have found it another way", async () => {
+    const now = Date.now();
+    // A running work interval under the OLD 25-minute default, so the arc has a value the
+    // push could plausibly disturb: 15 of 25 minutes left is a 0.6 fraction.
+    await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false }, { workMin: 25 }),
+      async ({ probeHome, port, secret }) => {
+        const opened = await openLiveProbe({ home: probeHome, port, seconds: 5 });
+        assert.equal(opened.stdout.trim(), 'stream=connected', `setup: the probe must connect before this check can mean anything:\n${opened.stdout}\n${opened.stderr}`);
+
+        const res = await fetch(`http://127.0.0.1:${port}/api/pomodoro/settings`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+          body: JSON.stringify({ workMin: 30 }),
+        });
+        assert.equal(res.status, 200, 'setup: the settings write must land');
+
+        const { code, signal, stdout, stderr } = await opened.waitForExit();
+        assert.equal(signal, null, `the probe must exit on its own, never be signalled: ${stderr}`);
+        assert.equal(code, 0, `the probe must report success:\n${stdout}\n${stderr}`);
+        assert.match(stdout, /^live=pushed$/m, `the settings write must be observed as a push, not timed out:\n${stdout}`);
+        assert.match(stdout, /\banswered=yes\b/, stdout);
+        const fraction = Number((stdout.match(/\bfraction=([\d.]+)\b/) || [])[1]);
+        // The interval's own deadline is untouched by a settings write (mergeSettings
+        // never retargets a running timer), so 15 minutes remaining against the NEW
+        // 30-minute setting is 0.5 -- against the OLD 25-minute one it would still read
+        // 0.6, which is what pins this to the pushed settings rather than a coincidence.
+        assert.ok(Math.abs(fraction - 0.5) < 0.01, `expected an arc near 0.5 under the newly-pushed 30-minute setting, got ${fraction}`);
+      });
+  });
+
+  await check("ticket 02, criteria 2 and 3: a board becoming newly awaited reaches the item's cached waiting rows through the stream alone", async () => {
+    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+      const opened = await openLiveProbe({ home: probeHome, port, seconds: 5 });
+      assert.equal(opened.stdout.trim(), 'stream=connected');
+
+      await fetch(`http://127.0.0.1:${port}/api/board`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+        body: JSON.stringify({
+          title: 'ticket 02 waiting push',
+          blocks: [{ kind: 'question', prompt: 'Waiting?', widget: 'single', options: [{ label: 'Yes' }] }],
+        }),
+      });
+
+      const { code, signal, stdout, stderr } = await opened.waitForExit();
+      assert.equal(signal, null, `the probe must exit on its own, never be signalled: ${stderr}`);
+      assert.equal(code, 0, `the probe must report success:\n${stdout}\n${stderr}`);
+      assert.match(stdout, /^live=pushed$/m, `the newly-awaited board must be observed as a push, not timed out:\n${stdout}`);
+      // The `waiting` event carries no rows of its own (just a count) -- this is what
+      // proves the push triggered a real re-check of GET /api/waiting rather than merely
+      // being noticed and dropped.
+      assert.match(stdout, /^waiting=1 total=1 more=0$/m, `the fresh row must be in the item's cache by the time the probe exits, not merely available for a poll to find later:\n${stdout}`);
+      assert.match(stdout, /^row=ticket 02 waiting push · round 1$/m);
+    });
+  });
+
+  await check("ticket 02, criterion 2 (the being-answered half): a round being submitted reaches the item's cached waiting rows through the stream alone -- the row disappears, not merely fails to reappear", async () => {
+    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+      const posted = await (await fetch(`http://127.0.0.1:${port}/api/board`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+        body: JSON.stringify({
+          title: 'ticket 02 answered push',
+          blocks: [{ kind: 'question', prompt: 'Waiting?', widget: 'single', options: [{ label: 'Yes' }] }],
+        }),
+      })).json();
+
+      // Setup, asserted directly against the daemon rather than through the client under
+      // test, and BEFORE the probe below ever opens: there really is one board waiting,
+      // so a report of `waiting=0` after the answer is a genuine disappearance and not a
+      // client whose cache was simply never populated in the first place. (The probe's
+      // own cache starts at zero regardless -- it connects after this board's own
+      // `waiting` push already fired, and a stream carries no replay -- which is exactly
+      // why this has to be checked here rather than through the probe's report.)
+      const waitingBefore = await (await fetch(`http://127.0.0.1:${port}/api/waiting`, {
+        headers: { [SECRET_HEADER]: secret },
+      })).json();
+      assert.equal(waitingBefore.total, 1, 'setup: the board is awaited before the probe opens');
+
+      const opened = await openLiveProbe({ home: probeHome, port, seconds: 5 });
+      assert.equal(opened.stdout.trim(), 'stream=connected');
+
+      const res = await fetch(`http://127.0.0.1:${port}/api/board/${posted.boardId}/submit`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+        body: JSON.stringify({ round: posted.round, action: 'send', answers: [], comments: [] }),
+      });
+      assert.equal(res.status, 200, 'setup: the submit must land');
+
+      const { code, signal, stdout, stderr } = await opened.waitForExit();
+      assert.equal(signal, null, `the probe must exit on its own, never be signalled: ${stderr}`);
+      assert.equal(code, 0, `the probe must report success:\n${stdout}\n${stderr}`);
+      assert.match(stdout, /^live=pushed$/m, `the answer must be observed as a push, not timed out:\n${stdout}`);
+      // handleSubmit broadcasts 'waiting' the same way handlePostBoard does (both call
+      // broadcastWaiting), so this is the SAME code path the check above already proved
+      // reaches cb_state_waiting -- what's new here is the daemon-reported total actually
+      // going back to zero once the round this probe's one push was about is answered.
+      assert.match(stdout, /^waiting=0 total=0 more=0$/m, `the row must be gone from the item's cache once the answer's push lands:\n${stdout}`);
+      assert.ok(!/^row=/m.test(stdout), `no row may survive the answer:\n${stdout}`);
+    });
+  });
+
+  await check('ticket 02: with nothing pushed, the live probe reports a timeout rather than a change from nowhere -- the ablation for the two checks above', async () => {
+    // Without this, the two checks above could pass for the wrong reason: a probe that
+    // reported updated state unconditionally, having never actually wired the stream to
+    // cb_poll_once, would satisfy both. This is what proves the report is read off a real
+    // push and not fabricated -- the same reasoning ticket 01's own ablation carries.
+    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
+      const started = Date.now();
+      const state = await probe({ home: probeHome, port, args: ['live', '1'] });
+      assert.equal(state.code, 0, `a timeout is a reported outcome, not a failure: ${state.stderr}`);
+      assert.equal(state.stream, 'connected');
+      assert.equal(state.live, 'timeout');
+      assert.equal(state.answered, 'no', 'nothing was ever pushed, so the item never got its first answer');
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed >= 900, `must actually wait out the window, not return early: ${elapsed}ms`);
+      assert.ok(elapsed < 10_000, `must not overrun the window it was given: ${elapsed}ms`);
+    });
+  });
+
+  await check('ticket 02: an absent daemon is `stream=refused` for the live probe too, promptly, with no hang', async () => {
+    const home = makeProbeHome(randomBytes(32).toString('hex'));
+    const { createServer } = await import('node:net');
+    const port = await new Promise((resolve, reject) => {
+      const probeSocket = createServer();
+      probeSocket.on('error', reject);
+      probeSocket.listen(0, '127.0.0.1', () => {
+        const bound = probeSocket.address().port;
+        probeSocket.close(() => resolve(bound));
+      });
+    });
+    const started = Date.now();
+    const state = await probe({ home, port, args: ['live', '5'] });
+    assert.equal(state.code, 0);
+    assert.equal(state.stream, 'refused');
+    assert.equal(state.live, undefined, 'no wait was ever entered, so there is nothing to report about one');
+    assert.ok(Date.now() - started < 10_000, 'a connection nothing answers must not be waited out to the push window');
+  });
+
+  await check('ticket 02: the poll is untouched -- CB_POLL_S, its queue and cb_poll_once are still exactly what they were', async () => {
+    // A structural pin rather than a behavioural one: the spec is explicit that the
+    // stream lives BESIDE the existing poll, never in place of it, and ticket 03 needs
+    // the poll to still be there to fall back on. The easiest way for that constraint to
+    // quietly break is an edit that "simplifies" cb_menubar by folding the poll into the
+    // stream -- which would pass every check above (a live daemon always has a stream to
+    // push through) while failing ticket 03's whole premise.
+    const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    assert.match(source, /static const double CB_POLL_S = 15\.0;/, 'the poll period is untouched');
+    assert.match(source, /dispatch_source_create\(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, cb_poll_queue\)/, 'the poll is still a timer source on the poll queue');
+    assert.match(source, /dispatch_source_set_event_handler\(poll, \^\{ cb_poll_once\(\); \}\);/, 'the poll still calls cb_poll_once on its own timer');
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Ticket 03: a dead stream is invisible. Criteria 4-6 -- a daemon killed and restarted
+  // recovers with no user action, a drop reconnects without ever showing stale data as
+  // fresh, and a stream that is unavailable for any reason leaves the ordinary poll
+  // updating the item regardless. The ticket itself says to be ruthless about the last
+  // one: prove it by actually preventing the stream from opening, not by reading the code.
+  // -------------------------------------------------------------------------------------
+
+  /** A reverse proxy in front of a real daemon that behaves normally for every route except
+   * `GET /api/events`, which it refuses outright by destroying the connection the instant
+   * the request line arrives -- no response, no 4xx, no hang for the client's own timeout
+   * to save it from, just a dead socket, the way a firewall or a daemon that has never
+   * heard of this route would look from here. This is what makes criterion 6 checkable for
+   * real: everything else (`/api/pomodoro`, `/api/waiting`) is forwarded untouched, so a
+   * client behind this proxy has a perfectly healthy POLL and a stream that can never open
+   * -- the one combination `--menubar --probe run` (bin/menubar.m) exists to be pointed
+   * at. `eventsAttempts` lets a check confirm the client actually TRIED the route it was
+   * meant to be refused on, rather than this proving nothing because nobody asked. */
+  function startBlockingProxy(targetPort) {
+    let eventsAttempts = 0;
+    const server = http.createServer((req, res) => {
+      if (req.url === '/api/events') {
+        eventsAttempts++;
+        req.socket.destroy();
+        return;
+      }
+      const upstream = http.request(
+        { host: '127.0.0.1', port: targetPort, path: req.url, method: req.method, headers: req.headers },
+        upstreamRes => {
+          res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+          upstreamRes.pipe(res);
+        },
+      );
+      upstream.on('error', () => res.destroy());
+      req.pipe(upstream);
+    });
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        resolve({ server, port: server.address().port, get eventsAttempts() { return eventsAttempts; } });
+      });
+    });
+  }
+
+  await check('ticket 03, structurally: cb_state_answered_at is written in exactly one place -- inside cb_poll_once, on an actual fetch -- so a reconnect or a push can never advance freshness by itself', async () => {
+    // Criterion 5 in one grep: the only way this file can make the item look "fresh" is a
+    // real fetch landing inside cb_poll_once. A reconnect or a pushed event can only ever
+    // ask for one of those (cb_stream_handle_event, and now the reconnect's own catch-up
+    // poll) -- neither may touch the timestamp directly, which is what this pins.
+    const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    // Excludes the file-scope declaration itself (`static double cb_state_answered_at =
+    // 0.0;`), which is a definition with an initializer, not a write against a live item.
+    const assignments = (source.match(/^(?!static double).*\bcb_state_answered_at\s*=/gm) || []);
+    assert.equal(assignments.length, 1, `expected exactly one write to cb_state_answered_at, found ${assignments.length}:\n${assignments.join('\n')}`);
+    const start = source.indexOf('static void cb_poll_once(void) {');
+    const end = source.indexOf('static int cb_current_display');
+    assert.ok(start > 0 && end > start, 'setup: cb_poll_once must still be findable by name');
+    assert.match(source.slice(start, end), /cb_state_answered_at\s*=\s*cb_now_ms\(\);/, 'the one write must be inside cb_poll_once itself');
+  });
+
+  await check('ticket 03, criteria 4 and 5: the daemon is killed and restarted on the same port -- the stream reconnects on its own, and the item\'s next report is a REAL fetch of the new daemon rather than the old one replayed', async () => {
+    const now = Date.now();
+    await withDaemon(runningDoc({ phase: 'work', deadline: now + 20 * 60_000, paused: false }, { workMin: 25 }),
+      async ({ daemonHome, probeHome, port, secret, server }) => {
+        const opened = await openLiveProbe({ home: probeHome, port, seconds: 10 });
+        assert.equal(opened.stdout.trim(), 'stream=connected', `setup: the probe must connect before this check can mean anything:\n${opened.stdout}\n${opened.stderr}`);
+
+        // Kill the daemon the way a crash or a supervised restart does: every fd it held,
+        // including the open SSE connection the probe above is on, closes out from under
+        // the client -- not a polite server.close(), which would just wait forever for
+        // that connection to finish on its own (it never does; that is the whole point of
+        // an SSE stream).
+        server.closeAllConnections();
+        await new Promise(resolve => server.close(resolve));
+
+        // A beat with nobody on the port at all -- long enough that the client's own first
+        // reconnect attempt, if it fired instantly, would find no daemon there, which is
+        // exactly the restart window this criterion is about.
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Back on the SAME port, with a DIFFERENT document: a report matching THIS one and
+        // not the pre-kill one is what proves the reconnect fetched fresh data rather than
+        // replaying what the item already had.
+        writeDoc(runningDoc({ phase: 'break', deadline: Date.now() + 3 * 60_000, paused: false }, { breakMin: 5 }), daemonHome);
+        const restarted = await startServer({ home: daemonHome, port, secret });
+        try {
+          const { code, signal, stdout, stderr } = await opened.waitForExit();
+          assert.equal(signal, null, `the probe must exit on its own, never be signalled: ${stderr}`);
+          assert.equal(code, 0, `the probe must report success:\n${stdout}\n${stderr}`);
+          assert.match(stdout, /^live=pushed$/m, `the reconnect after a daemon restart must be observed as a push, not a timeout:\n${stdout}`);
+          assert.match(stdout, /\banswered=yes\b/, stdout);
+          assert.match(stdout, /\bphase=break\b/, `the report must reflect the RESTARTED daemon's own document, not the one from before the kill:\n${stdout}`);
+        } finally {
+          await new Promise(resolve => restarted.server.close(resolve));
+        }
+      });
+  });
+
+  await check('ticket 03, criterion 6: with GET /api/events refused outright, the item still updates on the ordinary poll -- proven by actually breaking the route, not by reading the code', async () => {
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 10 * 60_000, paused: false }), async ({ probeHome, port }) => {
+      const proxy = await startBlockingProxy(port);
+      try {
+        const state = await probe({ home: probeHome, port: proxy.port, args: ['run', '5'] });
+        assert.equal(state.code, 0, `run must report, not crash: ${state.stderr}`);
+        assert.equal(state.run, 'polled', `the periodic poll must land within the window even though the stream can never open:\n${state.stdout}\n${state.stderr}`);
+        assert.equal(state.answered, 'yes');
+        assert.equal(state.phase, 'work');
+        assert.ok(proxy.eventsAttempts >= 1, 'setup: the client must actually have tried GET /api/events for this to prove anything');
+      } finally {
+        await new Promise(resolve => proxy.server.close(resolve));
+      }
+    });
+  });
+
+  await check('ticket 03, criterion 6 ablation: an entirely absent daemon is `run=timeout answered=no`, not a fabricated poll -- the ablation for the check above', async () => {
+    // Without this, the check above could pass for the wrong reason: a `run` mode that
+    // printed `run=polled answered=yes` unconditionally, having never actually wired the
+    // real poll in, would satisfy it just as well. Same reasoning every other ablation in
+    // this file carries.
+    const home = makeProbeHome(randomBytes(32).toString('hex'));
+    const { createServer } = await import('node:net');
+    const port = await new Promise((resolve, reject) => {
+      const probeSocket = createServer();
+      probeSocket.on('error', reject);
+      probeSocket.listen(0, '127.0.0.1', () => {
+        const bound = probeSocket.address().port;
+        probeSocket.close(() => resolve(bound));
+      });
+    });
+    const started = Date.now();
+    const state = await probe({ home, port, args: ['run', '3'] });
+    assert.equal(state.code, 0);
+    assert.equal(state.run, 'timeout');
+    assert.equal(state.answered, 'no', 'nothing ever answered, so the item never got its first answer');
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 900 * 3, `must actually wait out the window, not return early: ${elapsed}ms`);
+    assert.ok(elapsed < 15_000, `must not overrun the window it was given: ${elapsed}ms`);
+  });
+
+  await check('ticket 03: a stream that cannot connect backs off rather than hammering the port -- a bounded, growing-interval retry, not a tight loop', async () => {
+    // A bare TCP stand-in, not an HTTP one: every connection this process makes to open
+    // `GET /api/events` shows up as a `connection` event here regardless of what it sends,
+    // and destroying the socket at once (never answering) is what forces a fast, repeated
+    // failure -- the shape a reconnect-with-backoff has to survive without spinning.
+    const attempts = [];
+    const { createServer } = await import('node:net');
+    const stub = createServer(socket => {
+      attempts.push(Date.now());
+      socket.destroy();
+    });
+    await new Promise(resolve => stub.listen(0, '127.0.0.1', resolve));
+    const port = stub.address().port;
+    const home = makeProbeHome(randomBytes(32).toString('hex'));
+    try {
+      // `live` alone: it arms no periodic poll of its own, so every connection this stand-in
+      // sees is the STREAM's own reconnect and nothing else. Its first wait is hardcoded to
+      // CB_REQUEST_TIMEOUT_S (5s) regardless of the argument here, which is what bounds this
+      // check without needing a longer-lived probe mode.
+      await probe({ home, port, args: ['live', '1'] });
+
+      // Measured: NSURLSession makes more than one raw TCP connection per LOGICAL attempt
+      // against a peer that resets instantly (three, consistently, on this stack) -- not
+      // this file's own retry loop, which only ever calls cb_stream_start once per backoff
+      // wait. So it is CLUSTER boundaries -- attempts more than 200ms apart -- that reflect
+      // this file's own schedule; folding anything closer than that into one cluster is
+      // what keeps this check about OUR backoff instead of the platform's own connection
+      // handling underneath it.
+      const clusters = [];
+      for (const t of attempts) {
+        if (clusters.length === 0 || t - clusters[clusters.length - 1] > 200) clusters.push(t);
+      }
+      assert.ok(clusters.length >= 2, `must actually retry, not give up after the first failure: ${clusters.length} attempt(s), raw=${attempts.length}`);
+      const gaps = clusters.slice(1).map((t, i) => t - clusters[i]);
+      assert.ok(gaps.every(g => g >= 400), `must not hammer the port -- retries must be spaced out, not immediate: gaps ${gaps.join(',')}ms`);
+      if (gaps.length >= 2) {
+        assert.ok(gaps[gaps.length - 1] > gaps[0] * 1.3, `the interval between retries must grow, not stay constant: gaps ${gaps.join(',')}ms`);
+      }
+    } finally {
+      stub.close();
+    }
   });
 
   // -------------------------------------------------------------------------------------

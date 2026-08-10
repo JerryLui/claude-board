@@ -276,23 +276,15 @@ static const char *const LAUNCHD_MARKER_VALUE = "1";
  * cannot reach it: the fork below execs this binary with exactly one argument, and there
  * is nowhere else `--probe` could come from.
  *
- * The two optional words after it are that seam's two shapes, and neither is reachable
- * without `--probe`:
- *
- *   --menubar --probe <action>     perform ONE of the popover's own actions and then
- *                                  report, which is how criterion 4 ("every one takes
- *                                  effect") is checkable at all. bin/menubar.m matches
- *                                  the word against its own closed table and posts a
- *                                  compiled-in route literal, so no argv byte reaches a
- *                                  URL -- the same discipline MESSAGES applies above.
- *   --menubar --probe url <candidate>  print whether cb_is_board_url would let the
- *                                  popover open that URL. The one way to check
- *                                  criterion 6's refusal without a real daemon that can
- *                                  be made to emit a bad URL.
- *
- * Passed straight through as `argc`-guarded pointers rather than parsed here: this file
- * knows neither vocabulary, and splitting the validation across two files is how one of
- * the two halves ends up trusting the other's. */
+ * The optional words after it are that seam's own shapes -- an action word posted through
+ * the popover's closed table, `url <candidate>`, `stream <seconds>`, `live <seconds>` and
+ * whatever bin/menubar.m's own cb_menubar_probe grows next -- and neither this file nor
+ * this comment enumerates them: they are passed straight through as `argc`-guarded
+ * pointers, unparsed. This file knows neither vocabulary, and splitting the validation
+ * across two files is how one of the two halves ends up trusting the other's; the same
+ * reasoning extends to splitting the DOCUMENTATION of that vocabulary across two files,
+ * which is how one of the two copies ends up stale. bin/menubar.m's own comment above
+ * cb_menubar_probe is the one place that enumeration lives. */
 extern int cb_menubar(void);
 extern int cb_menubar_probe(const char *word, const char *argument);
 

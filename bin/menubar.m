@@ -130,6 +130,37 @@ static const double CB_TICK_S = 1.0;
  * daemon answers by reading one small JSON file. */
 static const double CB_REQUEST_TIMEOUT_S = 5.0;
 
+/* `--menubar --probe stream` (bottom of this file) has no poll of its own to bound it: it
+ * holds `GET /api/events` open and waits for whichever push a caller triggers. Five seconds
+ * is generous next to a loopback round trip and short enough that a genuinely broken
+ * stream still fails the check that uses it in a few seconds, not never. Overridden by the
+ * probe's own second argument, in whichever check needs a different number. */
+static const double CB_STREAM_DEFAULT_TIMEOUT_S = 5.0;
+
+/* Ticket 02's LIVE stream connection's own idle timeout — not the probe above, which is
+ * bounded some other way, but the long-lived `GET /api/events` subscription the real run
+ * loop holds open beside its poll. `NSURLRequest.timeoutInterval` measures IDLE time, reset
+ * by every byte the daemon sends, so as long as the daemon's own heartbeat (every
+ * `DEFAULT_SSE_HEARTBEAT_MS`, 15s by default) keeps landing this figure is never reached in
+ * the healthy case. Set well clear of that cadence — several heartbeats' worth of margin —
+ * rather than left at NSURLRequest's own 60s default, so an operator who lengthened the
+ * daemon's heartbeat with `CLAUDE_BOARD_SSE_HEARTBEAT_MS` does not silently outrun a number
+ * this file never named. What happens when it IS reached — the connection erroring out — is
+ * handled the same way every other drop is: CBEventStream's `didCompleteWithError:` below
+ * schedules a reconnect on the backoff the next two constants name. */
+static const double CB_STREAM_IDLE_TIMEOUT_S = 120.0;
+
+/* Ticket 03: how long to wait before trying `GET /api/events` again after the connection
+ * above ends, for ANY reason — a drop, a daemon that was never there, a non-200 answer
+ * running out its own short body, the idle timeout just above. Doubled after every failed
+ * attempt and reset the instant one succeeds (CBEventStream's own `didReceiveResponse:`),
+ * the same shape a browser's own EventSource reconnect uses and for the same reason: a
+ * daemon genuinely down for a while should not be hammered once a second for the length of
+ * a login session, and a daemon merely mid-restart (install.sh's usual few hundred
+ * milliseconds) should not sit unnoticed anywhere near the cap either. */
+static const double CB_STREAM_RECONNECT_INITIAL_S = 1.0;
+static const double CB_STREAM_RECONNECT_MAX_S = 30.0;
+
 /* Criterion 9's "later stops answering", as a number. Three poll periods since the last
  * SUCCESSFUL answer, i.e. two consecutive misses before the item dims.
  *
@@ -623,14 +654,15 @@ static int cb_bool(NSDictionary *dict, NSString *key, int fallback) {
   return [value isKindOfClass:[NSNumber class]] ? ([value boolValue] ? 1 : 0) : fallback;
 }
 
-/* One request, synchronously, and the only place in this file that speaks HTTP. NEVER
- * call this on the main thread while the item is up: it blocks, and the whole point of
- * the poll queue below is that the network half cannot be starved by — or starve — a menu
- * or popover tracking on the main run loop. That applies to the popover's own actions as
- * much as to the poll: every one of them hops onto the poll queue first, precisely
- * because a reader who pressed Pause while the daemon was wedged would otherwise be
- * holding a frozen popover open. The one caller that does run it on the main thread is
- * `--menubar --probe`, which has no run loop, no item and nothing else to do.
+/* One request, synchronously, and — until `cb_stream_probe` below, ticket 01's test seam
+ * only — the only place in this file that speaks HTTP. NEVER call this on the main thread
+ * while the item is up: it blocks, and the whole point of the poll queue below is that the
+ * network half cannot be starved by — or starve — a menu or popover tracking on the main
+ * run loop. That applies to the popover's own actions as much as to the poll: every one of
+ * them hops onto the poll queue first, precisely because a reader who pressed Pause while
+ * the daemon was wedged would otherwise be holding a frozen popover open. The one caller
+ * that does run it on the main thread is `--menubar --probe`, which has no run loop, no
+ * item and nothing else to do.
  *
  * `body` non-nil makes it a POST with a JSON content-type; nil is a bodyless request of
  * whatever `method` says. Returns the response body on a 200 and nil on anything else —
@@ -639,7 +671,10 @@ static int cb_bool(NSDictionary *dict, NSString *key, int fallback) {
  *
  * `path` is ALWAYS a compiled-in literal — /api/pomodoro, /api/waiting, or one of
  * CB_ACTION_PATHS above. Nothing this process reads over the network or takes from argv
- * ever reaches it, which is why building the URL by format string here is safe. */
+ * ever reaches it, which is why building the URL by format string here is safe.
+ *
+ * Deliberately NOT what `cb_stream_probe` below is built on: this function returns only
+ * once the daemon ENDS the response, and an SSE stream never does. */
 static NSData *cb_request(NSString *method, const char *path, NSData *body) {
   NSString *secret = cb_secret();
   if (secret == nil) return nil;
@@ -691,6 +726,154 @@ static NSData *cb_request(NSString *method, const char *path, NSData *body) {
     return nil;
   }
   return reply;
+}
+
+/* --- The stream probe -------------------------------------------------------------------
+ *
+ * `--menubar --probe stream` (bottom of this file), and nothing else: no ordinary poll or
+ * popover action ever opens `GET /api/events`. It exists to check the daemon-wide stream is
+ * real -- reachable over real loopback, by a real `NSURLSession`, holding a real connection
+ * open -- ahead of anything in this file having a use for what arrives: this process still
+ * only polls today, and nothing below reads what this probe mode observes. Widening this
+ * seam rather than opening a second one is deliberate: `test/check-menubar-client.mjs`
+ * already drives every other claim in this file through `--probe`, and a stream-only test
+ * double would prove that double works, not this binary.
+ *
+ * `cb_request` above cannot serve this: it returns only once the daemon ENDS the response,
+ * and an SSE stream never does. This reads the body incrementally instead, through an
+ * `NSURLSessionDataDelegate` -- which needs no run loop of its own to call back on, same as
+ * `cb_request`'s completion handler above: `NSURLSession` runs its delegate queue
+ * regardless of whether the calling thread is spinning one, so a plain
+ * `dispatch_semaphore_wait` is enough to block this synchronous probe on it. */
+@interface CBStreamProbe : NSObject <NSURLSessionDataDelegate>
+@property (nonatomic, strong) NSMutableData *buffer;
+@property (nonatomic) NSInteger statusCode;
+@property (nonatomic, strong) dispatch_semaphore_t headersSem;
+@property (nonatomic, strong) dispatch_semaphore_t eventSem;
+@property (nonatomic, copy) NSString *eventName;
+@property (nonatomic) BOOL delivered;
+@end
+
+@implementation CBStreamProbe
+
+- (instancetype)init {
+  self = [super init];
+  if (self != nil) {
+    _buffer = [NSMutableData data];
+    _headersSem = dispatch_semaphore_create(0);
+    _eventSem = dispatch_semaphore_create(0);
+  }
+  return self;
+}
+
+/* Signals as soon as the daemon's own response headers land -- which is BEFORE
+ * `handleStream` (src/server.mjs) can have done anything else, since `res.writeHead` runs
+ * before that function's `stream.subscribe(res)` call and both run synchronously with no
+ * await between them. So by the time this callback fires, the subscription already exists
+ * on the daemon side, and `cb_stream_probe` below is safe to tell its caller to act. */
+- (void)URLSession:(NSURLSession *)session
+              dataTask:(NSURLSessionDataTask *)task
+    didReceiveResponse:(NSURLResponse *)response
+     completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler {
+  self.statusCode = [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
+  dispatch_semaphore_signal(self.headersSem);
+  completionHandler(NSURLSessionResponseAllow);
+}
+
+/* Every chunk the stream delivers, appended and re-decoded whole rather than parsed
+ * incrementally byte-by-byte: the volumes here are a handful of comment lines and JSON
+ * events, never large enough for that to matter. A decode that fails (a multi-byte
+ * character split across two chunks -- nothing this stream sends today, but nothing here
+ * should assume otherwise) returns nil and this simply waits for the next chunk to
+ * complete it, rather than crashing on a byte sequence that is not yet whole.
+ *
+ * Looks for the first LINE naming an event (`event: <name>`) rather than waiting for a
+ * complete `\n\n`-terminated frame: PROTOCOL.md "SSE events" puts the event line before its
+ * data line and the closing blank line, so the name is already knowable, and this probe's
+ * whole question is "did a push arrive", not "what did it carry". A bare `:` comment line
+ * (the leading `: connected`, or a heartbeat) has no `event:` line at all and is silently
+ * skipped, same as any real client's parser would. Only the FIRST named event matters --
+ * once `delivered` is set, later chunks are ignored, so a caller cannot be handed a stale
+ * result by racing this against a second event this same probe is not asking about. */
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
+  if (self.delivered) return;
+  [self.buffer appendData:data];
+  NSString *text = [[NSString alloc] initWithData:self.buffer encoding:NSUTF8StringEncoding];
+  if (text == nil) return;
+  for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+    if (![line hasPrefix:@"event:"]) continue;
+    self.eventName = [[line substringFromIndex:6]
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    self.delivered = YES;
+    dispatch_semaphore_signal(self.eventSem);
+    return;
+  }
+}
+
+@end
+
+/* Drives `CBStreamProbe` above end to end: connect, report readiness, wait for a push, report
+ * what arrived (or that nothing did), and return -- never throws, never hangs past
+ * `timeoutSeconds` plus one ordinary request timeout. Two lines on stdout, flushed
+ * separately and in this order:
+ *
+ *   stream=connected               the daemon answered and the subscription is live; a
+ *                                   caller may now trigger whatever change it wants to see
+ *   event=<name>  |  event=timeout the first pushed event's name, or a timeout with none
+ *
+ * `stream=refused` alone (no `event=` line at all) covers everything `cb_request` already
+ * folds into one "no" -- a missing secret, a daemon that never answers, a non-200 -- because
+ * there was never a live subscription for a caller to have raced against. */
+static void cb_stream_probe(double timeoutSeconds) {
+  NSString *secret = cb_secret();
+  if (secret == nil) {
+    printf("stream=refused\n");
+    fflush(stdout);
+    return;
+  }
+
+  // Built the same way `cb_request` builds every other route's URL -- `path` a standalone
+  // literal rather than folded into one bigger format string -- so this route is not a
+  // second shape the structural closed-set check (test/check-menubar-client.mjs, criterion
+  // 8) has to special-case, and so it counts this route the same way it counts every other.
+  NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%d%s", cb_port(), "/api/events"]];
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                    timeoutInterval:timeoutSeconds + CB_REQUEST_TIMEOUT_S];
+  [request setValue:secret forHTTPHeaderField:@"x-claude-board-secret"];
+  request.HTTPMethod = @"GET";
+
+  CBStreamProbe *delegate = [[CBStreamProbe alloc] init];
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]
+                                                          delegate:delegate
+                                                     delegateQueue:nil];
+  NSURLSessionDataTask *task = [session dataTaskWithRequest:request];
+  [task resume];
+
+  int64_t headersWaitNs = (int64_t)(CB_REQUEST_TIMEOUT_S * (double)NSEC_PER_SEC);
+  BOOL connected = dispatch_semaphore_wait(delegate.headersSem, dispatch_time(DISPATCH_TIME_NOW, headersWaitNs)) == 0
+      && delegate.statusCode == 200;
+  if (!connected) {
+    [task cancel];
+    [session invalidateAndCancel];
+    cb_forget_secret();
+    printf("stream=refused\n");
+    fflush(stdout);
+    return;
+  }
+  printf("stream=connected\n");
+  fflush(stdout);
+
+  int64_t eventWaitNs = (int64_t)(timeoutSeconds * (double)NSEC_PER_SEC);
+  BOOL delivered = dispatch_semaphore_wait(delegate.eventSem, dispatch_time(DISPATCH_TIME_NOW, eventWaitNs)) == 0;
+  [task cancel];
+  [session invalidateAndCancel];
+  if (delivered) {
+    printf("event=%s\n", delegate.eventName.UTF8String ?: "");
+  } else {
+    printf("event=timeout\n");
+  }
+  fflush(stdout);
 }
 
 /* `GET /api/pomodoro`. Fills the outputs with defaults first and returns whether the
@@ -838,6 +1021,14 @@ static int cb_state_zero_fetched = 0;
  * on the main thread. Every dispatch onto it is guarded accordingly. */
 static dispatch_queue_t cb_poll_queue = nil;
 
+/* Signalled once at the end of every SUCCESSFUL cb_poll_once, and nil everywhere except
+ * `--menubar --probe live` (ticket 02's widened seam, bottom of this file) — the real run
+ * loop never creates one, so this costs it one pointer compare per poll and nothing else.
+ * It is what lets that probe mode say "a push updated the state" without a periodic poll
+ * of its own to have found the same answer some other way, and without sleeping and
+ * hoping: a semaphore wait either returns because this fired, or it times out. */
+static dispatch_semaphore_t cb_poll_completed_sem = nil;
+
 static void cb_poll_once(void) {
   cb_timer timer;
   cb_settings settings;
@@ -869,6 +1060,9 @@ static void cb_poll_once(void) {
   cb_state_answered_once = 1;
   cb_state_zero_fetched = 0;
   [cb_state_lock unlock];
+
+  /* Test seam only — see cb_poll_completed_sem above. */
+  if (cb_poll_completed_sem != nil) dispatch_semaphore_signal(cb_poll_completed_sem);
 }
 
 /* The one derivation both readers share: the once-a-second repaint, and the popover's
@@ -916,6 +1110,227 @@ static void cb_dispatch_action(cb_action action) {
     cb_perform(action);
     cb_poll_once();
   });
+}
+
+/* --- The live stream client ------------------------------------------------------------
+ *
+ * Ticket 02. Holds `GET /api/events` open for as long as the connection lasts and, on
+ * every `pomodoro` or `waiting` push, dispatches a fresh `cb_poll_once` onto the SAME
+ * serial queue the periodic poll and every popover action already use — one code path
+ * applies state to cb_state_*, whether what triggered it was a timer tick, a button press
+ * or a push arriving. `pomodoro`'s own payload mirrors `GET /api/pomodoro` closely enough
+ * to parse in place, but re-fetching instead keeps state application confined to the one
+ * function that already owns it rather than growing a second parser for the same shape —
+ * and it is the ONLY way to answer `waiting`, whose payload is a bare count with no rows
+ * in it at all, when what the popover draws is the rows `GET /api/waiting` holds.
+ *
+ * Deliberately NOT a reconnecting client. Ticket 03 owns retry, staleness and
+ * degradation; this file's job stops at "hold it open and act on what arrives". If this
+ * connection never opens, or opens and later drops, nothing here notices or retries — the
+ * periodic poll above is untouched and keeps running exactly as it does today, which is
+ * what keeps a dead stream from being worse than no stream at all (see
+ * CB_STREAM_IDLE_TIMEOUT_S above for the one number that bounds how long a silent
+ * connection is left believing itself alive).
+ *
+ * This class owns only the transport — framing SSE chunks into named events — and never
+ * touches cb_state_* itself; `cb_stream_handle_event` below is the one place that
+ * decides what an event NAME means. Forward-declared here because the delegate method
+ * that calls it is defined above its own definition. */
+static void cb_stream_handle_event(NSString *name);
+
+/* Ticket 03's reconnect, forward-declared for the same reason cb_stream_handle_event above
+ * is: CBEventStream's own `didCompleteWithError:` schedules a call to this function, and
+ * its real definition sits below the class that calls it. */
+static void cb_stream_start(dispatch_semaphore_t connectedSem);
+
+/* The backoff's own mutable state — see CB_STREAM_RECONNECT_INITIAL_S near the top of the
+ * file for what the two numbers it walks between mean. `cb_stream_had_failure` is what
+ * lets `didReceiveResponse:` below tell a RECONNECT apart from the very first connect at
+ * process start, which needs no catch-up poll of its own — see that method. */
+static double cb_stream_backoff_s = CB_STREAM_RECONNECT_INITIAL_S;
+static int cb_stream_had_failure = 0;
+
+/* Doubles the backoff (capped at CB_STREAM_RECONNECT_MAX_S) and arranges for
+ * `cb_stream_start` to run again once it elapses, on `cb_poll_queue` — the same serial
+ * queue every request in this process already goes out on, so a reconnect can never race a
+ * poll or a popover action into existence. Shared by CBEventStream's own
+ * `didCompleteWithError:` below and by `cb_stream_start` itself for the one failure that
+ * delegate callback can never report at all: no secret to open the connection with in the
+ * first place. `cb_poll_queue` is nil only if this is somehow called before either
+ * `cb_menubar` or a probe mode has set it up, which no caller in this file does. */
+static void cb_stream_schedule_reconnect(void) {
+  cb_stream_had_failure = 1;
+  double backoff = cb_stream_backoff_s;
+  cb_stream_backoff_s = fmin(cb_stream_backoff_s * 2.0, CB_STREAM_RECONNECT_MAX_S);
+  if (cb_poll_queue == nil) return;
+  dispatch_time_t when = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(backoff * (double)NSEC_PER_SEC));
+  dispatch_after(when, cb_poll_queue, ^{
+    cb_stream_start(nil);
+  });
+}
+
+@interface CBEventStream : NSObject <NSURLSessionDataDelegate>
+@property(nonatomic, strong) NSMutableData *buffer;
+/* Signalled once, the instant the daemon's response headers land with a 200 — a test
+ * seam for `--menubar --probe live` below, exactly the role CBStreamProbe's headersSem
+ * plays for `--probe stream`. nil in the real run loop, which has no caller waiting to be
+ * told when it is safe to trigger a daemon-side change. */
+@property(nonatomic, strong) dispatch_semaphore_t connectedSem;
+@end
+
+@implementation CBEventStream
+
+- (instancetype)init {
+  self = [super init];
+  if (self != nil) _buffer = [NSMutableData data];
+  return self;
+}
+
+- (void)URLSession:(NSURLSession *)session
+              dataTask:(NSURLSessionDataTask *)task
+    didReceiveResponse:(NSURLResponse *)response
+     completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler {
+  (void)session;
+  (void)task;
+  NSInteger status =
+      [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
+  if (status == 200) {
+    /* A live subscription again. Reset the backoff so the NEXT drop starts counting from
+     * CB_STREAM_RECONNECT_INITIAL_S rather than carrying forward whatever a run of earlier
+     * failures grew it to — and, only if THIS connection followed at least one failure, fire
+     * a fresh poll to catch up on anything a `pomodoro` or `waiting` event might have
+     * carried while nothing was listening. Skipped on the very first connect at process
+     * start (`cb_stream_had_failure` is still 0 then): the periodic poll already fires at
+     * DISPATCH_TIME_NOW beside it, and a second redundant fetch a moment later would buy
+     * nothing. Either way, this never touches cb_state_answered_at itself — only
+     * cb_poll_once does that, on an actual successful fetch — so a reconnect alone can never
+     * make stale data look fresh (criterion 5); it can only ever trigger the SAME real fetch
+     * a button press or a pushed event already does. */
+    cb_stream_backoff_s = CB_STREAM_RECONNECT_INITIAL_S;
+    if (cb_stream_had_failure) {
+      cb_stream_had_failure = 0;
+      if (cb_poll_queue != nil) dispatch_async(cb_poll_queue, ^{ cb_poll_once(); });
+    }
+    if (self.connectedSem != nil) dispatch_semaphore_signal(self.connectedSem);
+  }
+  completionHandler(NSURLSessionResponseAllow);
+}
+
+/* Ticket 03: every way this connection can end — the daemon dropping it, never answering at
+ * all, a non-200 response finishing its own short body, the idle timeout above — arrives
+ * here exactly once, `error` nil only for the last of those, and every one of them means the
+ * same thing: there is no live subscription any more. Reruns `cb_stream_start` itself,
+ * rather than anything narrower, on the backoff `cb_stream_schedule_reconnect` arranges —
+ * which is what makes a daemon restart transparent: the next attempt reads cb_port() and
+ * cb_secret() again from scratch, exactly as the very first connection did, and picks up a
+ * rotated secret meanwhile (cb_forget_secret, the same policy cb_request already carries for
+ * every other route). `nil` for `connectedSem`, always: only `--menubar --probe live`'s own
+ * FIRST connection ever wants one, and it has no second wait armed for whatever a reconnect
+ * this deep into a run finds. */
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+  (void)session;
+  (void)task;
+  (void)error;
+  cb_forget_secret();
+  cb_stream_schedule_reconnect();
+}
+
+/* Frames are `\n\n`-terminated (PROTOCOL.md "SSE events"), so this looks for a complete one
+ * before doing any work, and DISCARDS what it consumed from the buffer — unlike
+ * CBStreamProbe above, which is a one-shot probe that reads only its first event and
+ * exits. This connection is held for a login session, so a buffer that only ever grew
+ * would be a slow leak against a process nothing restarts. A decode that fails (a
+ * multi-byte character split across two chunks) leaves the bytes in the buffer for the
+ * next chunk to complete, same reasoning CBStreamProbe's own comment gives. */
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
+  (void)session;
+  (void)task;
+  [self.buffer appendData:data];
+  NSData *sep = [@"\n\n" dataUsingEncoding:NSUTF8StringEncoding];
+  for (;;) {
+    NSRange found = [self.buffer rangeOfData:sep options:0 range:NSMakeRange(0, self.buffer.length)];
+    if (found.location == NSNotFound) break;
+    NSData *frameData = [self.buffer subdataWithRange:NSMakeRange(0, found.location)];
+    NSString *frame = [[NSString alloc] initWithData:frameData encoding:NSUTF8StringEncoding];
+    if (frame == nil) break;  // incomplete multi-byte sequence; wait for the next chunk
+    [self.buffer replaceBytesInRange:NSMakeRange(0, found.location + sep.length) withBytes:NULL length:0];
+    for (NSString *line in [frame componentsSeparatedByString:@"\n"]) {
+      if (![line hasPrefix:@"event:"]) continue;
+      NSString *name = [[line substringFromIndex:6]
+          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+      cb_stream_handle_event(name);
+      break;
+    }
+  }
+}
+
+@end
+
+/* Strong, file-scope, same reasoning as cb_popover: a session's delegate is not retained
+ * anywhere else, and a task's own reference is not enough to keep the session it belongs
+ * to alive for the length of a login session. */
+static NSURLSession *cb_stream_session = nil;
+static CBEventStream *cb_stream_delegate = nil;
+
+/* The one thing an event NAME means: `pomodoro` and `waiting` both become the exact same
+ * re-poll a button press already triggers (cb_dispatch_action's own trailing
+ * `cb_poll_once`). Anything else — a future event name this build predates — is silently
+ * ignored, the same closed-set discipline cb_phase_from applies to an unrecognised phase
+ * string: an unknown event is not evidence of nothing, only of nothing THIS build knows
+ * how to act on. */
+static void cb_stream_handle_event(NSString *name) {
+  if (![name isEqualToString:@"pomodoro"] && ![name isEqualToString:@"waiting"]) return;
+  if (cb_poll_queue == nil) return;
+  dispatch_async(cb_poll_queue, ^{
+    cb_poll_once();
+  });
+}
+
+/* Opens `GET /api/events` and holds it for as long as the connection lasts — and, as of
+ * ticket 03, is also what every RECONNECT calls to try again: CBEventStream's own
+ * `didCompleteWithError:` schedules a fresh call to this exact function after a backoff, so
+ * there is only one way this file ever opens the stream, whether it is the very first
+ * attempt of a login session or the fiftieth after a flaky network. A missing secret is no
+ * longer a dead end either — it schedules its own retry through the same backoff, because
+ * the daemon (and the secret file HOME derives) can appear after this process does, and
+ * giving up here would mean nothing ever tried again for the rest of the login session.
+ * Either way, the periodic poll beside it is what a reader gets meanwhile, exactly as it
+ * already does today.
+ *
+ * `connectedSem` is the test seam CBEventStream's own doc comment names; nil from the real
+ * run loop (cb_menubar below) and from every RECONNECT, which pass nothing because nothing
+ * there is waiting to be told THIS particular attempt succeeded. */
+static void cb_stream_start(dispatch_semaphore_t connectedSem) {
+  NSString *secret = cb_secret();
+  if (secret == nil) {
+    cb_stream_schedule_reconnect();
+    return;
+  }
+
+  /* A reconnect replaces the session wholesale rather than reusing the old one's task —
+   * NSURLSession task objects are one-shot, and reissuing a request on an already-completed
+   * one is not a thing the API supports. Tear the previous session down first so a login
+   * session with many drops does not grow one abandoned NSURLSession per reconnect: nil the
+   * very first time this ever runs, the just-completed session every time after — its own
+   * task is already done (that is why this is running at all), so this only releases what
+   * is left of it rather than cancelling anything still in flight. */
+  if (cb_stream_session != nil) [cb_stream_session invalidateAndCancel];
+
+  NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%d%s", cb_port(), "/api/events"]];
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                    timeoutInterval:CB_STREAM_IDLE_TIMEOUT_S];
+  [request setValue:secret forHTTPHeaderField:@"x-claude-board-secret"];
+  request.HTTPMethod = @"GET";
+
+  cb_stream_delegate = [[CBEventStream alloc] init];
+  cb_stream_delegate.connectedSem = connectedSem;
+  cb_stream_session =
+      [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]
+                                     delegate:cb_stream_delegate
+                                delegateQueue:nil];
+  NSURLSessionDataTask *task = [cb_stream_session dataTaskWithRequest:request];
+  [task resume];
 }
 
 /* --- The drawing ----------------------------------------------------------------------
@@ -2089,6 +2504,13 @@ int cb_menubar(void) {
     dispatch_source_set_event_handler(poll, ^{ cb_poll_once(); });
     dispatch_resume(poll);
 
+    /* Ticket 02: the daemon-wide stream, opened BESIDE the poll above rather than instead
+     * of it — the poll's own timer, queue and cadence are all untouched by this line, and
+     * everything a stream push does from here on is dispatch a fresh cb_poll_once onto the
+     * SAME cb_poll_queue the timer above and every popover action already share. `nil`:
+     * nothing in the real run loop is waiting to be told the subscription connected. */
+    cb_stream_start(nil);
+
     /* NSRunLoopCommonModes, not the default mode, and this is the trap QUIRKS.md wrote
      * down after measuring it: menu and popover tracking run the loop in
      * NSEventTrackingRunLoopMode, which a default-mode timer never reaches. A countdown
@@ -2189,7 +2611,7 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  * Gated on a second argv word so the supervised path cannot reach it: bin/launcher.c execs
  * this binary with exactly `--menubar` and nothing after it.
  *
- * Three optional words follow, and they are the seam's three shapes:
+ * Six optional words follow, and they are the seam's six shapes:
  *
  *   <action>            one of CB_PROBE_ACTIONS, POSTed before the report. This is what
  *                       makes "every control takes effect" checkable at all: a check can
@@ -2210,6 +2632,29 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  *                       ink somewhere it does not belong (measured: either one takes the
  *                       restart icon's width from 20 units to 6). Paths only: no image, no
  *                       view, no application.
+ *   stream <seconds>    hold the daemon-wide `GET /api/events` stream open (`cb_stream_probe`
+ *                       above) and report the first pushed event, or a timeout after
+ *                       `seconds` (default CB_STREAM_DEFAULT_TIMEOUT_S). The one shape here
+ *                       that does not exit at once: it prints `stream=connected` the moment
+ *                       the subscription is live, which is a check's cue that it may now
+ *                       make whatever daemon-side change it wants this probe to observe.
+ *                       Ticket 01's seam: proves the RAW connection carries a push.
+ *   live <seconds>      ticket 02's own widening of the seam above. `stream` proves a push
+ *                       arrives on the wire; this proves a push reaches the exact state
+ *                       cb_tick draws from — cb_state_*, updated through the real
+ *                       cb_stream_start / cb_poll_once pair the run loop wires together,
+ *                       with no AppKit anywhere near it and no periodic poll armed to have
+ *                       found the same answer some other way. See cb_menubar_probe_live
+ *                       below for the full shape of what it prints.
+ *   run <seconds>       ticket 03's own widening, and the mirror image of `live`: where
+ *                       `live` arms the stream ALONE so a report can only be explained by a
+ *                       push, this arms BOTH pieces cb_menubar's real run loop arms — the
+ *                       periodic poll and the stream, side by side, exactly as shipped.
+ *                       Criterion 6 is a claim about what happens when the stream genuinely
+ *                       cannot be reached, and the only way to prove that without reasoning
+ *                       about the code is to point this at something that answers
+ *                       `/api/pomodoro` but refuses or never opens `/api/events`, and watch
+ *                       the item update anyway. See cb_menubar_probe_run below.
  *
  * Output. The first line is space-separated `key=value` with every value a bare word, so a
  * check can split it without a parser; `text` is the countdown the derivation produced
@@ -2219,6 +2664,119 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  * verbatim — because a row label contains spaces and a middle dot, and quoting them would
  * be a parser this seam does not need. Exits 0 even when the daemon never answered: the
  * errand was to report, and it reported. */
+
+/* `--menubar --probe live <seconds>`, the body of the `live` shape documented above.
+ *
+ * Sets up exactly the two pieces of shared state cb_menubar's real run loop sets up before
+ * it ever touches AppKit — `cb_state_lock` and `cb_poll_queue` — starts the SAME
+ * `cb_stream_start` the real run loop calls, and then waits. No `dispatch_source` timer is
+ * armed here, unlike cb_menubar: with nothing else able to call `cb_poll_once`, the only
+ * way `cb_state_*` can change during the wait is a push landing on the stream and
+ * `cb_stream_handle_event` dispatching a re-poll — so a report that differs from the
+ * unanswered defaults is proof the push, and only the push, did it.
+ *
+ * Two lines on stdout, mirroring `cb_stream_probe`'s own shape:
+ *
+ *   stream=connected | stream=refused   the subscription's own headers, exactly as
+ *                                       `--probe stream` reports them — a caller's cue
+ *                                       that it may now make the daemon-side change it
+ *                                       wants this probe to observe. Nothing further is
+ *                                       printed on a refusal: there is no wait to report.
+ *   live=pushed | live=timeout          did a push land inside `seconds` (default
+ *                                       CB_STREAM_DEFAULT_TIMEOUT_S)
+ *
+ * followed by the plain probe's own report line and waiting-section lines — cb_state_*
+ * read back through cb_current_display and cb_state_waiting, the exact fields cb_tick
+ * would draw from and -rebuild would list. */
+static void cb_menubar_probe_live(double timeoutSeconds) {
+  cb_state_lock = [[NSLock alloc] init];
+  cb_defaults(&cb_state_timer, &cb_state_settings);
+  cb_poll_queue =
+      dispatch_queue_create("io.github.jerrylui.claude-board.menubar.probe-live", DISPATCH_QUEUE_SERIAL);
+  cb_poll_completed_sem = dispatch_semaphore_create(0);
+
+  dispatch_semaphore_t connectedSem = dispatch_semaphore_create(0);
+  cb_stream_start(connectedSem);
+
+  int64_t headersWaitNs = (int64_t)(CB_REQUEST_TIMEOUT_S * (double)NSEC_PER_SEC);
+  BOOL connected = dispatch_semaphore_wait(connectedSem, dispatch_time(DISPATCH_TIME_NOW, headersWaitNs)) == 0;
+  printf(connected ? "stream=connected\n" : "stream=refused\n");
+  fflush(stdout);
+  if (!connected) return;
+
+  int64_t pushWaitNs = (int64_t)(timeoutSeconds * (double)NSEC_PER_SEC);
+  BOOL pushed = dispatch_semaphore_wait(cb_poll_completed_sem, dispatch_time(DISPATCH_TIME_NOW, pushWaitNs)) == 0;
+  printf("live=%s\n", pushed ? "pushed" : "timeout");
+
+  cb_display d;
+  if (!cb_current_display(&d, NULL)) memset(&d, 0, sizeof(d));
+  static const char *const PHASES[] = { "idle", "work", "break", "longBreak" };
+  printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s answered=%s\n",
+         PHASES[d.phase], d.paused ? "yes" : "no", d.remaining_s, d.fraction,
+         d.countdown ? "yes" : "no", d.text[0] ? d.text : "none", d.hidden ? "yes" : "no",
+         d.answered ? "yes" : "no");
+
+  [cb_state_lock lock];
+  cb_waiting waiting = cb_state_waiting;
+  [cb_state_lock unlock];
+  printf("waiting=%d total=%d more=%d\n", waiting.count, waiting.total, waiting.more);
+  for (int i = 0; i < waiting.count; i++) printf("row=%s\n", waiting.rows[i].label);
+  fflush(stdout);
+}
+
+/* `--menubar --probe run <seconds>`, the body of the `run` shape documented above. Ticket
+ * 03's own widening, and the mirror image of `cb_menubar_probe_live` above: that mode arms
+ * the stream ALONE so a report can only be explained by a push; this arms the SAME two
+ * pieces cb_menubar's real run loop arms — the periodic `dispatch_source` poll (identical to
+ * the one cb_menubar creates, and to the one test/check-menubar-client.mjs's own structural
+ * pin asserts is untouched) and the stream, side by side.
+ *
+ * Waits for exactly ONE successful poll rather than the periodic cadence itself, which would
+ * cost a real CB_POLL_S per observation: the poll is armed at DISPATCH_TIME_NOW exactly as
+ * cb_menubar's is, so seeing that first one land already owes nothing to the stream — a
+ * caller wanting to prove criterion 6 points this at something that answers `/api/pomodoro`
+ * but refuses or never opens `/api/events` (a stand-in, a proxy, an old daemon) and reads
+ * `answered=yes` back regardless.
+ *
+ * One line ahead of the plain probe's own report: `run=polled` or `run=timeout`. No
+ * `stream=` line here on purpose — unlike `live`, this mode's whole point is that the
+ * stream's own fate must not decide what gets printed. */
+static void cb_menubar_probe_run(double timeoutSeconds) {
+  cb_state_lock = [[NSLock alloc] init];
+  cb_defaults(&cb_state_timer, &cb_state_settings);
+  cb_poll_queue =
+      dispatch_queue_create("io.github.jerrylui.claude-board.menubar.probe-run", DISPATCH_QUEUE_SERIAL);
+  cb_poll_completed_sem = dispatch_semaphore_create(0);
+
+  dispatch_source_t poll = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, cb_poll_queue);
+  dispatch_source_set_timer(poll, DISPATCH_TIME_NOW, (uint64_t)(CB_POLL_S * (double)NSEC_PER_SEC),
+                            (uint64_t)NSEC_PER_SEC);
+  dispatch_source_set_event_handler(poll, ^{ cb_poll_once(); });
+  dispatch_resume(poll);
+
+  cb_stream_start(nil);
+
+  int64_t waitNs = (int64_t)(timeoutSeconds * (double)NSEC_PER_SEC);
+  BOOL polled = dispatch_semaphore_wait(cb_poll_completed_sem, dispatch_time(DISPATCH_TIME_NOW, waitNs)) == 0;
+  dispatch_source_cancel(poll);
+  printf("run=%s\n", polled ? "polled" : "timeout");
+
+  cb_display d;
+  if (!cb_current_display(&d, NULL)) memset(&d, 0, sizeof(d));
+  static const char *const PHASES[] = { "idle", "work", "break", "longBreak" };
+  printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s answered=%s\n",
+         PHASES[d.phase], d.paused ? "yes" : "no", d.remaining_s, d.fraction,
+         d.countdown ? "yes" : "no", d.text[0] ? d.text : "none", d.hidden ? "yes" : "no",
+         d.answered ? "yes" : "no");
+
+  [cb_state_lock lock];
+  cb_waiting waiting = cb_state_waiting;
+  [cb_state_lock unlock];
+  printf("waiting=%d total=%d more=%d\n", waiting.count, waiting.total, waiting.more);
+  for (int i = 0; i < waiting.count; i++) printf("row=%s\n", waiting.rows[i].label);
+  fflush(stdout);
+}
+
 int cb_menubar_probe(const char *word, const char *argument) {
   @autoreleasepool {
     if (word != NULL && strcmp(word, "url") == 0) {
@@ -2245,6 +2803,33 @@ int cb_menubar_probe(const char *word, const char *argument) {
                box.size.width, box.size.height);
       }
       fflush(stdout);
+      return 0;
+    }
+    if (word != NULL && strcmp(word, "stream") == 0) {
+      double timeoutSeconds = CB_STREAM_DEFAULT_TIMEOUT_S;
+      if (argument != NULL) {
+        double parsed = atof(argument);
+        if (parsed > 0.0) timeoutSeconds = parsed;
+      }
+      cb_stream_probe(timeoutSeconds);
+      return 0;
+    }
+    if (word != NULL && strcmp(word, "live") == 0) {
+      double timeoutSeconds = CB_STREAM_DEFAULT_TIMEOUT_S;
+      if (argument != NULL) {
+        double parsed = atof(argument);
+        if (parsed > 0.0) timeoutSeconds = parsed;
+      }
+      cb_menubar_probe_live(timeoutSeconds);
+      return 0;
+    }
+    if (word != NULL && strcmp(word, "run") == 0) {
+      double timeoutSeconds = CB_STREAM_DEFAULT_TIMEOUT_S;
+      if (argument != NULL) {
+        double parsed = atof(argument);
+        if (parsed > 0.0) timeoutSeconds = parsed;
+      }
+      cb_menubar_probe_run(timeoutSeconds);
       return 0;
     }
     if (word != NULL) {
