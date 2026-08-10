@@ -991,7 +991,12 @@ records, exactly one of which still existed on disk.** Notification Center resol
 by bundle id and picks whichever record it likes, so the symptom is macOS raising
 *"claude-board.app is damaged and can't be opened"* over and over while the real install is
 fine and the board is up and serving. `install.sh` now skips registration for a bundle
-staged under `/tmp` or `/var/folders`, and `test/check-install.mjs` asserts it.
+staged under a throwaway root, and `test/check-install.mjs` asserts it. That test is
+`is_throwaway_bundle_path`, carried byte-identical in both scripts — the hardcoded roots
+plus, for a developer who exported their own `TMPDIR`, anything under it. The `TMPDIR` arm
+refuses `/`, `$HOME` and empty on purpose: a wrong YES there means the REAL install is
+never registered and never notifies again, with nothing on screen to say why, which is a
+worse bug than the one being prevented.
 `uninstall.sh` now withdraws the record after removing the bundle — after, because under
 `set -e` an rm that fails would otherwise abort with the record already gone, leaving a
 runnable bundle that can never notify, and because the gap between a withdrawal and a

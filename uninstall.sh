@@ -145,18 +145,34 @@ fi
 # LaunchServices rescan to re-register, restoring exactly the record being removed. Dying
 # after the rm instead leaves a stale record, which is no worse than never having run.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+# --- BEGIN throwaway-bundle test (byte-identical in uninstall.sh) ---
+# True when $1 sits under a throwaway root -- a bundle nobody will ever click, so one with
+# no business in a database that keeps its records forever. uninstall.sh carries an exact
+# copy (neither script sources the other) and test/check-install.mjs fails if the two drift
+# or if any case below stops holding.
+is_throwaway_bundle_path() {
+  case "$1" in
+    /tmp/*|/private/tmp/*|/var/tmp/*|/private/var/tmp/*|/var/folders/*|/private/var/folders/*) return 0 ;;
+  esac
+  # macOS's own TMPDIR lives under /var/folders and is already matched above; this is for a
+  # developer who exported their own, whose temp bundles would otherwise land somewhere no
+  # pattern names. Honoured only when it is a real nested directory: TMPDIR=/ or
+  # TMPDIR=$HOME would swallow the REAL install instead, silently costing it notifications
+  # for the life of the machine, which is a worse bug than the one being prevented.
+  _tmproot="${TMPDIR:-}"
+  _tmproot="${_tmproot%/}"
+  case "$_tmproot" in ''|/|"$HOME") return 1 ;; esac
+  case "$1" in "$_tmproot"/*) return 0 ;; esac
+  return 1
+}
+# --- END throwaway-bundle test ---
 if [ -d "$APP_PATH" ]; then
   rm -rf "$APP_PATH"
   echo "==> removed $APP_PATH"
-  case "$APP_PATH" in
-    /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;;
-    *)
-      if [ -x "$LSREGISTER" ]; then
-        "$LSREGISTER" -u "$APP_PATH" >/dev/null 2>&1 || true
-        echo "==> withdrew its LaunchServices record"
-      fi
-      ;;
-  esac
+  if ! is_throwaway_bundle_path "$APP_PATH" && [ -x "$LSREGISTER" ]; then
+    "$LSREGISTER" -u "$APP_PATH" >/dev/null 2>&1 || true
+    echo "==> withdrew its LaunchServices record"
+  fi
 else
   echo "==> no launcher bundle at $APP_PATH"
 fi

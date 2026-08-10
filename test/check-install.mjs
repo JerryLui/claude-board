@@ -607,22 +607,71 @@ async function main() {
       'and AFTER the rm: under `set -e` an rm that fails would otherwise abort with the record '
       + 'already gone, leaving a runnable bundle that can never notify (see uninstall.sh step 1b)',
     );
-    // The skip list is duplicated across the two scripts by necessity (neither sources the
-    // other), so drift is the failure mode: a root install.sh refuses to register but
-    // uninstall.sh happily unregisters is harmless, the reverse is the bug above returning.
-    //
-    // `[^)]*` rather than `.*`: greedy would swallow an arm body containing a paren. And
-    // each side is asserted to have MATCHED before they are compared -- `?.[0]` yields
-    // undefined on a miss, so an equality alone passes vacuously the moment either line is
-    // reformatted, which is precisely when this check is supposed to fire.
-    const roots = src => src.match(/^\s*(\/tmp\/\*\|[^)]*)\)/m)?.[1];
-    const uninstallRoots = roots(readFileSync(uninstallScript, 'utf8'));
-    const installRoots = roots(readFileSync(installScript, 'utf8'));
-    assert.ok(uninstallRoots, 'uninstall.sh must still carry a temp-root skip list this can read');
-    assert.ok(installRoots, 'install.sh must still carry a temp-root skip list this can read');
+    // `is_throwaway_bundle_path` is duplicated across the two scripts by necessity (neither
+    // sources the other), so drift is the failure mode: a root install.sh refuses to
+    // register but uninstall.sh happily unregisters is harmless; the reverse re-opens the
+    // bug above. The WHOLE function is compared, not just its pattern list, because the
+    // TMPDIR arm below carries as much of the decision as the patterns do.
+    const fn = src => src.match(
+      /# --- BEGIN throwaway-bundle test.*?\n(is_throwaway_bundle_path\(\) \{\n.*?\n\})\n/s,
+    )?.[1];
+    const installFn = fn(readFileSync(installScript, 'utf8'));
+    const uninstallFn = fn(readFileSync(uninstallScript, 'utf8'));
+    // Asserted to have MATCHED before being compared: a regex miss yields undefined on both
+    // sides, and an equality alone would pass vacuously the moment either script is
+    // reformatted -- precisely when this check is supposed to fire.
+    assert.ok(installFn, 'install.sh must still carry is_throwaway_bundle_path where this can read it');
+    assert.ok(uninstallFn, 'uninstall.sh must still carry is_throwaway_bundle_path where this can read it');
+    assert.equal(uninstallFn, installFn, 'is_throwaway_bundle_path has drifted between the two scripts');
+  });
+
+  await check('is_throwaway_bundle_path answers correctly for every root it has to judge', async () => {
+    // The function above is only ever run here with its verdict thrown away, so this runs
+    // the real extracted text against the cases that matter. A wrong YES is the expensive
+    // direction: the real install silently never registers, and never notifies again.
+    const installFn = readFileSync(installScript, 'utf8').match(
+      /# --- BEGIN throwaway-bundle test.*?\n(is_throwaway_bundle_path\(\) \{\n.*?\n\})\n/s,
+    )?.[1];
+    assert.ok(installFn, 'setup sanity: the function text must be extractable');
+
+    const asks = async (appPath, env) => {
+      const r = spawnSync('bash', ['-c', `set -euo pipefail\n${installFn}\nis_throwaway_bundle_path "$1"`, 'bash', appPath], {
+        encoding: 'utf8', env: { HOME: '/Users/somebody', ...env },
+      });
+      assert.equal(r.stderr, '', `the function must not error on ${appPath}: ${r.stderr}`);
+      return r.status === 0;
+    };
+
+    // Throwaway, in every spelling macOS uses. /var/folders is where os.tmpdir() points,
+    // and lsregister -dump reports the /private spelling of all of them.
+    for (const p of [
+      '/tmp/x/claude-board.app',
+      '/private/tmp/x/claude-board.app',
+      '/var/tmp/x/claude-board.app',
+      '/private/var/tmp/x/claude-board.app',
+      '/var/folders/vc/abc/T/x/claude-board.app',
+      '/private/var/folders/vc/abc/T/x/claude-board.app',
+    ]) assert.equal(await asks(p, {}), true, `${p} is a throwaway root`);
+
+    // A real install, under every TMPDIR that must not change the answer.
+    const real = '/Users/somebody/Applications/claude-board.app';
+    for (const TMPDIR of [undefined, '', '/', '/Users/somebody', '/Users/somebody/', '/var/folders/vc/abc/T/']) {
+      assert.equal(
+        await asks(real, TMPDIR === undefined ? {} : { TMPDIR }),
+        false,
+        `a real install must stay registerable with TMPDIR=${JSON.stringify(TMPDIR)} -- a wrong `
+        + 'yes here costs it notifications permanently, with no error anywhere',
+      );
+    }
+
+    // The gap this closes: a developer's own TMPDIR, which no hardcoded pattern names.
     assert.equal(
-      uninstallRoots, installRoots,
-      'the temp-root skip lists in install.sh and uninstall.sh have drifted apart',
+      await asks('/Users/somebody/tmp/x/claude-board.app', { TMPDIR: '/Users/somebody/tmp' }), true,
+      'a bundle under a custom TMPDIR is still a throwaway one',
+    );
+    assert.equal(
+      await asks('/Users/somebody/tmp/x/claude-board.app', { TMPDIR: '/Users/somebody/tmp/' }), true,
+      'and the trailing slash macOS itself puts on TMPDIR must not change that',
     );
   });
 

@@ -1114,11 +1114,28 @@ echo "         $ERR_LOG"
 # bundle sitting in temp is not one anybody will ever click, so it has no business in that
 # database; the real install is unaffected, since $APP_PATH is under $HOME there.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-case "$APP_PATH" in
-  /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) REGISTERABLE=0 ;;
-  *) REGISTERABLE=1 ;;
-esac
-if [ "$USE_LAUNCHER" -eq 1 ] && [ "$REGISTERABLE" -eq 1 ] && [ -x "$LSREGISTER" ]; then
+# --- BEGIN throwaway-bundle test (byte-identical in uninstall.sh) ---
+# True when $1 sits under a throwaway root -- a bundle nobody will ever click, so one with
+# no business in a database that keeps its records forever. uninstall.sh carries an exact
+# copy (neither script sources the other) and test/check-install.mjs fails if the two drift
+# or if any case below stops holding.
+is_throwaway_bundle_path() {
+  case "$1" in
+    /tmp/*|/private/tmp/*|/var/tmp/*|/private/var/tmp/*|/var/folders/*|/private/var/folders/*) return 0 ;;
+  esac
+  # macOS's own TMPDIR lives under /var/folders and is already matched above; this is for a
+  # developer who exported their own, whose temp bundles would otherwise land somewhere no
+  # pattern names. Honoured only when it is a real nested directory: TMPDIR=/ or
+  # TMPDIR=$HOME would swallow the REAL install instead, silently costing it notifications
+  # for the life of the machine, which is a worse bug than the one being prevented.
+  _tmproot="${TMPDIR:-}"
+  _tmproot="${_tmproot%/}"
+  case "$_tmproot" in ''|/|"$HOME") return 1 ;; esac
+  case "$1" in "$_tmproot"/*) return 0 ;; esac
+  return 1
+}
+# --- END throwaway-bundle test ---
+if [ "$USE_LAUNCHER" -eq 1 ] && ! is_throwaway_bundle_path "$APP_PATH" && [ -x "$LSREGISTER" ]; then
   "$LSREGISTER" -f "$APP_PATH" >/dev/null 2>&1 || true
 fi
 
