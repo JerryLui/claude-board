@@ -215,21 +215,33 @@ function addAwaitedRound(boardId, prompt, awaitTimeoutMs = AWAIT_MS) {
 function stand() {
   const withdrawn = [];
   const looking = new Map();
-  // When the `null` (unknown) Watcher on a board subscribed. Defaults to "just now", so
-  // an ordinary `looking.set(id, null)` models a tab that has only this moment
-  // reconnected; a check that wants an old one sets this back by hand.
-  const since = new Map();
+  // Per board, the instant a look-away window ENDS (ADR 73) -- an absolute stamp, not a
+  // duration, so it decays on the real clock exactly as the hub's does and can expire
+  // with nothing calling anything. Unset is the ordinary case: `looking` alone decides
+  // and there is no window. `lookAway()` below is how a check opens one.
+  const windowUntil = new Map();
+  const remaining = id => {
+    if (looking.get(id) === true) return Infinity;
+    const until = windowUntil.get(id);
+    return until ? Math.max(0, until - Date.now()) : 0;
+  };
   const banners = [];
   const watch = createStrandedWatch({
     home,
     sse: {
-      isAttended: (id, unknownAfterMs = Infinity) => {
-        if (!looking.has(id)) return false;
-        const state = looking.get(id);
-        if (state !== null) return state;
-        return Date.now() - (since.get(id) ?? Date.now()) < unknownAfterMs;
-      },
-      isConfirmedAttended: id => looking.get(id) === true,
+      // DERIVED from `attendedRemainingMs`, exactly as the real hub derives it
+      // (src/server.mjs: `remainingMs(boardId) > 0`). Spelling it `looking.get(id) === true`
+      // instead is the drift that hid a defect: the rule reads this boolean in one place
+      // and the milliseconds in another, so a stand-in where the two disagree cannot fail
+      // the way production does -- and production's whole hazard is a board that is
+      // Attended on a CLOCK rather than on a report. A stand-in that has drifted from the
+      // thing it stands in for is worse than none.
+      isConfirmedAttended: id => remaining(id) > 0,
+      // How LONG this board stays Attended, which is what tells the rule when to look
+      // again (ADR 73). `Infinity` is a tab focused right now, which never ages out; a
+      // finite number is a tab that has lost focus and is still inside its look-away
+      // window; 0 is nobody watching.
+      attendedRemainingMs: remaining,
     },
     notify: (folder, opts) => {
       // A stand-in ChildProcess, down to the one event the rule subscribes to: `exit`,
@@ -250,7 +262,10 @@ function stand() {
     // unclean restart. Recorded rather than performed, because the real one sends SIGTERM.
     withdraw: (pid, startedAtMs) => withdrawn.push({ pid, startedAtMs }),
   });
-  return { looking, since, banners, withdrawn, watch };
+  /** Open a look-away window on this board that really expires, `ms` from now: the tab
+   * has just lost focus and the daemon still counts the board as Attended until then. */
+  const lookAway = (id, ms) => windowUntil.set(id, Date.now() + ms);
+  return { looking, lookAway, banners, withdrawn, watch };
 }
 
 // The click target as the daemon really builds it (`strandedTarget`, src/server.mjs):
@@ -379,24 +394,264 @@ async function layerOne() {
     second.watch.close();
   });
 
-  await check('criterion 6: returning kills the click-serving process with SIGTERM and clears the marker', async () => {
+  await check('a board whose rounds are ABANDONED loses its banner, and keeps its mark', async () => {
+    // ADR 69 (`ask(fresh: true)`) meets ADR 74. The reviewer ran `/clear` with a banner on
+    // screen: nothing on this board is awaited any more, so the banner names a round that
+    // no longer wants an answer and its click would land on a board with nothing to do --
+    // for up to `min(the round's deadline, CLICK_LIFETIME_MAX_MS)`, tens of minutes.
+    //
+    // This used to fall out of `mayAnnounce` spending a record whose round had stopped
+    // being awaited; that spend is gone with the permanent mark, so `evaluate` alone now
+    // cancels the pending grace and never reaches the delivered banner. `abandoned` is the
+    // withdrawal half on its own -- and it must stay ONLY that half: abandoning is not
+    // returning, so the mark and the gate are left exactly as they were.
+    const { banners, watch } = stand();
+    const board = seedBoard();
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1);
+    const before = bannerOn(board.id);
+    assert.equal(before.returned, false, 'nobody has come back');
+
+    // The shim declares the conversation over, exactly as handleAbandon does it: every
+    // open round closed on disk, then the rule told.
+    const abandoned = readBoard(board.id, home);
+    for (const r of abandoned.rounds) if (r.status === 'open') r.status = 'abandoned';
+    writeBoard(abandoned, home);
+    watch.abandoned(board.id);
+
+    assert.deepEqual(banners[0].child.killed, ['SIGTERM'],
+      'the banner comes off the screen: SIGTERM is what withdraws a delivered one');
+    const after = bannerOn(board.id);
+    assert.ok(after, 'the mark survives -- abandoning is not returning');
+    assert.equal(after.round, before.round, 'still the round that was announced');
+    assert.equal(after.returned, false, 'and the gate is still shut, because nobody came back');
+    assert.equal(after.pid, null, 'only the pid goes, with the process it named');
+    watch.close();
+  });
+
+  await check('an abandoned board does not become announceable: the gate is untouched', async () => {
+    // The half that would be easy to get wrong by reaching for `spend` again. A board
+    // abandoned with a banner standing must not announce a later round without a return --
+    // and abandoned boards do get later rounds: `ask(fresh: true)` starts a NEW board, but
+    // nothing stops a stale shim posting into this one.
     const { looking, banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
     await tick();
     assert.equal(banners.length, 1);
 
+    const abandoned = readBoard(board.id, home);
+    for (const r of abandoned.rounds) if (r.status === 'open') r.status = 'abandoned';
+    writeBoard(abandoned, home);
+    watch.abandoned(board.id);
+
+    addAwaitedRound(board.id, 'a round landing on an abandoned board?');
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1, 'silent: withdrawing a banner is not a reviewer returning');
+
+    looking.set(board.id, true);   // ... and a genuine return still unblocks it
+    watch.evaluate(board.id, target(board.id));
+    looking.delete(board.id);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 2, 'the gate still works, it just was not opened by the abandon');
+    watch.close();
+  });
+
+  await check('abandoning a board with no banner on it is a silent no-op', async () => {
+    // `handleAbandon` calls this unconditionally, for every board a shim declares done --
+    // almost none of which was ever announced. It must not throw, write, or announce.
+    const { banners, watch } = stand();
+    const board = seedBoard();
+    assert.doesNotThrow(() => watch.abandoned(board.id));
+    assert.doesNotThrow(() => watch.abandoned('b_never_created'));
+    assert.doesNotThrow(() => watch.abandoned('../../etc/passwd'));
+    await tick();
+    assert.equal(banners.length, 0);
+    assert.equal(bannerOn(board.id), null, 'nothing was written to a board that had nothing');
+    watch.close();
+  });
+
+  await check('the countdown waits out the look-away window, and is clamped to what a timer can hold', async () => {
+    // Two properties of one expression, `grace + whatever is left of the window`.
+    //
+    // It has to WAIT the window out, because no event fires when a window expires: without
+    // the sum the window would not delay a banner, it would cancel it (see `evaluate`).
+    await withGrace(30, async () => {
+      const { lookAway, banners, watch } = stand();
+      const board = seedBoard();
+      lookAway(board.id, 250);   // a tab buried a moment ago, 250ms of window left
+      try {
+        watch.evaluate(board.id, target(board.id));
+        await tick(120);           // four graces later, still inside the window
+        assert.equal(banners.length, 0, 'the grace alone must not be what fires this');
+        await tick(250);
+        assert.equal(banners.length, 1, 'and past the window it announces, once');
+      } finally {
+        watch.close();
+      }
+    });
+
+    // And it has to be CLAMPED. Both knobs are validated finite-and-positive but neither
+    // is bounded above, and node coerces a setTimeout delay to a signed 32-bit int: a sum
+    // past 2^31-1 does not throw, it warns and fires on the next tick. An operator asking
+    // for a month-long window would get every board announcing instantly -- the exact
+    // inverse of the request.
+    await withGrace(30, async () => {
+      const { lookAway, banners, watch } = stand();
+      const board = seedBoard();
+      lookAway(board.id, 30 * 24 * 60 * 60 * 1000); // a month, well past the ceiling
+      try {
+        watch.evaluate(board.id, target(board.id));
+        await tick(120);
+        assert.equal(banners.length, 0,
+          'an over-long window must clamp to the ceiling, not wrap around into "fire immediately"');
+      } finally {
+        watch.close();
+      }
+    });
+  });
+
+  await check('a window that opens UNDER an already-armed countdown still gets its banner, with no further event', async () => {
+    // The permanent false negative, and the exact sequence an `install.sh` update
+    // produces. `handleEvents` evaluates at SUBSCRIBE, before the reconnecting page has
+    // reported anything, so the bare grace is armed against no window at all; the page's
+    // `sinceFocusMs` seeds a longer window one round trip later, and `evaluate` leaves the
+    // shorter countdown alone because one is already armed.
+    //
+    // The grace then fires INSIDE the window. If it simply returns -- which is what asking
+    // `isConfirmedAttended`, a boolean, led to -- the countdown is gone and the window
+    // expires against nothing, because no event fires when a window expires. The round is
+    // then never announced at all: not delayed, lost. ADR.md entry 74 accepts a banner
+    // missed while the screen was locked never being repeated; it does not accept this.
+    //
+    // Nothing is called after the window is opened. That is the whole point: the rule has
+    // to come back on its own.
+    await withGrace(50, async () => {
+      const { lookAway, banners, watch } = stand();
+      const board = seedBoard();
+      try {
+        watch.evaluate(board.id, target(board.id)); // subscribe: no window yet, bare grace
+        lookAway(board.id, 300);                    // ... and the report lands, seeding one
+        watch.evaluate(board.id, target(board.id)); // which leaves the armed countdown alone
+
+        await tick(150); // the grace has fired, well inside the window
+        assert.equal(banners.length, 0, 'nothing may fire while the board is still Attended');
+
+        await tick(400); // the window expires -- and NOTHING calls evaluate here
+        assert.equal(banners.length, 1,
+          'the rule has to re-arm on the remaining window: no event fires when one expires, so a countdown dropped here is a round that is never announced');
+        assert.equal(bannerOn(board.id).round, 1);
+      } finally {
+        watch.close();
+      }
+    });
+  });
+
+  await check('a countdown armed for a look-away window is re-armed when that tab goes away', async () => {
+    // The window belongs to an OPEN tab (criterion 7 says so in as many words). A timer
+    // armed at grace + two minutes while a tab was buried is waiting out a window for a
+    // tab nobody has open any more, so the board sits silent for the rest of it. Narrowly
+    // scoped to "the board now reports no attended time at all", so it cannot become the
+    // general re-arm that would let a flaky socket hold the countdown open forever -- the
+    // check just below this one is what pins that.
+    await withGrace(40, async () => {
+      const { lookAway, banners, watch } = stand();
+      const board = seedBoard();
+      lookAway(board.id, 5000); // buried tab, five seconds of window left
+      try {
+        watch.evaluate(board.id, target(board.id));
+        await tick(80);
+        assert.equal(banners.length, 0, 'waiting out the window, as it should be');
+
+        lookAway(board.id, 0);     // the tab closes: its window goes with it
+        watch.evaluate(board.id, target(board.id));
+        await tick(120);
+        assert.equal(banners.length, 1,
+          'the banner arrives one plain grace later, rather than waiting out a window nobody owns');
+      } finally {
+        watch.close();
+      }
+    });
+  });
+
+  await check('criterion 3: returning kills the click-serving process with SIGTERM and leaves the mark standing', async () => {
+    // THE REWRITTEN ASSERTION (SPEC_SIGNALS.md criterion 3; ADR 74). This check used to
+    // pin the opposite: that coming back CLEARED the marker, so leaving again raised a
+    // second banner for the same round. That was the defect, measured at roughly one
+    // banner a minute for one round -- a glance at the board, or the banner's own click
+    // bringing the tab forward, reset the budget.
+    //
+    // What a return buys now: the banner comes off the screen, and the board may announce
+    // a round it has never announced. What it does not buy: another banner for the round
+    // already announced, ever, however many times the reviewer leaves and comes back.
+    const { looking, banners, watch } = stand();
+    const board = seedBoard();
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1);
+    const mark = bannerOn(board.id);
+    assert.equal(mark.round, 1);
+    assert.equal(mark.returned, false, 'the gate is shut from the moment a banner is raised');
+
     looking.set(board.id, true); // a tab reports that it is visible and focused
     watch.evaluate(board.id, target(board.id));
     assert.deepEqual(banners[0].child.killed, ['SIGTERM'],
       'SIGTERM specifically: it is the path that withdraws the delivered banner from Notification Center');
-    assert.equal(announcedAt(board.id), null, 'coming back ends the absence');
+    const returnedRec = bannerOn(board.id);
+    assert.ok(returnedRec, 'coming back does NOT erase the mark');
+    assert.equal(returnedRec.round, 1, 'round 1 stays announced for the whole of its life');
+    assert.equal(returnedRec.returned, true, 'what the return buys is the gate, not the mark');
+    assert.equal(returnedRec.pid, null, 'and the pid goes with the banner it named');
+    assert.equal(returnedRec.at, mark.at, 'the announcement is the same announcement, stamp and all');
 
-    // ... and leaving again may raise a fresh one.
+    // ... and leaving again raises NOTHING, because the only round waiting has had its one
+    // banner. Three departures and three returns, to make "any number of times" literal.
+    for (let i = 0; i < 3; i++) {
+      looking.delete(board.id);
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+      looking.set(board.id, true);
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+    }
+    assert.equal(banners.length, 1, 'criterion 3: a round is announced at most once, ever');
+    watch.close();
+  });
+
+  await check('criterion 5: after a genuine return and a fresh departure, a round never announced earns one banner', async () => {
+    // The other side of criterion 3, and the reason the mark is per ROUND rather than per
+    // board: a return really does re-arm the board, just not for the round already spent.
+    const { looking, banners, watch } = stand();
+    const board = seedBoard();
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1);
+    assert.equal(bannerOn(board.id).round, 1);
+
+    looking.set(board.id, true); // the reviewer genuinely comes back
+    watch.evaluate(board.id, target(board.id));
+    assert.equal(bannerOn(board.id).returned, true);
+
+    addAwaitedRound(board.id, 'a second question, asked while they were here');
+    looking.delete(board.id); // ... and leaves again
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 2, 'criterion 5: round 2 has never been announced, so it earns one banner');
+    const rec = bannerOn(board.id);
+    assert.equal(rec.round, 2, 'and the mark moves to the round it is about');
+    assert.equal(rec.returned, false, 'with the gate shut again behind it');
+
+    // Round 1 is still awaited and still the oldest -- and still silent forever.
+    assert.ok(roundIsAwaitedOpen(readBoard(board.id, home).rounds[0]), 'round 1 really is still waiting');
+    looking.set(board.id, true);
+    watch.evaluate(board.id, target(board.id));
     looking.delete(board.id);
     watch.evaluate(board.id, target(board.id));
     await tick();
-    assert.equal(banners.length, 2, 'criterion 6: leaving again may raise a fresh banner');
+    assert.equal(banners.length, 2, 'and nothing re-announces round 1 or round 2: both marks are spent');
     watch.close();
   });
 
@@ -578,7 +833,9 @@ const { createStrandedWatch } = await import(strandedUrl);
 const pids = [];
 const stand = () => createStrandedWatch({
   home: process.env.CLAUDE_BOARD_HOME,
-  sse: { isAttended: () => false, isConfirmedAttended: () => false },
+  // attendedRemainingMs is what evaluate actually asks (ADR 73): 0 is "nobody is
+  // watching and no look-away window is running", which is this scene's whole premise.
+  sse: { attendedRemainingMs: () => 0 },
   // A real process, detached and unref'd exactly as src/notify.mjs leaves the
   // click-serving child: it outlives this one unless something kills it, which is the
   // whole fact under test. Long enough that its own deadline cannot be what ends it.
@@ -809,10 +1066,10 @@ process.exit(0);
     watch.close();
   });
 
-  await check('the absence ends with the round the record NAMES, not with the last round on the board', async () => {
-    // The predicate must be the named round and nothing wider. "Is ANYTHING still
-    // awaited" leaves round 2 with no banner of its own for the rest of its wait, in the
-    // shape handlePostBoard calls ordinary: an awaited page round beside a question round.
+  await check('criterion 6: the announced round being ANSWERED while another waits, with no return, raises nothing', async () => {
+    // REWRITTEN (ADR 74). This used to assert the opposite -- that round 1 being answered
+    // retired the record and handed round 2 an absence of its own. A round becoming the
+    // oldest waiting one is not the reviewer coming back, and it earns nothing on its own.
     const { banners, watch } = stand();
     const board = seedBoard();                          // round 1, awaited
     addAwaitedRound(board.id, 'a second, awaited too?'); // round 2, awaited
@@ -828,10 +1085,38 @@ process.exit(0);
     writeBoard(answered, home);
     watch.evaluate(board.id, target(board.id));
     await tick();
-    assert.equal(banners.length, 2, 'the announced round is over, so round 2 gets an absence of its own');
-    assert.equal(bannerOn(board.id).round, 2, 'and the new record names it');
-    assert.deepEqual(banners[0].child.killed, ['SIGTERM'],
-      'the first banner is withdrawn on the way, so the reviewer never has two standing at once');
+    assert.equal(banners.length, 1, 'criterion 6: nobody has come back, so the board stays silent');
+    assert.equal(bannerOn(board.id).round, 1, 'the mark stays on the round it was raised for');
+    assert.equal(bannerOn(board.id).returned, false, 'and the gate is still shut');
+
+    // ... until the reviewer genuinely returns, and then round 2 gets its one banner.
+    watch.close();
+  });
+
+  await check('criterion 6: ... and the round the reviewer does come back for is round 2, once', async () => {
+    // The same shape carried one step further: the silence of criterion 6 is a delay, not
+    // a permanent loss. A genuine return and a fresh departure is what unblocks round 2.
+    const { looking, banners, watch } = stand();
+    const board = seedBoard();
+    addAwaitedRound(board.id, 'a second, awaited too?');
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1);
+
+    const answered = readBoard(board.id, home);
+    answered.rounds[0].status = 'sent';
+    writeBoard(answered, home);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1);
+
+    looking.set(board.id, true);   // the reviewer comes back ...
+    watch.evaluate(board.id, target(board.id));
+    looking.delete(board.id);      // ... and leaves again
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 2, 'round 2 has never been announced, so now it earns its one banner');
+    assert.equal(bannerOn(board.id).round, 2);
     watch.close();
   });
 
@@ -862,49 +1147,62 @@ process.exit(0);
     watch.close();
   });
 
-  await check('a wait that dies unanswered ends its absence: a later round may raise a fresh banner', async () => {
-    // The reviewer swipes the banner away and never comes back. Round 1's wait dies on
-    // its own, and the process serving that banner's click dies with it -- `until` is
-    // that same instant. Without the record expiring there, every later round on this
-    // board is silent for the life of the store.
+  await check('criterion 6: the announced round LAPSING while another waits, with no return, raises nothing', async () => {
+    // REWRITTEN (ADR 74). The reviewer swipes the banner away and never comes back. Round
+    // 1's wait dies on its own and the process serving its click dies with it, so there is
+    // nothing on screen -- and this used to be read as the absence ending, which handed
+    // round 2 a second banner nobody had come back for. Lapsing is not returning.
+    //
+    // The distinct path: criterion 6's other half is a round ANSWERED, above. This one is
+    // a wait that simply runs out, which fires no event at all and is noticed lazily.
     const { banners, watch } = stand();
     const board = seedBoard({ awaitTimeoutMs: 150 }); // a wait that dies almost at once
+    addAwaitedRound(board.id, 'a second, waiting behind it', AWAIT_MS);
     watch.evaluate(board.id, target(board.id));
     await tick();
     assert.equal(banners.length, 1);
     assert.equal(bannerOn(board.id).round, 1);
 
     await tick(200); // round 1's wait dies, and the banner raised for it goes with it
-    addAwaitedRound(board.id, 'and now?');
+    assert.ok(!roundIsAwaitedOpen(readBoard(board.id, home).rounds[0]), 'round 1 really did lapse');
+    assert.ok(roundIsAwaitedOpen(readBoard(board.id, home).rounds[1]), 'and round 2 really is still waiting');
     watch.evaluate(board.id, target(board.id));
     await tick();
-    assert.equal(banners.length, 2,
-      'the absence that record stood for is over, so this is a new one -- and the reviewer has nothing on screen either way');
-    assert.equal(bannerOn(board.id).round, 2, 'and the new record describes the new round');
+    assert.equal(banners.length, 1, 'criterion 6: a round becoming the oldest waiting one earns nothing on its own');
+    assert.equal(bannerOn(board.id).round, 1, 'the mark is untouched');
     watch.close();
   });
 
-  await check('... and so does everything on the board being answered', async () => {
-    const { banners, watch } = stand();
+  await check('criterion 6: a further round landing after the announced one is answered raises nothing either', async () => {
+    // REWRITTEN (ADR 74). The same rule where the board empties first: with nothing left
+    // awaited the record used to be retired outright, so the next round to land announced
+    // itself. Emptying is not returning; the gate is still shut.
+    const { looking, banners, watch } = stand();
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
     await tick();
     assert.equal(banners.length, 1);
 
     // Answered by a script carrying the local secret: no browser, so no attended Watcher
-    // and no return to resolve it into one. With nothing awaited there is no absence left.
+    // and no return to resolve it into one.
     const answered = readBoard(board.id, home);
     answered.rounds[0].status = 'sent';
     writeBoard(answered, home);
     watch.evaluate(board.id, target(board.id));
     await tick();
-    assert.equal(bannerOn(board.id), null, 'the record is retired rather than left to suppress the next absence');
-    assert.deepEqual(banners[0].child.killed, ['SIGTERM'], 'and the banner is withdrawn: nothing is left for its click to open');
+    assert.ok(bannerOn(board.id), 'the mark survives the round it names being answered');
 
-    addAwaitedRound(board.id, 'a new round, a new absence?');
+    addAwaitedRound(board.id, 'a new round, with nobody back?');
     watch.evaluate(board.id, target(board.id));
     await tick();
-    assert.equal(banners.length, 2);
+    assert.equal(banners.length, 1, 'still silent: nobody has been back to this board');
+
+    looking.set(board.id, true);
+    watch.evaluate(board.id, target(board.id));
+    looking.delete(board.id);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 2, 'and a genuine return and departure is what finally lets round 2 speak');
     watch.close();
   });
 
@@ -960,12 +1258,12 @@ process.exit(0);
     }
   });
 
-  await check('a clear that could not be written withdraws nothing either: the record and the screen agree', async () => {
+  await check('a return that could not be written withdraws nothing either: the record and the screen agree', async () => {
     // Withdrawing first and then restoring the record on a write that failed left the
-    // banner GONE and the board still believing it had one, which suppressed every
-    // replacement for the rest of the wait -- the reviewer silently loses the signal on a
-    // machine that is already in trouble. So the write goes first and the withdrawal only
-    // follows a write that landed.
+    // banner GONE and the board still believing nobody had come back, which suppressed
+    // every later round for the rest of the wait -- the reviewer silently loses the signal
+    // on a machine that is already in trouble. So the write goes first and the withdrawal
+    // only follows a write that landed.
     //
     // The cost, stated: on a read-only store, coming back to a board does not take its
     // banner off the screen until the store recovers. Consistent and recoverable, which
@@ -981,18 +1279,19 @@ process.exit(0);
       assert.ok(bannerOn(board.id));
 
       chmodSync(boardsDir, 0o500);
-      looking.set(board.id, true);   // the reviewer comes back, but the clear cannot land
+      looking.set(board.id, true);   // the reviewer comes back, but the gate cannot be written
       watch.evaluate(board.id, target(board.id));
       await tick();
       assert.deepEqual(banners[0].child.killed, [], 'nothing is withdrawn, because nothing could be recorded');
-      assert.ok(bannerOn(board.id), 'and the record still stands, which is what the screen shows');
+      assert.equal(bannerOn(board.id).returned, false, 'and the gate is still shut, which is what the screen shows');
 
       // The store comes back. Now returning does both.
       chmodSync(boardsDir, mode);
       watch.evaluate(board.id, target(board.id));
       await tick();
       assert.deepEqual(banners[0].child.killed, ['SIGTERM'], 'the withdrawal it owed');
-      assert.equal(bannerOn(board.id), null, 'and the record it owed');
+      assert.equal(bannerOn(board.id).returned, true, 'and the gate it owed');
+      assert.equal(bannerOn(board.id).pid, null, 'with the pid cleared alongside the banner it named');
     } finally {
       chmodSync(boardsDir, mode);
       watch.close();
@@ -1085,7 +1384,7 @@ process.exit(0);
     live.watch.evaluate(board.id, target(board.id));
     assert.deepEqual(live.withdrawn, [{ pid: 4242, startedAtMs: Date.parse(rec.at) }],
       'it signals the recorded pid, and hands over when the record was written so the start time can be checked');
-    assert.equal(bannerOn(board.id), null, 'and the absence ends');
+    assert.equal(bannerOn(board.id).returned, true, 'and the return gate opens, with the mark left standing');
     live.watch.close();
 
     // Now the same thing with a record whose banner must long since have gone.
@@ -1102,7 +1401,7 @@ process.exit(0);
     later.watch.evaluate(board2.id, target(board2.id));
     assert.deepEqual(later.withdrawn, [],
       'a pid whose process must have exited is a stranger now -- possibly this daemon\'s own supervisor');
-    assert.equal(bannerOn(board2.id), null, 'the record is still retired; only the signal is withheld');
+    assert.equal(bannerOn(board2.id).returned, true, 'the gate still opens; only the signal is withheld');
     later.watch.close();
     seeder.watch.close();
     first.watch.close();
@@ -1355,6 +1654,19 @@ async function arriveAt(port, boardId) {
 /** Post a first round that asks something, into its own project directory. */
 const askBoard = (folder, extra) => ({ title: `Stranded: ${folder}`, blocks: [QUESTION('Ship?')], cwd: projectFor(folder), ...extra });
 
+/** A first round that is Awaited but asks no QUESTION -- an awaited page round (ADR.md
+ * entry 45), which is one `html` block and `wait: true`. The point is what happens to the
+ * NEXT post: `handlePostBoard` AMENDS a round that is still open and asks something, so a
+ * board opened with `askBoard` accumulates amendments to round 1 rather than minting
+ * rounds 2 and 3. A board opened this way mints real round numbers, which is what every
+ * "a DIFFERENT round" check below needs. */
+const waitingArtifactBoard = folder => ({
+  title: `Stranded: ${folder}`,
+  blocks: [{ kind: 'html', html: '<p>an artifact, waiting on a comment</p>' }],
+  cwd: projectFor(folder),
+  wait: true,
+});
+
 let server, port;
 
 /** `server.close()` alone waits for every open connection, and node's default agent
@@ -1368,8 +1680,28 @@ function stopServer(s) {
   s.closeAllConnections?.();
 }
 
+/** Run `fn` with a different look-away window, and put the old one back even if it
+ * throws -- the same shape and the same reason as `withGrace` above. The shipped window
+ * is two minutes (ADR 73) and no check may sleep through one. */
+async function withWindow(ms, fn) {
+  const saved = process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS;
+  process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = String(ms);
+  try {
+    await fn();
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS;
+    else process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = saved;
+  }
+}
+
 async function layerTwo() {
   process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = '60';
+  // Layer 2 drives the real hub, so the shipped two-minute look-away window (ADR 73)
+  // applies to every `reportAttended(..., false)` below -- a buried tab keeps its board
+  // Attended, and nothing here could ever strand. Squashed to 20ms for the whole layer so
+  // that "the reviewer switched to the terminal" reads as it did before the window
+  // existed; the checks that are ABOUT the window set their own with `withWindow`.
+  process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS = '20';
   ({ server, port } = await startServer({ home, port: 0 }));
 
   await check('criterion 1: a round posted into a board with no tab watching raises one banner', async () => {
@@ -1410,50 +1742,136 @@ async function layerTwo() {
 
   await check('criterion 5: a round landing on a board somebody is looking at raises nothing', async () => {
     const { boardId } = await postRound(port, askBoard('watched'));
-    // Posted before any stream existed, so that first absence is announced. Arriving
-    // ends it; everything after this is the attended case.
+    // Posted before any stream existed, so round 1 is announced. Arriving withdraws that
+    // banner and opens the return gate; everything after this is the attended case.
     await waitForRows('watched', 1);
     const tab = await arriveAt(port, boardId);
     try {
       await tick(30);
-      assert.equal(announcedAt(boardId), null, 'arriving cleared the earlier absence');
+      assert.equal(bannerOn(boardId).returned, true, 'arriving opened the gate');
       for (const n of [2, 3, 4]) await postRound(port, { boardId, blocks: [QUESTION(`round ${n}?`)] });
       await tick(250);
       assert.equal(spawnsFor('watched').length, 1, 'however many rounds land, a board in front of the reviewer says nothing more');
-      assert.equal(announcedAt(boardId), null);
     } finally {
       tab.req.destroy();
     }
   });
 
-  await check('criterion 2: closing the last tab while a round is still awaited raises one banner', async () => {
+  await check('criterion 3: closing the tab on an ALREADY-ANNOUNCED round raises nothing more', async () => {
+    // REWRITTEN (ADR 74). This used to assert a second banner here: the round was
+    // announced, the reviewer glanced at the board, and closing the tab announced the same
+    // round again. That is the defect -- the round is spent, and no amount of leaving and
+    // coming back buys it another banner.
     const { boardId } = await postRound(port, askBoard('closed-on'));
     await waitForRows('closed-on', 1);
-    const tab = await arriveAt(port, boardId); // the reviewer arrives, ending that absence
+    const tab = await arriveAt(port, boardId); // the reviewer glances at it
     await tick(30);
-    assert.equal(announcedAt(boardId), null);
+    assert.equal(bannerOn(boardId).returned, true);
 
-    tab.req.destroy(); // ... and closes the tab with the round still open
-    await waitForRows('closed-on', 2);
-    assert.equal(spawnsFor('closed-on').length, 2, 'the disconnect hook is what makes this case exist at all');
-    assert.ok(announcedAt(boardId));
+    tab.req.destroy(); // ... and closes the tab with round 1 still open
+    await tick(250);
+    assert.equal(spawnsFor('closed-on').length, 1, 'criterion 3: round 1 has had its one banner, ever');
+    assert.equal(bannerOn(boardId).round, 1, 'and the mark is untouched');
   });
 
-  await check('criterion 3: switching away from a board with an awaited round on it raises the same banner', async () => {
+  await check('criterion 5: closing the tab on a round that has NEVER been announced raises one banner', async () => {
+    // The positive twin of the check above, and the case the disconnect hook exists for:
+    // the reviewer genuinely returned, a new round landed while they were there, and then
+    // they closed the tab. That round has never been announced, so it earns its one banner.
+    const { boardId } = await postRound(port, waitingArtifactBoard('closed-on-fresh'));
+    await waitForRows('closed-on-fresh', 1);
+    const tab = await arriveAt(port, boardId);
+    await tick(30);
+    assert.equal(bannerOn(boardId).returned, true, 'a genuine return');
+
+    await postRound(port, { boardId, blocks: [QUESTION('asked while they were looking?')] });
+    await tick(100);
+    assert.equal(spawnsFor('closed-on-fresh').length, 1, 'nothing while they are still looking at it');
+
+    tab.req.destroy(); // ... and the fresh departure
+    await waitForRows('closed-on-fresh', 2);
+    assert.equal(spawnsFor('closed-on-fresh').length, 2, 'criterion 5: round 2 earns exactly one banner');
+    assert.equal(bannerOn(boardId).round, 2, 'and the mark moves to it');
+  });
+
+  await check('criterion 3: switching away from an already-announced round raises nothing more', async () => {
+    // REWRITTEN (ADR 74), and the exact shape the defect was measured in: the banner's own
+    // click brings the tab forward, the reviewer switches back to the terminal, and the
+    // same round announces itself again a grace later, once a minute for as long as it
+    // waits.
     const { boardId } = await postRound(port, askBoard('switched-away'));
     await waitForRows('switched-away', 1);
     const tab = await arriveAt(port, boardId);
     try {
       await tick(30);
-      assert.equal(announcedAt(boardId), null);
-      const r = await reportAttended(port, boardId, tab.watcher, false); // the tab is buried
-      assert.equal(r.status, 200);
-      await waitForRows('switched-away', 2);
-      assert.deepEqual(spawnsFor('switched-away')[1], ['spawn', '-e', BANNER('switched-away')],
-        'an open tab is not the same as a reviewer looking at it');
+      assert.equal(bannerOn(boardId).returned, true);
+      // Buried and brought back, four times over: the ordinary posture, terminal to
+      // browser and back.
+      for (let i = 0; i < 4; i++) {
+        assert.equal((await reportAttended(port, boardId, tab.watcher, false)).status, 200);
+        await tick(120);
+        await reportAttended(port, boardId, tab.watcher, true);
+        await tick(30);
+      }
+      assert.equal(spawnsFor('switched-away').length, 1,
+        'criterion 3: glancing at the board and leaving again, any number of times, raises nothing further');
     } finally {
       tab.req.destroy();
     }
+  });
+
+  await check('criterion 7: a tab open but not focused keeps its board attended for the window, and may strand past it', async () => {
+    // End to end, through a real daemon and a real event stream: the tab reports that it
+    // has lost focus, exactly as src/ui.mjs's own blur handler does, and the board has to
+    // stay quiet for the whole window and then be allowed to strand.
+    //
+    // The window here is 400ms against a 60ms grace, so "inside" and "past" are far enough
+    // apart to be two different observations rather than one race.
+    await withWindow(400, async () => {
+      const { boardId } = await postRound(port, waitingArtifactBoard('look-away'));
+      await waitForRows('look-away', 1);
+      const tab = await arriveAt(port, boardId);
+      try {
+        await tick(30);
+        assert.equal(bannerOn(boardId).returned, true, 'a genuine return');
+        // A round the reviewer has not been told about, posted while they are looking.
+        await postRound(port, { boardId, blocks: [QUESTION('and this one?')] });
+        await tick(50);
+        assert.equal(spawnsFor('look-away').length, 1);
+
+        await reportAttended(port, boardId, tab.watcher, false); // switches to the terminal
+        await tick(200); // well past the 60ms grace, well inside the 400ms window
+        assert.equal(spawnsFor('look-away').length, 1,
+          'criterion 7: a tab open behind the terminal is not nobody watching');
+
+        await waitForRows('look-away', 2, 2000);
+        assert.equal(spawnsFor('look-away').length, 2,
+          'criterion 7: past the window the board may strand, and this round has never been announced');
+        assert.equal(bannerOn(boardId).round, 2);
+      } finally {
+        tab.req.destroy();
+      }
+    });
+  });
+
+  await check('criterion 8: a tab left focused counts as watching for as long as it stays focused', async () => {
+    // No idle detection: nothing reads the reviewer's keyboard. A tab that reported focus
+    // once and never reported anything again is watched for as long as it stays connected,
+    // here for many times the look-away window.
+    await withWindow(30, async () => {
+      const { boardId } = await postRound(port, askBoard('left-focused'));
+      await waitForRows('left-focused', 1);
+      const tab = await arriveAt(port, boardId);
+      try {
+        await tick(30);
+        await postRound(port, { boardId, blocks: [QUESTION('a fresh round, never announced?')] });
+        await tick(400); // ~13 windows and ~6 graces, with no further report from the tab
+        assert.equal(spawnsFor('left-focused').length, 1,
+          'criterion 8: a focused tab never ages out, so the round waits silently in front of the reviewer');
+      } finally {
+        tab.req.destroy();
+      }
+    });
   });
 
   await check('criterion 3: a round landing on a board whose tab is open but hidden raises the same banner', async () => {
@@ -1491,7 +1909,7 @@ async function layerTwo() {
       await postRound(port, { boardId, blocks: [QUESTION('while watched?')] });
       await tick(250);
       assert.equal(spawnsFor('two-tabs').length, 1, 'no second banner: either tab looking is enough');
-      assert.equal(announcedAt(boardId), null);
+      assert.equal(bannerOn(boardId).returned, true, 'and the looking tab counts as the reviewer being back');
     } finally {
       one.req.destroy();
       two.req.destroy();
@@ -1539,8 +1957,8 @@ async function layerTwo() {
     const watched = await arriveAt(port, theirs.boardId); // the reviewer sits on the OTHER board
     try {
       await tick(30);
-      assert.equal(announcedAt(theirs.boardId), null, 'the board being looked at is out of its absence');
-      assert.ok(announcedAt(mine.boardId), 'a reviewer attending a different board is not attending this one');
+      assert.equal(bannerOn(theirs.boardId).returned, true, 'the board being looked at has had its return');
+      assert.equal(bannerOn(mine.boardId).returned, false, 'a reviewer attending a different board is not attending this one');
       await postRound(port, { boardId: mine.boardId, blocks: [QUESTION('still nobody?')] });
       await tick(250);
       assert.equal(spawnsFor('board-alone').length, 1, 'nothing crosses between boards, in either direction');
@@ -1664,7 +2082,10 @@ async function layerTwo() {
         const rows = await waitForRows('returned-to', 2);
         assert.deepEqual(rows[1], ['SIGTERM', '-e', BANNER('returned-to')],
           'the daemon kills the process serving the click, and SIGTERM is what withdraws the delivered banner');
-        assert.equal(announcedAt(boardId), null, 'and the absence is over, so leaving again may raise a fresh one');
+        const rec = bannerOn(boardId);
+        assert.equal(rec.returned, true, 'the gate opens, so a round never announced may still speak');
+        assert.equal(rec.round, 1, 'but the mark stays: round 1 is announced for the rest of its life');
+        assert.equal(rec.pid, null, 'and the pid goes with the banner just withdrawn');
       } finally {
         tab.req.destroy();
       }
@@ -1705,6 +2126,136 @@ async function layerTwo() {
       process.env.STUB_OSASCRIPT_LINGER_MS = '0';
       stopServer(own.server);
     }
+  });
+
+  await check('ADR 69 end to end: abandoning a thread takes its banner off the screen', async () => {
+    // The whole path, through the real route the shim calls: agent posts a question,
+    // nobody looks, the banner fires, the reviewer runs `/clear`, the shim calls
+    // `ask(fresh: true)` and `POST /api/board/:id/abandon` closes every open round on the
+    // old board. The banner must go with them -- otherwise it sits there for up to
+    // `min(the round's deadline, CLICK_LIFETIME_MAX_MS)` and clicking it opens a board
+    // where nothing is awaited.
+    process.env.STUB_OSASCRIPT_LINGER_MS = '5000';
+    try {
+      const { boardId } = await postRound(port, askBoard('abandoned-thread'));
+      await waitForRows('abandoned-thread', 1);
+      const rec = bannerOn(boardId);
+      assert.ok(rec, 'the board really is in an announced state');
+
+      const r = await rawRequest(port, 'POST', `/api/board/${boardId}/abandon`, {
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+      });
+      assert.equal(r.status, 200, `abandon failed: ${r.body}`);
+      assert.ok(JSON.parse(r.body).closed.length >= 1, 'a round really was closed');
+
+      const rows = await waitForRows('abandoned-thread', 2);
+      assert.deepEqual(rows[1], ['SIGTERM', '-e', BANNER('abandoned-thread')],
+        'the process serving the click is killed, and SIGTERM is what withdraws the delivered banner');
+      const after = bannerOn(boardId);
+      assert.ok(after, 'the mark stays: abandoning is not returning (ADR 74)');
+      assert.equal(after.returned, false, 'and so does the shut gate');
+      assert.equal(after.pid, null, 'only the pid goes');
+    } finally {
+      process.env.STUB_OSASCRIPT_LINGER_MS = '0';
+    }
+  });
+
+  await check('criterion 7: the look-away window survives a daemon restart, so an install.sh update raises nothing', async () => {
+    // The scenario ticket 01 forces on every reviewer: they look at a board, switch to the
+    // terminal, and run `./install.sh`. The daemon restarts, EventSource reconnects, and
+    // the reconnect mints a FRESH Watcher with no memory of that tab ever having had
+    // focus. Read from the daemon's side alone the window is spent, the bare grace is
+    // armed, and a banner fires for a round the reviewer was looking at seconds ago --
+    // exactly the defect ADR 73 exists to remove, reintroduced by the restart.
+    //
+    // What closes it is `sinceFocusMs` on the report: the PAGE knows when it last had
+    // focus and says so, and a fresh Watcher seeds its stamp from that. Never from the
+    // fact of connecting, which is the reading entry 73 refuses -- the check below this
+    // one is what pins that half.
+    await withWindow(4000, async () => {
+      // Its own daemon, so the restart can be a REAL stop and start rather than a second
+      // daemon beside the first -- the same shape the install.sh check above uses, and the
+      // only one where the original daemon's pending countdown genuinely dies.
+      const own = await startServer({ home, port: 0 });
+      let successor = null;
+      try {
+        // Round 1 is an awaited page round, so round 2 is a real round rather than an
+        // amendment (see `waitingArtifactBoard`). Round 1 is announced and spent.
+        const { boardId } = await postRound(own.port, waitingArtifactBoard('survives-restart'));
+        await waitForRows('survives-restart', 1);
+        const tab = await arriveAt(own.port, boardId); // the reviewer looks at it
+        await tick(30);
+        assert.equal(bannerOn(boardId).returned, true, 'a genuine return');
+
+        // A round they have never been told about, posted while they are looking ...
+        await postRound(own.port, { boardId, blocks: [QUESTION('and this one?')] });
+        await tick(30);
+        assert.equal(spawnsFor('survives-restart').length, 1, 'silent while they are looking');
+        // ... and then they switch to the terminal, with the tab still open.
+        await reportAttended(own.port, boardId, tab.watcher, false);
+
+        // ./install.sh. The DAEMON goes first and the socket dies with it -- that order is
+        // the scenario, and the reverse is a different one: a tab closing while the daemon
+        // is still up is the last Watcher leaving, which strands on the bare grace by
+        // design (the window belongs to an open tab). A successor comes up over the same
+        // store and the tab's EventSource reconnects into it, minting a Watcher that has
+        // never seen this tab have focus.
+        stopServer(own.server);
+        tab.req.destroy();
+        // No banner may be raised on the way out, either: a stopping daemon destroys its
+        // open SSE connections, and each close handler re-evaluates on its way out.
+        await tick(150);
+        assert.equal(spawnsFor('survives-restart').length, 1,
+          'a daemon that has been stopped announces nothing, however its connections unwind');
+        successor = await startServer({ home, port: 0 });
+        const back = await openStream(successor.port, boardId);
+        try {
+          // What the page really sends: still buried, and last had focus a moment ago.
+          await rawRequest(successor.port, 'POST', `/api/board/${boardId}/attended`, {
+            headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+            body: JSON.stringify({ watcher: back.watcher, attended: false, seq: 9, sinceFocusMs: 40 }),
+          });
+          await tick(400); // six graces, and still well inside the four-second window
+          assert.equal(spawnsFor('survives-restart').length, 1,
+            'the restart must not cost the reviewer their look-away window: round 2 has never been announced and the gate is open, so only the window is holding it back');
+        } finally {
+          back.req.destroy();
+        }
+      } finally {
+        if (successor) stopServer(successor.server);
+        stopServer(own.server);
+      }
+    });
+  });
+
+  await check('criterion 7: a reconnecting tab that has never had focus gets no window from connecting', async () => {
+    // The refused reading, pinned so it cannot creep back in through the seam the check
+    // above opened. A tab that has never been looked at reports no `sinceFocusMs` at all,
+    // and a Watcher with nothing to count from must not be treated as recently focused --
+    // otherwise reconnecting shortly before each grace would be a mute button obtainable
+    // with a read credential and one write.
+    await withWindow(4000, async () => {
+      const { boardId } = await postRound(port, waitingArtifactBoard('never-focused'));
+      await waitForRows('never-focused', 1);
+      const tab = await arriveAt(port, boardId);
+      await tick(30);
+      assert.equal(bannerOn(boardId).returned, true, 'a genuine return, so a later round may speak');
+      await postRound(port, { boardId, blocks: [QUESTION('never announced?')] });
+      tab.req.destroy();
+      await tick(50);
+
+      // A tab opened in the background and never looked at: it connects and reports
+      // hidden, with no focus of its own to report.
+      const buried = await openStream(port, boardId);
+      try {
+        await reportAttended(port, boardId, buried.watcher, false);
+        await waitForRows('never-focused', 2);
+        assert.equal(spawnsFor('never-focused').length, 2,
+          'connected is not recently focused: the round still strands on the plain grace');
+      } finally {
+        buried.req.destroy();
+      }
+    });
   });
 
   await check('the connected-tab count stays on the round-posting response', async () => {

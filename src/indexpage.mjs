@@ -221,12 +221,35 @@ function threadRow(t) {
 </a>`;
 }
 
-/** The index page's only client script: keeps each row's `updated` timestamp
- * reading as relative time ("an hour ago") instead of a one-shot server-rendered
- * string that goes stale in a tab left open — the exact ISO value stays on the
- * element's `title` attribute (set server-side above) for when it is genuinely
- * needed. Small, dependency-free, inline (QUIRKS.md "No external assets — except two
- * bare sibling filenames"; an icon is not one of them),
+/** The contents of `.thread-list`: the filtered rows, or whichever empty state
+ * applies. The ONE renderer for that markup, called both by `renderIndexPage`
+ * below (server-rendered first paint) and by `GET /api/index/rows` (the poll the
+ * page runs on its own fifteen-second tick, ADR 77) — so what the poll patches in
+ * can never drift from what the page was served with.
+ *
+ * Two different empty states, because they mean two different things: an empty
+ * STORE is "nothing has happened yet, here is what would put something here",
+ * while an empty FILTER is "your query excluded everything, the list itself is
+ * fine". Reporting the first when the second is true would read as if the
+ * sessions had gone missing. */
+export function renderThreadRows({ threads = [], query = '' } = {}) {
+  const filtering = query.trim().length > 0;
+  const shown = filterThreads(threads, query);
+  if (shown.length) return shown.map(threadRow).join('\n');
+  return filtering
+    ? `<p class="empty-state">No sessions match “${escHtml(query.trim())}”.</p>`
+    : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
+}
+
+/** The index page's only client script. Two jobs on one fifteen-second tick: it
+ * keeps each row's `updated` timestamp reading as relative time ("an hour ago")
+ * instead of a one-shot server-rendered string that goes stale in a tab left open
+ * — the exact ISO value stays on the element's `title` attribute (set server-side
+ * above) for when it is genuinely needed — and it fetches the rows themselves from
+ * `GET /api/index/rows` and patches the list in place, so a board posted after the
+ * page loaded appears without anyone reloading (ADR 77). Small, dependency-free,
+ * inline (QUIRKS.md "No external assets — except two bare sibling filenames"; an
+ * icon is not one of them),
  * and wired entirely from this script rather than from `onclick` attributes: the
  * index page carries no CSP `<meta>` today (the board page does), and that is not
  * a license to wire any differently than a page that does.
@@ -299,14 +322,82 @@ function refresh() {
   }
 }
 
+// The rows this tab last patched in, so an unchanged list is left completely
+// alone -- no DOM write, no lost text selection, no repaint (ADR 77). Starts
+// null, so the FIRST poll always patches once even against an unchanged store;
+// the server-rendered markup cannot be read back to compare against (the page is
+// served with it, and reading innerHTML back to fingerprint it would be a parse
+// per tick for one saved write on one tick).
+var lastRowsHtml = null;
+// One poll at a time. A daemon answering slower than the tick would otherwise
+// accumulate an outstanding request per tick, and responses can land out of
+// order -- a slow tick-1 answer arriving after a fast tick-2 answer differs from
+// lastRowsHtml and patches the OLDER rows in over the newer ones. It self-corrects
+// on the next tick, so the cost is one interval of a stale list, but it is a
+// stale list shown for no reason. Skipping is right rather than queueing: the
+// next tick is fifteen seconds away and asks the same question.
+var rowsInFlight = false;
+
+// The index polls for its rows and patches the LIST, never the page (ADR 77).
+// Not SSE: this is a page nobody stares at, and a live connection per open tab
+// costs the daemon more than being at most one tick behind costs the reader. Not
+// a reload either, and that is the load-bearing half -- replacing only the list's
+// contents is what leaves the scroll position and whatever is typed in the search
+// box exactly as they were, which a reload would throw away.
+//
+// The query comes off the list element rather than the URL: this script's only
+// injected globals are 'document' and 'setInterval'.
+//
+// credentials: 'same-origin', like fetchPomodoro below -- the session cookie a
+// browser holds after /auth/:token is what authorises this read; the page carries
+// no secret of its own and needs none. Failures are swallowed: a daemon mid-restart
+// or a sleeping laptop must leave the list as it is, not blank it or shout.
+//
+// ponytail: the whole list is re-set when anything in it changed, rather than the
+// changed rows being patched one by one. Ceiling: any change repaints every row,
+// so a row can never hold client-side state of its own (nothing on it does today
+// -- a row is a link). Upgrade path: key the rows by data-thread-id and patch
+// per row.
+function patchRows() {
+  var list = document.querySelector('div.thread-list');
+  if (!list || rowsInFlight) return;
+  var q = list.getAttribute('data-query') || '';
+  rowsInFlight = true;
+  return fetch('/api/index/rows?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('index rows fetch failed: ' + r.status);
+      return r.json();
+    })
+    .then(function (data) {
+      if (!data || typeof data.html !== 'string') return;
+      if (data.html === lastRowsHtml) return;
+      lastRowsHtml = data.html;
+      list.innerHTML = data.html;
+      // The rows arrive carrying absolute stamps, exactly as the server-rendered
+      // ones did; this is what turns them relative again.
+      refresh();
+    })
+    .catch(function () { /* leave the list as it is: see this function's comment */ })
+    // Cleared on BOTH paths, and after the catch rather than beside it: a failed
+    // poll that left this set would stop the list updating for the life of the
+    // tab, which is a worse outcome than the pile-up it guards against.
+    .then(function () { rowsInFlight = false; });
+}
+
+function tick() {
+  refresh();
+  patchRows();
+}
+
 refresh();
 // 15s, not 60s: the narrowest bucket above ("a minute ago", 45s to 90s) is only
 // 45 seconds wide. A row can load at any offset within a bucket, so a 60s poll
 // can step clean over one depending on where load time happens to land -- a row
 // loaded at age 44s reads "just now" until its true age is 1m44s, skipping "a
 // minute ago" for that row entirely. 15s comfortably undersamples every bucket
-// here, including the narrowest one.
-setInterval(refresh, 15000);
+// here, including the narrowest one. The rows ride the same tick rather than
+// getting one of their own: one interval, one reason for the page to wake up.
+setInterval(tick, 15000);
 ` + '\n' + formatCountdown.toString() + '\n' + `
 // =================================================================================
 // The pomodoro widget. Everything below this line
@@ -956,20 +1047,11 @@ export function filterThreads(threads, query) {
  * counts and a visual live/settled distinction), filtered to `query` when one is
  * given — a plain GET-form round trip needing no client JS of its own. The
  * page's one script (`indexScript` above) only ever touches `.rel-time` text
- * content and the pomodoro widget; nothing here depends on it running. */
+ * content, the contents of `.thread-list`, and the pomodoro widget; nothing here
+ * depends on it running, and the served list is correct as of the moment it was
+ * served whether or not it ever does. */
 export function renderIndexPage({ threads = [], query = '' } = {}) {
-  const filtering = query.trim().length > 0;
-  const shown = filterThreads(threads, query);
-  // Two different empty states, because they mean two different things: an
-  // empty STORE is "nothing has happened yet, here is what would put something
-  // here", while an empty FILTER is "your query excluded everything, the list
-  // itself is fine". Reporting the first when the second is true would read as
-  // if the sessions had gone missing.
-  const threadsHtml = shown.length
-    ? shown.map(threadRow).join('\n')
-    : filtering
-      ? `<p class="empty-state">No sessions match “${escHtml(query.trim())}”.</p>`
-      : '<p class="empty-state">No threads yet. Boards posted by a session will show up here.</p>';
+  const threadsHtml = renderThreadRows({ threads, query });
 
   return `<!doctype html>
 <html lang="en">
@@ -999,7 +1081,11 @@ ${faviconLink}
     <button class="search-btn" type="submit">Filter</button>
   </form>
 
-  <div class="thread-list">
+  <!-- data-query carries the filter this list was rendered under, so patchRows can ask
+       for the SAME rows without reading location: indexScript is executed with document
+       and setInterval as its only injected globals (test/check-pomodoro-page.mjs's
+       harness), and a reference to location there is a ReferenceError. -->
+  <div class="thread-list" data-query="${escAttr(query)}">
     ${threadsHtml}
   </div>
 </div>

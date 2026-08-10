@@ -4898,6 +4898,38 @@
   // report this tab EVER sends ordered against itself with no reset to
   // coordinate with the server.
   var attendedEpoch = 0;
+  // When this TAB last had focus, in its own clock, and 0 if it never has. Sent
+  // alongside every report as 'sinceFocusMs' so the daemon's two-minute look-away
+  // window (ADR.md entry 73) survives an SSE reconnect.
+  //
+  // Without it the window is lost exactly where it is needed most. The daemon's
+  // record of when a tab last had focus lives in the SSE hub, per Watcher, and a
+  // reconnect mints a FRESH Watcher that has never reported focus -- so a buried
+  // tab's first report after one is 'attended: false' against no prior focus at
+  // all, the window reads as zero, and the bare grace is armed. That is the
+  // ordinary install.sh update: reviewer looks at a board, switches to the
+  // terminal, the daemon restarts under them, EventSource reconnects, and fifteen
+  // seconds later a banner fires for a round they were looking at half a minute
+  // ago -- the precise defect entry 73 exists to remove.
+  //
+  // Stamped from the TAB's own state, never from the mere fact of connecting: a
+  // tab that has never been looked at sends nothing and gets no window, because
+  // "connected implies recently focused" is the reading entry 73 refuses.
+  var attendedLastFocusAt = 0;
+  // What the LAST report said about this tab, and the only reason the stamp above can be
+  // correct. Reports are edge-driven, so a tab focused for ten minutes sends nothing in
+  // between: stamping only when a report says 'attended: true' pins the stamp to the
+  // moment focus was GAINED, and the blur report -- which takes the false branch and
+  // stamps nothing at all -- then claims focus was lost ten minutes ago. Anyone who reads
+  // a board for longer than the daemon's window and then buries the tab would hand the
+  // next reconnect a window that was already spent, which is criterion 7's defect
+  // surviving untouched for exactly the reviewer this product is for.
+  //
+  // So the tab stamps when it HAD focus before this report or HAS it now -- the mirror of
+  // the daemon's own rule for the Watchers it can observe itself (src/server.mjs's
+  // setAttended, 'watcher.attended === true || attended'). A blur then reads ~0, which is
+  // the truth: the tab had focus right up to this instant.
+  var attendedWasFocused = false;
 
   function isTabAttended() {
     return !document.hidden && (typeof document.hasFocus !== 'function' || document.hasFocus());
@@ -4942,14 +4974,34 @@
     // turns AWAY a retry, never the report that armed it.
     if (readonly || epoch !== attendedEpoch) return;
     var watcher = attendedWatcherId;
+    // Read ONCE and reused for both fields below: reading isTabAttended() twice
+    // could report 'attended: false' with a sinceFocusMs of 0 (or the reverse) if
+    // focus moved between the two calls, which is the one combination that lies.
+    var attended = isTabAttended();
+    if (attended || attendedWasFocused) attendedLastFocusAt = Date.now();
+    attendedWasFocused = attended;
     // 'seq' is THIS call's own epoch, captured as the function's argument --
     // never the live attendedEpoch read fresh at send time, which a retry
     // would otherwise report as newer than the (possibly stale) attended
     // value it is actually carrying.
+    //
+    // 'sinceFocusMs' is computed at SEND time rather than captured with the
+    // epoch, for the opposite reason: it describes how long ago focus was lost
+    // as of the moment this POST leaves, so a retry that fires eight seconds
+    // later must carry eight seconds more.
+    //
+    // Sent ONLY when this tab does not have focus right now, and only when it
+    // has had focus at some point. A report that says 'attended: true' already
+    // says the stronger thing, and a tab that has never been looked at has
+    // nothing to tell -- an absent field is "I do not know", which is not the
+    // same claim as zero, and zero is what would hand a never-focused tab a
+    // full window it has not earned.
+    var report = { watcher: watcher, attended: attended, seq: epoch };
+    if (!attended && attendedLastFocusAt) report.sinceFocusMs = Math.max(0, Date.now() - attendedLastFocusAt);
     fetch('/api/board/' + boardId + '/attended', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ watcher: watcher, attended: isTabAttended(), seq: epoch }),
+      body: JSON.stringify(report),
     }).then(function (r) {
       // A rejected response (401 mid-secret-rotation, 5xx, anything not 2xx)
       // resolves this promise -- only a network failure rejects it on its own --

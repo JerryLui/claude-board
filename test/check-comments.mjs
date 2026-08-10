@@ -458,9 +458,12 @@ check('rule 3 reports a symbol attributed to the wrong file, and passes the righ
   const bare = withPlantedComment('src/ui.mjs', 'stillWaiting (src/server.mjs) asks, so the click lands on the round the');
   assert.deepEqual(misattributedSymbols(bare.files).wrong,
     [`${bare.at} attributes \`stillWaiting\` to src/server.mjs, whose code does not contain it`]);
-  // The same three sentences as they read now: silent.
+  // The same three sentences as they read now: silent. The first names a different symbol
+  // than its ablation above, because `standingBanner` did not just move -- ADR.md entry 74
+  // deleted it, and the repair for a symbol that is gone everywhere is to attribute a
+  // symbol that exists. `nextToAnnounce` is what took over the question it answered.
   for (const fixed of [
-    ["so a board's announced marker no longer stands for anything on screen (src/stranded.mjs's", '`standingBanner`).'],
+    ["so a board's announced marker no longer stands for anything on screen (src/stranded.mjs's", '`nextToAnnounce`).'],
     "delivered banner when the reviewer comes back (src/stranded.mjs's `terminate`). Node",
     'stillWaiting (src/stranded.mjs) asks, so the click lands on the round the',
   ]) {

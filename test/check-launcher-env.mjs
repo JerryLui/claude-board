@@ -196,6 +196,7 @@ async function main() {
     CLAUDE_BOARD_SHUTDOWN_MS: '4242',
     CLAUDE_BOARD_SSE_HEARTBEAT_MS: '5353',
     CLAUDE_BOARD_STRANDED_GRACE_MS: '8686',
+    CLAUDE_BOARD_ATTENDED_WINDOW_MS: '9797',
     CLAUDE_BOARD_TIMEOUT_MS: '6464',
     CLAUDE_BOARD_HANDOFF_TTL_MS: '7575',
     TMPDIR: path.join(workDir, 'poison-tmpdir'),
@@ -227,7 +228,7 @@ async function main() {
       'CLAUDE_BOARD_HOME', 'CLAUDE_BOARD_REF_ROOTS',
       'CLAUDE_BOARD_REPO_ROOT',
       'CLAUDE_BOARD_PORT', 'CLAUDE_BOARD_SHUTDOWN_MS', 'CLAUDE_BOARD_SSE_HEARTBEAT_MS',
-      'CLAUDE_BOARD_STRANDED_GRACE_MS',
+      'CLAUDE_BOARD_STRANDED_GRACE_MS', 'CLAUDE_BOARD_ATTENDED_WINDOW_MS',
       'CLAUDE_BOARD_TIMEOUT_MS', 'CLAUDE_BOARD_HANDOFF_TTL_MS', 'TMPDIR',
     ].sort();
     // TMPDIR is the one passthrough name macOS also sets on its own account in some
@@ -263,6 +264,12 @@ async function main() {
     // variable, as the other timings are"): a bundled install that dropped it here would
     // leave the shipped fifteen seconds the only value reachable under a real install.
     assert.equal(childEnv.CLAUDE_BOARD_STRANDED_GRACE_MS, '8686');
+    // The look-away window (ADR.md entry 73), for the same reason as the grace beside it:
+    // PROTOCOL.md documents it as an override, and a bundled install that dropped it here
+    // would leave the shipped two minutes the only value reachable under a real install --
+    // a doc and a binary contradicting each other, silently, since a plist entry for a name
+    // that is not on this list is not refused, it is ignored.
+    assert.equal(childEnv.CLAUDE_BOARD_ATTENDED_WINDOW_MS, '9797');
     assert.equal(childEnv.CLAUDE_BOARD_TIMEOUT_MS, '6464');
     assert.equal(childEnv.CLAUDE_BOARD_HANDOFF_TTL_MS, '7575');
     assert.equal(childEnv.TMPDIR, path.join(workDir, 'poison-tmpdir'));

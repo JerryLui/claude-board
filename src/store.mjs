@@ -13,7 +13,7 @@
 // corrupt a board: a reader always sees either the old or the new content, never a
 // partial one.
 
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync, readdirSync, unlinkSync, existsSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync, readdirSync, unlinkSync, existsSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { closeLapsedAwaitedRounds } from './badge.mjs';
 import { SHARED_ASSETS, ASSET_NAME, assetsNamedBy } from './assets.mjs';
@@ -195,6 +195,45 @@ export function readPage(id, home = boardHome()) {
   } catch (err) {
     if (err.code === 'ENOENT') return null;
     throw err;
+  }
+}
+
+/** A cheap fingerprint of the boards directory: name, size and mtime of every stored
+ * board, and nothing read or parsed. Two calls returning the same string mean no board
+ * was added, removed, or written since the first — which is what lets a caller that would
+ * otherwise `listBoards` skip the walk entirely.
+ *
+ * This exists for `GET /api/index/rows` (ADR.md entry 77), which every open index polls
+ * every fifteen seconds. `listBoards` is a synchronous `readFileSync` + `JSON.parse` of
+ * every board document on the event loop, and a page board's document can run to
+ * megabytes — a cost `GET /` paid once per navigation and a poll would otherwise pay
+ * forever, stalling every `/wait` long-poll and SSE heartbeat in the process. Almost
+ * every tick finds nothing changed, so almost every tick now costs one `readdir` and a
+ * `stat` per file.
+ *
+ * `mtimeMs` and `size` together rather than either alone: HFS+ and some network stores
+ * carry second-resolution mtimes, so two writes inside one second can share a stamp, and
+ * the size is what separates them when the content genuinely changed. A same-second write
+ * that changes neither size nor mtime is the residual miss, and it costs one poll of
+ * staleness — a fifteen-second-old index, which is the freshness the ADR promises anyway.
+ *
+ * Degrades to a unique string on any error, so an unreadable directory or a file that
+ * vanished mid-walk always reads as "changed" and the caller falls through to the real
+ * walk. Never the reverse: this must not be able to claim nothing changed when something
+ * did. */
+export function storeFingerprint(home = boardHome()) {
+  try {
+    const dir = boardsDir(home);
+    const files = readdirSync(dir).filter(f => f.endsWith('.json') && !f.includes('.tmp-')).sort();
+    const parts = [];
+    for (const f of files) {
+      const s = statSync(path.join(dir, f));
+      parts.push(`${f}:${s.size}:${s.mtimeMs}`);
+    }
+    return parts.join('|');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return ''; // no store yet: a real, stable state
+    return `unreadable:${Date.now()}:${Math.random()}`;
   }
 }
 

@@ -36,6 +36,12 @@ function strandedGraceMs() {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_STRANDED_GRACE_MS;
 }
 
+/** node's own `setTimeout` ceiling: the delay is coerced to a signed 32-bit int, and
+ * anything above this fires on the next tick with a TimeoutOverflowWarning instead of
+ * waiting. `arm` sums two independently-configured knobs, so the sum can reach here even
+ * when neither knob alone looks unreasonable -- see that function's own comment. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** Every stranded watch alive in this process, and ONE 'exit' listener serving all of
  * them. Criterion 15's last sentence -- "stopping the daemon leaves none of them
  * running" -- is not free: a click-serving process is a separate, deliberately unref'd
@@ -61,27 +67,33 @@ function registerStrandedWatch(watch) {
 }
 
 /** The stranded rule (SPEC_STRANDED.md; ADR.md entries 55 and 58). Reads
- * `sse.isConfirmedAttended` and nothing else the daemon does not already know.
+ * `sse.attendedRemainingMs` and nothing else the daemon does not already know. It asked
+ * `sse.isConfirmedAttended` until ADR.md entry 73 gave the hub a clock: a boolean cannot
+ * say WHEN a board stops being attended, and this rule has to arm a timer for that
+ * moment because nothing fires when a look-away window expires.
  *
  * The rule in one sentence: a board with at least one open, awaited round on it and no
- * Watcher looking at it is Stranded, and after a grace it gets ONE banner -- per board,
- * per absence, not per round. Rounds arrive faster than a reviewer returns, so counting
- * per board is what makes "one per absence" mean anything; the banner's click carries
- * only the board's own URL plus the `#stranded-round` sentinel, which the page resolves
- * to the oldest round still waiting AT THE MOMENT IT IS CLICKED rather than to whichever
- * round happened to trigger this.
+ * Watcher looking at it is Stranded, and after a grace the oldest such round that has
+ * never been announced gets ONE banner -- once, ever (ADR.md entry 74, narrowing 55).
+ * "One per absence" is NOT the rule this implements any more: the mark is per round and
+ * permanent, a return withdraws the banner without erasing it, and a board announces a
+ * different round only after the reviewer has genuinely come back. The banner's click
+ * carries only the board's own URL plus the `#stranded-round` sentinel, which the page
+ * resolves to the oldest round still waiting AT THE MOMENT IT IS CLICKED rather than to
+ * whichever round happened to trigger this.
  *
- * Four things drive it, and all four are events the daemon already handles: a round
+ * Five things drive it, and all five are events the daemon already handles: a round
  * landing (`handlePostBoard`), a Watcher arriving or leaving (`handleEvents`), a tab
- * reporting whether it is looked at (`handleAttended`), and a round being answered
- * (`handleSubmit`) -- all in src/server.mjs. There is no polling and no clock of its own
- * beyond the one grace timer per board, because everything else it needs to know is a fact
- * it can read off the board when one of those four happens. That is why an absence ending
- * is decided LAZILY -- see `standingBanner` -- rather than on a timer at `awaitDeadline`:
- * nothing fires when a wait lapses, and a timer built to fire there would be the "notice
- * after it has lapsed" the spec puts out of scope. It is the same absence of an event that
- * makes the click-serving child hold its own deadline as a backstop rather than waiting
- * to be told to stand down (ADR.md entry 57).
+ * reporting whether it is looked at (`handleAttended`), a round being answered
+ * (`handleSubmit`), and a thread's open rounds being abandoned (`handleAbandon`) -- all in
+ * src/server.mjs. There is no polling and no clock of its own beyond the one grace timer
+ * per board, because everything else it needs to know is a fact it can read off the board
+ * when one of those happens. That is why "is this round still waiting" is decided LAZILY
+ * -- see `nextToAnnounce` -- rather than on a timer at `awaitDeadline`: nothing fires when
+ * a wait lapses, and a timer built to fire there would be the "notice after it has lapsed"
+ * the spec puts out of scope. It is the same absence of an event that makes the
+ * click-serving child hold its own deadline as a backstop rather than waiting to be told
+ * to stand down (ADR.md entry 57).
  *
  * `notify` and `withdraw` are `notifyRound` and `withdrawClickChild`, and the daemon
  * never passes anything else. They are seams for the checks alone: the PATH-stubbed
@@ -113,6 +125,16 @@ export function createStrandedWatch({
   // this rule its memory of one absence across a restart rather than a banner per round
   // for as long as the store stays broken. Empty in every healthy install.
   const unpersisted = new Map();
+  // Set by `close()`, and never unset: a watch that has been stopped announces nothing,
+  // ever again. Not merely tidiness -- `close()` cancels the graces standing at the moment
+  // it runs, but a daemon shutting down destroys its open SSE connections, and each one's
+  // close handler calls `evaluate` on its way out. Those land in whatever order the event
+  // loop gives them, so a disconnect that runs AFTER `close()` used to arm a fresh
+  // countdown on a watch whose owner was already gone -- and a stopping daemon with board
+  // tabs open is precisely what an `install.sh` update is. The timers are unref'd, so a
+  // process that exits promptly never sees the banner; one that lingers, or an in-process
+  // daemon (which is every daemon in this suite), does.
+  let closed = false;
 
   // readBoard throws on an id that cannot be a path (src/store.mjs's assertSafeId) and
   // on any unreadable file. Neither is a reason for a banner rule to take down the
@@ -177,76 +199,48 @@ export function createStrandedWatch({
     return (board && board[STRANDED_BANNER]) || unpersisted.get(board && board.id) || null;
   }
 
-  /** The banner recorded on this board, if it still STANDS -- that is, if this board's
-   * absence has already been announced and is still running. Exactly one question, asked
-   * of exactly one round: is the round this record NAMES still awaited?
+  /** The oldest awaited round on this board that has NEVER been announced, or null.
    *
-   * That is criterion 7 read literally, and the literal reading is the one that was
-   * chosen: one banner per board until the reviewer actually comes back. Two nearby
-   * readings were rejected, and both are easy to drift back into:
+   * The mark is per round and permanent for the life of that round (ADR.md entry 74), and
+   * `rec.round` is where it is kept: the banner always names the oldest never-announced
+   * round, so the announced set is exactly "every round up to and including `rec.round`"
+   * and one number holds it. The oldest waiting round only ever moves FORWARD -- rounds
+   * are appended, and a round that has been answered, abandoned or lapsed never becomes
+   * awaited again -- so nothing below the mark can come back needing a banner of its own.
    *
-   *  - "is ANYTHING on the board still awaited". Wrong, and wrong in the shape
-   *    `handlePostBoard` calls ordinary -- an awaited page round beside a question round.
-   *    The named round dying while the second is still live would leave the record
-   *    standing forever, and the second round would never get a banner of its own.
-   *  - "is the banner still on screen" (`until`, below). Rejected deliberately. It made a
-   *    replacement appear once the first banner's process had exited, which is a second
-   *    banner for an absence nobody had come back from.
-   *
-   * THE COST, accepted with the trade-off in view rather than overlooked: a reviewer who
-   * dismisses a banner without opening the board gets nothing further for that board until
-   * the announced round's wait ends. The signal is one per absence, and dismissing it is
-   * spending it.
-   *
-   * Not a timer. Read lazily off events the daemon already handles; a timer on
-   * `awaitDeadline` would be precisely the "notice after the wait has lapsed" the spec
-   * puts out of scope. `roundIsAwaitedOpen` is the same predicate `stillWaiting` applies,
-   * so "the wait ended" reaches here as a fact `readBoard` already swept. */
-  function standingBanner(board) {
+   * `roundIsAwaitedOpen` (via `stillWaiting`) is the same predicate the countdown and the
+   * read-only downgrade already read, so "the wait ended" arrives here as a fact
+   * `readBoard` has already swept, with no timer of this rule's own. */
+  function nextToAnnounce(board) {
     const rec = recordOn(board);
-    if (!rec) return null;
-    return roundIsAwaitedOpen((board.rounds || []).find(r => r.n === rec.round)) ? rec : null;
+    const mark = (rec && Number.isInteger(rec.round)) ? rec.round : 0;
+    return stillWaiting(board).find(r => r.n > mark) || null;
   }
 
-  /** Retire the record on this board, and withdraw whatever is still serving it -- either
-   * because the reviewer came back, or because the round it named stopped being awaited
-   * and there is nothing left for its click to open.
+  /** Is there something to announce about this board, and may it be announced?
    *
-   * WRITE FIRST, WITHDRAW SECOND, and the order is the whole point: the record and the
-   * screen have to agree. Withdrawing first and then restoring the record on a write that
-   * failed left the banner gone AND the board believing it had one, which suppressed
-   * every replacement for the rest of the wait -- the reviewer silently loses the signal
-   * on exactly the machine that is already in trouble. So on a store that refuses the
-   * write, nothing is withdrawn either: the banner stays up and the record stays standing,
-   * which is consistent and recoverable, at the price of a return not withdrawing until
-   * the store comes back.
+   * Two gates, and they are different questions (ADR.md entry 74).
    *
-   * Covers the submit-by-secret edge too -- a round answered by a script carrying the
-   * local secret leaves no attended Watcher to resolve into a return, so its record is
-   * retired here on the next evaluation instead. */
-  function spend(board) {
-    const rec = recordOn(board);
-    const saved = board[STRANDED_BANNER];
-    board[STRANDED_BANNER] = null;
-    if (!persist(board)) {
-      board[STRANDED_BANNER] = saved; // the document goes back exactly as it was
-      return;
-    }
-    unpersisted.delete(board.id);
-    terminate(board.id, rec);
-  }
-
-  /** Is there something to announce about this board, and may it be announced? Also the
-   * one place a spent record is retired, deliberately ahead of the suppression check
-   * below -- the other order is what leaves a board deaf. */
+   * THE RETURN GATE. A board that has announced anything says nothing further until the
+   * reviewer has GENUINELY returned to it -- `rec.returned`, which only `returned()` below
+   * ever sets. Further rounds landing behind the announced one earn nothing (criterion 4),
+   * and neither does the announced round being answered, abandoned or lapsing while
+   * another waits: a round becoming the oldest waiting one is not a reviewer coming back
+   * (criterion 6). That last clause is the one this used to get wrong, by retiring the
+   * record the moment its round stopped being awaited and treating the next round as a
+   * fresh absence.
+   *
+   * THE PER-ROUND MARK. Even after a return, the round already announced never earns a
+   * second banner -- `nextToAnnounce` skips everything at or below the mark (criterion 3).
+   * Coming back withdraws the banner from the screen; it does not un-announce the round.
+   *
+   * THE COST, accepted explicitly rather than overlooked (ADR.md entry 74): a banner
+   * missed while the screen was locked is never repeated, and a board whose only awaited
+   * round has already been announced is silent for the rest of that round's life. */
   function mayAnnounce(board) {
-    if (recordOn(board) && !standingBanner(board)) spend(board);
-    // One banner per absence, per board (criterion 7): a further round landing on a board
-    // whose announced round is still awaited adds nothing, and neither does a second tab
-    // closing, and neither does that banner having expired off the screen. A restart reads
-    // the same record off disk and says the same.
-    if (recordOn(board)) return false;
-    return stillWaiting(board).length > 0; // criterion 8: nothing awaited, nothing stranded
+    const rec = recordOn(board);
+    if (rec && !rec.returned) return false;
+    return nextToAnnounce(board) != null; // criterion 8: nothing awaited, nothing stranded
   }
 
   function cancel(boardId) {
@@ -254,6 +248,38 @@ export function createStrandedWatch({
     if (!entry) return;
     clearTimeout(entry.timer);
     pending.delete(boardId);
+  }
+
+  /** Arm the one countdown this board gets, replacing whatever was armed before.
+   *
+   * `windowed` records that this delay is waiting out a look-away window rather than the
+   * bare grace, which is what lets `evaluate` shorten it when the tab holding that window
+   * goes away -- see its own comment.
+   *
+   * Clamped to node's own timer ceiling. `setTimeout` coerces its delay to a signed 32-bit
+   * int, and a value past that does not throw: node warns and fires on the NEXT TICK. Both
+   * knobs feeding this are validated finite and positive but neither is bounded above, and
+   * they are summed, so an operator asking for an implausibly long window would otherwise
+   * get every board announcing instantly -- the exact inverse of the request. Clamped, an
+   * absurd value degrades to "about 25 days", which is at least the same direction.
+   *
+   * Unref'd: a banner that has not fired yet must never be what keeps a daemon from
+   * exiting, exactly like src/server.mjs's SSE heartbeat interval. */
+  /** The one place a countdown is started, shared by `evaluate` and `announce`'s
+   * re-arm, so the timer ceiling is clamped once and `windowed` is recorded once.
+   *
+   * The two callers pass deliberately different delays, which is worth stating because
+   * it looks like an inconsistency. `evaluate` arms the grace PLUS whatever is left of
+   * the look-away window: the grace is the reviewer's chance to come back before
+   * anything is said. `announce` re-arms on the bare remainder, no grace, because by
+   * then the grace has already been served once -- the window is only holding back a
+   * banner that was otherwise about to fire. */
+  function arm(boardId, target, delayMs, windowed) {
+    cancel(boardId);
+    const entry = { target, windowed };
+    entry.timer = setTimeout(() => announce(boardId, entry.target), Math.min(delayMs, MAX_TIMEOUT_MS));
+    entry.timer.unref?.();
+    pending.set(boardId, entry);
   }
 
   /** Withdraw the banner currently on screen for `boardId`, by killing the process that
@@ -270,7 +296,7 @@ export function createStrandedWatch({
    *
    * `until` is what bounds that, and this is the ONE place it is still consulted: whether
    * the record still SUPPRESSES is a different question with a different answer (see
-   * `standingBanner`), but a record whose banner's own process must long since have exited
+   * `mayAnnounce`), but a record whose banner's own process must long since have exited
    * names a pid that has been recycled onto something else, and signalling it would be
    * signalling a stranger. The pid path is therefore gated on the banner plausibly still
    * existing, even though the suppression is not. */
@@ -289,21 +315,57 @@ export function createStrandedWatch({
     return true;
   }
 
-  /** The reviewer is looking at this board again (criterion 6). Stops the pending
-   * banner, withdraws the delivered one, and clears the record so that leaving again MAY
-   * raise a fresh one -- which is what makes it mean "this absence has been announced"
-   * rather than "this board has been announced once, ever". */
+  /** The reviewer is looking at this board again. Stops the pending banner, withdraws the
+   * delivered one, and OPENS THE RETURN GATE -- without erasing the mark (ADR.md entry
+   * 74). A return takes the banner off the screen and buys the board the right to announce
+   * a round it has never announced; it does not buy the announced round a second banner.
+   *
+   * That distinction is the whole fix. The record used to be deleted here, so any report
+   * that a tab was attended -- a glance at the board, or the banner's own click bringing
+   * the tab forward -- reset the budget and the same round was announced again one grace
+   * later, measured at roughly one banner a minute for one round.
+   *
+   * WRITE FIRST, WITHDRAW SECOND, and the order is the whole point: the record and the
+   * screen have to agree. Withdrawing first and then restoring the record on a write that
+   * failed left the banner gone AND the board believing nobody had come back, which
+   * suppressed everything for the rest of the wait -- the reviewer silently loses the
+   * signal on exactly the machine that is already in trouble. So on a store that refuses
+   * the write, nothing is withdrawn either: the banner stays up and the gate stays shut,
+   * which is consistent and recoverable.
+   *
+   * The pid is cleared along with the gate, because there is no banner left for it to
+   * name and `until` would go on claiming that process may live for another hour.
+   *
+   * A record whose gate is already open takes no write at all, which matters because this
+   * runs on every `attended` report a tab sends and a page board's document can be
+   * megabytes. */
   function returned(boardId) {
     cancel(boardId);
     const board = boardOf(boardId);
-    if (!recordOn(board)) {
-      // Nothing recorded: no durable write on the ordinary path, which matters because
-      // this runs on every `attended` report a tab sends and a page board's document can
-      // be megabytes. The in-memory handle is still worth checking.
+    const rec = recordOn(board);
+    if (!rec || rec.returned) {
+      // Nothing to record. The in-memory handle is still worth checking: a banner raised
+      // and then returned from inside one evaluate still has a child to kill.
       terminate(boardId, null);
       return;
     }
-    spend(board);
+    // Copied before anything below can clear the pid off it: this is what `terminate`
+    // reaches a banner by when this daemon has no child handle of its own.
+    const withdrawable = { ...rec };
+    const saved = board[STRANDED_BANNER];
+    if (saved) {
+      board[STRANDED_BANNER] = { ...saved, returned: true, pid: null };
+      if (!persist(board)) {
+        board[STRANDED_BANNER] = saved; // the document goes back exactly as it was
+        return;
+      }
+    }
+    // The degraded path: a record this daemon could not write is held in memory, so the
+    // gate opens there instead. Mutated rather than replaced -- `recordOn` handed back
+    // this very object.
+    const held = unpersisted.get(boardId);
+    if (held) { held.returned = true; held.pid = null; }
+    terminate(boardId, withdrawable);
   }
 
   /** The grace has elapsed. Everything is re-decided here rather than trusted from when
@@ -327,7 +389,25 @@ export function createStrandedWatch({
       // read credential: `/events` needs no write, and a subscriber that reconnects
       // shortly before each grace expires is never old enough to age out, so no
       // per-Watcher bound could close it. There is nothing to bound now.
-      if (sse.isConfirmedAttended(boardId)) return;
+      //
+      // WHY THIS ASKS FOR MILLISECONDS AND NOT A BOOLEAN. Returning here without re-arming
+      // was safe while "attended" meant "a tab said it is looking": a later blur was a DOM
+      // edge, and the edge was guaranteed to bring an event that armed a fresh countdown.
+      // It is not safe now that the same answer can be true purely because a look-away
+      // window is still running, because NO EVENT FIRES WHEN A WINDOW EXPIRES. Dropping
+      // the countdown there loses the round for good -- reachable on the ordinary
+      // `install.sh` update, where `handleEvents` arms the bare grace at subscribe and the
+      // page's `sinceFocusMs` seeds a longer window one round trip later: the grace fires
+      // first, finds the window, and the window then expires against nothing at all. That
+      // is a permanent false negative, and ADR.md entry 74 accepts a missed banner never
+      // being repeated, not a round that is never announced.
+      //
+      // `Infinity` is the one case that may still return with nothing armed: a tab that is
+      // focused RIGHT NOW must produce a blur, a close or an answer eventually, and each of
+      // those is an event.
+      const attendedFor = sse.attendedRemainingMs(boardId);
+      if (attendedFor === Infinity) return;
+      if (attendedFor > 0) return arm(boardId, target, attendedFor, true);
       const board = boardOf(boardId);
       if (!board || !mayAnnounce(board)) return;
       // The reviewer's own switch (ticket 03): off means this whole rule is silent, while
@@ -335,8 +415,15 @@ export function createStrandedWatch({
       // for the same reason notifyBoundary re-reads on every interval -- a toggle flipped
       // mid-day takes effect on the next banner, not the next restart.
       if (!roundBannersEnabled(readPomodoroDoc(home).settings)) return;
-      // The oldest round still waiting is what the click resolves to, so it is also what
-      // bounds the child that serves the click, and it is what the record below names.
+      // The oldest round still waiting that has never been announced (ADR.md entry 74):
+      // what this banner is ABOUT, what the record below names, and what bounds the child
+      // that serves the click. In the ordinary case it is simply the oldest waiting round;
+      // it differs only after a return, where an older round has already had its one
+      // banner and may never have another.
+      //
+      // The click itself still resolves to the oldest round waiting AT THE MOMENT IT IS
+      // CLICKED, which is the round the reviewer owes an answer for -- the banner carries
+      // only the board's URL and a sentinel, never a round number (ADR.md entry 55).
       // The fragment is `#stranded-round` and NOT `#open-round`: the two look alike and
       // mean different things. `#open-round` resolves to the newest open round, which is
       // right for the index's live-row links; a banner has to land on the OLDEST round
@@ -344,7 +431,7 @@ export function createStrandedWatch({
       // banner's lifetime is bounded by (src/ui.mjs's `oldestAwaitedRoundNumber`
       // resolves it, on load and on hashchange/focus/visibilitychange so a tab that was
       // already open moves too).
-      const oldest = stillWaiting(board)[0];
+      const oldest = nextToAnnounce(board);
       const deadlineAt = Date.parse(oldest.awaitDeadline);
       const child = notify(folderName(board.cwd), {
         url: target && target.url ? `${target.url}#stranded-round` : null,
@@ -354,8 +441,12 @@ export function createStrandedWatch({
         deadlineAt,
       });
       const at = Date.now();
-      // Recorded durably, all four parts together. `round` is the load-bearing one: the
-      // absence ends when THAT round stops being awaited. `at` and `pid` are what let a
+      // Recorded durably, all five parts together. `round` is the load-bearing one: it is
+      // the MARK, permanent for the life of that round, and `returned` beside it is the
+      // gate -- shut from the moment a banner is raised until the reviewer comes back
+      // (ADR.md entry 74). A record read off disk by a successor daemon that predates this
+      // field carries no `returned`, which reads as a shut gate: conservative, and the
+      // side that costs a banner rather than repeating one. `at` and `pid` are what let a
       // replacement daemon withdraw a banner it did not raise, and `until` -- when the
       // process serving this banner will exit and withdraw it, the same
       // `min(the round's deadline, the launcher's hard ceiling)` src/notify.mjs applies to
@@ -369,6 +460,7 @@ export function createStrandedWatch({
       const rec = {
         at: new Date(at).toISOString(),
         round: oldest.n,
+        returned: false,
         pid: (child && child.pid) || null,
         until: new Date(Number.isFinite(deadlineAt)
           ? Math.min(deadlineAt, at + CLICK_LIFETIME_MAX_MS)
@@ -415,18 +507,24 @@ export function createStrandedWatch({
      * connection's own close handler, which runs with no request frame around it. */
     evaluate(boardId, target = null) {
       try {
-        // A Watcher has SAID it is looking: the reviewer is back. End the absence --
-        // withdraw the banner, clear the record -- so that leaving again may raise a
-        // fresh one (criterion 6). This is the ONLY thing that ends an absence while its
-        // round is still awaited: a Watcher that has merely subscribed has not said
-        // anything yet, and a hidden tab reconnecting must not be read as a reviewer
-        // returning (criterion 7).
-        if (sse.isConfirmedAttended(boardId)) return returned(boardId);
+        // A stopped watch decides nothing. See `closed` above for the ordering this
+        // closes: the call sites include an SSE connection's own close handler, and a
+        // daemon shutdown destroys those connections after `close()` has already run.
+        if (closed) return;
+        // A tab is focused RIGHT NOW: the reviewer is here. Withdraw the banner and open
+        // the return gate, WITHOUT erasing the mark, so that leaving again may raise a
+        // banner for a round that has never had one and never for the round that has
+        // (ADR.md entry 74). This is the ONLY thing that opens that gate: a Watcher that
+        // has merely subscribed has not said anything yet, a hidden tab reconnecting must
+        // not be read as a reviewer returning (criterion 7) -- and neither is a tab that
+        // is merely inside its look-away window, which says the reviewer is AROUND, not
+        // that they have looked at this board.
+        const attendedFor = sse.attendedRemainingMs(boardId);
+        if (attendedFor === Infinity) return returned(boardId);
         const board = boardOf(boardId);
-        // Nothing to announce -- nothing awaited (criterion 8), or an absence already
-        // announced and still standing (criterion 7). Either way a grace still counting
-        // down is counting down to nothing, so it goes. `mayAnnounce` also retires a
-        // record whose round is over, which is the other way an absence ends.
+        // Nothing to announce -- nothing awaited (criterion 8), a return gate still shut,
+        // or every waiting round already marked. Either way a grace still counting down is
+        // counting down to nothing, so it goes.
         if (!board || !mayAnnounce(board)) return cancel(boardId);
         // Already counting down: leave it alone, deadline and target both. Re-arming on
         // every event would let a busy agent, or a tab on a flaky socket that reconnects
@@ -434,13 +532,19 @@ export function createStrandedWatch({
         // produce a banner at all. What suppresses a banner for a tab that has just
         // reconnected is `announce`'s own re-check at fire time, not the absence of a
         // timer -- which is exactly where a decision about the present belongs.
-        if (pending.has(boardId)) return;
-        const entry = { target };
-        entry.timer = setTimeout(() => announce(boardId, entry.target), strandedGraceMs());
-        // A banner that has not fired yet must never be what keeps a daemon from
-        // exiting, exactly like src/server.mjs's SSE heartbeat interval.
-        entry.timer.unref?.();
-        pending.set(boardId, entry);
+        //
+        // The ONE exception is a countdown armed past a look-away window whose tab has
+        // since gone: that timer is waiting out a window belonging to a tab nobody has
+        // open any more, so it is re-armed on the plain grace instead. Narrowly gated on
+        // the board having no attended time left at all, so it cannot become the general
+        // re-arm the paragraph above rules out.
+        const armed = pending.get(boardId);
+        if (armed && !(attendedFor === 0 && armed.windowed)) return;
+        // The grace, plus whatever is left of the look-away window on the tab that last
+        // had focus (ADR.md entry 73), so the countdown cannot finish while the board is
+        // still Attended. `announce` re-decides on arrival and re-arms on whatever window
+        // is left, so overshooting costs nothing; undershooting costs a wasted wake-up.
+        arm(boardId, target, strandedGraceMs() + attendedFor, attendedFor > 0);
       } catch (err) {
         console.error(`claude-board: stranded rule for board ${boardId} failed: ${(err && err.message) || err}`);
       }
@@ -478,18 +582,50 @@ export function createStrandedWatch({
       return terminate(boardId, rec);
     },
 
+    /** Every open round on this board has been abandoned (ADR.md entry 69): the reviewer
+     * ran `/clear`, the shim called `ask(fresh: true)`, and nothing on this board is
+     * awaited any more. The banner standing for it names a round that no longer wants an
+     * answer, and clicking it would land the reviewer on a board with nothing to do -- for
+     * up to `min(the round's deadline, CLICK_LIFETIME_MAX_MS)`, which is tens of minutes.
+     * So the child goes and the pid comes off the record.
+     *
+     * ITS OWN ENTRY POINT rather than something `evaluate` infers, and deliberately not a
+     * clear of the record: abandoning is not returning. The mark stays and the gate stays
+     * exactly as it was, so a fresh board's first round still earns its own banner while
+     * this board's announced round never earns a second (ADR.md entry 74). Before the mark
+     * was permanent this fell out of `mayAnnounce` spending a record whose round had
+     * stopped being awaited; that spend is gone, and this is what replaces it -- the
+     * withdrawal half, without the re-announcement half that came with it.
+     *
+     * The write is best-effort and the kill is not conditional on it: a store that refuses
+     * the write leaves a stale pid on a record whose `until` still bounds it, which
+     * `terminate`'s own guard already handles, while a banner left on screen for an
+     * abandoned round is the thing this exists to prevent. */
+    abandoned(boardId) {
+      cancel(boardId);
+      const board = boardOf(boardId);
+      const rec = recordOn(board);
+      terminate(boardId, rec);
+      if (!rec || rec.pid == null) return;
+      if (board && board[STRANDED_BANNER]) {
+        board[STRANDED_BANNER] = { ...board[STRANDED_BANNER], pid: null };
+        persist(board);
+      }
+      const held = unpersisted.get(boardId);
+      if (held) held.pid = null;
+    },
+
     /** Stop owning anything: every pending grace and every click-serving process this
      * daemon spawned goes with it (criterion 15). Idempotent.
      *
      * Deliberately WITHOUT retiring the records those children serve. Killing them does
      * take their banners off the screen -- SIGTERM is how a banner is withdrawn -- and it
      * is tempting to reason that a board with no banner on screen should be announceable
-     * again. That is the reading criterion 7 rules out in as many words: further rounds
-     * raise nothing more until the reviewer comes back, "whether or not the banner already
-     * raised is still on screen". An absence ends two ways and only two, the reviewer
-     * returning or the announced round ceasing to be awaited, and a daemon stop is
-     * neither. Retiring here meant a reviewer who was told once at t=0 was told again
-     * after an ordinary `install.sh` update -- two signals for one absence.
+     * again. That is the reading ADR.md entry 74 rules out in as many words: further
+     * rounds raise nothing more until the reviewer comes back, whether or not the banner
+     * already raised is still on screen. The return gate opens ONE way, the reviewer
+     * genuinely returning, and a daemon stop is not that. Retiring here meant a reviewer
+     * who was told once at t=0 was told again after an ordinary `install.sh` update.
      *
      * Nothing here may skip the kill, either: criterion 15's last sentence is
      * unconditional, and an unref'd child left behind by a shutdown outlives its owner by
@@ -497,6 +633,7 @@ export function createStrandedWatch({
      * to nothing. With no write in this path there is nothing that can fail and no
      * temptation to make the kill conditional on it. */
     close() {
+      closed = true;
       for (const boardId of [...pending.keys()]) cancel(boardId);
       for (const boardId of [...children.keys()]) {
         // The pid goes even though the record stays. Leaving the record standing is the

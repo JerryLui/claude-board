@@ -806,6 +806,29 @@ resolver's own defensive guard against it), splice a properly-normalised block
 from a throwaway `createBoard` directly into `board.blocks[i]`, id overwritten by
 hand — don't fight `amendRound` for it, it will always throw.
 
+### `POST /api/board` into an open question round amends it, so a check cannot mint round 2
+
+`handlePostBoard` amends the latest round in place when it is still `open` AND asks
+something (a question block anywhere in it, nested included). So the obvious way to
+build a two-round board in a check —
+
+```js
+const { boardId } = await postRound(port, { title, blocks: [QUESTION('a?')], cwd });
+await postRound(port, { boardId, blocks: [QUESTION('b?')] });   // still round 1
+```
+
+leaves the board with ONE round and a second question glued into it. Nothing fails;
+the response even comes back `{ round: 1 }`, which is easy to read past. Every
+assertion about "a different round" then quietly asserts nothing.
+
+To mint real round numbers, open the board with an **awaited page round** instead —
+one `html` block plus `wait: true` (ADR entry 45). It is Awaited (so it strands, and
+counts on the index) but asks no question, so the next post takes the `addRound` branch
+and becomes round 2. `test/check-stranded.mjs`'s `waitingArtifactBoard` is that helper.
+Note `wait: true` alone is not enough: `mintAwait` requires `isPageRound`, which is one
+`html` block and nothing else — a markdown block with `wait: true` is not awaited at all
+and strands nothing.
+
 ### A machine-identity sweep cannot be `includes(os.hostname())`
 
 The obvious way to check a committed artifact for leaked machine identity is
@@ -1153,6 +1176,43 @@ Debugging this at all needs `getNotificationSettingsWithCompletionHandler:`, sin
 `requestAuthorization` reports "denied by the user long ago" and "you are not a registered
 app" with the same string. A throwaway bundle carrying the same `CFBundleIdentifier` as the
 one under test reads the real status without disturbing it.
+
+### macOS 26 refits and masks a legacy `.icns` itself, so the artwork's own padding and corners are invisible
+
+Measured on macOS 26.5 (25F84) with a throwaway bundle whose icon is a **full bleed, opaque,
+sharp cornered square**: `-[NSWorkspace iconForFile:]` returns it as a 412×412 body centred in
+a 512 tile (0.80 of the canvas) with a squircle corner about 31 px in on the diagonal, plus the
+system shadow. Identical numbers, to the pixel, for Bruno, Linear, Ghostty, Calculator, and for
+this repo's icon before *and* after it was redrawn to the 0.80 grid. Fresh bundle identifiers
+were used, so this is live compositing rather than an Icon Services cache.
+
+Two consequences. Padding the artwork to four fifths and rounding its corners is a no-op on
+this OS, since the system does both regardless, and a body already inset would be double-inset if it
+refitted the *canvas*, which it does not; it refits the opaque bounds. And "the icon does not
+fill its tile, the system drops it on a grey plate" is not reproducible here through this path:
+a wrong-shaped legacy icns comes out of it looking correct. Keep the padded artwork anyway, it
+is what older macOS and any non-IconServices consumer expect, but do not spend a rebuild on
+icon geometry alone on macOS 26 without first measuring the surface that looks wrong.
+
+The probe is four lines of AppKit (draw `iconForFile:` into an `NSBitmapImageRep`, scan for the
+alpha bounding box, sample the corner) and is worth rewriting over trusting a screenshot: the
+Finder, System Settings and Quick Look surfaces all read this same composited image. `qlmanage
+-t` is not a substitute: it hung past two minutes on a bundle with no code signature.
+
+### `rsvg-convert` refuses an XML comment containing `--`, silently taking down every size in the loop
+
+Regenerating `bin/claude-board.icns` (comment above `LAUNCHER_ICON_SRC` in `install.sh`) runs
+`rsvg-convert -w N -h N mark-grid.svg -o icon_NxN.png` once per size. An SVG comment that
+contains a literal `--` (a plain-English aside, an em-dash rendered as two hyphens, "cost
+the -- extra" style prose) makes libxml refuse the whole document with `XML parse error:
+... Double hyphen within comment`, and every invocation in the loop fails the same way —
+`rsvg-convert`'s own error mentions the file, not the comment, so the first instinct is to
+suspect the geometry rather than the prose sitting above it. This is standard XML (`--`
+is disallowed inside a comment body by spec); most browsers and other SVG tools tolerate
+it anyway, which is why a comment written and eyeballed in a browser can still trip this
+tool later. Write comments in `.svg` sources the same way you would inside a genuine XML
+document — no `--`, spell it out or use a single `-` — since this is the one file type
+here that is generated through a strict parser rather than displayed by a lenient one.
 
 ### `soundNamed:` searches `/System/Library/Sounds` and does NOT search the app bundle — the documented search path is backwards
 

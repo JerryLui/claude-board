@@ -546,11 +546,18 @@ POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, 
 POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
                                     open on a board a conversation walked away from
                                     (ADR.md entry 69). Secret only: never cookie-reachable
-POST /api/board/:id/attended        { watcher, attended, seq? } -> { ok: true }; the open
-                                    tab reporting whether it is Attended right now
+POST /api/board/:id/attended        { watcher, attended, seq?, sinceFocusMs? } -> { ok: true };
+                                    the open tab reporting whether it is Attended right now
                                     (CONTEXT.md "Watcher", "Attended"); stores nothing
-                                    durable itself, but a report that ends an absence
-                                    retires the stranded banner recorded on that board
+                                    durable itself, but a report that the reviewer has
+                                    returned withdraws the stranded banner recorded on that
+                                    board and opens its return gate
+GET  /api/index/rows?q=             -> { html }: the index's thread rows, filtered by the
+                                    same q, and nothing else -- no page, no styles, no
+                                    board content. What an open index polls on its own
+                                    fifteen-second tick to patch the list in place
+                                    (ADR 77); the rows are rendered by the same function
+                                    `GET /` uses, so the two cannot drift
 GET  /api/search?q=                 archive search
 GET  /api/pomodoro                  the whole document -> { settings, cycle, cycleDate, timer, now };
                                     rolled to the current pomodoro day first, so a read
@@ -796,15 +803,18 @@ naming the board id it holds in its own memory — which is what scopes this to 
 session: nothing here reads `cwd` or `thread`, so two sessions in one project directory cannot
 touch each other's boards.
 
-Closing the rounds is also what takes the stranded Banner down: the rule is re-evaluated after the
-write, finds nothing awaited, spends any standing record (withdrawing a banner already on screen)
-and cancels a grace still counting down. Nothing can re-arm it, because only a round landing on
-this board could, and none ever will.
+Closing the rounds is also what takes the stranded Banner down: the rule is told the board was
+abandoned, which cancels a grace still counting down and withdraws a banner already on screen by
+SIGTERMing the process serving its click. Nothing can re-arm it, because only a round landing on
+this board could, and none ever will. Abandoning is NOT returning: the announcement mark and the
+return gate are left exactly as they were, so this withdraws a banner without ever buying another
+one (ADR.md entry 74).
 
 ## `POST /api/board/:id/attended`
 
 ```js
-{ watcher: '<id from the stream's own "watcher" event>', attended: true | false, seq?: 0, 1, 2… }
+{ watcher: '<id from the stream's own "watcher" event>', attended: true | false,
+  seq?: 0, 1, 2…, sinceFocusMs?: 0, 1, 2… }
   -> { ok: true }
 ```
 
@@ -823,6 +833,22 @@ board would raise no banner for the rest of that wait. It is optional, and a rep
 applied and leaves the counter alone, so a page predating the ordering keeps working; present and
 malformed is a 400.
 
+`sinceFocusMs` is how long ago the TAB last had focus, and it exists so the two-minute look-away
+window (ADR.md entry 73) survives an SSE reconnect. The daemon's own record of when a tab last had
+focus lives per Watcher, and a reconnect mints a fresh one — so a buried tab's first report through
+it would otherwise read as "never focused", the window would read as spent, and the bare grace
+would be armed under a reviewer who looked at that board thirty seconds ago. It seeds the stamp
+only when the daemon has no observation of its own, so a report can never extend a window already
+running, and a tab that has never had focus does not send the field at all. Optional and validated
+exactly as `seq` is; a value old enough to be spent lands as an expired window, not an error.
+
+It is the page's own claim, like `attended` beside it, and the same write credential reaches both.
+It is not merely a weaker `attended: true`, though: a seeded window holds a banner back WITHOUT
+opening the return gate, where a report of `attended: true` opens it. So the two differ in kind
+rather than in degree — one is a quieter state, the other a louder one — and a forged report can
+buy silence either way. What neither can buy is a second banner for a round already announced,
+which is the mark's business and not this route's.
+
 Cookie-authenticated exactly like `submit` (see "The browser session cookie" above): a browser
 holding a live stream on this board is the only party that can honestly answer this question, so an
 unauthenticated report is refused rather than believed. What a forged one would buy an attacker:
@@ -830,10 +856,11 @@ unauthenticated report is refused rather than believed. What a forged one would 
 
 What it stores is a fact about a live SSE connection and nothing about the board. It is not,
 however, a route with no durable consequence: the stranded rule reads that fact immediately, and a
-report that ends an absence retires the banner record standing on the board — one read and one
-write, and for a page board that document can be large. That is the price of a marker that survives
-a restart, and it is paid only when the reviewer really comes back to a board that had been
-announced; the ordinary report writes nothing. A report naming a `watcher` this board has no live
+report that the reviewer has RETURNED opens the return gate on the banner record standing on the
+board — one read and one write, and for a page board that document can be large. That is the price
+of a mark that survives a restart, and it is paid once, only when the reviewer really comes back to
+a board that had been announced; every later report on that board, and every ordinary report on any
+other, writes nothing. A report naming a `watcher` this board has no live
 subscription for stops before the rule is consulted at all.
 
 The daemon ORs this flag across every Watcher currently subscribed to a board — two tabs on it
@@ -861,8 +888,21 @@ every event that can change the answer — a round landing, a Watcher arriving o
 (`CLAUDE_BOARD_STRANDED_GRACE_MS` overrides, and the launcher passes it through), which is one SSE
 heartbeat, so a tab that is merely reconnecting is never mistaken for an absent reviewer.
 
-One banner per **board**, per absence: further rounds landing on a board whose announced round is
-still awaited add nothing. The click carries the board's own URL plus the `#stranded-round`
+A board is Attended while a Watcher reports its tab focused, **and for two minutes after that tab
+last had focus** (`CLAUDE_BOARD_ATTENDED_WINDOW_MS` overrides, and the launcher passes it through;
+ADR.md entry 73). A tab that is focused right now has no clock on it at all, however long it sits
+there — there is no idle detection, and nothing reads the reviewer's keyboard. Because no event
+fires when a window expires, the grace a board is armed with is the grace *plus* whatever is left
+of that window. The window is per Watcher and dies with the tab, so closing the last tab strands
+the board on the bare grace; it survives a reconnect only because the page reports `sinceFocusMs`
+with every `attended` report, and a fresh Watcher seeds its stamp from that rather than from the
+fact of being connected.
+
+One banner per **round**, once, ever (ADR.md entry 74). Further rounds landing on a board that has
+announced anything add nothing, and neither does the announced round being answered, abandoned or
+lapsing — a round becoming the oldest waiting one is not a reviewer coming back. Returning takes the banner
+off the screen and lets the board announce a round it has never announced; it never un-announces
+the round already marked. The click carries the board's own URL plus the `#stranded-round`
 sentinel, which resolves to the oldest round still waiting at the moment it is clicked (not
 `#open-round`, which resolves to the newest open round and belongs to the index's live-row links).
 The URL is built from the socket the daemon is bound to and never from the `Host` header, and the
@@ -870,22 +910,23 @@ bound port crosses to the launcher as its own argument so the two can be checked
 other.
 
 The banner is recorded on the board document as `strandedBanner`,
-`{ at, until, round, pid } | null`: when it went up, when the process serving it will exit and
-withdraw it (the round's deadline or the launcher's hard ceiling, whichever is sooner), which round
-was announced, and that process's pid. It is stripped from everything a client sees, so the served
-page stays byte-identical to `pages/<id>.html`. A daemon restart reads it back and does not
-re-announce.
+`{ at, until, round, returned, pid } | null`: when it went up, when the process serving it will exit
+and withdraw it (the round's deadline or the launcher's hard ceiling, whichever is sooner), the
+highest round announced — the **mark**, permanent for the life of that round — whether the reviewer
+has returned since, and the pid of the process serving the click. It is stripped from everything a
+client sees, so the served page stays byte-identical to `pages/<id>.html`. A daemon restart reads it
+back and does not re-announce; a record written before `returned` existed reads as a shut gate.
 
-An absence ends exactly two ways: the reviewer returns (a Watcher *reports* it is looking), or the
-round named in `round` stops being awaited — answered, or its wait lapsed — whereupon the next round
-on that board starts a fresh absence and may raise a banner of its own. Both are read lazily off
-events the daemon already handles; there is no timer on `awaitDeadline`.
+The gate opens exactly one way: the reviewer returns, meaning a Watcher *reports* its tab focused.
+Nothing else does — not a round ending, not the banner expiring off the screen, not a daemon
+restart. It is read lazily off events the daemon already handles; there is no timer on
+`awaitDeadline`.
 
-A daemon restart is neither, on either path. Killed outright, the daemon leaves its child orphaned
-with the banner still up and the record on disk. Stopped gracefully, it SIGTERMs the child — so the
-banner goes off the screen — and leaves the record standing with only its `pid` cleared, since that
-pid now names a process it has just killed. Both mean the same thing to the successor: this board's
-absence has been announced, and nothing more is raised for it until the reviewer comes back.
+A daemon restart, on either path, is not a return. Killed outright, the daemon leaves its child
+orphaned with the banner still up and the record on disk. Stopped gracefully, it SIGTERMs the child
+— so the banner goes off the screen — and leaves the record standing with only its `pid` cleared,
+since that pid now names a process it has just killed. Both mean the same thing to the successor:
+this board has been announced, and nothing more is raised for it until the reviewer comes back.
 
 Nothing else ends it. In particular a banner that has expired off the screen still counts as this
 board's one announcement while the round it named is awaited, so **a reviewer who dismisses a banner

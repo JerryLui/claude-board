@@ -363,7 +363,15 @@ async function main() {
       assert.deepEqual(abandoned.answers, {}, 'and no answer was fabricated for it');
 
       // AC 3, the live half: the Banner is withdrawn and cannot fire again.
-      assert.equal(storedBoard(boardA).strandedBanner, null, 'the standing banner record is spent');
+      // The record is NOT cleared, and that is ADR.md entry 74 rather than a leak: the
+      // announcement mark is per round and permanent, and abandoning a board is not the
+      // reviewer returning to it. What goes is the banner on screen and the pid that named
+      // the process serving it -- the withdrawal, without the "and now the next round may
+      // announce itself" that used to come with it.
+      const spent = storedBoard(boardA).strandedBanner;
+      assert.ok(spent, 'the mark stays: a round announced once is announced for its whole life');
+      assert.equal(spent.returned, false, 'and so does the shut gate -- nobody came back, they cleared');
+      assert.equal(spent.pid, null, 'only the pid goes, with the process about to be killed');
       const withdrawn = await waitForRows('cleared', 2, 10_000);
       assert.ok(withdrawn.some(r => r[0] === 'SIGTERM'),
         `SIGTERM specifically: it is the path that withdraws the delivered banner from Notification Center (rows: ${JSON.stringify(withdrawn)})`);

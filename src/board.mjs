@@ -1113,23 +1113,28 @@ export function buildPacket(board, round, url) {
 // that case. One field holding one record rather than three parallel ones that must be
 // written, cleared and stripped together:
 //
-//   board.strandedBanner = { at, until, round, pid } | null
+//   board.strandedBanner = { at, until, round, returned, pid } | null
 //
-//   at     when the banner went up, an ISO stamp like `sentAt`/`postedAt` beside it.
-//          Also what bounds `pid` below: a process that started before this did is not
-//          the one this record names, whatever it is called.
-//   until  when the process serving the banner will exit and withdraw it -- the round's
-//          own deadline, or the launcher's hard ceiling, whichever comes first. Used for
-//          ONE thing: deciding whether `pid` is still worth signalling. Deliberately NOT
-//          a term in whether the record SUPPRESSES -- a banner that has expired off the
-//          screen still counts as this board's one announcement (criterion 7, read
-//          literally).
-//   round  which round the reviewer was told about, and the load-bearing field: the
-//          absence ends when THIS round stops being awaited (answered, or its wait
-//          lapsed), whereupon the next round on the board starts a fresh one.
-//   pid    the process serving that banner's click, so a daemon that did not spawn it
-//          can still withdraw it after an unclean restart. Null on the osascript
-//          fallback, which has no process that outlives its post.
+//   at        when the banner went up, an ISO stamp like `sentAt`/`postedAt` beside it.
+//             Also what bounds `pid` below: a process that started before this did is not
+//             the one this record names, whatever it is called.
+//   until     when the process serving the banner will exit and withdraw it -- the round's
+//             own deadline, or the launcher's hard ceiling, whichever comes first. Used for
+//             ONE thing: deciding whether `pid` is still worth signalling. Deliberately NOT
+//             a term in whether the record SUPPRESSES -- a banner that has expired off the
+//             screen still counts as this board's one announcement.
+//   round     the highest round the reviewer has been told about: THE MARK, permanent for
+//             the life of that round (ADR.md entry 74). A round at or below it is never
+//             announced again, whatever happens to it.
+//   returned  whether the reviewer has genuinely returned to this board since. False from
+//             the moment a banner is raised, and only a Watcher reporting its tab focused
+//             sets it true -- not a round ending, not the banner expiring, not a restart.
+//             While it is false the board announces nothing further at all. Absent on a
+//             record written before this field existed, which reads as false.
+//   pid       the process serving that banner's click, so a daemon that did not spawn it
+//             can still withdraw it after an unclean restart. Null on the osascript
+//             fallback, which has no process that outlives its post, and cleared when the
+//             banner it named is withdrawn.
 //
 // Declared HERE rather than in src/server.mjs because `stripDaemonOnly` below is what
 // strips it and src/render.mjs calls that; render.mjs cannot import from the server,

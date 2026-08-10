@@ -542,7 +542,16 @@ async function main() {
     assert.equal(info.status, 0, info.stderr);
     const infoPlist = JSON.parse(info.stdout);
     assert.equal(infoPlist.CFBundleIdentifier, 'io.github.jerrylui.claude-board', 'the bundle id IS the name of the TCC grant; changing it silently costs every user their grant');
-    assert.equal(infoPlist.LSBackgroundOnly, true, 'a daemon must not take a Dock icon at login');
+    // LSUIElement, not LSBackgroundOnly (ADR.md entry 75): a daemon must not take a Dock
+    // icon at login, but it DOES need to be activatable so a stranded banner's click can
+    // bring it to the front to serve the response -- LSBackgroundOnly declares an app
+    // that may never be brought forward, and every click against it fails activation
+    // with -600. Both assertions, not just the one on LSUIElement: both keys present is
+    // the ambiguous state (LSBackgroundOnly is documented to win), so a future edit that
+    // adds LSBackgroundOnly back next to LSUIElement must fail here rather than reopen
+    // the -600 alert with a still-green suite.
+    assert.equal(infoPlist.LSUIElement, true, 'the bundle must be an agent app so a banner click can activate it (ADR.md entry 75)');
+    assert.equal(infoPlist.LSBackgroundOnly, undefined, 'LSBackgroundOnly must be gone, not merely false -- present at all is the ambiguous state the OS resolves in its favour');
 
     // Ad-hoc signed, and verifiably so: an unsigned bundle gets no stable TCC identity
     // at all, which is the entire reason this bundle exists.

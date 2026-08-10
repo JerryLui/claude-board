@@ -450,6 +450,14 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
   await check('bin/notify.m carries the category, the delegate, the withdrawal and the signal handling', async () => {
     const m = readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8');
     assert.match(m, /UNNotificationCategory/, 'an action category, per ADR.md entry 57');
+    // Pinned as source-level reality, not as something the fix depends on: ADR.md entry
+    // 75 is what stops the -600 alert (the bundle's LSUIElement, checked in
+    // test/check-install.mjs), not this option. The option may ride along -- dropping it
+    // is not the fix either -- but nothing here or in install.sh may come to rely on it
+    // (SPEC_SIGNALS.md Decisions), so this only pins that the action still asks to come
+    // to the foreground; it asserts no behaviour beyond the string being present.
+    assert.match(m, /UNNotificationActionOptionForeground/,
+      'the click action asks to bring the app forward -- LSUIElement is what lets that succeed');
     assert.match(m, /UNUserNotificationCenterDelegate/, 'and a delegate to receive the click');
     assert.match(m, /center\.delegate\s*=\s*delegate/, 'set on the center before the post');
     assert.match(m, /removeDeliveredNotificationsWithIdentifiers/,

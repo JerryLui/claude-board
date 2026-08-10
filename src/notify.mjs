@@ -159,11 +159,14 @@ export function isBoardUrl(url, port) {
 // a deadline 400ms away still buys a click rather than a process that exits on arrival.
 //
 // Exported in milliseconds because the daemon has to reason about the same ceiling from
-// the other side: past it, the process below has exited and WITHDRAWN its notification,
-// so a board's announced marker no longer stands for anything on screen (src/stranded.mjs's
-// `standingBanner`). A wait longer than this ceiling is reachable -- CLAUDE_BOARD_TIMEOUT_MS
-// is on the launcher's plist passthrough allowlist -- and without the daemon knowing the
-// number, such a wait loses its banner partway through and never gets a replacement.
+// the other side: past it, the process below has exited and WITHDRAWN its notification, so
+// the pid on a board's announced record names a process that is gone and must not be
+// signalled (src/stranded.mjs's `terminate`, and the `until` it is bounded by). Whether
+// that record still SUPPRESSES is a different question with a different answer -- the mark
+// is permanent, so a banner that has expired off the screen still counts as this round's
+// one announcement (ADR.md entry 74). A wait longer than this ceiling is reachable --
+// CLAUDE_BOARD_TIMEOUT_MS is on the launcher's plist passthrough allowlist -- and without
+// the daemon knowing the number it would go on signalling a recycled pid.
 const MAX_CLICK_SECONDS = 3600;
 export const CLICK_LIFETIME_MAX_MS = MAX_CLICK_SECONDS * 1000;
 

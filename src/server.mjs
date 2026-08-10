@@ -47,17 +47,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, searchBoards, pruneStore } from './store.mjs';
+import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore } from './store.mjs';
 import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
-import { buildThreadIndex, renderIndexPage } from './indexpage.mjs';
+import { buildThreadIndex, renderIndexPage, renderThreadRows } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
-import { isPageRound, roundIsAwaited, roundWaitLapsed, closeLapsedAwaitedRounds } from './badge.mjs';
+import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, closeLapsedAwaitedRounds } from './badge.mjs';
 import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
@@ -80,6 +80,30 @@ function sseHeartbeatMs() {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_SSE_HEARTBEAT_MS;
 }
 
+/** How long a board stays Attended after its tab last had FOCUS (CONTEXT.md "Attended";
+ * ADR.md entry 73). Two minutes, because the posture this product is built for is a board
+ * tab sitting behind the terminal: read as a live boolean, that tab counts as nobody
+ * watching and its board strands within seconds of every glance away, roughly once a
+ * minute all day. The window is what makes an open tab mean "the reviewer is around".
+ *
+ * A tab that is focused RIGHT NOW is Attended for as long as it stays focused, with no
+ * clock on it at all -- idle detection was considered and refused, so nothing here reads
+ * the reviewer's keyboard to decide whether they are present. The window only ever bounds
+ * how long a tab that has LOST focus keeps counting.
+ *
+ * An environment variable rather than a settings row, exactly like the stranded grace
+ * below and for the same two reasons: it is a characteristic of the machine, not a
+ * preference, and a check has to be able to drive the rule without sleeping two real
+ * minutes. Zero, negative, empty and unparseable all fall back to the default, so that
+ * blanking it (the ordinary way an operator turns a knob off) cannot silently reinstate
+ * the bug this exists to fix. */
+export const DEFAULT_ATTENDED_WINDOW_MS = 120_000;
+
+function attendedWindowMs() {
+  const v = Number(process.env.CLAUDE_BOARD_ATTENDED_WINDOW_MS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_ATTENDED_WINDOW_MS;
+}
+
 /** SSE subscriber registry, keyed by board id, one entry per Watcher (CONTEXT.md).
  *
  * Keyed by a server-minted `watcherId` rather than by `res` alone, so an `attended`
@@ -91,7 +115,31 @@ function sseHeartbeatMs() {
  * Exported for the checks: `res` is never inspected here, only held and later
  * `.write()`n, so a stand-in carrying a `write` method (or none) is enough. */
 export function createSseHub() {
-  const subs = new Map(); // boardId -> Map<watcherId, { res, attended }>
+  const subs = new Map(); // boardId -> Map<watcherId, { res, attended, seq, focusedAt }>
+
+  /** Is this Watcher inside its look-away window -- did it have focus recently enough
+   * that the board still counts as Attended (ADR.md entry 73)? `focusedAt` is the last
+   * instant this tab is known to have had focus, so a tab that has never reported focus
+   * at all (0) is never inside a window, however long it has been connected. */
+  function withinLookAway(watcher) {
+    return watcher.focusedAt > 0 && Date.now() - watcher.focusedAt < attendedWindowMs();
+  }
+
+  /** How much longer this board counts as Attended. See the `attendedRemainingMs` entry
+   * on the returned object for what the three answers mean. A plain function rather than
+   * a `this.` call between two methods, so a caller that pulls one method off the hub does
+   * not get a broken one. */
+  function remainingMs(boardId) {
+    const board = subs.get(boardId);
+    if (!board) return 0;
+    let best = 0;
+    for (const watcher of board.values()) {
+      if (watcher.attended === true) return Infinity;
+      if (watcher.focusedAt > 0) best = Math.max(best, attendedWindowMs() - (Date.now() - watcher.focusedAt));
+    }
+    return Math.max(0, best);
+  }
+
   return {
     subscribe(boardId, res) {
       let board = subs.get(boardId);
@@ -105,7 +153,7 @@ export function createSseHub() {
       // neither end an absence nor hold a banner back (`isConfirmedAttended` below is
       // what the stranded rule asks); and it is not evidence they are gone either, so
       // `isAttended` still counts it for anything merely asking whether a tab is open.
-      board.set(watcherId, { res, attended: null, seq: -1 });
+      board.set(watcherId, { res, attended: null, seq: -1, focusedAt: 0 });
       return watcherId;
     },
     unsubscribe(boardId, watcherId) {
@@ -145,7 +193,7 @@ export function createSseHub() {
      * of that wait, with no further DOM edge coming to correct it -- or, reversed, fire
      * a banner at a reviewer who is looking at the board. A report carrying no `seq` is
      * applied and leaves the counter alone: degrade, do not refuse. */
-    setAttended(boardId, watcherId, attended, seq = null) {
+    setAttended(boardId, watcherId, attended, seq = null, sinceFocusMs = null) {
       const board = subs.get(boardId);
       const watcher = board && board.get(watcherId);
       if (!watcher) return false;
@@ -153,37 +201,87 @@ export function createSseHub() {
         if (seq <= watcher.seq) return false; // an older edge, overtaken in flight
         watcher.seq = seq;
       }
+      // The last instant this tab is known to have had focus, which is what the two-minute
+      // look-away window counts from (ADR.md entry 73). Stamped when a report SAYS the tab
+      // is focused, and equally when a report says it has just STOPPED being focused --
+      // the tab had focus right up to this instant, so a blur starts the window here, not
+      // back when focus was gained. Without the second half, a tab focused for ten minutes
+      // and then buried would be treated as last-focused ten minutes ago and strand at once.
+      if (watcher.attended === true || attended) watcher.focusedAt = Date.now();
+      // A RECONNECT is the case this Watcher cannot observe for itself: it was minted
+      // seconds ago by a fresh `/events` stream, so a buried tab's first report through it
+      // is `false` against a `focusedAt` of zero and the window reads as spent. The page
+      // carries how long ago IT last had focus (`sinceFocusMs`, src/ui.mjs) and that seeds
+      // the stamp -- but only when this Watcher has no observation of its own, so a report
+      // can never EXTEND a window the daemon is already tracking, and never invent one for
+      // a tab that has not said it had focus at all.
+      //
+      // It is the page's own claim, like `attended` beside it, and the same write
+      // credential reaches both. Not merely a weaker `attended: true`, though, and the
+      // difference is worth naming: a seeded window holds a banner back WITHOUT opening the
+      // return gate, where `attended: true` opens it -- a quieter state rather than a lesser
+      // one. Both buy silence; neither buys a second banner for a round already announced,
+      // which is the mark's business. A value old enough to be already spent lands as an
+      // expired window, not an error.
+      else if (!watcher.focusedAt && Number.isInteger(sinceFocusMs) && sinceFocusMs >= 0) {
+        watcher.focusedAt = Date.now() - sinceFocusMs;
+      }
       watcher.attended = !!attended;
       return true;
     },
     /** CONTEXT.md "Attended", OR-across-Watchers: true unless every Watcher of this
-     * board has REPORTED itself hidden or unfocused. Two clauses the branches turn on,
-     * because neither survives the summary above: a board with no Watchers at all is NOT
-     * Attended (`if (!board) return false`, rather than the vacuous "every one of zero
-     * Watchers has reported hidden"), and a Watcher that has not reported yet counts as
-     * looking (`attended !== false`, not `=== true`) -- which is the entire reason
-     * `isConfirmedAttended` below exists. No production reader -- kept for
-     * test/check-attended.mjs, which pins this rule directly since nothing over HTTP
-     * surfaces it. Production asks `isConfirmedAttended` below instead. */
+     * board has REPORTED itself hidden or unfocused AND is past its look-away window.
+     * Three clauses the branches turn on, because none survives the summary above: a
+     * board with no Watchers at all is NOT Attended (`if (!board) return false`, rather
+     * than the vacuous "every one of zero Watchers has reported hidden"), a Watcher that
+     * has not reported yet counts as looking (`attended !== false`, not `=== true`) --
+     * which is the entire reason `isConfirmedAttended` below exists -- and one that
+     * reported itself hidden within the last two minutes still counts (ADR.md entry 73).
+     * No production reader -- kept for test/check-attended.mjs, which pins this rule
+     * directly since nothing over HTTP surfaces it. Nor has `isConfirmedAttended` below
+     * one any more: since ADR.md entry 73 the only accessor production reads is
+     * `attendedRemainingMs`, because the stranded rule needs to know WHEN a board stops
+     * being attended, not just whether it is. Both booleans are test-only now, and
+     * saying so here is not bookkeeping: a stand-in that had drifted from this hub is
+     * what hid a defect that made a stranded board silent forever. */
     isAttended(boardId) {
       const board = subs.get(boardId);
       if (!board) return false;
-      for (const watcher of board.values()) if (watcher.attended !== false) return true;
+      for (const watcher of board.values()) if (watcher.attended !== false || withinLookAway(watcher)) return true;
       return false;
     },
     /** The stricter question, and the one a caller deciding whether the reviewer has
-     * COME BACK has to ask: has any Watcher actually SAID it is looking? A freshly
-     * subscribed one has not, so this is false through the reconnect and true again a
-     * round trip later if the tab really is in front of the reviewer -- which is what
-     * keeps a hidden tab's reconnect (a dropped socket, a laptop wake, a daemon restart)
-     * from reading as the reviewer returning (SPEC_STRANDED.md criterion 7). See
-     * `createStrandedWatch.evaluate` (src/stranded.mjs). */
+     * COME BACK has to ask: has any Watcher actually SAID it is looking, now or recently
+     * enough to still be inside its look-away window? A freshly subscribed one has not,
+     * so this is false through the reconnect and true again a round trip later if the tab
+     * really is in front of the reviewer -- which is what keeps a hidden tab's reconnect
+     * (a dropped socket, a laptop wake, a daemon restart) from reading as the reviewer
+     * returning (SPEC_STRANDED.md criterion 7).
+     *
+     * The window (ADR.md entry 73) is why a tab buried behind the terminal -- the ordinary
+     * working posture -- does not strand its board the moment focus moves: it goes on
+     * answering true for two minutes after that tab last had focus. A tab that IS focused
+     * answers true with no clock involved at all, however long it sits there.
+     *
+     * Test-only, like `isAttended` above: the rule this was written for now asks
+     * `attendedRemainingMs` instead, needing the moment the window ends and not just
+     * whether it is still running. See `createStrandedWatch.evaluate` (src/stranded.mjs). */
     isConfirmedAttended(boardId) {
-      const board = subs.get(boardId);
-      if (!board) return false;
-      for (const watcher of board.values()) if (watcher.attended === true) return true;
-      return false;
+      return remainingMs(boardId) > 0;
     },
+    /** The same question with its answer in milliseconds, which is what the stranded rule
+     * needs to know WHEN to ask again (ADR.md entry 73).
+     *
+     * `Infinity` means a tab is focused right now -- the reviewer is here, and no clock is
+     * running on them. A finite number is how much of the look-away window is left on the
+     * tab that last had focus; `0` is a board nobody is watching.
+     *
+     * Without this the window would be a mute button rather than a delay: the rule fires
+     * on events, and no event fires when a window expires, so a board whose only tab was
+     * buried and then left alone would go from "attended for two minutes" to "attended
+     * forever". `createStrandedWatch.evaluate` arms its countdown past the remaining
+     * window for exactly that reason. */
+    attendedRemainingMs: remainingMs,
   };
 }
 
@@ -1151,14 +1249,23 @@ async function handleWait(req, res, id, url, home, sse) {
  * this is the LAST write it will ever get, and a `pages/<id>.html` left showing live
  * widgets would stay that way in the archive for good.
  *
- * `stranded.evaluate` last, after the write has landed. That single call is the whole of
- * criterion "its Banner does not fire afterwards": the rule re-reads the board off disk,
- * `stillWaiting` finds nothing (`roundIsAwaitedOpen` wants `status === 'open'`), so
- * `mayAnnounce` spends any standing record — which withdraws the banner already on screen
- * by SIGTERMing the process serving its click — and `evaluate` cancels a grace still
- * counting down. Nothing re-arms it, because only a round landing on this board could,
- * and no round ever will. Deliberately NOT `stranded.answered`: nobody answered anything.
- */
+ * `stranded.abandoned` last, after the write has landed. That single call is the whole of
+ * criterion "its Banner does not fire afterwards", and it has two halves: it cancels a
+ * grace still counting down, and it withdraws the banner already on screen by SIGTERMing
+ * the process serving its click. Nothing re-arms it, because only a round landing on this
+ * board could, and no round ever will.
+ *
+ * `abandoned`, not `evaluate`, and the difference is load-bearing since ADR 74 made the
+ * announcement mark permanent. `evaluate` alone now cancels the pending grace and stops:
+ * with nothing awaited there is nothing to announce, so it takes the early exit and never
+ * reaches the banner already delivered, which would sit on screen for up to
+ * `min(the round's deadline, CLICK_LIFETIME_MAX_MS)` pointing at a board where nothing is
+ * awaited. It used to fall out of `mayAnnounce` retiring a record whose round had stopped
+ * being awaited — which also handed the next round a fresh banner, the behaviour entry 74
+ * removes. `abandoned` keeps the withdrawal and drops the re-announcement.
+ *
+ * Deliberately NOT `stranded.answered`: nobody answered anything, and that path is scoped
+ * to one round number where this is about every open round at once. */
 function handleAbandon(req, res, id, home, sse, stranded) {
   req.resume();
   const board = readBoard(id, home);
@@ -1173,7 +1280,7 @@ function handleAbandon(req, res, id, home, sse, stranded) {
     // the round number, for the reason given there.
     for (const n of closed) sse.broadcast(id, 'awaitExpired', { round: n });
   }
-  stranded.evaluate(id, strandedTarget(req, id));
+  stranded.abandoned(id);
   return sendJson(res, 200, { ok: true, board: board.id, closed });
 }
 
@@ -1316,6 +1423,13 @@ async function handleAttended(req, res, id, sse, stranded) {
   if (body.seq !== undefined && !(Number.isInteger(body.seq) && body.seq >= 0)) {
     return sendJson(res, 400, { error: 'attended\'s optional "seq" must be a non-negative integer' });
   }
+  // How long ago this TAB last had focus, so the look-away window survives a reconnect
+  // (ADR.md entry 73; see `setAttended`). Optional and validated the same way `seq` is: a
+  // page that predates it sends none and the Watcher keeps only what the daemon observed
+  // itself.
+  if (body.sinceFocusMs !== undefined && !(Number.isInteger(body.sinceFocusMs) && body.sinceFocusMs >= 0)) {
+    return sendJson(res, 400, { error: 'attended\'s optional "sinceFocusMs" must be a non-negative integer' });
+  }
   // The return value is the point: `setAttended` is what knows whether this report names
   // a Watcher this board actually has AND whether it is newer than the one already
   // applied. A report that names none, or that lost a race to a later edge, changed
@@ -1324,7 +1438,7 @@ async function handleAttended(req, res, id, sse, stranded) {
   // write, and steering the click target with this request's socket -- on a route whose
   // whole answer is otherwise a silent no-op. Still a 200: see `setAttended` for why a tab
   // cannot know it lost that race.
-  if (!sse.setAttended(id, body.watcher, body.attended, body.seq ?? null)) return sendJson(res, 200, { ok: true });
+  if (!sse.setAttended(id, body.watcher, body.attended, body.seq ?? null, body.sinceFocusMs ?? null)) return sendJson(res, 200, { ok: true });
   // The one report that changes whether this board is Attended is also the one event
   // that can strand a round without a round having landed or a tab having closed:
   // switching away from a board with something awaited on it (criterion 3), and coming
@@ -1563,6 +1677,28 @@ async function handlePrune(req, res, home) {
   }
 }
 
+/** The soonest instant at which a round still waiting anywhere in `boards` will lapse, or
+ * `Infinity` when nothing is waiting. The one thing that changes an index row with no
+ * write behind it: a wait dying takes the live dot out and the rounds-left badge down,
+ * and `readBoard` performs that sweep in memory rather than writing it back, so the
+ * board file is byte-identical either side of it. `GET /api/index/rows` expires its cache
+ * here for exactly that reason — see the route.
+ *
+ * Read off boards that have ALREADY been through `readBoard`, so every round it sees is
+ * one that is still genuinely waiting; the deadlines that have already passed were swept
+ * to `awaited: false` before they got here, and cannot pull this back into the past. */
+function nextLapseAt(boards) {
+  let soonest = Infinity;
+  for (const board of boards) {
+    for (const round of (board.rounds || [])) {
+      if (!roundIsAwaitedOpen(round)) continue;
+      const at = Date.parse(round.awaitDeadline);
+      if (Number.isFinite(at) && at < soonest) soonest = at;
+    }
+  }
+  return soonest;
+}
+
 /** Build the daemon's request handler as a plain `node:http` listener, without
  * binding a port — used directly by the check and by `startServer` below.
  *
@@ -1579,6 +1715,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // `requestHandler.close` below is how startServer hands it its own shutdown --
   // criterion 15's "stopping the daemon leaves none of them running".
   const stranded = createStrandedWatch({ home, sse });
+  // `GET /api/index/rows`'s one-entry cache: `{ print, query, html, lapseAt }`, or null
+  // before the first poll. Per handler, like everything else here, so two daemons in one
+  // process never serve each other's rows -- and dropped with the handler, so nothing here
+  // outlives a daemon. See the route itself for what the fingerprint buys and what
+  // `lapseAt` covers that it cannot.
+  let rowsCache = null;
   // A caller-supplied instance (startServer's, below) is what makes pause/resume/reset/
   // settings and the boot-time clock share the ONE live setTimeout for this daemon —
   // two independent createPomodoro() instances against the same home would each arm
@@ -1673,6 +1815,50 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         return sendHtml(res, 200, renderIndexPage({ threads, query }), {
           'content-security-policy': INDEX_CSP,
         });
+      }
+
+      // The rows feed the open index pages poll on their own fifteen-second tick (ADR.md
+      // entry 77). Deliberately NOT a stream: an index is a page nobody stares at, and a
+      // live connection per open tab costs more than being at most one tick behind.
+      //
+      // The same renderer `GET /` uses, so what a poll patches in can never disagree with
+      // what the page was served with -- and none of the page around it: no styles, no
+      // script, no board bodies.
+      //
+      // What makes it cheap enough to answer on that interval for every open index is the
+      // fingerprint, not the payload. `listBoards` is a synchronous read and parse of every
+      // board document, which `GET /` pays once per navigation and this route would pay
+      // every fifteen seconds per open tab, on the event loop, ahead of every blocked
+      // `/wait` and every SSE heartbeat. `storeFingerprint` is a `readdir` plus a `stat`
+      // per file and settles the common case -- nothing changed -- without parsing
+      // anything. The threads themselves are cached per query behind it.
+      //
+      // Keyed by the query as well as the fingerprint, because two indexes can poll the
+      // same daemon under different filters; one entry, not a map, since re-rendering on a
+      // query the last caller did not use is one walk, not a leak, and an index nobody is
+      // filtering is by far the common case.
+      if (req.method === 'GET' && url.pathname === '/api/index/rows') {
+        const query = url.searchParams.get('q') || '';
+        const print = storeFingerprint(home);
+        // The fingerprint cannot see a wait LAPSING, and a lapse changes a row: the live
+        // dot goes out and the rounds-left badge drops. `readBoard` sweeps a lapsed
+        // awaited round in memory rather than writing the sweep back, so nothing about the
+        // file moves -- same size, same mtime, same listing -- and a fingerprint alone
+        // would serve that row stale forever. The agent-still-waiting case self-heals
+        // (`handleWait`'s timeout branch writes), but the one where nobody is waiting does
+        // not: the reviewer closed the terminal, or the MCP call was interrupted, and an
+        // index left open overnight goes on showing a live dot for a wait that died.
+        //
+        // So the cache also expires at the soonest deadline it can see, computed off the
+        // same walk it already paid for. Precise rather than a coarse clock bucket: this
+        // invalidates exactly when a row's content genuinely changes, and never otherwise.
+        const lapsed = rowsCache && Date.now() >= rowsCache.lapseAt;
+        if (!rowsCache || lapsed || rowsCache.print !== print || rowsCache.query !== query) {
+          const boards = listBoards(home);
+          const threads = buildThreadIndex(boards);
+          rowsCache = { print, query, html: renderThreadRows({ threads, query }), lapseAt: nextLapseAt(boards) };
+        }
+        return sendJson(res, 200, { html: rowsCache.html });
       }
 
       if (req.method === 'GET' && url.pathname === '/api/search') {

@@ -113,8 +113,88 @@ await check("blur -- the tab stays VISIBLE, only loses focus to another window -
     focused = false;
     window.dispatchEvent(new StandInEvent('blur'));
     assert.equal(calls.length, 2, "the initial watcher report plus the blur report -- losing focus (document stays visible, document.hidden false) must trigger a fresh report -- a board left open on one screen while the reviewer works in another window or the terminal is the single most common posture this product has, and reportAttended used to have no way to hear about it at all");
-    assert.deepEqual(calls[1].body, { watcher: 'w1', attended: false, seq: 2 }, 'attended must read false once focus has moved elsewhere, carrying a seq strictly greater than the watcher report -- the daemon needs that ordering to resist the blur POST landing on a second connection ahead of an earlier one');
+    const blurBody = calls[1].body;
+    assert.equal(blurBody.watcher, 'w1');
+    assert.equal(blurBody.attended, false, 'attended must read false once focus has moved elsewhere');
+    assert.equal(blurBody.seq, 2, 'carrying a seq strictly greater than the watcher report -- the daemon needs that ordering to resist the blur POST landing on a second connection ahead of an earlier one');
+    // The look-away window's own half (ADR 73). The daemon's record of when a tab last
+    // had focus lives on the SSE Watcher, and a reconnect mints a fresh one -- so the tab
+    // has to be able to say how long ago it last had focus, or a daemon restart under a
+    // buried tab costs the reviewer the whole window and raises a banner for a board they
+    // were looking at seconds ago.
+    assert.ok(Number.isInteger(blurBody.sinceFocusMs) && blurBody.sinceFocusMs >= 0,
+      `a blur must carry how long ago this tab last had focus, got ${JSON.stringify(blurBody.sinceFocusMs)}`);
+    assert.ok(blurBody.sinceFocusMs < 1000, 'and it has only just lost it, so that is a very small number');
   } finally { restore(); }
+});
+
+await check('sinceFocusMs measures from when focus was LOST, not from when it was gained -- the ordinary posture is a board read for a long stretch and then buried', async () => {
+  // The assertion above cannot see this: it blurs in the same millisecond as the watcher
+  // report, so "time since focus was gained" and "time since focus was lost" are the same
+  // number and a wrong implementation passes. This one reads the board for a while first.
+  //
+  // Reports are edge-driven, so nothing is sent during that stretch -- which is exactly
+  // why the tab cannot stamp only when a report says it IS focused. Getting this wrong
+  // costs the whole look-away window for anyone who reads a board for longer than two
+  // minutes before switching to the terminal, which is the posture the window exists for.
+  const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
+  let focused = true;
+  document.hasFocus = () => focused;
+  const { calls, restore } = stubFetch();
+  try {
+    es.dispatch('watcher', JSON.stringify({ id: 'w1' }));
+    assert.equal(calls[0].body.attended, true, 'setup sanity: the reviewer is looking at it');
+
+    const READING_MS = 250; // a stretch of reading, with no DOM edge and so no report
+    await new Promise(r => setTimeout(r, READING_MS));
+    assert.equal(calls.length, 1, 'setup sanity: nothing is reported while the tab just sits there focused');
+
+    focused = false;
+    window.dispatchEvent(new StandInEvent('blur'));
+    const blur = calls[1].body;
+    assert.ok(blur.sinceFocusMs < READING_MS / 2,
+      `a tab that has just lost focus last had it ~now, not ${READING_MS}ms ago: got ${blur.sinceFocusMs}`);
+
+    // And the reconnect leg, which is the one the field exists for: the report a fresh
+    // Watcher gets must measure from the BLUR, so the daemon seeds what is genuinely left
+    // of the window rather than one already spent by the time spent reading.
+    const AWAY_MS = 120;
+    await new Promise(r => setTimeout(r, AWAY_MS));
+    es.dispatch('watcher', JSON.stringify({ id: 'w2' })); // EventSource reconnected
+    const reconnect = calls[calls.length - 1].body;
+    assert.equal(reconnect.watcher, 'w2', 'setup sanity: this is the reconnect report');
+    assert.ok(reconnect.sinceFocusMs >= AWAY_MS * 0.5 && reconnect.sinceFocusMs < READING_MS,
+      `the reconnect must report the time spent AWAY (~${AWAY_MS}ms), not away plus the time spent reading (~${READING_MS + AWAY_MS}ms): got ${reconnect.sinceFocusMs}`);
+  } finally { restore(); }
+});
+
+await check('a report that says the tab IS focused carries no sinceFocusMs, and one from a tab that never had focus carries none either', async () => {
+  // Two absences, and both are deliberate. A tab that has focus right now says the
+  // stronger thing already, so the field would be noise. A tab that has NEVER had focus
+  // has nothing to report, and sending zero would hand it a full look-away window it has
+  // not earned -- "connected implies recently focused" is the reading ADR 73 refuses.
+  const board = createBoard({ title: 'x', blocks: [{ kind: 'markdown', text: '# hi' }] });
+  const { document, window, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const { calls, restore } = stubFetch();
+  try {
+    es.dispatch('watcher', JSON.stringify({ id: 'w1' }));
+    assert.ok(!('sinceFocusMs' in calls[0].body), `a focused report must not carry it: ${JSON.stringify(calls[0].body)}`);
+    restore();
+  } finally { restore(); }
+
+  const other = createBoard({ title: 'y', blocks: [{ kind: 'markdown', text: '# hi' }] });
+  const buried = loadBoardWithEventSource(renderBoardPage(other));
+  buried.document.hasFocus = () => false;
+  const { calls: buriedCalls, restore: restoreBuried } = stubFetch();
+  try {
+    // A tab that opened straight into the background: its very first report is `false`,
+    // and it has no focus of its own to date.
+    buried.es.dispatch('watcher', JSON.stringify({ id: 'w2' }));
+    assert.equal(buriedCalls[0].body.attended, false, 'setup sanity: this tab really is unfocused');
+    assert.ok(!('sinceFocusMs' in buriedCalls[0].body),
+      `a tab that has never had focus must send nothing: ${JSON.stringify(buriedCalls[0].body)}`);
+  } finally { restoreBuried(); }
 });
 
 await check('regaining focus after a blur reports attended: true again, through the SAME listener pair blur uses', async () => {
