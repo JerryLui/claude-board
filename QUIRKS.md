@@ -1179,6 +1179,54 @@ preview resolves to the same file the notification plays.
 
 ---
 
+## The menu bar status item
+
+### A status item is not your window, and every obvious detector lies about it
+
+`NSStatusItem`'s button window is composited by **ControlCenter**, not by the process that
+created it. Measured while verifying ADR 72, every one of these is a false negative or a
+false positive:
+
+- `CGWindowListCopyWindowInfo` filtered to your own pid returns nothing in **every**
+  condition, including for a plain `NSApplicationActivationPolicyRegular` app. A detector
+  built on own-pid windows reports failure always, and has told you nothing.
+- `button.window.windowNumber` is `4294967296` (2^32), not a real window-server number.
+- `button.window.isVisible` is `1` even with `statusItem.visible = NO` and the window parked
+  off-screen at `(0,-17 61x22)`. Worthless as a signal.
+- The frame is height-zero for the first 1-2 seconds, so a synchronous check straight after
+  `statusItemWithLength:` says "not in the menu bar" about an item that is working. Sample at
+  t ≥ 2s.
+
+The one detector that survived its own must-fail control: take `button.window.frame`, flip it
+to CoreGraphics top-left (`screenHeight - (y + h)`), and search the **global** on-screen
+window list for a layer-25 window at those bounds. It needs no Screen Recording grant — only
+`kCGWindowName` is redacted without one. Two instances at once land in distinct adjacent slots,
+which is how you know the geometry is a real allocation rather than computed hope.
+
+### `LSBackgroundOnly` does not block a status item, and the activation policy is not why
+
+A forked-and-exec'd child of the bundle executable shows a visible status item under
+`LSBackgroundOnly=true` with no `LSUIElement`, from a shell and from launchd alike — and it
+does so **with the `setActivationPolicy:` call omitted entirely**, policy left at `Prohibited`.
+Keep the call to match `bin/notify.m`, but do not build a design on the belief that it is what
+makes the item appear. Also: `-[NSApp setActivationPolicy:]` returns `NO` when the policy
+already matches, because the BOOL means "did it change", not "did it succeed". Do not
+error-check on it.
+
+### A main-queue `dispatch_after` never fires while a status item menu is tracking
+
+Menu tracking runs the loop in `NSEventTrackingRunLoopMode`, which a plain main-queue block
+does not reach — a watchdog scheduled that way hangs past any timeout you gave it. Any timer
+in the menu bar process must be scheduled in the tracking mode too, or live off the main
+thread. This is the trap waiting for the once-a-second countdown tick.
+
+### `screencapture` is unavailable from an agent process tree
+
+"could not create image from rect", sandboxed or not, for want of a Screen Recording grant.
+Visual verification of anything on screen has to go through the window-list geometry above.
+
+---
+
 ## Shell, C and the filesystem
 
 ### An apostrophe inside `${VAR:-...}` swallows the rest of a bash script

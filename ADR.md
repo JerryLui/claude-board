@@ -22,7 +22,6 @@ link where it is worth reading.
 | 5 | [This repo ships the protocol, not its callers](.agents/adr/0005-this-repo-ships-the-protocol-not-its-callers.md) | 2026-07-31 | accepted |
 | 7 | [An `html` block may name a file, but only a whole one](.agents/adr/0007-html-block-may-name-a-file-but-only.md) | 2026-08-04 | accepted |
 | 8 | [The daemon owns the pomodoro clock](.agents/adr/0008-daemon-owns-the-pomodoro-clock.md) | 2026-08-04 | accepted |
-| 9 | [No menu bar item — the bundle's signature is load-bearing](.agents/adr/0009-no-menu-bar-item-the-bundle-s-signature.md) | 2026-08-04 | narrowed by 57 |
 | 11 | [The repo ships one caller-facing file: the manual](.agents/adr/0011-repo-ships-one-caller-facing-file-the-manual.md) | 2026-08-04 | accepted |
 | 13 | [The daemon's environment is baked into the launcher, not the plist](.agents/adr/0013-daemon-s-environment-is-baked-into-the-launcher.md) | 2026-08-04 | accepted |
 | 14 | [The launcher is compiled from a staged copy; the stamp covers the binary](.agents/adr/0014-launcher-is-compiled-from-a-staged-copy-the.md) | 2026-08-04 | accepted |
@@ -47,7 +46,7 @@ link where it is worth reading.
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
 | 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58 |
 | 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19 |
-| 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 9 |
+| 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 72 |
 | 58 | [One notifier for a round, and it is the daemon's](.agents/adr/0058-one-notifier-for-a-round-and-it-is.md) | 2026-08-09 | widens 55 |
 | 59 | [The board clears its own chrome band, the artifact does not](.agents/adr/0059-board-clears-its-own-chrome-band-the-artifact.md) | 2026-08-09 | narrows 40 |
 | 62 | [Third-party rendering code is vendored, not depended on](.agents/adr/0062-third-party-rendering-code-is-vendored-not-depended.md) | 2026-08-09 | accepted |
@@ -60,3 +59,4 @@ link where it is worth reading.
 | 69 | [A conversation boundary is declared by the agent, and starts a new thread](.agents/adr/0069-a-conversation-boundary-is-declared-by-the-agent.md) | 2026-08-10 | narrows 4 |
 | 70 | [A page references its script and styles, content-addressed and never rewritten](.agents/adr/0070-a-page-references-its-script-and-styles-content-addressed.md) | 2026-08-10 | accepted |
 | 71 | [The store is prunable by hand, and the promise not to prune it is dropped](.agents/adr/0071-the-store-is-prunable-by-hand-and-the-promise-is-dropped.md) | 2026-08-10 | relates to 70 |
+| 72 | [The status item is a second process of the same bundle](.agents/adr/0072-status-item-is-a-second-process-of-the.md) | 2026-08-10 | replaces the deleted 9; narrowed by 57 |
