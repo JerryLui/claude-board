@@ -20,9 +20,11 @@ tab. There is no Linux or Windows path and none is planned.
 review — every block kind and answer widget, comments pinned to a diagram node, to an
 element inside a rendered mock, and to a whole block — rendered to
 [`examples/sample-board.html`](examples/sample-board.html), the same format a real
-review is archived in. GitHub serves that file as plain text rather than a page, so
-treat the link as something to download and open locally (double-click it, or
-`open examples/sample-board.html`) — it renders read-only, no daemon required.
+review is archived in. GitHub serves that file as plain text rather than a page, so it is
+something to open locally: clone the repo and run `open examples/sample-board.html` — it
+renders read-only, no daemon required. Clone rather than download the one file, because a
+board names its script and stylesheet as siblings instead of carrying its own copy of
+each (ADR 70), so an archive travels as a page plus the folder around it.
 
 The board has two rounds, one pager flip apart, and opens on the newer one: the block
 gallery below. The other round is a different shape entirely — a full-viewport artifact
@@ -194,11 +196,12 @@ into some other browser, or a board id to land on that board rather than the ind
   answer, emitting progress notifications so the call is never idle-aborted. Claude Code
   backgrounds it after roughly two minutes, so your session stays interactive while the
   page is open.
-- **JSON is truth.** A board is a JSON document and the page is a pure function of it,
-  emitted with its own source inlined, so an archived board double-clicked from Finder
-  renders read-only with no daemon running — though a mermaid diagram in it still
-  fetches its renderer from jsdelivr. Re-rendering old boards after a design change is a
-  loop over the store, not a migration.
+- **JSON is truth.** A board is a JSON document and the page is a pure function of it, so
+  an archived board double-clicked from Finder renders read-only with no daemon running —
+  as long as its folder comes too, since the page names the shared script and stylesheet
+  sitting beside it rather than carrying its own copy of each. (A mermaid diagram in it
+  still fetches its renderer from jsdelivr.) Re-rendering old boards after a design change
+  is a loop over the store, not a migration.
 
 Boards live outside this repository, under
 `~/Library/Application Support/claude-board/` (override with `CLAUDE_BOARD_HOME`), so

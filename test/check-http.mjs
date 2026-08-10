@@ -24,6 +24,7 @@ import { readBoard, writeBoard, searchBoards } from '../src/store.mjs';
 import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { renderBoardPage } from '../src/render.mjs';
+import { assetsNamedBy } from '../src/assets.mjs';
 import { isPageRound } from '../src/badge.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
@@ -58,20 +59,19 @@ function rawRequest(port, method, pathName, host, { headers = {}, body = null } 
   });
 }
 
-/** Strip the inlined <style> block, the #board-data JSON payload, and the client
- * <script type="module"> from a served page, leaving only the block markup that
- * renderBlock actually emitted. A block-kind-coverage assertion against the raw page
- * is unsafe: a class name like "compare-grid" or "mermaid-block" is also a CSS
- * selector in src/styles.mjs and a querySelector string literal in src/ui.mjs, and
- * any field value on a block (a label, a snippet of prose) is also present in the
- * JSON board.blocks the page inlines verbatim for hydration -- none of that proves
- * the corresponding renderBlock case ran. Stripping all three first means a needle
- * can only be found where the renderer actually put it. */
+/** Strip the #board-data JSON payload from a served page, leaving only the block markup
+ * that renderBlock actually emitted. A block-kind-coverage assertion against the raw page
+ * is unsafe: any field value on a block (a label, a snippet of prose) is also present in
+ * the JSON board.blocks the page inlines verbatim for hydration, and finding it there
+ * proves nothing about whether the corresponding renderBlock case ran.
+ *
+ * This used to strip two more things, for the same reason: the inlined `<style>` block
+ * (where a class name like "compare-grid" is also a CSS selector) and the inlined client
+ * `<script type="module">` (where it is also a querySelector string literal). Since ADR 70
+ * the page carries neither -- it names them as sibling files -- so the JSON payload is the
+ * only haystack left that can produce a false positive. */
 function renderedMarkup(html) {
-  return html
-    .replace(/<style>[\s\S]*?<\/style>/, '')
-    .replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '')
-    .replace(/<script type="module">[\s\S]*?<\/script>/, '');
+  return html.replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '');
 }
 
 /** Recursively hash every file under `dir`, keyed by path relative to `dir`. Used to
@@ -1751,12 +1751,27 @@ async function main() {
 
     const after = snapshotTree(home);
 
-    // no file was added or removed by answering
-    assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort());
+    // Nothing is ever removed by answering, and the only thing that may APPEAR is a
+    // shared asset the regenerated page actually names -- src/store.mjs's writePage puts
+    // the two content-addressed siblings down before the page that references them (ADR
+    // 70), so a submit landing the first time this daemon has ever written a given
+    // payload legitimately adds a file. Anything else appearing is still a failure: this
+    // check is what says a submit writes no scratch file, no lock, no backup, no
+    // second board.
+    const added = [...after.keys()].filter(rel => !before.has(rel));
+    const removed = [...before.keys()].filter(rel => !after.has(rel));
+    assert.deepEqual(removed, [], 'answering must never remove a file from the store');
+    const namedByPage = assetsNamedBy(after.get(pagePathRel).bytes.toString('utf8'));
+    for (const rel of added) {
+      assert.ok(path.dirname(rel) === 'pages' && namedByPage.includes(path.basename(rel)),
+        `answering added ${rel}, which is not a shared asset the regenerated page names`);
+    }
 
-    // every file except the board's own JSON and its emitted page projection is
-    // byte-identical -- answering touches nothing else on disk. (Ablation: writing
-    // any stray file during submit, or touching an unrelated board, fails this.)
+    // every file except the board's own JSON, its emitted page projection and any asset
+    // just added is byte-identical -- answering touches nothing else on disk, and in
+    // particular never REWRITES a shared asset (the name is the hash: a file that exists
+    // already holds exactly those bytes). (Ablation: writing any stray file during
+    // submit, or touching an unrelated board, fails this.)
     for (const rel of before.keys()) {
       if (rel === boardPathRel || rel === pagePathRel) continue;
       assert.equal(after.get(rel).sha, before.get(rel).sha, `${rel} must be untouched by a submit`);

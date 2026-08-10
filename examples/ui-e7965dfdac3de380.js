@@ -1,89 +1,4 @@
-// Client-side script for the board page, exported as a string so render.mjs can
-// inline it in a <script type="module"> tag and the page stays self-contained.
-//
-// Hydrates from the embedded board JSON; wires the four answer widgets (single,
-// multi, text, rank) and the per-question defer toggle; renders mermaid
-// client-side from its CDN; wires comments anchored at block and at element
-// level (a dom path + hint inside an html stage, a mermaid node id inside a
-// rendered diagram) on the two kinds ADR.md entry 28 leaves commentable --
-// 'html' and 'mermaid', wherever they appear, and nothing else.
-//
-// Send and Discuss in chat are never gated on how much is filled in, but go
-// disabled once the round has actually gone out: the send bar sits outside the
-// round section, so no history collapse can reach it.
-//
-// Subscribes over SSE so a follow-up round pushes into this already-open tab
-// instead of requiring a reload -- marking that tab (title count, favicon badge)
-// rather than stealing focus back, and reporting whether it is being looked at
-// so the daemon's own banner (ADR.md entry 58) can tell a buried tab from a
-// genuinely absent reviewer. The board is re-read on every (re)connect, because
-// the stream has no replay and a disconnected client would otherwise lose a push
-// for good.
-//
-// A comment gets its pin the moment it is QUEUED, not when the batch is finally
-// sent: pendingComments carries a provisional number continuing the server's
-// sequence and renders hollow (.pin-pending). See commentsWithPending /
-// refreshPins below.
-//
-// All of that wiring is factored into `wireRoot(root)` so it can run once at
-// hydrate (root = document) and again on just the newly-inserted subtree after a
-// push -- see wireRoot's own comment below for the scoping rule that keeps a
-// push from double-registering listeners on already-wired elements.
-//
-// Element-level pins render their resolved/lost styling from `board.comments` as
-// embedded by src/render.mjs — already run through resolveComment server-side —
-// and only use a live DOM/SVG lookup to decide *where* to draw the pin, never to
-// decide whether it's resolved. See src/anchor.mjs's file comment for why.
-//
-// Read-only mode: opened straight from disk (file://) there is no daemon to submit
-// to or subscribe to, so the page hydrates from its embedded copy, disables every
-// input, and never opens an SSE connection.
 
-import { computeBoardPatch } from './patch.mjs';
-import {
-  composeHint, parseMermaidDomId, MERMAID_NODE_SELECTOR,
-  findPendingCommentForAnchor, removePendingComment,
-} from './anchor.mjs';
-import {
-  roundPageLabel, roundNumberLabel, isPageRound,
-  questionBlocks, roundIsAwaited,
-  roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
-  ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE,
-  PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE,
-} from './badge.mjs';
-import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
-import { THEME_CHANGE_EVENT } from './theme.mjs';
-import { palettes } from './styles.mjs';
-
-// Mermaid variable -> CSS token, read at call time from the live computed style
-// rather than hardcoded a second time in the client script below. 'background'
-// and the 'fontFamily'/'fontSize' pair stay literal in mermaidThemeVariables
-// below -- neither is a color token.
-//
-// A real, top-level module constant (not just text inside the `ui` template
-// literal below) for the same reason MERMAID_NODE_SELECTOR above is imported
-// rather than retyped: it's spliced into the client script via JSON.stringify
-// so the two can never drift, AND it's directly importable by
-// test/check-mermaid-theme.mjs, which cross-checks every value against
-// src/styles.mjs's real palettes. Without that binding, a palette rename that
-// orphaned a mapping surfaced only as an unhandled rejection wiping every
-// diagram, never as a test failure.
-export const MERMAID_TOKEN_MAP = {
-  primaryColor: '--panel-2',
-  primaryTextColor: '--ink',
-  primaryBorderColor: '--accent',
-  secondaryColor: '--panel-3',
-  tertiaryColor: '--panel',
-  lineColor: '--muted',
-  textColor: '--ink-2',
-  mainBkg: '--panel-2',
-  nodeBorder: '--accent',
-  clusterBkg: '--accent-glow',
-  clusterBorder: '--hairline-2',
-  edgeLabelBackground: '--panel',
-};
-
-export const ui = `
 (function () {
   // THE ID RULE FOR THIS WHOLE FILE, stated here once: every id lookup is
   // tag/type-qualified, never a bare getElementById or a bare '#id' selector.
@@ -193,7 +108,91 @@ export const ui = `
   // src/patch.mjs. This is the EXACT same function, spliced in verbatim by
   // Function.prototype.toString() at build time (see src/ui.mjs), not a hand copy,
   // so the tested behaviour and this browser copy can never drift apart.
-  var computeBoardPatch = ${computeBoardPatch.toString()};
+  var computeBoardPatch = function computeBoardPatch(prevBoard, nextBoard) {
+  /** Every block in display order, nested ones included: a question's `context`
+   * blocks and both sides of a compare block are blocks with their own ids and
+   * their own rendered widgets/comment forms. */
+  function flattenBlocks(blocks, out) {
+    (blocks || []).forEach(function (b) {
+      if (!b || typeof b !== 'object') return;
+      out.push(b);
+      if (b.context) flattenBlocks(b.context, out);
+      if (b.left && b.left.block) flattenBlocks([b.left.block], out);
+      if (b.right && b.right.block) flattenBlocks([b.right.block], out);
+      // choose-between-rendered-variants: an option's own `block`
+      // is a nested block with its own id, its own rendered widget and its own
+      // comment form, exactly like a compare side's -- walked here for the
+      // same reason the two lines above are, or an amend that replaced only an
+      // option's block would report nothing changed and the reviewer's stale
+      // field state against the OLD option content would ride along.
+      if (b.options) flattenBlocks(b.options.map(function (o) { return o.block; }).filter(Boolean), out);
+    });
+    return out;
+  }
+
+  /** A block's own content, WITHOUT its nested children: comparing whole subtrees
+   * would report a compare/question block as changed merely because something
+   * nested inside it changed, and the client would then clear field state for a
+   * block that did not actually change. Each nested block is compared on its own
+   * account instead, under its own id. The two `label`s are pulled up because
+   * they belong to the compare block itself, not to either nested block.
+   * `options` (choose-between-rendered-variants) is handled the same way: each
+   * option's own `block` is dropped from the comparison (compared separately,
+   * under its own id, by the flattened walk above) and replaced with just the
+   * nested block's id, so the SET of options / which block each one points at
+   * is still compared, without re-comparing either option's entire nested
+   * content a second time. */
+  function ownContent(block) {
+    var copy = {};
+    Object.keys(block).forEach(function (k) {
+      if (k === 'context' || k === 'left' || k === 'right' || k === 'options') return;
+      copy[k] = block[k];
+    });
+    if (block.left) copy.leftLabel = block.left.label;
+    if (block.right) copy.rightLabel = block.right.label;
+    if (block.options) {
+      copy.options = block.options.map(function (o) {
+        return { label: o.label, description: o.description, preview: o.preview, blockId: o.block ? o.block.id : null };
+      });
+    }
+    return copy;
+  }
+
+  var prevBlocksById = {};
+  flattenBlocks(prevBoard.blocks, []).forEach(function (b) { prevBlocksById[b.id] = b; });
+
+  var addedBlockIds = [];
+  var changedBlockIds = [];
+  flattenBlocks(nextBoard.blocks, []).forEach(function (b) {
+    var prev = prevBlocksById[b.id];
+    if (!prev) {
+      addedBlockIds.push(b.id);
+    } else if (JSON.stringify(ownContent(prev)) !== JSON.stringify(ownContent(b))) {
+      changedBlockIds.push(b.id);
+    }
+  });
+
+  var prevRoundsByN = {};
+  (prevBoard.rounds || []).forEach(function (r) { prevRoundsByN[r.n] = r; });
+
+  var roundsNewlyOpen = [];
+  var roundsNowSent = [];
+  (nextBoard.rounds || []).forEach(function (r) {
+    var prev = prevRoundsByN[r.n];
+    if (!prev) {
+      roundsNewlyOpen.push(r.n);
+    } else if (prev.status !== 'sent' && r.status === 'sent') {
+      roundsNowSent.push(r.n);
+    }
+  });
+
+  return {
+    addedBlockIds: addedBlockIds,
+    changedBlockIds: changedBlockIds,
+    roundsNewlyOpen: roundsNewlyOpen,
+    roundsNowSent: roundsNowSent,
+  };
+};
 
   // The hint rule, spliced in the same way and for the same
   // reason: the exact function test/check-comment-mode.mjs's hint checks run
@@ -201,7 +200,32 @@ export const ui = `
   // its logic. Gathering the DOM inputs this takes (buildHint, below) stays here, same
   // split as buildSteps being parity-bound while "which element did the click
   // land on" is not.
-  var composeHint = ${composeHint.toString()};
+  var composeHint = function composeHint(text, tagName, insideCompare, compareLabel, blockKind) {
+  var ROLE_WORD = { button: 'button', a: 'link', img: 'image', input: 'field', textarea: 'field', select: 'menu' };
+  var BLOCK_NOUN = { html: 'stage', mermaid: 'diagram', code: 'reference', question: 'question', compare: 'comparison', markdown: 'block' };
+  var tag = String(tagName || '').toLowerCase();
+  // `tag`/`blockKind` come from the mock's own markup and the caller's
+  // block kind respectively -- both attacker/author-influenced strings. An
+  // unguarded `ROLE_WORD[tag]` walks the prototype chain for a tag like
+  // 'constructor', returning `Object` (the constructor FUNCTION, not a role
+  // word), which `JSON.stringify` then silently drops when the anchor is
+  // persisted. `hasOwnProperty` closes that off the same way `decodeEntities`
+  // below already guards its own `NAMED_ENTITIES` lookup.
+  var role = Object.prototype.hasOwnProperty.call(ROLE_WORD, tag) ? ROLE_WORD[tag] : undefined;
+  var context = insideCompare
+    ? (String(compareLabel || '') + ' ' + (Object.prototype.hasOwnProperty.call(BLOCK_NOUN, blockKind) ? BLOCK_NOUN[blockKind] : 'block')).replace(/\s+/g, ' ').trim()
+    : '';
+  // The role word ("... button") is appended ONLY alongside real context --
+  // without something to disambiguate against, an element's own text is already
+  // unambiguous on its own block, and suppressing the role word there is what
+  // keeps the plain html-stage hint ('Send', not 'Send button')
+  // unchanged outside a compare.
+  var identity = text ? (context && role ? text + ' ' + role : text) : (role || tag);
+  // Coerced to a string so this function can never return anything else --
+  // every input above is now guarded, but the return stays defensive
+  // rather than relying on that staying true forever.
+  return String(context ? identity + ' in ' + context : identity);
+};
 
   // The two pure functions called out
   // for extraction, spliced in the same way and for the same reason as
@@ -210,8 +234,27 @@ export const ui = `
   // second hand-written copy that could silently drift. See that module's own
   // comment for the full design (why 'id', not 'blockId'+'anchor', identifies
   // a queued comment for removal; why a sent comment can never match).
-  var findPendingCommentForAnchor = ${findPendingCommentForAnchor.toString()};
-  var removePendingComment = ${removePendingComment.toString()};
+  var findPendingCommentForAnchor = function findPendingCommentForAnchor(pendingComments, blockId, anchor) {
+  function sameTarget(a, b) {
+    if (!a || !b) return false;
+    return a.kind === b.kind && (a.ref || '') === (b.ref || '');
+  }
+  var list = pendingComments || [];
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
+    if (c && c.blockId === blockId && sameTarget(c.anchor, anchor)) return c;
+  }
+  return undefined;
+};
+  var removePendingComment = function removePendingComment(pendingComments, id) {
+  var list = pendingComments || [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].id === id) continue;
+    out.push(list[i]);
+  }
+  return out;
+};
 
   // Two pure round facts from src/badge.mjs, spliced the same way: the
   // pager names a round with the SAME function src/render.mjs printed that
@@ -220,9 +263,15 @@ export const ui = `
   // rendered it. Both are the "one implementation, embedded not copied" rule --
   // a hand-written twin here would be free to disagree with the markup on
   // screen, and nothing would catch it.
-  var roundNumberLabel = ${roundNumberLabel.toString()};
-  var roundPageLabel = ${roundPageLabel.toString()};
-  var isPageRound = ${isPageRound.toString()};
+  var roundNumberLabel = function roundNumberLabel(n) {
+  return 'Round ' + n;
+};
+  var roundPageLabel = function roundPageLabel(n, title) {
+  return title ? roundNumberLabel(n) + ' · ' + title : roundNumberLabel(n);
+};
+  var isPageRound = function isPageRound(blocks) {
+  return blocks.length === 1 && blocks[0].kind === 'html' && !blocks[0].error;
+};
 
   // Same technique a third time: whether a round is *awaited* (CONTEXT.md
   // "Awaited") is what markPendingRound below gates the tab mark on, and what
@@ -236,8 +285,33 @@ export const ui = `
   // every side instead of three that could quietly disagree. questionBlocks is
   // roundIsAwaited's own dependency (its legacy fallback), spliced for the same
   // reason, not because anything else here calls it directly.
-  var questionBlocks = ${questionBlocks.toString()};
-  var roundIsAwaited = ${roundIsAwaited.toString()};
+  var questionBlocks = function questionBlocks(board) {
+  const out = [];
+  const visit = b => {
+    if (!b) return;
+    if (b.kind === 'question') {
+      out.push(b);
+      (b.context || []).forEach(visit);
+      // choose-between-rendered-variants: an option's own block can
+      // itself be a nested question (the same generality context/compare
+      // already allow), so its answer has to reach applySubmit's answerable
+      // set and buildPacket the same way a context/compare-nested question's
+      // does.
+      (b.options || []).forEach(o => visit(o.block));
+    }
+    if (b.kind === 'compare') {
+      visit(b.left?.block);
+      visit(b.right?.block);
+    }
+  };
+  for (const b of board.blocks) visit(b);
+  return out;
+};
+  var roundIsAwaited = function roundIsAwaited(board, r) {
+  if (!r) return false;
+  if (typeof r.awaited === 'boolean') return r.awaited;
+  return questionBlocks(board).some(q => q.round === r.n);
+};
 
   // The waiting signal (SPEC_AWAITED.md ticket 03), spliced the same way and in
   // dependency order (each one calls only a name already assigned above it --
@@ -248,15 +322,28 @@ export const ui = `
   // explains why only THIS file may ever call roundIsCurrentlyAwaited/
   // roundCountdownText/pageBoardPillMeta with a real clock -- src/render.mjs
   // never does, so a rendered page stays a pure function of its board JSON.
-  var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
-  var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
-  var ROUND_OPEN_UNAWAITED_TITLE = ${JSON.stringify(ROUND_OPEN_UNAWAITED_TITLE)};
-  var PAGE_SEND_EXPIRED_LABEL = ${JSON.stringify(PAGE_SEND_EXPIRED_LABEL)};
-  var PAGE_SEND_EXPIRED_TITLE = ${JSON.stringify(PAGE_SEND_EXPIRED_TITLE)};
-  var roundIsAwaitedOpen = ${roundIsAwaitedOpen.toString()};
-  var roundIsCurrentlyAwaited = ${roundIsCurrentlyAwaited.toString()};
-  var roundCountdownText = ${roundCountdownText.toString()};
-  var pageBoardPillMeta = ${pageBoardPillMeta.toString()};
+  var ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
+  var PILL_READONLY_TITLE = "No agent is listening on this page -- commenting is off.";
+  var ROUND_OPEN_UNAWAITED_TITLE = "No agent is waiting live right now -- comments and answers here are saved and reach the next agent that asks.";
+  var PAGE_SEND_EXPIRED_LABEL = "Goes out with the next round";
+  var PAGE_SEND_EXPIRED_TITLE = "This round ended. Comments left here are stored and reach the next agent that asks.";
+  var roundIsAwaitedOpen = function roundIsAwaitedOpen(round) {
+  return !!round && round.status === 'open' && round.awaited === true;
+};
+  var roundIsCurrentlyAwaited = function roundIsCurrentlyAwaited(round, nowMs) {
+  return roundIsAwaitedOpen(round) && !!round.awaitDeadline && Date.parse(round.awaitDeadline) > nowMs;
+};
+  var roundCountdownText = function roundCountdownText(round, nowMs) {
+  if (!roundIsCurrentlyAwaited(round, nowMs)) return null;
+  const minutes = Math.ceil((Date.parse(round.awaitDeadline) - nowMs) / 60000);
+  return minutes + 'm left';
+};
+  var pageBoardPillMeta = function pageBoardPillMeta(round, nowMs, fullpage = true) {
+  const countdown = roundCountdownText(round, nowMs);
+  if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
+  const title = (!fullpage && round && round.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
+  return { text: 'read-only', title };
+};
 
   function seedAnswers(blockIds, boardData) {
     blockIds.forEach(function (id) {
@@ -476,10 +563,10 @@ export const ui = `
 
   /* anchor-parity:extractHint start */
   function extractHint(text) {
-    var collapsed = String(text == null ? '' : text).replace(/\\s+/g, ' ').trim();
+    var collapsed = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
     var max = 80;
     if (collapsed.length <= max) return collapsed;
-    return collapsed.slice(0, max - 1).replace(/\\s+$/, '') + '…';
+    return collapsed.slice(0, max - 1).replace(/\s+$/, '') + '…';
   }
   /* anchor-parity:extractHint end */
 
@@ -527,12 +614,15 @@ export const ui = `
   // prefixes node ids with the diagram's svg id, so the copy matched nothing and
   // the diagram gesture was dead in every browser while check-pure.mjs happily
   // exercised the module version against ids mermaid never emits.
-  var parseMermaidDomId = ${parseMermaidDomId.toString()};
+  var parseMermaidDomId = function parseMermaidDomId(domId) {
+  const m = /(?:^|-)flowchart-(.+)-\d+$/.exec(String(domId ?? ''));
+  return m ? m[1] : null;
+};
 
   // The selector that must agree with the parser above, from the same source of
   // truth (src/anchor.mjs) -- the click walk-up below, the pin-candidate scan in
   // renderMermaidPins and the hover/cursor rules in src/styles.mjs all use it.
-  var MERMAID_NODE_SELECTOR = ${JSON.stringify(MERMAID_NODE_SELECTOR)};
+  var MERMAID_NODE_SELECTOR = "[id*=\"-flowchart-\"], [id^=\"flowchart-\"]";
 
   // --- hint derivation ---------------------------------------------------------
   //
@@ -558,7 +648,7 @@ export const ui = `
     var compareLabel = '';
     if (side) {
       var labelEl = side.querySelector('.compare-label');
-      compareLabel = labelEl ? String(labelEl.textContent || '').replace(/\\s+/g, ' ').trim() : '';
+      compareLabel = labelEl ? String(labelEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
     }
     var withKind = containerEl.closest ? containerEl.closest('[data-block-kind]') : null;
     var blockKind = withKind ? withKind.getAttribute('data-block-kind') : '';
@@ -1685,9 +1775,20 @@ export const ui = `
   // forever. Anything they need is declared inside their own bodies -- the
   // embedded copies are function sources, so a module-level helper would not
   // exist here.
-  var lensZoomAt = ${lensZoomAt.toString()};
-  var lensFit = ${lensFit.toString()};
-  var lensOneToOne = ${lensOneToOne.toString()};
+  var lensZoomAt = function lensZoomAt(view, px, py, factor, min, max) {
+  var s = Math.min(max, Math.max(min, view.s * factor));
+  var k = s / view.s;
+  return { x: px - k * (px - view.x), y: py - k * (py - view.y), s: s };
+};
+  var lensFit = function lensFit(sw, sh, w, h, min, max) {
+  var lo = min == null ? 0 : min;
+  var hi = Math.min(max == null ? 1 : max, 1);
+  var s = Math.min(Math.max(Math.min(sw / w, sh / h), lo), hi);
+  return { x: (sw - w * s) / 2, y: (sh - h * s) / 2, s: s };
+};
+  var lensOneToOne = function lensOneToOne(sw, sh, w, h) {
+  return { x: (sw - w) / 2, y: (sh - h) / 2, s: 1 };
+};
 
   var LENS_MIN_SCALE = 0.1;
   var LENS_MAX_SCALE = 8;
@@ -3138,7 +3239,7 @@ export const ui = `
   // is never a second, hand-typed copy that can silently drift from the one
   // test/check-mermaid-theme.mjs actually checks against src/styles.mjs's
   // palettes.
-  var MERMAID_TOKEN_MAP = ${JSON.stringify(MERMAID_TOKEN_MAP)};
+  var MERMAID_TOKEN_MAP = {"primaryColor":"--panel-2","primaryTextColor":"--ink","primaryBorderColor":"--accent","secondaryColor":"--panel-3","tertiaryColor":"--panel","lineColor":"--muted","textColor":"--ink-2","mainBkg":"--panel-2","nodeBorder":"--accent","clusterBkg":"--accent-glow","clusterBorder":"--hairline-2","edgeLabelBackground":"--panel"};
 
   // Resolved the SAME way src/styles.mjs's own selectors resolve :root's
   // tokens: an explicit data-theme attribute wins outright; absent that, the
@@ -3384,7 +3485,7 @@ export const ui = `
   // control's three states down to the two a stage can act on. This is what
   // makes the artifact carry no theme control of its own: there is exactly one
   // on the page, and it paints both documents.
-  window.addEventListener('${THEME_CHANGE_EVENT}', function () {
+  window.addEventListener('cb-theme-change', function () {
     redrawMermaidForTheme();
     broadcastStageMode();
   });
@@ -4691,13 +4792,13 @@ export const ui = `
       canvas.height = 32;
       var ctx = canvas.getContext && canvas.getContext('2d');
       if (!ctx) return null;
-      ctx.fillStyle = '${palettes.dark['--warning']}';
+      ctx.fillStyle = '#e5b04d';
       ctx.beginPath();
       ctx.roundRect(0, 0, 32, 32, 9);
       ctx.fill();
       var label = n > 99 ? '9+' : String(n);
       var size = n > 99 ? 17 : (n >= 10 ? 18 : 22);
-      ctx.fillStyle = '${palettes.dark['--accent-ink']}';
+      ctx.fillStyle = '#0a1020';
       ctx.font = 'bold ' + size + 'px system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -5372,4 +5473,3 @@ export const ui = `
     es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); });
   }
 })();
-`;

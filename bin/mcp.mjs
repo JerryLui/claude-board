@@ -497,7 +497,7 @@ const ASK_TOOL = {
     'Blocks until the reviewer submits when the round carries any question block, or when ' +
     'it is a page board (one html block) posted with wait: true; every other round returns ' +
     'as soon as the post succeeds, nothing to wait for. The default wait is 40 minutes. Opens ' +
-    'a browser tab on the first board of this session; later rounds push into the same tab. ' +
+    'a browser tab on the first board of this conversation; later rounds push into the same tab. ' +
     'Returns a packet naming each question\'s status, choice and note, and every comment ' +
     'with its anchor.',
   inputSchema: {
@@ -518,6 +518,20 @@ const ASK_TOOL = {
           'on it come back in this same call\'s packet instead of riding a later round. Only has ' +
           'an effect when blocks is exactly one html block (a page board); default false. A ' +
           'question round blocks regardless of this flag.',
+      },
+      fresh: {
+        type: 'boolean',
+        description:
+          'Declare that you have posted NO board in this conversation, so this call starts a ' +
+          'new thread on a new board and opens its own tab, instead of pushing a round onto the ' +
+          'board a previous conversation left behind. This process outlives /clear, so without ' +
+          'it the first question after a /clear lands on the abandoned conversation\'s board, ' +
+          'under that work\'s title, with no tab opening. After a /clear it is ALWAYS true: a ' +
+          'cleared context holds no board. Pass it on the first ask of a conversation whenever ' +
+          'you cannot see a board URL of your own in the conversation so far, and leave it off ' +
+          'for every later round, or each round opens a board of its own. Harmless when there ' +
+          'is no board yet — one board, one thread, one tab — and it closes any round still ' +
+          'open on the board it walks away from. Default false.',
       },
     },
     required: ['title', 'blocks'],
@@ -602,21 +616,72 @@ function packetResult(text, packet) {
   };
 }
 
+/** The conversation boundary (ADR 69). The agent has declared that it has posted no board
+ * in this conversation, so whatever board this process is still holding belongs to a
+ * conversation that no longer exists: forget it, and let the next post mint a new thread
+ * and open its tab.
+ *
+ * The clear happens FIRST and unconditionally, before the daemon is told anything. The
+ * boundary is the agent's declaration, not the daemon's to ratify — a daemon that is
+ * down, or that 404s a board someone pruned, must not be able to wedge this conversation
+ * onto the previous one's board. So the abandon call is best-effort and its failure is a
+ * stderr line: the worst it costs is a round left awaited on a board nobody is reading,
+ * which is exactly the state this whole flag exists to avoid but strictly better than
+ * posting into it.
+ *
+ * A no-op when there is no board yet, which is the ordinary case for the first `ask` of a
+ * conversation that never had one: nothing is abandoned, and the post below mints one
+ * board, one thread and one tab exactly as it would have without the flag.
+ *
+ * Only ever names THIS process's own board id, held in memory here and reachable from
+ * nowhere else. That is what keeps two sessions in one project directory out of each
+ * other's way: a second shim's board is a different id this one has never seen, and the
+ * daemon route is scoped to the id it is given. */
+async function declareBoundary(session) {
+  const abandoned = session.boardId;
+  session.boardId = null;
+  session.thread = null;
+  session.url = null;
+  // Same gate as safeBoardUrl, and for the same reason: this string goes into a URL path
+  // segment. A daemon that once answered with something that is not a board id gets no
+  // second chance to have it sent back.
+  if (typeof abandoned !== 'string' || !BOARD_ID_RE.test(abandoned)) return;
+  try {
+    await httpJson('POST', `${BASE_URL}/api/board/${abandoned}/abandon`, null, { timeoutMs: POST_TIMEOUT_MS });
+  } catch (err) {
+    logErr(
+      `could not close the round(s) still open on board ${abandoned} ` +
+      `(${err.statusCode ? `HTTP ${err.statusCode}` : err.code || err.message}); ` +
+      `this conversation starts a new board regardless`
+    );
+  }
+}
+
 /** Post this call's blocks, minting the thread's board on the first call and
  * pushing a round into it on every later one.
  *
  * Thread creation is guarded by an in-flight promise on `session`, because
  * `session.boardId == null` is read before an await and written after one: two `ask`
  * calls arriving in the same tick would otherwise both see null, both POST a brand-new
- * board and both open a tab, breaking "one thread per MCP shim process". The promise is
+ * board and both open a tab, breaking "one thread per conversation". The promise is
  * cleared in `finally`, so a failed first post leaves the session clean for the next
  * call to retry rather than wedging the thread forever. */
-async function postThisRound(session, title, blocks, wait) {
+async function postThisRound(session, title, blocks, wait, fresh) {
   if (session.creatingThread) {
     // Someone else is minting the thread. Wait it out — if it succeeded we push a
     // round into its board, if it failed we fall through and try to create it.
     try { await session.creatingThread; } catch { /* the creator reports its own failure */ }
   }
+
+  // After that wait and before the create-vs-push branch below: a boundary declared while
+  // another call was mid-mint has to walk away from the board that call actually made,
+  // not from the null it saw on the way in.
+  // ponytail: two `ask` calls declaring a boundary in the same tick would both clear and
+  // both mint, giving two threads. Not guarded, because the second call is by definition
+  // not fresh — this conversation has posted a board by then — so that shape is a caller
+  // error whose only symptom is the extra thread the caller asked for. The upgrade, if it
+  // ever matters, is the same in-flight-promise guard `creatingThread` already is.
+  if (fresh) await declareBoundary(session);
 
   if (session.boardId == null) {
     const creating = (async () => {
@@ -656,11 +721,30 @@ async function postThisRound(session, title, blocks, wait) {
     .update(JSON.stringify([session.boardId, title, blocks, Boolean(wait)]))
     .digest('hex')
     .slice(0, 32);
-  const posted = await httpJson(
-    'POST', `${BASE_URL}/api/board`,
-    { boardId: session.boardId, blocks, title, wait: Boolean(wait), requestId },
-    { timeoutMs: POST_TIMEOUT_MS }
-  );
+  let posted;
+  try {
+    posted = await httpJson(
+      'POST', `${BASE_URL}/api/board`,
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), requestId },
+      { timeoutMs: POST_TIMEOUT_MS }
+    );
+  } catch (err) {
+    // The board this session has been pushing rounds into is GONE: pruned from the
+    // index's settings panel while the session kept running (ADR 71). 404 is the only
+    // way the daemon says that, and a session is not punished for it -- forget the dead
+    // id and let the same call mint a fresh board, tab and all, rather than failing a
+    // question the agent genuinely asked. `session.thread` is deliberately kept: if the
+    // thread has surviving boards the fresh one rejoins them in the index, and if it
+    // has none the id costs nothing.
+    //
+    // Re-entrant exactly once: `boardId` is null on the way back in, so the call takes
+    // the create branch above, and nothing on that branch can 404.
+    if (err && err.statusCode === 404) {
+      session.boardId = null;
+      return postThisRound(session, title, blocks, wait);
+    }
+    throw err;
+  }
   return { posted, isFirstBoard: false };
 }
 
@@ -710,7 +794,8 @@ function isAwaited(blocks, wait) {
 
 /** `session` carries the in-memory, per-shim-process state a live thread needs: the
  * board id to push follow-up rounds into, and the in-flight thread-creation guard. One
- * shim == one Claude session == one thread. Everything belonging to a single call — its
+ * shim == one conversation == one thread, and `fresh` (ADR 69) is what moves it on to the
+ * next conversation, since the process survives every one of them. Everything belonging to a single call — its
  * progress sink above all — is an argument, never session state: a second `ask` runs
  * concurrently with the first by design, and a session-stored progress sink redirects
  * call A's notifications to call B's token, leaving A with nothing holding the MCP
@@ -726,13 +811,14 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   const title = args && args.title;
   const blocks = args && args.blocks;
   const wait = args && args.wait;
+  const fresh = args && args.fresh;
   if (typeof title !== 'string' || !title) throw new ToolError('ask requires a non-empty string "title"');
   if (!Array.isArray(blocks)) throw new ToolError('ask requires a "blocks" array');
 
   let posted;
   let isFirstBoard;
   try {
-    ({ posted, isFirstBoard } = await postThisRound(session, title, blocks, wait));
+    ({ posted, isFirstBoard } = await postThisRound(session, title, blocks, wait, fresh));
   } catch (err) {
     throw toolErrorFor(err, session.url);
   }
@@ -864,9 +950,12 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
   });
 }
 
-// One thread per shim process: board id / thread id remembered across calls, so
-// the second `ask` in a session pushes a round into the same board instead of
-// opening a new one. Nothing call-scoped lives here (see askTool's comment).
+// One thread per CONVERSATION, not per shim process (ADR.md entry 69): board id /
+// thread id remembered across calls, so the second `ask` in a conversation pushes a round
+// into the same board instead of opening a new one — until `fresh` says the conversation
+// that minted it is gone, which clears both and starts the next one over. This process
+// outlives `/clear`, so the flag is the only thing that can tell those two apart.
+// Nothing call-scoped lives here (see askTool's comment).
 const session = { boardId: null, thread: null, url: null, creatingThread: null };
 
 /** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has

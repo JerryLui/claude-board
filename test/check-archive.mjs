@@ -11,10 +11,19 @@
 // in the suite that does, and it does so the way the spec insists on: by writing a
 // real rendered page to a real file on a real temp directory, with nothing
 // listening on any port, reading THAT FILE's bytes back off disk, and only then
-// parsing and running the real `ui` string against it with `location.protocol`
+// parsing and running the real client script against it with `location.protocol`
 // actually set to `'file:'` -- never by constructing a document and flipping a
 // `readonly` variable by hand, which would prove nothing about the branch a real
 // double-click in Finder actually takes.
+//
+// Since ADR 70 the archive does not carry that client script (nor its stylesheet): it
+// NAMES them, as bare content-addressed sibling filenames, and the daemon writes them
+// beside it. So this file no longer runs the `ui` string it imported -- it takes the name
+// out of the archive's own bytes, resolves it against the archive's own directory, reads
+// THAT file, and runs it. Same for the CSS every cascade assertion below is computed
+// against. That round trip is the only thing that actually proves a folder handed to
+// someone else opens (AC 9); running an imported payload would pass just as happily
+// against a page whose reference pointed nowhere.
 //
 // The board carries one already-resolved comment per acceptance-criterion
 // content kind (prose, a list item, a table cell, a line of a code reference, one
@@ -48,10 +57,11 @@
 // of scope here.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createBoard, applySubmit } from '../src/board.mjs';
+import { writePage } from '../src/store.mjs';
 import { renderBoardPage, STAGE_MARGIN_RESET } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles, palettes } from '../src/styles.mjs';
@@ -70,42 +80,50 @@ function check(name, fn) {
   }
 }
 
-/** Parse `html` and run the real `ui` client script against it, with
- * `location.protocol` set to `protocol` -- the ONLY input src/ui.mjs reads to
- * decide read-only mode. A fresh document every call. */
-function loadBoard(html, protocol) {
+/** Parse `html` and run a client script against it, with `location.protocol` set to
+ * `protocol` -- the ONLY input src/ui.mjs reads to decide read-only mode. A fresh
+ * document every call.
+ *
+ * `script` defaults to the in-memory `ui` export, which is right for the minting session
+ * below (an ordinary live page, never written to disk). Every ARCHIVE load in this file
+ * passes the script the archive itself names, read back off disk -- see `openArchive`. */
+function loadBoard(html, protocol, script = ui) {
   const document = parseHTML(html);
   const window = document.defaultView;
   const location = { protocol };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', script)(document, window, location);
   return document;
 }
 
-/** Extract the real `<style>...</style>` block's CSS text from a rendered
- * page. NOT the first (or last) `<style>`/`</style>` substring in the bytes:
- * `themeBootScript` (src/theme.mjs) carries the literal words "before
- * `<style>` is even parsed" inside its own JS comments, and `styles`
- * (src/styles.mjs) itself carries "injected into the sandboxed document's
- * own `<style>`" inside a CSS comment describing the (unrelated) html-stage
- * hover outline -- real prose baked into the client script and the
- * stylesheet's own text, both landing BEFORE the true closing `</style>`, so
- * neither a naive `/<style>([\s\S]*?)<\/style>/` (grabs from the FIRST fake
- * opener) nor a `lastIndexOf('<style>', closeIdx)` (grabs the LAST one,
- * which turns out to be the CSS-comment one, still short of the real tag) is
- * safe. src/render.mjs and src/indexpage.mjs both emit the real tag
- * immediately after the boot script's own closing tag
- * (`<script>${themeBootScript}</script>\n<style>${styles}</style>`) -- an
- * exact, structural adjacency neither piece of PROSE text reproduces -- so
- * that marker is what actually locates it. */
-function extractStyleBlock(html) {
-  const marker = '</script>\n<style>';
-  const markerIdx = html.indexOf(marker);
-  assert.ok(markerIdx !== -1, 'setup failure: no boot-script-then-<style> boundary found in the rendered page');
-  const openIdx = markerIdx + marker.length;
-  const closeIdx = html.indexOf('</style>', openIdx);
-  assert.ok(closeIdx !== -1, 'setup failure: no </style> after the real <style> tag');
-  return html.slice(openIdx, closeIdx);
+/** Resolve one of the two sibling files an archive NAMES, exactly as a browser opening
+ * that file would: take the bare filename out of the page's own bytes, join it to the
+ * directory the page is in, and read it. Nothing here knows the payload in advance --
+ * that is the point (ADR 70, AC 9). A reference that is anything but a bare filename
+ * fails the assertion before it can be joined, which is what makes this a real test of
+ * the Finder surface rather than a re-derivation of what render.mjs meant. */
+function readNamedSibling(pagePath, pageText, pattern, what) {
+  const m = pageText.match(pattern);
+  assert.ok(m, `the archive on disk names no ${what}`);
+  const name = m[1];
+  assert.ok(!name.includes('/') && !name.includes(':') && !name.startsWith('.'),
+    `the archive's ${what} reference "${name}" is not a bare sibling filename, so it cannot resolve from Finder`);
+  return readFileSync(path.join(path.dirname(pagePath), name), 'utf8');
 }
+
+const namedScript = (pagePath, pageText) =>
+  readNamedSibling(pagePath, pageText, /<script defer src="([^"]+)"><\/script>/, 'client script');
+const namedStylesheet = (pagePath, pageText) =>
+  readNamedSibling(pagePath, pageText, /<link rel="stylesheet" href="([^"]+)">/, 'stylesheet');
+
+// This file used to carry an `extractStyleBlock(html)` that pulled the page's CSS out of
+// its inlined `<style>` block, located by the structural adjacency render.mjs emitted
+// (`</script>\n<style>`) because the payloads themselves contain the literal words
+// `<style>` and `</style>` inside their own comments. ADR 70 removed the inlining
+// entirely, and with it that whole problem: the CSS is now a named sibling file, read by
+// `namedStylesheet` above. That is also a STRICTLY better check than the old one was --
+// the old marker would simply have vanished from the bytes, leaving every cascade
+// assertion in this file passing against a stylesheet the archive no longer had any way
+// to load.
 
 function enableCommentMode(document) {
   const toggle = document.getElementById('comment-mode-toggle');
@@ -309,17 +327,38 @@ const lostCommentN = submittedComments.findIndex(c => c.text === 'this used to p
 // --- write the finished page to a REAL file, with nothing listening, and read ---
 // it back off disk -- the archive is what a reviewer double-clicks in Finder, not
 // a string held in this process's memory.
+//
+// Through src/store.mjs's `writePage` rather than a bare `writeFileSync`, since ADR 70:
+// an archive is a file plus the folder it sits in, and `writePage` is the code that puts
+// the two shared siblings there. Hand-writing the page would leave a folder no browser
+// could open, and this file would then be proving the Finder surface works using bytes it
+// had assembled itself.
 
-const archiveDir = mkdtempSync(path.join(tmpdir(), 'claude-board-archive-'));
+const archiveHome = mkdtempSync(path.join(tmpdir(), 'claude-board-archive-'));
+const archiveDir = path.join(archiveHome, 'pages');
 const archivePath = path.join(archiveDir, `${board.id}.html`);
 const renderedNow = renderBoardPage(board);
-writeFileSync(archivePath, renderedNow, 'utf8');
+writePage(board.id, renderedNow, archiveHome);
 const fileContents = readFileSync(archivePath, 'utf8');
 assert.equal(fileContents, renderedNow, 'setup failure: the file on disk does not match what was written');
+
+// The script and the stylesheet this archive NAMES, read back off disk by resolving that
+// bare name against the archive's own directory -- never the in-memory `ui`/`styles`
+// exports. Every load and every cascade assertion below runs against these, so a page
+// naming a file that is not there, or naming it in a form that does not resolve from
+// Finder, fails the whole file rather than passing on payloads this process happened to
+// have imported (AC 9).
+const archiveScript = namedScript(archivePath, fileContents);
+const archiveCss = namedStylesheet(archivePath, fileContents);
 
 check('setup: the file actually landed on disk at a real path', () => {
   assert.ok(archivePath.startsWith(archiveDir), 'setup failure: the archive path is not under the temp dir it was written to');
   assert.equal(fileContents.length > 0, true);
+});
+
+check('archive: the sibling files the page names are really beside it on disk, and really are the shared payloads', () => {
+  assert.equal(archiveScript, ui, 'the script sitting next to the archive must be the real client script, byte for byte');
+  assert.equal(archiveCss, styles, 'the stylesheet sitting next to the archive must be the real stylesheet, byte for byte');
 });
 
 // The whole archive/live split is one byte-identical page ("JSON is
@@ -342,7 +381,7 @@ function loadArchive() {
     constructor() { esConstructed = true; }
   }
   globalThis.EventSource = SpyEventSource;
-  const document = loadBoard(fileContents, 'file:');
+  const document = loadBoard(fileContents, 'file:', archiveScript);
   return {
     document,
     restore() { globalThis.fetch = originalFetch; globalThis.EventSource = originalES; },
@@ -509,7 +548,7 @@ check('archive: the back-to-index control is absent, not merely disabled -- ther
 // loaded archive -- not the rule's spelling, which is what QUIRKS.md warns
 // against asserting.
 check('archive: the theme control\'s COMPUTED display is inline-flex under body.readonly, not silently inheriting .mode-toggle\'s own display:none', () => {
-  const cssText = extractStyleBlock(fileContents);
+  const cssText = archiveCss;
 
   const { document, restore } = loadArchive();
   try {
@@ -717,10 +756,24 @@ check('archive: the block-level "comment" button opens no form either -- disable
   } finally { restore(); }
 });
 
-check('archive: the emitted page still has no external script or stylesheet reference, even carrying compare/html/mermaid content and nine comments', () => {
-  assert.ok(!/<link[^>]+rel=["']stylesheet["']/.test(fileContents));
-  assert.ok(!/<script[^>]+\bsrc=/.test(fileContents));
-  assert.ok(fileContents.includes('<style>'));
+// Was "the emitted page still has no external script or stylesheet reference" -- ADR 70
+// replaced that rule with a narrower one (QUIRKS.md, "No external assets -- except two
+// bare sibling filenames"): every reference the page loads must be either self-carrying
+// (`data:`) or a bare sibling filename that really is sitting beside it. Both halves
+// matter here specifically, because this board carries compare/html/mermaid content and
+// nine comments -- the richest page the renderer emits, and the one most likely to sneak
+// a reference to something outside the folder.
+check('archive: every reference the emitted page loads resolves inside its own folder, even carrying compare/html/mermaid content and nine comments', () => {
+  for (const [, tag, attrs] of fileContents.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
+    const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
+    if (!m || m[1].startsWith('data:')) continue;
+    const ref = m[1];
+    assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
+      `<${tag}> loads "${ref}", which is not a bare sibling filename -- it cannot resolve from Finder`);
+    assert.equal(readFileSync(path.join(archiveDir, ref), 'utf8').length > 0, true,
+      `<${tag}> names "${ref}", which is not on disk beside the archive`);
+  }
+  assert.ok(archiveScript.length > 0 && archiveCss.length > 0, 'setup failure: the archive names no script or stylesheet at all');
 });
 
 // =================================================================================
@@ -748,7 +801,7 @@ check('archive: the emitted page still has no external script or stylesheet refe
 // {OS dark, OS light} x {no attribute, data-theme="light", data-theme="dark"}
 // matrix resolves to the intended palette.
 check('archive: the bytes on disk carry a real, working cascade -- every (OS preference, data-theme) combination resolves to the intended palette, computed from the file\'s own <style> text, not asserted by any one rule\'s spelling', () => {
-  const cssText = extractStyleBlock(fileContents);
+  const cssText = archiveCss;
 
   const document = parseHTML(fileContents);
   const docEl = document.documentElement;
@@ -837,8 +890,11 @@ const pageArtifact = '<style>.doc{font:14px system-ui}</style>'
 // of a file meant to be handed to someone else.
 const pageBoardDoc = createBoard({ title: 'Archived artifact', cwd: archiveDir, blocks: [{ kind: 'html', html: pageArtifact }] });
 const pageArchivePath = path.join(archiveDir, `${pageBoardDoc.id}.html`);
-writeFileSync(pageArchivePath, renderBoardPage(pageBoardDoc), 'utf8');
+writePage(pageBoardDoc.id, renderBoardPage(pageBoardDoc), archiveHome);
 const pageFileContents = readFileSync(pageArchivePath, 'utf8');
+// Resolved from THIS page's own bytes, not reused from the board above: two archives in
+// one folder must each name their own siblings, and a page board is a different render.
+const pageArchiveScript = namedScript(pageArchivePath, pageFileContents);
 
 function loadPageArchive() {
   const originalFetch = globalThis.fetch;
@@ -850,7 +906,7 @@ function loadPageArchive() {
     constructor() { esConstructed = true; }
   }
   globalThis.EventSource = SpyEventSource;
-  const document = loadBoard(pageFileContents, 'file:');
+  const document = loadBoard(pageFileContents, 'file:', pageArchiveScript);
   return {
     document,
     restore() { globalThis.fetch = originalFetch; globalThis.EventSource = originalES; },
@@ -910,11 +966,20 @@ check('criterion 7: the archived page board carries no local project path -- the
     'the archived file must not contain the project directory anywhere in its bytes');
 });
 
-check('criterion 7: the archived page board\'s bytes carry no external script or stylesheet reference either', () => {
-  assert.ok(!/<link[^>]+rel=["']stylesheet["']/.test(pageFileContents));
-  assert.ok(!/<script[^>]+\bsrc=/.test(pageFileContents),
-    'an artifact that pulled in a script by src would be a page board that opens empty from Finder');
-  assert.ok(pageFileContents.includes('<style>'));
+check('criterion 7: every reference the archived page board loads resolves inside its own folder either', () => {
+  for (const [, tag, attrs] of pageFileContents.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
+    const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
+    if (!m || m[1].startsWith('data:')) continue;
+    const ref = m[1];
+    assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
+      `<${tag}> loads "${ref}" -- an artifact that pulled anything in from outside the folder would be a page board that opens empty from Finder`);
+    assert.equal(readFileSync(path.join(archiveDir, ref), 'utf8').length > 0, true,
+      `<${tag}> names "${ref}", which is not on disk beside the archive`);
+  }
+  // The artifact's own markup is snapshotted into the page's `srcdoc`, escaped -- so the
+  // stage's `<style>`/`<script>` are attribute text, not tags, and cannot be reached by
+  // the tag scan above. This is what keeps them accounted for.
+  assert.ok(pageFileContents.includes('&lt;style&gt;'), 'the artifact must still be carried inline, escaped into its srcdoc');
 });
 
 if (failures) {

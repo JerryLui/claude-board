@@ -47,7 +47,8 @@
 
 import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { writeFileSync } from 'node:fs';
+import { SHARED_ASSETS } from '../src/assets.mjs';
+import { writeFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -479,6 +480,24 @@ if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
   const board = buildSampleBoard();
   const dir = path.dirname(thisFile);
   writeFileSync(path.join(dir, 'sample-board.json'), JSON.stringify(board, null, 2) + '\n', 'utf8');
+  // The shared script and stylesheet the page NAMES, written as its siblings, before the
+  // page itself (ADR 70, and the same ordering src/store.mjs's writePage keeps). An
+  // emitted page is no longer a single mailable file: opening this one requires the two
+  // files beside it, so a sample committed without them would be a sample that does not
+  // open.
+  //
+  // Superseded ones are DELETED here, which is the opposite of what the store does and
+  // right for the opposite reason: the store holds pages written against every past
+  // payload and must keep serving each of them its own bytes, while this directory holds
+  // exactly one page, regenerated in the same breath. Nothing here is ever left naming a
+  // file this loop removed, so the alternative is only ever committed dead weight.
+  const current = new Set(SHARED_ASSETS.map(a => a.name));
+  for (const entry of readdirSync(dir)) {
+    if (/^(?:ui|styles)-[0-9a-f]{16}\.(?:js|css)$/.test(entry) && !current.has(entry)) unlinkSync(path.join(dir, entry));
+  }
+  for (const asset of SHARED_ASSETS) {
+    writeFileSync(path.join(dir, asset.name), asset.contents, 'utf8');
+  }
   writeFileSync(path.join(dir, 'sample-board.html'), renderBoardPage(board), 'utf8');
-  console.log('wrote examples/sample-board.json and examples/sample-board.html');
+  console.log(`wrote examples/sample-board.json, examples/sample-board.html and its assets (${SHARED_ASSETS.map(a => a.name).join(', ')})`);
 }

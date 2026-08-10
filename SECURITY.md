@@ -182,11 +182,12 @@ browser ends up holding nothing — cleared cookies, a second profile, a differe
 the refusal page names one command that fixes it: `node bin/authorize.mjs` from your clone.
 
 **What the cookie may write.** The secret authorizes every write. The cookie authorizes a
-strictly smaller, closed set: `submit` and `attended` (`BOARD_COOKIE_ACTIONS`) plus the
-pomodoro actions named in `POMODORO_COOKIE_ACTIONS` (`src/server.mjs`). That set is a
-named list rather than a `/api/pomodoro/*` prefix match, so a pomodoro route added later is
-secret-only until someone adds it deliberately. What it means in practice, and it is more
-than the name suggests: a browser holding only the cookie can start, pause, resume and
+smaller, closed set: `submit` and `attended` (`BOARD_COOKIE_ACTIONS`), the pomodoro
+actions named in `POMODORO_COOKIE_ACTIONS`, and `prune` (`STORE_COOKIE_ACTIONS`) — all
+three in `src/server.mjs`. Each is a named list rather than an `/api/<thing>/*` prefix
+match, so a route added later is secret-only until someone adds it deliberately. What it
+means in practice, and it is more than the name suggests: a browser holding only the
+cookie can start, pause, resume and
 reset a work interval, skip or rewind a phase (`forward`, `restart`), trigger the
 notification that fires at an interval boundary (`notifyTest`), play a cue through
 `afplay` (`preview`), rewrite every duration along with both the notify and cue settings
@@ -194,6 +195,20 @@ through `settings`, and report a board Attended or not (`attended`) — which is
 report has to be authenticated at all: an unauthenticated one could silence every Stranded
 banner the daemon would otherwise raise (ADR.md entry 58). The same-origin write check
 stands in front of all of it.
+
+**`prune` is the one cookie-reachable write that destroys something**, and it is on the
+list with its eyes open (ADR 71). `POST /api/store/prune` deletes every board older than
+a window the request names, documents and emitted pages together, plus any shared asset
+no surviving page still references. It is admitted not because it reaches less than
+`submit` — it reaches further — but because the control that fires it lives in the index
+page's settings panel, and that page is exactly a browser holding only the cookie;
+requiring the secret would make the one surface the design names unable to use it. What
+still stands in front of it is the rest of the gate: loopback `Host`, the same-origin
+write check, and a cookie derived from the local secret that rotating the secret revokes.
+The same holder can already read every question, answer and snapshotted source file in
+the archive, so this is not a credential the archive was being protected from. There is
+no automatic prune anywhere — nothing sweeps on read, at daemon start or on a timer — so
+nothing deletes a board unless someone clicks.
 
 **Guessing a board URL.** Board ids are 16 random bytes — but that entropy is not what
 protects the board. Every route requires a credential, reads included, so a guessed id
@@ -303,6 +318,17 @@ plus forge-an-answer, on every board rendered after it. Closing it means vendori
 into the signed payload and dropping the host from the CSP. The availability consequence —
 boards render fine without network, diagrams do not — is the smaller half of it.
 
+`script-src` and `style-src` also carry `'self'` since ADR 70, because a page now names its
+script and stylesheet instead of inlining them. That admits exactly one route,
+`GET /b/<name>`, which serves nothing but a file in `pages/` whose name matches
+`(ui|styles)-<16 hex>.(js|css)` — an anchored pattern, checked where the name becomes a path
+(`src/store.mjs`), so no name off the wire can escape that directory or reach anything else
+in it. Planting a script there needs write access to the store, which is the
+running-as-you boundary directly below. `'self'` is deliberately not widened to a bare
+`file:` source, which would also make an archive work but would let an archived board's
+untrusted `html` stage — it inherits the page's policy through its `srcdoc` — pull any
+script off the reader's disk.
+
 ### Not defended, by design
 
 **Any process running as you.** It can read `~/.config/claude-board/secret` and is
@@ -339,10 +365,10 @@ learns nothing — an already-used token is refused exactly like an expired or i
 That is a narrow race, not an eliminated one. It is also inside the boundary above: such a
 process could read the secret file instead.
 
-**An archived board.** `pages/*.html` is a standalone file and opens from disk with no
-credential at all; the gate is on the daemon, not on the archive. Anything that can read
-that directory can read those boards, which is the same statement as "the store is
-owner-only" above.
+**An archived board.** `pages/<boardId>.html` opens from disk with no credential at all,
+with the two shared files beside it (ADR 70); the gate is on the daemon, not on the
+archive. Anything that can read that directory can read those boards, which is the same
+statement as "the store is owner-only" above.
 
 **Anything multi-user or remote.** There is no authentication, no accounts, no
 cross-machine access, and none is planned. Do not expose the port.

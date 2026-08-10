@@ -1,375 +1,161 @@
-// Page CSS for the board, exported as a string so render.mjs can inline it and the
-// page stays a single self-contained file. A calm review surface: one accent,
-// layered surfaces, hairline borders, and motion only where it explains a state
-// change. One exception, deliberate: the code surface carries a six-hue syntax
-// palette (--code-keyword/string/function/number/comment/base), because
-// highlighting cannot be done in one accent -- ADR.md entry 63 states that this
-// discipline stops describing that one surface, and holds everywhere else. Dark by default; a light palette (designed against the accent, not a
-// mechanical inversion) takes over under `prefers-color-scheme: light` — see the
-// DARK/LIGHT objects below. No web fonts and no external assets — the standalone
-// `file:` archive has to look identical with the network off (see src/render.mjs).
-//
-// Everything is driven by the tokens in `:root`. Rules below reference tokens, never
-// a raw hex or rgba literal, so a palette change is a one-block edit (enforced by
-// test/check-pure.mjs, which fails the build if one leaks back in). Note that
-// test/check-pure.mjs also asserts every class ruled on here is a class the markup
-// actually emits — a rule for a class nothing renders is a failure, not dead code.
 
-import { MERMAID_NODE_SELECTOR } from './anchor.mjs';
-
-/** Scope the shared mermaid-node selector list under a prefix. The selector is two
- * alternatives (mermaid 11's prefixed ids and mermaid 10's bare ones), so it cannot
- * simply be concatenated onto a prefix — each alternative needs its own full rule.
- * Single-sourced from src/anchor.mjs so the CSS that draws the affordance and the JS
- * that handles the click can never again disagree about what a node looks like. */
-const mermaidNodeRule = (prefix, suffix = '') =>
-  MERMAID_NODE_SELECTOR.split(',').map(s => `${prefix}${s.trim()}${suffix}`).join(',\n');
-
-// Both palettes are plain data: the same key set, one color value each. That is
-// what makes a palette change a one-block edit
-// no matter how many CSS rules end up referencing a token, and it is what lets
-// test/check-contrast.mjs assert the contrast bar by importing these objects
-// directly instead of regexing them back out of a CSS string. Every dark value
-// below is byte-for-byte what shipped, except --muted: measured at
-// 4.45:1 on --panel-2 and 4.03:1 on --panel-3 (both below the 4.5:1 bar, and
-// --muted genuinely sits on both), so it moves to the minimal same-hue lift that
-// clears 4.5:1 everywhere it's used.
-const DARK = {
-  '--bg': '#0a0e15',
-  '--bg-tint': '#101726',
-  '--panel': '#131a27',
-  '--panel-2': '#18202f',
-  '--panel-3': '#1e2839',
-  '--scrollbar-hover': '#2c3852',
-  '--history-bg': 'rgba(19, 26, 39, 0.55)',
-  // The tab mark's own rest-tile colour (src/styles.mjs's REST_SHAPES, below).
-  // Not a page surface -- nothing in this file's CSS ever paints with it, and
-  // it is read by name from the palette object in JS, the same way MARK_SHAPES
-  // reads --warning and --accent-ink by name a little further down. Today's
-  // value is byte-identical to --scrollbar-hover above, which is the color a
-  // slate tile picked on chroma (not value) against Chrome's tab strip happens
-  // to land on -- but the mark owns this name, not that one: a scrollbar
-  // restyle changes --scrollbar-hover and leaves the tab mark exactly where it
-  // is. The "declared and never wired up" trip-wire (test/check-contrast.mjs)
-  // still watches this key because that check learns to scan palette-object
-  // reads, not because the key borrows a CSS reference.
-  '--mark-rest-tile': '#2c3852',
-  // The html stage's artboard ('.html-stage', '.stage-lens-frame'). Neutral and
-  // per-palette, and not a page surface: a mock owns its own background, so this
-  // is only ever what shows through one that paints none. Two constraints decide
-  // the value and they pull opposite ways:
-  //   - a srcdoc that paints no background sets no color either, so its text is
-  //     the UA's black. The artboard has to stay light enough to read that
-  //     (12.28:1 here) -- which is why the DARK palette's artboard is not dark.
-  //   - the stage's hover outline (STAGE_ACCENT_HEX, src/render.mjs) is ONE
-  //     literal for both palettes and has to clear 3:1 on each: 3.89:1 here.
-  // Dimmed well below LIGHT's #e6e8ee, and a plain grey beside this palette's
-  // blue-tinted surfaces (9.55:1 against --panel-2), so it reads as an inert
-  // artboard rather than as a slab of content.
-  '--stage-bg': '#c3c6cd',
-
-  // bg at partial alpha, for the two gradient masks that fade content into --bg.
-  // Plain CSS can't derive these from var(--bg) portably (no color-mix() here --
-  // this page has to render identically in whatever browser opens a file:// copy
-  // of it), so they're their own tokens, tracked by hand alongside --bg.
-  '--bg-fade-0': 'rgba(10, 14, 21, 0)',
-  '--bg-fade-80': 'rgba(10, 14, 21, 0.8)',
-
-  '--ink': '#eaeef6',
-  '--ink-2': '#b6bfd0',
-  '--muted': '#8690a2',
-  '--code-ink': '#cfd8ea',
-
-  // Six-hue syntax palette (SPEC_RENDERING.md ticket 02, ADR.md entry 63) --
-  // twelve new tokens across DARK and LIGHT, one set per theme, each clearing
-  // 4.5:1 against --panel-2 (test/check-contrast.mjs): keyword 7.22:1, string
-  // 9.56:1, function 8.01:1, number 6.95:1, comment 5.49:1, base 11.40:1 here.
-  // Distinct from --code-ink above on purpose: --code-ink stays the
-  // inline-code/markdown colour it always was, while --code-base is specifically
-  // a *highlighted code block's* default (uncoloured-token) text colour --
-  // src/render.mjs's TOKEN_CLASS table leaves most of Prism's own token types
-  // unmapped, and everything unmapped inherits this one rather than getting a
-  // span of its own. Its value happens to equal --code-ink's today (same design
-  // intent, same contrast bar), but the two are free to diverge without one
-  // accidentally dragging the other along.
-  '--code-keyword': '#c299ff',
-  '--code-string': '#7fd99a',
-  '--code-function': '#59c2e8',
-  '--code-number': '#e6975a',
-  '--code-comment': '#8896b3',
-  '--code-base': '#cfd8ea',
-
-  // lines: alpha, so they read correctly on every surface level
-  '--hairline': 'rgba(255, 255, 255, 0.075)',
-  '--hairline-2': 'rgba(255, 255, 255, 0.14)',
-
-  '--accent': '#7c9cff',
-  '--accent-hi': '#a5b9ff',
-  '--accent-soft': 'rgba(124, 156, 255, 0.13)',
-  '--accent-glow': 'rgba(124, 156, 255, 0.06)',
-  '--accent-underline': 'rgba(124, 156, 255, 0.4)',
-  '--accent-select': 'rgba(124, 156, 255, 0.3)',
-  '--accent-ink': '#0a1020',
-  '--good': '#56d68a',
-  // SPEC_RENDERING.md ticket 05, ADR.md entry 64: the conventional diff add/remove
-  // tint, alpha 0.12 -- pre-composited over --good/--critical's own RGB triple, same
-  // convention as --warning-soft/--critical-soft above, because plain CSS can't tear
-  // a custom property's hex apart into rgba(var(--good), 0.12) (and this page has to
-  // render identically from a file:// archive with no CSS engine to lean on for
-  // that). test/check-contrast.mjs composites this OVER --panel-2 specifically (the
-  // code block's own background, .code-block pre), not over --bg the way
-  // resolveSurface's default alpha-surface treatment does -- dark --code-ink on this
-  // fill 8.92:1, on --diff-del-fill 9.61:1.
-  '--diff-add-fill': 'rgba(86, 214, 138, 0.12)',
-  '--warning': '#e5b04d',
-  // The owed-round dot's hue, theme-dependent where every other "waiting on you"
-  // surface is not (ADR.md entry 66). Dark takes the accent: amber sits too close
-  // to the pager's own panel here, while the blue separates from the current
-  // page's chip. Light takes amber, named off DARK because light's own --warning
-  // is #805300 -- the brown entry 30 keeps the tab mark away from.
-  '--owed-dot': 'var(--accent)',
-  '--warning-soft': 'rgba(229, 176, 77, 0.12)',
-  '--warning-ink': '#f0cd8c',
-  '--warning-border': 'rgba(229, 176, 77, 0.35)',
-  '--warning-line': 'rgba(229, 176, 77, 0.4)',
-  '--warning-border-strong': 'rgba(229, 176, 77, 0.45)',
-  '--warning-ring': 'rgba(229, 176, 77, 0.5)',
-  '--warning-fade': 'rgba(229, 176, 77, 0)',
-  '--critical': '#f0757a',
-  '--critical-soft': 'rgba(240, 117, 122, 0.08)',
-  '--critical-border': 'rgba(240, 117, 122, 0.25)',
-  // Diff fill's other half -- see --diff-add-fill's own comment above.
-  '--diff-del-fill': 'rgba(240, 117, 122, 0.12)',
-
-  // elevation (--shadow-3 existed pre-ticket-01 and pre-dates this feature too --
-  // no rule anywhere ever referenced it. test/check-contrast.mjs's orphan-token
-  // check catches exactly this shape of drift, so it's dropped here rather than
-  // carried into two palettes.)
-  '--shadow-1': '0 1px 2px rgba(0, 0, 0, 0.4)',
-  '--shadow-2': '0 6px 20px -6px rgba(0, 0, 0, 0.55)',
-  '--ring': '0 0 0 3px rgba(124, 156, 255, 0.28)',
-};
-
-// Designed against --accent's own hue (periwinkle, ~226°), not an inversion of
-// DARK: inverting reliably washes out accent text and near-invisible hairlines.
-// Surfaces don't mirror DARK's monotonic climb
-// either -- panel/panel-2 sit at/near white (they carry cards, inputs, code
-// blocks), and panel-3 is the one *deeper* than panel-2, because it is the
-// hover/scrollbar-thumb/inline-code surface and there is nothing lighter than
-// white left to climb to. Every value here is verified by
-// test/check-contrast.mjs against every surface token it can land on, not by eye.
-const LIGHT = {
-  '--bg': '#eef1f7',
-  '--bg-tint': '#f7f9fc',
-  '--panel': '#ffffff',
-  '--panel-2': '#f5f6fb',
-  '--panel-3': '#e2e6f0',
-  '--scrollbar-hover': '#c9d0e2',
-  '--history-bg': 'rgba(255, 255, 255, 0.55)',
-  // The key set must match DARK's (test/check-contrast.mjs), but the mark has
-  // no light variant and never reads this
-  // value -- it names DARK's '--mark-rest-tile' explicitly, exactly as it
-  // names DARK's '--warning' rather than following prefers-color-scheme. Given
-  // a light-theme reader anyway: LIGHT's own slate, the scrollbar-hover value
-  // two lines up, so a light rest tile would separate from a light tab strip
-  // by the same chroma logic DARK's does, if this ever grows a caller.
-  '--mark-rest-tile': '#c9d0e2',
-  // the artboard, one step BELOW --panel-2 (1.14:1) rather than at/near white,
-  // so a mock that paints nothing reads as a recessed stage and not as another
-  // card. Black srcdoc text 17.14:1, stage hover outline 5.43:1 -- DARK's own
-  // --stage-bg comment has the full account of both bars.
-  '--stage-bg': '#e6e8ee',
-
-  // must track --bg exactly (same rgb triple) or the two fade masks show a seam
-  '--bg-fade-0': 'rgba(238, 241, 247, 0)',
-  '--bg-fade-80': 'rgba(238, 241, 247, 0.8)',
-
-  '--ink': '#171c2a',
-  '--ink-2': '#3c4459',
-  '--muted': '#515c76',
-  '--code-ink': '#3a4c78',
-
-  // Six-hue syntax palette -- see DARK's own comment for why these are new
-  // tokens rather than reusing --code-ink. Each clears 4.5:1 against LIGHT's
-  // --panel-2 (#f5f6fb): keyword 5.54:1, string 5.00:1, function 5.21:1, number
-  // 4.89:1, comment 5.49:1, base (== --code-ink) 7.83:1.
-  '--code-keyword': '#7a3fd6',
-  '--code-string': '#1a7a3d',
-  '--code-function': '#0d6f96',
-  '--code-number': '#a15a00',
-  '--code-comment': '#5b6479',
-  '--code-base': '#3a4c78',
-
-  // lines: rgba(255,255,255,…) inverted to rgba(0,0,0,…) reads far too weak at
-  // DARK's alphas on a light surface, so these are relit by eye, not inverted
-  '--hairline': 'rgba(0, 0, 0, 0.1)',
-  '--hairline-2': 'rgba(0, 0, 0, 0.18)',
-
-  // accent: has to clear 4.5:1 on near-white as body/link text (#7c9cff on white
-  // is ~2.3:1), so it lands in the mid-blues, same hue family as DARK's. --accent-hi
-  // is the hover state and moves further from the background (darker), not lighter.
-  '--accent': '#3251c9',
-  '--accent-hi': '#2a46b8',
-  '--accent-soft': 'rgba(50, 81, 201, 0.13)',
-  '--accent-glow': 'rgba(50, 81, 201, 0.06)',
-  '--accent-underline': 'rgba(50, 81, 201, 0.4)',
-  '--accent-select': 'rgba(50, 81, 201, 0.3)',
-  '--accent-ink': '#f5f8ff',
-  // good/warning/critical: the prior
-  // values (#146b3f, #8a5a00, #b32432) were tuned to clear 4.5:1 against the
-  // full SURFACES cross product -- a self-imposed bar, never asked
-  // for, since these three are used as fills/borders at least as often as
-  // text, and it is what pushed them into a desaturated dark-green/brown/brick
-  // family instead of the board's amber/green/red. Retuned against the bar --
-  // 4.5:1 at each one's REAL text sites
-  // (test/check-contrast.mjs's TEXT_SITES, the tightest of which is each
-  // color composited under its own *-soft background) -- with room to spare,
-  // not sitting on the boundary: light --warning on --warning-soft measures
-  // 4.96:1, light --good on --history-bg 5.54:1, light --critical on
-  // --critical-soft 5.07:1. warning-soft/border/line/border-strong/ring/fade
-  // and critical-soft/border share --warning's/--critical's own RGB triple at
-  // varying alpha, same convention as DARK above; --warning-ink is untouched
-  // (still clears 5.58:1 on the new --warning-soft).
-  '--good': '#007530',
-  // SPEC_RENDERING.md ticket 05, ADR.md entry 64 -- see DARK's own comment for the
-  // full account. light --code-ink on this fill (composited over --panel-2)
-  // 6.59:1, on --diff-del-fill 6.40:1.
-  '--diff-add-fill': 'rgba(0, 117, 48, 0.12)',
-  '--warning': '#805300',
-  // Amber, taken from DARK rather than from this palette's own --warning (ADR.md
-  // entry 66): #805300 is the brown entry 30 already rules out for the tab mark,
-  // and it reads as disabled rather than as owed. See DARK's own comment.
-  '--owed-dot': DARK['--warning'],
-  '--warning-soft': 'rgba(128, 83, 0, 0.12)',
-  '--warning-ink': '#7a4a00',
-  '--warning-border': 'rgba(128, 83, 0, 0.35)',
-  '--warning-line': 'rgba(128, 83, 0, 0.4)',
-  '--warning-border-strong': 'rgba(128, 83, 0, 0.45)',
-  '--warning-ring': 'rgba(128, 83, 0, 0.5)',
-  '--warning-fade': 'rgba(128, 83, 0, 0)',
-  '--critical': '#b81b1b',
-  '--critical-soft': 'rgba(184, 27, 27, 0.08)',
-  '--critical-border': 'rgba(184, 27, 27, 0.25)',
-  '--diff-del-fill': 'rgba(184, 27, 27, 0.12)',
-
-  // elevation: much softer/tighter than DARK's heavy black shadows, or a light
-  // page reads muddy
-  '--shadow-1': '0 1px 2px rgba(16, 24, 40, 0.06)',
-  '--shadow-2': '0 6px 20px -6px rgba(16, 24, 40, 0.12)',
-  '--ring': '0 0 0 3px rgba(50, 81, 201, 0.28)',
-};
-
-// Exported so a later ticket (mermaid's themeVariables) can look the
-// active theme's colors up instead of hand-maintaining a second copy of the palette.
-export const palettes = { dark: DARK, light: LIGHT };
-
-// The tab mark: a board -- two quiet rows and one emphasised row, the open
-// question. Inline as a data URI, never an asset file, for the same reason the
-// badge drawn over it is (PROTOCOL.md "Marking an already-open tab"): the page
-// has to stay a single self-contained file, so the `file:` archive shows the
-// same mark with the network off and the daemon gone.
-//
-// A favicon gets no CSS, so both colours are literals here rather than var()s --
-// read straight off DARK so a palette edit stays a one-block edit. DARK's
-// --warning in BOTH themes on purpose, and it is the one token that can be: amber
-// is the only hue the palette carries at nearly the same value in either theme's
-// usable range, so the mark needs no light variant to keep in sync. It must be
-// named off DARK explicitly, though -- light's --warning is #805300, a brown tuned
-// for contrast against text, which would turn the tile to mud. (An icon that
-// followed prefers-color-scheme would vanish into whichever tab strip it matched.)
-//
-// Rows are 4.6/4.6/5.4, not the 3.4 this shipped with: below ~4 the two quiet bars
-// merge into one after the browser's downsample to 16px, and 16px is the only size
-// that matters. The open row is the only one at full opacity -- the single piece of
-// hierarchy the mark carries. rx 9 rather than 8 to match the heavier bars.
-//
-// --warning is also how the product says "waiting on you" (.live-dot,
-// .rounds-left-badge, .thread-item.live), but the pending badge in src/ui.mjs
-// does not spend it a second way: the tile stays this same constant amber in
-// every state, and ink mass is the signal instead of hue -- three hairline
-// rows here already read as "some ink"; a pending round replaces them with a
-// bold numeral drawn as canvas text over the same fill, "a lot more ink", the
-// way peripheral vision reads a mass difference at 16px far more reliably than
-// a value flip. No state ever paints a second tile colour. ADR.md records what
-// that used to cost, back when it did.
-const MARK_SHAPES =
-  `<rect width="32" height="32" rx="9" fill="${DARK['--warning']}"/>`
-  + `<rect x="7" y="6.6" width="18" height="4.6" rx="2.3" fill="${DARK['--accent-ink']}" opacity=".34"/>`
-  + `<rect x="7" y="13.4" width="11" height="4.6" rx="2.3" fill="${DARK['--accent-ink']}" opacity=".34"/>`
-  + `<rect x="7" y="20" width="18" height="5.4" rx="2.7" fill="${DARK['--accent-ink']}"/>`;
-
-const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">${MARK_SHAPES}</svg>`;
-
-/** The same mark sized for the page rather than the tab: the board head's home
- * control (30, the slot it now fills outright) and the index title (36). Shares
- * MARK_SHAPES with the favicon so the tab and the page can never drift. No
- * `xmlns` -- this is inlined into HTML, not a standalone document. */
-export const markSvg = (size) =>
-  `<svg viewBox="0 0 32 32" width="${size}" height="${size}" aria-hidden="true">${MARK_SHAPES}</svg>`;
-
-/** The `<link rel="icon">` every page emits, href inlined. `encodeURIComponent`
- * rather than a hand-escaped string: `#` in a data URI would otherwise cut the
- * href off at the first colour. */
-export const faviconLink =
-  `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}">`;
-
-// The rest mark: the board's own rows, stood up. On a break the index tab has
-// nothing to ask for, so the three ink rows above collapse to two -- taller,
-// upright, at rest -- on a tile that stops alerting. Same geometry as
-// MARK_SHAPES (32x32, rx 9) and the same corner, so swapping one href for the
-// other (a later ticket's job, not this one's) reads as the SAME mark turned
-// down, not a different icon.
-//
-// The tile is DARK['--mark-rest-tile'], not DARK['--scrollbar-hover'] -- see
-// that key's own comment, above: the colour is
-// load-bearing for a shipped drawing now, so it gets a name that says so.
-// Picked on chroma, not value: Chrome's tab strip is a neutral grey, so a
-// slate tile close to it in VALUE still separates by chroma, leaving the
-// amber bars to supply the tile's value contrast from inside it rather than
-// around it. No light variant, same reasoning as MARK_SHAPES above -- this
-// names DARK explicitly and reads no CSS var().
-//
-// Bars, not rows: two vertical amber bars at 86% opacity read as a pause
-// glyph, the same family as the work mark's ink rows, one register down. Two,
-// not one -- a single rest bar at 16px is indistinguishable from a tile that
-// failed to load after the browser's downsample; two survive the squint as
-// something specific. Geometry is the design's own: x 10.4 and 17.2, y 8.6,
-// 4.4 wide by 14.8 tall, rx 2.2.
-const REST_SHAPES =
-  `<rect width="32" height="32" rx="9" fill="${DARK['--mark-rest-tile']}"/>`
-  + `<rect x="10.4" y="8.6" width="4.4" height="14.8" rx="2.2" fill="${DARK['--warning']}" opacity=".86"/>`
-  + `<rect x="17.2" y="8.6" width="4.4" height="14.8" rx="2.2" fill="${DARK['--warning']}" opacity=".86"/>`;
-
-const REST_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">${REST_SHAPES}</svg>`;
-
-/** The rest mark's href alone, not a whole `<link>` -- the page that wants it
- * already carries `faviconLink`'s tag and swaps this in as its `href`
- * (inline data URI, no asset file, no network fetch, no
- * canvas). `encodeURIComponent` for the same reason as `faviconLink`'s own:
- * a hand-escaped `#` would cut the href off at the first colour. */
-export const restFaviconHref = `data:image/svg+xml,${encodeURIComponent(REST_FAVICON_SVG)}`;
-
-/** Render a palette object as one `selector { ... }` rule's custom-property
- * declarations, plus `color-scheme` so the browser's own chrome (native form
- * controls, the default scrollbar when the webkit one above doesn't apply)
- * matches too. Prior art: mermaidNodeRule above, the same "generate a CSS rule
- * from JS data" shape for a different axis (selector fan-out instead of a
- * palette swap). This is also exactly what test/check-pure.mjs's raw-literal
- * check now means by "a token block": a rule whose declarations are all custom
- * properties (plus this one `color-scheme` line). */
-const tokenBlock = (selector, palette, scheme) => `${selector} {
-  color-scheme: ${scheme};
-${Object.entries(palette).map(([name, value]) => `  ${name}: ${value};`).join('\n')}
-}`;
-
-export const styles = `
-${tokenBlock(':root', DARK, 'dark')}
-
-@media (prefers-color-scheme: light) {
-${tokenBlock(':root:not([data-theme="dark"])', LIGHT, 'light')}
+:root {
+  color-scheme: dark;
+  --bg: #0a0e15;
+  --bg-tint: #101726;
+  --panel: #131a27;
+  --panel-2: #18202f;
+  --panel-3: #1e2839;
+  --scrollbar-hover: #2c3852;
+  --history-bg: rgba(19, 26, 39, 0.55);
+  --mark-rest-tile: #2c3852;
+  --stage-bg: #c3c6cd;
+  --bg-fade-0: rgba(10, 14, 21, 0);
+  --bg-fade-80: rgba(10, 14, 21, 0.8);
+  --ink: #eaeef6;
+  --ink-2: #b6bfd0;
+  --muted: #8690a2;
+  --code-ink: #cfd8ea;
+  --code-keyword: #c299ff;
+  --code-string: #7fd99a;
+  --code-function: #59c2e8;
+  --code-number: #e6975a;
+  --code-comment: #8896b3;
+  --code-base: #cfd8ea;
+  --hairline: rgba(255, 255, 255, 0.075);
+  --hairline-2: rgba(255, 255, 255, 0.14);
+  --accent: #7c9cff;
+  --accent-hi: #a5b9ff;
+  --accent-soft: rgba(124, 156, 255, 0.13);
+  --accent-glow: rgba(124, 156, 255, 0.06);
+  --accent-underline: rgba(124, 156, 255, 0.4);
+  --accent-select: rgba(124, 156, 255, 0.3);
+  --accent-ink: #0a1020;
+  --good: #56d68a;
+  --diff-add-fill: rgba(86, 214, 138, 0.12);
+  --warning: #e5b04d;
+  --owed-dot: var(--accent);
+  --warning-soft: rgba(229, 176, 77, 0.12);
+  --warning-ink: #f0cd8c;
+  --warning-border: rgba(229, 176, 77, 0.35);
+  --warning-line: rgba(229, 176, 77, 0.4);
+  --warning-border-strong: rgba(229, 176, 77, 0.45);
+  --warning-ring: rgba(229, 176, 77, 0.5);
+  --warning-fade: rgba(229, 176, 77, 0);
+  --critical: #f0757a;
+  --critical-soft: rgba(240, 117, 122, 0.08);
+  --critical-border: rgba(240, 117, 122, 0.25);
+  --diff-del-fill: rgba(240, 117, 122, 0.12);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 6px 20px -6px rgba(0, 0, 0, 0.55);
+  --ring: 0 0 0 3px rgba(124, 156, 255, 0.28);
 }
 
-${tokenBlock(':root[data-theme="light"]', LIGHT, 'light')}
+@media (prefers-color-scheme: light) {
+:root:not([data-theme="dark"]) {
+  color-scheme: light;
+  --bg: #eef1f7;
+  --bg-tint: #f7f9fc;
+  --panel: #ffffff;
+  --panel-2: #f5f6fb;
+  --panel-3: #e2e6f0;
+  --scrollbar-hover: #c9d0e2;
+  --history-bg: rgba(255, 255, 255, 0.55);
+  --mark-rest-tile: #c9d0e2;
+  --stage-bg: #e6e8ee;
+  --bg-fade-0: rgba(238, 241, 247, 0);
+  --bg-fade-80: rgba(238, 241, 247, 0.8);
+  --ink: #171c2a;
+  --ink-2: #3c4459;
+  --muted: #515c76;
+  --code-ink: #3a4c78;
+  --code-keyword: #7a3fd6;
+  --code-string: #1a7a3d;
+  --code-function: #0d6f96;
+  --code-number: #a15a00;
+  --code-comment: #5b6479;
+  --code-base: #3a4c78;
+  --hairline: rgba(0, 0, 0, 0.1);
+  --hairline-2: rgba(0, 0, 0, 0.18);
+  --accent: #3251c9;
+  --accent-hi: #2a46b8;
+  --accent-soft: rgba(50, 81, 201, 0.13);
+  --accent-glow: rgba(50, 81, 201, 0.06);
+  --accent-underline: rgba(50, 81, 201, 0.4);
+  --accent-select: rgba(50, 81, 201, 0.3);
+  --accent-ink: #f5f8ff;
+  --good: #007530;
+  --diff-add-fill: rgba(0, 117, 48, 0.12);
+  --warning: #805300;
+  --owed-dot: #e5b04d;
+  --warning-soft: rgba(128, 83, 0, 0.12);
+  --warning-ink: #7a4a00;
+  --warning-border: rgba(128, 83, 0, 0.35);
+  --warning-line: rgba(128, 83, 0, 0.4);
+  --warning-border-strong: rgba(128, 83, 0, 0.45);
+  --warning-ring: rgba(128, 83, 0, 0.5);
+  --warning-fade: rgba(128, 83, 0, 0);
+  --critical: #b81b1b;
+  --critical-soft: rgba(184, 27, 27, 0.08);
+  --critical-border: rgba(184, 27, 27, 0.25);
+  --diff-del-fill: rgba(184, 27, 27, 0.12);
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 6px 20px -6px rgba(16, 24, 40, 0.12);
+  --ring: 0 0 0 3px rgba(50, 81, 201, 0.28);
+}
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef1f7;
+  --bg-tint: #f7f9fc;
+  --panel: #ffffff;
+  --panel-2: #f5f6fb;
+  --panel-3: #e2e6f0;
+  --scrollbar-hover: #c9d0e2;
+  --history-bg: rgba(255, 255, 255, 0.55);
+  --mark-rest-tile: #c9d0e2;
+  --stage-bg: #e6e8ee;
+  --bg-fade-0: rgba(238, 241, 247, 0);
+  --bg-fade-80: rgba(238, 241, 247, 0.8);
+  --ink: #171c2a;
+  --ink-2: #3c4459;
+  --muted: #515c76;
+  --code-ink: #3a4c78;
+  --code-keyword: #7a3fd6;
+  --code-string: #1a7a3d;
+  --code-function: #0d6f96;
+  --code-number: #a15a00;
+  --code-comment: #5b6479;
+  --code-base: #3a4c78;
+  --hairline: rgba(0, 0, 0, 0.1);
+  --hairline-2: rgba(0, 0, 0, 0.18);
+  --accent: #3251c9;
+  --accent-hi: #2a46b8;
+  --accent-soft: rgba(50, 81, 201, 0.13);
+  --accent-glow: rgba(50, 81, 201, 0.06);
+  --accent-underline: rgba(50, 81, 201, 0.4);
+  --accent-select: rgba(50, 81, 201, 0.3);
+  --accent-ink: #f5f8ff;
+  --good: #007530;
+  --diff-add-fill: rgba(0, 117, 48, 0.12);
+  --warning: #805300;
+  --owed-dot: #e5b04d;
+  --warning-soft: rgba(128, 83, 0, 0.12);
+  --warning-ink: #7a4a00;
+  --warning-border: rgba(128, 83, 0, 0.35);
+  --warning-line: rgba(128, 83, 0, 0.4);
+  --warning-border-strong: rgba(128, 83, 0, 0.45);
+  --warning-ring: rgba(128, 83, 0, 0.5);
+  --warning-fade: rgba(128, 83, 0, 0);
+  --critical: #b81b1b;
+  --critical-soft: rgba(184, 27, 27, 0.08);
+  --critical-border: rgba(184, 27, 27, 0.25);
+  --diff-del-fill: rgba(184, 27, 27, 0.12);
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 6px 20px -6px rgba(16, 24, 40, 0.12);
+  --ring: 0 0 0 3px rgba(50, 81, 201, 0.28);
+}
 
 :root {
   /* non-color tokens: theme-independent, so they live in one shared block rather
@@ -1099,8 +885,10 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
    toggle-gated everywhere -- a diagram node is no longer a standing exception either,
    so both rules below also require body.comment-mode, the same class setCommentMode
    (src/ui.mjs) toggles for every other anchoring rule. */
-${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g')} { cursor: pointer; }
-${mermaidNodeRule('body.comment-mode:not(.readonly) .mermaid-block svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
+body.comment-mode:not(.readonly) .mermaid-block svg g[id*="-flowchart-"],
+body.comment-mode:not(.readonly) .mermaid-block svg g[id^="flowchart-"] { cursor: pointer; }
+body.comment-mode:not(.readonly) .mermaid-block svg g[id*="-flowchart-"]:hover,
+body.comment-mode:not(.readonly) .mermaid-block svg g[id^="flowchart-"]:hover { outline: 2px solid var(--accent); outline-offset: 3px; }
 /* a node that already carries a SENT
    comment is no longer a comment target at all while comment mode is on --
    de-affordanced (not-allowed cursor, no hover outline) rather than marked
@@ -1165,8 +953,10 @@ body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { out
    them for free while each stays 20px on screen. */
 .lens-canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .lens-canvas svg { display: block; max-width: none; }
-${mermaidNodeRule('body.comment-mode:not(.readonly) .lens-canvas svg g')} { cursor: pointer; }
-${mermaidNodeRule('body.comment-mode:not(.readonly) .lens-canvas svg g', ':hover')} { outline: 2px solid var(--accent); outline-offset: 3px; }
+body.comment-mode:not(.readonly) .lens-canvas svg g[id*="-flowchart-"],
+body.comment-mode:not(.readonly) .lens-canvas svg g[id^="flowchart-"] { cursor: pointer; }
+body.comment-mode:not(.readonly) .lens-canvas svg g[id*="-flowchart-"]:hover,
+body.comment-mode:not(.readonly) .lens-canvas svg g[id^="flowchart-"]:hover { outline: 2px solid var(--accent); outline-offset: 3px; }
 /* the clone carries whatever .cb-anchor-sent stamps wireMermaidBlock put on the
    live diagram, so a node with a sent comment is de-affordanced in the lens for
    exactly the same reason and by exactly the same mechanism as it is inline */
@@ -2252,4 +2042,3 @@ body.page-board .back-to-top.visible {
      them, not because a page board was found to survive. */
   body { --stage-p: 0 !important; }
 }
-`;

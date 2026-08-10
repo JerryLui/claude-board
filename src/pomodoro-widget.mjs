@@ -26,6 +26,13 @@
 // dark-then-light is for theme (QUIRKS.md): unlike colour, a blank countdown
 // is not wrong, just not yet known.
 //
+// The settings panel behind the cogwheel is no longer the pomodoro's (ADR 71):
+// it is the index's GENERAL settings panel, sectioned with the hairline +
+// caption device it already had -- Pomodoro, Banners, Cues, Store. Only the
+// class and id prefixes still say `pomodoro-`, which is history rather than
+// scope; the store control below carries `store-*` ids because nothing about
+// it is the pomodoro's.
+//
 // test/check-pure.mjs's own class file allowlist (`emitters` in "every class
 // the stylesheet rules on is a class something actually emits") includes this
 // file alongside src/render.mjs/ui.mjs/indexpage.mjs/markdown.mjs/theme.mjs --
@@ -34,7 +41,8 @@
 import { cueNames } from './cues.mjs';
 
 // Stroke-based inline glyph, same family as src/theme.mjs's three theme icons
-// and src/render.mjs's COMMENT_ICON. No external assets, ever
+// and src/render.mjs's COMMENT_ICON. No external assets beyond the two bare
+// sibling filenames QUIRKS.md now admits (ADR.md entry 70) -- an icon is not one of them
 // (QUIRKS.md).
 // The widget's name, drawn rather than written: the word "Pomodoro" used to
 // prefix the status text, which cost header width on every reader's screen to
@@ -137,12 +145,15 @@ export function pomodoroWidget() {
   </span>
   <button type="button" class="pomodoro-switch" id="pomodoro-toggle" role="switch" aria-checked="false" aria-label="Start pomodoro" title="Start pomodoro"><span class="pomodoro-switch-knob" aria-hidden="true"></span></button>
   <details class="pomodoro-settings" id="pomodoro-settings">
-    <summary class="pomodoro-settings-summary" role="button" aria-label="Pomodoro settings" title="Pomodoro settings">${GEAR_ICON}</summary>
+    <summary class="pomodoro-settings-summary" role="button" aria-label="Settings" title="Settings">${GEAR_ICON}</summary>
     <form class="pomodoro-settings-form" id="pomodoro-settings-form">
+      <div class="pomodoro-settings-caption">Pomodoro</div>
       <label class="pomodoro-field">Work (min)<input type="number" name="workMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Short break (min)<input type="number" name="breakMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Long break (min)<input type="number" name="longBreakMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Long break every<input type="number" name="longEvery" min="1" max="100" step="1"></label>
+      <hr class="pomodoro-settings-divider">
+      <div class="pomodoro-settings-caption">Banners</div>
       <label class="pomodoro-field pomodoro-field-check">Notify<input type="checkbox" name="notify"></label>
       <!-- Round banners' own tick, independent of Notify above (ADR.md entry 58;
            CONTEXT.md's Banner) -- Notify gates a pomodoro boundary's banner, this one
@@ -150,7 +161,9 @@ export function pomodoroWidget() {
            banner of its own on the way on: that audition stays Notify's alone
            (src/indexpage.mjs's onPomodoroNotifyChange), so this checkbox's 'change'
            reaches no handler beyond the ordinary sync/submit every other field here
-           already gets. -->
+           already gets. It is what earns this section its own caption rather than
+           sitting under Pomodoro: it gates a Stranded ROUND's banner, which has nothing
+           to do with the clock. -->
       <label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>
       <!-- The 'sound' checkbox is gone (retired, not kept as a
            master mute) -- Cues below is its replacement, three independent
@@ -184,7 +197,44 @@ export function pomodoroWidget() {
              after a few seconds), a second click within that window is what
              actually posts /api/pomodoro/reset. Housed inside the settings panel,
              not beside the switch, as the spec's own placement decision. -->
-        <button type="button" class="pomodoro-btn pomodoro-reset-btn" id="pomodoro-reset">Reset</button>
+        <button type="button" class="pomodoro-btn pomodoro-reset-btn" id="pomodoro-reset" aria-label="Reset the pomodoro timer">Reset</button>
+      </div>
+      <!-- The store section (ADR 71), LAST and below Save/Reset on purpose: those two
+           belong to everything above them (Save writes the settings document, Reset ends
+           the pomodoro loop), and neither touches the store. Nothing here is part of the
+           settings document either -- the window below is never saved, never synced and
+           never defaulted.
+
+           Ids here are store-scoped, not pomodoro-scoped, because this control is not
+           the pomodoro's; the surrounding pomodoro- names are the panel's history, kept
+           because renaming markup nobody sees buys nothing. What the READER sees is now
+           a general settings panel: the cogwheel is named "Settings", and every section
+           in it -- Pomodoro, Banners, Cues, Store -- says which it is.
+
+           Inside the same form as the fields above, which has one consequence worth
+           naming: Enter in the window field submits the form, i.e. SAVES SETTINGS. It
+           cannot prune -- the button below is type="button", so it is unreachable
+           without a real click on it -- so the worst outcome is a save the reader did
+           not ask for, never a deletion. -->
+      <hr class="pomodoro-settings-divider">
+      <div class="pomodoro-settings-caption">Store</div>
+      <!-- No value, no placeholder number, and nothing ever fills it in: the window has
+           no default (ADR 71), so an untouched field means "no window named" and the
+           click below refuses. A prefilled 30 would make the one number that decides
+           what dies something the reader accepted rather than chose.
+           aria-label carrying the caption's word, for the reason the cue pickers above
+           carry theirs: the caption is a plain div, read in browse mode but not while
+           tabbing, and tabbing is how this panel is operated. Both still contain their
+           visible text, so voice control still matches (WCAG 2.5.3). -->
+      <label class="pomodoro-field">Older than (days)<input type="number" name="pruneDays" id="store-prune-days" min="1" max="3650" step="1" aria-label="Store: older than (days)"></label>
+      <div class="pomodoro-settings-actions">
+        <!-- One click, no arming -- deliberately unlike Reset directly above it, which
+             does arm. Weighed and chosen (ADR 71): the window is named deliberately at
+             the call, so the click is not the deliberate part. The critical colour is
+             worn permanently rather than on an armed state, since there is no armed
+             state to show. -->
+        <button type="button" class="pomodoro-btn pomodoro-btn-danger" id="store-prune" aria-label="Store: delete boards">Delete boards</button>
+        <span class="pomodoro-settings-status" id="store-prune-status" role="status" aria-live="polite"></span>
       </div>
     </form>
   </details>

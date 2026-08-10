@@ -24,6 +24,7 @@ ask({
   title,                                     // the plain-words title chosen earlier
   blocks: [{ kind: 'html', html: '<the finished file, verbatim>' }],
   wait: false,                               // this call never blocks
+  fresh: true,                               // nothing has been posted in this conversation yet
 })
 ```
 

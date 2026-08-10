@@ -2,14 +2,21 @@
 //
 // $CLAUDE_BOARD_HOME/boards/<boardId>.json    the board document, the only mutable truth
 // $CLAUDE_BOARD_HOME/pages/<boardId>.html     emitted projection, standalone-openable
+// $CLAUDE_BOARD_HOME/pages/ui-<hash>.js       the shared client script a page names
+// $CLAUDE_BOARD_HOME/pages/styles-<hash>.css  the shared stylesheet a page names
+//
+// The two shared assets are siblings of the page ON PURPOSE (ADR 70): a bare filename is
+// the one reference that resolves the same served (`/b/<name>`) and opened from Finder
+// (`./<name>`). They are content-addressed and append-only — see src/assets.mjs.
 //
 // Writes are atomic (temp file + rename) so a mid-write daemon restart cannot
 // corrupt a board: a reader always sees either the old or the new content, never a
 // partial one.
 
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync, renameSync, mkdirSync, readdirSync, unlinkSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { closeLapsedAwaitedRounds } from './badge.mjs';
+import { SHARED_ASSETS, ASSET_NAME, assetsNamedBy } from './assets.mjs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -51,7 +58,10 @@ function assertSafeId(id) {
 }
 
 // The store holds every question, answer, note and snapshotted source file from every
-// session and every project, indefinitely. Confidentiality is not something to leave to
+// session and every project, and forgets none of it on its own — nothing here expires,
+// sweeps or reaps. `pruneStore` below is the only thing that ever removes a board, and
+// only a person firing it by hand from the index's settings panel runs it (ADR 71).
+// Confidentiality is not something to leave to
 // whatever the parent directory happens to be: dirs are owner-only, files are owner-only.
 // (A creation mode is masked by umask, so these are a ceiling, never a floor.)
 const DIR_MODE = 0o700;
@@ -124,9 +134,59 @@ export function writeBoard(board, home = boardHome()) {
   return board;
 }
 
+/** The path of a shared asset, from a name that may have come off the wire. Same
+ * discipline as `boardPath` above: the pattern is enforced HERE, where a name becomes a
+ * filesystem path, and not at the one route that reads one. */
+function assetPath(name, home = boardHome()) {
+  if (typeof name !== 'string' || !ASSET_NAME.test(name)) {
+    throw Object.assign(new Error(`unsafe asset name: ${JSON.stringify(String(name))}`), { status: 400 });
+  }
+  return path.join(pagesDir(home), name);
+}
+
+/** Put the shared assets on disk, skipping any that is already there.
+ *
+ * Never overwrites, and that is the rule the whole scheme rests on (ADR 70): the name IS
+ * the hash of the contents, so a file that exists under a given name already holds exactly
+ * the bytes we would write, and every page ever written that names it is entitled to keep
+ * getting them. An overwrite could only ever be a no-op or a corruption, so it is simply
+ * not attempted.
+ *
+ * `atomicWrite` rather than a bare `openSync(..., 'wx')`: a create-in-place interrupted
+ * mid-write would leave a TRUNCATED file that now exists, so this function would skip it
+ * forever and every page naming it would load half a script. Temp-then-rename means a
+ * crash leaves the target absent and the next write retries.
+ *
+ * `assets` is parameterised for the same reason `sharedAssets()` is — so a check can write
+ * a stand-in "next version" of the payload through this exact code path. */
+export function writeSharedAssets(home = boardHome(), assets = SHARED_ASSETS) {
+  ensureDirs(home);
+  for (const asset of assets) {
+    const target = assetPath(asset.name, home);
+    if (existsSync(target)) continue;
+    atomicWrite(target, asset.contents);
+  }
+}
+
+/** Writes the page, and the assets it names FIRST — never the other way round. A page is
+ * reachable the instant it lands (the daemon serves it, Finder opens it), so publishing
+ * one that names a file not yet on disk is a window in which the archive is broken. */
 export function writePage(id, html, home = boardHome()) {
   ensureDirs(home);
+  writeSharedAssets(home);
   atomicWrite(pagePath(id, home), html);
+}
+
+/** A shared asset's bytes, or null if this store has never written one under that name.
+ * Bytes, not a string: this is served verbatim over HTTP, and re-encoding it through
+ * UTF-16 and back to satisfy a `content-length` is work with nothing to show for it. */
+export function readAsset(name, home = boardHome()) {
+  try {
+    return readFileSync(assetPath(name, home));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
 }
 
 export function readPage(id, home = boardHome()) {
@@ -242,4 +302,146 @@ export function searchBoards(query, home = boardHome(), boards = null) {
 export function deleteBoard(id, home = boardHome()) {
   try { unlinkSync(boardPath(id, home)); } catch (err) { if (err.code !== 'ENOENT') throw err; }
   try { unlinkSync(pagePath(id, home)); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+}
+
+/** When a board last changed, as epoch ms — or `null` when it will not say.
+ *
+ * `updatedAt`, falling back to `createdAt`, both ISO-8601 strings `createBoard` always
+ * sets; absent or unparseable only on a hand-edited or foreign-version file. A board that
+ * states NEITHER answers `null`, and `pruneStore` below KEEPS it.
+ *
+ * That is the opposite of how src/indexpage.mjs's `stamp` treats an absent stamp (there,
+ * absent collates as oldest so it sorts last), and the difference is deliberate: sorting
+ * has to put such a board somewhere, while deleting does not. "Older than the window" is
+ * a claim, and a board that cannot state its age has not been shown to meet it. A
+ * destructive operation removes only what it can prove. The same rule covers a file that
+ * will not parse at all — `listBoards` skips it with a warning, so a prune never sees it
+ * and can never delete it. */
+function boardTimeMs(board) {
+  for (const v of [board && board.updatedAt, board && board.createdAt]) {
+    if (typeof v !== 'string') continue;
+    const t = Date.parse(v);
+    if (Number.isFinite(t)) return t;
+  }
+  return null;
+}
+
+/** Delete every shared asset in `pages/` that no page left in `pages/` still names.
+ * Returns the filenames removed.
+ *
+ * The two namespaces in that directory are disjoint by construction (src/assets.mjs
+ * `ASSET_NAME`): an asset name carries a dot before its extension and can never be a
+ * board id, and a page is `<id>.html`. Both filters skip `.tmp-` files for the reason
+ * `listBoards` does — one of those is an `atomicWrite` mid-flight, and deleting it races
+ * the rename.
+ *
+ * `assetsNamedBy` scans a page's bytes rather than parsing it, so it over-reports rather
+ * than under-reports (a name that appears anywhere, `#board-data` included, counts as a
+ * reference). For a garbage collector that is the safe direction: the failure it makes
+ * impossible is deleting an asset a page still loads.
+ *
+ * ponytail: reads every surviving page in full, so a prune is O(bytes in `pages/`) —
+ * tens of MB on a long-lived store, seconds at worst, and it only ever runs when a person
+ * clicks. If that ever stops being true, the upgrade is a reference index written beside
+ * the page; nothing here depends on the scan being a scan.
+ *
+ * ponytail: a prune that runs while a DIFFERENT process is midway through `writePage`
+ * can delete an asset that write has already put down and is about to name (assets land
+ * first, deliberately). Not reachable from one daemon — it is single-threaded and this
+ * runs synchronously inside a request — and a second daemon over one store is not a
+ * supported shape. The upgrade, if it ever is: take a lock over `pages/` for the sweep. */
+function sweepUnreferencedAssets(home) {
+  const dir = pagesDir(home);
+  let files;
+  try {
+    files = readdirSync(dir);
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const assets = files.filter(f => ASSET_NAME.test(f));
+  if (!assets.length) return [];
+
+  const referenced = new Set();
+  for (const f of files) {
+    if (!f.endsWith('.html') || f.includes('.tmp-')) continue;
+    let page;
+    try {
+      page = readFileSync(path.join(dir, f), 'utf8');
+    } catch (err) {
+      if (err.code === 'ENOENT') continue; // vanished under us: not a survivor
+      throw err;
+    }
+    for (const name of assetsNamedBy(page)) referenced.add(name);
+  }
+
+  const removed = [];
+  for (const name of assets) {
+    if (referenced.has(name)) continue;
+    try { unlinkSync(path.join(dir, name)); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+    removed.push(name);
+  }
+  return removed;
+}
+
+/** Remove every board older than `days`, document and emitted page alike, then every
+ * shared asset no surviving page still names. Returns `{ boards, assets }` — the ids and
+ * the filenames actually removed.
+ *
+ * THE WINDOW HAS NO DEFAULT, and that is the decision this signature exists to enforce
+ * (ADR 71): the one number that decides what dies is named at the call, never implied.
+ * A call that does not name one is refused rather than filled in with something
+ * plausible. `status: 400` for the same reason `assertSafeId` throws one — this is
+ * reachable from the wire, so a missing window is a refusal, not a 500.
+ *
+ * A flat age rule with no exemption, not even for a board holding a question nobody ever
+ * answered. Blunt on purpose, and safe to be blunt only because nothing but a person ever
+ * fires it: there is no sweep, no expiry, no daemon-start reap and no timer anywhere that
+ * reaches this function.
+ *
+ * Ordered boards-then-assets, never the reverse: the asset sweep decides what to keep by
+ * reading the pages that are STILL THERE, so it has to run after the pages that are going
+ * have gone, or it would preserve assets for boards this same call just deleted. */
+export function pruneStore(days, home = boardHome(), now = Date.now()) {
+  if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) {
+    throw Object.assign(
+      new Error(`prune needs a window, in days, greater than zero: got ${JSON.stringify(days)}`),
+      { status: 400 }
+    );
+  }
+  const cutoff = now - days * 24 * 60 * 60 * 1000;
+  const boards = [];
+  let files;
+  try {
+    files = readdirSync(boardsDir(home));
+  } catch (err) {
+    if (err.code === 'ENOENT') return { boards, assets: [] }; // nothing has ever been written here
+    throw err;
+  }
+  for (const f of files) {
+    // `.tmp-` skipped for the reason `listBoards` skips it, and here it matters more: one
+    // of those is an `atomicWrite` mid-flight, and unlinking it races the rename that is
+    // about to publish a board.
+    if (!f.endsWith('.json') || f.includes('.tmp-')) continue;
+    const id = f.slice(0, -'.json'.length);
+    let board;
+    try {
+      board = readBoard(id, home);
+    } catch {
+      continue; // unparseable, or a filename that cannot be an id: never delete what you cannot read
+    }
+    if (!board) continue;
+    // The FILENAME is what `deleteBoard` builds both paths from, so a file whose stored
+    // `id` disagrees with its name is left alone rather than guessed at: deleting on the
+    // stored id would unlink a DIFFERENT board's document and page, and deleting on the
+    // filename would leave this one's page (written as `<board.id>.html`) behind. Such a
+    // file is already unreachable through every other surface — the index links
+    // `/b/<board.id>`, which 404s — so a prune is not the place to start acting on it.
+    if (board.id !== id) continue;
+    const at = boardTimeMs(board);
+    if (at === null || at >= cutoff) continue;
+    deleteBoard(id, home);
+    boards.push(id);
+  }
+  return { boards, assets: sweepUnreferencedAssets(home) };
 }

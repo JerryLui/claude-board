@@ -4,6 +4,15 @@
 // opened from Finder it hydrates from the embedded copy and renders read-only
 // (src/ui.mjs decides based on `location.protocol`).
 //
+// The board JSON is the only payload still inlined. The client script and the stylesheet
+// are REFERENCED, by the bare content-addressed sibling filenames src/assets.mjs names
+// (ADR 70) -- roughly 430KB a page that used to be written out again for every board. The
+// reference stays a pure function of the JSON, because the names are hashes of payloads
+// fixed at import: the served page, the pages/ file and a fresh render are still the same
+// bytes. It also keeps the page openable from Finder, as long as its folder travels with
+// it -- see src/assets.mjs for why the reference has exactly that one form, and why the
+// script tag is a deferred CLASSIC script rather than a module.
+//
 // Blocks are grouped into per-round <section class="round">s (renderRoundSection):
 // a sent round renders as history, still fully readable, its widgets disabled; the
 // open round renders live. src/server.mjs reuses renderRoundSection and renderBlock
@@ -25,8 +34,8 @@
 // src/server.mjs), so the pin src/ui.mjs draws and the comment list beside it can
 // never disagree about whether an anchor still resolves.
 
-import { styles, palettes, faviconLink, markSvg } from './styles.mjs';
-import { ui } from './ui.mjs';
+import { palettes, faviconLink, markSvg } from './styles.mjs';
+import { SCRIPT_ASSET, STYLE_ASSET } from './assets.mjs';
 import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
@@ -54,14 +63,23 @@ import {
  * depth even so — this closes an exploit (a mock's
  * script, same-origin with a `file://` parent, self-navigating to an external
  * URL with no CSP to stop it). Scoped to what the page genuinely uses: its own
- * inlined `<style>`/`<script>` (both emitted inline below, so `'unsafe-inline'`
- * is load-bearing, not laziness), mermaid's dynamic `import()` from jsdelivr
+ * inline `<script>` (the theme boot script, so `'unsafe-inline'` is load-bearing,
+ * not laziness), the two content-addressed siblings it names (`'self'`, ADR 70),
+ * mermaid's dynamic `import()` from jsdelivr
  * (src/ui.mjs), and same-origin fetch/EventSource — nothing else can load, no
- * form can post anywhere, no `<base>` can re-point a relative URL. */
+ * form can post anywhere, no `<base>` can re-point a relative URL.
+ *
+ * `'self'` is what admits the sibling script and stylesheet, and it does so on BOTH
+ * surfaces: served, the origin is the daemon's; opened from Finder, Chrome's origin for a
+ * `file:` document is `file://` and a sibling `file:` URL matches it. Verified against real
+ * Chrome rather than assumed — a `file:` page under this exact meta policy loads both
+ * siblings. Deliberately NOT widened to a bare `file:` scheme source, which would also work
+ * but would hand an archived board's untrusted `html` stage (it inherits this policy
+ * through its `srcdoc`) the ability to pull any script off the reader's disk. */
 const CSP_CLAUSES = [
   "default-src 'none'",
-  "script-src 'unsafe-inline' https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
-  "style-src 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
+  "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src data: https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
   "connect-src 'self'",
@@ -2052,7 +2070,13 @@ export function groupCommentsByBlock(resolvedComments) {
  * whole time. */
 export function renderRoundSection(board, roundN, commentsByBlock) {
   const round = board.rounds.find(r => r.n === roundN);
-  const historical = !!(round && round.status === 'sent');
+  // Anything that is not `open` is history: `sent`, and — since ADR 69 — `abandoned`,
+  // the round of a conversation that declared a boundary and walked away
+  // (`abandonOpenRounds`, src/board.mjs). Asked as "is it still open" rather than "is it
+  // sent" so a third terminal state does not silently render its widgets live again;
+  // identical for every board written before that state existed, which only ever carry
+  // `open` or `sent`.
+  const historical = !!(round && round.status !== 'open');
   const blocksForRound = board.blocks.filter(b => b.round === roundN);
   // Both of these are DERIVED from the board rather than passed in, and that is
   // load-bearing: src/server.mjs renders an SSE push through this same function,
@@ -2157,8 +2181,12 @@ export function isPageBoard(board) {
   return isPageRound((board && board.blocks) || []);
 }
 
+// A closed round owes nothing, whichever way it closed: sent, or abandoned by a
+// conversation that declared a boundary (ADR 69). The pager's dot accuses the reviewer of
+// stalling, so it must come off a round nobody can answer any more. Its twin in
+// src/ui.mjs asks the same question the same way.
 function roundOwesAnswer(board, round) {
-  if (!round || round.status === 'sent') return false;
+  if (!round || round.status !== 'open') return false;
   return board.blocks.some(b => b.round === round.n && b.kind === 'question');
 }
 
@@ -2355,7 +2383,7 @@ export function renderBoardPage(board) {
 <title>${escHtml(board.title || 'board')}</title>
 ${faviconLink}
 <script>${themeBootScript}</script>
-<style>${styles}</style>
+<link rel="stylesheet" href="${STYLE_ASSET}">
 </head>
 <body${fullpage ? ` class="page-board${pageUncommentable ? ' page-uncommentable' : ''}"` : ''}>
 <div class="board-shell">
@@ -2388,7 +2416,7 @@ ${roundPagerMarkup(board, initialRoundInView)}
   </div>
 </div>
 <script id="board-data" type="application/json">${safeJson(boardForClient)}</script>
-<script type="module">${ui}</script>
+<script defer src="${SCRIPT_ASSET}"></script>
 </body>
 </html>
 `;

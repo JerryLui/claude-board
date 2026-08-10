@@ -16,16 +16,32 @@ you reference stays read-only.
 
 ## The call
 
-`mcp__claude-board__ask` takes three arguments, one of them optional:
+`mcp__claude-board__ask` takes four arguments, two of them optional:
 
 ```js
-ask({ title, blocks, wait })
+ask({ title, blocks, wait, fresh })
 ```
 
 `title` names the round in the tab and on its page in the round pager. `blocks` is the ordered array the
 page shows. One call is one round: the first opens a tab, later calls push into the same
 board. Post a branch's questions together; only a question whose *shape* depends on an
 answer in this round waits for the next one.
+
+`fresh` (boolean, default `false`) says **you have posted no board in this conversation**, so this
+call starts a new board on a new thread and opens its own tab. Pass it on your first `ask` of a
+conversation whenever you cannot see a board URL of your own further up. After a `/clear` that is
+always true — a cleared context holds no board — and it matters there: the board server keeps
+running across a `/clear`, so without `fresh` your first question lands as another round on the
+cleared conversation's board, under that work's title, with no tab opening. Leave it off for every
+later round, or each round gets a board of its own. It is harmless when there is nothing to leave
+(one board, one thread, one tab), and it closes any round still open on the board it walks away
+from, so nothing is left waiting there.
+
+**Say the board's URL in chat after every round**, in your own reply, not only in what you post.
+The packet's `url` is a tool result, and a `/compact` rebuilds your context from the conversation
+rather than from tool results — so a board whose URL only ever lived in a tool result is a board
+you will not know you have, and your next `ask` will declare a boundary that abandons work still
+in progress.
 
 `wait` (boolean, default `false`) blocks a page board round — the single-stage shape
 described below — the same way a question round always blocks: the call returns only once

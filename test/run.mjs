@@ -25,7 +25,7 @@ const CHECK_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_CHECK_TIMEOUT_MS) || 18
 // screen from a dozen different check files, none of which is about notifications at
 // all. Pushed out of reach here rather than stubbed in each of them: the checks that DO
 // mean to exercise the rule (test/check-notify-round.mjs, test/check-notify-click.mjs,
-// test/check-stranded.mjs) set this variable themselves, to a few milliseconds, and
+// test/check-stranded.mjs, test/check-boundary.mjs) set this variable themselves, to a few milliseconds, and
 // stand a fake notifier ahead of the real one on PATH while they do. Inherited by every
 // spawned check below, and overridable from outside if someone genuinely wants the
 // shipped timing.
@@ -40,7 +40,7 @@ const JOBS = Number(process.env.CLAUDE_BOARD_JOBS) || Math.min(4, cpus().length)
 
 // Ordered slowest-first, which is what keeps the pool from finishing its short checks
 // and then waiting on check-install alone. Worth preserving when adding a check.
-const checks = ['check-install.mjs', 'check-http.mjs', 'check-mcp.mjs', 'check-install-payload.mjs', 'check-notify.mjs', 'check-anchor-perf.mjs', 'check-install-doc.mjs', 'check-mermaid-theme.mjs', 'check-pure.mjs', 'check-pomodoro-page.mjs', 'check-launcher-env.mjs', 'check-launcher-refuses.mjs', 'check-anchor-robustness.mjs', 'check-mermaid-anchor.mjs', 'check-prose-check.mjs', 'check-pomodoro.mjs', 'check-comment-mode.mjs', 'check-stage-isolation.mjs', 'check-archive.mjs', 'check-page-board.mjs', 'check-header-condense.mjs', 'check-round-pager.mjs', 'check-stage-lens.mjs', 'check-round-end.mjs', 'check-skill-prose.mjs', 'check-enter.mjs', 'check-anchor-push.mjs', 'check-theme.mjs', 'check-send-guard.mjs', 'check-amend-integrity.mjs', 'check-archive-ids.mjs', 'check-contrast.mjs', 'check-pin-placement.mjs', 'check-anchor-rerender.mjs', 'check-click.mjs', 'check-click-pin.mjs', 'check-parser-parity.mjs', 'check-sample-board.mjs', 'check-notify-round.mjs', 'check-attended.mjs', 'check-notify-click.mjs', 'check-stranded.mjs', 'check-notify-cleanup.mjs', 'check-attended-client.mjs', 'check-vendor-digest.mjs'];
+const checks = ['check-install.mjs', 'check-http.mjs', 'check-mcp.mjs', 'check-install-payload.mjs', 'check-notify.mjs', 'check-anchor-perf.mjs', 'check-install-doc.mjs', 'check-mermaid-theme.mjs', 'check-pure.mjs', 'check-pomodoro-page.mjs', 'check-launcher-env.mjs', 'check-anchor-robustness.mjs', 'check-mermaid-anchor.mjs', 'check-prose-check.mjs', 'check-pomodoro.mjs', 'check-comment-mode.mjs', 'check-stage-isolation.mjs', 'check-archive.mjs', 'check-page-board.mjs', 'check-header-condense.mjs', 'check-round-pager.mjs', 'check-stage-lens.mjs', 'check-round-end.mjs', 'check-skill-prose.mjs', 'check-enter.mjs', 'check-anchor-push.mjs', 'check-theme.mjs', 'check-send-guard.mjs', 'check-amend-integrity.mjs', 'check-archive-ids.mjs', 'check-contrast.mjs', 'check-pin-placement.mjs', 'check-anchor-rerender.mjs', 'check-click.mjs', 'check-click-pin.mjs', 'check-parser-parity.mjs', 'check-sample-board.mjs', 'check-notify-round.mjs', 'check-attended.mjs', 'check-notify-click.mjs', 'check-stranded.mjs', 'check-notify-cleanup.mjs', 'check-attended-client.mjs', 'check-vendor-digest.mjs', 'check-assets.mjs', 'check-boundary.mjs', 'check-prune.mjs', 'check-launcher-refuses.mjs'];
 
 /** Run one check file with a deadline. Resolves `{ code, signal, timedOut, elapsed,
  * output }` — never rejects, so one broken check cannot abort the run.

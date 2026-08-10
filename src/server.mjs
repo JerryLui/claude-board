@@ -47,10 +47,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readBoard, writeBoard, writePage, boardHome, listBoards, searchBoards } from './store.mjs';
+import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, searchBoards, pruneStore } from './store.mjs';
+import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly, STRANDED_BANNER } from './board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly, STRANDED_BANNER } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
@@ -878,6 +879,26 @@ function isBoardCookieWrite(parts) {
   return parts[0] === 'api' && parts[1] === 'board' && parts.length === 4 && BOARD_COOKIE_ACTIONS.has(parts[3]);
 }
 
+/** The store writes a cookie-holding browser may perform: `prune`, and nothing else. A
+ * named closed set for the reason `POMODORO_COOKIE_ACTIONS` above states.
+ *
+ * `prune` is admitted with its eyes open, because it is the one member of any of these
+ * three lists that DESTROYS something rather than reading or nudging it. The reasoning is
+ * not "it reaches less than submit" — it reaches further — but placement: ADR 71 puts the
+ * control in the index's settings panel, and the index page is exactly a browser holding
+ * only the session cookie. Requiring the secret instead would make the one surface the
+ * decision names unable to fire it. What still stands in front of it is the whole of the
+ * rest of the gate: the loopback `Host` check, `isSameOriginWrite`, and a cookie that is
+ * derived from the local secret and revoked by rotating it. The store is also already
+ * fully readable to the same holder — a credential that can read every question, answer
+ * and snapshotted source file in the archive is not one you are protecting the archive
+ * from — and the window that decides what dies is named in the request, never here. */
+const STORE_COOKIE_ACTIONS = new Set(['prune']);
+
+function isStoreCookieWrite(parts) {
+  return parts[0] === 'api' && parts[1] === 'store' && parts.length === 3 && STORE_COOKIE_ACTIONS.has(parts[2]);
+}
+
 /** True iff this write may proceed. Two ways to hold a credential, and they are not
  * interchangeable:
  *
@@ -901,11 +922,12 @@ function isBoardCookieWrite(parts) {
  *
  * Every non-GET goes through here, rather than an enumerated list of write routes: a
  * route added later is then gated by default instead of by remembering to add it. The
- * two exception lists are `BOARD_COOKIE_ACTIONS` and `POMODORO_COOKIE_ACTIONS` above. */
+ * three exception lists are `BOARD_COOKIE_ACTIONS`, `POMODORO_COOKIE_ACTIONS` and
+ * `STORE_COOKIE_ACTIONS` above. */
 function isAuthorizedWrite(req, parts, secret) {
   if (!secret) return false; // no secret on disk: refuse writes rather than fall open
   if (secretMatches(req.headers[SECRET_HEADER], secret)) return true;
-  if (!isBoardCookieWrite(parts) && !isPomodoroCookieWrite(parts)) return false;
+  if (!isBoardCookieWrite(parts) && !isPomodoroCookieWrite(parts) && !isStoreCookieWrite(parts)) return false;
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
@@ -1326,6 +1348,45 @@ function handleGetPage(req, res, id, home) {
   return sendHtml(res, 200, renderBoardPage(board));
 }
 
+/** The daemon's one static route: `GET /b/<ui|styles>-<hash>.<js|css>`, the shared script
+ * and stylesheet every page now names instead of carrying (ADR 70).
+ *
+ * It sits under `/b/` and not under some `/assets/` prefix of its own because the page's
+ * reference is a BARE FILENAME — the only spelling that resolves both served and from
+ * Finder — and a bare filename on a page served at `/b/<id>` resolves to `/b/<name>`. The
+ * two namespaces cannot collide: an asset name contains a dot, which `SAFE_BOARD_ID`
+ * (src/store.mjs) forbids, so the router's `ASSET_NAME` test below is a partition, not a
+ * priority.
+ *
+ * Served from DISK, never from the in-memory `SHARED_ASSETS`: a page written six months ago
+ * names the payload it was rendered against, and this daemon is running a newer one. Reading
+ * `pages/<name>` is what makes the served surface and the Finder surface literally the same
+ * bytes, which is the promise the hash in the name makes.
+ *
+ * Behind the read gate like every other route: the caller is a page this daemon just served,
+ * so it is already holding the session cookie. `immutable` caching is safe for exactly the
+ * same reason the name is a hash — the bytes under a given name never change. */
+function handleGetAsset(res, name, home) {
+  // The fallback covers the one case where a live page names an asset the store has never
+  // written: a board whose JSON exists but whose page file does not (readable through
+  // `GET /b/:id`, which re-renders from JSON and never touches pages/). Serving it from
+  // memory cannot serve the WRONG bytes — the name is their hash — and the alternative is a
+  // board page whose whole script 404s. It stays a read: nothing is written on a GET.
+  const bytes = readAsset(name, home)
+    ?? (SHARED_ASSETS.find(a => a.name === name)?.contents ?? null);
+  if (bytes === null) return sendText(res, 404, 'asset not found');
+  res.writeHead(200, {
+    'content-type': assetContentType(name),
+    // byteLength, not `.length`: the fallback above hands back a JS string, whose length is
+    // UTF-16 units, and the stylesheet carries non-ASCII (`·`, `—`) in its own comments.
+    'content-length': Buffer.byteLength(bytes),
+    'cache-control': 'private, max-age=31536000, immutable',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  });
+  res.end(bytes);
+}
+
 /** POST /api/handoff -> { token, expiresAt }. Reached only with the SECRET (gate 3 does
  * not accept the session cookie for anything but submit), so a browser cannot mint
  * itself a second credential and neither can anything holding only a stolen cookie.
@@ -1574,6 +1635,53 @@ async function handleWait(req, res, id, url, home, sse) {
   const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
   res.once('finish', commit);
   return sendJson(res, 200, packet);
+}
+
+/** POST /api/board/:id/abandon -> `{ ok, board, closed: [n…] }`: the shim declaring that
+ * the conversation which owned this board is over (ADR 69, `fresh` on `ask`), so every
+ * round still open on it is closed on the way out.
+ *
+ * SECRET-ONLY, deliberately: it is off `BOARD_COOKIE_ACTIONS` above, so the session
+ * cookie does not reach it and a browser cannot close a round it is looking at. The only
+ * caller is the shim that posted the board, naming the board id it holds in its own
+ * memory — which is what scopes this to the declaring session and keeps two shims in one
+ * project directory out of each other's way: nothing here reads `cwd`, `thread`, or any
+ * other board.
+ *
+ * Takes no body. The round-closing rule is `abandonOpenRounds` (src/board.mjs) and the
+ * request has nothing to add to it; `req.resume()` drains whatever a caller sent anyway
+ * rather than leaving the socket half-read.
+ *
+ * Rendered before either persist, and the page written as well as the document — the same
+ * ordering and the same pair `handleSubmit` below uses, for the same reason. It matters
+ * more here than anywhere: an abandoned board is one nothing will ever post to again, so
+ * this is the LAST write it will ever get, and a `pages/<id>.html` left showing live
+ * widgets would stay that way in the archive for good.
+ *
+ * `stranded.evaluate` last, after the write has landed. That single call is the whole of
+ * criterion "its Banner does not fire afterwards": the rule re-reads the board off disk,
+ * `stillWaiting` finds nothing (`roundIsAwaitedOpen` wants `status === 'open'`), so
+ * `mayAnnounce` spends any standing record — which withdraws the banner already on screen
+ * by SIGTERMing the process serving its click — and `evaluate` cancels a grace still
+ * counting down. Nothing re-arms it, because only a round landing on this board could,
+ * and no round ever will. Deliberately NOT `stranded.answered`: nobody answered anything.
+ */
+function handleAbandon(req, res, id, home, sse, stranded) {
+  req.resume();
+  const board = readBoard(id, home);
+  if (!board) return sendJson(res, 404, { error: 'board not found' });
+  const closed = abandonOpenRounds(board);
+  if (closed.length) {
+    const html = renderBoardPage(board);
+    writeBoard(board, home);
+    writePage(board.id, html, home);
+    // The same nudge `handleWait`'s timeout branch sends, and the same event: from a
+    // still-open tab's point of view this IS its round's wait ending. No payload beyond
+    // the round number, for the reason given there.
+    for (const n of closed) sse.broadcast(id, 'awaitExpired', { round: n });
+  }
+  stranded.evaluate(id, strandedTarget(req, id));
+  return sendJson(res, 200, { ok: true, board: board.id, closed });
 }
 
 async function handleSubmit(req, res, id, home, sse, stranded) {
@@ -1930,6 +2038,38 @@ async function handlePomodoro(req, res, parts, pomo, home) {
   return sendText(res, 404, 'not found');
 }
 
+/** `POST /api/store/prune` — the ONLY thing in this daemon that ever deletes a board, and
+ * the only caller `pruneStore` has (ADR 71). Fired by hand, from the index's settings
+ * panel, and by nothing else: there is no prune on read, none at daemon start, and no
+ * timer anywhere that reaches it.
+ *
+ * `{ days }` is required and is not defaulted here — `pruneStore` refuses a call that
+ * does not name a window, and this route deliberately passes `body.days` straight
+ * through rather than coercing a string or supplying a number of its own. The one number
+ * that decides what dies is the caller's to name.
+ *
+ * No preview and no arming, matching the control that calls it: one click deletes. The
+ * deliberate step is naming the window, not clicking after having named it. */
+async function handlePrune(req, res, home) {
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.status ? err.message : 'invalid JSON body' });
+  }
+  try {
+    const { boards, assets } = pruneStore(body && body.days, home);
+    // Counts, not ids: nothing needs to know WHICH boards went (they are gone; there is
+    // nothing left to address), and a list of every id in a large prune is a response
+    // body that grows with the store for no reader.
+    return sendJson(res, 200, { ok: true, boards: boards.length, assets: assets.length });
+  } catch (err) {
+    // `status: 400` is what pruneStore tags a refused window with; anything else really
+    // is this daemon failing, and says so.
+    return sendJson(res, err.status || 500, { error: String((err && err.message) || err) });
+  }
+}
+
 /** Build the daemon's request handler as a plain `node:http` listener, without
  * binding a port — used directly by the check and by `startServer` below.
  *
@@ -2051,6 +2191,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
+        // Ahead of the board route, and disjoint from it by construction — see
+        // handleGetAsset on why the two share a prefix at all.
+        if (ASSET_NAME.test(parts[1])) return handleGetAsset(res, parts[1], home);
         return handleGetPage(req, res, parts[1], home);
       }
 
@@ -2066,6 +2209,9 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         if (req.method === 'POST' && action === 'submit') {
           return await handleSubmit(req, res, boardId, home, sse, stranded);
         }
+        if (req.method === 'POST' && action === 'abandon') {
+          return handleAbandon(req, res, boardId, home, sse, stranded);
+        }
         if (req.method === 'POST' && action === 'attended') {
           return await handleAttended(req, res, boardId, sse, stranded);
         }
@@ -2073,6 +2219,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
 
       if (parts[0] === 'api' && parts[1] === 'pomodoro') {
         return await handlePomodoro(req, res, parts, pomo, home);
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/store/prune') {
+        return await handlePrune(req, res, home);
       }
 
       return sendText(res, 404, 'not found');

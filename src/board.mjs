@@ -637,6 +637,55 @@ export function amendRound(board, { blocks, cwd, title }) {
   return { round: openRound.n, blockIds };
 }
 
+/** Close every round still open on `board`, because the conversation that was posting
+ * to it declared a boundary and walked away (ADR 69). Returns the round numbers closed;
+ * mutates `board` in place, caller persists it.
+ *
+ * `status: 'abandoned'` is a THIRD terminal state, and inventing one is the point. Until
+ * now exactly two things ended an awaited round, and neither is honest here:
+ *
+ *  - `applySubmit` above marks it `sent` with an `action` of `'submitted'`/`'discuss'`.
+ *    That records that a human answered. Nobody did — the reviewer walked away and the
+ *    agent cleared its context — so a fabricated submit with an empty answer array would
+ *    put a lie in the durable board document and surface it as an answered round in the
+ *    index, the badge and the archive for good.
+ *  - `closeLapsedAwaitedRounds` (src/badge.mjs) clears `awaited` and deliberately leaves
+ *    `status: 'open'` forever. That is a lapse, not a close: the round would go on
+ *    advertising itself as open on a board nothing will ever post to again.
+ *
+ * So the round is closed and labelled as neither: not answered, not lapsed, abandoned.
+ * Every reader that asks "is this round open" already asks `status === 'open'`
+ * (`roundIsAwaitedOpen` and `closeLapsedAwaitedRounds` in src/badge.mjs, `amendRound`
+ * above, `handleSubmit` and the `requestId` dedupe in src/server.mjs,
+ * `openAwaitedRounds` in src/indexpage.mjs, `hasOpenRound` in src/render.mjs), so all of
+ * them drop an abandoned round with no code of their own — including the stranded rule,
+ * which is the load-bearing one: a round nobody is listening for is exactly what its
+ * Banner exists to announce, and `stillWaiting` must stop finding this one.
+ *
+ * `awaited: false` is set here rather than left for a clock, because the wait did not
+ * lapse — it was abandoned, now. `awaitDeadline` is left exactly as minted, the same way
+ * a lapse leaves it: it is the record of the wait this round was born with, and nothing
+ * is served by rewriting history to claim the deadline fell earlier than it did.
+ * `sentAt` stays null for the same reason; `abandonedAt` is the stamp beside it that says
+ * when this actually happened, since `updatedAt` is board-wide and gets overwritten.
+ *
+ * No `action` is recorded. `action` is the reviewer's own choice and `buildPacket` reads
+ * it straight into the packet's `status`, so writing one here would invent a packet
+ * status no caller knows. */
+export function abandonOpenRounds(board) {
+  const now = new Date().toISOString();
+  const closed = [];
+  for (const r of (board && board.rounds) || []) {
+    if (r.status !== 'open') continue;
+    r.status = 'abandoned';
+    r.abandonedAt = now;
+    r.awaited = false;
+    closed.push(r.n);
+  }
+  if (closed.length) board.updatedAt = now;
+  return closed;
+}
+
 /** Find a block by id anywhere in the tree: top-level, or nested arbitrarily deep
  * inside a question's `context` or a compare block's `left`/`right` sides — both
  * of which can themselves hold another question/compare/etc (normalizeBlock
@@ -767,7 +816,8 @@ export function applySubmit(board, { action, answers, comments }, round) {
     // straight off the wire untyped, and one submit carrying `note: 12345` wedged
     // src/store.mjs's searchBoards -- which calls .toLowerCase() on it -- for the WHOLE
     // store, permanently: every archive search 500s, the healthy boards' hits included,
-    // and nothing in the product can repair it (deleteBoard is wired to no route).
+    // and the only repair in the product is a prune old enough to reach the poisoned
+    // board -- which takes every board of that age with it (src/store.mjs pruneStore).
     board.answers[a.id] = {
       id: a.id,
       status: normalizeStatus(a),

@@ -225,7 +225,8 @@ function threadRow(t) {
  * reading as relative time ("an hour ago") instead of a one-shot server-rendered
  * string that goes stale in a tab left open — the exact ISO value stays on the
  * element's `title` attribute (set server-side above) for when it is genuinely
- * needed. Small, dependency-free, inline (QUIRKS.md "No external assets, ever"),
+ * needed. Small, dependency-free, inline (QUIRKS.md "No external assets — except two
+ * bare sibling filenames"; an icon is not one of them),
  * and wired entirely from this script rather than from `onclick` attributes: the
  * index page carries no CSP `<meta>` today (the board page does), and that is not
  * a license to wire any differently than a page that does.
@@ -825,6 +826,58 @@ function onPomodoroNotifyChange(ev) {
   }).catch(function () { /* fire-and-forget: see this function's own comment */ });
 }
 
+// The Store section's one control (ADR 71). Deliberately NOT routed through
+// postPomodoro: this is not a pomodoro write, the route is /api/store/prune,
+// and the response is a pair of counts rather than a pomodoro document --
+// applying it into pomodoroDoc would corrupt the widget's whole state.
+// credentials: 'same-origin' for the same reason every write here carries it:
+// the session cookie is what authorises it (STORE_COOKIE_ACTIONS,
+// src/server.mjs), and this page holds no secret of its own.
+//
+// One click, no arming and no preview, unlike the Reset button just above it in
+// the same panel. That difference is the decision, not an oversight: the window
+// is named deliberately at the call, so the click is not the deliberate part.
+//
+// THE WINDOW HAS NO DEFAULT. A field the reader has not filled in is refused
+// here and says so, rather than being quietly filled with a plausible number --
+// the daemon refuses it a second time (pruneStore's own 400) so the rule holds
+// for any caller, not just this one.
+function onStorePruneClick() {
+  var input = document.querySelector('input#store-prune-days');
+  var status = document.querySelector('span#store-prune-status');
+  var days = parseInt((input && input.value) || '', 10);
+  if (!(days > 0)) {
+    if (status) status.textContent = 'Name a window first.';
+    return;
+  }
+  if (status) status.textContent = 'Deleting…';
+  fetch('/api/store/prune', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ days: days }),
+  }).then(function (r) {
+    if (!r.ok) throw new Error('prune failed: ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    // The thread list on this page was server-rendered BEFORE the prune, so
+    // every row for a board that just went now links to a 404. A reload is the
+    // honest repair and needs no second rendering path: the shorter list is
+    // also the reader's confirmation. Only when something actually went --
+    // a prune that matched nothing would otherwise reload to an identical page
+    // and read as if the click had done nothing at all, so that case says so
+    // in words instead. Guarded rather than called bare: this script is also
+    // run against a document stand-in with no location at all.
+    if (data.boards > 0) {
+      if (typeof location !== 'undefined' && location && typeof location.reload === 'function') location.reload();
+      return;
+    }
+    if (status) status.textContent = 'Nothing older than that.';
+  }).catch(function (err) {
+    if (status) status.textContent = 'Prune failed: ' + ((err && err.message) || err);
+  });
+}
+
 // A click anywhere outside the panel closes it -- the ordinary popover gesture,
 // and the only way out other than the summary itself once the panel overlaps the
 // page. Registered on 'document', so it sees the click AFTER it has bubbled all
@@ -851,6 +904,8 @@ function initPomodoroWidget() {
   if (forwardBtn) forwardBtn.addEventListener('click', onPomodoroForwardClick);
   var resetBtn = document.querySelector('button#pomodoro-reset');
   if (resetBtn) resetBtn.addEventListener('click', onPomodoroResetClick);
+  var pruneBtn = document.querySelector('button#store-prune');
+  if (pruneBtn) pruneBtn.addEventListener('click', onStorePruneClick);
   var form = document.querySelector('form#pomodoro-settings-form');
   if (form) form.addEventListener('submit', onPomodoroSettingsSubmit);
   // Delegated on the form rather than one listener per <select>: the three

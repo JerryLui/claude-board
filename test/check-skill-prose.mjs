@@ -211,6 +211,26 @@ check('the artifact-rule checks fail on prose that lost the page-board shape rul
   assert.ok(!statesRule(drifted(/one `html` block and nothing else/g), ARTIFACT_RULES['one `html` block and nothing else is a page board']),
     'dropping the page-board shape rule from the manual did not fail its check');
 });
+// --- the boundary, and the one rule guarding it -----------------------------------
+// ADR 69: `fresh` is checked by the generic battery above (it is a real schema argument,
+// so the manual has to name it), but WHEN to pass it cannot be. Nothing can detect a
+// missed declaration, and the one thing that makes the agent able to answer "have I
+// posted a board in this conversation?" after a `/compact` is having written the URL into
+// chat -- a compaction summary is built from the conversation, not from tool results. That
+// rule lives nowhere else, so it is pinned here.
+check('the manual tells the agent when a boundary is declared', () => {
+  assert.match(norm(prose), /you have posted no board in this conversation/i);
+  assert.match(norm(prose), /after a `\/clear`/i);
+});
+check('the manual tells the agent to state the board URL in chat every round', () => {
+  assert.match(norm(prose), /say the board's URL in chat after every round/i);
+  assert.match(norm(prose), /`\/compact` rebuilds your context from the conversation/i);
+});
+check('the URL-in-chat check fails on prose that lost the rule', () => {
+  assert.doesNotMatch(norm(drifted(/Say the board's URL in chat after every round/)),
+    /say the board's URL in chat after every round/i);
+});
+
 check('the commenting-rule absence check fails if the manual regains the old claim', () => {
   // The exact sentence SKILL.md carried before this pass:
   // "The reviewer answers in any order, comments on any element by clicking it, and

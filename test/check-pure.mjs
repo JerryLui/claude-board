@@ -41,6 +41,7 @@ import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
 import { TOMATO_ICON, REST_ICON } from '../src/pomodoro-widget.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
+import { ASSET_NAME, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
 import {
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
   closeLapsedAwaitedRounds, roundWaitLapsed,
@@ -79,20 +80,19 @@ const fixturesDir = mkdtempSync(path.join(tmpdir(), 'claude-board-pure-fixtures-
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Strip the inlined <style> block, the #board-data JSON payload, and the client
- * <script type="module"> from a rendered page, leaving only the block markup that
- * renderBlock actually emitted. Asserting against the raw page string is unsafe for
- * a block-kind-coverage check: a class name like "compare-grid" or "mermaid-block"
- * is also a CSS selector in src/styles.mjs and a querySelector string literal in
- * src/ui.mjs, and any field value on a block (a label, a snippet of prose) is also
- * present in the JSON board.blocks the page inlines verbatim for hydration -- none
- * of that proves the corresponding renderBlock case ran. Stripping all three first
- * means a needle can only be found where the renderer actually put it. */
+/** Strip the #board-data JSON payload from a rendered page, leaving only the block markup
+ * that renderBlock actually emitted. Asserting against the raw page string is unsafe for a
+ * block-kind-coverage check: any field value on a block (a label, a snippet of prose) is
+ * also present in the JSON board.blocks the page inlines verbatim for hydration, and
+ * finding it there proves nothing about whether the corresponding renderBlock case ran.
+ *
+ * This used to strip two more things, for the same reason: the inlined `<style>` block
+ * (where a class name like "compare-grid" is also a CSS selector) and the inlined client
+ * `<script type="module">` (where it is also a querySelector string literal). Since ADR 70
+ * the page carries neither -- it names them as sibling files -- so the JSON payload is the
+ * only haystack left that can produce a false positive. */
 function renderedMarkup(html) {
-  return html
-    .replace(/<style>[\s\S]*?<\/style>/, '')
-    .replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '')
-    .replace(/<script type="module">[\s\S]*?<\/script>/, '');
+  return html.replace(/<script id="board-data"[^>]*>[\s\S]*?<\/script>/, '');
 }
 
 // --- markdown.mjs: carried from visualize/check.mjs -------------------------------
@@ -3820,16 +3820,65 @@ check('an amend that replaces a block clears the reviewer\'s local field state f
   assert.ok(/delete touched\[id\]/.test(clearBody));
 });
 
-check('the emitted page has no external script or stylesheet reference -- everything needed to open standalone is inlined', () => {
+// This check used to read "the emitted page has no external script or stylesheet
+// reference -- everything needed to open standalone is inlined", and rejected any
+// `<link rel=stylesheet>` or `<script src=>` outright (QUIRKS.md, "No external assets,
+// ever"). ADR 70 supersedes that rule: a page now REFERENCES the shared script and
+// stylesheet rather than carrying 438KB of byte-identical copies of them. What replaces
+// it is narrower and stricter -- the reference must be a BARE SIBLING FILENAME, which is
+// the single form that resolves identically from a page served at `/b/<id>` and from the
+// same bytes double-clicked in Finder. An absolute path, a URL, a protocol-relative
+// `//host/x` or a subdirectory would each break the Finder surface (AC 9), so each is
+// still a failure here; that is what this check now defends.
+check('the emitted page references the shared script and stylesheet as BARE SIBLING FILENAMES, and nothing else external', () => {
   const board = createBoard({
     title: 'Standalone',
     blocks: [{ kind: 'markdown', text: '# A' }, { kind: 'question', prompt: 'Q', widget: 'single', options: [{ label: 'X' }] }],
   });
   const html = renderBoardPage(board);
-  assert.ok(!/<link[^>]+rel=["']stylesheet["']/.test(html));
-  assert.ok(!/<script[^>]+\bsrc=/.test(html));
-  assert.ok(html.includes('<style>'));
+
+  // Every subresource the page pulls, by the attribute the browser would fetch. Navigation
+  // hrefs (the back-to-index `<a href="/">`) are deliberately not in this set: they are not
+  // loads, and they are allowed to be absolute.
+  const refs = [];
+  for (const [, tag, attrs] of html.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
+    const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
+    if (m) refs.push({ tag, ref: m[1] });
+  }
+  assert.ok(refs.length >= 3, `setup failure: expected at least the favicon, the stylesheet and the script, found ${refs.length}`);
+
+  for (const { tag, ref } of refs) {
+    // A `data:` URL carries its own bytes, so it is self-contained by definition -- that is
+    // the favicon (src/styles.mjs's faviconLink), and it stays allowed.
+    if (ref.startsWith('data:')) continue;
+    assert.ok(ASSET_NAME.test(ref),
+      `<${tag}> loads "${ref}", which is not a bare content-addressed sibling filename -- ` +
+      'an absolute path, a URL, a protocol-relative reference or a subdirectory all fail to ' +
+      'resolve when the page is opened from Finder (ADR 70)');
+    assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
+      `<${tag}> loads "${ref}", which is not bare: no separator, no scheme, no dot segment`);
+  }
+
+  // And the two it must name are the real content-addressed ones, not some spelling that
+  // merely looks like one. (Ablation: hardcode a name in render.mjs and this fails the
+  // moment the payload changes, which is exactly the drift the hash exists to catch.)
+  assert.ok(html.includes(`<link rel="stylesheet" href="${STYLE_ASSET}">`), 'the page must name the current stylesheet asset');
+  assert.ok(html.includes(`<script defer src="${SCRIPT_ASSET}"></script>`), 'the page must name the current script asset');
+
+  // Deferred CLASSIC script, never a module: Chrome CORS-blocks a module script over
+  // `file:`, so `type="module"` here silently kills the Finder surface. `defer` is what
+  // keeps the execution timing a module tag already had (after parse, before
+  // DOMContentLoaded), which two `document.readyState === 'complete'` branches in
+  // src/ui.mjs read.
+  assert.ok(!/<script[^>]*\btype="module"[^>]*\bsrc=/.test(html), 'the shared script must not be referenced as a module');
+
+  // The board JSON is still inlined -- it is per-board, so it has nothing to share.
   assert.ok(html.includes('id="board-data"'));
+
+  // And the payloads themselves are genuinely gone from the bytes, which is the weight
+  // half of AC 8: naming the file while still carrying it would pass every assertion above.
+  assert.ok(!html.includes(ui), 'the page must not still carry the client script');
+  assert.ok(!html.includes(styles), 'the page must not still carry the stylesheet');
 });
 
 // =================================================================================
@@ -6779,7 +6828,11 @@ check('the submitted push disables the send bar, and a new round brings it back'
     /if \(!submitInFlight\) setSendBarEnabled\(open !== null && currentRound === open\)/,
     'and the one place that decides it reads both halves');
   const open = namedFunctionBody(ui, 'openRoundNumber');
-  assert.match(open, /r\.status !== 'sent'/, 'the open round is the one not yet sent');
+  // Asked positively, and it has to be: since ADR 69 a round can close as 'abandoned' too
+  // (a conversation declared a boundary and walked away), and "not sent" would read that
+  // as still open -- a live Send bar on a board whose every submit is a 409, which is the
+  // exact shape this whole check exists to keep off the screen.
+  assert.match(open, /r\.status === 'open'/, 'the open round is the one still open, not merely the one not sent');
   // Never re-enable anything in a read-only page, where everything is hard-disabled.
   assert.match(namedFunctionBody(ui, 'setSendBarEnabled'), /if \(readonly\) return;/);
 });
@@ -8069,10 +8122,14 @@ check('pomodoro widget: the settings control is an icon, and the icon carries a 
   const html = renderIndexPage({ threads: [] });
   const summary = html.match(/<summary class="pomodoro-settings-summary"[^>]*>([\s\S]*?)<\/summary>/);
   assert.ok(summary, 'setup failure: no settings <summary> rendered');
-  assert.match(summary[0], /aria-label="Pomodoro settings"/, 'an icon-only control must be named for a screen reader (ui-ux-pro-max accessibility priority 1)');
-  assert.match(summary[0], /title="Pomodoro settings"/, 'and named on hover for everyone else');
+  // "Settings", not "Pomodoro settings" (SPEC_BOUNDARY.md AC 15, ADR 71): the panel
+  // behind this cogwheel is the index's general settings panel now -- the pomodoro is
+  // one captioned section in it, beside Banners, Cues and Store -- and the one name the
+  // panel has must not claim it is the pomodoro's.
+  assert.match(summary[0], /aria-label="Settings"/, 'an icon-only control must be named for a screen reader (ui-ux-pro-max accessibility priority 1)');
+  assert.match(summary[0], /title="Settings"/, 'and named on hover for everyone else');
   assert.match(summary[1], /^<svg\b/, 'the summary\'s content must be the cogwheel glyph itself');
-  assert.doesNotMatch(summary[1], /Pomodoro settings/, 'the visible label text must be gone -- the icon replaces it, it does not sit beside it');
+  assert.doesNotMatch(summary[1], /[Ss]ettings/, 'the visible label text must be gone -- the icon replaces it, it does not sit beside it');
   // Inline SVG, never an emoji or an external asset (QUIRKS.md "No external
   // assets, ever"; ui-ux-pro-max style rules name emoji-as-icon as the
   // anti-pattern). Matches how src/theme.mjs draws its own three glyphs.
@@ -8877,6 +8934,96 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
     panel.open = true;
     resetBtn.dispatchEvent(new StandInEvent('click'));
     assert.equal(calls.filter(c => c.method === 'POST').length, 0, 'and that next click must be a fresh first click, posting nothing');
+  });
+});
+
+// --- the settings panel is general now, and holds the store control (ADR 71) ------
+// SPEC_BOUNDARY.md AC 14 ("reachable from the settings panel on the index, takes the
+// window as an input, and deletes on a single click") and AC 15 ("reads as general
+// settings rather than the pomodoro's, with the store control in its own captioned
+// section"). What the prune actually DOES to the store is test/check-prune.mjs's job;
+// these two are about the surface that fires it.
+
+check('settings panel: reads as general settings -- four captioned sections in order, and the store control sits in its own', () => {
+  const html = renderIndexPage({ threads: [] });
+  const captions = [...html.matchAll(/<div class="pomodoro-settings-caption">([^<]*)<\/div>/g)].map(m => m[1]);
+  assert.deepEqual(captions, ['Pomodoro', 'Banners', 'Cues', 'Store'],
+    'the panel must name every section it holds -- a panel where only Cues is captioned reads as the pomodoro\'s with an unlabelled top half');
+  // The device is the one the panel already had: a hairline BETWEEN sections, so one
+  // fewer than there are captions (nothing sits above the first).
+  assert.equal((html.match(/<hr class="pomodoro-settings-divider">/g) || []).length, captions.length - 1,
+    'each section after the first is separated by the existing hairline, and the first carries none');
+
+  // The store control is under the Store caption and after every pomodoro field --
+  // ordering, not just presence. Save/Reset stay ABOVE it: they belong to the sections
+  // they follow, and neither touches the store.
+  const at = re => { const m = html.match(re); assert.ok(m, `setup failure: ${re} not found`); return m.index; };
+  const storeCaption = at(/<div class="pomodoro-settings-caption">Store<\/div>/);
+  assert.ok(at(/id="pomodoro-reset"/) < storeCaption, 'Save/Reset must sit above the Store section, or they read as its actions');
+  assert.ok(storeCaption < at(/id="store-prune-days"/) && at(/id="store-prune-days"/) < at(/id="store-prune"/),
+    'the window field then the button, both below the Store caption');
+
+  // One click, and no way to reach a submit by accident: `type="button"` is what keeps
+  // Enter in the window field a settings SAVE rather than a deletion.
+  assert.match(html, /<button type="button" class="pomodoro-btn pomodoro-btn-danger" id="store-prune"/,
+    'the delete control must be type="button" -- a default submit button inside this form would prune on Enter');
+
+  // The window has no default. Not "min=1 and value=30": no value attribute at all, so
+  // an untouched field means no window was named and the click refuses (ADR 71).
+  const field = html.match(/<input type="number" name="pruneDays"[^>]*>/);
+  assert.ok(field, 'setup failure: no pruneDays input rendered');
+  assert.doesNotMatch(field[0], /\svalue=/, 'the window must never be prefilled -- the one number that decides what dies is named at the call, never implied');
+  assert.doesNotMatch(field[0], /\splaceholder=/, 'and not suggested by a placeholder either');
+
+  // Every control under a caption carries its own aria-label repeating the caption's
+  // word -- the rule the Cues pickers already follow, for the same reason: the caption
+  // is a plain div, read in browse mode but not while tabbing. Each must still CONTAIN
+  // its visible text (WCAG 2.5.3 label-in-name).
+  for (const [re, visible] of [[/<input type="number" name="pruneDays"[^>]*aria-label="([^"]*)"/, 'Older than (days)'], [/id="store-prune"[^>]*aria-label="([^"]*)"/, 'Delete boards']]) {
+    const m = html.match(re);
+    assert.ok(m, `the Store control matching ${re} must carry an aria-label`);
+    assert.ok(m[1].toLowerCase().includes(visible.toLowerCase()), `"${m[1]}" must contain its visible label "${visible}"`);
+    assert.ok(/store/i.test(m[1]), `"${m[1]}" must name its section, the way the cue pickers name theirs`);
+  }
+});
+
+await checkAsync('settings panel: the Store control deletes on ONE click, posting the window it was given and nothing else', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  const handler = call => (call.url === '/api/store/prune' ? { ok: true, boards: 0, assets: 0 } : doc);
+  await withPomodoroFetch(handler, async (calls) => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    document.querySelector('details#pomodoro-settings').open = true;
+    document.querySelector('input#store-prune-days').value = '30';
+    document.querySelector('button#store-prune').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+
+    const prunes = calls.filter(c => c.url === '/api/store/prune');
+    assert.equal(prunes.length, 1, 'ONE click must delete -- no arming step, deliberately unlike the Reset button in the same panel');
+    assert.equal(prunes[0].method, 'POST');
+    assert.equal(prunes[0].credentials, 'same-origin', 'the index page holds only the session cookie, so it must be sent');
+    assert.deepEqual(prunes[0].body, { days: 30 }, 'the window the reader named, as a number, and nothing else');
+    // Never through the pomodoro's own writer: the response is a pair of counts, and
+    // applying it into pomodoroDoc would wipe the widget's state.
+    assert.equal(calls.filter(c => c.url.startsWith('/api/pomodoro/')).length, 0, 'a prune must post to no pomodoro route');
+  });
+});
+
+await checkAsync('settings panel: a Store click with no window named is refused client-side -- nothing is posted, and it says so', async () => {
+  const nowMs = Date.now();
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  await withPomodoroFetch(() => doc, async (calls) => {
+    const { document } = loadIndexWithPomodoro();
+    await flushPomodoro();
+    document.querySelector('details#pomodoro-settings').open = true;
+    // Untouched, which is how the field renders: no default, ever.
+    document.querySelector('button#store-prune').dispatchEvent(new StandInEvent('click'));
+    await flushPomodoro();
+    assert.equal(calls.filter(c => c.url === '/api/store/prune').length, 0,
+      'a prune with no window named must not reach the daemon at all -- refused, never filled in with a plausible number');
+    assert.match(document.querySelector('span#store-prune-status').textContent, /window/i,
+      'and the refusal must be visible, or the click reads as a control that silently does nothing');
   });
 });
 

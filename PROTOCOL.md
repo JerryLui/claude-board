@@ -53,14 +53,34 @@ user-facing configuration as well as the seam the checks run against.
 
 ```
 $CLAUDE_BOARD_HOME/boards/<boardId>.json    the board document, the only mutable truth
-$CLAUDE_BOARD_HOME/pages/<boardId>.html     emitted projection, standalone-openable
+$CLAUDE_BOARD_HOME/pages/<boardId>.html     emitted projection, openable with its folder
+$CLAUDE_BOARD_HOME/pages/ui-<hash>.js       the shared client script a page names
+$CLAUDE_BOARD_HOME/pages/styles-<hash>.css  the shared stylesheet a page names
 $CLAUDE_BOARD_HOME/pomodoro.json            the pomodoro clock and its settings (ADR 8)
 ```
+
+A page does not carry the client script or the stylesheet; it *names* them, as a bare
+sibling filename hashed from their contents (ADR 70). A bare name is the one reference that
+resolves the same served (`GET /b/<name>`, the daemon's only static route) and opened from
+Finder (the file next to the page), so an archive still opens with the daemon stopped — as
+long as its folder travels with it. The assets are append-only: changing either payload
+mints a new name and leaves the old file untouched, so a page written a year ago keeps
+loading the exact bytes it was rendered against. Pages already on disk before this split
+keep their inlined copies forever; nothing rewrites a written archive.
 
 `pomodoro.json` is the one thing here that is not a board, and the one thing `uninstall.sh`
 removes from this directory — by exact name, never a glob. It is configuration this repo
 authored (a deadline, a break length), not review history the user accumulated. See
-`src/pomodoro.mjs` for the document shape.
+`src/pomodoro.mjs` for the document shape. Uninstalling therefore still leaves the whole
+store in place; that has not changed.
+
+Nothing in this directory expires. No read, no daemon start and no timer has ever removed
+a board, and none does now. What does exist is a **prune**, fired by hand from the
+settings panel on the index (`POST /api/store/prune`, ADR 71): it deletes every board
+older than a window the caller names — document and emitted page together — and then any
+shared asset no surviving page still names. The window has no default; a prune that does
+not name one is refused. This is the only thing in the system that ever deletes a board,
+so how long a board survives is the reader's decision and nothing else's.
 
 Daemon listens on `127.0.0.1:7391` (`CLAUDE_BOARD_PORT` overrides, for the checks).
 
@@ -95,8 +115,8 @@ board = {
   cwd,                              // project directory of the session that owns the thread
   createdAt, updatedAt,             // ISO 8601
   state,                            // 'open' | 'submitted' | 'discuss' | 'timeout'
-  rounds: [ { n, postedAt, status, sentAt, title, action?, awaited, awaitDeadline } ],
-                                     // status: 'open' | 'sent'
+  rounds: [ { n, postedAt, status, sentAt, title, action?, awaited, awaitDeadline, abandonedAt? } ],
+                                     // status: 'open' | 'sent' | 'abandoned'
   blocks: [ Block ],                // every block of every round, in display order
   answers: { [questionBlockId]: Answer },
   comments: [ Comment ],
@@ -111,6 +131,18 @@ sendable at all (ADR 35) — stays `open` for the life of the board, and more th
 `open` at a time. "The open round" always means the latest one (see `POST /api/board` below). A round's `action` (`'submitted'` |
 `'discuss'`) records that round's own outcome, which a later round's `addRound` cannot
 overwrite the way it resets `board.state` to `'open'`.
+
+**`status: 'abandoned'`** (ADR 69) is the third and last way a round closes: the conversation
+that owned the board declared a boundary (`fresh` on `ask`, "MCP surface" below) and walked away,
+so `POST /api/board/:id/abandon` closed every round still open on it. It is deliberately neither
+of the other two outcomes. A submit would record that a human answered, and nobody did; a lapse
+(`awaited: false`, `status: 'open'` — see below) would leave the round advertising itself as open
+on a board nothing will ever post to again. `awaited` goes `false` with it, `sentAt` stays `null`,
+no `action` is recorded (so nothing reads it back as an answer), `awaitDeadline` is left exactly
+as minted, and `abandonedAt` is the ISO stamp of when it happened. Every reader that asks whether
+a round is open asks `status === 'open'`, so an abandoned round drops out of the send bar, the
+index badge, the "rounds left" count and the stranded rule with no rule of its own. **A round
+written before this state existed carries only `open` or `sent`,** and reads identically.
 
 **Round `title`.** Every round carries the `title` of the post that created it — `ask` requires
 a non-empty one on every call. `createBoard` seeds round 1's from the board title, `addRound`
@@ -497,6 +529,11 @@ is not a question block of the round being submitted is ignored server-side rath
 ```
 GET  /?q=                           thread index, filtered to sessions matching q
 GET  /b/:boardId                    the served page
+GET  /b/<asset>                     the shared script or stylesheet a page names, by
+                                    content-addressed filename (ADR.md entry 70); the
+                                    daemon's only static route. Disjoint from the line
+                                    above: an asset name contains a dot, which a board id
+                                    cannot
 GET  /api/health                    { ok: true, version }        (open: install.sh polls it)
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
@@ -505,6 +542,9 @@ POST /api/board                     post a board or a round into a live thread
 GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet
 GET  /api/board/:id/events          SSE: round pushes, state changes
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
+POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
+                                    open on a board a conversation walked away from
+                                    (ADR.md entry 69). Secret only: never cookie-reachable
 POST /api/board/:id/attended        { watcher, attended, seq? } -> { ok: true }; the open
                                     tab reporting whether it is Attended right now
                                     (CONTEXT.md "Watcher", "Attended"); stores nothing
@@ -534,6 +574,13 @@ POST /api/pomodoro/preview          { cue } -> { ok: true }; plays a cue immedia
                                     and writes nothing
 POST /api/pomodoro/notifyTest       no body -> { ok: true }; raises one test banner
                                     immediately, reads and writes nothing
+POST /api/store/prune               { days } -> { ok: true, boards, assets }, the counts
+                                    removed. Deletes every board older than `days`
+                                    (document and page) plus every shared asset no
+                                    surviving page names. `days` is REQUIRED and never
+                                    defaulted: a call without it is a 400. The only
+                                    route that deletes a board, and nothing but a click
+                                    in the index's settings panel calls it (ADR 71)
 ```
 
 Posting and waiting are separate routes on purpose, so splitting `ask` into post + collect stays
@@ -563,8 +610,10 @@ x-claude-board-secret: <secret>    request header; the file is re-read per gated
                                    crypto.timingSafeEqual, length-guarded
 ```
 
-**Every non-GET request** must carry it — except `POST /api/board/:id/submit` and
-`POST /api/board/:id/attended`, which also take the session cookie below. A missing or wrong
+**Every non-GET request** must carry it — except `POST /api/board/:id/submit`,
+`POST /api/board/:id/attended` and `POST /api/store/prune`, which also take the session
+cookie below. `POST /api/board/:id/abandon` is deliberately **not** among them: only the
+shim that owns a board may close its rounds, never a browser looking at it. A missing or wrong
 credential is **401 with no body**: nothing about
 what is behind it, not even whether the board exists. A daemon that finds no secret file says so
 on stderr at startup and refuses everything gated: it fails closed, never open. `bin/mcp.mjs`
@@ -713,6 +762,34 @@ second path:
 
 The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`), which
 `body.readonly` hides wholesale — so the standalone `file:` archive offers neither.
+
+### `POST /api/board/:id/abandon`
+
+```js
+(no body)  -> { ok: true, board, closed: [1, 2…] }
+```
+
+The shim declaring that the conversation which owned this board is over (ADR 69; `fresh` on `ask`,
+"MCP surface" below). Every round still `open` on the board is closed — `status: 'abandoned'`,
+`awaited: false`, `abandonedAt` stamped (see "Board document" above) — and `closed` names them, or
+is empty when there was nothing left open. Idempotent by construction: a second call finds no open
+round and closes none. A board id that names nothing is a **404**.
+
+The board document and its `pages/<id>.html` are both rewritten, unlike the `/wait` timeout branch
+which writes only the document: this is the last write an abandoned board will ever get, so a page
+left showing live widgets would stay that way in the archive for good. `awaitExpired` is broadcast
+once per closed round, the same nudge and the same event a wait dying of its own clock sends.
+
+**Secret-only.** It is off `BOARD_COOKIE_ACTIONS`, so the session cookie does not reach it and a
+browser cannot close a round it is looking at. The only caller is the shim that posted the board,
+naming the board id it holds in its own memory — which is what scopes this to the declaring
+session: nothing here reads `cwd` or `thread`, so two sessions in one project directory cannot
+touch each other's boards.
+
+Closing the rounds is also what takes the stranded Banner down: the rule is re-evaluated after the
+write, finds nothing awaited, spends any standing record (withdrawing a banner already on screen)
+and cancels a grace still counting down. Nothing can re-arm it, because only a round landing on
+this board could, and none ever will.
 
 ### `POST /api/board/:id/attended`
 
@@ -1091,9 +1168,10 @@ as an object exposing only `postMessage`, never `.document`, for the same reason
 
 ## MCP surface
 
-One tool, `ask`, on the stdio shim. Arguments mirror the board document: `{ title, blocks, wait? }`,
-where question blocks carry their questions by value and content blocks carry a `source` ref. It
-posts a board and opens the tab on the thread's first board.
+One tool, `ask`, on the stdio shim. Arguments mirror the board document:
+`{ title, blocks, wait?, fresh? }`, where question blocks carry their questions by value and
+content blocks carry a `source` ref. It posts a board and opens the tab on the thread's first
+board.
 
 Whether it then waits is derived from the round just posted, not purely from `wait`: a round
 carrying a question block anywhere in it (top-level, or nested in a question's `context` or a
@@ -1112,12 +1190,27 @@ command), a non-interactive session, or a session on which nothing can open a ta
 session on a machine with no display passes the first two checks and would otherwise post a board
 nobody can see and block for the full wall-clock cap. Both session checks are below.
 
-The shim tracks one thread per process (one shim per Claude session): the first `ask` call starts
-a new thread and opens its tab; every later `ask` call in the same process pushes a round into the
-same live board (`POST /api/board` with `boardId` set) and opens no tab of its own. A round
-landing with nobody watching is the daemon's stranded banner to raise, not the shim's tab to force
-open. `bin/authorize.mjs` still opens a tab, being the standalone recovery command a reviewer runs
-deliberately.
+The shim tracks one thread per CONVERSATION, not one per process (ADR.md entry 69): the first
+`ask` call starts a new thread and opens its tab; every later `ask` call in the same conversation
+pushes a round into the same live board (`POST /api/board` with `boardId` set) and opens no tab of
+its own. A round landing with nobody watching is the daemon's stranded banner to raise, not the
+shim's tab to force open. `bin/authorize.mjs` still opens a tab, being the standalone recovery
+command a reviewer runs deliberately.
+
+**`fresh`** is what separates one conversation from the next, because nothing else can. Claude Code
+does not restart stdio MCP servers on `/clear`, so this process — and the board id it holds in
+memory — outlives the conversation that minted it, and no session id reaches the shim by
+environment variable, by `initialize` handshake or otherwise. The agent's own context is the only
+place the boundary is visible at all: after a `/clear` it is empty, so "have I posted a board in
+this conversation?" is a question the agent can always answer. `fresh: true` means "no", and the
+shim clears `session.boardId` and `session.thread` on it, so this call mints a new thread and opens
+its tab; the board it walks away from has its open rounds closed through
+`POST /api/board/:id/abandon` above. The clear happens first and unconditionally — a daemon that is
+down cannot wedge a new conversation onto the old one's board — and the abandon call is
+best-effort, its failure a stderr line. `fresh` on a conversation that has posted no board is a
+no-op: one board, one thread, one tab. Correctness rests on the agent passing it; nothing can
+detect a missed one, which is why the manual has the agent state the board URL in chat each round
+(a `/compact` is built from chat, not from tool results).
 
 ### MCP shim environment
 

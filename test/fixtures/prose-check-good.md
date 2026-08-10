@@ -14,10 +14,11 @@ daemon's `ask` tool, exactly as `commands/grill.md` does.
 
 ## Calling ask
 
-Call `ask` with `{ title, blocks, wait }` — those are the arguments the tool takes, `wait`
-optional. `title` is the round's title. `blocks` is the ordered array of content and question
-blocks for this round. `wait` (default false) blocks on a page board round the same way a
-question round does.
+Call `ask` with `{ title, blocks, wait, fresh }` — those are the arguments the tool takes,
+`wait` and `fresh` optional. `title` is the round's title. `blocks` is the ordered array of
+content and question blocks for this round. `wait` (default false) blocks on a page board
+round the same way a question round does. `fresh` (default false) says this conversation has
+posted no board yet, so the call starts a new one.
 
 A worked example: a code reference block, followed by a single-choice question.
 

@@ -38,13 +38,32 @@ mermaid node ids are prefixed"). Those two rules are now built from
 select a REAL node id, not by matching their spelling. Prefer that shape for any new
 rule whose whole job is to select something.
 
-### No external assets, ever
+### No external assets — except two bare sibling filenames
 
-`renderBoardPage` output must open from Finder with the network off. The page test
-rejects any `<link rel=stylesheet>` or `<script src=>`, so: no web fonts (system
-stack only), no icon fonts, no CDN CSS. Icons are inline SVG. Mermaid is the one
-exception — it is imported at runtime from a CDN and degrades to raw source when it
-cannot be reached.
+`renderBoardPage` output must open from Finder with the network off. So: no web fonts
+(system stack only), no icon fonts, no CDN CSS. Icons are inline SVG. Mermaid is the
+one exception — imported at runtime from a CDN, degrading to raw source when it cannot
+be reached.
+
+This used to read "no external assets, ever", and the page test rejected any `<link
+rel=stylesheet>` or `<script src=>` outright. ADR 70 supersedes that: the client script
+and the stylesheet are now referenced, not inlined, because 438KB of byte-identical
+payload per board was 16MB of an 18MB `pages/`. The rule that replaces it is narrower
+and stricter, and `test/check-pure.mjs` now enforces exactly it:
+
+- The reference is a **bare sibling filename** — `href="styles-<hash>.css"`. An absolute
+  path, a URL, a protocol-relative `//host/...` and a subdirectory must all still fail.
+  That one form is the only one that resolves identically served (`/b/<name>`, the
+  daemon's single static route) and opened in Finder (the file next to the page).
+- The name is **content-addressed** and the file is **never rewritten or overwritten**,
+  so a page keeps loading the exact bytes it was written against forever. A payload
+  change mints a new name and leaves the old file alone.
+- The script tag is a **deferred classic script**, never `type="module"`: Chrome
+  CORS-blocks module scripts over `file:`, so a module reference silently breaks the
+  Finder surface. `defer` is what preserves a module tag's execution timing.
+
+The cost, accepted in ADR 70: an archive is a file plus its folder, not one mailable
+file. `examples/sample-board.html` is committed with its two siblings for that reason.
 
 ### Two stylesheets, one palette
 
@@ -96,6 +115,14 @@ and `src/theme.mjs`'s `themeBootScript` each carry their entire payload as one t
 literal, so `render.mjs` can inline it verbatim. A markdown-style code span in a comment
 *inside* that literal is a real backtick to the parser: it closes the literal early and
 reopens at the next one, leaving whatever sat between them as invalid top-level JS.
+
+Two more literals have the same trap without carrying a client script:
+`src/indexpage.mjs`'s `indexScript` (its own header comment states the ban) and
+`src/pomodoro-widget.mjs`'s `pomodoroWidget()` return, which is HTML — so the comments
+that break it are `<!-- ... -->` ones, where a backticked identifier reads as perfectly
+ordinary prose. That one surfaces like `styles` does: the outer module fails to parse and
+`node --check src/pomodoro-widget.mjs` names the line (reproduced, 2026-08-10). Write the
+identifier bare, or in single quotes.
 
 How the break surfaces splits the four literals in two, and the difference is worth
 knowing before you go looking. `src/styles.mjs` is mostly CSS, so a stray backtick in a
@@ -622,12 +649,21 @@ They run exactly one script — `src/ui.mjs`'s `ui` — against the real file by
 enough for every check that does not depend on `src/theme.mjs` (readonly, pins,
 gestures). But `#theme-toggle`'s click handler and the pre-paint `data-theme` attribute
 are both wired by `themeBootScript`, not `ui` — a real page runs the boot script first
-(inline, pre-`<style>`) and `ui` second (the deferred module script), so a check that only
+(inline, ahead of the stylesheet `<link>`) and `ui` second (the deferred sibling script,
+ADR.md entry 70), so a check that only
 runs `ui` finds `#theme-toggle` in the markup and not disabled, and nothing happens when
 it is clicked, since no listener was ever attached. Proving the theme control works *in
 the archive* needs a loader that runs both scripts in that order (`loadArchiveThemed`).
 
-### Finding the real `<style>` tag in rendered bytes
+### Finding the real stylesheet in rendered bytes
+
+**Superseded by ADR.md entry 70, and kept only as the reason the current shape is easy.**
+A page no longer carries its CSS at all: it names a bare sibling stylesheet, so a check
+that wants the real bytes reads that file beside the archive rather than digging a
+`<style>` block out of the HTML. `extractStyleBlock` is deleted. What follows is why the
+old extraction was hard, so nobody reinvents it for a page written before the change.
+
+
 
 A check that wants to test the cascade against the ACTUAL bytes on disk (not the
 in-memory `styles` export) has to locate the real `<style>...</style>` block inside a
@@ -639,9 +675,9 @@ So a non-greedy regex from the first match captures the ENTIRE boot script and `
 module script as "CSS" (confirmed: ~43KB of client-script text, not ~7KB of real CSS).
 `lastIndexOf('<style>', closeIdx)` is not safe either, because `styles`' own comment also
 contains the substring, landing between the true opening tag and the close. What works:
-locate the structural adjacency `src/render.mjs`/`src/indexpage.mjs` both emit,
-`` </script>\n<style> `` — a shape no comment's prose reproduces. See `extractStyleBlock`
-in `test/check-archive.mjs`.
+locate the structural adjacency `src/render.mjs`/`src/indexpage.mjs` both emitted,
+`` </script>\n<style> `` — a shape no comment's prose reproduces. Only `src/indexpage.mjs`
+still emits it; a board page written since entry 70 has no `<style>` block to find.
 
 ### A block-comment stripper needs to know about regex literals, not just strings
 
