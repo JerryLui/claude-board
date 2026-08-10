@@ -1,4 +1,4 @@
-// The index stops lying (SPEC_SIGNALS.md criteria 9 and 10; ADR 77): the daemon owes a
+// The index stops lying (ADR 77): the daemon owes a
 // rows endpoint, and the index's own fifteen-second tick fetches it and patches the list
 // in place rather than reloading.
 //

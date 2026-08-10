@@ -1547,7 +1547,7 @@ function playPreview(cue) {
 /** `GET /api/waiting` -- every round in the store still waiting for an answer, as JSON.
  *
  * It exists because the thread index is HTML and nothing else answers this question: the
- * status item (SPEC_MENUBAR.md) is a native client with no DOM to scrape, and the only
+ * status item (ADR.md entry 72) is a native client with no DOM to scrape, and the only
  * other surface that knows which boards owe the reviewer a trip is a rendered page.
  *
  * Gated like every other read -- deliberately NOT on `isOpenRoute`'s list. What it hands

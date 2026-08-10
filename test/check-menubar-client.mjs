@@ -1,7 +1,6 @@
 // The status item's HTTP half and its whole derivation, against a real daemon.
 //
-// SPEC_MENUBAR.md's Testing section draws the line this file sits on, and it is worth
-// restating because it is the reason this file looks the way it does: the AppKit half —
+// The reason this file looks the way it does: the AppKit half —
 // the status item, its image, its title, and ticket 05's popover — is NOT covered, because
 // there is no headless way to assert a status item's title (QUIRKS.md, "a status item is
 // not your window, and every obvious detector lies about it": own-pid window lists come
@@ -27,7 +26,7 @@
 // legible, keyboard-reachable or correct in dark mode. No assertion below would survive
 // bin/menubar.m's popover being deleted wholesale, and none pretends to.
 //
-// The acceptance criteria this file exists for, from SPEC_MENUBAR.md:
+// The acceptance criteria this file exists for:
 //
 //   - 1, "shows the current phase and the remaining time, and both track the daemon within
 //     one second of the widget": the countdown the probe derives is compared against the
@@ -291,8 +290,8 @@ async function main() {
   });
 
   await check('criterion 2, short break vs long break: the two break phases are told apart, not collapsed into one', async () => {
-    // The whole reason SPEC_MENUBAR.md's Open Questions had to decide anything: two glyph
-    // shapes, four states. If the derivation collapsed `break` and `longBreak` into one
+    // ADR.md entry 80 is why two glyph
+    // shapes have to cover four states. If the derivation collapsed `break` and `longBreak` into one
     // phase there would be nothing left for the renderer to draw differently, and
     // criterion 2 would be unmeetable regardless of how the drawing was done.
     const now = Date.now();

@@ -1,6 +1,6 @@
 // Acceptance checks for what an amend must NOT do to a live page — the cluster
-// D26-D30 of findings/audit-2026-08-06.md, all of which are the same shape: a
-// push lands, and something on screen goes on saying what was true before it.
+// D26-D30 below, all of which are the same shape: a push lands, and something
+// on screen goes on saying what was true before it.
 //
 // Harness idiom is test/check-anchor-push.mjs's, deliberately: a stubbed
 // EventSource in place before the real `ui` script runs, then the real payloads

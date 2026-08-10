@@ -3697,10 +3697,11 @@ async function main() {
   // --- GET /api/waiting: the boards waiting for an answer ---------------
   //
   // The one route a client with no DOM has for "which boards owe the reviewer a trip"
-  // (SPEC_MENUBAR.md). "Waiting" is `roundIsAwaitedOpen` -- the round has an OPEN WAIT --
-  // and the three checks below are the three ways that differs from the readings next to
-  // it: an answered round drops out, a round whose wait LAPSED drops out while staying
-  // open, and neither depends on anyone being attached to the board.
+  // (ADR.md entry 72: the status item is a second process, a pure client reading the
+  // daemon over loopback). "Waiting" is `roundIsAwaitedOpen` -- the round has an OPEN
+  // WAIT -- and the three checks below are the three ways that differs from the readings
+  // next to it: an answered round drops out, a round whose wait LAPSED drops out while
+  // staying open, and neither depends on anyone being attached to the board.
   //
   // Every assertion is scoped to a board this section posted itself, never to `total` or
   // to the length of the list: this file runs one daemon over one store for its whole

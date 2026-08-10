@@ -179,9 +179,9 @@ async function runBundledLauncher() {
     env: {
       PATH: process.env.PATH,
       CLAUDE_BOARD_PORT: String(port),
-      // ADR.md entry 76 (SPEC_SIGNALS.md ticket 02): the no-argument supervising path
-      // this helper exercises now refuses to fork without this marker, which install.sh
-      // writes into the real plist's EnvironmentVariables dict. This direct hand-launch
+      // ADR.md entry 76: the no-argument supervising path this helper exercises now
+      // refuses to fork without this marker, which install.sh writes into the real
+      // plist's EnvironmentVariables dict. This direct hand-launch
       // stands in for launchd on purpose -- this suite is about the payload the launcher
       // serves, not about the refusal itself (test/check-launcher-refuses.mjs).
       CLAUDE_BOARD_LAUNCHD_MARKER: '1',
@@ -277,7 +277,7 @@ async function main() {
     );
   });
 
-  await check('SPEC_MENUBAR criterion 10: the INSTALLED bundle, run the way launchd runs it, forks the status item beside the daemon', async () => {
+  await check('the INSTALLED bundle, run the way launchd runs it, forks the status item beside the daemon', async () => {
     // The closest this suite gets to a login: a real bundle, built and signed by
     // install.sh, exec'd with no arguments at all -- which is exactly the invocation the
     // plist makes, and the plist already carries RunAtLoad. What a login would add is the

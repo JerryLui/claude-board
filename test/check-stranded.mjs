@@ -578,7 +578,7 @@ async function layerOne() {
   });
 
   await check('criterion 3: returning kills the click-serving process with SIGTERM and leaves the mark standing', async () => {
-    // THE REWRITTEN ASSERTION (SPEC_SIGNALS.md criterion 3; ADR 74). This check used to
+    // THE REWRITTEN ASSERTION (ADR 74). This check used to
     // pin the opposite: that coming back CLEARED the marker, so leaving again raised a
     // second banner for the same round. That was the defect, measured at roughly one
     // banner a minute for one round -- a glance at the board, or the banner's own click

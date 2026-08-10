@@ -154,8 +154,8 @@ LAUNCHER_NOTIFY_SRC="$REPO_DIR/bin/notify.m"
 LAUNCHER_MENUBAR_SRC="$REPO_DIR/bin/menubar.m"
 # The bundle's icon, and therefore the icon on every pomodoro notification. Drawn from
 # the same bars and colours as the board mark in src/styles.mjs (the one the favicon
-# draws), but NOT that mark's raw 32x32 SVG: an app icon is redrawn to the macOS grid
-# (SPEC_SIGNALS.md Decisions), the body scaled to roughly 819/1024 (~4/5) of the 1024
+# draws), but NOT that mark's raw 32x32 SVG: an app icon is redrawn to the macOS grid,
+# the body scaled to roughly 819/1024 (~4/5) of the 1024
 # canvas, centered on transparency, and rounded to roughly the standard macOS corner
 # radius (184.32px, 0.18 of the canvas). Neither the padding nor the radius is visible on
 # macOS 26, which refits and masks a legacy icns itself whatever shape the artwork is

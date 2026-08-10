@@ -269,8 +269,9 @@ static const char *const LAUNCHD_MARKER_VALUE = "1";
  * cb_menubar_probe is that mode's test seam, and it is the ONE thing the flag takes
  * arguments for: `--menubar --probe` does a single fetch, prints the display state it
  * derives and the popover's own rows, and exits without drawing anything. It exists
- * because the drawing half has no headless check available to it (SPEC_MENUBAR.md,
- * Testing), so everything interesting is kept in pure functions and this is how a node
+ * because the drawing half has no headless check available to it -- a status item's title
+ * and a popover's contents exist only inside a running NSApplication with a window server
+ * session -- so everything interesting is kept in pure functions and this is how a node
  * check reaches them. Gated on a SECOND argv word specifically so the supervised path
  * cannot reach it: the fork below execs this binary with exactly one argument, and there
  * is nowhere else `--probe` could come from.
@@ -380,13 +381,14 @@ static int is_safe_folder_name(const char *s) {
  * reaches and this file therefore never trusts.
  *
  * NOT static, and the `cb_` prefix says why: bin/menubar.m's popover opens a board URL
- * too (SPEC_MENUBAR.md criterion 6), against a URL it read out of `GET /api/waiting`
- * rather than out of argv, and it calls THIS function to decide whether it may. There is
- * one board-URL pattern in the product and it is here -- a second one in Objective-C
- * would be a second opinion about what `/b/../../etc` means, and the two would drift on
- * the first day one of them was tightened. Declared `extern` at the top of bin/menubar.m
- * on the same footing as cb_notify and cb_menubar: one definition, one build, a
- * two-argument signature checkable against the other file by eye. */
+ * too -- each of its waiting rows opens the board that round is on, against a URL it read
+ * out of `GET /api/waiting` rather than out of argv -- and it calls THIS function to
+ * decide whether it may. There is one board-URL pattern in the product and it is here --
+ * a second one in Objective-C would be a second opinion about what `/b/../../etc` means,
+ * and the two would drift on the first day one of them was tightened. Declared `extern`
+ * at the top of bin/menubar.m on the same footing as cb_notify and cb_menubar: one
+ * definition, one build, a two-argument signature checkable against the other file by
+ * eye. */
 #define MAX_BOARD_URL_LEN 200
 
 /* Case-insensitive compare of a bounded span against a lowercase literal. Host names

@@ -178,8 +178,8 @@ async function main() {
     // it needs to find (the launcher execs by absolute path), so it is left out on
     // purpose too, to prove PATH is baked in rather than needed from the parent.
     NODE_OPTIONS: `--require ${junkMarkerPath}`,
-    // ADR.md entry 76: since ticket 02 of SPEC_SIGNALS.md, the supervising path this
-    // suite exercises refuses to fork at all unless this exact marker is present --
+    // ADR.md entry 76: the supervising path this suite exercises refuses to fork at all
+    // unless this exact marker is present --
     // install.sh writes it into the plist's own EnvironmentVariables dict, standing in
     // here for "this run came from launchd" the same way the rest of this object stands
     // in for a poisoned parent shell. test/check-launcher-refuses.mjs is the suite for

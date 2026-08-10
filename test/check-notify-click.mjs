@@ -458,9 +458,9 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
     // Pinned as source-level reality, not as something the fix depends on: ADR.md entry
     // 75 is what stops the -600 alert (the bundle's LSUIElement, checked in
     // test/check-install.mjs), not this option. The option may ride along -- dropping it
-    // is not the fix either -- but nothing here or in install.sh may come to rely on it
-    // (SPEC_SIGNALS.md Decisions), so this only pins that the action still asks to come
-    // to the foreground; it asserts no behaviour beyond the string being present.
+    // is not the fix either -- but nothing here or in install.sh may come to rely on it,
+    // so this only pins that the action still asks to come to the foreground; it asserts
+    // no behaviour beyond the string being present.
     assert.match(m, /UNNotificationActionOptionForeground/,
       'the click action asks to bring the app forward -- LSUIElement is what lets that succeed');
     assert.match(m, /UNUserNotificationCenterDelegate/, 'and a delegate to receive the click');
@@ -492,10 +492,10 @@ fs.appendFileSync(process.env.STUB_OSASCRIPT_LOG, JSON.stringify(process.argv.sl
 
   await check('the board-URL pattern lives in C, beside the other two argv filters, and there is exactly one of it', async () => {
     const c = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
-    // Not `static`, as of the menu bar item (SPEC_MENUBAR.md criterion 6): the popover's
-    // rows open a board URL too, over a URL read from GET /api/waiting rather than from
-    // argv, and they call THIS function to decide whether they may. The `cb_` prefix is
-    // what the other cross-file symbols in this binary carry (cb_notify, cb_menubar).
+    // Not `static`, as of the menu bar item: the popover's rows open a board URL too,
+    // over a URL read from GET /api/waiting rather than from argv, and they call THIS
+    // function to decide whether they may. The `cb_` prefix is what the other cross-file
+    // symbols in this binary carry (cb_notify, cb_menubar).
     assert.match(c, /^int cb_is_board_url\(/m, 'the pattern is checked in C (ADR.md entry 57)');
     assert.match(c, /is_safe_cue_name/, 'beside the cue filter');
     assert.match(c, /is_safe_folder_name/, 'and the folder filter');

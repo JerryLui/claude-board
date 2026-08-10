@@ -40,7 +40,7 @@ function fakeRes() {
 const tick = (ms = 20) => new Promise(r => setTimeout(r, ms));
 
 /** Run `fn` with a different look-away window, and put the old one back even if it
- * throws (SPEC_SIGNALS.md criteria 7 and 8; ADR 73). The shipped window is two minutes,
+ * throws (ADR 73). The shipped window is two minutes,
  * which no check may sleep through -- the same reason, and the same idiom, as
  * test/check-stranded.mjs's `withGrace`. Restored in a `finally` so a failing assertion
  * leaves the next check running against the shipped value rather than this one's. */

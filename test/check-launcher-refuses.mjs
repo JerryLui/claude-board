@@ -1,4 +1,4 @@
-// Proves ADR.md entry 76 / SPEC_SIGNALS.md ticket 02: bin/launcher.c's no-argument
+// Proves ADR.md entry 76: bin/launcher.c's no-argument
 // supervising path refuses to fork node unless CLAUDE_BOARD_LAUNCHD_MARKER=1 is present
 // in its own environment -- the signal install.sh writes into the real plist's
 // EnvironmentVariables dict (see install.sh step 2, and test/check-install.mjs's "the

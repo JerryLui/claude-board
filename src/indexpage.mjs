@@ -1014,7 +1014,7 @@ function onDocumentClickClosePomodoroSettings(ev) {
 }
 
 // The fragment the menu bar item's 'Settings...' row navigates to
-// (SPEC_MENUBAR.md: no setting is editable from the menu bar, so the item sends
+// (no setting is editable from the menu bar, so the item sends
 // the reader here instead of growing a second panel). Handled explicitly rather
 // than left to the browser's own fragment-auto-expand for a closed 'details' --
 // that behaviour is recent and unevenly shipped, and nothing here gets to pick

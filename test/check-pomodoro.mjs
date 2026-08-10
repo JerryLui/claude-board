@@ -622,8 +622,8 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // menubarCountdown / menubarHidden -- the status item's two preferences
-  // (SPEC_MENUBAR.md). Nothing reads them yet: the item and the settings panel are
+  // menubarCountdown / menubarHidden -- the status item's two preferences.
+  // Nothing reads them yet: the item and the settings panel are
   // later slices, so what is provable here is exactly what those slices will rest on --
   // the defaults, an older document that predates both keys, and the merge boundary.
   // The round trip through the HTTP surface is at the bottom of this file, against a

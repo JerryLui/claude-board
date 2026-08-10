@@ -42,11 +42,11 @@
  * from one HTTP response to a display state and to the popover's own row labels, with no
  * AppKit anywhere near them), then the HTTP client that feeds them, then the drawing and
  * the popover that consume them, then the two entry points. That split is not tidiness —
- * it is what makes the interesting half testable. SPEC_MENUBAR.md's Testing section is
- * honest that there is no headless way to assert a status item's title OR a popover's
- * contents, so the AppKit layer is kept as thin a renderer as it can be, and
- * `--menubar --probe` (bottom of this file) exposes everything else to a node check
- * without drawing anything at all.
+ * it is what makes the interesting half testable. There is no headless way to assert a
+ * status item's title OR a popover's contents — both exist only inside a running
+ * NSApplication with a window server session — so the AppKit layer is kept as thin a
+ * renderer as it can be, and `--menubar --probe` (bottom of this file) exposes everything
+ * else to a node check without drawing anything at all.
  *
  * The popover deserves its own warning, because it is the half with no automated test:
  * every control below is a stock AppKit one at its default appearance. That is not
@@ -228,15 +228,15 @@ static double cb_phase_length_ms(cb_phase phase, const cb_settings *settings) {
  * one line of policy is the caller's; everything else about staleness is here: the digits
  * go, the shape stays.
  *
- * Four appearances out of the widget's two shapes (SPEC_MENUBAR.md, Open Questions), and
- * NOT ONE OF THEM IS A COLOUR: idle is the tomato with a plain undepleted circle and no
- * arc; work is the tomato with the depleting arc; a short break is the bars glyph with
- * the depleting arc; a long break is the bars glyph with that arc on a FILLED circle. The
- * icon is a template image (see cb_image below), so the system owns the hue and this
- * function has only shape and weight to spend — which is what the Open Questions picked
- * these four for. Paused draws the glyph its phase would draw, at the muted weight, with
- * the arc frozen — which is also the only thing separating idle from paused-in-work,
- * since both are the muted tomato: idle has no arc at all, paused has a stopped one. */
+ * Four appearances out of the widget's two shapes (ADR 80), and NOT ONE OF THEM IS A
+ * COLOUR: idle is the tomato with a plain undepleted circle and no arc; work is the
+ * tomato with the depleting arc; a short break is the bars glyph with the depleting arc;
+ * a long break is the bars glyph with that arc on a FILLED circle. The icon is a template
+ * image (see cb_image below), so the system owns the hue and this function has only shape
+ * and weight to spend — which is what these four were picked against. Paused draws the
+ * glyph its phase would draw, at the muted weight, with the arc frozen — which is also
+ * the only thing separating idle from paused-in-work, since both are the muted tomato:
+ * idle has no arc at all, paused has a stopped one. */
 static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settings *settings,
                             double now_ms) {
   cb_display d;
@@ -248,11 +248,11 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
   d.fraction = 1.0;
 
   if (!timer->running) {
-    /* Idle. Muted, and no countdown at all — "countdown text appears only while a timer
-     * exists" (SPEC_MENUBAR.md Decisions), so an idle item is the icon alone whatever
-     * menubarCountdown says. The widget's own idle row says the same thing differently
-     * ("Idle (25 min)"); there is no room for that in a menu bar, and a duration that is
-     * not counting down would read as one that is. */
+    /* Idle. Muted, and no countdown at all — countdown text appears only while a timer
+     * exists, so an idle item is the icon alone whatever menubarCountdown says. The
+     * widget's own idle row says the same thing differently ("Idle (25 min)"); there is
+     * no room for that in a menu bar, and a duration that is not counting down would read
+     * as one that is. */
     d.phase = CB_IDLE;
     d.muted = 1;
     return d;
@@ -309,8 +309,8 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
 /* Five rows, and this cap is THIS FILE's rule rather than the route's. `GET /api/waiting`
  * is uncapped by design (src/server.mjs says so in as many words) precisely so the client
  * drawing the list can pick its own maximum and still have a `total` to say "and N more"
- * with. Five, because an uncapped section is a popover with no maximum height
- * (SPEC_MENUBAR.md Decisions) and because the overflow row has somewhere to send you. */
+ * with. Five, because an uncapped section is a popover with no maximum height, and
+ * because the overflow row has somewhere to send you. */
 #define CB_WAITING_MAX 5
 
 /* A title long enough to fill the popover's width twice over is a real thing a board can
@@ -478,10 +478,10 @@ static const char *cb_switch_label(cb_action action) {
  *
  * A pure client of `GET http://127.0.0.1:<port>/api/pomodoro`, authorized by the local
  * secret in the `x-claude-board-secret` header — the same credential the MCP shim holds,
- * and the reason SECURITY.md now names this process. No new route was added for the item
- * (SPEC_MENUBAR.md Decisions): a native client sends no `Origin` header, which the
- * same-origin gate already treats as same-origin, and the secret already authorizes every
- * read and write in the pomodoro set. */
+ * and the reason SECURITY.md now names this process. No new route was added for the item:
+ * a native client sends no `Origin` header, which the same-origin gate already treats as
+ * same-origin, and the secret already authorizes every read and write in the pomodoro
+ * set. */
 
 /* The secret's path is derived from HOME, never read from CLAUDE_BOARD_SECRET_FILE —
  * that variable is a testing seam and bin/launcher.c deliberately keeps it out of this
@@ -737,9 +737,9 @@ static BOOL cb_fetch_waiting(cb_waiting *out) {
  * nothing to say a first-class caller of them — and one compiled-in JSON literal for the
  * hide.
  *
- * No new API was added for any of this (SPEC_MENUBAR.md Decisions): a native client sends
- * no `Origin` header, which the same-origin gate already treats as same-origin, and the
- * local secret already authorizes every write in the pomodoro set.
+ * No new API was added for any of this: a native client sends no `Origin` header, which
+ * the same-origin gate already treats as same-origin, and the local secret already
+ * authorizes every write in the pomodoro set.
  *
  * Criterion 12's hide is a COMMAND rather than a settings form, and that distinction is
  * the whole of why it is allowed to exist beside "no setting is editable from the menu
@@ -907,10 +907,10 @@ static const double CB_INK_CENTER_Y = 11.0;
  * picked, and that is exactly how it looked.
  *
  * So there is no amber for work here, and no labelColor/secondaryLabelColor either. The
- * four states are told apart by SHAPE and WEIGHT alone, which is what SPEC_MENUBAR.md's
- * Open Questions chose them for in the first place ("the one that distinguishes the
- * breaks is weight rather than colour — so it survives Increase Contrast, and it would
- * survive being made a template image later"). It has been.
+ * four states are told apart by SHAPE and WEIGHT alone (ADR 80), which is what they were
+ * chosen for in the first place: the thing that distinguishes the breaks is weight rather
+ * than colour, so it survives Increase Contrast, and it would survive being made a
+ * template image later. It has been.
  *
  * Alpha is the one channel that survives templating, because alpha IS the mask, so the
  * two weight distinctions the widget already draws are spelled in it:
@@ -1044,7 +1044,7 @@ static NSImage *cb_image(cb_display d) {
 
 /* --- The popover ----------------------------------------------------------------------
  *
- * An NSPopover rather than an NSMenu, and SPEC_MENUBAR.md is honest about what that buys
+ * An NSPopover rather than an NSMenu, and it is worth being honest about what that buys
  * and what it costs. It buys two things a menu cannot have: the countdown keeps ticking
  * while the reader is looking straight at it (which is why the tick lives in
  * NSRunLoopCommonModes — QUIRKS.md measured that a main-queue block never runs while a
@@ -1636,14 +1636,14 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  * what registers a bundle with LaunchServices (see cb_ensure_item), and the check suite
  * runs this against throwaway bundles, so this path must never reach AppKit.
  *
- * It exists because SPEC_MENUBAR.md's Testing section is honest that the AppKit half
- * cannot be checked: there is no headless way to assert a status item's title, or a
- * popover's contents. So the interesting half is kept OUT of AppKit — cb_derive,
- * cb_row_label, cb_overflow_count, cb_status_label and cb_switch_action are all pure C —
- * and this mode is how a node check reaches them, against a real daemon on a temp home,
- * the way test/check-launcher-menubar.mjs already compiles and drives this binary. It also
- * gets the "daemon absent" and "wrong secret" cases for free: both come back
- * `answered=no`, which is the honest report and not a crash.
+ * It exists because the AppKit half cannot be checked at all: there is no headless way to
+ * assert a status item's title, or a popover's contents. So the interesting half is kept
+ * OUT of AppKit — cb_derive, cb_row_label, cb_overflow_count, cb_status_label and
+ * cb_switch_action are all pure C — and this mode is how a node check reaches them,
+ * against a real daemon on a temp home, the way test/check-launcher-menubar.mjs already
+ * compiles and drives this binary. It also gets the "daemon absent" and "wrong secret"
+ * cases for free: both come back `answered=no`, which is the honest report and not a
+ * crash.
  *
  * Gated on a second argv word so the supervised path cannot reach it: bin/launcher.c execs
  * this binary with exactly `--menubar` and nothing after it.

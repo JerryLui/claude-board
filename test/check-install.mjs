@@ -571,9 +571,9 @@ async function main() {
       env: {
         ...process.env,
         CLAUDE_BOARD_PORT: String(healthPort), // already bound: the daemon exits, fast
-        // ADR.md entry 76 (SPEC_SIGNALS.md ticket 02): the no-argument supervising path
-        // now refuses to fork at all without this marker, which install.sh writes into
-        // the real plist's EnvironmentVariables dict (asserted elsewhere in this suite);
+        // ADR.md entry 76: the no-argument supervising path now refuses to fork at all
+        // without this marker, which install.sh writes into the real plist's
+        // EnvironmentVariables dict (asserted elsewhere in this suite);
         // this direct hand-launch stands in for launchd here on purpose, since the point
         // of this particular assertion is still "can it exec node", not the refusal
         // itself -- that has its own suite, test/check-launcher-refuses.mjs.
@@ -964,7 +964,7 @@ async function main() {
     assert.ok(!('CLAUDE_BOARD_SERVE_ROOTS' in fallbackPlist.EnvironmentVariables), 'the daemon serves boards and nothing else: no serve-roots key, ever');
   });
 
-  await check('a launcher half that will not compile degrades the install rather than aborting it (SPEC_MENUBAR criterion 13)', async () => {
+  await check('a launcher half that will not compile degrades the install rather than aborting it', async () => {
     // The same guarantee the missing-compiler check above makes, against the other way the
     // build can fail now that the launcher has three sources: one of them not compiling.
     // The whole build runs inside install.sh's `elif ! { ... }` condition, which is what

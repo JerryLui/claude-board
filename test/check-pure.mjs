@@ -7983,7 +7983,7 @@ const CUE_A = ALL_CUES[1] || NO_CUE;
 const CUE_B = ALL_CUES[2] || NO_CUE;
 const CUE_C = ALL_CUES[3] || NO_CUE;
 
-// The two menubar keys ride along at their DEFAULTS here (SPEC_MENUBAR.md), so
+// The two menubar keys ride along at their DEFAULTS here, so
 // every check using this fixture reads a document shaped exactly like the one the
 // daemon actually serves; the checks that are about those two keys set their own
 // values rather than leaning on these.
@@ -8051,7 +8051,7 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   assert.match(html, /<form class="pomodoro-settings-form" id="pomodoro-settings-form">/);
   // One control per settings key, and the control's `name` IS the key -- which is
   // what lets pomodoroSyncForm and onPomodoroSettingsSubmit look every field up by
-  // the same spelling the daemon stores. The two menubar keys (SPEC_MENUBAR.md)
+  // the same spelling the daemon stores. The two menubar keys
   // are on this list for that reason even though one of them renders as its own
   // negation ("Show in menu bar"): the inversion is in the ticked STATE, never in
   // the name.
@@ -8450,15 +8450,14 @@ await checkAsync('a running, unpaused break or long break swaps the index tab to
   }
 });
 
-// Criterion 14 (SPEC_MENUBAR.md) as its own line, not as one row of the table
-// above: the criterion is a REGRESSION line, and a table row is easy to edit away
-// while the table still passes. The spec's own Open Questions record why it costs
-// nothing to satisfy -- renderPomodoroGlyph only ever mounts REST_ICON under
+// This regression line stays its own line, not a row in the table above: a table
+// row is easy to edit away while the table still passes. Staying true costs
+// nothing -- renderPomodoroGlyph only ever mounts REST_ICON under
 // pomodoroIsResting, which idle (timer === null) cannot satisfy, so idle has
 // always drawn the muted tomato and the menu bar item is the surface that has to
 // come to it. What this pins is that it STAYS that way while the item is built
 // against it: both surfaces read idle as one shape.
-await checkAsync('criterion 14 (SPEC_MENUBAR.md): idle draws the muted tomato and never the rest glyph, in the server-rendered markup and after the first fetch alike', async () => {
+await checkAsync('idle draws the muted tomato and never the rest glyph, in the server-rendered markup and after the first fetch alike', async () => {
   const nowMs = Date.now();
   const idle = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   // The server-rendered slot first: no script has run at all here, and this is
@@ -8687,7 +8686,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eleven
   // flipped to false OPPOSITE notify (which goes false too here) so a bug that wired
   // the two checkboxes to the same underlying value, rather than two independent ones,
   // would still show up as a mismatch against POMODORO_SETTINGS' own notifyRounds: true.
-  // Both menubar keys leave their defaults too (SPEC_MENUBAR.md), and in OPPOSITE
+  // Both menubar keys leave their defaults too, and in OPPOSITE
   // directions: the countdown goes off, the item stays shown. A patch that dropped
   // either -- or that wired the pair to one underlying value -- fails the deepEqual
   // below rather than passing on a coincidence.
@@ -9001,8 +9000,8 @@ await checkAsync('pomodoro widget: closing the panel by clicking away disarms a 
 });
 
 // =================================================================================
-// SPEC_MENUBAR.md ticket 02 -- the settings panel's two menu bar controls, and the
-// fragment the item's "Settings..." row opens the panel on. Criterion 14's own
+// The settings panel's two menu bar controls, and the
+// fragment the item's "Settings..." row opens the panel on. The idle-tomato
 // regression line sits with the other glyph checks further up, beside the states
 // it is about.
 // =================================================================================
@@ -9081,12 +9080,12 @@ await checkAsync('pomodoro widget: unticking "Show in menu bar" saves menubarHid
   assert.equal(posts[0].body.menubarCountdown, true, 'and the countdown box must carry its own value straight through, uninverted');
 });
 
-// Criterion 7 (SPEC_MENUBAR.md): "A 'Settings...' item opens the index page's
-// existing pomodoro panel." The item navigates the browser to
-// http://127.0.0.1:7391/#pomodoro-settings, so the panel has to open itself --
-// deliberately NOT left to the browser's own fragment-auto-expand for a closed
-// <details>, which is recent and unevenly shipped.
-await checkAsync('criterion 7 (SPEC_MENUBAR.md): loading the index page on the #pomodoro-settings fragment opens the panel, filled, and brings it into view', async () => {
+// The menu bar's "Settings..." item opens the index page's existing pomodoro
+// panel by navigating the browser to http://127.0.0.1:7391/#pomodoro-settings, so
+// the panel has to open itself -- deliberately NOT left to the browser's own
+// fragment-auto-expand for a closed <details>, which is recent and unevenly
+// shipped.
+await checkAsync('loading the index page on the #pomodoro-settings fragment opens the panel, filled, and brings it into view', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
@@ -9115,7 +9114,7 @@ await checkAsync('pomodoro widget: an ordinary index load opens nothing -- only 
   });
 });
 
-await checkAsync('criterion 7 (SPEC_MENUBAR.md): the fragment arriving in a tab already open on the index -- a hashchange, never a load -- opens the panel too', async () => {
+await checkAsync('the fragment arriving in a tab already open on the index -- a hashchange, never a load -- opens the panel too', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
@@ -9133,7 +9132,7 @@ await checkAsync('criterion 7 (SPEC_MENUBAR.md): the fragment arriving in a tab 
   });
 });
 
-await checkAsync('criterion 7 (SPEC_MENUBAR.md): the fragment is SPENT once it has opened the panel, so a second `Settings...` into the same tab still works', async () => {
+await checkAsync('the fragment is SPENT once it has opened the panel, so a second `Settings...` into the same tab still works', async () => {
   // The failure this pins is silent and second-use-only: a browser handed a URL a tab is
   // already parked on surfaces that tab and fires no 'hashchange', so a reader who opened
   // Settings, closed the panel, and clicked Settings again would get nothing at all. Only

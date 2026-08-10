@@ -240,7 +240,7 @@ async function main() {
         form.querySelector('select[name="cueWork"]').value = cueWork;
         form.querySelector('select[name="cueBreak"]').value = cueBreak;
         form.querySelector('select[name="cueLongBreak"]').value = cueLongBreak;
-        // The two menu bar preferences (SPEC_MENUBAR.md), both moved OFF their
+        // The two menu bar preferences, both moved OFF their
         // defaults so this proves a real write rather than agreeing with what was
         // already stored -- and in opposite directions to each other, the same
         // reason notify and notifyRounds are set opposite above. "Show in menu bar"

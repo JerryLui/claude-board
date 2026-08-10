@@ -62,8 +62,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // default, so a reader who has never opened settings still gets round banners. See
   // roundBannersEnabled below for the read side a later chunk consults.
   notifyRounds: true,
-  // The macOS status item's two preferences (SPEC_MENUBAR.md; the item is a second
-  // process of the same bundle, ADR 72). They live in the DAEMON's document rather than
+  // The macOS status item's two preferences (the item is a second process of the same
+  // bundle, ADR 72). They live in the DAEMON's document rather than
   // in the item's own defaults for the same reason every other preference here does: the
   // item owns no state at all -- it reads GET /api/pomodoro and drives the routes the
   // index widget already drives -- so a preference kept on its side would be a second

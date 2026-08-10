@@ -2,7 +2,7 @@
 // daemon it has always forked, and the macOS status item it forks beside it as
 // `claude-board --menubar` (ADR 72, bin/menubar.m).
 //
-// The acceptance criteria this file exists for, from SPEC_MENUBAR.md:
+// The acceptance criteria this file exists for:
 //
 //   - 10, "the item is present after a login with no manual step": the LaunchAgent already
 //     carries RunAtLoad, so what is left to prove here is that an argv-LESS invocation of

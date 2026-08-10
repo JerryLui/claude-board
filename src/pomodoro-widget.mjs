@@ -185,8 +185,8 @@ export function pomodoroWidget() {
       <label class="pomodoro-field">Work<select name="cueWork" aria-label="Work cue">${cueOptions}</select></label>
       <label class="pomodoro-field">Short break<select name="cueBreak" aria-label="Short break cue">${cueOptions}</select></label>
       <label class="pomodoro-field">Long break<select name="cueLongBreak" aria-label="Long break cue">${cueOptions}</select></label>
-      <!-- The macOS status item's two preferences (SPEC_MENUBAR.md; the item is a
-           second process of the same bundle, ADR 72). They are edited HERE and
+      <!-- The macOS status item's two preferences (the item is a second process
+           of the same bundle, ADR 72). They are edited HERE and
            nowhere else -- the item owns no state of its own, it reads and writes
            the same daemon document this form does, and no setting is editable
            from the menu bar at all. A third captioned group in the existing
