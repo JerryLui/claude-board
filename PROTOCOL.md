@@ -5,7 +5,9 @@ The wire contract: the shapes on disk, the routes that move them, and what each 
 tables. `skills/claude-board/SKILL.md` is the prose manual a caller reads.
 
 **Changing this file:** changes are additive. A shape that is not here gets a new field, added
-here in the same commit that uses it. Do not repurpose or rename an existing field.
+here in the same commit that uses it. Do not repurpose or rename an existing field. Removing
+one takes an ADR that names the field and every consumer moved off of it — ADR 99 (the
+packet's `resolved`, redundant beside `lost`) is the shape of that exception.
 
 ## Layout
 
@@ -349,7 +351,10 @@ client degrades to a whole-block comment, the same fallback an unrecognised kind
 
 An anchor of any kind that no longer resolves at render time is reported, not dropped: the comment
 survives with `resolved: false` and a `lost` field naming what it lost (`src/board.mjs`'s
-`lostLabel`) — the stored `hint` when there is one, the bare `ref` otherwise.
+`lostLabel`) — the stored `hint` when there is one, the bare `ref` otherwise. This `resolved`/`lost`
+pair is `resolveComment`'s own shape, read by the rendered page and the SSE-pushed client board
+(ADR 28's element anchoring). The **Packet** below is the one consumer that drops `resolved` (ADR
+99) and keeps `lost` alone.
 
 A `dom` ref's index chain is 1-based over `Element.children` **as the browser parses the markup** —
 implied `tbody`, auto-closed `p`/`li`/`tr`/`td`/`option`, and `script`/`style` counted as elements.
@@ -484,10 +489,15 @@ except for `cwd`.
   board, thread, title, round,
   status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'abandoned' | 'error'
   answers:  [ { id, round, prompt, widget, status, choice, note } ],
-  comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, resolved, lost? } ],
+  comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, lost? } ],
   url,
 }
 ```
+
+No `resolved` (ADR 99): it read as review state to every packet consumer, and duplicated `lost` —
+false exactly when `lost` is present. A comment whose anchor is gone still carries `lost`, naming
+what it lost, exactly as above; a consumer that used to branch on `resolved === false` branches on
+`lost`'s presence instead.
 
 `posted` means the round was not *awaited* (`round.awaited`, CONTEXT.md "Awaited"): it carried
 no question block anywhere in it — top-level, or nested in a question's `context` or a `compare`

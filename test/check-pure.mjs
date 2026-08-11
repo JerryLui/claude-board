@@ -1155,17 +1155,19 @@ check('packet shape names board, round, and every question status/choice/note', 
   assert.equal(byId.q3.note, 'ask later');
 
   assert.equal(packet.comments.length, 3);
+  // ADR 99: the packet carries no `resolved` key at all, on any comment --
+  // resolved or lost, `lost` alone tells the two apart.
+  for (const c of packet.comments) assert.equal('resolved' in c, false, `packet comment #${c.n} must carry no resolved key`);
+
   const resolved = packet.comments.find(c => c.anchor.ref === 'two');
-  assert.equal(resolved.resolved, true);
   assert.equal(resolved.blockKind, 'mermaid');
   assert.equal(resolved.lost, undefined);
 
   const lost = packet.comments.find(c => c.anchor.ref === 'ghost');
-  assert.equal(lost.resolved, false);
   assert.equal(lost.lost, 'ghost');
 
   const blockLevel = packet.comments.find(c => c.blockId === 'q1');
-  assert.equal(blockLevel.resolved, true);
+  assert.equal(blockLevel.lost, undefined);
   assert.equal(blockLevel.anchor.kind, 'block');
 });
 

@@ -52,7 +52,7 @@ import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, sto
 import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly, SUPPRESSED, roundContentDrifted } from './board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, dropResolved, resolveComments, questionBlocks, stripDaemonOnly, SUPPRESSED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
@@ -1325,7 +1325,12 @@ function drainUndeliveredComments(thread, board, round, home) {
     const drained = undelivered.filter(c => b.id !== board.id || c.round !== round);
     const mark = b.id === board.id ? undelivered : drained;
     if (!mark.length) continue;
-    if (drained.length) comments.push(...resolveComments(b, drained));
+    // `dropResolved` for the same reason `buildPacket` applies it to its own
+    // comments (src/board.mjs, ADR 99): this function's `comments` lands in the
+    // same packet (buildPacketWithUndelivered concatenates them), so a comment
+    // carried forward from an earlier board must not be the one entry in the
+    // packet still carrying the field the round's own comments dropped.
+    if (drained.length) comments.push(...dropResolved(resolveComments(b, drained)));
     pendingByBoard.push({ board: b, pending: mark });
   }
   const commit = () => {

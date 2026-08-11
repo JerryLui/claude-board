@@ -37,11 +37,15 @@ function check(name, fn) {
 
 // Two blocks (or any non-single-html shape) is deliberately NOT a page board
 // (src/render.mjs's isPageBoard, ADR.md entry 33) -- this file's whole subject
-// is the board type that scrolls its own document.
+// is the board type that scrolls its own document. The second block is `html`
+// rather than a second markdown one so the round stays Commentable (ADR 98) --
+// this file's own comment-toggle check below needs the toggle actually
+// rendering, which is orthogonal to the condense mechanics every other check
+// here drives.
 function ordinaryBoard() {
   return createBoard({
     title: 'An ordinary board',
-    blocks: [{ kind: 'markdown', text: 'first block' }, { kind: 'markdown', text: 'second block' }],
+    blocks: [{ kind: 'markdown', text: 'first block' }, { kind: 'html', html: '<p>second block</p>' }],
   });
 }
 

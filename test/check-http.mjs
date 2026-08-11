@@ -338,10 +338,12 @@ async function main() {
     assert.equal(packet.answers[0].note, 'ship it');
 
     assert.equal(packet.comments.length, 2);
+    // ADR 99: the packet carries no `resolved` key at all -- `lost` alone tells
+    // a resolved comment from a lost one.
+    for (const c of packet.comments) assert.equal('resolved' in c, false);
     const resolved = packet.comments.find(c => c.anchor.ref === 'two');
-    assert.equal(resolved.resolved, true);
+    assert.equal(resolved.lost, undefined);
     const lost = packet.comments.find(c => c.anchor.ref === 'ghost');
-    assert.equal(lost.resolved, false);
     assert.equal(lost.lost, 'ghost');
   });
 
@@ -1266,16 +1268,17 @@ async function main() {
 
     const packet = await waitPromise;
     assert.equal(packet.comments.length, 4);
+    // ADR 99: no comment in the packet carries a `resolved` key -- `lost` alone
+    // tells a resolved comment from a lost one.
+    for (const c of packet.comments) assert.equal('resolved' in c, false);
 
     const domOk = packet.comments.find(c => c.anchor.kind === 'dom' && c.anchor.ref === '1.1');
-    assert.equal(domOk.resolved, true);
     assert.equal(domOk.blockKind, 'html');
     assert.equal(domOk.anchor.hint, 'Send'); // hint survives the round trip verbatim
     assert.equal(domOk.lost, undefined);
     assert.equal(domOk.text, 'move this button left');
 
     const domLost = packet.comments.find(c => c.anchor.kind === 'dom' && c.anchor.ref === '9.9');
-    assert.equal(domLost.resolved, false);
     // A lost `dom` anchor's `.lost` names the stored HINT ("Launch"),
     // not the opaque index-chain ref ("9.9") -- the hint is what a human or an
     // agent reading the packet can recognise as "what this comment was about"
@@ -1286,13 +1289,11 @@ async function main() {
     assert.equal(domLost.anchor.ref, '9.9');
 
     const mermaidOk = packet.comments.find(c => c.anchor.kind === 'mermaid' && c.anchor.ref === 'A');
-    assert.equal(mermaidOk.resolved, true);
     assert.equal(mermaidOk.blockKind, 'mermaid');
     assert.equal(mermaidOk.text, 'rename the start node');
     assert.equal(mermaidOk.lost, undefined);
 
     const mermaidLost = packet.comments.find(c => c.anchor.kind === 'mermaid' && c.anchor.ref === 'Ghost');
-    assert.equal(mermaidLost.resolved, false);
     assert.equal(mermaidLost.lost, 'Ghost');
 
     // and the store JSON carries the same shapes verbatim -- the packet isn't
@@ -1467,11 +1468,14 @@ async function main() {
     assert.equal(submitRes.status, 200);
 
     // What the agent reads: every one of these must come back resolved, not
-    // lost -- this is the exact packet buildPacket hands back over /wait.
+    // lost -- this is the exact packet buildPacket hands back over /wait. ADR 99:
+    // the packet carries no `resolved` key at all, so "resolved" is `lost` being
+    // absent, not a field to read.
     const packet = await (await fetch(`${base}/api/board/${rrBoardId}/wait?round=1`)).json();
     assert.equal(packet.comments.length, pairs.length);
     for (const c of packet.comments) {
-      assert.equal(c.resolved, true, `comment on block ${c.blockId} (ref ${JSON.stringify(c.anchor.ref)}) must resolve after a real submit + re-render, not report lost`);
+      assert.equal('resolved' in c, false, `comment on block ${c.blockId} must carry no resolved key`);
+      assert.equal(c.lost, undefined, `comment on block ${c.blockId} (ref ${JSON.stringify(c.anchor.ref)}) must resolve after a real submit + re-render, not report lost`);
     }
 
     // Re-render from the stored JSON (a plain GET /b/:id always re-renders from
@@ -3111,7 +3115,10 @@ async function main() {
     assert.equal(carried.blockId, h1, 'resolved against the block on ITS OWN board, not board2');
     assert.equal(carried.blockKind, 'html');
     assert.equal(carried.round, 1, 'the comment still carries the round it was actually left in, not the collecting round');
-    assert.equal(carried.resolved, true);
+    // ADR 99: no `resolved` key, on a carried-forward comment either -- this is
+    // the path that concatenates onto buildPacket's own comments AFTER it runs
+    // (drainUndeliveredComments), so it is its own proof the drop covers both.
+    assert.equal('resolved' in carried, false);
     assert.equal(carried.lost, undefined);
 
     assert.equal(readBoard(board1, home).comments[0].delivered, true, 'the mark persists on the board the comment actually lives on');

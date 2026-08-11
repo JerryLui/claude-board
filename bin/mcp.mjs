@@ -638,7 +638,11 @@ function summarizeAnswers(packet) {
       `${comments.length} comment(s) — each is feedback on the block it is anchored to, to address as its own input:`,
       ...comments.map(c => {
         const where = `${c.blockId}${c.blockKind ? ` (${c.blockKind})` : ''} @ ${formatAnchor(c.anchor)}`;
-        const lost = c.resolved === false || c.lost ? ' [anchor no longer resolves]' : '';
+        // ADR 99: the packet drops `resolved` and keeps `lost` alone, so a
+        // consumer that used to branch on `resolved === false` branches on
+        // `lost`'s presence instead -- the two were never anything but the
+        // same verdict under two names.
+        const lost = c.lost ? ' [anchor no longer resolves]' : '';
         return `  - [${c.n}] ${where}${lost}: ${c.text}`;
       }),
     ].join('\n')

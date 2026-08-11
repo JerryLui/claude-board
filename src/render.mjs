@@ -41,7 +41,7 @@ import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import {
-  roundPageLabel, isPageRound,
+  roundPageLabel, isPageRound, roundHasCommentable,
   roundIsAwaitedOpen, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE,
 } from './badge.mjs';
 
@@ -1855,11 +1855,12 @@ function buildStageSrcdoc(block) {
  *     before a wait died has nowhere else to keep rendering ("comments already
  *     left stay on screen", AC 12), and src/ui.mjs's refreshPins looks this id
  *     up by the same convention every block's list uses.
- *   - open and awaited, short of its deadline: the live surface -- the
- *     hint line while the list is empty (teaching the click-to-comment gesture,
- *     since comment mode already starts ON here and the toggle itself is no
- *     longer what reveals the gesture), the compose form, the list, and the
- *     send control labelled for exactly what it will send ("Nothing to add" at
+ *   - open and awaited, short of its deadline: the live surface -- chat-dock
+ *     order (the Tray, CONTEXT.md): the list first, then the compose form
+ *     (with the hint line while the list is empty, teaching the
+ *     click-to-comment gesture, since comment mode already starts ON here and
+ *     the toggle itself is no longer what reveals the gesture), then the send
+ *     control labelled for exactly what it will send ("Nothing to add" at
  *     zero, "Send N comments" above it, AC 4) with Discuss beside it.
  *   - sent: the same live markup as the open case, `historical` true -- the
  *     identical treatment `commentArea` already gives every other block's form
@@ -1905,13 +1906,27 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
   const hint = showHint
     ? `<p class="page-comment-hint" id="${hintId}">Click anywhere on the page to leave a comment.</p>`
     : '';
+  // Chat-dock order (the Tray, CONTEXT.md): the queued list first, the
+  // composer next, the send bar last -- a reviewer scanning the panel meets
+  // what is already said before the box for saying more, and the send
+  // control settles at the reviewer's hand instead of above an
+  // arbitrarily long list. What keeps the composer and send bar out of the
+  // scrolling region is unaffected by this markup order (src/styles.mjs,
+  // above `.page-comments`): `.comment-list-wrap` alone is the explicit
+  // `flex: 1 1 auto; min-height: 0` that opts INTO shrinking, `.page-send-bar`
+  // is the explicit `flex: none` that refuses to, and `.comment-target`/
+  // `.comment-form` hold their own size the same way `.page-send-bar` does
+  // without saying so -- neither sets a `flex` property at all, so each falls
+  // back to a flex item's automatic minimum size (its own content height),
+  // which is exactly as much a floor as an authored `flex: none` for a
+  // container with only one item willing to shrink below it.
   return `
+    <div class="comment-list-wrap"><div class="comment-list" id="comment-list-${escAttr(blockId)}">${commentItemsHtml(blockId, commentsByBlock)}</div></div>
     <div class="comment-target" id="comment-target-${escAttr(blockId)}">commenting on: whole block</div>
     <form class="comment-form" id="comment-form-${escAttr(blockId)}" data-block-id="${escAttr(blockId)}" data-anchor-kind="block">
       <input type="text" placeholder="Add a comment"${showHint ? ` aria-describedby="${hintId}"` : ''}${historical ? ' disabled' : ''}>
       <button type="submit"${historical ? ' disabled' : ''}>Add</button>
     </form>
-    <div class="comment-list-wrap"><div class="comment-list" id="comment-list-${escAttr(blockId)}">${commentItemsHtml(blockId, commentsByBlock)}</div></div>
     <div class="page-send-bar" data-round="${round.n}">
       ${hint}
       <button type="button" class="btn-discuss page-discuss-btn" data-round="${round.n}"${historical ? ' disabled' : ''}>Discuss in chat</button>
@@ -2425,6 +2440,28 @@ export function renderBoardPage(board) {
   // split as the pill above); src/ui.mjs's refreshPager keeps it true afterwards,
   // including the round that expires under the reviewer.
   const pageUncommentable = fullpage && !initialRoundOpenAwaited;
+  // ADR 98 (widens entry 46): the comment-mode toggle renders only when the
+  // round on screen holds at least one Commentable block ('html'/'mermaid',
+  // wherever it appears -- roundHasCommentable, src/badge.mjs). Unlike
+  // `pageUncommentable` above this is not page-board-specific -- an ORDINARY
+  // round of only question/markdown/code blocks is exactly as uncommentable as
+  // a never-awaited artifact -- so it is asked of every board, not gated on
+  // `fullpage` first. src/ui.mjs's refreshPager re-asks the identical function
+  // on every flip, the same split `pageUncommentable`/refreshAwaitDisplay
+  // already uses for the awaited-ness half.
+  const roundUncommentable = !roundHasCommentable(board.blocks.filter(b => b.round === initialRoundInView));
+  // Both toggle-hiding facts ride the same body-class mechanism as `readonly`
+  // (QUIRKS.md "Readonly is locked twice"): kept in the markup, hidden
+  // structurally by src/styles.mjs rather than omitted, so a page that becomes
+  // commentable again (a later round pushed, a flip to a different round) never
+  // needs a second element minted for it. Built as a list rather than the old
+  // fullpage-only ternary, since `roundUncommentable` -- unlike
+  // `pageUncommentable` -- applies to an ordinary board too.
+  const bodyClasses = [
+    ...(fullpage ? ['page-board'] : []),
+    ...(pageUncommentable ? ['page-uncommentable'] : []),
+    ...(roundUncommentable ? ['round-uncommentable'] : []),
+  ];
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -2436,7 +2473,7 @@ ${faviconLink}
 <script>${themeBootScript}</script>
 <link rel="stylesheet" href="${STYLE_ASSET}">
 </head>
-<body${fullpage ? ` class="page-board${pageUncommentable ? ' page-uncommentable' : ''}"` : ''}>
+<body${bodyClasses.length ? ` class="${bodyClasses.join(' ')}"` : ''}>
 <div class="board-shell">
   <div class="readonly-banner">Read-only: opened from disk, without the daemon running.</div>
   <header class="board-head">

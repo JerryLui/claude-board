@@ -1204,6 +1204,19 @@ export function resolveComments(board, comments) {
   return (comments || []).map(c => resolveComment(board, c, blockCache));
 }
 
+/** Strip `resolved` off a batch of already-`resolveComment`d comments (ADR 99: "the
+ * packet says `lost`, not `resolved`"). A comment field named `resolved` reads as
+ * review state to every packet consumer, and the boolean is redundant beside `lost`
+ * -- false exactly when `lost` is present. Scoped to the packet only: `resolveComment`'s
+ * own shape is unchanged and every OTHER consumer of it (the rendered page, the
+ * SSE-pushed client board -- src/render.mjs, src/server.mjs's `resolveBoardComments`)
+ * keeps branching on `.resolved`, so this is called at the packet's two assembly
+ * points (`buildPacket` below, and server.mjs's `buildPacketWithUndelivered` for the
+ * comments it carries forward from an earlier board) and nowhere else. */
+export function dropResolved(comments) {
+  return comments.map(({ resolved, ...rest }) => rest);
+}
+
 /** Assemble the packet the `ask` tool (eventually) returns, and what /wait resolves
  * with: names the board, the round, each question's status/choice/note, and every
  * comment with the anchor it attached to. See PROTOCOL.md "Packet".
@@ -1222,7 +1235,7 @@ export function buildPacket(board, round, url) {
       const a = board.answers[b.id] || { status: 'unanswered', choice: null, note: '' };
       return { id: b.id, round: b.round, prompt: b.prompt, widget: b.widget, status: a.status, choice: a.choice, note: a.note };
     });
-  const comments = resolveComments(board, board.comments.filter(c => (c.round ?? round) === round));
+  const comments = dropResolved(resolveComments(board, board.comments.filter(c => (c.round ?? round) === round)));
   // The round's own recorded outcome wins over the board-wide state, which a later
   // round resets to 'open'. Falls back to board.state for rounds sent before
   // `action` was recorded, and for a round that has not been sent at all.

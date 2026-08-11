@@ -272,6 +272,24 @@
   var isPageRound = function isPageRound(blocks) {
   return blocks.length === 1 && blocks[0].kind === 'html' && !blocks[0].error;
 };
+  // ADR 98: whether the round on screen has anything the comment-mode toggle
+  // could ever anchor to -- spliced the same way, so refreshPager's own
+  // round-uncommentable toggle (below, this file) and src/render.mjs's
+  // first-paint decision can never disagree about which rounds qualify.
+  var roundHasCommentable = function roundHasCommentable(blocks) {
+  function visit(b) {
+    if (!b) return false;
+    if (b.kind === 'html' || b.kind === 'mermaid') return true;
+    if (b.kind === 'question') {
+      return (b.context || []).some(visit) || (b.options || []).some(o => visit(o.block));
+    }
+    if (b.kind === 'compare') {
+      return visit(b.left && b.left.block) || visit(b.right && b.right.block);
+    }
+    return false;
+  }
+  return blocks.some(visit);
+};
 
   // Same technique a third time: whether a round is *awaited* (CONTEXT.md
   // "Awaited") is what markPendingRound below gates the tab mark on, and what
@@ -3298,6 +3316,22 @@
       // one; refreshPins rebuilds the list entries the same way, so editing in
       // place cannot also leave a stray second entry for the same queue item.
       refreshPins(document);
+      // Chat-dock order (the Tray, CONTEXT.md): the list is meant to follow the
+      // newest entry, same as an ordinary chat input -- with the 40vh cap
+      // (src/styles.mjs), the 4th queued comment already overflows, and with no
+      // scroll the reviewer types, the input clears, and the new entry lands
+      // below the fold with nothing on screen to say so. '.comment-list-wrap'
+      // is the ONE element that actually scrolls ('overflow-y: auto') --
+      // '.comment-list' itself only grows -- and only the Tray ever has one at
+      // all (an ordinary block's own commentArea renders no wrap), so this is
+      // a no-op everywhere else. 'scrollTop = scrollHeight' is the plain
+      // no-animation floor, same idiom 'back-to-top' (elsewhere in this file)
+      // already uses for the identical reason (QUIRKS.md: 'scrollTo' can be a
+      // silent no-op the stand-in and a real browser alike would never catch
+      // through a 'try/catch').
+      var queuedList = document.querySelector('div#comment-list-' + blockId);
+      var queuedWrap = queuedList && queuedList.closest && queuedList.closest('.comment-list-wrap');
+      if (queuedWrap) queuedWrap.scrollTop = queuedWrap.scrollHeight;
       input.value = '';
       form.removeAttribute('data-editing-id');
       form.classList.remove('open');
@@ -4047,6 +4081,26 @@
     // page it was rendered as, and flipping to the question round puts the
     // ordinary column back with no reload.
     document.body.classList.toggle('page-board', isPageRound(blocksOfRound(currentRound)));
+
+    // ADR 98: the comment-mode toggle follows the page it's ON, not the board --
+    // a thread can hold a Commentable round next to an all-question one, and
+    // flipping between them has to re-decide the toggle exactly like it
+    // re-decides 'page-board' just above. src/render.mjs makes the identical
+    // call at first paint (from the round initially in view), off the same
+    // roundHasCommentable; this is what keeps it correct after every flip too.
+    var roundUncommentable = !roundHasCommentable(blocksOfRound(currentRound));
+    document.body.classList.toggle('round-uncommentable', roundUncommentable);
+    // QUIRKS.md "readonly is locked twice", applied to this gate too: hiding
+    // the CONTROL (the CSS rule above) is only half the lock. A reviewer who
+    // turned comment mode on before flipping here would otherwise keep
+    // commentMode true with no visible toggle left to turn it back off --
+    // every ordinary answer gesture on the arriving round would go on raising
+    // the "answers locked" Notice at them for good, which is ADR 98's own
+    // Context, reached by a flip rather than a first paint. setCommentMode(false)
+    // is the JS half: it turns the STATE off, not merely the control that
+    // would have. Reachable from every refreshPager caller, including the SSE
+    // catch-up/push paths, not only goToRound.
+    if (roundUncommentable && commentMode) setCommentMode(false);
 
     // "A page already sent is read-only" -- the guarantee the deleted history
     // rail carried. The stylesheet's body.sent-page rules are the visible half;

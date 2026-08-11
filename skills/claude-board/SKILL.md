@@ -124,6 +124,13 @@ board the frame's height is derived from what the stage reports, so a page laid 
 placeholder height rather than its own. Size from the content — a `min-height` off what it
 holds, no `100vh` anywhere — and the frame follows it.
 
+**The board themes every stage.** Before a stage renders, the board sets `data-theme`
+(`light` or `dark`) and `color-scheme` on its own document — a template that already reads
+`data-theme` needs nothing new. Condition any literal color in your own CSS on that
+attribute, in both directions, or leave the stage colorless and it inherits the board's
+palette for free; a hardcoded light-mode color left unconditioned reads as broken the
+moment the board is dark, and vice versa.
+
 ## Question blocks
 
 A question carries its `prompt` by value, a `widget`, and its own `context` array:
@@ -166,7 +173,7 @@ round of content only returns the instant it lands.
   board, thread, title, round,
   status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'abandoned' | 'error'
   answers:  [ { id, round, prompt, widget, status, choice, note } ],
-  comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, resolved, lost? } ],
+  comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, lost? } ],
   url,
 }
 ```

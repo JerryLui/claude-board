@@ -6,8 +6,9 @@
 //
 //   - a LOST anchor reports what it lost -- visibly on the page (a pin drawn
 //     `pin-lost`, a comment-list entry reading "lost: <hint>") and in what the
-//     agent reads (buildPacket's own `resolved`/`lost` fields) -- rather than
-//     silently vanishing.
+//     agent reads (buildPacket's own `lost` field; ADR 99 dropped `resolved`
+//     from the packet, so a lost comment is named by `lost` alone) -- rather
+//     than silently vanishing.
 //   - a board archived BEFORE this behavior existed -- built with the actual
 //     code at commit 578f666 (the tip before anchors-survive-re-render
 //     landed; test/fixtures/pre-ticket04-board.json, committed alongside this
@@ -107,17 +108,17 @@ applySubmit(lostBoard, {
   ],
 }, 1);
 
-check('what the agent reads -- buildPacket reports a lost page-scoped dom anchor as unresolved, naming the stored hint, not dropping the comment', () => {
+check('what the agent reads -- buildPacket reports a lost page-scoped dom anchor by naming the stored hint under `lost`, not dropping the comment, and carries no `resolved` key at all (ADR 99: the packet says lost, not resolved)', () => {
   const packet = buildPacket(lostBoard, 1, 'http://127.0.0.1/b/x');
   assert.equal(packet.comments.length, 1, 'the comment must still be IN the packet -- lost, not dropped');
   const c = packet.comments[0];
-  assert.equal(c.resolved, false);
+  assert.equal('resolved' in c, false, 'the packet drops `resolved` entirely -- a lost comment is named by `lost` alone');
   assert.equal(c.lost, 'a sentence that used to live here', 'the stored hint is what survives when the element does not');
   assert.equal(c.text, 'this used to point at a real sentence', 'the comment text itself is untouched');
   assert.equal(c.blockId, lostBlockId);
 });
 
-check('resolveComment agrees, directly', () => {
+check('resolveComment agrees, directly -- its own shape is untouched by the packet-only drop, since src/render.mjs and src/ui.mjs still branch on `.resolved`', () => {
   const resolved = resolveComment(lostBoard, lostBoard.comments[0]);
   assert.equal(resolved.resolved, false);
   assert.equal(resolved.lost, 'a sentence that used to live here');
@@ -180,7 +181,7 @@ check('contrast -- the same shape of board, but a ref/hint that DOES still match
     comments: [{ blockId, anchor, text: 'fine as is' }],
   }, 1);
   const packet = buildPacket(okBoard, 1, 'http://127.0.0.1/b/x');
-  assert.equal(packet.comments[0].resolved, true);
+  assert.equal('resolved' in packet.comments[0], false, 'no `resolved` key on a comment that DOES resolve either -- the packet drops it unconditionally');
   assert.equal(packet.comments[0].lost, undefined);
 });
 
@@ -203,12 +204,14 @@ check('a board built with the actual pre-existing code (commit 578f666) still re
   // to decorate -- checked directly in the next case. The
   // element-level anchors on the two kinds that ARE still commentable (n:3 on the
   // html stage, n:4 on the diagram) resolve exactly as they always did.
+  // Every entry here resolves (none is lost), so the packet check below asserts
+  // both halves of ADR 99 at once: no `resolved` key at all, and `lost` absent.
   const expected = [
-    { n: 1, blockId: 'd1', kind: 'block', resolved: true },
-    { n: 2, blockId: 'd1', kind: 'md', resolved: true },
-    { n: 3, blockId: 'h1', kind: 'dom', resolved: true, hint: 'Send' },
-    { n: 4, blockId: 'm1', kind: 'mermaid', resolved: true },
-    { n: 5, blockId: 'd1', kind: 'md', resolved: true },
+    { n: 1, blockId: 'd1', kind: 'block' },
+    { n: 2, blockId: 'd1', kind: 'md' },
+    { n: 3, blockId: 'h1', kind: 'dom', hint: 'Send' },
+    { n: 4, blockId: 'm1', kind: 'mermaid' },
+    { n: 5, blockId: 'd1', kind: 'md' },
   ];
   assert.equal(oldBoard.comments.length, expected.length, 'setup failure: the fixture does not have the comments this check expects -- was it regenerated?');
   assert.ok(oldBoard.comments.some(c => c.anchor && c.anchor.kind === 'md'),
@@ -221,7 +224,8 @@ check('a board built with the actual pre-existing code (commit 578f666) still re
     assert.equal(c.n, exp.n);
     assert.equal(c.blockId, exp.blockId);
     assert.equal(c.anchor.kind, exp.kind);
-    assert.equal(c.resolved, exp.resolved, `comment #${exp.n} (${exp.kind} on ${exp.blockId}) resolved unexpectedly`);
+    assert.equal('resolved' in c, false, `comment #${exp.n} (${exp.kind} on ${exp.blockId}) must carry no resolved key in the packet (ADR 99)`);
+    assert.equal(c.lost, undefined, `comment #${exp.n} (${exp.kind} on ${exp.blockId}) resolved unexpectedly`);
     if (exp.hint) assert.equal(c.anchor.hint, exp.hint);
   });
 });

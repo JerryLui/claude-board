@@ -57,6 +57,38 @@ export function isPageRound(blocks) {
   return blocks.length === 1 && blocks[0].kind === 'html' && !blocks[0].error;
 }
 
+// Does this round hold a Commentable block -- 'html' or 'mermaid', WHEREVER it
+// appears (CONTEXT.md "Commentable"): top-level, nested inside a question's
+// `context`, an option's own `block` (choose-between-rendered-variants), or
+// either side of a `compare` -- the same tree `findBlock`/`roundBlocks`
+// (src/board.mjs) walk. ADR 98 (widens entry 46): a round with none is a round
+// where the comment-mode toggle has nothing to anchor, so the toggle itself
+// renders only when this is true. An errored html/mermaid block still counts
+// -- it still carries the comment control, just aimed at its own
+// '.resolve-error' note instead of live content (test/check-comment-mode.mjs's
+// KIND_CASES table drives exactly that gesture), unlike isPageRound above,
+// whose error exclusion is about a DIFFERENT question (is there a stage to
+// fill the viewport with).
+//
+// Blocks-for-a-round in, same convention as isPageRound: src/render.mjs
+// filters board.blocks by round once and hands the slice to whichever of
+// these needs it; src/ui.mjs's blocksOfRound does the identical filter for
+// the client-side re-check on every flip.
+export function roundHasCommentable(blocks) {
+  function visit(b) {
+    if (!b) return false;
+    if (b.kind === 'html' || b.kind === 'mermaid') return true;
+    if (b.kind === 'question') {
+      return (b.context || []).some(visit) || (b.options || []).some(o => visit(o.block));
+    }
+    if (b.kind === 'compare') {
+      return visit(b.left && b.left.block) || visit(b.right && b.right.block);
+    }
+    return false;
+  }
+  return blocks.some(visit);
+}
+
 // Every question block on the board, in display order, INCLUDING those nested in a
 // question's `context` array or a compare block's sides.
 //

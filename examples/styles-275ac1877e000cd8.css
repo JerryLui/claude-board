@@ -309,12 +309,17 @@ body:not(.page-board) .round-meta { display: inline; }
 .mode-toggle:hover:not(:disabled) { border-color: var(--hairline-2); color: var(--ink); }
 .mode-toggle.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 /* ADR.md entry 46: a page board nobody is listening to is uncommentable, so the
-   control that turns commenting on is not on offer there either. Two classes
-   rather than one because they are two different facts -- an archive is read-only
-   whatever it holds, while 'page-uncommentable' is about this page's round in
-   particular (src/render.mjs sets it at first paint, src/ui.mjs's
-   refreshAwaitDisplay keeps it true against the clock). */
-body.readonly .mode-toggle, body.page-uncommentable .mode-toggle { display: none; }
+   control that turns commenting on is not on offer there either. ADR 98 widens
+   this with a third, independent fact: a round with nothing Commentable on it
+   ('html'/'mermaid', wherever it appears) is uncommentable regardless of who's
+   listening, on ANY board, not only a page one. Three classes rather than one
+   because they are three different facts -- an archive is read-only whatever it
+   holds; 'page-uncommentable' is about a page board's round being unawaited in
+   particular; 'round-uncommentable' is about the round's own CONTENT, awaited or
+   not (src/render.mjs sets both at first paint, src/ui.mjs's
+   refreshAwaitDisplay/refreshPager keep them true afterwards -- against the
+   clock for the first, against every round flip for the second). */
+body.readonly .mode-toggle, body.page-uncommentable .mode-toggle, body.round-uncommentable .mode-toggle { display: none; }
 
 /* the theme control (src/theme.mjs): reuses .mode-toggle's chrome above rather
    than duplicating it, plus this icon-only modifier -- no visible label, so
@@ -322,9 +327,10 @@ body.readonly .mode-toggle, body.page-uncommentable .mode-toggle { display: none
 .mode-toggle-icon { padding: 7px; }
 /* Unlike .mode-toggle, this control stays live in a read-only archive -- an
    archive reader is exactly who needs to switch theme. Same for an
-   uncommentable page board: nothing there is answerable, but the theme of a
-   full-viewport artifact is exactly what a reader still wants to change, so
-   both of .mode-toggle's hiding gates above are carved out here. An id
+   uncommentable page board, and same again for a round with nothing
+   Commentable on it: nothing there is answerable or anchorable, but the theme
+   of whatever IS on screen is exactly what a reader still wants to change, so
+   all three of .mode-toggle's hiding gates above are carved out here. An id
    selector outranks body.readonly .mode-toggle's class selector regardless of
    source order, so that rule's own wording (asserted verbatim by
    test/check-archive.mjs) never has to change to carve this control out of it.
@@ -335,7 +341,7 @@ body.readonly .mode-toggle, body.page-uncommentable .mode-toggle { display: none
    qualifier is what the real button has and
    a markdown-minted heading never can -- see src/ui.mjs's matching
    'button#theme-toggle' lookup and its own comment on the same collision. */
-body.readonly button#theme-toggle, body.page-uncommentable button#theme-toggle { display: inline-flex; }
+body.readonly button#theme-toggle, body.page-uncommentable button#theme-toggle, body.round-uncommentable button#theme-toggle { display: inline-flex; }
 
 .readonly-banner { display: none; background: var(--warning-soft); border: 1px solid var(--warning-border);
   color: var(--warning-ink); font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }
@@ -1592,25 +1598,36 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    stay reachable at every comment count: unbounded growth pushed the panel's own
    top edge off the top of a short viewport well before the list got long,
    taking the send control with it. 'max-height' below puts a ceiling on
-   the panel itself, tied to the SAME '--round-pager-dock-h' the 'bottom' value
-   already reads (no second number to keep in sync): whatever the dock's real
-   height is, the panel's own height is capped at "the rest of the viewport,
-   minus this panel's own bottom offset, minus 72px of headroom for the
-   condensed header pill (ADR.md entry 40) plus its own gap" -- so the panel's
-   top edge can never rise above that fixed distance from the viewport's top,
-   at ANY comment count. '.comment-list-wrap' is what actually absorbs the
+   the panel itself: the Tray (variant A, CONTEXT.md) stops growing at roughly
+   40% of the viewport height, so the artifact's upper half stays visible under
+   it no matter how many comments are queued. 'min()' keeps the older,
+   dock-relative ceiling alongside the flat one rather than replacing it --
+   tied to the SAME '--round-pager-dock-h' the 'bottom' value already reads (no
+   second number to keep in sync) -- as the floor for a viewport short enough
+   that 40vh alone would still let the panel's top edge climb into the
+   condensed header pill's own headroom (ADR.md entry 40): "the rest of the
+   viewport, minus this panel's own bottom offset, minus 72px of headroom for
+   the pill plus its own gap". Whichever number is smaller wins, so the panel's
+   top edge can never rise above either limit, at ANY comment count.
+   '.comment-list-wrap' is what actually absorbs the
    overflow: 'flex: 1 1 auto; min-height: 0' lets it shrink below its content's
    natural height and scroll internally, while the compose form and
-   '.page-send-bar' below it stay 'flex: none' -- their own natural size,
-   never scrolled, always the last thing on screen no matter how long the list
-   above them grows. The hint rides inside '.page-send-bar' now rather than
-   sitting beside it (see its own rule below), so it is carried by the bar's
-   'flex: none' rather than carrying one of its own. 'overflow: hidden' on the panel itself is a backstop, not
-   the mechanism: the inner scroll is what is meant to absorb every case, this
+   '.page-send-bar' below it stay at their own natural size, never scrolled,
+   always the last thing on screen no matter how long the list above them
+   grows -- '.page-send-bar' says so explicitly ('flex: none' below); the
+   compose form says nothing at all and gets the identical floor for free, a
+   flex item's automatic minimum size defaulting to its own content height
+   whenever nothing opts it into shrinking below that (src/render.mjs's own
+   comment on renderPageCommentPanel has the fuller version of this). The hint
+   rides inside '.page-send-bar' now rather than sitting beside it (see its
+   own rule below), so it is carried by the bar's 'flex: none' rather than
+   carrying one of its own. 'overflow: hidden' on the panel itself is a
+   backstop, not the mechanism: the inner scroll is what is meant to absorb
+   every case, this
    only guards against a measurement this comment did not anticipate. */
 .page-comments { position: fixed; z-index: 30; left: 50%;
   bottom: calc(var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3));
-  max-height: calc(100vh - (var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3)) - 72px);
+  max-height: min(40vh, calc(100vh - (var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3)) - 72px));
   transform: translateX(-50%); width: min(640px, calc(100vw - 2 * var(--space-6)));
   display: flex; flex-direction: column; overflow: hidden; }
 .page-comments:has(.comment-form.open), .page-comments:has(.comment-item), .page-comments:has(.page-send-bar) {

@@ -166,10 +166,13 @@ async function main() {
     const packet = await waitRes.json();
     assert.equal(packet.status, 'submitted');
     assert.equal(packet.comments.length, 1);
-    // The comment may resolve true or false depending on hint-match semantics
-    // (out of scope here) -- what matters here is that
-    // resolving it never throws and always comes back as a well-formed verdict.
-    assert.equal(typeof packet.comments[0].resolved, 'boolean');
+    // The comment may resolve or go lost depending on hint-match semantics (out
+    // of scope here) -- what matters here is that resolving it never throws and
+    // always comes back as a well-formed verdict: `lost` is either absent
+    // (resolved) or a string naming what it lost, and the packet never carries
+    // `resolved` at all (ADR 99).
+    assert.equal('resolved' in packet.comments[0], false);
+    assert.ok(packet.comments[0].lost === undefined || typeof packet.comments[0].lost === 'string');
   });
 
   if (sse) sse.req.destroy();

@@ -49,7 +49,7 @@
 //     itself gating that gesture.
 
 import assert from 'node:assert/strict';
-import { createBoard, applySubmit } from '../src/board.mjs';
+import { createBoard, applySubmit, addRound } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
@@ -1346,11 +1346,67 @@ check("a mermaid diagram nested inside a compare side is commentable exactly as 
     "the only open form afterward must still be the compare side's own nested block -- the grid minted nothing");
 });
 
-// --- a round of only question blocks: no anchorable content anywhere, but -----
-// answering and sending it (and toggling comment mode itself) behave exactly as
-// before -----------------------------------------------------------------------
+// --- the Tray's markup order (variant A, chat dock): list, composer, send bar -
 
-check('a round with only question blocks: the comment-mode toggle still renders and still toggles, and answering/sending behaves exactly as before', () => {
+check('AC 1: an awaited page board\'s Tray orders its list before its composer before its send bar', () => {
+  const trayBoard = createBoard({
+    title: 'Ticket -- Tray reorder',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Ship</button></div>' }],
+    wait: true,
+  });
+  const document = parseHTML(renderBoardPage(trayBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+
+  const panel = document.querySelector('.page-comments');
+  assert.ok(panel, 'setup failure: no .page-comments Tray rendered on an awaited page board');
+  const order = panel.children.map(c => c.className);
+  const listIdx = order.indexOf('comment-list-wrap');
+  const targetIdx = order.indexOf('comment-target');
+  const formIdx = order.indexOf('comment-form');
+  const sendBarIdx = order.indexOf('page-send-bar');
+  assert.ok([listIdx, targetIdx, formIdx, sendBarIdx].every(i => i !== -1),
+    `setup failure: expected all four Tray sections (list-wrap, target, form, send bar), got ${JSON.stringify(order)}`);
+  assert.ok(listIdx < targetIdx && targetIdx < formIdx && formIdx < sendBarIdx,
+    `the Tray must order the queued list before the composer (target+form) before the send bar -- got ${JSON.stringify(order)}`);
+});
+
+check('AC 2 corollary: queueing a comment scrolls the Tray\'s list to the newest entry, not just the composer/send-bar out of the way', () => {
+  const trayBoard = createBoard({
+    title: 'Ticket -- Tray follows the newest comment',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Ship</button></div>' }],
+    wait: true,
+  });
+  const document = parseHTML(renderBoardPage(trayBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+
+  const blockId = trayBoard.blocks[0].id;
+  const wrap = document.querySelector('.comment-list-wrap');
+  assert.ok(wrap, 'setup failure: no .comment-list-wrap rendered on an awaited page board');
+  // The stand-in has no layout (QUIRKS.md "scrollHeight and clientHeight model
+  // exactly one fact"): declare the box a real, 40vh-capped Tray already
+  // overflowing with queued comments would actually measure -- the same
+  // data-standin-scroll-height/-client-height idiom test/check-anchor-push.mjs
+  // already uses for a capped <pre>.
+  wrap.setAttribute('data-standin-scroll-height', '900');
+  wrap.setAttribute('data-standin-client-height', '200');
+  assert.ok(!wrap.scrollTop, 'setup: unscrolled before anything is queued');
+
+  const form = document.getElementById('comment-form-' + blockId);
+  const input = form.querySelector('input[type=text]');
+  input.value = 'a queued remark';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  assert.equal(wrap.scrollTop, wrap.scrollHeight,
+    'queueing a comment must scroll the Tray\'s list to the bottom -- with the panel capped at ~40vh, the 4th queued comment already overflows, and with no scroll a reviewer who just typed one sees the input clear with nothing to show it landed');
+});
+
+// --- toggle gating (ADR 98): a round with no Commentable block anywhere on it -
+// shows no comment-mode toggle; one with at least one shows it exactly as
+// before. -------------------------------------------------------------------
+
+check('a round with only question blocks: the comment-mode toggle renders with no visible affordance (ADR 98), and answering/sending behaves exactly as before', () => {
   const onlyQuestionsBoard = createBoard({
     title: 'Ticket 02 -- an all-question round',
     blocks: [
@@ -1363,16 +1419,22 @@ check('a round with only question blocks: the comment-mode toggle still renders 
   const window = document.defaultView;
   new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
 
-  // The toggle is page-global chrome, never conditional on what the board can
-  // anchor -- it must render and flip both ways even here.
+  // A round with no 'html'/'mermaid' block has nothing the toggle could ever
+  // anchor to (CONTEXT.md "Commentable"), so it renders no toggle -- structurally
+  // hidden, same discipline as body.readonly (QUIRKS.md "Readonly is locked
+  // twice"): the element stays IN the markup (test/check-archive.mjs's own idiom
+  // -- "still IN the markup ... hides it structurally, not by omitting it"), so a
+  // later round that DOES carry a Commentable block never needs a second element
+  // minted for it.
+  assert.equal(document.body.classList.contains('round-uncommentable'), true,
+    'a round with no html/mermaid block must be marked round-uncommentable at first paint');
   const toggle = document.getElementById('comment-mode-toggle');
-  assert.ok(toggle, 'the comment-mode toggle must render even on a board with no anchorable content');
-  enableCommentMode(document); // asserts inside the helper that clicking it actually turns comment mode on
-  toggle.dispatchEvent(new StandInEvent('click'));
-  assert.equal(toggle.classList.contains('active'), false,
-    'the toggle must still turn back off on a board with no anchorable content');
+  assert.ok(toggle, 'the toggle is still in the markup, hidden by CSS rather than omitted');
+  assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'none',
+    'the comment-mode toggle must render with no visible affordance on a board with no anchorable content');
 
-  // Answering and sending proceed exactly as they did before.
+  // Answering and sending proceed exactly as they did before -- gating the
+  // toggle never touches the ordinary widget/send path.
   const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
   yes.dispatchEvent(new StandInEvent('click'));
   assert.equal(yes.classList.contains('selected'), true, 'choosing an option must still work on an all-question board');
@@ -1402,6 +1464,100 @@ check('a round with only question blocks: the comment-mode toggle still renders 
   const textAnswer = captured.body.answers.find(a => a.id === qText.id);
   assert.ok(textAnswer, 'the text question must be in the collected answers');
   assert.equal(textAnswer.choice, 'a free-text answer');
+});
+
+check('a round with at least one Commentable block shows the toggle unchanged (ADR 98): one html block among the same questions flips the gate back', () => {
+  const mixedBoard = createBoard({
+    title: 'Ticket 02 -- one stage among the questions',
+    blocks: [
+      { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      { kind: 'html', html: '<div class="mock"><button>Ship</button></div>' },
+    ],
+  });
+  const document = parseHTML(renderBoardPage(mixedBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+
+  assert.equal(document.body.classList.contains('round-uncommentable'), false,
+    'a round carrying an html block must not be marked round-uncommentable');
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
+  assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'inline-flex',
+    'one Commentable block anywhere in the round is enough to render the toggle, unchanged from before ADR 98');
+  enableCommentMode(document); // the toggle still functions exactly as before once it renders at all
+});
+
+check('an errored html block still counts as Commentable (ADR 98): a round holding only an unresolved html reference still shows the toggle', () => {
+  const erroredBoard = createBoard({
+    title: 'Ticket -- an errored stage is still Commentable',
+    blocks: [{ kind: 'html', source: { path: 'no-such-html-98.html' } }],
+  });
+  assert.equal(typeof erroredBoard.blocks[0].error, 'string',
+    'setup failure: the html fixture must actually fail to resolve, or this proves nothing about the errored branch');
+  const document = parseHTML(renderBoardPage(erroredBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+
+  // roundHasCommentable (src/badge.mjs) deliberately does not exclude an
+  // errored html/mermaid block the way isPageRound does -- it still carries
+  // the comment control, aimed at its own '.resolve-error' note (this file's
+  // own KIND_CASES table, above, drives exactly that gesture against the
+  // shared fixture's errored diagrams).
+  assert.equal(document.body.classList.contains('round-uncommentable'), false,
+    'an errored html block still carries the comment control, so the round must not be marked round-uncommentable');
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.ok(toggle, 'setup failure: no #comment-mode-toggle rendered');
+  assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'inline-flex',
+    'the toggle must still render for a round whose only block is an html reference that failed to resolve');
+});
+
+// --- comment mode has to survive a round FLIP, not just a first paint ---------
+
+check('ADR 98\'s own scenario: comment mode turns off, not merely invisible, when a flip lands on an uncommentable round', () => {
+  const flipBoard = createBoard({
+    title: 'Ticket -- comment mode off on an uncommentable flip',
+    blocks: [
+      { kind: 'markdown', text: 'round one prose' },
+      { kind: 'html', html: '<div class="mock"><button>Ship</button></div>' },
+    ],
+  });
+  addRound(flipBoard, {
+    blocks: [
+      { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+    ],
+  });
+  const document = parseHTML(renderBoardPage(flipBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+
+  // The board opens on its newest round (round 2, all-question) -- step back
+  // to round 1, the Commentable one, before turning comment mode on.
+  document.querySelector('button#round-prev').dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.body.classList.contains('round-uncommentable'), false, 'setup: round 1 carries an html block');
+  enableCommentMode(document);
+  assert.equal(document.body.classList.contains('comment-mode'), true, 'setup: comment mode is genuinely on');
+
+  document.querySelector('button#round-next').dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(document.body.classList.contains('round-uncommentable'), true,
+    'round 2 holds only question blocks -- it must be marked round-uncommentable on arrival');
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'none',
+    'the toggle itself must be gone on arrival -- no visible control left to turn comment mode back off');
+  assert.equal(toggle.classList.contains('active'), false,
+    'the toggle\'s own .active class must reflect the state actually turning off, not merely the control disappearing while the state persists underneath');
+  assert.equal(document.body.classList.contains('comment-mode'), false,
+    'commentMode itself must turn off on the flip (QUIRKS.md "locked twice": the CSS hiding the control is only half the lock) -- otherwise every ordinary answer gesture on the arriving round keeps raising the "answers locked" Notice with nothing on screen able to undo it');
+
+  // And the ordinary widget gesture on the arriving round now behaves exactly
+  // as if comment mode had never been turned on: no Notice, the option gets
+  // chosen.
+  const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
+  yes.dispatchEvent(new StandInEvent('click'));
+  assert.equal(yes.classList.contains('selected'), true,
+    'once commentMode is genuinely off, an ordinary option click must select it rather than raise the Notice');
+  assert.equal(document.querySelector('.notice.visible'), null,
+    'and it must raise no Notice at all -- comment mode being genuinely off, not merely uncontrollable, is what this whole check is about');
 });
 
 // =================================================================================
