@@ -264,8 +264,8 @@ const env = {
   STUB_LAUNCHCTL_LOG: launchctlLog,
   STUB_LAUNCHCTL_STATE: launchctlState,
   // What `launchctl print` reports as the job's pid: the health stub's own, so the
-  // gate's health-pid == job-pid comparison holds for every run that doesn't
-  // deliberately break it.
+  // gate's descends-from-the-job check holds for every run that doesn't deliberately
+  // break it.
   STUB_LAUNCHCTL_PRINT_PID: String(healthProc.pid),
 };
 // Never inherit this check process's own reference allowlist: the plist assertion
@@ -2133,6 +2133,35 @@ http.createServer((req, res) => {
     assert.notEqual(r.status, 0, 'a right-digest wrong-pid listener must fail the install');
     assert.match(r.stderr, /not the daemon\s+this install just set up/, 'and be named as the foreign-listener problem');
     assert.ok(!existsSync(registrations), 'a failed install must not have rewritten the MCP registration');
+  });
+
+  await check('the health gate accepts the daemon the launchd job forked, not just the job itself', async () => {
+    // The launcher path's actual shape, and the one an equality gate got wrong: the bundle
+    // stub forks node instead of exec'ing it (bin/launcher.c, so the daemon keeps the
+    // bundle's TCC identity), so launchd's pid is the stub's and health answers with the
+    // child's -- never equal. Every launcher install hung at the health probe until the
+    // budget ran out, then blamed a foreign listener. Here the job pid is this check
+    // process, which is exactly what forked the health stub, so the answerer descends from
+    // the job without being it.
+    const root = path.join(workDir, 'forked-run');
+    const registrations = path.join(root, 'claude-registrations.json');
+    const r = spawnSync('bash', [installScript], {
+      env: {
+        ...env,
+        CLAUDE_BOARD_HEALTH_TRIES: '8',
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+        CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+        STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-forked.log'),
+        STUB_CLAUDE_STATE: registrations,
+        STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-forked.log'),
+        STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-forked.json'),
+        STUB_LAUNCHCTL_PRINT_PID: String(process.pid),
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `a daemon forked by the launchd job must pass the gate\n${r.stdout}\n${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /not the daemon/, 'and must not be mistaken for a foreign listener');
   });
 
   // --- carry-forward: the port is a choice, like the roots and the store ------------

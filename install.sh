@@ -1,96 +1,51 @@
 #!/bin/bash
-# install.sh — one idempotent command from a fresh clone of claude-board to a
-# running service. Owns the two things that sit outside this repository (see
-# "One install command, because a clone is not
-# enough"):
+# Fresh clone -> running service, in one idempotent command. macOS only.
 #
-#   1. MCP registration (Claude Code owns the config): `claude mcp add
-#      --scope user`, pointed at THIS clone's bin/mcp.mjs by absolute path.
-#   1b. ~/Applications/claude-board.app, a launcher bundle compiled from
-#      bin/launcher.c and ad-hoc signed, which exists so macOS TCC has an
-#      application to attribute the daemon's file reads to. Without it the plist
-#      runs `node` directly, TCC has only `node` to ask about, and every
-#      reference into ~/Documents, ~/Desktop or ~/Downloads comes back EPERM.
-#      This step also stages a COPY of bin/daemon.mjs and all of src/ into the
-#      bundle's Contents/Resources, ahead of the codesign call, so the signature
-#      (and the rebuild stamp) cover the code that runs under the granted
-#      identity, not just the launcher binary that forks it. See step 1b below
-#      and SECURITY.md "What the launcher bundle is for".
-#   2. The launchd plist in ~/Library/LaunchAgents, running the daemon (PROTOCOL.md
-#      "Layout") through that launcher — from the COPY staged in the bundle when a
-#      launcher is in use, or straight from THIS clone's bin/daemon.mjs on the
-#      degraded (no-launcher) path — with RunAtLoad + KeepAlive. New code does NOT
-#      restart the daemon by itself:
-#      this script's own bootout/bootstrap at the end is what takes an update,
-#      so a running review is never interrupted by somebody's save. (A
-#      plist-level WatchPaths could not have done it anyway — it only ever
-#      *starts* a job that isn't running, and KeepAlive guarantees this one
-#      always already is, so the two fight rather than compose.)
-#      The dict carries CLAUDE_BOARD_PORT and, on the DEGRADED (no-launcher) path only,
-#      CLAUDE_BOARD_REF_ROOTS/HOME too: a launchd job inherits nothing from
-#      your shell, so any knob the daemon reads from the environment has to be written
-#      here or it may as well not exist. With a launcher bundle in use, those two are
-#      baked into the bundle instead (step 1b, bin/launcher.c) and deliberately left out
-#      of this dict — see "the plist stops carrying what the launcher now bakes" at step
-#      2, and SECURITY.md "Known limits of that..." / "Fixed 2026-08-04: the environment
-#      used to be a third route, and the widest one".
-#      It also carries CLAUDE_BOARD_LAUNCHD_MARKER (ADR.md entry 76): the one thing this
-#      dict exists to prove is that launchd, not a stray LaunchServices launch, is what
-#      execed the launcher, and this is the signal launchd itself hands the process for
-#      that -- a value from a job description only launchd ever reads and injects, never
-#      something LaunchServices consults when it opens a bundle by double-click or by a
-#      failed notification activation. bin/launcher.c checks for it, by exact value,
-#      before it forks anything; never copied into the daemon's own environment (it is
-#      not in launcher.c's PASSTHROUGH_NAMES).
+# Installs four things, all outside this repo. ADR.md entries 5 and 11 fix that
+# boundary: the service, its credential, and the manual for its one tool -- never a
+# caller of them.
 #
-# Plus one file, added in step 6 below: skills/claude-board/SKILL.md, the manual
-# for the `ask` tool, copied to ~/.claude/skills/claude-board/.
+#   1b. ~/Applications/claude-board.app -- launcher bundle, ad-hoc signed under
+#       $BUNDLE_ID, with a COPY of bin/daemon.mjs and src/ staged inside the
+#       signature. Exists so TCC has an application to attribute the daemon's reads
+#       to; without it every read under ~/Documents, ~/Desktop or ~/Downloads is
+#       EPERM. Why it forks node rather than exec'ing it: bin/launcher.c. What the
+#       grant does and does not widen: SECURITY.md.
+#   2.  ~/Library/LaunchAgents/claude-board.plist -- RunAtLoad + KeepAlive, running
+#       the daemon through that launcher, or directly on the DEGRADED path.
+#   5.  MCP registration: `claude mcp add --scope user`, absolute path into THIS clone.
+#   6.  skills/claude-board/SKILL.md -> ~/.claude/skills/claude-board/.
 #
-# That is the whole boundary (ADR.md entries 5 and 11): this script installs the
-# service, its credential and the manual for its one tool, and nothing that
-# calls them. `/grill` and every other caller are personal, versioned in
-# ~/.claude's own git repo, and evolve on their own schedule — a fresh clone
-# yields a daemon, an MCP registration and a manual, and pointing something at
-# them is a separate, later act.
+# Four invariants an edit here has to preserve:
 #
-# Running this script again on a machine that already has the service must
-# change nothing and break nothing: no duplicate MCP registration, no
-# duplicate launchd job, no clobbered logs, exit 0 both times. Reconciliation
-# is unconditional remove-then-add / bootout-then-bootstrap rather than
-# diffing prior state, so the result is the same regardless of what was there
-# before (e.g. a stale registration pointing at a different clone path).
+#   IDEMPOTENT. A second run changes nothing and exits 0: no duplicate registration
+#   or job, no clobbered logs, no rotated secret, no rebuilt bundle. Reconciliation is
+#   unconditional remove-then-add / bootout-then-bootstrap, never a diff against prior
+#   state, so a stale registration from another clone path converges the same way a
+#   fresh machine does.
 #
-# Testing seams (env vars): not user-facing configuration, defaults are the real
-# paths, exist so test/check-install.mjs can point everything at a temp dir and a
-# stub binary instead of touching this machine for real.
+#   THIS SCRIPT OWNS THE RESTART. New code never restarts the daemon by itself -- the
+#   bootout/bootstrap at step 3 is the only thing that takes an update, so a live review
+#   survives somebody's save. Do not add WatchPaths: it only starts a job that is not
+#   running, KeepAlive guarantees this one always is, so the two fight.
 #
-# CLAUDE_BOARD_HOME is NOT one of these. It is documented configuration — where the
-# store lives — in README.md and PROTOCOL.md. This comment used to cite it as the
-# example of a test seam -- that description has since been retired.
+#   A LAUNCHD JOB INHERITS NOTHING FROM YOUR SHELL. Every knob the daemon reads from the
+#   environment is written into the plist (DEGRADED path) or baked into the launcher
+#   (bundle path). Exactly one of the two, never both -- two copies of one decision
+#   reads as though rewriting the plist could still move the boundary, when it cannot.
 #
-#   CLAUDE_BOARD_LAUNCH_AGENTS_DIR   default: ~/Library/LaunchAgents
-#   CLAUDE_BOARD_LOG_DIR             default: ~/Library/Logs/claude-board
-#   CLAUDE_BOARD_MCP_CMD             default: claude
-#   CLAUDE_BOARD_LAUNCHCTL_CMD       default: launchctl
-#   CLAUDE_BOARD_PLUTIL_CMD          default: plutil
-#   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret
-#   CLAUDE_BOARD_APP_DIR             default: ~/Applications
-#   CLAUDE_BOARD_CC                  default: cc
-#   CLAUDE_BOARD_CODESIGN            default: codesign
-#   CLAUDE_BOARD_SKILLS_DIR          default: ~/.claude/skills
-#   CLAUDE_BOARD_HEALTH_TRIES        default: 20, or 480 on the TCC-dialog path below
+#   A REBUILD COSTS THE USER THEIR GRANT. TCC pins a grant to the code signature, so
+#   rebuilding the bundle silently revokes Documents access. Anything that changes the
+#   bundle's bytes belongs in $LAUNCHER_STAMP; anything that does not must not touch them.
 #
-# macOS only, zero dependencies: bash + coreutils + launchctl/plutil, nothing
-# this OS doesn't already ship — with one soft dependency, the `cc` from the
-# Xcode Command Line Tools, needed only to build the launcher bundle. A machine
-# without it still gets a working install (step 1b degrades to running node
-# directly, exactly as every version before the bundle did); what it does not get
-# is the ability to read a board reference out of ~/Documents, ~/Desktop or
-# ~/Downloads. That is a loud warning, not a failure.
+# CLAUDE_BOARD_* variables are of two kinds, and the difference is invisible in the code:
+# most are TEST SEAMS, defaulting to the real paths so test/check-install.mjs can redirect
+# them at a temp dir. CLAUDE_BOARD_HOME, CLAUDE_BOARD_PORT and CLAUDE_BOARD_REF_ROOTS are
+# documented configuration (README.md, PROTOCOL.md) and carry forward across reinstalls.
 #
-# The hard requirements — macOS, node 22 or newer, and the `claude` CLI — are checked in
-# the preflight section below, BEFORE this script writes, builds, signs or registers
-# anything. Each of them used to surface late and under a false name (see that section).
+# `cc` is the one soft dependency: without it step 1b degrades, the daemon still runs,
+# and the install warns rather than fails. The hard ones -- macOS, node >= 22, the
+# `claude` CLI -- are refused in preflight, before anything is written.
 
 set -euo pipefail
 
@@ -188,32 +143,23 @@ APP_EXEC="$APP_PATH/Contents/MacOS/${LABEL}"
 BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
 
 # --- preflight: the ways this machine cannot run the service at all -----------
-# Everything past this section writes, builds, signs or registers something, so every
-# refusal that belongs to the MACHINE rather than to the install belongs here. Each of
-# these used to surface late and under a false name: a non-macOS host got as far as
-# `launchctl: command not found`; a node too old to parse the daemon's own source built
-# and signed a bundle, wrote the plist, and then failed the health gate as "the daemon is
-# NOT running"; and a missing `claude` CLI failed at step 5 of 6, with the plist written,
-# the daemon up and the registration this repo does not own already torn down. A refusal
-# that names the real cause and touches nothing is worth more than a partial install that
-# names the wrong one.
+# Everything past this section writes, builds, signs or registers. A refusal that belongs
+# to the MACHINE rather than to the install goes here, so it costs nothing and names its
+# own cause; left to surface later, each of these arrives under a false name (a missing
+# node fails the health gate as "the daemon is NOT running", a missing `claude` CLI fails
+# at step 5 with the plist written and the registration this repo does not own torn down).
 #
-# The Xcode Command Line Tools are deliberately NOT a preflight check: a machine without
-# `cc` still gets a working daemon (step 1b degrades), so that stays a loud warning.
+# `cc` stays out of preflight on purpose: without it step 1b degrades and the daemon still
+# runs, so it is a warning, not a refusal.
 
-# The clone first: cheapest to check, and it decides whether there is anything to install.
 if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$LAUNCHER_SRC" ] || [ ! -d "$REPO_DIR/src" ]; then
   echo "error: bin/daemon.mjs, bin/mcp.mjs, bin/launcher.c or src/ not found under $REPO_DIR — run this script from a claude-board clone" >&2
   exit 1
 fi
-# src/ is staged into the launcher bundle whole (step 1b below), so it has to exist even on
-# the degraded (no-launcher) path -- a clone missing it is not a partial install, it is one
-# bin/daemon.mjs's own `../src/server.mjs` import could never have satisfied either.
+# src/ is required on the DEGRADED path too: bin/daemon.mjs imports ../src/server.mjs.
 
-# macOS only, and not as a matter of taste: the service is a launchd agent, the daemon's
-# file reads are attributed by TCC to an ad-hoc signed .app bundle, and the notifications
-# come from UserNotifications. There is no degraded mode to fall back to on another
-# kernel, so this refuses rather than failing four steps later inside `launchctl`.
+# No degraded mode on another kernel: launchd agent, TCC-attributed bundle,
+# UserNotifications.
 KERNEL="$(uname -s 2>/dev/null || true)"
 if [ "$KERNEL" != "Darwin" ]; then
   echo "error: claude-board installs on macOS only — this host reports '${KERNEL:-an unknown kernel}'." >&2
@@ -222,31 +168,23 @@ if [ "$KERNEL" != "Darwin" ]; then
   exit 1
 fi
 
-# $HOME is baked into the launcher (CLAUDE_BOARD_HOME_DIR) and is the root of nearly every
-# default path above, so an empty one produces an install rooted at "/" -- checked here
-# rather than discovered as a permission error halfway through step 0.
+# Empty $HOME roots the whole install at "/", and it is baked into the launcher as
+# CLAUDE_BOARD_HOME_DIR.
 if [ -z "${HOME:-}" ]; then
   echo "error: HOME is empty — every path this script writes is derived from it." >&2
   exit 1
 fi
 
-# The interpreter path is baked into the launcher bundle and into the MCP registration, so
-# it has to still exist in six months. `command -v node` alone does not clear that bar on a
-# machine using a version manager: it resolves to a versioned directory
-# (~/.nvm/versions/node/v24.18.0/bin, ~/.local/share/mise/installs/node/24.4.0/bin,
-# ~/Library/Application Support/fnm/node-versions/v24.4.0/installation/bin, ...), and the
-# next upgrade deletes it — leaving launchd pointing at a path that is gone, reported as
-# "daemon is not reachable" in every session. A rewritten plist cannot even fix it once a
-# launcher bundle is in use, because the path is compiled into the signed binary.
+# This path is baked into the signed launcher and into the MCP registration, so it has to
+# outlive the next `node` upgrade. Two shapes fail that bar, and the case list below
+# matches both: a VERSIONED directory (~/.nvm/versions/node/v24.18.0/bin) that the upgrade
+# deletes, and a SHIM directory (mise/shims, nodenv/shims, fnm multishell) that dispatches
+# through the version manager's config at call time -- which launchd runs without. Either
+# way launchd points at nothing and every session reports "daemon is not reachable"; once a
+# bundle is in use, rewriting the plist cannot fix it, because the path is compiled in.
 #
-# A shim directory (mise/shims, nodenv/shims, fnm's per-shell multishell path) is no better
-# than a versioned one: it is a dispatcher that resolves through the version manager's own
-# config at call time, and launchd runs it with none of the shell environment that config
-# assumes. Both shapes are matched below.
-#
-# So: a version-manager path is only used when there is no stable alternative, and the
-# substitution — or the lack of one — is announced rather than silent. CLAUDE_BOARD_NODE
-# overrides both.
+# Prefer a stable interpreter, fall back to the version-managed one, and print whichever
+# happened. CLAUDE_BOARD_NODE overrides.
 NODE_BIN="${CLAUDE_BOARD_NODE:-}"
 if [ -z "$NODE_BIN" ]; then
   NODE_BIN="$(command -v node || true)"
@@ -280,10 +218,9 @@ if [ ! -x "$NODE_BIN" ]; then
   exit 1
 fi
 
-# Kept in step with package.json's `engines.node`; test/check-install.mjs fails if the two
-# drift. An older node does not fail at install time on its own -- it fails when the daemon
-# it is pointed at tries to parse syntax it does not know, which arrives here as a health
-# gate that times out and names the wrong cause.
+# Kept in step with package.json's `engines.node`; test/check-install.mjs fails on drift.
+# Checked here because an old node fails later as a health-gate timeout naming the wrong
+# cause -- the daemon cannot parse its own source.
 MIN_NODE_MAJOR=22
 NODE_VERSION="$("$NODE_BIN" --version 2>/dev/null || true)"
 NODE_MAJOR="${NODE_VERSION#v}"
@@ -301,10 +238,8 @@ if [ "$NODE_MAJOR" -lt "$MIN_NODE_MAJOR" ]; then
   exit 1
 fi
 
-# The MCP registration is step 5 of 6, and it is the half this repo does not own: without
-# the Claude Code CLI there is nothing to register with, and no amount of daemon is a
-# working install. Checked here so that failure costs nothing rather than arriving after
-# the plist, the bundle and the running service.
+# Without the Claude Code CLI there is nothing to register with, and a daemon no session
+# can reach is not an install.
 if ! command -v "$MCP_CMD" >/dev/null 2>&1; then
   echo "error: the Claude Code CLI ('$MCP_CMD') was not found." >&2
   echo "       claude-board registers its MCP server with it (step 5 below), so an install" >&2
@@ -313,26 +248,28 @@ if ! command -v "$MCP_CMD" >/dev/null 2>&1; then
   exit 1
 fi
 
-# An empty CLAUDE_BOARD_HOME is not a choice, it is a mistake with a sticky consequence:
-# it used to bake CLAUDE_BOARD_STORE_DIR "" into the signed launcher AND leave a zero-byte
-# carry-forward record, so every later reinstall read the empty record back and did it
-# again. Refused by name here; unset the variable to get the default store.
+# Empty is refused rather than treated as a choice: it bakes CLAUDE_BOARD_STORE_DIR "" into
+# the signed launcher and leaves a zero-byte carry-forward record that repeats it on every
+# later reinstall. Unset the variable for the default store.
 if [ -n "${CLAUDE_BOARD_HOME+set}" ] && [ -z "$CLAUDE_BOARD_HOME" ]; then
   echo "error: CLAUDE_BOARD_HOME is set but empty — unset it to use the default store" >&2
   echo "       (~/Library/Application Support/claude-board), or give it a real path." >&2
   exit 1
 fi
 
-# The port, carried forward across reinstalls exactly the way the roots and the store are,
-# and for a sharper reason: it is baked into the plist, the health gate, the shim's advice
-# and every URL printed below, and a reinstall from a clean shell used to revert a custom
-# one to the default. The old daemon still holds the custom port, the new job tries the
-# default, and if anything else has that -- or the old job is still shutting down -- launchd
-# throttles the restart loop with nothing on screen naming the cause.
+# CARRY-FORWARD, the shape all three install-time choices below share (port, reference
+# roots, store). Each is resolved by the same precedence -- explicit variable, then the
+# record file next to the secret, then a one-time migration out of the plist an older
+# install wrote, then the default -- and each prints where its value came from, because a
+# choice that changes silently across a `git pull && ./install.sh` is the failure the
+# mechanism exists to prevent. The plist stopped being the record once the launcher started
+# baking these values (step 2); the files in $SECRET_DIR are it now.
 #
-# Kept in step with src/handoff.mjs's DEFAULT_PORT (test/check-install.mjs asserts they
-# match). Precedence, like the two records below: an explicit variable, then the record,
-# then a one-time migration out of the plist an older install wrote, then the default.
+# The port earns it most sharply: reverting a custom one to the default means the old daemon
+# still holds the custom port, the new job binds the default, and launchd throttles the
+# restart loop with nothing on screen naming the cause.
+#
+# Kept in step with src/handoff.mjs's DEFAULT_PORT; test/check-install.mjs asserts it.
 DEFAULT_PORT=7391
 if [ -n "${CLAUDE_BOARD_PORT:-}" ]; then
   PORT="$CLAUDE_BOARD_PORT"
@@ -346,9 +283,8 @@ else
   PORT="$DEFAULT_PORT"
   PORT_FROM="default"
 fi
-# Validated whichever of those four it came from: a corrupt record or a hand-edited plist
-# bakes its bytes into the plist and the launcher just as readily as a typo in the variable
-# does, and `<string></string>` in a launchd job is a daemon that binds the wrong thing.
+# Validated whichever of the four it came from: a corrupt record bakes its bytes in as
+# readily as a typo does, and `<string></string>` in a launchd job binds the wrong thing.
 case "$PORT" in
   ''|*[!0-9]*) PORT_OK=0 ;;
   *) if [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then PORT_OK=1; else PORT_OK=0; fi ;;
@@ -358,69 +294,39 @@ if [ "$PORT_OK" -ne 1 ]; then
   exit 1
 fi
 
-# The allowlist a content reference may resolve inside, on top of the board's own
-# project directory (ADR.md entry 3, src/resolve.mjs): colon-separated absolute paths,
-# so a session can render the skill, command or agent file it is discussing.
+# The allowlist a content reference may resolve inside, on top of the board's own project
+# directory (ADR.md entry 3, src/resolve.mjs). Three directories under ~/.claude rather
+# than the tree, which also holds settings.json, .credentials.json and every project's
+# transcripts; plus the render directory, so an agent can reference a stage it just
+# rendered instead of inlining the bytes. Keep in step with DEFAULT_REF_ROOTS in
+# src/resolve.mjs; test/check-install.mjs asserts it.
 #
-# Under ~/.claude the default is three directories, NOT the whole tree: the rest
-# of it is settings.json, .credentials.json, shell snapshots and
-# every project's transcripts, none of which a board has a reason to quote.
-# `CLAUDE_BOARD_REF_ROOTS=$HOME/.claude ./install.sh` still installs the whole tree for
-# anyone who wants it. The fourth entry is the render directory (2026-08-05): an agent
-# that just rendered a stage needs a place to reference it FROM, or it inlines the bytes
-# into the post instead. Keep all four in step with DEFAULT_REF_ROOTS in src/resolve.mjs;
-# test/check-install.mjs asserts they match.
+# THIS IS THE ONLY PLACE THE DEFAULT LIVES. src/resolve.mjs reads an absent
+# CLAUDE_BOARD_REF_ROOTS as an EMPTY allowlist, deliberately: the daemon restarts itself on
+# any src/ change, so a default in code would widen the boundary during a `git pull`,
+# unannounced. Written here, it arrives only when someone runs the installer.
 #
-# This is also the ONLY place the default exists: src/resolve.mjs reads an
-# absent CLAUDE_BOARD_REF_ROOTS as an EMPTY allowlist, so that a default living in code
-# cannot widen the boundary on machines whose plist predates it — the daemon restarts
-# itself on any src/ change, so such a default would go live during a `git pull`,
-# unannounced. Written here, the default arrives when someone runs the installer, which
-# is a thing a person does deliberately.
-#
-# Which leaves the upgrade path, and it used to leak the same way: this
-# script rewrote the plist unconditionally and never read the old one back, so an
-# operator who ran `CLAUDE_BOARD_REF_ROOTS= ./install.sh` to get a cwd-only daemon had
-# that decision reverted to the default by the next `git pull && ./install.sh` from a
-# clean shell — the boundary widening back with nothing on screen. So the precedence is:
-# an explicit variable wins (empty included), otherwise whatever was carried forward
-# says (originally the plist; now $REF_ROOTS_RECORD_FILE, next to the secret — see
-# "Carry-forward across reinstalls" below and the resolution just under this comment),
-# and only a machine with neither at all gets the default. The resolved value is printed
-# either way, so it is never a silent choice.
-#
-# Carrying forward is not freezing, though (ADR.md entry 36). A carried-forward record
-# is checked against today's DEFAULT_REF_ROOTS below, and any directory the defaults name
-# that the record is missing is added back in and the addition is printed by name — the
-# consequence found in use: `~/Documents/renders` has been a default for a while, and a
-# record written before it joined stayed short of it forever, on every reinstall, with no
-# way for a `git pull` to fix it. Narrowing still survives, but only for directories the
-# current defaults do NOT name; the ones they do are re-added regardless of what an
-# operator once removed. Wanting a genuinely narrow list now takes an explicit
-# `CLAUDE_BOARD_REF_ROOTS=...` rather than relying on the record's inertia.
+# Carry-forward applies (see the port above), with one addition from ADR.md entry 36:
+# carried forward is not frozen. The widening loop below re-adds any of today's defaults
+# the record is missing and prints what it added, because a record written before
+# ~/Documents/renders joined the defaults would otherwise stay short of it forever. An
+# operator's narrowing survives only for directories the defaults do not name; a genuinely
+# narrow list needs an explicit CLAUDE_BOARD_REF_ROOTS, not the record's inertia.
 DEFAULT_REF_ROOTS="$HOME/.claude/skills:$HOME/.claude/commands:$HOME/.claude/agents:$HOME/Documents/renders"
 REF_ROOTS_CARRIED=0
 if [ -n "${CLAUDE_BOARD_REF_ROOTS+set}" ]; then
   REF_ROOTS="$CLAUDE_BOARD_REF_ROOTS"
   REF_ROOTS_FROM="CLAUDE_BOARD_REF_ROOTS"
 elif [ -f "$REF_ROOTS_RECORD_FILE" ]; then
-  # The ordinary carry-forward path once a launcher bundle is in use: the plist no
-  # longer carries this value at all (see "the plist stops carrying..." at step 2 below),
-  # so this file -- rewritten at the end of every run that resolves a value, right after
-  # the secret above is created -- is what a plain `git pull && ./install.sh` reads back
-  # instead of the plist.
   REF_ROOTS="$(cat "$REF_ROOTS_RECORD_FILE")"
   REF_ROOTS_FROM="carried forward from $REF_ROOTS_RECORD_FILE"
   REF_ROOTS_CARRIED=1
 elif REF_ROOTS="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_REF_ROOTS raw -o - "$PLIST_PATH" 2>/dev/null)"; then
-  # One-time migration fallback, for a plist from before the record file existed -- back
-  # when the plist itself was the only carry-forward mechanism there was. Exit 0 means
-  # the key was there, empty string included -- an empty carried value is a real value
-  # to migrate, not a missing one. It does NOT survive as-is: REF_ROOTS_CARRIED=1 sends
-  # it through the widening loop below like any other carried record (ADR.md entry 36),
-  # so an empty one comes out holding today's defaults, named on screen. Only the
-  # explicit-env branch above pins a narrow list. Written into the record file below, so
-  # this branch fires at most once per machine.
+  # Migration, at most once per machine (the record is written below). plutil exit 0 means
+  # the key was present, empty string included -- an empty carried value is a value, not a
+  # missing one, and REF_ROOTS_CARRIED=1 sends it through the widening loop like any other
+  # record, so it comes out holding today's defaults. Only the explicit-env branch pins a
+  # narrow list.
   REF_ROOTS_FROM="carried forward from $PLIST_PATH (migrated to $REF_ROOTS_RECORD_FILE)"
   REF_ROOTS_CARRIED=1
 else
@@ -428,14 +334,11 @@ else
   REF_ROOTS_FROM="default"
 fi
 
-# ADR.md entry 36: a carried-forward record does not get to permanently miss a default
-# the way an operator's deliberate narrowing does. Walk today's defaults and add back
-# whichever ones the carried-forward value is missing; REF_ROOTS_WIDENED collects exactly
-# what got added, so the print block below can name it -- the print is load-bearing, not
-# decoration, since a read allowlist growing with nothing on screen is the failure this
-# whole mechanism exists to prevent. Explicit-env and default-value roots skip this: an
-# operator who just set the variable meant exactly what they typed, and the default
-# already names everything there is to add.
+# The widening loop (ADR.md entry 36). REF_ROOTS_WIDENED collects exactly what was added so
+# the print block below can name it; that print is load-bearing, since a read allowlist
+# growing with nothing on screen is the failure the whole mechanism prevents. Only carried
+# records go through it -- an explicit variable means what it says, and the default already
+# names everything there is to add.
 REF_ROOTS_WIDENED=""
 if [ "$REF_ROOTS_CARRIED" -eq 1 ]; then
   OLD_IFS="$IFS"
@@ -462,43 +365,31 @@ if [ "$REF_ROOTS_CARRIED" -eq 1 ]; then
   IFS="$OLD_IFS"
 fi
 
-# CLAUDE_BOARD_HOME, resolved the same way and for the same reason. It is
-# documented configuration (README.md, PROTOCOL.md), but it was never written into
-# the plist -- and a launchd job inherits nothing from the shell that ran this
-# script, so pointing the store at an encrypted volume produced a green install and
-# boards at the default path anyway. Unlike REF_ROOTS there is no default to write:
-# absent means the key is omitted and src/store.mjs picks its own default, so an
-# install that never set it keeps exactly today's plist.
+# The store, same carry-forward. Unlike the roots there is no default to write: absent
+# means the key is omitted and src/store.mjs picks its own, so an install that never
+# mentions CLAUDE_BOARD_HOME leaves the plist byte-identical. BOARD_HOME_FROM empty is the
+# marker for "never chose one" and has to stay distinguishable from "chose the default",
+# which is what BOARD_HOME_XML further down keys on.
 if [ -n "${CLAUDE_BOARD_HOME+set}" ]; then
   BOARD_HOME="$CLAUDE_BOARD_HOME"
   BOARD_HOME_FROM="CLAUDE_BOARD_HOME"
 elif [ -s "$BOARD_HOME_RECORD_FILE" ]; then
-  # Same carry-forward replacement as the two roots above. Unlike them there is no
-  # default to fall back to below this -- BOARD_HOME_FROM empty means "the operator
-  # never chose one", and that has to stay distinguishable from "chose the default
-  # explicitly" for the plist logic further down (BOARD_HOME_XML) to keep working.
-  #
-  # -s, not -f: a zero-byte record is not a store choice, it is the residue an empty
-  # CLAUDE_BOARD_HOME used to leave behind (now refused outright in the preflight). Read
-  # back as "no choice", it falls through to the default below and the persistence step
-  # deletes the file, so a machine carrying one heals itself on the next run.
+  # -s, not -f: a zero-byte record is residue from an empty CLAUDE_BOARD_HOME (now refused
+  # in preflight), not a store choice. Read as "no choice" it falls through to the default
+  # and the persistence step deletes it, so a machine carrying one heals on the next run.
   BOARD_HOME="$(cat "$BOARD_HOME_RECORD_FILE")"
   BOARD_HOME_FROM="carried forward from $BOARD_HOME_RECORD_FILE"
 elif BOARD_HOME="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_HOME raw -o - "$PLIST_PATH" 2>/dev/null)"; then
-  # One-time migration fallback -- see the identical branch on CLAUDE_BOARD_REF_ROOTS.
+  # Migration -- see the identical branch on CLAUDE_BOARD_REF_ROOTS.
   BOARD_HOME_FROM="carried forward from $PLIST_PATH (migrated to $BOARD_HOME_RECORD_FILE)"
 else
   BOARD_HOME=""
   BOARD_HOME_FROM=""
 fi
 
-# The launcher's compiled-in CLAUDE_BOARD_STORE_DIR (bin/launcher.c) always has to be a
-# real path -- it is baked in and applied unconditionally, so an empty string would just
-# mean the daemon spends a run resolving its own fallback anyway, and "the header states
-# nothing" is exactly the silence the resolved-value-on-screen rule elsewhere in this
-# script refuses. So: the operator's choice if there is one, otherwise the identical
-# default src/store.mjs would compute on its own (kept in step with it here, the way
-# DEFAULT_REF_ROOTS is kept in step with src/resolve.mjs).
+# The launcher bakes CLAUDE_BOARD_STORE_DIR unconditionally, so it needs a real path even
+# when nobody chose one: the operator's choice, else the same default src/store.mjs would
+# compute. Kept in step with it, as DEFAULT_REF_ROOTS is with src/resolve.mjs.
 if [ -n "$BOARD_HOME_FROM" ]; then
   EFFECTIVE_BOARD_HOME="$BOARD_HOME"
 else
@@ -509,90 +400,66 @@ echo "==> claude-board install"
 echo "    repo:   $REPO_DIR"
 echo "    daemon: $DAEMON_PATH"
 echo "    mcp:    $MCP_PATH"
-# Spelled out rather than folded into a ${REF_ROOTS:-...} default: an apostrophe inside
-# that word is a quote character to bash even within double quotes, which silently
-# swallows the rest of the script up to the next one. See QUIRKS.md.
+# Spelled out rather than folded into ${REF_ROOTS:-...}: an apostrophe in that word is a
+# quote character to bash even inside double quotes, and swallows the rest of the script
+# up to the next one. QUIRKS.md.
 if [ -n "$REF_ROOTS" ]; then
   echo "    reference roots: $REF_ROOTS"
 else
   echo "    reference roots: none (a reference resolves inside the board project directory only)"
 fi
 echo "                     [$REF_ROOTS_FROM]"
-# ADR.md entry 36: the widen is silent otherwise, and a read allowlist growing without
-# being asked is exactly what the carry-forward existed to prevent -- so this line is
-# printed whenever REF_ROOTS_WIDENED is non-empty, never folded into the line above.
+# Its own line, never folded into the one above (ADR.md entry 36): an unasked-for widen
+# that prints nothing is the failure carry-forward exists to prevent.
 if [ -n "$REF_ROOTS_WIDENED" ]; then
   echo "                     widened by the current defaults: $REF_ROOTS_WIDENED"
 fi
-# Printed for the same reason the roots are: the store is where the reviewer's answers
-# end up, and an operator who redirected it should be able to see that it took.
 if [ -n "$BOARD_HOME_FROM" ]; then
   echo "    store:  $BOARD_HOME"
   echo "                     [$BOARD_HOME_FROM]"
 else
   echo "    store:  ~/Library/Application Support/claude-board [default]"
 fi
-# And the port, for the third time the same reason: it is carried forward now, so which
-# port this install is about must not be something the reader has to infer from the plist.
 echo "    port:   $PORT"
 echo "                     [$PORT_FROM]"
 
 # --- 0. the local secret ----------------------------------------------------
-# The credential that tells this machine's shim from any other local process
-# ("A loopback Host check, an origin check, and a
-# local secret"; "Read routes are gated"). The daemon requires
-# it on every route but /api/health -- reads included, since the cookie a browser
-# holds is derived from this file -- and bin/mcp.mjs reads it at startup and sends
-# it. /api/health stays open precisely so the health check below can use plain
-# curl, which has no credential to offer.
+# The credential separating this machine's shim from any other local process (SECURITY.md).
+# Required on every route but /api/health, reads included -- a browser's cookie is derived
+# from this file. /api/health stays open so the health gate below can use plain curl.
 #
-# Generated FIRST, before launchd is (re)loaded, so the daemon that comes up
-# below already has one to read.
-#
-# Idempotent in the strongest sense: an existing secret is NEVER rotated.
-# Rotating it would 401 every shim already running against the old value —
-# i.e. every live Claude Code session on this machine would lose the board
-# mid-review — and re-running install.sh is a routine, expected act (config
-# sync, a moved clone, a repeat of the README's one command).
+# NEVER ROTATED once it exists. Rotating 401s every shim already running against the old
+# value, i.e. every live session loses its board mid-review, and re-running this script is
+# routine. Generated before launchd is reloaded, so the daemon has one to read.
 mkdir -p "$SECRET_DIR"
 chmod 700 "$SECRET_DIR"
 if [ -s "$SECRET_FILE" ]; then
   echo "==> local secret already present at $SECRET_FILE (left as it is; never rotated)"
 else
-  # crypto.randomBytes, i.e. the OS CSPRNG, 32 bytes rendered as 64 hex chars.
-  # Written through a 077 umask so it is never briefly world-readable between
-  # creation and chmod, and chmod'ed anyway so a pre-existing empty file with
+  # OS CSPRNG, 32 bytes as hex. The umask keeps it from being briefly world-readable
+  # between creation and chmod; the chmod runs anyway, so a pre-existing empty file with
   # looser modes is corrected rather than trusted.
   ( umask 077; "$NODE_BIN" -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))' > "$SECRET_FILE" )
   chmod 600 "$SECRET_FILE"
   echo "==> generated local secret at $SECRET_FILE"
 fi
 
-# Persist the resolved roots (and the store, if the operator chose one) into the same
-# 0700 directory, so the NEXT run's resolution above reads them back from here instead
-# of from the plist -- which, once a launcher bundle is in use, no longer carries them
-# at all (see "the plist stops carrying..." at step 2 below). Roots are rewritten every
-# run regardless of where the value came from, default included: today's default is
-# tomorrow's carried-forward value, the same way the plist always held the key
-# regardless of value under the old mechanism. The store is the odd one out, as it is
-# everywhere else in this script -- written only when the operator has actually chosen
-# one, so an install that never mentions CLAUDE_BOARD_HOME keeps resolving the daemon's
-# own default rather than freezing today's default in as a future explicit choice.
+# Write the carry-forward records, into the same 0700 directory as the secret.
+#
+# Roots and port unconditionally, whatever the value's source: today's default is
+# tomorrow's carried value, so a machine on 7391 keeps landing on 7391 even if the default
+# moves. The store only when the operator actually chose one -- writing it always would
+# freeze today's default in as a future explicit choice.
 printf '%s' "$REF_ROOTS" > "$REF_ROOTS_RECORD_FILE"
 if [ -n "$BOARD_HOME_FROM" ]; then
   printf '%s' "$BOARD_HOME" > "$BOARD_HOME_RECORD_FILE"
 else
-  # Also the repair for a zero-byte record an older run left behind: read as "no choice"
-  # above, it is deleted here rather than left to be re-read forever.
+  # Also repairs a zero-byte record: read as "no choice" above, deleted here rather than
+  # re-read forever.
   rm -f "$BOARD_HOME_RECORD_FILE"
 fi
-# The port goes in unconditionally, like the roots and unlike the store: it always has a
-# resolved value, today's default is tomorrow's carried-forward value, and a machine whose
-# daemon is on 7391 must keep landing on 7391 even if that default ever moves.
 printf '%s' "$PORT" > "$PORT_RECORD_FILE"
-# ADR.md entry 38: `/file/` and its allowlist are gone, so there is nothing left to carry
-# this record forward for. An install that predates the deletion left one behind; this
-# removes it on the very next run rather than leaving a stale file nothing reads again.
+# `/file/` and its allowlist are gone (ADR.md entry 38); clear what an older install left.
 rm -f "$SERVE_ROOTS_RECORD_FILE"
 
 # --- content hashing helpers -------------------------------------------------
@@ -606,19 +473,14 @@ sha256_file() {
   ' "$1"
 }
 
-# The same digest over a string rather than a file, used by step 1b to fold several
-# file hashes and an identifier into the one stamp that decides whether the launcher
-# bundle needs rebuilding. That caller keeps the argument ASCII (digests and an
-# identifier, never a raw path), because a process argument reaches node as a UTF-8 string
-# and a filename is not obliged to be one: a stray byte would be replaced on the way in,
-# and a stamp that cannot tell two builds apart is a bundle that never gets rebuilt.
+# CALLERS MUST PASS ASCII (digests, identifiers -- not raw paths). A process argument
+# reaches node as UTF-8 and a filename need not be; a stray byte is replaced on the way in,
+# and a stamp that cannot tell two builds apart is a bundle that never rebuilds.
 #
-# The health gate at step 4 is the one deliberate exception, and it is exempt for the
-# reason the rule exists rather than despite it: it hashes the daemon's program PATH, and
-# compares the result against a digest the daemon computed from its own `process.argv[1]`
-# -- which arrived through execve and was decoded by node exactly the way this argument is.
-# Both sides lose the same bytes to the same replacement, so a path that is not valid UTF-8
-# still matches itself, which is the only property that comparison needs.
+# The health gate at step 4 is the one exception, exempt for the reason the rule exists: it
+# hashes the daemon's program path and compares against a digest the daemon made from its
+# own process.argv[1], which arrived through execve and was decoded identically. Both sides
+# lose the same bytes to the same replacement, so the path still matches itself.
 sha256_string() {
   "$NODE_BIN" -e '
     const crypto = require("node:crypto");
@@ -626,22 +488,16 @@ sha256_string() {
   ' "$1"
 }
 
-# The digest of the daemon's own payload -- bin/daemon.mjs and everything under src/ --
-# folded into the launcher stamp below so that editing either in THE CLONE (not the
-# installed bundle, which is a copy made at build time and already covered by
-# codesign) makes the next install rebuild rather than report "already current" over
-# stale code. One node invocation for the whole tree rather than one sha256_file call
-# per file: this already runs on every install, including a no-op one, since the stamp
-# has to be computed before it can be compared.
+# Digest of bin/daemon.mjs plus everything under src/, folded into the launcher stamp so an
+# edit in THE CLONE forces a rebuild instead of "already current" over stale code. One node
+# invocation for the whole tree: this runs on every install, no-op ones included, because
+# the stamp has to be computed before it can be compared.
 #
-# Deterministic by construction, which the brief this exists for calls out by name:
-# `readdirSync` order is not documented as stable, so every relative path is collected
-# first and sorted before anything is hashed, and the digest is built from each file's
-# OWN hash paired with its relative path (not from concatenating raw file bytes back to
-# back), so content never depends on mtime, inode, or the order the filesystem happened
-# to hand files back in -- two clean checkouts of identical content produce the same
-# digest. See test/check-install-payload.mjs, which pins this against a real filesystem
-# rather than trusting the reasoning.
+# DETERMINISTIC BY CONSTRUCTION. readdirSync order is not documented as stable, so paths
+# are collected and sorted before anything is hashed, and the digest folds each file's own
+# hash paired with its relative path rather than concatenating raw bytes -- no dependence on
+# mtime, inode, or filesystem order. test/check-install-payload.mjs pins this against a
+# real filesystem.
 payload_digest() {
   "$NODE_BIN" -e '
     const fs = require("node:fs");
@@ -654,15 +510,11 @@ payload_digest() {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) out = out.concat(walk(full));
         else if (entry.isFile()) out.push(full);
-        // Refuse loudly rather than skip. isFile() is FALSE for a symlink, so a symlinked
-        // file under src/ used to fall through this loop silently: its bytes never entered
-        // PAYLOAD_DIGEST, while cp -R staged it into the signed bundle as a link whose
-        // target lives outside the seal. codesign then vouched for the link, the stamp
-        // stayed unchanged, and "bundle already current" skipped the rebuild -- so both
-        // the signature and the stamp actively attested to content neither covered.
-        // Refuse, but as a one-line message and a clean exit code rather than a thrown
-        // stack trace: the caller turns this into launcher_degraded, the same graceful
-        // path every other build-input problem in this section takes.
+        // Refuse loudly rather than skip: isFile() is FALSE for a symlink, whose bytes
+        // would never enter the digest while cp staged it into the signed bundle as a link
+        // pointing outside the seal -- signature and stamp both attesting to content
+        // neither covers. One-line message and a clean exit, not a thrown stack trace, so
+        // the caller can turn it into launcher_degraded like every other build-input problem.
         else {
           process.stderr.write("src/ contains a non-regular file the bundle signature cannot cover: " + path.relative(root, full) + "\n");
           process.exit(1);
@@ -685,74 +537,54 @@ payload_digest() {
 }
 
 # --- escaping helpers -------------------------------------------------------
-# Two destinations, two rules, and a clone path is a filename in both: it may legally
-# contain any byte but NUL and `/`.
+# Two destinations, two rules. A clone path is a filename in both, so it may hold any byte
+# but NUL and `/`.
 #
-# LC_ALL=C on both, because a filename is bytes and a locale is an opinion about them.
-# Under a UTF-8 locale BSD sed refuses input that is not valid
-# UTF-8 with "RE error: illegal byte sequence" and exits non-zero — and under `set -euo
-# pipefail` that failing command substitution aborts the entire install, part-way
-# through, on a clone path or a reference root containing one stray byte. In the C locale
-# sed treats the input as bytes and passes it through untouched, which is what a
-# substitution over a handful of ASCII characters wanted all along.
+# LC_ALL=C ON BOTH. Under a UTF-8 locale BSD sed refuses input that is not valid UTF-8
+# ("RE error: illegal byte sequence") and exits non-zero, which under `set -euo pipefail`
+# aborts the install part-way through on one stray byte in a clone path. The C locale
+# passes bytes through untouched.
 
-# For XML: `&`, `<` and `>` are all legal in a filename. Unescaped, a path containing `&`
-# produces a plist that plutil rejects while this script still exits 0 and launchd
-# silently has nothing to load.
+# For XML: `&`, `<` and `>` are legal in a filename. Unescaped, `&` makes a plist plutil
+# rejects while this script exits 0 and launchd has nothing to load.
 xml_escape() {
   printf '%s' "$1" | LC_ALL=C sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
-# For a C string literal in the generated launcher_paths.h: a backslash or a double quote
-# in a clone path would otherwise end the literal early and turn a path into a syntax
-# error, or worse, into a different path. Order matters — backslashes first, or the
-# backslash this function just added to escape a quote gets escaped in turn.
+# For a C string literal in the generated launcher_paths.h: an unescaped backslash or quote
+# ends the literal early, turning a path into a syntax error or into a different path.
+# Order matters -- backslashes first, or the one added to escape a quote gets escaped too.
 #
-# A newline cannot be escaped this way (sed is line-oriented, and the substitution would
-# have to span lines), so it is refused by the caller instead rather than silently
-# producing a header that will not compile.
+# A newline cannot be escaped here (sed is line-oriented), so the caller refuses it instead.
 c_escape() {
   printf '%s' "$1" | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
 # --- 1b. the launcher app bundle --------------------------------------------
-# What this is for, in one line: macOS TCC gates ~/Documents, ~/Desktop and ~/Downloads
-# per application, and "the application" here is whatever the plist names. Naming
-# `node` means the only grant that unblocks a board is a grant to every node program on
-# the machine — and one that dies at the next `brew upgrade node`, since homebrew's node
-# is ad-hoc signed under a versioned Cellar path. So the plist names a bundle of ours
-# instead: ~/Applications/claude-board.app, compiled from bin/launcher.c, ad-hoc signed
-# under $BUNDLE_ID, which forks the real node. See bin/launcher.c for why it forks
-# rather than execs, and SECURITY.md for what the grant does and does not widen.
+# TCC gates ~/Documents, ~/Desktop and ~/Downloads per application, and "the application"
+# is whatever the plist names. Naming `node` means the only grant that unblocks a board
+# covers every node program on the machine -- and dies at the next `brew upgrade node`,
+# homebrew's node being ad-hoc signed under a versioned Cellar path. So the plist names
+# ~/Applications/claude-board.app instead. Why it forks node: bin/launcher.c. What the
+# grant widens: SECURITY.md.
 #
-# The user still has to tick the box once; nothing here can grant anything. What this
-# step owes them is that they are asked ONCE. TCC pins a grant to the code signature, so
-# a rebuild resets it and the user gets silently locked out again by an install that
-# landed nothing but JavaScript — which, given install.sh is the routine way to take an
-# update, would be most installs. Hence the stamp: the bundle is rebuilt only when one of
-# its actual inputs changed (the launcher source, either baked-in path, the bundle
-# identifier), and a run that would produce the same bundle touches nothing at all.
+# ASK ONCE. TCC pins a grant to the code signature, so any rebuild silently revokes it, and
+# this script is the routine way to take an update. The stamp is what keeps a run that
+# would produce the same bundle from touching it at all.
 #
-# The bundle's signature used to cover only the launcher binary — bin/daemon.mjs and all
-# of src/, the code that actually runs under the granted identity, stayed in the clone,
-# outside the signature and outside the stamp. Anything that could write the clone owned
-# the grant with no recompile and no re-sign (SECURITY.md "Known limits of that"). Fixed
-# here: the build below copies bin/daemon.mjs and src/ into $STAGED_APP/Contents/Resources
-# BEFORE codesign runs, so the ad-hoc signature — and codesign --verify, already part of
-# the "already current" test — cover the payload too, and a digest of that payload
-# (payload_digest, above) is folded into the stamp so editing it in the clone forces a
-# rebuild instead of being silently ignored. bin/daemon.mjs's own `../src/server.mjs`
-# import resolves unchanged, because the copy preserves bin/'s and src/'s relative layout.
-# mcp.mjs, authorize.mjs and launcher.c are deliberately NOT copied: the first two are the
-# shim, registered with Claude Code and invoked by callers at this clone's own absolute
-# path, never through the launcher or the TCC-granted identity, so a copy inside the
-# bundle would be dead weight nothing points at; the third is a build input, not something
-# ever executed as itself.
+# THE SIGNATURE COVERS THE PAYLOAD. bin/daemon.mjs and src/ are copied into
+# Contents/Resources BEFORE codesign runs, so the signature and `codesign --verify` cover
+# the code that actually runs under the granted identity, and payload_digest is folded into
+# the stamp so editing it in the clone forces a rebuild. Otherwise anything that could
+# write the clone would own the grant with no recompile. The copy preserves bin/'s and
+# src/'s relative layout, so daemon.mjs's own `../src/server.mjs` import resolves unchanged.
+#
+# NOT copied: mcp.mjs and authorize.mjs are the shim, invoked by callers at this clone's
+# absolute path and never through the granted identity; launcher.c is a build input.
 LAUNCHER_STAMP_FILE="$SECRET_DIR/launcher.stamp"
 USE_LAUNCHER=0
-# Only a bundle built by THIS run earns the "grant it in System Settings" notice at the
-# end. A reinstall that left an already-granted bundle alone must not tell the user to go
-# and grant it again, or the notice stops meaning anything.
+# Gates the "grant it in System Settings" notice at the end: only a bundle built by THIS
+# run has lost its grant, and a notice printed on every reinstall stops meaning anything.
 LAUNCHER_IS_NEW=0
 
 launcher_degraded() {
@@ -763,19 +595,14 @@ launcher_degraded() {
   echo "    Everything else works. To fix: xcode-select --install, then re-run this script."
 }
 
-# bin/launcher.c includes its generated header with a QUOTED #include
-# ("launcher_paths.h", not <launcher_paths.h>), and a quoted include searches the
-# including file's own directory first. Compiling bin/launcher.c in place, out of the
-# clone, means that search starts in bin/ — so a launcher_paths.h planted there shadows
-# the real one this script generates and gets baked into a bundle macOS will trust with
-# the Documents grant, with nothing on screen saying so. Below, the source is copied
-# into $LAUNCHER_BUILD_DIR next to the real header and compiled from there instead, with
-# no include path back into the clone (-iquote, not -I): a quoted include's own-directory
-# search then lands on the real header no matter what sits beside bin/launcher.c. That
-# makes the shadow powerless by construction rather than by a check that could rot, but a
-# leftover header at this path is still worth naming — an older install.sh generated it
-# in place, so it is plausible and innocent, and refusing outright would turn a stale
-# file into a failed install.
+# bin/launcher.c uses a QUOTED #include for its generated header, which searches the
+# including file's own directory first. Compiling in place would therefore let a
+# launcher_paths.h planted in bin/ shadow the real one and get baked into a bundle macOS
+# trusts with the Documents grant. The build below copies the source next to the real
+# header in $LAUNCHER_BUILD_DIR and compiles there with -iquote and no include path back
+# into the clone, which makes the shadow powerless by construction. A leftover header is
+# still named -- an older install.sh generated one in place, so it is plausible and
+# innocent, and refusing would turn a stale file into a failed install.
 if [ -f "$REPO_DIR/bin/launcher_paths.h" ]; then
   echo "==> warning: ignoring $REPO_DIR/bin/launcher_paths.h — the launcher is compiled from a copy staged outside the clone, so this file cannot affect the built bundle."
 fi
@@ -786,38 +613,30 @@ trap 'rm -rf "$LAUNCHER_BUILD_DIR"' EXIT
 STAGED_APP="$LAUNCHER_BUILD_DIR/${LABEL}.app"
 STAGED_INFO="$STAGED_APP/Contents/Info.plist"
 STAGED_HEADER="$LAUNCHER_BUILD_DIR/launcher_paths.h"
-# The compiled copy of bin/launcher.c, staged beside STAGED_HEADER for the reason above.
 STAGED_LAUNCHER_SRC="$LAUNCHER_BUILD_DIR/launcher.c"
-# bin/notify.m gets the same treatment for consistency rather than necessity: it includes
-# nothing of ours, so there is no header for anything beside it in the clone to shadow.
-# Compiling both halves of the binary out of the same staging directory is one fewer rule
-# to remember than compiling one there and one from the clone.
+# notify.m and menubar.m include nothing of ours, so neither can be shadowed. Staged
+# anyway: one rule for all three sources beats one rule per source.
 STAGED_NOTIFY_SRC="$LAUNCHER_BUILD_DIR/notify.m"
-# And the menu bar half, staged out of the same directory for the same reason.
 STAGED_MENUBAR_SRC="$LAUNCHER_BUILD_DIR/menubar.m"
 mkdir -p "$STAGED_APP/Contents/MacOS"
 cp "$LAUNCHER_SRC" "$STAGED_LAUNCHER_SRC"
 cp "$LAUNCHER_NOTIFY_SRC" "$STAGED_NOTIFY_SRC"
 cp "$LAUNCHER_MENUBAR_SRC" "$STAGED_MENUBAR_SRC"
 
-# The one filename byte c_escape cannot handle. Absurd in practice, a broken build if it
-# ever happens, and cheaper to refuse by name than to debug from a compiler error.
+# The one filename byte c_escape cannot handle -- cheaper to refuse by name than to debug
+# from a compiler error.
 #
-# EVERY value the header below bakes is in this test, not just the two paths it started
-# with: a newline in $HOME, in the store or in the reference roots produces exactly the
-# same unterminated string literal as one in the daemon path, and the guard used to let
-# all three through to the compiler. The seventh #define, CLAUDE_BOARD_PATH, is the only
-# one absent — it is a constant in this script, so nothing outside it can put a byte
-# there. (Baked as: NODE_BIN, BUNDLED_DAEMON_PATH, HOME, EFFECTIVE_BOARD_HOME, REF_ROOTS,
-# REPO_DIR; DAEMON_PATH rides along because the degraded path still runs it by name.)
+# KEEP THIS TEST IN STEP WITH THE HEADER BELOW. Every value it bakes is here, because a
+# newline in the store or the reference roots makes the same unterminated string literal as
+# one in the daemon path. Only CLAUDE_BOARD_PATH is absent, being a constant in this script.
+# DAEMON_PATH rides along because the DEGRADED path runs it by name.
 case "$NODE_BIN$DAEMON_PATH$BUNDLED_DAEMON_PATH$REPO_DIR$HOME$EFFECTIVE_BOARD_HOME$REF_ROOTS" in
   *$'\n'*) LAUNCHER_NEWLINE_IN_PATH=1 ;;
   *) LAUNCHER_NEWLINE_IN_PATH=0 ;;
 esac
 
-# Computed up front so a payload the signature cannot honestly cover degrades the way
-# every other build-input problem here does, rather than aborting the whole install under
-# `set -e` with a raw stack trace.
+# Computed up front so a payload the signature cannot honestly cover degrades like every
+# other build-input problem, instead of aborting the install under `set -e`.
 PAYLOAD_DIGEST_ERR=""
 if ! PAYLOAD_DIGEST="$(payload_digest "$REPO_DIR" 2>&1)"; then
   PAYLOAD_DIGEST_ERR="$PAYLOAD_DIGEST"
@@ -829,6 +648,9 @@ if [ "$LAUNCHER_NEWLINE_IN_PATH" -eq 1 ]; then
 elif [ -n "$PAYLOAD_DIGEST_ERR" ]; then
   launcher_degraded "$PAYLOAD_DIGEST_ERR"
 else
+  # EDITING ANYTHING BELOW, THE COMMENT INCLUDED, REBUILDS EVERY BUNDLE ON EVERY MACHINE.
+  # This file's sha256 is in $LAUNCHER_STAMP, so its bytes are a bundle input like any
+  # other, and a rebuild silently revokes the user's Documents grant (see the step header).
   cat > "$STAGED_HEADER" <<HEADER
 /* Generated by install.sh — not checked in, rebuilt from scratch on every run.
  * CLAUDE_BOARD_NODE and CLAUDE_BOARD_DAEMON are the only two things bin/launcher.c will
@@ -855,12 +677,10 @@ else
 #define CLAUDE_BOARD_REPO_ROOT_VALUE "$(c_escape "$REPO_DIR")"
 HEADER
 
-  # CFBundleIconFile only when there is an icon to name, because naming one that is not in
-  # Contents/Resources is worse than naming none: the bundle then has a broken icon
-  # reference rather than the system default. The key is spliced in ahead of the first
-  # key below (trailing newline inside the variable, no blank line when empty) so that the
-  # plist stays byte-identical to the pre-icon one on an install that has no icns —
-  # a plist whose bytes moved is a rebuild, and a rebuild is the user's Documents grant.
+  # CFBundleIconFile only when there is an icns to name: naming a missing one gives a broken
+  # icon reference rather than the system default. Spliced in with a trailing newline inside
+  # the variable and no blank line when empty, so a clone without an icns produces
+  # byte-identical plist bytes -- moved bytes are a rebuild, and a rebuild is the grant.
   ICON_PLIST_ENTRY=""
   if [ -f "$LAUNCHER_ICON_SRC" ]; then
     ICON_PLIST_ENTRY="	<key>CFBundleIconFile</key>
@@ -868,34 +688,23 @@ HEADER
 "
   fi
 
-  # LSUIElement, not LSBackgroundOnly (ADR.md entry 75): this is a daemon with no Dock
-  # icon and no menu bar at login, but it DOES need to be activatable, because bin/notify.m
-  # serves a banner's click by bringing the bundle to the front to hand the response over,
-  # and LSBackgroundOnly declares an app that may never be brought forward -- every click
-  # failed activation with -600 and put "The application claude-board.app is not open
-  # anymore." on screen. LSUIElement is the agent-app policy: no Dock tile, no menu bar,
-  # but a process macOS can still activate. Only one of the two keys belongs here --
-  # both present is ambiguous and LSBackgroundOnly is documented to win, so
-  # test/check-install.mjs asserts LSUIElement is true AND LSBackgroundOnly is absent, not
-  # merely present-and-true, or a future edit could add LSBackgroundOnly back next to it
-  # and silently reopen the -600 alert.
+  # LSUIElement, NEVER LSBackgroundOnly (ADR.md entry 75). Both are "no Dock tile, no menu
+  # bar", but LSBackgroundOnly declares an app that may never be brought forward, and
+  # bin/notify.m serves a banner click by activating the bundle to hand the response over --
+  # every click failed with -600 and "The application claude-board.app is not open anymore."
+  # Adding LSBackgroundOnly back beside LSUIElement reopens that: both present is ambiguous
+  # and LSBackgroundOnly is documented to win, so test/check-install.mjs asserts LSUIElement
+  # true AND LSBackgroundOnly absent.
   #
-  # NSAppleEventsUsageDescription arrived with ADR.md entry 93, which has a board-opening
-  # click ask the scriptable browsers whether one of them is already showing that board
-  # (bin/launcher.c's cb_surface_tab) rather than pile a second tab on the one the reviewer
-  # is looking at. This key is the sentence macOS puts in the "claude-board wants to control
-  # Safari" dialog that asking costs, once per browser the reviewer actually uses. Apple
-  # documents it as required of an app that sends Apple Events at all; what an omitted one
-  # actually does here has NOT been measured, and is not worth measuring when the plist
-  # bytes are this cheap and the dialog is the one place this product gets to say why it is
-  # asking.
+  # NSAppleEventsUsageDescription (ADR.md entry 93) is the sentence macOS shows in the
+  # "claude-board wants to control Safari" dialog, which a board-opening click costs once
+  # per browser when it asks whether one is already showing that board
+  # (bin/launcher.c's cb_surface_tab). Apple documents it as required of any app that sends
+  # Apple Events; what an omitted one does here is unmeasured.
   #
-  # None of the three keys stops the bundle posting notifications,
-  # and none stops macOS showing the one-time "claude-board would like to send you
-  # notifications" prompt — measured, not assumed (QUIRKS.md). No CFBundleVersion tied to
-  # package.json's version either — a version bump would change these bytes, change the
-  # signature, and cost the user their Documents grant for nothing. The bundle's version
-  # is the bundle's, and it only moves when the bundle actually does.
+  # None of the keys blocks notifications or the one-time permission prompt -- measured,
+  # QUIRKS.md. CFBundleVersion stays off package.json's version: a version bump would move
+  # these bytes, move the signature, and cost the grant for nothing.
   cat > "$STAGED_INFO" <<INFO
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -927,36 +736,24 @@ ${ICON_PLIST_ENTRY}	<key>CFBundleIdentifier</key>
 </plist>
 INFO
 
-  # Every input that decides the bundle's bytes, and nothing that does not. Composed out
-  # of hex digests and an ASCII identifier rather than out of the paths themselves, so
-  # this string is safe to hand to node as an argument no matter what bytes the clone
-  # path is made of. PAYLOAD_DIGEST (computed above, before this script knew whether it
-  # would even reach this branch — the stamp has to be computed to be COMPARED) is what
-  # makes an edit to bin/daemon.mjs or anything under src/ in the clone force a rebuild:
-  # without it, the payload copied into Contents/Resources a few lines below could go
-  # stale forever, since nothing else in this stamp depends on its content.
-  # The icon is a bundle input like any other, so it is in the stamp like any other: a
-  # redrawn icns with everything else unchanged has to force a rebuild, or the bundle
-  # keeps the old art forever. "none" rather than a digest when there is no icns, so that
-  # adding one later moves the stamp too.
+  # EVERY INPUT THAT DECIDES THE BUNDLE'S BYTES, AND NOTHING THAT DOES NOT. An input left
+  # out is one whose edits never rebuild the bundle, silently, on every later install;
+  # anything extra costs the user their grant for nothing.
+  #
+  # Composed of hex digests and an ASCII identifier, never raw paths, so it is safe to hand
+  # to sha256_string whatever bytes the clone path holds. "none" rather than a skipped
+  # field when there is no icns, so adding one later still moves the stamp.
   LAUNCHER_ICON_DIGEST="none"
   if [ -f "$LAUNCHER_ICON_SRC" ]; then
     LAUNCHER_ICON_DIGEST="$(sha256_file "$LAUNCHER_ICON_SRC")"
   fi
-  # Every SOURCE that compiles into the executable is here, menubar.m included: a source
-  # left out of this string is a source whose edits never rebuild the bundle, silently, on
-  # every later install -- and the reader's only symptom is a status item that stays
-  # whatever it was the last time some OTHER input happened to move.
+  # All three sources, the icon, both generated plists, the identifier, and the payload.
   LAUNCHER_STAMP="$(sha256_string "$(sha256_file "$LAUNCHER_SRC")|$(sha256_file "$LAUNCHER_NOTIFY_SRC")|$(sha256_file "$LAUNCHER_MENUBAR_SRC")|$LAUNCHER_ICON_DIGEST|$(sha256_file "$STAGED_HEADER")|$(sha256_file "$STAGED_INFO")|$BUNDLE_ID|$PAYLOAD_DIGEST")"
 
-  # The stamp file has two lines: the input stamp above, and the sha256 of the
-  # executable as it was actually installed (recorded below, after the atomic `mv`).
-  # The first covers everything that DECIDES the bundle's bytes; the second covers the
-  # bytes themselves, so that editing the installed binary directly -- bypassing every
-  # input above -- still makes the next run rebuild rather than trust a stamp that no
-  # longer describes what is on disk. A stamp file written by an older install.sh has
-  # only the first line: the second read is then empty, which can never equal a real
-  # digest, so that case rebuilds once rather than crashing on a missing field.
+  # Two lines: the input stamp, then the sha256 of the executable as installed. The first
+  # covers what DECIDES the bytes, the second the bytes themselves, so editing the installed
+  # binary directly still forces a rebuild. A one-line file from an older install reads the
+  # second as empty, which can never equal a real digest, so it rebuilds once.
   RECORDED_LAUNCHER_STAMP=""
   RECORDED_EXEC_STAMP=""
   if [ -f "$LAUNCHER_STAMP_FILE" ]; then
@@ -964,12 +761,10 @@ INFO
     RECORDED_EXEC_STAMP="$(sed -n '2p' "$LAUNCHER_STAMP_FILE")"
   fi
 
-  # "Already current" has to mean the bundle on disk is really there, really signed, and
-  # really the bytes the stamp describes -- not just that a stamp file says so: the app
-  # lives in ~/Applications, where a user is entitled to drag things to the Trash or
-  # overwrite the executable in place, and a stamp that outlived what it was stamping
-  # would otherwise leave the plist pointing at something wrong, or a tampered binary
-  # mistaken for the one this script built.
+  # "Already current" means present, signed, and the bytes the stamp describes -- not
+  # merely that a stamp file says so. The app lives in ~/Applications, where a user may
+  # trash it or overwrite the executable in place, and a stamp that outlived what it
+  # stamped leaves the plist pointing at something wrong or trusts a tampered binary.
   if [ -n "$RECORDED_LAUNCHER_STAMP" ] && [ "$RECORDED_LAUNCHER_STAMP" = "$LAUNCHER_STAMP" ] \
      && [ -x "$APP_EXEC" ] && [ -n "$RECORDED_EXEC_STAMP" ] \
      && [ "$RECORDED_EXEC_STAMP" = "$(sha256_file "$APP_EXEC")" ] \
@@ -980,24 +775,16 @@ INFO
     launcher_degraded "no C compiler ('$CC_CMD') found — the Xcode Command Line Tools are not installed"
   elif ! command -v "$CODESIGN_CMD" >/dev/null 2>&1; then
     launcher_degraded "no '$CODESIGN_CMD' found, so the launcher bundle cannot be signed"
-  # -Wall but not -Werror: a future compiler inventing a new warning must not be able to
-  # turn a routine reinstall into a failed one. -iquote, not -I: the source compiled here
-  # is the copy staged next to the real header (see STAGED_LAUNCHER_SRC above), and no
-  # include path reaches back into the clone, so a launcher_paths.h planted beside
-  # bin/launcher.c has no route into this build.
-  # Three compiler invocations rather than one, because the halves are different
-  # languages: -fobjc-arc is meaningless for C and passing it alongside a .c file makes
-  # clang say so. notify.m and menubar.m compile to objects first, then launcher.c compiles
-  # and links against both with the three frameworks they need: Foundation and
-  # UserNotifications for posting, and AppKit for the click — a notification's delegate is
-  # only called on a RUNNING app, and becoming one is NSApplication's job (ADR.md entry 57,
-  # which is what first admitted AppKit here; bin/notify.m's own header has the reasoning) — and, as
-  # of ADR 72, for the status item bin/menubar.m grows into. All three halves land in one
-  # binary on purpose — see bin/notify.m's header for why a second executable in the bundle
-  # cannot post a notification, and bin/menubar.m's for why a second bundle is worse.
-  # Every one of them is inside this `if !` condition, so a compile failure in any of them
-  # degrades the install (no bundle, daemon still runs) rather than aborting it under
-  # `set -e`.
+  # -Wall but NOT -Werror: a future compiler inventing a warning must not fail a routine
+  # reinstall. -iquote, not -I, so no include path reaches back into the clone.
+  #
+  # Three invocations because the sources are two languages -- clang objects to -fobjc-arc
+  # beside a .c file. The .m halves compile to objects, then launcher.c links against both
+  # with Foundation and UserNotifications for posting and AppKit for the click, since a
+  # notification's delegate only fires on a running app (ADR.md entries 57 and 72;
+  # bin/notify.m's header for why one binary, bin/menubar.m's for why one bundle).
+  #
+  # All of it inside the `if !`, so a compile failure degrades rather than aborting.
   elif ! {
     "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/notify.o" "$STAGED_NOTIFY_SRC" 2>&1 \
       && "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/menubar.o" "$STAGED_MENUBAR_SRC" 2>&1 \
@@ -1007,18 +794,11 @@ INFO
            -framework Foundation -framework UserNotifications -framework AppKit 2>&1
   }; then
     launcher_degraded "the launcher failed to compile (output above)"
-  # The daemon's own payload, staged into Contents/Resources BEFORE signing so the
-  # ad-hoc signature (and codesign --verify, part of the "already current" test above)
-  # cover it too — see "the launcher app bundle" comment near the top of this step.
-  # mkdir -p first, then cp -R with a trailing "/." on the source and a trailing "/" on
-  # the already-created destination: explicit rather than relying on cp -R's own
-  # directory-exists-or-not behaviour, which differs depending on whether Resources/src
-  # already exists (it never does here, since $STAGED_APP is fresh out of mktemp, but the
-  # explicit form is correct either way and does not depend on that being true forever).
-  # The icon rides along in the same step and under the same signature: it is what every
-  # pomodoro notification shows, and CFBundleIconFile above names it. Copied only if it
-  # exists, matching the plist key above — a clone with no icns builds an unbranded bundle
-  # rather than no bundle.
+  # The payload, staged BEFORE signing so the signature covers it (see the step header).
+  # mkdir -p first, then cp with an explicit "/." source and "/" destination rather than
+  # relying on cp -R's directory-exists-or-not behaviour, which differs by case. The icon
+  # rides along under the same signature; copied only if present, matching the plist key,
+  # so a clone with no icns builds an unbranded bundle rather than no bundle.
   elif ! {
     mkdir -p "$STAGED_APP/Contents/Resources/bin" "$STAGED_APP/Contents/Resources/src" \
       && cp "$REPO_DIR/bin/daemon.mjs" "$STAGED_APP/Contents/Resources/bin/daemon.mjs" \
@@ -1026,25 +806,23 @@ INFO
       && { [ ! -f "$LAUNCHER_ICON_SRC" ] || cp "$LAUNCHER_ICON_SRC" "$STAGED_APP/Contents/Resources/${LABEL}.icns"; }
   }; then
     launcher_degraded "could not stage bin/daemon.mjs and src/ into the bundle before signing"
-  # --force so a re-sign replaces rather than refuses; --identifier explicitly rather
-  # than inherited from Info.plist, because this string IS the grant's name and it should
-  # be impossible to change it by editing a plist alone.
+  # --force so a re-sign replaces rather than refuses. --identifier explicitly, never
+  # inherited from Info.plist: this string IS the grant's name, and editing a plist alone
+  # must not be able to change it.
   elif ! "$CODESIGN_CMD" --force --sign - --identifier "$BUNDLE_ID" "$STAGED_APP" 2>&1; then
     launcher_degraded "the launcher bundle failed to sign (output above)"
   elif ! "$CODESIGN_CMD" --verify "$STAGED_APP" >/dev/null 2>&1; then
     launcher_degraded "the launcher bundle did not verify after signing"
   else
     mkdir -p "$APP_DIR"
-    # Signed in the staging directory and swapped in whole, so a compile or sign that
-    # fails leaves the previously installed bundle exactly as it was — including, and
-    # this is the point, its grant. Removing the old bundle while the current daemon is
-    # running from it is safe: the running image holds its inode open, and it is being
-    # booted out and replaced twenty lines below anyway.
+    # Signed in staging and swapped in whole, so a failed compile or sign leaves the
+    # installed bundle -- and its grant -- exactly as it was. Removing the old one while
+    # the daemon runs from it is safe: the running image holds its inode open, and it is
+    # booted out and replaced below anyway.
     rm -rf "$APP_PATH"
     mv "$STAGED_APP" "$APP_PATH"
-    # The second field is hashed AFTER the mv, i.e. of the executable exactly as
-    # installed at $APP_EXEC -- not the staged copy -- so the recorded digest is the one
-    # a future run will actually find on disk.
+    # Hashed AFTER the mv, so the recorded digest is of the executable a future run will
+    # actually find on disk rather than of the staged copy.
     printf '%s\n%s\n' "$LAUNCHER_STAMP" "$(sha256_file "$APP_EXEC")" > "$LAUNCHER_STAMP_FILE"
     USE_LAUNCHER=1
     echo "==> built and signed $APP_PATH ($BUNDLE_ID)"
@@ -1053,26 +831,14 @@ INFO
 fi
 
 # --- 2. launchd plist -------------------------------------------------------
-# The launchd half runs BEFORE the MCP registration, deliberately. The
-# registration is a remove-then-add on config this repo does not own; if a
-# launchctl step fails afterwards under `set -e`, the script dies having
-# already torn down and rebuilt that registration, i.e. it can only ever
-# strand the half it does not own. Doing the part this repo owns first means
-# a failure leaves the previous registration exactly as it was.
+# KEEP THIS BEFORE THE MCP REGISTRATION. The registration is a remove-then-add on config
+# this repo does not own, so a launchctl failure after it would strand exactly the half
+# this script cannot repair. Owned work first means a failure leaves the registration alone.
 mkdir -p "$LAUNCH_AGENTS_DIR"
 mkdir -p "$LOG_DIR"
-# The logs carry whatever the daemon prints about boards, i.e. the user's own
-# questions and answers; same owner-only posture as the store itself.
+# The logs carry whatever the daemon prints about boards -- the user's own questions and
+# answers -- so they get the store's owner-only posture.
 chmod 700 "$LOG_DIR"
-
-# Every value below is spliced into XML by xml_escape, defined above step 1b (with
-# c_escape, its C-string counterpart) because the launcher bundle's Info.plist needs it
-# first. The reasoning lives with the function.
-
-# No reload-on-change key here, and none in bin/daemon.mjs either: a daemon that exits
-# on every write under src/ restarts mid-review, and a restart drops every SSE stream
-# and every held-open wait, which then has to reattach. Taking an update is this
-# script's job (the bootout/bootstrap below), at a moment somebody chose.
 LABEL_X="$(xml_escape "$LABEL")"
 NODE_BIN_X="$(xml_escape "$NODE_BIN")"
 DAEMON_PATH_X="$(xml_escape "$DAEMON_PATH")"
@@ -1082,10 +848,9 @@ OUT_LOG_X="$(xml_escape "$OUT_LOG")"
 ERR_LOG_X="$(xml_escape "$ERR_LOG")"
 PORT_X="$(xml_escape "$PORT")"
 
-# What launchd actually execs, and therefore what TCC will attribute every file the
-# daemon reads to. The launcher takes no arguments on purpose (bin/launcher.c: the target
-# is compiled in, so holding the Documents grant is not the same as being able to point
-# it at arbitrary code), which is why this is one string where the fallback is two.
+# What launchd execs, and therefore what TCC attributes the daemon's reads to. One string
+# where the DEGRADED fallback is two, because the launcher takes no arguments: its target is
+# compiled in, so holding the grant is not the same as being able to point it at any code.
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   PROGRAM_ARGS_XML="		<string>${APP_EXEC_X}</string>"
 else
@@ -1093,16 +858,12 @@ else
 		<string>${DAEMON_PATH_X}</string>"
 fi
 
-# CLAUDE_BOARD_REF_ROOTS and CLAUDE_BOARD_HOME: written into this dict only on the
-# DEGRADED path. When a launcher bundle is in use it bakes both into itself instead
-# (step 1b above, bin/launcher.c's OVERRIDE_ENV) and ignores whatever this dict says for
-# them — so leaving them here too would be a second copy of a decision the plist no
-# longer makes, and one that reads as though rewriting the plist could still move the
-# boundary when it cannot. Without a launcher, node runs directly and reads its
-# environment from here because there is nowhere else for it to come from, so the
-# degraded plist carries exactly what it always did: every value below is unconditional
-# in that branch, same as before this change, because src/resolve.mjs reads an absent key
-# as no allowlist at all rather than as "ask the launcher".
+# The plist carries CLAUDE_BOARD_REF_ROOTS and CLAUDE_BOARD_HOME on the DEGRADED path ONLY.
+# A launcher bakes both into itself (bin/launcher.c's OVERRIDE_ENV) and ignores this dict,
+# so writing them here too is the second copy the header's third invariant forbids. Without
+# a launcher, node has nowhere else to read them from -- and src/resolve.mjs reads an absent
+# key as no allowlist at all, not as "ask the launcher", so that branch writes them
+# unconditionally.
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   EXTRA_ENV_XML=""
 else
@@ -1110,9 +871,8 @@ else
   EXTRA_ENV_XML="		<key>CLAUDE_BOARD_REF_ROOTS</key>
 		<string>${REF_ROOTS_X}</string>
 "
-  # Emitted only when the operator actually chose a store root, so a degraded install
-  # that never mentions CLAUDE_BOARD_HOME produces a byte-identical dict to before and
-  # the daemon keeps picking its own default.
+  # Only when the operator chose a store root, so an install that never mentions
+  # CLAUDE_BOARD_HOME leaves the dict byte-identical and the daemon picks its own default.
   if [ -n "$BOARD_HOME_FROM" ]; then
     BOARD_HOME_X="$(xml_escape "$BOARD_HOME")"
     EXTRA_ENV_XML="${EXTRA_ENV_XML}		<key>CLAUDE_BOARD_HOME</key>
@@ -1153,8 +913,7 @@ ${EXTRA_ENV_XML}	</dict>
 </plist>
 PLIST
 
-# Refuse to report success on a plist launchd cannot load. Without this an
-# unparseable plist is invisible: bootstrap fails, the script exits 0 anyway, and
+# An unparseable plist is otherwise invisible: bootstrap fails, this script exits 0, and
 # the user is told the service is running.
 if ! "$PLUTIL_CMD" -lint "$PLIST_PATH" >/dev/null; then
   echo "error: generated plist at $PLIST_PATH is not valid — refusing to continue" >&2
@@ -1164,18 +923,15 @@ fi
 echo "==> wrote $PLIST_PATH"
 
 # --- 3. load / reload it, idempotently --------------------------------------
-# bootout-then-bootstrap rather than a conditional check: idempotent either
-# way (bootout of a job that isn't loaded just fails, harmlessly, so a fresh
-# machine and a reinstall take the same path) and it's what actually picks up
-# a plist that changed (e.g. a different clone path) rather than restarting
-# the previously-loaded definition in place.
+# bootout-then-bootstrap rather than a conditional: a bootout of an unloaded job fails
+# harmlessly, so a fresh machine and a reinstall take one path, and it picks up a CHANGED
+# plist rather than restarting the loaded definition in place.
 #
-# Every launchctl call is guarded rather than left to `set -e`, because the
-# common reinstall path genuinely fails once: bootout returns as soon as the
-# job is asked to stop, while a KeepAlive job is still tearing down, and a
-# bootstrap landing in that window is refused ("service already loaded" /
-# EBUSY). Retrying is the fix; dying is not. Whether the service actually came
-# up is settled by the health check below, not by these exit codes.
+# Every launchctl call is guarded rather than left to `set -e`, because the common reinstall
+# genuinely fails once: bootout returns as soon as the job is asked to stop, a KeepAlive job
+# is still tearing down, and a bootstrap landing in that window is refused with EBUSY.
+# Retrying is the fix. Whether the service came up is settled by the health gate below, not
+# by these exit codes.
 UID_N="$(id -u)"
 DOMAIN="gui/${UID_N}"
 TARGET="${DOMAIN}/${LABEL}"
@@ -1201,18 +957,15 @@ fi
 "$LAUNCHCTL_CMD" kickstart -k "$TARGET" >/dev/null 2>&1 || true
 
 # --- 4. prove it actually bound before claiming success ----------------------
-# "wrote a plist and called launchctl" is not "running": a syntax error in the
-# daemon, a port already taken, or a bootstrap that silently did nothing all
-# end here otherwise, with the script cheerfully printing "installed and
-# running".
+# "Wrote a plist and called launchctl" is not "running": a syntax error in the daemon, a
+# taken port, or a bootstrap that silently did nothing all reach here otherwise, and the
+# script prints "installed and running" over them.
 HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
 
-# A launcher bundle built by THIS run has no TCC grant yet, and if this clone sits in
-# ~/Documents, ~/Desktop or ~/Downloads then reading bin/daemon.mjs is itself a gated
-# read: the daemon cannot start until the user allows it. macOS raises that prompt
-# against the launchd job, so it appears while this loop is waiting — which is why the
-# budget below is a person's budget rather than a process's. Five seconds is plenty for
-# a daemon and nowhere near enough for a dialog nobody has looked at yet.
+# THE BUDGET BELOW IS A PERSON'S, NOT A PROCESS'S. A bundle built by THIS run holds no
+# grant yet, so if the clone sits in ~/Documents, ~/Desktop or ~/Downloads, reading
+# bin/daemon.mjs is itself a gated read and the daemon cannot start until the user clicks
+# Allow. macOS raises that prompt against the launchd job, i.e. while this loop waits.
 case "$REPO_DIR/" in
   "$HOME/Documents/"*|"$HOME/Desktop/"*|"$HOME/Downloads/"*) REPO_IN_PROTECTED_DIR=1 ;;
   *) REPO_IN_PROTECTED_DIR=0 ;;
@@ -1229,31 +982,46 @@ if [ "$LAUNCHER_IS_NEW" -eq 1 ] && [ "$REPO_IN_PROTECTED_DIR" -eq 1 ]; then
   echo "    find $LABEL, and turn the folder on there."
   echo
 fi
-# Test seam. The budget above is a person's (two minutes to notice a TCC dialog and
-# click it); the check that proves a dead port fails the install has nobody to wait for,
-# and this clone living under ~/Documents made it pay the full two minutes every run.
+# Test seam: the budget above is a person's, and the checks that prove a dead port fails
+# the install have nobody to wait for.
 HEALTH_TRIES="${CLAUDE_BOARD_HEALTH_TRIES:-$HEALTH_TRIES}"
 
-# WHICH daemon has to answer, not merely that something did. "A listener on the port" was
-# the whole test, so a hand-run `node bin/daemon.mjs`, or a previous install's daemon still
-# holding the port, let this script report "installed and running" over a launchd job that
-# could not bind and is being throttled into a restart loop. src/server.mjs answers
-# /api/health with a digest of its own program path (DAEMON_ID there); the path this run
-# just pointed launchd at is known exactly, so the two are compared.
+# WHICH daemon answered, not merely that something did. "A listener on the port" lets a
+# hand-run `node bin/daemon.mjs` or a previous install's daemon stand in for a launchd job
+# that could not bind and is being throttled into a restart loop. Two facts have to agree:
 #
-# A digest rather than the path because /api/health is the one uncredentialed route — see
-# isOpenRoute in src/server.mjs. sha256_string sends its argument through node's argv like
-# the daemon's own program path arrives through execve, so a path that is not valid UTF-8
-# is decoded the same way on both sides and still matches itself.
+#   IDENTITY. src/server.mjs answers /api/health with a digest of its own program path
+#   (DAEMON_ID there), and this run knows exactly which path it pointed launchd at. A
+#   digest rather than the path because /api/health is the one uncredentialed route
+#   (isOpenRoute in src/server.mjs). Both sides decode through node's argv, so a path that
+#   is not valid UTF-8 still matches itself.
 #
-# The digest alone has one gap: on the DEGRADED (no-launcher) path the installed daemon
-# is `node $DAEMON_PATH` out of this clone, and a hand-run `node bin/daemon.mjs` from the
-# same clone is the same program at the same path — identical digests. So the gate also
-# requires the answering process to BE the one launchd supervises: health carries the
-# daemon's pid, `launchctl print` names the job's pid, and the two must agree. That is
-# exact on both paths, and catches a previous install's daemon still holding the port
-# (right digest, wrong pid) the same way. A mid-probe restart makes the pids disagree for
-# one iteration; the loop just tries again, so the race costs a retry, not the install.
+#   ANCESTRY. The digest alone cannot separate the DEGRADED install from a hand-run
+#   `node bin/daemon.mjs` out of the same clone -- same program, same path. So the answering
+#   process must also be the launchd job or a descendant of it. Descendant, not equal: the
+#   launcher forks node rather than exec'ing it (bin/launcher.c says why), so launchd's pid
+#   is the stub's and health answers with the child's. Requiring equality hangs every
+#   launcher install here until the budget runs out, then blames a foreign listener.
+#
+# A mid-probe restart makes the two disagree for one iteration; the loop retries, so the
+# race costs a retry rather than the install.
+pid_descends_from() {  # <pid> <ancestor-pid>
+  _pdf_pid="$1"
+  _pdf_hops=0
+  # ponytail: 8 hops, walked one `ps` at a time. The real chain is one hop (launcher forks
+  # node once) and the bound only exists so a corrupt or racy ppid chain cannot spin. If a
+  # future launcher gains a supervision layer, raise the bound; a deeper chain reads as a
+  # foreign listener rather than as a hang, which is the safe direction to fail.
+  while [ -n "$_pdf_pid" ] && [ "$_pdf_pid" -gt 1 ] 2>/dev/null && [ "$_pdf_hops" -lt 8 ]; do
+    [ "$_pdf_pid" = "$2" ] && return 0
+    # Empty when the pid is gone, which ends the loop -- `ps` failing and `ps` printing
+    # nothing arrive here identically.
+    _pdf_pid="$(ps -o ppid= -p "$_pdf_pid" 2>/dev/null | tr -d '[:space:]')"
+    _pdf_hops=$((_pdf_hops + 1))
+  done
+  return 1
+}
+
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   HEALTH_DAEMON_PATH="$BUNDLED_DAEMON_PATH"
 else
@@ -1267,18 +1035,16 @@ HEALTHY=0
 # below can name that instead of "the daemon never answered".
 HEALTH_FOREIGN=0
 for _ in $(seq 1 "$HEALTH_TRIES"); do
-  # --noproxy '*': a corporate or VPN Mac exports ALL_PROXY / http_proxy / https_proxy with
-  # no loopback exemption, and curl then asks that proxy for 127.0.0.1 — which answers 502,
-  # or nothing at all. The daemon is up and healthy; the probe simply never reaches it, and
-  # this script used to declare it dead and exit right here, BEFORE the MCP registration and
-  # the manual — i.e. a genuinely broken install on a machine where nothing was wrong.
+  # --noproxy '*' is load-bearing: a corporate or VPN Mac exports ALL_PROXY / http_proxy /
+  # https_proxy with no loopback exemption, and curl then asks that proxy for 127.0.0.1,
+  # which answers 502 or nothing. The daemon is healthy and the probe never reaches it.
   HEALTH_BODY="$(curl -fsS --noproxy '*' --max-time 2 "$HEALTH_URL" 2>/dev/null)" || HEALTH_BODY=""
   case "$HEALTH_BODY" in
     '') ;;
     *"$HEALTH_DAEMON_ID"*)
       HEALTH_PID="$(printf '%s' "$HEALTH_BODY" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')"
       JOB_PID="$("$LAUNCHCTL_CMD" print "$TARGET" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -n 1)"
-      if [ -n "$HEALTH_PID" ] && [ "$HEALTH_PID" = "$JOB_PID" ]; then
+      if [ -n "$HEALTH_PID" ] && [ -n "$JOB_PID" ] && pid_descends_from "$HEALTH_PID" "$JOB_PID"; then
         HEALTHY=1; break
       fi
       HEALTH_FOREIGN=1
@@ -1303,8 +1069,8 @@ if [ "$HEALTHY" -ne 1 ]; then
   echo "error: the daemon never answered $HEALTH_URL — it is NOT running" >&2
   echo "       logs: $OUT_LOG" >&2
   echo "             $ERR_LOG" >&2
-  # The one failure mode this script can name precisely rather than leave to the logs,
-  # because the logs say "EPERM" and mean "you have not clicked Allow yet".
+  # Named precisely rather than left to the logs, which say "EPERM" and mean "nobody has
+  # clicked Allow yet".
   if [ "$USE_LAUNCHER" -eq 1 ] && [ "$REPO_IN_PROTECTED_DIR" -eq 1 ]; then
     echo >&2
     echo "       Most likely cause: macOS is refusing $LABEL access to $(dirname "$REPO_DIR")," >&2
@@ -1316,12 +1082,10 @@ if [ "$HEALTHY" -ne 1 ]; then
 fi
 
 # --- 5. MCP registration ---------------------------------------------------
-# Claude Code owns this config, not this repo. Reconcile unconditionally:
-# remove any prior registration under this name (no-op, ignored, if there
-# isn't one — e.g. a fresh machine, or a stale one from a different clone
-# path) then add one pointing at this clone. That is what keeps a second run
-# from duplicating a registration or erroring on one that's already there.
-# Last, so that nothing above can fail with this half-rewritten.
+# Claude Code owns this config, not this repo. Remove-then-add unconditionally: the remove
+# is an ignored no-op on a fresh machine and clears a stale registration from another clone
+# path, so a second run neither duplicates nor errors. Last, so nothing above can fail with
+# this half-rewritten.
 echo "==> registering MCP server '$LABEL' ($MCP_CMD)"
 "$MCP_CMD" mcp remove "$LABEL" --scope user >/dev/null 2>&1 || true
 if ! "$MCP_CMD" mcp add "$LABEL" --scope user -- "$NODE_BIN" "$MCP_PATH"; then
@@ -1331,18 +1095,14 @@ if ! "$MCP_CMD" mcp add "$LABEL" --scope user -- "$NODE_BIN" "$MCP_PATH"; then
 fi
 
 # --- 6. The manual ---------------------------------------------------------
-# skills/claude-board/SKILL.md copied to ~/.claude/skills/claude-board/, which is
-# where Claude Code looks for a personal skill. This is not a caller (ADR.md entry 5,
-# amended by entry 11): it teaches the `ask` tool's call shape, block kinds, widgets,
-# packet and failure modes, and decides nothing about when to ask. Callers name it and
-# keep only what is specific to them, so the protocol has one statement instead of one
-# per caller.
+# skills/claude-board/SKILL.md -> where Claude Code looks for a personal skill. Not a
+# caller (ADR.md entries 5 and 11): it teaches the `ask` tool's call shape, blocks, widgets,
+# packet and failure modes, and decides nothing about when to ask, so callers name it and
+# keep only what is specific to them.
 #
-# Unconditional overwrite, no hash record and no did-they-edit-it branch — the machinery
-# entry 5 deleted along with the old command-file step. The file is this repo's, says so
-# in its own first line, and a copy that quietly stops matching the shim is the whole
-# failure this step exists to prevent. Non-fatal: a daemon and a registration are the
-# install, and a missing manual must not fail a run that produced both.
+# Unconditional overwrite -- no hash record, no did-they-edit-it branch. The file is this
+# repo's and a copy that quietly stops matching the shim is the failure this step prevents.
+# Non-fatal: a daemon and a registration are the install.
 echo "==> installing the board's manual to $SKILL_DEST_DIR/SKILL.md"
 if [ ! -f "$SKILL_SRC" ]; then
   echo "warning: $SKILL_SRC is missing — skills that name the claude-board skill will not" >&2
@@ -1355,10 +1115,8 @@ fi
 echo
 echo "claude-board installed and running."
 echo
-# Two spellings of the same command, decided by the environment the reader is standing in:
-# with a proxy exported and no loopback exemption, the plain form asks the proxy for
-# 127.0.0.1 and reports a board that is up as down — the same trap the health gate above
-# now sidesteps, and a copy-pasteable line that fails is worse than none.
+# Same proxy trap as the health gate above: with a proxy exported and no loopback
+# exemption, the plain form reports a board that is up as down.
 PROXY_IN_ENV=0
 for _proxy_var in ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy; do
   if [ -n "${!_proxy_var:-}" ]; then PROXY_IN_ENV=1; break; fi
@@ -1369,40 +1127,29 @@ if [ "$PROXY_IN_ENV" -eq 1 ]; then
 else
   echo "verify:  curl -s http://127.0.0.1:${PORT}/api/health"
 fi
-# Boards are served only to an authorized browser. The tab a session opens is
-# authorized for you; this is the one command for a browser that holds nothing
-# (cleared cookies, a second profile, a different browser), and it is the same
-# command the daemon's own refusal page prints.
+# For a browser holding nothing -- cleared cookies, a second profile, another browser. The
+# same command the daemon's own refusal page prints.
 echo "authorize a browser:  $NODE_BIN $REPO_DIR/bin/authorize.mjs"
-# Deliberately the literal string bin/mcp.mjs prints on an unreachable daemon
-# (gui/\$(id -u), not the resolved uid) — same command, same shell semantics,
-# copy-pasteable either place it's printed.
+# Literally what bin/mcp.mjs prints on an unreachable daemon: gui/\$(id -u), unresolved, so
+# the string is copy-pasteable from either place.
 echo 'revive:  launchctl kickstart -k gui/$(id -u)/claude-board'
 echo "logs:    $OUT_LOG"
 echo "         $ERR_LOG"
-# LaunchServices has to know about the bundle before macOS will let it post a
-# notification at all -- a bundle that is merely present at $APP_PATH, correctly signed
-# and perfectly runnable, is refused with "Notifications are not allowed for this
-# application" until it is registered. LaunchServices does pick up ~/Applications on its
-# own eventually, but "eventually" is not something the first pomodoro boundary after an
-# install can wait for. Measured, and recorded in QUIRKS.md.
+# A correctly signed, perfectly runnable bundle is still refused with "Notifications are
+# not allowed for this application" until LaunchServices knows about it. It picks up
+# ~/Applications on its own eventually, which the first pomodoro boundary cannot wait for.
+# Measured, QUIRKS.md.
 #
-# lsregister lives at a private path, which is why this is a guarded call and not a
-# dependency: if Apple moves it, the bundle is registered a little later by the scanner
-# instead of immediately by this line, and nothing else about the install changes.
+# Guarded, not a dependency: lsregister lives at a private path, so if Apple moves it the
+# scanner registers the bundle a little later and nothing else changes.
 #
-# NOT done for a bundle staged under a temp root, and that exclusion is the whole reason
-# this block has a condition beyond "is lsregister there". The test suite installs into
-# throwaway roots -- fakehomes, CLAUDE_BOARD_APP_DIR overrides, and fixtures deliberately
-# built corrupt (Applications-tamper, Applications-rogue) -- and every one of those runs
-# used to leave a PERMANENT record in the real LaunchServices database, all of them
-# claiming the same real bundle id. Measured on this machine after a few weeks of test
-# runs: 6908 records, all but a handful naming paths that no longer exist. Notification
-# Center resolves a banner by bundle id and picks whichever record it likes, so a dead or
-# tampered one is macOS putting "claude-board.app is damaged and can't be opened" on
-# screen, on repeat, on a machine whose actual install is fine and whose board is up. A
-# bundle sitting in temp is not one anybody will ever click, so it has no business in that
-# database; the real install is unaffected, since $APP_PATH is under $HOME there.
+# NEVER FOR A THROWAWAY BUNDLE, which is why this has a condition beyond "is lsregister
+# there". The test suite installs into temp roots, including deliberately corrupt fixtures,
+# and each run leaves a PERMANENT record claiming the real bundle id -- 6908 of them
+# measured here after a few weeks, nearly all naming paths that no longer exist.
+# Notification Center resolves a banner by bundle id and picks whichever record it likes, so
+# a dead or tampered one puts "claude-board.app is damaged and can't be opened" on screen
+# repeatedly, on a machine whose install is fine.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 # --- BEGIN throwaway-bundle test (byte-identical in uninstall.sh) ---
 # True when $1 sits under a throwaway root -- a bundle nobody will ever click, so one with
@@ -1429,20 +1176,14 @@ if [ "$USE_LAUNCHER" -eq 1 ] && ! is_throwaway_bundle_path "$APP_PATH" && [ -x "
   "$LSREGISTER" -f "$APP_PATH" >/dev/null 2>&1 || true
 fi
 
-# Ask for notification permission here, at the end of an install the reader is watching,
-# rather than leaving the prompt to surface hours later at the first pomodoro boundary --
-# by which time the dialog has no context and the interval it belonged to is already
-# running. `|| true` because this script runs under `set -e` and a reader who says No (or
-# who has said No before) has answered the question, not broken the install: notifications
-# are one feature of the board and the daemon above is already up and serving without
-# them. Idempotent on every later run — macOS prompts once per bundle and answers from its
-# own record after that, so this is a no-op round trip on an install that changed nothing.
+# Asked at the end of an install somebody is watching, rather than hours later at the first
+# pomodoro boundary, where the dialog has no context. `|| true` under `set -e` because a No
+# answers the question rather than breaking the install. Idempotent: macOS prompts once per
+# bundle and answers from its own record after that.
 if [ "$USE_LAUNCHER" -eq 1 ] && [ -x "$APP_EXEC" ]; then
-  # Said before the call, not after: the first install puts a dialog on screen and this
-  # line blocks until it is answered, and an unexplained pause with a dialog behind the
-  # terminal window is the shape of a hung installer. Every later run prints this and
-  # returns instantly, which is the price of not having to know in advance which run is
-  # the first one.
+  # Printed BEFORE the call, which blocks until the dialog is answered -- an unexplained
+  # pause with a dialog behind the terminal is the shape of a hung installer. Later runs
+  # print it and return instantly, the price of not knowing which run is the first.
   echo "==> if macOS asks whether \"$LABEL\" may send notifications, say Allow"
   echo "    (pomodoro boundaries, and a round waiting on a board nobody is looking at)"
   "$APP_EXEC" --notify-authorize >/dev/null 2>&1 || true
@@ -1450,18 +1191,14 @@ fi
 
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   echo "launcher: $APP_PATH ($BUNDLE_ID)"
-  # Named on every successful run, not just the run that built it: this is the answer to
-  # "why can't the board read that file", and the person hitting that is rarely the
-  # person who watched the install scroll past.
+  # Every successful run, not just the one that built it: this is the answer to "why can't
+  # the board read that file", and whoever hits that rarely watched the install scroll past.
   echo "          macOS attributes the daemon's file reads to this bundle. A reference into"
   echo "          ~/Documents, ~/Desktop or ~/Downloads needs it ticked in System Settings ->"
   echo "          Privacy & Security -> Files and Folders."
-  # The one thing about the pomodoro notification this script cannot do for the reader.
-  # Banner (auto-dismissing after a few seconds) versus Alert (stays until dismissed) is a
-  # per-app setting macOS exposes only in System Settings — there is no API for it, which
-  # is why this is a printed instruction rather than a line of code. It is worth printing
-  # at all because the setting is the whole reason the notification comes from this bundle
-  # rather than from osascript: before, the row to change said "Script Editor".
+  # Printed rather than set: Banner vs Alert is per-app and macOS exposes no API for it.
+  # Worth printing because owning the bundle is what makes the row say claude-board at all
+  # -- posting through osascript put the setting under "Script Editor".
   echo "          Both kinds of notification come from it -- pomodoro boundaries and a round"
   echo "          left waiting. To make them stay on screen until dismissed:"
   echo "          System Settings -> Notifications -> $LABEL -> Alerts."
