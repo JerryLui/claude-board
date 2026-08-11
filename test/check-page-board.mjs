@@ -28,14 +28,14 @@
 // scroll-spy fires and a real <dialog> opens at 100vh is a real-browser question.
 
 import assert from 'node:assert/strict';
-import { createBoard, addRound, applySubmit } from '../src/board.mjs';
+import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock, stageAgentScript, COMMENT_ICON } from '../src/render.mjs';
 // The daemon's own push builder, imported rather than re-implemented: a check
 // that rebuilt the payload locally would assert its own copy of the rule and
 // stay green through any change to the real one (which is how the amend path's
 // missing `fullpage` survived two other push checks).
 import { buildRoundPushPayload } from '../src/server.mjs';
-import { ui } from '../src/ui.mjs';
+import { ui, ROUND_ABANDONED_LABEL, ROUND_ABANDONED_TITLE } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
 import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, PILL_SUBMITTED_TITLE } from '../src/badge.mjs';
 import { themeBootScript } from '../src/theme.mjs';
@@ -55,6 +55,20 @@ let failures = 0;
 function check(name, fn) {
   try {
     fn();
+    console.log(`ok - ${name}`);
+  } catch (err) {
+    failures++;
+    console.error(`FAIL - ${name}`);
+    console.error((err && err.stack) || err);
+  }
+}
+
+/** check(), for a case that has to let a promise chain settle -- the client's own
+ * resync is a fetch and two .then hops deep, and its effects are invisible until
+ * they drain. Same shape and same name as test/check-amend-integrity.mjs's. */
+async function checkAsync(name, fn) {
+  try {
+    await fn();
     console.log(`ok - ${name}`);
   } catch (err) {
     failures++;
@@ -1601,7 +1615,13 @@ check('AC 12: an "awaitExpired" SSE push reverts the page to read-only, leaving 
     // Captured rather than allowed to hit the real global fetch: what is being
     // asserted is that the comment LEFT the tab, and the tab's own memory is the
     // only place it existed.
-    flushCalls = withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })));
+    // Filtered to what this nudge WRITES: the same event is also how a tab hears
+    // that its round was abandoned rather than merely lapsed, which nothing in the
+    // payload distinguishes, so the handler re-reads the board (a GET) alongside
+    // the repaint. That read is asserted where it means something (the abandoned
+    // checks below); here it is noise between the queue and the submit.
+    flushCalls = withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })))
+      .filter(c => c.method === 'POST');
     assert.equal(flushCalls.length, 1, 'the queued comment must be flushed to the board on the way into the freeze, not frozen with it');
     assert.match(flushCalls[0].url, /\/submit$/);
     assert.equal(flushCalls[0].body.round, 1);
@@ -1659,7 +1679,10 @@ check('AC 12: a page round that expires with an EMPTY queue posts nothing at all
   const realNow = Date.now;
   try {
     Date.now = () => realNow() + 41 * 60_000;
-    const calls = withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })));
+    // Writes only -- see the filter in the check above for why the nudge also
+    // issues a read.
+    const calls = withFetchCapture(() => es.dispatch('awaitExpired', JSON.stringify({ round: 1 })))
+      .filter(c => c.method === 'POST');
     assert.deepEqual(calls, [], 'nothing was queued, so nothing may be sent -- a page nobody wrote on must not close its own round');
   } finally {
     Date.now = realNow;
@@ -1699,6 +1722,146 @@ check('AC 8/ADR 46: the comment-mode toggle is gone on a page board nobody is li
   } finally {
     Date.now = realNow;
   }
+});
+
+// =================================================================================
+// The comment rail is CHROME. '.page-comments' is nested inside the artifact's own
+// block (renderHtmlBlock's fullpage branch), so anchorRootFor finds that block for
+// anything the reviewer clicks in the rail -- and the html kind is anchorable, so
+// with the rail missing from ANCHOR_CHROME_SELECTOR the generic click-to-anchor
+// listener answered every press in it.
+// =================================================================================
+
+check('the panel\'s own hint is chrome, not artifact content: a click on it in comment mode anchors nothing (ablation: drop .page-comments from ANCHOR_CHROME_SELECTOR and it mints a dom anchor against the html block)', () => {
+  const { document } = openPageBoard();
+  enableCommentMode(document);
+  const hint = pageCommentHint(document);
+  assert.ok(hint, 'setup failure: the hint renders while the panel holds no comments');
+
+  hint.dispatchEvent(new StandInEvent('mouseover'));
+  assert.equal(hint.classList.contains('cb-anchor-hover'), false,
+    'the rail must not even offer itself as an anchor target');
+
+  hint.dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.querySelectorAll('.comment-form.open').length, 0,
+    'a click on the instructions must not open a compose form aimed at the instructions');
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0, 'and must queue nothing');
+  // The anchor it used to mint is the damaging part, not the stray form: it names
+  // a path in THIS document, and the daemon resolves an html block's dom anchor
+  // against the stage's own document (resolveComment, src/server.mjs), where the
+  // hint does not exist -- so the reviewer is told their comment is about
+  // something that is already gone.
+});
+
+check('Send in comment mode submits once and opens no compose form (ablation: the same one-line selector -- the send control is inside .page-comments, and the delegated Send listener carries no comment-mode guard of its own)', () => {
+  const { document, frame, blockId } = openPageBoard();
+  enableCommentMode(document);
+  queueComment(document, frame.contentDocument.getElementById('theme'), blockId, 'a remark worth sending');
+  assert.equal(document.querySelectorAll('.comment-form.open').length, 0, 'setup: queueing closed the form again');
+
+  const calls = withFetchCapture(() => pageSendBtn(document).dispatchEvent(new StandInEvent('click')));
+  const posts = calls.filter(c => c.method === 'POST');
+  assert.equal(posts.length, 1, 'the press must submit exactly once');
+  assert.deepEqual(posts[0].body.comments.map(c => c.text), ['a remark worth sending']);
+  assert.equal(document.querySelectorAll('.comment-form.open').length, 0,
+    'and must not ALSO open a compose form over the artifact -- one press, one meaning');
+});
+
+// =================================================================================
+// A round that closed WITHOUT being sent (abandonOpenRounds, ADR 69: the
+// conversation that owned this board declared a boundary and walked away). The
+// daemon nudges every open tab with the same 'awaitExpired' it sends for a wait
+// that merely lapsed, and nothing in that payload tells the two apart -- so the
+// tab re-reads the board, and what it finds has to reach the screen.
+// =================================================================================
+
+/** Dispatch `event` at `es` with the board page `fresh` served to the client's own
+ * resync, and let its promise chain drain. DOMParser is stubbed for the reason
+ * test/check-amend-integrity.mjs's own resync check gives: the stand-in has none,
+ * and resync's .catch would silently swallow the ReferenceError into exactly the
+ * no-op a check must not mistake for "the catch-up did nothing". */
+async function withResync(es, event, data, fresh) {
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  const posts = [];
+  globalThis.fetch = async (url, opts) => {
+    if (opts && opts.method === 'POST') { posts.push({ url, body: JSON.parse(opts.body) }); return { ok: true, status: 200, json: async () => ({}) }; }
+    return { ok: true, status: 200, text: async () => fresh };
+  };
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  try {
+    es.dispatch(event, data);
+    await new Promise(r => setTimeout(r, 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
+  return posts;
+}
+
+await checkAsync('a page board whose round was abandoned stops counting down, freezes, and says its queued comments never went out (ablation: drop roundsClosedUnsent from applyResync and the tab keeps a live countdown over a board nothing can ever be posted to)', async () => {
+  const board = pageBoard();
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  queueComment(document, frame.contentDocument.getElementById('theme'), board.blocks[0].id, 'typed before the boundary');
+  assert.equal(roundMeta(document).textContent.endsWith('m left'), true, 'setup: the round is awaited, so a countdown runs');
+  assert.equal(pageSendBtn(document).disabled, false, 'setup: the send control is live');
+
+  // The daemon's own two steps, in order: close the open rounds, then nudge every
+  // tab. The deadline is still 40 minutes away throughout -- no clock is moved
+  // here, deliberately, because this close has nothing to do with one.
+  const closed = abandonOpenRounds(board);
+  assert.deepEqual(closed, [1], 'setup: abandoning closes the one open round');
+  const posts = await withResync(es, 'awaitExpired', JSON.stringify({ round: 1 }), renderBoardPage(board));
+
+  assert.equal(roundMeta(document).textContent, 'read-only',
+    'the countdown must stop: nobody is waiting on this round any more');
+  const panel = document.querySelector('.page-comments');
+  assert.equal(panel.classList.contains('expired'), true, 'the compose surface must freeze');
+  assert.equal(pageSendBtn(document).disabled, true, 'and be genuinely disabled, not merely hidden (QUIRKS.md "Readonly is locked twice")');
+  assert.equal(pageDiscussBtn(document).disabled, true);
+  assert.deepEqual(posts, [],
+    'nothing may be posted on the way into this freeze -- the round is closed, so the daemon answers every submit 409');
+
+  // The comments are still on screen and now genuinely stranded, which is exactly
+  // why the control that can no longer be pressed has to say so.
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1,
+    'a comment already left stays on screen');
+  const frozen = pageSendBtn(document);
+  assert.equal(frozen.textContent, ROUND_ABANDONED_LABEL, 'the frozen control must say the round closed unsent...');
+  assert.equal(frozen.title, ROUND_ABANDONED_TITLE);
+  assert.notEqual(frozen.textContent, PAGE_SEND_EXPIRED_LABEL,
+    '...and must NOT borrow the lapsed-wait label, which promises the comments reach the next agent -- untrue on a board nothing will ever post to again');
+});
+
+await checkAsync('the expired Send label survives the flush it announces (ablation: drop the .page-comments.expired guard from updatePageSendControls and the flush\'s own refreshPins overwrites it with a dead "Nothing to add")', async () => {
+  const board = pageBoard();
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  queueComment(document, frame.contentDocument.getElementById('theme'), board.blocks[0].id, 'left before the wait died');
+
+  const realNow = Date.now;
+  let posts;
+  try {
+    Date.now = () => realNow() + 41 * 60_000; // past the 40-minute default: the wait itself lapsed
+    // The freeze's own flush is a POST whose .then re-renders the pins -- and
+    // refreshPins calls updatePageSendControls. The label is only overwritten
+    // once that response lands, which is why this check has to wait for it: the
+    // existing AC 12 check reads the label synchronously and stays green either
+    // way.
+    posts = await withResync(es, 'awaitExpired', JSON.stringify({ round: 1 }), renderBoardPage(board));
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(posts.length, 1, 'setup: the queued comment was flushed, so the response that relabels has actually landed');
+
+  const frozen = pageSendBtn(document);
+  assert.equal(frozen.textContent, PAGE_SEND_EXPIRED_LABEL,
+    'the control must still name where those comments went -- it is the only place the reviewer is told');
+  assert.equal(frozen.title, PAGE_SEND_EXPIRED_TITLE);
+  assert.equal(frozen.disabled, true);
 });
 
 if (failures) {

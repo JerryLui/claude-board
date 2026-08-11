@@ -327,6 +327,11 @@
   var PILL_SUBMITTED_TITLE = "This round was submitted -- the answer already went out.";
   var PAGE_SEND_EXPIRED_LABEL = "Goes out with the next round";
   var PAGE_SEND_EXPIRED_TITLE = "This round ended. Comments left here are stored and reach the next agent that asks.";
+  // The other closed-without-sending case -- see these two constants' own comment
+  // at the top of this file for why a lapsed wait and an abandoned round may not
+  // share one label.
+  var ROUND_ABANDONED_LABEL = "Round closed, not sent";
+  var ROUND_ABANDONED_TITLE = "The conversation that opened this board ended, so this round closed. Comments queued here were never sent.";
   var roundIsAwaitedOpen = function roundIsAwaitedOpen(round) {
   return !!round && round.status === 'open' && round.awaited === true;
 };
@@ -2563,6 +2568,14 @@
    * queued, which is precisely why this exists. */
   function updatePageSendControls() {
     qsa('.page-send-bar', document).forEach(function (bar) {
+      // A frozen panel's control is no longer a count of what is queued: it has
+      // been relabelled to say where those comments went (refreshAwaitDisplay
+      // below), and that freeze is one-directional. This function runs from
+      // refreshPins, which the flush's OWN submit calls the moment it resolves --
+      // so the last thing a reviewer saw as their comments left was this
+      // overwriting that label with a dead "Nothing to add", on a disabled
+      // button, exactly where they had been told to look.
+      if (bar.closest && bar.closest('.page-comments.expired')) return;
       var n = parseInt(bar.getAttribute('data-round'), 10);
       if (!isFinite(n)) return;
       var blocks = blocksOfRound(n);
@@ -2801,8 +2814,23 @@
   // keeps the generic gesture out of it entirely (hover marking included) and
   // leaves the lens's own listener, which mints the specific mermaid anchor its
   // surface needs, as the only thing that answers a click in there.
+  // .page-comments is the page board's floating comment rail (renderPageCommentPanel,
+  // src/render.mjs) -- the comment infrastructure itself, exactly like .comment-form
+  // and .comment-list above, and listed for both reasons this list exists. It is
+  // NOT outside .blocks the way the header and the ordinary send bar are: the
+  // panel is nested inside the artifact's own block, so anchorRootFor finds that
+  // block for anything in it. Two defects followed from the omission. Its own
+  // hint line ("Click anywhere on the page to leave a comment.") is chrome this
+  // page drew, not authored content, but a click on it minted a page-scoped dom
+  // anchor against the html block -- which the server resolves through the
+  // IFRAME's document (resolveComment, src/server.mjs), where that hint does not
+  // exist -- so the reviewer was told they had commented on something that was
+  // gone the moment they commented on it. And its Send/Discuss controls have
+  // their own delegated listener below, which carries no comment-mode guard: with
+  // the panel unlisted, one press in comment mode both submitted the round AND
+  // opened a compose form over the artifact.
   var ANCHOR_CHROME_SELECTOR = '.block-kicker, .comment-btn, .comment-form, .comment-target, '
-    + '.comment-list, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
+    + '.comment-list, .page-comments, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
     + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens';
 
   function isAnchorChrome(el) {
@@ -3763,7 +3791,16 @@
       var n = section ? parseInt(section.getAttribute('data-round'), 10) : NaN;
       if (!isFinite(n)) return;
       var round = roundEntry(n);
-      if (roundIsAwaitedOpen(round) && !roundIsCurrentlyAwaited(round, now)) {
+      // The second way a page round's compose surface stops being live, and the
+      // one nothing here used to notice: the conversation that owned this board
+      // declared a boundary and 'abandonOpenRounds' (src/board.mjs) closed the
+      // round out from under this tab. That is not a clock fact -- the deadline
+      // can still be an hour away -- so the two branches are asked separately,
+      // and the abandoned one is asked off 'status' alone. A round that went
+      // 'sent' is deliberately not here: its whole section is replaced by the
+      // server's own historical markup on the 'submitted' push.
+      var abandoned = !!round && round.status === 'abandoned';
+      if (abandoned || (roundIsAwaitedOpen(round) && !roundIsCurrentlyAwaited(round, now))) {
         // Last exit before the freeze. 'pendingComments' lives ONLY in this tab's
         // memory (see its declaration) and the Send control is the only thing that
         // ever moves it to the board, so freezing the control with the queue still
@@ -3771,7 +3808,13 @@
         // they sit on screen looking saved until the tab is reloaded. Flushed
         // first, frozen second -- the payload is captured synchronously inside
         // submitPageRound, so the disable sweep below cannot race it.
-        flushPendingOnExpiry(n);
+        //
+        // No flush on the abandoned branch, and not as an oversight: there is
+        // nothing left to flush TO. The round is not 'open' any more, so
+        // submitPageRound refuses it before the fetch and the daemon would answer
+        // 409 anyway. Saying so on the control (below) is the whole of what this
+        // tab can honestly do.
+        if (!abandoned) flushPendingOnExpiry(n);
         panel.classList.add('expired');
         qsa('input, button', panel).forEach(function (el) { el.disabled = true; });
         // Frozen, but not mute: the control stays on screen saying where the
@@ -3779,8 +3822,8 @@
         // disable sweep so it cannot be re-enabled by it.
         var expiredSend = panel.querySelector('.page-send-btn');
         if (expiredSend) {
-          expiredSend.textContent = PAGE_SEND_EXPIRED_LABEL;
-          expiredSend.title = PAGE_SEND_EXPIRED_TITLE;
+          expiredSend.textContent = abandoned ? ROUND_ABANDONED_LABEL : PAGE_SEND_EXPIRED_LABEL;
+          expiredSend.title = abandoned ? ROUND_ABANDONED_TITLE : PAGE_SEND_EXPIRED_TITLE;
         }
       }
     });
@@ -5116,7 +5159,19 @@
   // about to throw away. Closing first returns the form while its slot is still
   // in the document; leaving it open would strand it inside a dialog and leave
   // two elements sharing one id the moment the replacement rendered its own.
+  // Counts the live pushes this tab has applied. Read by resync() alone, which
+  // captures it before its fetch and drops the answer if it moved -- see that
+  // function's own comment for the reversion this closes.
+  var pushGeneration = 0;
+  // The same guard for the catch-ups themselves: how many have been ISSUED, and
+  // the issue number of the newest one to have come back. Two counters rather
+  // than one, because "a fresher sibling already landed" is a different question
+  // from "how many are outstanding" -- see resync() below.
+  var resyncIssued = 0;
+  var resyncNewest = 0;
+
   function applyRoundPush(data) {
+    pushGeneration++;
     lensClose();
     // The stage lens needs the same treatment for the same reason, and was
     // never given it: it holds a pick control bound to a card this push is
@@ -5301,6 +5356,7 @@
   }
 
   function applySubmittedPush(data) {
+    pushGeneration++; // see applyRoundPush above, and resync below
     lensClose(); // see applyRoundPush above
     stageLensClose();
     disarmSend();
@@ -5311,6 +5367,24 @@
     // to place pins on whatever it wires, including the just-submitted section
     // this call is about to swap in.
     board = data.board;
+    // BEFORE any wiring, not after it. The round is now sent: nothing in it is
+    // worth preserving as "in progress" any more, however this client happened to
+    // have it filled in. Both sources are used deliberately -- board.blocks is the
+    // TOP level only, so a question nested in a compare block or in another
+    // question's context appears solely in replacedIds, harvested from the DOM
+    // subtree actually being replaced.
+    //
+    // The ORDER is the whole point, and it was wrong: wireRoot re-applies this
+    // tab's live selections/notes/deferred onto whatever markup it wires (see its
+    // per-widget loops), so clearing afterwards emptied the variables while
+    // leaving their contents painted on screen. The section it paints them onto is
+    // the server's own render of what was ACTUALLY submitted -- by whichever tab
+    // pressed Send -- so a second tab repainted its private, unsent draft note and
+    // its own unsent selections into the immutable record of someone else's
+    // answer. Both halves matter: a reviewer's unsent draft is not for the record,
+    // and the record must show what went out.
+    var roundBlockIds = (data.board.blocks || []).filter(function (b) { return b.round === data.round; }).map(function (b) { return b.id; });
+    clearFieldState(roundBlockIds.concat(replacedIds));
     if (data.html) {
       var wrap = document.createElement('div');
       wrap.innerHTML = data.html;
@@ -5355,13 +5429,6 @@
     // a detached node, so any page-scoped pin it drew is positioned wrong now
     // that the section is actually attached. Recompute once, here, after attach.
     refreshPins(document);
-    // The round is now sent: nothing in it is worth preserving as "in progress"
-    // any more, however this client happened to have it filled in. Both sources
-    // are used deliberately -- board.blocks is the TOP level only, so a question
-    // nested in a compare block or in another question's context appears solely
-    // in replacedIds, harvested from the DOM subtree actually being replaced.
-    var roundBlockIds = (data.board.blocks || []).filter(function (b) { return b.round === data.round; }).map(function (b) { return b.id; });
-    clearFieldState(roundBlockIds.concat(replacedIds));
     // Sent means sent: the send bar stays disabled until a new round arrives, so
     // a second click (or a second tab) can never re-submit a round that went
     // out. goToRound above has already said exactly this (the bar is live only
@@ -5392,8 +5459,56 @@
   // ('#board-data', resolveComment already run over it) AND the server-rendered
   // markup for every round — so the catch-up reuses the same fragments a live
   // push would have carried, instead of the client inventing its own markup.
+  /** The rounds this snapshot says closed WITHOUT being sent -- the one board
+   * change computeBoardPatch cannot report, and the reason applyResync's own
+   * early return could not be trusted alone.
+   *
+   * 'abandonOpenRounds' (src/board.mjs) moves a round to 'abandoned' when the
+   * conversation that owned this board declares a boundary and walks away. No
+   * block changes, and 'sent' is the only status transition the patch reports, so
+   * that close diffs to NOTHING: the resync returned early and this tab kept a
+   * board whose round still said 'open'. Everything downstream then read that
+   * stale copy and lied in step -- the countdown ticked against a deadline nobody
+   * was waiting on, the send bar stayed live over a submit the daemon answers 409,
+   * and a comment queued in this tab's memory sat there with nothing on screen
+   * saying it would never leave.
+   *
+   * Asked here rather than inside computeBoardPatch: that function is spliced
+   * verbatim from src/patch.mjs and its 'roundsNowSent' is read by
+   * markRoundHistory, which must NOT fire for a round that was never sent. */
+  function roundsClosedUnsent(fresh) {
+    var closed = [];
+    (fresh.rounds || []).forEach(function (r) {
+      var prev = null;
+      (board.rounds || []).forEach(function (p) { if (p.n === r.n) prev = p; });
+      if (prev && prev.status === 'open' && r.status !== 'open' && r.status !== 'sent') closed.push(r.n);
+    });
+    return closed;
+  }
+
+  /** Take on a snapshot in which a round closed unsent, and restate the surfaces
+   * that were describing it as live. refreshPager is the whole repaint: the
+   * countdown, the send bar and (through refreshAwaitDisplay) the page panel's
+   * freeze are all written from 'board' alone, which is the only thing this
+   * changed. */
+  function adoptClosedRounds(fresh) {
+    // The reviewer's own queue is the half no repaint reaches: pendingComments
+    // lives only in this tab's memory and the closed round was the only thing that
+    // could ever have carried it. Said in the one place a reviewer of an ordinary
+    // board is already looking; a page board's frozen panel carries the same
+    // sentence on its own control (refreshAwaitDisplay), off the same constant.
+    if (sendStatus && pendingComments.length) sendStatus.textContent = ROUND_ABANDONED_TITLE;
+    board = fresh;
+    refreshPager();
+    refreshPins(document);
+  }
+
   function applyResync(fresh, doc) {
     var patch = computeBoardPatch(board, fresh);
+    // Ahead of the patch's own early return (that return is what swallowed this)
+    // and after computeBoardPatch has read the OLD board -- see the two functions
+    // just above.
+    if (roundsClosedUnsent(fresh).length) adoptClosedRounds(fresh);
     if (!patch.addedBlockIds.length && !patch.changedBlockIds.length && !patch.roundsNowSent.length) return;
     lensClose(); // see applyRoundPush above -- after the no-op early return, not before
     stageLensClose();
@@ -5441,7 +5556,8 @@
     rounds.sort(function (a, b) { return a - b; });
 
     if (!rounds.length) {
-      // Only status to catch up on -- a round went sent while we were away.
+      // Only status to catch up on -- a round went sent, or closed unsent
+      // (roundsClosedUnsent above), while we were away.
       board = fresh;
       clearFieldState(patch.changedBlockIds);
       patch.roundsNowSent.forEach(markRoundHistory);
@@ -5479,10 +5595,37 @@
 
   function resync() {
     if (readonly) return;
+    // The snapshot about to be fetched describes the board as it is NOW; by the
+    // time it lands, a live push may have described it as it is later. Which of
+    // the two the DOM ends up showing was decided by nothing at all: computeBoardPatch
+    // is a symmetric diff, so an older snapshot arriving after a newer push
+    // reports the push's own block as "changed" just as convincingly, re-renders
+    // it from the stale markup, and clearFieldState wipes what the reviewer typed
+    // into it in between -- the amend goes backwards on screen and the answer to
+    // it is gone. Cheap to rule out: remember which push this fetch was issued
+    // after and drop the answer if that is no longer the newest, since a push
+    // carries the WHOLE board (data.board) rather than a delta, so nothing the
+    // dropped snapshot knew is lost by trusting the push instead. The next
+    // reconnect resyncs again anyway.
+    var generation = pushGeneration;
+    // Two catch-ups can now be in the air at once -- the 'awaitExpired' handler
+    // below re-reads the board on every nudge, and abandoning a board sends one
+    // per round it closes -- and the push counter cannot separate two SIBLINGS:
+    // neither of them is a push, so both still match it and the older one applies
+    // its staler snapshot over the fresher one that already landed, which is the
+    // same reversion this guard exists to stop. So each fetch is also stamped with
+    // its own place in issue order and compared against the newest that has
+    // arrived: the OLDER of two answering out of order is what drops, rather than
+    // whichever happens to land second (dropping by arrival would throw away the
+    // FRESHER snapshot whenever the older one answered first).
+    var issued = ++resyncIssued;
     fetch('/b/' + encodeURIComponent(boardId)).then(function (r) {
       if (!r.ok) throw new Error('resync failed: ' + r.status);
       return r.text();
     }).then(function (text) {
+      if (pushGeneration !== generation) return;
+      if (issued < resyncNewest) return;
+      resyncNewest = issued;
       // DOMParser does not run scripts or fetch subresources, so parsing the
       // served page here is inert -- it is read purely as a data envelope.
       // Tag/type-qualified for the same reason as the hydrate-time lookup at
@@ -5521,10 +5664,19 @@
     // AC 12: "when a wait dies while the page is open, the page is told over
     // SSE". src/server.mjs's handleWait broadcasts this the instant its own
     // /wait call times out, which is genuinely earlier than the periodic tick
-    // above would otherwise catch it. No payload is needed -- every fact this
-    // repaints (board.rounds' own status/awaited/awaitDeadline, and this
-    // reader's own clock) is already known locally; the event exists purely as
-    // a wake-up nudge, so a malformed or absent 'data' still repaints.
-    es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); });
+    // above would otherwise catch it. The repaint is unconditional and needs no
+    // payload -- for a wait that simply ran out, every fact it states
+    // (board.rounds' own status/awaited/awaitDeadline, and this reader's own
+    // clock) is already known locally -- so a malformed or absent 'data' still
+    // repaints.
+    //
+    // The re-read beside it is for the OTHER sender of this same event:
+    // handleAbandon broadcasts it for every round it closes (ADR 69, a
+    // conversation declaring a boundary), and that is a fact no local repaint can
+    // reach. Nothing in the payload distinguishes the two, and this tab's own copy
+    // of the board still says 'open' either way, so the board is re-read rather
+    // than guessed at -- one path for both, since a re-read on a wait that merely
+    // lapsed diffs to nothing and applyResync returns without touching the DOM.
+    es.addEventListener('awaitExpired', function () { refreshAwaitDisplay(); resync(); });
   }
 })();

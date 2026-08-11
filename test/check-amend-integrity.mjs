@@ -18,11 +18,15 @@
 //   D28. every push path closes the stage lens, not only the diagram lens.
 //   D30. a context-nested html stage carries exactly ONE pin layer, so its
 //        comments are drawn once, where the stage itself says they are.
+//   ...and the two other pushes of the same shape, at the end of this file: a
+//        'submitted' push renders what was SUBMITTED rather than the receiving
+//        tab's own unsent draft, and a resync answered after a live push is
+//        dropped rather than applied backwards over it.
 
 import assert from 'node:assert/strict';
-import { createBoard, amendRound, resolveComments } from '../src/board.mjs';
+import { createBoard, addRound, amendRound, applySubmit, abandonOpenRounds, resolveComments } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock } from '../src/render.mjs';
-import { ui } from '../src/ui.mjs';
+import { ui, ROUND_ABANDONED_TITLE } from '../src/ui.mjs';
 import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
 
 let failures = 0;
@@ -259,6 +263,233 @@ check('a stage cannot grow the pending-locate table without bound, and cannot na
   const positions = ui.slice(ui.indexOf('function handleStagePositions('));
   assert.match(positions.slice(0, 900), /Object\.prototype\.hasOwnProperty\.call\(pendingLocates, data\.requestId\)/,
     "requestId is a string the stage chooses: a bare lookup hands 'toString' a function, sails past the !pending guard and throws out of the message listener");
+});
+
+// --- a submitted round shows what was SUBMITTED, not this tab's draft --------
+//
+// Same family, different push. Two tabs are open on one board; one of them
+// presses Send. The daemon broadcasts 'submitted' carrying the round re-rendered
+// from the now-authoritative board -- "the actual answers/notes/choices that were
+// sent", as src/server.mjs's own comment beside that broadcast puts it, precisely
+// so that the OTHER tab's unsent state is not frozen into the record as if it
+// were what went out. The client then undid that on arrival: it wired the
+// replacement (which re-applies this tab's live selections/notes onto whatever it
+// wires) BEFORE clearing them, so the second tab painted its own private draft
+// over the immutable record of someone else's answer.
+
+check('a just-sent round shows what was submitted, never this tab\'s unsent draft (ablation: move applySubmittedPush\'s clearFieldState back below wireRoot and the second tab repaints its own selection onto the record)', () => {
+  const board = createBoard({
+    title: 'Two tabs, one Send',
+    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const qid = board.blocks[0].id;
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+
+  // THIS tab's private, unsent state: a different choice and a note nobody else
+  // has ever seen, entered through the real widgets.
+  const pick = label => Array.from(document.querySelectorAll('.choice-single')).find(el => el.textContent.indexOf(label) !== -1);
+  pick('No').dispatchEvent(new StandInEvent('click'));
+  const draftNote = document.querySelector(`textarea[data-note-for="${qid}"]`);
+  draftNote.value = 'my private draft, never sent';
+  draftNote.dispatchEvent(new StandInEvent('input'));
+  assert.equal(pick('No').classList.contains('selected'), true, 'setup failure: the draft choice was not recorded');
+
+  // The OTHER tab answers differently and sends. Everything from here is the
+  // daemon's own payload, built the way handleSubmit builds it.
+  applySubmit(board, {
+    action: 'send',
+    answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'what actually went out' }],
+    comments: [],
+  }, 1);
+  const resolved = resolveComments(board, board.comments);
+  const html = renderRoundSection(board, 1, groupCommentsByBlock(resolved));
+  es.dispatch('submitted', JSON.stringify({ round: 1, board: { ...board, comments: resolved }, html }));
+
+  const section = document.querySelector('.round[data-round="1"]');
+  const selected = Array.from(section.querySelectorAll('.choice-single.selected'));
+  assert.equal(selected.length, 1, `the record must show exactly one choice, got ${selected.length}`);
+  assert.equal(selected[0].getAttribute('data-choice'), 'Yes',
+    'and it must be the choice that was actually submitted, not the one this tab had merely picked');
+
+  const noteEl = section.querySelector(`textarea[data-note-for="${qid}"]`);
+  assert.equal(noteEl.textContent, 'what actually went out', 'the server rendered the note that was sent');
+  // The stand-in never seeds `.value` from a textarea's markup (a documented
+  // ceiling -- see its own header), so `.value` here is exactly "what the client
+  // script wrote into this field", and the answer must be: nothing.
+  assert.equal(noteEl.value, '',
+    'the client must not write this tab\'s draft note over the note that was submitted');
+});
+
+// --- a stale resync must not revert what the reviewer just typed -------------
+//
+// resync fetches a snapshot describing the board as it is NOW; by the time it
+// lands, a live push may have described it as it is later. computeBoardPatch is a
+// symmetric diff, so the older snapshot reports the push's own block as "changed"
+// just as convincingly -- and applyRoundPush then re-renders it from the stale
+// markup and clears the field state, taking the reviewer's answer with it.
+
+await checkAsync('a resync answered after a live amend is dropped, not applied backwards over it (ablation: delete resync\'s generation guard and the amended question reverts, taking the answer just given with it)', async () => {
+  const board = createBoard({
+    title: 'Stale resync',
+    blocks: [{ kind: 'question', prompt: 'Q1: the original prompt', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const qid = board.blocks[0].id;
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  // The snapshot the daemon is about to serve: taken BEFORE the amend, which is
+  // the whole point -- the reconnect and the amend crossed on the wire.
+  const stalePage = renderBoardPage(board);
+
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  let release = null;
+  globalThis.fetch = () => new Promise(resolve => {
+    release = () => resolve({ ok: true, status: 200, text: async () => stalePage });
+  });
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  try {
+    es.dispatch('open', ''); // the reconnect: resync is now in flight, unanswered
+    assert.ok(release, 'setup failure: the subscription never issued its catch-up fetch');
+
+    // The amend lands while that fetch is still in the air.
+    amendRound(board, {
+      blocks: [{ id: qid, kind: 'question', prompt: 'Q1: the amended prompt', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+    });
+    es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, 1, 'amend', [qid])));
+    const yes = Array.from(document.querySelectorAll('.choice-single')).find(el => el.textContent.indexOf('Yes') !== -1);
+    assert.ok(yes, 'setup failure: the amended question did not render its options');
+    yes.dispatchEvent(new StandInEvent('click')); // and the reviewer answers it
+
+    release(); // ...and only now does the pre-amend snapshot arrive
+    await new Promise(r => setTimeout(r, 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
+
+  const section = document.querySelector('.round[data-round="1"]');
+  assert.match(section.textContent, /the amended prompt/, 'the amend must still be on screen');
+  assert.doesNotMatch(section.textContent, /the original prompt/, 'the withdrawn prompt must not come back');
+  const selected = Array.from(section.querySelectorAll('.choice-single.selected'));
+  assert.equal(selected.length, 1, 'the answer given after the amend must survive the stale catch-up');
+  assert.equal(selected[0].getAttribute('data-choice'), 'Yes');
+});
+
+// The same rule, between two catch-ups rather than between a catch-up and a push.
+// Two are genuinely in the air now: the 'awaitExpired' handler re-reads the board
+// on every nudge, and closing a board sends one nudge per round it closes. Neither
+// sibling is a push, so the push counter cannot separate them -- and the daemon is
+// single-threaded, so the one ISSUED first is the one whose snapshot was read
+// first, whichever order the two responses reach the tab in.
+//
+// What the older sibling would do on arrival TODAY is early-return: a strictly
+// older snapshot carries the same blocks and no status the newer one has not
+// already moved past, so computeBoardPatch reports nothing. That is why this is
+// asserted where the decision is made -- the snapshot is dropped unread -- rather
+// than through a reverted widget. The abandoned-round branch just below is the
+// first branch to act on a status change alone (no applyRoundPush, so nothing
+// bumps the push counter), and it is exactly that shape of branch that turns "the
+// older sibling reaches applyResync" into a visible revert; the ordering rule is
+// pinned here so the next one cannot reintroduce it quietly.
+
+await checkAsync('of two catch-ups in flight, the older one answering last is dropped unread, not applied over the fresher one that already landed (ablation: delete the issue-order half of resync\'s guard and the stale snapshot is parsed and handed to applyResync)', async () => {
+  const q = n => ({ kind: 'question', prompt: `Q${n}: pick one`, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] });
+  const board = createBoard({ title: 'Two nudges', blocks: [q(1)], wait: true });
+  addRound(board, { blocks: [q(2)], wait: true });
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+  const sendBtn = document.getElementById('send-btn');
+  assert.equal(sendBtn.disabled, false, 'setup: two open rounds, so the newest is submittable');
+
+  // The two snapshots: what the daemon had before it closed the board, and what
+  // it has after. The first nudge's read is the slow one here -- the failure the
+  // guard is about is precisely that it can answer last.
+  const stalePage = renderBoardPage(board);
+  const closed = abandonOpenRounds(board);
+  assert.deepEqual(closed, [1, 2], 'setup: both open rounds close, so the daemon nudges twice');
+  const freshPage = renderBoardPage(board);
+
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  const parsed = [];
+  const pending = [];
+  globalThis.fetch = () => new Promise(resolve => pending.push(resolve));
+  globalThis.DOMParser = class { parseFromString(text) { parsed.push(text); return parseHTML(text); } };
+  try {
+    es.dispatch('awaitExpired', JSON.stringify({ round: 1 }));
+    es.dispatch('awaitExpired', JSON.stringify({ round: 2 }));
+    assert.equal(pending.length, 2, 'setup: one catch-up per nudge, both in the air at once');
+
+    pending[1]({ ok: true, status: 200, text: async () => freshPage }); // the fresher answers first
+    await new Promise(r => setTimeout(r, 0));
+    assert.equal(parsed.length, 1, 'setup: the fresher snapshot was read');
+    assert.equal(sendBtn.disabled, true, 'setup: ...and applied -- the board is closed, so Send is gone');
+
+    pending[0]({ ok: true, status: 200, text: async () => stalePage }); // the older answers last
+    await new Promise(r => setTimeout(r, 0));
+    assert.equal(parsed.length, 1,
+      'the older snapshot must be dropped where it is decided, not read and handed to applyResync to be diffed against a board it predates');
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
+
+  assert.equal(sendBtn.disabled, true, 'and the closed board stays closed');
+});
+
+// --- an abandoned board, on an ORDINARY board's surface ----------------------
+//
+// The page board's half of this is test/check-page-board.mjs's (its floating
+// panel is its own compose surface). This is the same close seen from the
+// ordinary send bar: a conversation declared a boundary, abandonOpenRounds closed
+// the round, and the daemon nudged every open tab with the same 'awaitExpired'
+// it sends for a wait that merely lapsed.
+
+await checkAsync('an ordinary board whose round was abandoned stops counting down, takes Send away, and says why the queued comments never left (ablation: delete roundsClosedUnsent/adoptClosedRounds and the bar stays live over a board that answers every submit 409)', async () => {
+  const board = createBoard({
+    title: 'Boundary declared',
+    blocks: [
+      { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      { kind: 'html', html: '<p id="mock">the artifact</p>' },
+    ],
+    wait: true,
+  });
+  const htmlId = board.blocks[1].id;
+  const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
+
+  // A comment queued through the block's own "Add comment" affordance -- it lives
+  // nowhere but this tab's memory until a Send carries it.
+  document.querySelector(`.comment-btn[data-block-id="${htmlId}"]`).dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + htmlId);
+  assert.ok(form && form.classList.contains('open'), 'setup failure: the comment form did not open');
+  form.querySelector('input[type=text]').value = 'a remark with nowhere to go';
+  form.dispatchEvent(new StandInEvent('submit'));
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1, 'setup failure: nothing was queued');
+
+  const countdown = document.querySelector('span#round-countdown');
+  assert.equal(countdown.textContent.endsWith('m left'), true, 'setup: the round is awaited, so the bar counts down');
+  assert.equal(document.getElementById('send-btn').disabled, false, 'setup: Send is live');
+
+  abandonOpenRounds(board);
+  const freshPage = renderBoardPage(board);
+  const originalFetch = globalThis.fetch;
+  const originalParser = globalThis.DOMParser;
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => freshPage });
+  globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
+  try {
+    es.dispatch('awaitExpired', JSON.stringify({ round: 1 }));
+    await new Promise(r => setTimeout(r, 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.DOMParser = originalParser;
+  }
+
+  assert.equal(countdown.textContent, '', 'the countdown must stop -- nobody is waiting on this round any more');
+  assert.equal(countdown.classList.contains('visible'), false);
+  assert.equal(document.getElementById('send-btn').disabled, true, 'Send must go, rather than stay live over a submit the daemon answers 409');
+  assert.equal(document.getElementById('discuss-btn').disabled, true);
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1,
+    'the queued comment stays on screen -- it is the reviewer\'s, and nothing here may throw it away');
+  assert.equal(document.querySelector('span#send-status').textContent, ROUND_ABANDONED_TITLE,
+    'and the one line beside the dead button has to say why it will never go out');
 });
 
 if (failures) process.exit(1);

@@ -21,7 +21,8 @@ Round 6 does not redeliver rounds 1-5. _Avoid_: turn, batch, post.
 
 **Awaited**: of a round, that the `ask` call which posted it is still blocked on it, so a submit
 reaches a listening agent. The property behind three surfaces — the sendable badge, the Banner,
-and the index's per-Thread count of rounds still open — until the round is sent or its wait ends.
+and the index's per-Thread count of rounds still open — until the round is sent, Abandoned, or its
+wait ends.
 _Avoid_: waiting (of a round — a round is Awaited, a Board is Waiting), blocking, live, pending,
 rounds left, outstanding.
 
@@ -35,9 +36,18 @@ round being answered. A lapsed round is no longer Awaited and is never resumed b
 _Avoid_: expired, stale, dead.
 
 **Submitted**: of a round, that the reviewer sent their answers, which is the reader-facing
-name for the round state the store calls `sent`. The one closed state a reader is told about
-by name: Lapsed and never-Awaited rounds are both read-only and say only that. _Avoid_: sent
-(internal only), answered, completed, done.
+name for the round state the store calls `sent`. One of the two closed states a reader is told
+about by name, Abandoned being the other; Lapsed and never-Awaited rounds are both read-only and
+say only that. _Avoid_: sent (internal only), answered, completed, done.
+
+**Abandoned**: of a round, that it was closed with nobody having answered it, because the
+conversation that posted it declared itself over — the `fresh` flag on a later `ask`, or a direct
+abandon. The second closed state told by name, and terminal in a way Lapsed is not: a lapsed round
+sits on a board that can still be posted to, while an abandoned one belongs to a conversation that
+has moved to another board. A blocked `ask` on it is released at once and told `abandoned` rather
+than left to the wall clock, and a Send that arrives after is refused by name rather than as "already
+submitted" — nobody submitted anything. _Avoid_: cancelled, dropped, discarded, closed, expired
+(that is Lapsed).
 
 **Watcher**: an open board tab holding a live stream to one board. Counted per board and
 never per machine: a reviewer sitting on another board's tab is not a watcher of this one.

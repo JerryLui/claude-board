@@ -15,7 +15,10 @@ import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 import { startServer, activeWaitCount, buildPacketWithUndelivered, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
-import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER } from '../src/board.mjs';
+import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
+// The one cap every by-value string on a board shares (src/resolve.mjs), read rather
+// than restated so a check cannot pass against a number the product no longer uses.
+import { MAX_REF_BYTES } from '../src/resolve.mjs';
 import { readBoard, writeBoard, searchBoards } from '../src/store.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
@@ -152,6 +155,14 @@ function fetch(input, init = {}) {
 function sessionCookieHeader() {
   return `${SESSION_COOKIE}=${sessionToken(SECRET)}`;
 }
+
+// Out of reach, exactly as test/run.mjs pushes it for the whole suite and for the same
+// reason: this file boots a daemon and posts awaited rounds into it that nobody ever
+// looks at, which is precisely what the stranded rule announces. `??=` so the suite's
+// own value still wins; what this adds is that running this check ALONE behaves the same
+// way -- no real banners, and no stranded write landing on a board mid-check and moving
+// the store under the walk-count assertions near the bottom of this file.
+process.env.CLAUDE_BOARD_STRANDED_GRACE_MS ??= String(24 * 60 * 60 * 1000);
 
 // Short heartbeat so the SSE checks below can prove the stream survives past one
 // (or several) heartbeat intervals without a multi-second sleep. Read live by
@@ -3328,6 +3339,354 @@ async function main() {
     assert.ok(Date.parse(round2.awaitDeadline) > Date.now(), 'against a deadline that is actually in the future -- the whole point');
   });
 
+  await check('the requestId dedupe keys on RESOLVED CONTENT: re-posting the same artifact after its referenced file was regenerated surfaces the new file, not a deduped 200 pointing at the old one', async () => {
+    // The loop the board manual actually prescribes: post an artifact that REFERENCES a
+    // rendered file, regenerate that file, re-issue the identical `ask`. `requestId` is a
+    // hash of the raw blocks (bin/mcp.mjs) and a raw block names the file by PATH, so the
+    // second call arrives byte-identical -- and a body-keyed dedupe answered it
+    // `deduped: 200`. The reviewer went on reading v1 while the agent believed v2 had
+    // landed, and a content-only round is never `sent`, so nothing ever broke the cycle.
+    const stageDir = projectDir('regenerated-artifact');
+    const stagePath = path.join(stageDir, 'stage.html');
+    const page = marker => `<!doctype html><html><body><h1>${marker}</h1></body></html>`;
+    writeFileSync(stagePath, page('ARTIFACT_V1'), 'utf8');
+
+    const ask = { title: 'Rendered artifact', blocks: [{ kind: 'html', source: { path: 'stage.html' } }], requestId: 'regen-artifact-1' };
+    const first = await (await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, cwd: stageDir }),
+    })).json();
+    assert.equal(first.round, 1);
+    assert.ok(readBoard(first.boardId, home).blocks[0].html.includes('ARTIFACT_V1'), 'setup: round 1 snapshotted v1');
+
+    // Same body, same bytes on disk: still a retry, and it has to stay one -- this is the
+    // lost-response case the dedupe exists for, and a content check that reported drift
+    // here would mint a duplicate artifact round on every dropped response.
+    const retry = await (await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, boardId: first.boardId }),
+    })).json();
+    assert.equal(retry.deduped, true, 'an identical re-post against unchanged content is the retry the dedupe is for');
+    assert.equal(retry.round, 1);
+
+    writeFileSync(stagePath, page('ARTIFACT_V2'), 'utf8');
+    const regenerated = await (await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, boardId: first.boardId }),
+    })).json();
+    // (Ablation: with the resolved-content gate removed this comes back `deduped: true`,
+    // round 1, and every assertion below fails on a board still holding only v1.)
+    assert.ok(!regenerated.deduped, 'the same request naming a file whose bytes changed is not the request that was already applied');
+    assert.equal(regenerated.round, 2, 'it mints the next round instead');
+
+    const stored = readBoard(first.boardId, home);
+    assert.ok(stored.blocks.find(b => b.round === 2).html.includes('ARTIFACT_V2'), 'and that round carries what the file says NOW');
+    assert.ok(stored.blocks.find(b => b.round === 1).html.includes('ARTIFACT_V1'), 'while round 1 keeps the snapshot it was posted with');
+    assert.notEqual(stored.blocks.find(b => b.round === 1).sha, stored.blocks.find(b => b.round === 2).sha);
+  });
+
+  await check('the resolved-content gate holds at the AMEND gate too: a retry naming a regenerated file mints round 2 instead of appending a second artifact and a duplicate question into the live round', async () => {
+    // The shape `ask` actually posts, and the one the check above does not reach: the
+    // artifact and the question ABOUT it in one round. Refusing the retry at the dedupe
+    // gate is only half the fix -- what it refuses lands on the amend gate one branch
+    // down, which says yes to any open round that asks something, and `amendRound`
+    // APPENDS. The reviewer was left reading round 1 holding [stale artifact, question,
+    // fresh artifact, duplicate question], and `buildPacket` reported two answers for the
+    // one question that was actually asked.
+    const stageDir = projectDir('regenerated-artifact-question');
+    const stagePath = path.join(stageDir, 'stage.html');
+    const page = marker => `<!doctype html><html><body><h1>${marker}</h1></body></html>`;
+    writeFileSync(stagePath, page('AMEND_V1'), 'utf8');
+
+    const ask = {
+      title: 'Artifact and the question about it',
+      blocks: [
+        { kind: 'html', source: { path: 'stage.html' } },
+        { kind: 'question', prompt: 'Ship this render?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+      ],
+      requestId: 'regen-amend-1',
+    };
+    const first = await (await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, cwd: stageDir }),
+    })).json();
+    assert.equal(first.round, 1);
+    assert.equal(first.awaited, true, 'setup: the round asks something, so it is genuinely amendable -- that is what makes this the dangerous shape');
+
+    writeFileSync(stagePath, page('AMEND_V2'), 'utf8');
+    const regenerated = await (await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ ...ask, boardId: first.boardId }),
+    })).json();
+    // (Ablation: with the drift gate on the dedupe branch alone, this comes back round 1
+    // -- amended -- and every assertion below fails on a doubled round.)
+    assert.ok(!regenerated.deduped, 'the bytes changed, so this is not the request already applied');
+    assert.equal(regenerated.round, 2, 'and a retry the dedupe refused is not therefore an amendment of the round it refused');
+
+    const stored = readBoard(first.boardId, home);
+    const round1 = stored.blocks.filter(b => b.round === 1);
+    const round2 = stored.blocks.filter(b => b.round === 2);
+    assert.deepEqual(round1.map(b => b.kind), ['html', 'question'], 'round 1 is exactly what was posted into it, with nothing appended');
+    assert.deepEqual(round2.map(b => b.kind), ['html', 'question'], 'and the whole new post is round 2');
+    assert.ok(round1[0].html.includes('AMEND_V1'), 'round 1 keeps its own snapshot');
+    assert.ok(round2[0].html.includes('AMEND_V2'), 'round 2 carries what the file says now');
+
+    // What the reviewer and the agent actually experience: round 1 asked ONE question, so
+    // answering it reports one answer -- not a second one against a duplicate prompt
+    // nobody was ever shown a control for.
+    const waitPromise = fetch(`${base}/api/board/${first.boardId}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${first.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: round1[1].id, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet = await waitPromise;
+    assert.equal(packet.answers.length, 1, `one question was asked, so the packet reports one answer (got ${packet.answers.length})`);
+    assert.equal(packet.answers[0].choice, 'Yes');
+  });
+
+  await check('a comment left on an awaited round that no /wait was listening to still reaches the next packet -- `awaited` is a mint-time flag, not a record that a packet left', async () => {
+    // The permanent loss ADR 35 exists to prevent, in its commonest shape: a round born
+    // awaited, answered by the reviewer at a moment when no /wait happened to be
+    // connected. `applySubmit` marks it `sent` and leaves `awaited: true` (only
+    // `closeLapsedAwaitedRounds` clears it, and only while `open`), so the round is
+    // `sent + awaited` for the rest of its life -- and a drain keyed on that flag filtered
+    // its comment out of every future packet on the thread, forever.
+    const html = '<!doctype html><html><body><h1>AWAITED_THEN_SENT</h1></body></html>';
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Awaited, answered unheard', blocks: [{ kind: 'html', html }], wait: true }),
+    })).json();
+    const h1 = readBoard(posted.boardId, home).blocks[0].id;
+    assert.equal(readBoard(posted.boardId, home).rounds[0].awaited, true, 'setup: minted awaited');
+
+    // No /wait anywhere: the reviewer answers a board nobody is currently polling.
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action: 'send',
+        answers: [],
+        comments: [{ blockId: h1, anchor: { kind: 'block' }, text: 'ANSWERED_WITH_NOBODY_LISTENING' }],
+      }),
+    });
+    const afterSubmit = readBoard(posted.boardId, home).rounds[0];
+    assert.equal(afterSubmit.status, 'sent');
+    assert.equal(afterSubmit.awaited, true, 'the state this is about: sent AND still flagged awaited');
+    assert.equal(readBoard(posted.boardId, home).comments[0].delivered, undefined, 'nothing has asked for a packet, so nothing is delivered');
+
+    // The next round on the thread must carry it. (Ablation: keying the drain on
+    // `roundIsAwaited` instead of on `delivered` makes this packet empty -- and every
+    // packet after it, for the life of the board.)
+    const second = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: posted.boardId, title: 'Follow-up', blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    })).json();
+    const q = readBoard(posted.boardId, home).blocks.find(b => b.round === second.round).id;
+    const waitPromise = fetch(`${base}/api/board/${posted.boardId}/wait?round=${second.round}`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: second.round, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet = await waitPromise;
+    assert.deepEqual(packet.comments.map(c => c.text), ['ANSWERED_WITH_NOBODY_LISTENING'], 'the comment nobody heard rides the thread\'s next packet');
+
+    // Exactly once, still: a packet leaving round 2 marks round 2's own comments as well
+    // as the ones it drained, so a third round sees neither.
+    const third = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: posted.boardId, blocks: [{ kind: 'question', prompt: 'Anything else?', widget: 'single', options: [{ label: 'No' }] }] }),
+    })).json();
+    const q3 = readBoard(posted.boardId, home).blocks.find(b => b.round === third.round).id;
+    const waitPromise3 = fetch(`${base}/api/board/${posted.boardId}/wait?round=${third.round}`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: third.round, action: 'send', answers: [{ id: q3, status: 'answered', choice: 'No', note: '' }], comments: [] }),
+    });
+    assert.equal((await waitPromise3).comments.length, 0, 'and never a second time');
+  });
+
+  await check('a follow-up question posted after the wait cap mints a NEW live round -- it is never appended to the lapsed one, and the caller is not told nothing is awaited', async () => {
+    // The amend gate tested `status === 'open'` only. A wait-lapsed question round stays
+    // `open` forever (only submit and abandon move `status`), so the daemon's own timeout
+    // advice -- "post a fresh round to continue" -- landed the agent's next question
+    // INSIDE the dead round. `ask` then answered `awaited: false`, the shim reported "no
+    // response needed", nothing waited, and the reviewer's Send answered into a void.
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Lapsed question round', blocks: [{ kind: 'question', prompt: 'First question?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    })).json();
+    assert.equal(posted.awaited, true, 'setup: a question round is awaited');
+
+    const boardFile = path.join(home, 'boards', `${posted.boardId}.json`);
+    const raw = JSON.parse(readFileSync(boardFile, 'utf8'));
+    raw.rounds[0].awaitDeadline = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(boardFile, JSON.stringify(raw, null, 2));
+    assert.equal(readBoard(posted.boardId, home).rounds[0].status, 'open', 'the round the agent is about to post into is still `open` -- that is the whole trap');
+
+    // Exactly what the timeout text tells the agent to do next.
+    const followUp = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: posted.boardId, title: 'Lapsed question round', blocks: [{ kind: 'question', prompt: 'Second question?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    })).json();
+    // (Ablation: without the lapse gate on the amend branch this is round 1,
+    // `awaited: false`, and the new question is glued into the dead round.)
+    assert.equal(followUp.round, 2, 'a lapsed round is not the home of a follow-up question');
+    assert.equal(followUp.awaited, true, 'and the caller is told to wait on it, not that no response is needed');
+
+    const stored = readBoard(posted.boardId, home);
+    assert.deepEqual(
+      stored.blocks.filter(b => b.round === 1).map(b => b.prompt),
+      ['First question?'],
+      'nothing was appended to the lapsed round'
+    );
+    assert.deepEqual(stored.blocks.filter(b => b.round === 2).map(b => b.prompt), ['Second question?']);
+    assert.ok(Date.parse(stored.rounds[1].awaitDeadline) > Date.now(), 'the new round waits against a deadline that has not already passed');
+  });
+
+  await check('an abandoned round releases a blocked /wait at once, named for what happened -- and the Send it refuses afterwards says abandoned, not submitted', async () => {
+    // `POST /abandon` invents a third terminal round state (ADR 69, the ordinary
+    // `fresh: true` path after a context compaction). `waitForRound` only recognised
+    // `sent`, so a call already blocked on that round polled a corpse for the full
+    // forty-minute cap and was then handed a `timeout` saying the board is "still open".
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Abandoned mid-wait', blocks: [{ kind: 'question', prompt: 'Still there?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    })).json();
+
+    const started = Date.now();
+    // A ceiling of the check's own, and an abort behind it: a daemon that cannot see the
+    // abandon has to fail this assertion loudly rather than leave a /wait polling a dead
+    // round for forty minutes and holding this whole check file open behind it (the same
+    // discipline the wall-clock-ceiling check further up uses).
+    const abort = new AbortController();
+    const waitPromise = Promise.race([
+      fetch(`${base}/api/board/${posted.boardId}/wait?round=1`, { signal: abort.signal })
+        .then(r => r.json())
+        .catch(err => ({ status: `request failed: ${err.message}` })),
+      new Promise(resolve => setTimeout(() => resolve({ status: 'check-gave-up' }), 5000)),
+    ]);
+    await new Promise(resolve => setTimeout(resolve, 150));
+
+    const abandoned = await (await fetch(`${base}/api/board/${posted.boardId}/abandon`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.deepEqual(abandoned.closed, [1]);
+
+    const packet = await waitPromise;
+    const elapsed = Date.now() - started;
+    abort.abort();
+    assert.equal(packet.status, 'abandoned', `the blocked call is released and told what actually happened (got "${packet.status}" after ${elapsed}ms)`);
+    assert.ok(elapsed < 5000, `promptly, not at the wall-clock cap -- took ${elapsed}ms`);
+    assert.equal(packet.board, posted.boardId);
+    assert.equal(packet.answers[0].status, 'unanswered', 'carrying whatever the store holds, like every other terminal packet');
+    assert.equal(activeWaitCount(), 0, 'and leaving no polling loop behind');
+
+    // A /wait that arrives AFTER the abandon is answered the same way rather than
+    // starting a fresh forty minutes on a round that is already over.
+    const late = await fetch(`${base}/api/board/${posted.boardId}/wait?round=1`).then(r => r.json());
+    assert.equal(late.status, 'abandoned');
+
+    // The reviewer's tab is still open and its Send bar still live. It is refused --
+    // correctly -- but it used to be refused with a sentence claiming somebody had
+    // answered this board.
+    const send = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+    });
+    assert.equal(send.status, 409);
+    const refusal = (await send.json()).error;
+    assert.match(refusal, /abandoned/, `the refusal names the abandon rather than inventing a submit: ${refusal}`);
+    assert.ok(!/already been submitted/.test(refusal), 'nobody submitted anything');
+  });
+
+  await check('a submit is bounded on every axis a reviewer can repeat: comment text, comment count, and choices per answer -- an over-cap send persists nothing', async () => {
+    // `POST /submit` is reachable with the session COOKIE alone, comments are append-only
+    // with no in-product removal, and prune is age-only -- so one over-cap send used to
+    // leave a permanently degraded board document that every later read re-parsed on the
+    // daemon's one thread. Measured by the audit: a 19.6 MB body -> a 156 MB board.
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Submit caps',
+        blocks: [
+          { kind: 'mermaid', text: 'flowchart LR\n  a --> b' },
+          { kind: 'question', prompt: 'Rank these', widget: 'rank', options: [{ label: 'One' }, { label: 'Two' }] },
+        ],
+      }),
+    })).json();
+    const stored0 = readBoard(posted.boardId, home);
+    const target = stored0.blocks[0].id;
+    const q = stored0.blocks[1].id;
+    const submit = body => fetch(`${base}/api/board/${posted.boardId}/submit`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(body) });
+    const unchanged = () => {
+      const now = readBoard(posted.boardId, home);
+      assert.equal(now.comments.length, 0, 'a refused submit stores no comment');
+      assert.equal(now.rounds[0].status, 'open', 'and does not close the round it was refusing');
+    };
+
+    const oversize = await submit({ round: 1, action: 'send', answers: [], comments: [{ blockId: target, text: 'x'.repeat(MAX_REF_BYTES + 1) }] });
+    assert.equal(oversize.status, 400, 'comment text is bounded by the same cap every other by-value string on a board is');
+    unchanged();
+
+    const tooMany = await submit({
+      round: 1, action: 'send', answers: [],
+      comments: Array.from({ length: MAX_SUBMIT_COMMENTS + 1 }, () => ({ blockId: target, text: 'x' })),
+    });
+    assert.equal(tooMany.status, 400, 'the number of comments in one send is capped, not just each one\'s length');
+    assert.match((await tooMany.json()).error, new RegExp(String(MAX_SUBMIT_COMMENTS)), 'and the refusal names the cap');
+    unchanged();
+
+    const tooManyChoices = await submit({
+      round: 1, action: 'send', comments: [],
+      answers: [{ id: q, status: 'answered', choice: Array.from({ length: MAX_ANSWER_CHOICES + 1 }, (_, i) => `opt${i}`), note: '' }],
+    });
+    assert.equal(tooManyChoices.status, 400, 'an answer\'s choice array is capped the same way');
+    unchanged();
+
+    // A non-string text is coerced at the door rather than persisted verbatim: the packet
+    // contract says `text` is a string, and every reader downstream assumed it.
+    const coerced = await submit({ round: 1, action: 'send', answers: [], comments: [{ blockId: target, text: { nope: 1 } }] });
+    assert.equal(coerced.status, 200);
+    const afterCoerce = readBoard(posted.boardId, home);
+    assert.equal(afterCoerce.comments.length, 1);
+    assert.equal(typeof afterCoerce.comments[0].text, 'string', 'stored as a string, whatever arrived');
+  });
+
+  await check('a compare side\'s label is bounded like every sibling label on a block', async () => {
+    // `normalizeCompareSide` was the one by-value string on a posted block that skipped
+    // `byValueText`, so a compare label's only ceiling was the 25 MB body limit -- and it
+    // is persisted, re-rendered on every read, and shown as a heading.
+    const oversize = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Compare label cap',
+        blocks: [{ kind: 'compare', left: { label: 'x'.repeat(MAX_REF_BYTES + 1), block: { kind: 'markdown', text: 'left' } }, right: { label: 'After', block: { kind: 'markdown', text: 'right' } } }],
+      }),
+    });
+    assert.equal(oversize.status, 400);
+    assert.match((await oversize.json()).error, /compare side label/, 'the 400 names the field, like every other capped one');
+
+    const ordinary = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Compare label cap',
+        blocks: [{ kind: 'compare', left: { label: 'Before', block: { kind: 'markdown', text: 'left' } }, right: { label: 'After', block: { kind: 'markdown', text: 'right' } } }],
+      }),
+    });
+    assert.equal(ordinary.status, 200, 'the cap is a ceiling, not a blanket refusal');
+    assert.equal(readBoard((await ordinary.json()).boardId, home).blocks[0].left.label, 'Before');
+  });
+
   await check('ADR 35: re-issuing the IDENTICAL /wait URL on an already-answered round returns the same packet, and drains nothing a second time', async () => {
     // Non-redelivery had only ever been proven by moving on -- a later round, or a
     // later board. This is the case that does not move on: the exact same URL,
@@ -3814,6 +4173,149 @@ async function main() {
     const afterLapse = await (await fetch(`${base}/api/waiting`)).json();
     assert.ok(!afterLapse.waiting.some(e => e.boardId === posted.boardId), 'a wait that has died is not something the reviewer can still answer');
     assert.equal(readBoard(posted.boardId, home).rounds[0].status, 'open', 'and it left the list without the round being closed -- an open, unanswered round it is simply too late to answer');
+  });
+
+  /** Run `fn` with a live count of how many times the daemon walked the WHOLE store.
+   *
+   * `listBoards` (src/store.mjs) warns once per unreadable file per walk, so a
+   * deliberately corrupt board document turns "did this handler re-parse every board"
+   * into a number the check can assert on -- the same instrument the index's own
+   * walk-count check further up this file uses. `fn` is handed a `count()` it may call at
+   * any point; the corrupt file is planted before it runs and removed after, so the store
+   * is exactly as it was either side. */
+  async function withStoreWalkCount(fn) {
+    const corruptPath = path.join(boardsDirPath, 'b_walkcount.json');
+    writeFileSync(corruptPath, '{"id":"b_walkcount","blocks":[{"kind":"mark', 'utf8');
+    const realWarn = console.warn;
+    let walks = 0;
+    console.warn = (...args) => { if (args.join(' ').includes('b_walkcount.json')) walks++; };
+    try {
+      return await fn(() => walks);
+    } finally {
+      console.warn = realWarn;
+      unlinkSync(corruptPath);
+    }
+  }
+
+  await check('WAITING: a repeat poll, and a round posted into a live board, answer from the store fingerprint instead of re-parsing every board', async () => {
+    // `GET /api/waiting` is the status item's fixed fifteen-second poll and the waiting
+    // count rides every post -- both were a synchronous readFileSync + JSON.parse of
+    // EVERY board in the store, on the daemon's one thread, ahead of every blocked /wait
+    // and every SSE heartbeat, for a store nothing bounds the growth of (the audit
+    // measured ~39 ms at 200 boards, ~200 ms at 1000). The fingerprint cache that fixes
+    // it already existed at GET /api/index/rows and was simply never wired to these.
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'WAITING_CACHE',
+        blocks: [{ kind: 'html', html: '<!doctype html><html><body><h1>WAITING_CACHE</h1></body></html>' }],
+        wait: true,
+      }),
+    })).json();
+
+    await withStoreWalkCount(async count => {
+      // Cold: planting the counter's own file changed the store, so this poll walks --
+      // which is the point of a fingerprint, not a failure of one.
+      const first = await (await fetch(`${base}/api/waiting`)).json();
+      const cold = count();
+      assert.equal(cold, 1, `the first poll after a store change reads it once (got ${cold})`);
+      assert.ok(first.waiting.some(w => w.boardId === posted.boardId && w.round === 1), 'setup: the awaited round is on the list');
+
+      await fetch(`${base}/api/waiting`);
+      await fetch(`${base}/api/waiting`);
+      // (Ablation: drop the cache and each of these adds a full walk -- four by the end
+      // of this check, on a poll that runs forever every fifteen seconds.)
+      assert.equal(count(), cold, 'a poll against an unchanged store parses nothing at all');
+
+      const second = await (await fetch(`${base}/api/board`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ boardId: posted.boardId, blocks: [{ kind: 'question', prompt: 'Ship?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+      })).json();
+      assert.equal(second.round, 2);
+      assert.equal(count(), cold, 'a round posted into a live board publishes its waiting count off the document it just wrote, not off a fresh walk');
+
+      const after = await (await fetch(`${base}/api/waiting`)).json();
+      assert.equal(count(), cold, 'and the poll behind it still reads the cache');
+      assert.ok(after.waiting.some(w => w.boardId === posted.boardId && w.round === 2), 'which has to be RIGHT, not merely cheap: the round that post opened is listed');
+      assert.equal(after.total, after.waiting.length);
+    });
+  });
+
+  await check('THREADS: a minted thread id is drawn against the ids the store already holds, so two unrelated sessions cannot share one', async () => {
+    // Thread ids stopped being labels once `drainUndeliveredComments` began routing
+    // undelivered comments by thread across every board in the store: on a collision,
+    // session A's /wait drains a comment written about session B's project (a
+    // cross-project content leak) and B's agent never receives it (a permanent loss).
+    // The width is unchanged and short on purpose -- nothing is authorised by knowing a
+    // thread id -- so the store itself is what makes a collision impossible.
+
+    // A collision is not reproducible by drawing, so the taken set is what stands in for
+    // one: it CLAIMS the first two ids it is shown and keeps them. The observable is the
+    // board that comes back -- its thread is not an id this store holds. A mint that drew
+    // once and shipped whatever it got hands back a claimed one.
+    const claimed = new Set();
+    let shown = 0;
+    const takenThreads = { has: id => (shown++ < 2 ? (claimed.add(id), true) : claimed.has(id)) };
+    const board = createBoard({ title: 'rigged mint', blocks: [], takenThreads });
+    assert.equal(claimed.size, 2, 'a mint that never asks the store cannot avoid a collision: nothing consulted the taken set');
+    assert.ok(!claimed.has(board.thread), 'a board never carries a thread id another session already holds');
+
+    // At the seam: a create consults the store, and does it in ONE walk shared with the
+    // thread's bound-directory lookup rather than two.
+    const before = new Set(readdirSync(boardsDirPath)
+      .filter(f => f.endsWith('.json'))
+      .map(f => { try { return JSON.parse(readFileSync(path.join(boardsDirPath, f), 'utf8')).thread; } catch { return null; } })
+      .filter(Boolean));
+    assert.ok(before.size > 0, 'setup: the store has to hold threads for this to mean anything');
+    const walks = await withStoreWalkCount(async count => {
+      const created = await (await fetch(`${base}/api/board`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({ title: 'Fresh session', blocks: [{ kind: 'markdown', text: '# fresh' }] }),
+      })).json();
+      assert.ok(!before.has(created.thread), 'the minted thread is not one another session is already using');
+      return count();
+    });
+    assert.equal(walks, 1, `a create reads the store once, for both the taken-thread set and the thread's bound cwd (got ${walks})`);
+  });
+
+  await check('THREADS: an undelivered comment never crosses into another thread\'s packet', async () => {
+    // The damage a collision does, asserted directly rather than inferred from the id
+    // width: the drain is thread-scoped, so a comment left in one session must be
+    // invisible to a wait resolving in an unrelated one.
+    const leaky = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Project A', blocks: [{ kind: 'html', html: '<!doctype html><html><body><h1>PROJECT_A</h1></body></html>' }] }),
+    })).json();
+    const aBlock = readBoard(leaky.boardId, home).blocks[0].id;
+    await fetch(`${base}/api/board/${leaky.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [{ blockId: aBlock, anchor: { kind: 'block' }, text: 'PROJECT_A_SECRET' }] }),
+    });
+    assert.equal(readBoard(leaky.boardId, home).comments[0].delivered, undefined, 'setup: the comment is undelivered, so it IS a drain candidate somewhere');
+
+    const other = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Project B', blocks: [{ kind: 'question', prompt: 'Unrelated?', widget: 'single', options: [{ label: 'Yes' }] }] }),
+    })).json();
+    assert.notEqual(other.thread, leaky.thread, 'two independent posts are two independent threads');
+
+    const q = readBoard(other.boardId, home).blocks[0].id;
+    const waitPromise = fetch(`${base}/api/board/${other.boardId}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${other.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: q, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet = await waitPromise;
+    assert.deepEqual(packet.comments, [], 'a wait in one thread carries nothing written in another');
+    assert.equal(readBoard(leaky.boardId, home).comments[0].delivered, undefined, 'and leaves it undelivered for the thread it actually belongs to');
   });
 
   // --- the pomodoro HTTP surface ---------------------------------------

@@ -52,7 +52,7 @@ import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, sto
 import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly } from './board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
@@ -729,7 +729,16 @@ function sleep(ms) {
  * rule handleEvents applies to an SSE subscription) and `deadlineAt` (the wall-clock
  * cap). Without them every timed-out or abandoned `ask` would leave a loop re-parsing a
  * board JSON — which embeds full file snapshots — every 120ms for the life of the
- * machine. */
+ * machine.
+ *
+ * `abandoned` is the fourth way out, and it is not a nicety: `abandonOpenRounds`
+ * (src/board.mjs) invented a THIRD terminal state, and a loop that only recognises
+ * `sent` cannot see it. A backgrounded first `ask` -- the ordinary `fresh: true` path
+ * after a context compaction -- therefore polled a round the daemon had already closed
+ * for the full forty-minute cap and then reported a `timeout` whose text says the board
+ * is "still open ... reopen it", which is false in both halves. A round that is
+ * abandoned is exactly as final as one that is sent; the only difference is what the
+ * caller is told, which is the caller's branch to make, not this loop's. */
 async function waitForRound(boardId, round, home, { intervalMs = 120, isAborted = () => false, deadlineAt = Infinity } = {}) {
   activeWaits++;
   try {
@@ -739,6 +748,7 @@ async function waitForRound(boardId, round, home, { intervalMs = 120, isAborted 
       if (!board) return { gone: true };
       const r = board.rounds.find(r => r.n === round);
       if (r && r.status === 'sent') return { board };
+      if (r && r.status === 'abandoned') return { abandoned: true, board };
       if (Date.now() >= deadlineAt) return { timedOut: true, board };
       await sleep(intervalMs);
     }
@@ -810,17 +820,18 @@ export function buildRoundPushPayload(board, round, mode, blockIds) {
  * that is the one asked — reading "whatever the newest board says" would let a board
  * that somehow slipped through re-decide the answer for everything after it.
  *
- * This walks the store, which is why it is only called when the caller actually names
- * a thread: a first post (the overwhelmingly common case, and the one the shim makes)
- * pays nothing. */
-function boundCwdForThread(thread, home) {
-  const inThread = listBoards(home)
+ * Takes the store walk rather than making one: its only caller already has to walk for
+ * the thread-uniqueness set beside it (see `handlePostBoard`), and two walks of the same
+ * directory in one request handler is one more full parse of every board than the answer
+ * needs. */
+function boundCwdForThread(thread, boards) {
+  const inThread = boards
     .filter(b => b && b.thread === thread && b.cwd)
     .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
   return inThread.length ? inThread[0].cwd : null;
 }
 
-async function handlePostBoard(req, res, home, sse, stranded, stream) {
+async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -854,9 +865,34 @@ async function handlePostBoard(req, res, home, sse, stranded, stream) {
       // a retry; the post falls through and mints round N+1 with a live deadline. The
       // lost-response retry this defends against always targets a live open round, so
       // neither gate costs anything.
+      //
+      // The third gate is `roundContentDrifted` (src/board.mjs), and it is what makes
+      // this an identity over the round's RESOLVED CONTENT rather than over the request
+      // body. `requestId` hashes the raw blocks, and a raw block names a file by path, so
+      // the loop the manual prescribes -- post an artifact, regenerate the file it
+      // references, re-issue the identical `ask` -- arrives here as a byte-identical
+      // body and used to be answered `deduped: 200`. The reviewer kept seeing v1, the
+      // agent believed v2 had landed, and (a content-only round is never `sent`) nothing
+      // ever moved that round out of `open` to break the cycle. Same bytes on disk is
+      // still a retry; different bytes is a different round, and falls through.
+      //
+      // Hoisted out of the condition rather than inlined, because BOTH gates below need
+      // the same answer and it must be the same one. Failing the dedupe is only half the
+      // fix: a retry that falls out of it lands on the amend gate one branch down, and
+      // for the shape `ask` actually posts -- an artifact block beside the question about
+      // it -- that gate says yes. The round then holds the old artifact AND the new one,
+      // the old question AND its duplicate, and the packet reports two answers for one
+      // question. "Drifted" has to mean "not this round's business" at every gate that
+      // could still put these blocks into round N, not just at the first.
+      //
+      // Computed only for a candidate RETRY (`isRetry`), never on the ordinary post
+      // path: it re-reads every referenced file, and a post that is not answering to an
+      // already-applied `requestId` has nothing to compare against anyway.
       const guarded = board.rounds[board.rounds.length - 1];
-      if (body.requestId && board.lastRequestId === body.requestId && guarded && guarded.status === 'open'
-        && !roundWaitLapsed(guarded)) {
+      const isRetry = Boolean(body.requestId) && board.lastRequestId === body.requestId;
+      const drifted = isRetry && !!guarded && roundContentDrifted(board, guarded.n);
+      if (isRetry && guarded && guarded.status === 'open'
+        && !roundWaitLapsed(guarded) && !drifted) {
         return sendJson(res, 200, {
           boardId: board.id,
           thread: board.thread,
@@ -885,9 +921,33 @@ async function handlePostBoard(req, res, home, sse, stranded, stream) {
       // round after it. Everything that asks "which round is open" therefore
       // has to mean the LATEST open one, which is what `amendRound`
       // (src/board.mjs) and `handleSubmit` below were changed to say.
+      //
+      // A round whose WAIT HAS LAPSED is not amendable either, for the same reason the
+      // dedupe one branch up refuses to resume one: nothing will ever hand an agent
+      // anything off it again. `status` alone cannot see that -- only submit and abandon
+      // move `status`, and `closeLapsedAwaitedRounds` moves only `awaited` -- so a
+      // question round that timed out sits at `status: 'open'` forever, and without this
+      // gate the daemon's OWN timeout advice ("post a fresh round to continue") landed
+      // the agent's next question appended to the dead round. `ask` then answered
+      // `awaited: false`, the shim reported "no response needed", nothing waited, and
+      // the reviewer's still-live Send bar answered into a void -- for every further
+      // question in that conversation. A lapsed round is never the answer to a retry
+      // (PROTOCOL.md), and it is not the home of a follow-up either: this falls through
+      // to `addRound` and mints round N+1 with a live deadline.
+      //
+      // `!drifted` (computed above) is the same rule arriving from the other direction,
+      // and this gate is where it actually bites for the shape `ask` posts. A retry
+      // naming a file whose bytes changed is refused by the dedupe above -- and then
+      // lands HERE, on a round that is open and does ask something, because the manual's
+      // own flow puts the artifact and the question about it in ONE round. Amending
+      // appends: the reviewer gets round 1 holding the stale artifact, the new artifact,
+      // the question and its duplicate, and `buildPacket` reports two answers for one
+      // question. The dedupe gate refusing a retry only means "this is not the request I
+      // already applied"; it never meant "so append it to that request's round".
       const latestAsksSomething = !!latestRound
         && questionBlocks(board).some(q => q.round === latestRound.n);
-      if (latestRound && latestRound.status === 'open' && latestAsksSomething) {
+      if (latestRound && latestRound.status === 'open' && latestAsksSomething
+        && !roundWaitLapsed(latestRound) && !drifted) {
         // The open round hasn't been sent yet: amend it in place rather than
         // minting round N+1.
         //
@@ -919,6 +979,13 @@ async function handlePostBoard(req, res, home, sse, stranded, stream) {
         pushMode = 'new-round';
       }
     } else {
+      // ONE walk of the store for this branch, feeding both things a brand-new board
+      // needs to know about the threads that already exist. `boundCwdForThread` did its
+      // own walk here and `takenThreads` would have been a second; a create is the one
+      // post that legitimately has to look at more than its own board, and it should
+      // look exactly once. Nothing else on this handler walks: a round pushed into an
+      // existing board takes the branch above and reads one document.
+      const boards = listBoards(home);
       // A SECOND board in an EXISTING thread inherits that thread's already-bound
       // project directory and may not move it (src/board.mjs `bindBoardCwd`). Without
       // passing it, the additive `threadCwd` guard is dead code and the thread's
@@ -929,7 +996,13 @@ async function handlePostBoard(req, res, home, sse, stranded, stream) {
         blocks: body.blocks,
         cwd: body.cwd ?? null,
         thread: body.thread ?? null,
-        threadCwd: body.thread ? boundCwdForThread(body.thread, home) : null,
+        threadCwd: body.thread ? boundCwdForThread(body.thread, boards) : null,
+        // The thread ids already in use, so a minted one cannot land on another
+        // session's (src/board.mjs `mintThreadId`). Thread ids route undelivered
+        // comments across the whole store, so a collision is a comment delivered to a
+        // project the agent has never seen and lost to the agent it was written for --
+        // not the cosmetic index clash the short width was chosen against.
+        takenThreads: new Set(boards.map(b => b.thread).filter(Boolean)),
         wait: Boolean(body.wait),
         awaitTimeoutMs: waitTimeoutMs(),
       });
@@ -966,7 +1039,7 @@ async function handlePostBoard(req, res, home, sse, stranded, stream) {
   // newly awaited (ADR 45) either way, so the daemon-wide count may have just changed
   // regardless of which branch above ran; see `broadcastWaiting`'s own comment for why
   // this fires on every post rather than only the ones that provably changed it.
-  broadcastWaiting(stream, home);
+  broadcastWaiting(stream, waiting, board);
   // A round has just landed: if nobody is looking at this board, it is Stranded and the
   // daemon says so after the grace (criteria 1 and 3). After the persist and the push,
   // deliberately -- the rule reads the board back off disk, and the banner it may raise
@@ -1108,16 +1181,25 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
 /** ADR 35: a comment left on a round that returned no packet is held as undelivered
  * and rides the next packet the same thread returns, once.
  *
- * "Nobody is listening" means `roundIsAwaited` (src/badge.mjs -- shared with the index
- * badge/tab mark and the arrival notification, see its own comment for the legacy-board
- * fallback), never the round's SHAPE: a round carrying a question always is awaited, and
- * a page board is when the call said `wait` (CONTEXT.md "Awaited", ADR.md entry 45).
- * Keying on shape instead handed an awaited page round's comments back twice -- once in
- * its own packet, through `buildPacket`'s ordinary round-scoped filter, and again here.
- * So a comment is only ever a DRAIN candidate when its own round is NOT awaited;
- * `delivered` is not what decides that, it only guarantees such a comment is handed back
- * exactly once across repeat waits on the thread, including a second wait on a round
- * that already drained it.
+ * "Nobody is listening" is decided by ONE fact: whether a packet actually left this
+ * round, recorded as `delivered` on the comment itself. Not by the round's shape (keying
+ * on that handed an awaited page round's comments back twice -- once in its own packet,
+ * through `buildPacket`'s ordinary round-scoped filter, and again here), and no longer by
+ * `roundIsAwaited` either.
+ *
+ * `awaited` is a MINT-TIME flag, and using it as a stand-in for "its own packet carried
+ * these" lost a reviewer's comment permanently: `applySubmit` moves a round to `sent`
+ * without clearing `awaited` (`closeLapsedAwaitedRounds` only clears while `open`), so a
+ * round born awaited and then submitted is `sent + awaited: true` for good. Any comment
+ * left on it was filtered out of every future packet on the thread -- the exact loss
+ * ADR 35 exists to prevent, in the commonest shape there is: a reviewer answering an
+ * awaited round at a moment when no `/wait` happened to be connected.
+ *
+ * So the mark is what the flag was standing in for, and `commit` below now sets it for
+ * the waited round's OWN comments as well as for the drained ones -- a packet leaving
+ * this round is exactly the event that makes its comments delivered. The two directions
+ * meet: a comment whose packet left is never drained again, and a comment whose packet
+ * never left is always drained next.
  *
  * Walks every board of `thread`, not just `board`: a thread's rounds can span more
  * than one board (`boundCwdForThread` above does the same walk for the same reason),
@@ -1157,14 +1239,18 @@ function drainUndeliveredComments(thread, board, round, home) {
   const comments = [];
   const pendingByBoard = [];
   for (const b of boards) {
-    const awaitedRounds = new Set((b.rounds || []).filter(r => roundIsAwaited(b, r)).map(r => r.n));
-    const pending = (b.comments || []).filter(c =>
-      c.delivered !== true
-      && !awaitedRounds.has(c.round)
-      && (b.id !== board.id || c.round !== round));
-    if (!pending.length) continue;
-    comments.push(...resolveComments(b, pending));
-    pendingByBoard.push({ board: b, pending });
+    const undelivered = (b.comments || []).filter(c => c.delivered !== true);
+    // The waited round's own comments are DRAINED by nobody -- `buildPacket`'s
+    // round-scoped filter already put them in this very packet, and repeating them here
+    // would duplicate them in one response -- but they are MARKED by this commit all the
+    // same, because that packet leaving is precisely what makes them delivered. Split
+    // lists, one `writeBoard`: `drained` is what the caller adds to the packet, `mark`
+    // is everything this packet accounts for.
+    const drained = undelivered.filter(c => b.id !== board.id || c.round !== round);
+    const mark = b.id === board.id ? undelivered : drained;
+    if (!mark.length) continue;
+    if (drained.length) comments.push(...resolveComments(b, drained));
+    pendingByBoard.push({ board: b, pending: mark });
   }
   const commit = () => {
     for (const { board: b, pending } of pendingByBoard) {
@@ -1226,7 +1312,7 @@ export function buildPacketWithUndelivered(board, round, url, home) {
   return { packet, commit };
 }
 
-async function handleWait(req, res, id, url, home, sse, stream) {
+async function handleWait(req, res, id, url, home, sse, stream, waiting) {
   const roundParam = url.searchParams.get('round');
   const round = roundParam ? parseInt(roundParam, 10) : 1;
   const initial = readBoard(id, home);
@@ -1244,6 +1330,29 @@ async function handleWait(req, res, id, url, home, sse, stream) {
   });
   if (result.aborted) return; // the client is gone: nothing to write, nothing to keep polling for
   if (result.gone) return sendJson(res, 404, { error: 'board not found' });
+  if (result.abandoned) {
+    // The conversation that owned this board declared itself over (`POST /abandon`,
+    // ADR 69) while this call was still blocked on it. Answered AT ONCE and named for
+    // what it is: this used to be invisible to `waitForRound`, so the caller sat on a
+    // round the daemon had already closed until the forty-minute cap and was then handed
+    // a `timeout` telling it the board was "still open ... reopen it" -- forty minutes of
+    // nothing, ending in advice that could not work.
+    //
+    // Nothing is written and nothing is broadcast here, unlike the timeout branch
+    // below: `handleAbandon` already persisted the close, already nudged the board's
+    // open tabs, and already republished the waiting count. This branch is only the
+    // reply owed to a caller that happened to be blocked when it did.
+    //
+    // The packet still carries whatever the store holds (partial answers included),
+    // exactly as the timeout branch does, and rides the same undelivered-comment path:
+    // a comment left before the session walked away is owed to this packet as much as
+    // to any other. `status: 'abandoned'` is additive -- PROTOCOL.md's packet statuses
+    // gain a third terminal one beside `submitted`/`discuss`/`timeout`, matching the
+    // third terminal ROUND state `abandonOpenRounds` (src/board.mjs) already invented.
+    const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
+    res.once('finish', commit);
+    return sendJson(res, 200, { ...packet, status: 'abandoned' });
+  }
   if (result.timedOut) {
     // The wall-clock cap is an explicit no-response, not an error: same `timeout`
     // status PROTOCOL.md "Packet" already defines, carrying whatever partial answers
@@ -1278,7 +1387,7 @@ async function handleWait(req, res, id, url, home, sse, stream) {
     writeBoard(result.board, home);
     sse.broadcast(id, 'awaitExpired', { round });
     // A wait dying is a round leaving the waiting count exactly as surely as an answer is.
-    broadcastWaiting(stream, home);
+    broadcastWaiting(stream, waiting, result.board);
     const { packet, commit } = buildPacketWithUndelivered(result.board, round, boardUrl(req, id), home);
     // Committed only once the response has actually left this process (see
     // drainUndeliveredComments): if the socket died in the window between
@@ -1333,7 +1442,7 @@ async function handleWait(req, res, id, url, home, sse, stream) {
  *
  * Deliberately NOT `stranded.answered`: nobody answered anything, and that path is scoped
  * to one round number where this is about every open round at once. */
-function handleAbandon(req, res, id, home, sse, stranded, stream) {
+function handleAbandon(req, res, id, home, sse, stranded, stream, waiting) {
   req.resume();
   const board = readBoard(id, home);
   if (!board) return sendJson(res, 404, { error: 'board not found' });
@@ -1348,13 +1457,28 @@ function handleAbandon(req, res, id, home, sse, stranded, stream) {
     for (const n of closed) sse.broadcast(id, 'awaitExpired', { round: n });
     // Every closed round here was open, and an open round can be an awaited one -- the
     // same reasoning `broadcastWaiting`'s other call sites carry.
-    broadcastWaiting(stream, home);
+    broadcastWaiting(stream, waiting, board);
   }
   stranded.abandoned(id);
   return sendJson(res, 200, { ok: true, board: board.id, closed });
 }
 
-async function handleSubmit(req, res, id, home, sse, stranded, stream) {
+/** How a board with nothing open got that way, for the 409 a Send lands on. Two ways in
+ * (`applySubmit` and `abandonOpenRounds`, src/board.mjs) and the refusal used to name only
+ * one of them: a reviewer whose board was abandoned out from under them -- the ordinary
+ * `fresh: true` path after a context compaction -- was told the board "has already been
+ * submitted", which is a claim that someone answered it. Nobody did. `n` names the round
+ * the caller asked about when there is one; without it the LAST round is the one that
+ * decides, since it is the one the reviewer is looking at. */
+function closedVerb(board, n = null) {
+  const rounds = board.rounds || [];
+  const round = n === null ? rounds[rounds.length - 1] : rounds.find(r => r.n === n);
+  return round && round.status === 'abandoned'
+    ? 'been abandoned: the session that posted it declared itself over'
+    : 'already been submitted';
+}
+
+async function handleSubmit(req, res, id, home, sse, stranded, stream, waiting) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -1393,7 +1517,7 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream) {
     // only 409), which showed `submit failed: 400` and re-enabled the buttons for an
     // identical retry, forever. 409 is both truer and handled.
     if (openN === null) {
-      return sendJson(res, 409, { error: 'this board has already been submitted', board: board.id, round: null });
+      return sendJson(res, 409, { error: `this board has ${closedVerb(board)}`, board: board.id, round: null });
     }
     return sendJson(res, 400, { error: 'submit requires an integer "round" naming the round being answered', board: board.id, round: openN });
   }
@@ -1401,7 +1525,7 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream) {
   if (!claimedRound) {
     return sendJson(res, 409, {
       error: openN === null
-        ? `round ${claimed} is not open: this board has already been submitted`
+        ? `round ${claimed} is not open: this board has ${closedVerb(board, claimed)}`
         : `round ${claimed} is not open — reload the board to see what has changed`,
       board: board.id,
       round: openN,
@@ -1440,7 +1564,7 @@ async function handleSubmit(req, res, id, home, sse, stranded, stream) {
   sse.broadcast(id, 'submitted', { round, board: boardForClient, html });
   // Answered is the other way off the waiting list -- an open round this same call just
   // closed, mirroring `handleWait`'s timeout branch and `handleAbandon` above.
-  broadcastWaiting(stream, home);
+  broadcastWaiting(stream, waiting, board);
   // Criterion 15: the daemon owns the click-serving process and terminates it "once the
   // reviewer returns to the board OR the round is answered". This is the second half --
   // a banner still on screen pointing at a round that has just been answered has nothing
@@ -1671,65 +1795,116 @@ function playPreview(cue) {
  * client's wall clock is not the daemon's, and one that computes an offset once from a
  * response it already had to make can then reason about every deadline the daemon mints
  * without ever trusting its own `Date.now()`. */
-function handleWaiting(req, res, home) {
-  // One walk of the store, and every board read through `readBoard` -- which is what
-  // applies `closeLapsedAwaitedRounds` (src/store.mjs's own comment), so a round whose
-  // wait died is already un-flagged before `waitingRounds` ever sees it. That is the
-  // whole handling of the lapsed case: no clock here, and no second sweep.
-  const boards = listBoards(home);
-  // Newest board first, matching how the thread index orders its own live rows, so a
-  // client that shows the first few and links the rest to `/` shows the same few the
-  // index puts at the top. `stamp` and not `String(...)`: an `updatedAt` that is missing
-  // stringifies to "undefined", which collates ABOVE every ISO timestamp and would put a
-  // hand-edited board at the head of the list forever (the same trap buildThreadIndex
-  // documents in src/indexpage.mjs).
-  const stamp = b => (typeof b.updatedAt === 'string' ? b.updatedAt : '');
-  boards.sort((a, b) => stamp(b).localeCompare(stamp(a)));
-  const waiting = [];
-  for (const board of boards) {
-    for (const round of waitingRounds(board)) {
-      waiting.push({
-        boardId: board.id,
-        // The thread, so a client can group two board docs of one session the way the
-        // index does rather than presenting them as two unrelated rows.
-        thread: board.thread,
-        // The same headline the index row uses, resolved HERE rather than left to the
-        // client: title, else the project's folder name, else a plain label. A client
-        // that had to fall back for itself would need `cwd` -- an absolute path from the
-        // reader's machine -- to do it, and this route has no reason to hand that out.
-        title: board.title || folderName(board.cwd) || '(untitled)',
-        round: round.n,
-        // Built off the `Host` this request arrived with (see `boardUrl`), which is right
-        // for a URL handed straight back to the caller that sent it: it keeps a browser
-        // on the origin it already holds a session cookie for, and a native client opens
-        // whatever it asked through.
-        url: boardUrl(req, board.id),
-      });
-    }
-  }
-  return sendJson(res, 200, { waiting, total: waiting.length, now: Date.now() });
+function handleWaiting(req, res, waiting) {
+  const rows = waiting.rows();
+  return sendJson(res, 200, {
+    // The `url` is the one field built per request rather than cached with the row:
+    // it comes off the `Host` this request arrived with (see `boardUrl`), which is
+    // right for a URL handed straight back to the caller that sent it -- and wrong to
+    // freeze into a cache two different callers share.
+    waiting: rows.map(r => ({ boardId: r.boardId, thread: r.thread, title: r.title, round: r.round, url: boardUrl(req, r.boardId) })),
+    total: rows.length,
+    now: Date.now(),
+  });
 }
 
-/** The count half of `handleWaiting` above, without the per-round rows: one walk of the
- * store, summed rather than collected. This is what `broadcastWaiting` below publishes on
- * the daemon-wide stream -- "waiting-count changes", in the Solution's own words, not the
- * row set `GET /api/waiting` hands a poll. Whichever surface wants the actual rows (a
- * later ticket's Popover) still asks that route for them; this is only the number that
- * says something is worth asking about. */
-function waitingTotal(home) {
-  let total = 0;
-  for (const board of listBoards(home)) total += waitingRounds(board).length;
-  return total;
+/** Every round in the store still waiting for an answer, cached behind the store's own
+ * fingerprint -- the same device `GET /api/index/rows` already uses, applied to the two
+ * paths that were re-parsing every board document in the store on the daemon's one
+ * thread: `GET /api/waiting` (the status item's fixed 15s poll) and the waiting count
+ * every post/submit/abandon/expiry publishes. Measured by the audit at ~39 ms per walk at
+ * 200 boards and ~200 ms at 1000, ahead of every blocked `/wait` and every SSE heartbeat,
+ * for a number nothing bounds the growth of.
+ *
+ * Three things can move a row, and each has its own answer here:
+ *
+ *  - a board written by THIS daemon: `noteWrite` patches that one board's rows in place
+ *    from the copy the request already has in memory, so a post costs no walk at all
+ *    rather than a walk it could have avoided. Every route that writes a board also
+ *    publishes the count, so every such write comes through here.
+ *  - a wait LAPSING, which changes a row with no write behind it at all (`readBoard`
+ *    sweeps it in memory and the file never moves): `lapseAt`, exactly as the rows cache
+ *    computes it, off the same walk.
+ *  - anything else that touches the directory -- a prune, a hand-edit, a second daemon:
+ *    `storeFingerprint`, a readdir plus a stat per file and nothing parsed.
+ *
+ * `stamp` rides on the cached row so the sort survives a patch. It is `updatedAt` or the
+ * empty string, never `String(...)`: a missing `updatedAt` stringifies to "undefined",
+ * which collates ABOVE every ISO timestamp and would pin a hand-edited board to the head
+ * of the list forever (the same trap buildThreadIndex documents in src/indexpage.mjs).
+ * Newest first, matching how the thread index orders its own live rows.
+ *
+ * Per handler, like `rowsCache` beside it, so two daemons in one process never serve each
+ * other's rows. */
+function createWaitingCache(home) {
+  let cache = null; // { print, lapseAt, rows } | null
+  const rowsFor = board => waitingRounds(board).map(r => ({
+    boardId: board.id,
+    // The thread, so a client can group two board docs of one session the way the
+    // index does rather than presenting them as two unrelated rows.
+    thread: board.thread,
+    // The same headline the index row uses, resolved HERE rather than left to the
+    // client: title, else the project's folder name, else a plain label. A client
+    // that had to fall back for itself would need `cwd` -- an absolute path from the
+    // reader's machine -- to do it, and this route has no reason to hand that out.
+    title: board.title || folderName(board.cwd) || '(untitled)',
+    round: r.n,
+    stamp: typeof board.updatedAt === 'string' ? board.updatedAt : '',
+  }));
+  const sorted = rows => rows.sort((a, b) => b.stamp.localeCompare(a.stamp));
+  return {
+    rows() {
+      const print = storeFingerprint(home);
+      if (!cache || cache.print !== print || Date.now() >= cache.lapseAt) {
+        // Every board read through `readBoard` -- which is what applies
+        // `closeLapsedAwaitedRounds` (src/store.mjs's own comment), so a round whose
+        // wait died is already un-flagged before `waitingRounds` ever sees it. That is
+        // the whole handling of the lapsed case: no clock here, and no second sweep.
+        const boards = listBoards(home);
+        cache = { print, lapseAt: nextLapseAt(boards), rows: sorted(boards.flatMap(rowsFor)) };
+      }
+      return cache.rows;
+    },
+    /** The board a request has just written, still in memory: fold it in rather than
+     * re-reading the store to learn what this process already knows.
+     *
+     * `lapseAt` only ever moves EARLIER here. A board whose soonest deadline this write
+     * removed would leave the cache expiring sooner than it strictly must, which costs
+     * one walk and cannot serve a stale row; recomputing it properly would need the
+     * walk this whole function exists to skip.
+     *
+     * ponytail: re-fingerprinting here also ADOPTS whatever else has changed on disk
+     * since the last walk, which is only sound because every writer inside this daemon
+     * that can move a row publishes the count through here (`broadcastWaiting`'s call
+     * sites are exactly the routes that write a board) and the one that removes boards
+     * calls `reset` above. An outside editor writing a board file directly is the
+     * residual, and it is the same residual `storeFingerprint`'s own comment documents:
+     * at worst one row is a poll behind. The upgrade path, if a second writer ever
+     * appears, is to diff the fingerprint per file rather than adopt it wholesale. */
+    noteWrite(board) {
+      if (!cache) return; // nothing cached: the next read walks anyway
+      cache.rows = sorted(cache.rows.filter(r => r.boardId !== board.id).concat(rowsFor(board)));
+      cache.lapseAt = Math.min(cache.lapseAt, nextLapseAt([board]));
+      cache.print = storeFingerprint(home);
+    },
+    /** Drop the cache outright, for the one mutation that is not a board this process
+     * holds: `POST /api/store/prune` DELETES board documents (src/store.mjs), and a
+     * patch-and-re-fingerprint after that would adopt a fingerprint describing a store
+     * the cached rows no longer match -- serving rows for boards that are gone. */
+    reset() { cache = null; },
+  };
 }
 
 /** Publish the current waiting count on the daemon-wide stream. Called from every route
  * that could plausibly have moved it -- a round newly awaited, a round answered, a wait
- * expiring, a board abandoned -- rather than only where it provably did: recomputing the
- * total is one cheap walk of the store (`waitingTotal` above), and a push that happens to
- * repeat the same number is indistinguishable from silence to anything downstream. Safe
- * to call with no subscribers; `createStreamHub.broadcast` is a no-op then. */
-function broadcastWaiting(stream, home) {
-  stream.broadcast('waiting', { total: waitingTotal(home), now: Date.now() });
+ * expiring, a board abandoned -- rather than only where it provably did: a push that
+ * happens to repeat the same number is indistinguishable from silence to anything
+ * downstream. `board` is the document that route just wrote, folded into the cache here
+ * so the count costs neither a walk nor a stale answer. Safe to call with no
+ * subscribers; `createStreamHub.broadcast` is a no-op then. */
+function broadcastWaiting(stream, waiting, board = null) {
+  if (board) waiting.noteWrite(board);
+  stream.broadcast('waiting', { total: waiting.rows().length, now: Date.now() });
 }
 
 /** `{ ...doc, now: Date.now() }` for every pomodoro response, write or read alike. The
@@ -1863,7 +2038,7 @@ async function handlePomodoro(req, res, parts, pomo, home, stream) {
  *
  * No preview and no arming, matching the control that calls it: one click deletes. The
  * deliberate step is naming the window, not clicking after having named it. */
-async function handlePrune(req, res, home) {
+async function handlePrune(req, res, home, waiting) {
   let body;
   try {
     body = await readJsonBody(req);
@@ -1872,6 +2047,10 @@ async function handlePrune(req, res, home) {
   }
   try {
     const { boards, assets } = pruneStore(body && body.days, home);
+    // The one mutation that removes boards rather than writing one. Every cached view of
+    // the store keyed on "which boards exist" has to hear about it; see
+    // `createWaitingCache.reset`.
+    waiting.reset();
     // Counts, not ids: nothing needs to know WHICH boards went (they are gone; there is
     // nothing left to address), and a list of every id in a large prune is a response
     // body that grows with the store for no reader.
@@ -1935,6 +2114,10 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
   // outlives a daemon. See the route itself for what the fingerprint buys and what
   // `lapseAt` covers that it cannot.
   let rowsCache = null;
+  // The same device for `GET /api/waiting` and the waiting count every write publishes
+  // (see `createWaitingCache`). Per handler for the same reason `rowsCache` above is:
+  // two daemons in one process must not answer from each other's store.
+  const waitingCache = createWaitingCache(home);
   // A caller-supplied instance (startServer's, below) is what makes pause/resume/reset/
   // settings and the boot-time clock share the ONE live setTimeout for this daemon —
   // two independent createPomodoro() instances against the same home would each arm
@@ -2079,7 +2262,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       // answered as JSON to a client with no page. See handleWaiting for why it is not on
       // `isOpenRoute` and why it returns everything rather than a client's first few.
       if (req.method === 'GET' && url.pathname === '/api/waiting') {
-        return handleWaiting(req, res, home);
+        return handleWaiting(req, res, waitingCache);
       }
 
       // The daemon-wide stream (ticket 01): timer, settings and waiting-count changes, for
@@ -2096,7 +2279,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'POST' && url.pathname === '/api/board') {
-        return await handlePostBoard(req, res, home, sse, stranded, streamHub);
+        return await handlePostBoard(req, res, home, sse, stranded, streamHub, waitingCache);
       }
 
       if (req.method === 'GET' && parts[0] === 'b' && parts.length === 2) {
@@ -2110,16 +2293,16 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         const boardId = parts[2];
         const action = parts[3];
         if (req.method === 'GET' && action === 'wait') {
-          return await handleWait(req, res, boardId, url, home, sse, streamHub);
+          return await handleWait(req, res, boardId, url, home, sse, streamHub, waitingCache);
         }
         if (req.method === 'GET' && action === 'events') {
           return handleEvents(req, res, boardId, home, sse, stranded);
         }
         if (req.method === 'POST' && action === 'submit') {
-          return await handleSubmit(req, res, boardId, home, sse, stranded, streamHub);
+          return await handleSubmit(req, res, boardId, home, sse, stranded, streamHub, waitingCache);
         }
         if (req.method === 'POST' && action === 'abandon') {
-          return handleAbandon(req, res, boardId, home, sse, stranded, streamHub);
+          return handleAbandon(req, res, boardId, home, sse, stranded, streamHub, waitingCache);
         }
         if (req.method === 'POST' && action === 'attended') {
           return await handleAttended(req, res, boardId, sse, stranded);
@@ -2131,7 +2314,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'POST' && url.pathname === '/api/store/prune') {
-        return await handlePrune(req, res, home);
+        return await handlePrune(req, res, home, waitingCache);
       }
 
       return sendText(res, 404, 'not found');

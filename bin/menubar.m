@@ -263,6 +263,41 @@ typedef struct {
                          * never clamped against position_num the way the numerator is */
 } cb_display;
 
+/* Every wire number that is about to become a fixed-width integer, or to be rounded into
+ * one, is clamped here first.
+ *
+ * `pomodoro.json` is hand-editable by design and `normalizeDoc` (src/pomodoro.mjs) only
+ * guarantees the arithmetic on the DAEMON's side cannot produce NaN — a `cycle` of `1e300`
+ * is an integer as far as `Number.isInteger` is concerned, so it survives every validator
+ * on the way here and arrives intact. Converting a double that large to `int` is undefined
+ * behaviour in C, not a wraparound with a defined answer: the reported result was a
+ * NEGATIVE cycle position in the popover, and a compiler is entitled to do anything at all
+ * with it. Clamping first is the whole fix, and it costs a compare.
+ *
+ * NaN clamps to `lo` (there is no meaningful answer, and `lo` is the quiet one); either
+ * infinity falls out of the ordinary comparisons at the right end. */
+static double cb_clamp(double value, double lo, double hi) {
+  if (isnan(value)) return lo;
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+/* The bound the counted wire fields are held to. Far past anything the product can produce
+ * — a hundred thousand pomodoros is a lifetime, and `longEvery`'s own validator
+ * (src/pomodoro.mjs) refuses anything over 100 at the HTTP boundary — so nothing
+ * legitimate is ever clamped. It exists so `cycle + 1` cannot overflow and so the popover's
+ * `%d/%d` cannot print a negative. */
+#define CB_COUNT_MAX 100000
+
+/* A remaining time that could not be a real interval. `deadline` is a wire value too, so
+ * `deadline - now` is as unbounded as the document is, and `llround` of anything past
+ * LONG_MAX is undefined the same way the casts above are. A hundred days is many orders of
+ * magnitude past MAX_DURATION_MIN (one day, src/pomodoro.mjs) and still nowhere near the
+ * edge. The same bound covers a phase LENGTH, which is the ring's denominator: a NaN there
+ * would print `nan` as the fraction, past every clamp on the fraction itself. */
+static const double CB_MAX_REMAINING_MS = 100.0 * 24.0 * 60.0 * 60.0 * 1000.0;
+
 static double cb_phase_length_ms(cb_phase phase, const cb_settings *settings) {
   if (phase == CB_WORK) return settings->work_ms;
   if (phase == CB_BREAK) return settings->break_ms;
@@ -363,8 +398,11 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
     d.position_denom = every;
   }
 
-  double remaining = timer->paused ? timer->remaining_ms : timer->deadline_ms - now_ms;
-  if (remaining < 0.0) remaining = 0.0;
+  /* Clamped at BOTH ends, not just at zero: `deadline`/`remainingMs` are wire values and a
+   * hand-edited one can be arbitrarily large, which `llround` below has no defined answer
+   * for (cb_clamp's own comment). */
+  double remaining = cb_clamp(timer->paused ? timer->remaining_ms : timer->deadline_ms - now_ms,
+                              0.0, CB_MAX_REMAINING_MS);
 
   /* The ring is remaining-over-configured, not remaining-over-elapsed: the denominator is
    * the phase's CURRENT setting, which is the same number restartTimer mints a deadline
@@ -375,7 +413,7 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
    * Derived in every running state, including the ones that draw no ring — a break, and a
    * pause: it is what the ring comes back to when work resumes, and the probe reports it
    * either way, which is what lets a check pin the sweep without a window server. */
-  double total = cb_phase_length_ms(timer->phase, settings);
+  double total = cb_clamp(cb_phase_length_ms(timer->phase, settings), 0.0, CB_MAX_REMAINING_MS);
   d.fraction = total > 0.0 ? remaining / total : 0.0;
   if (d.fraction > 1.0) d.fraction = 1.0;
   if (d.fraction < 0.0) d.fraction = 0.0;
@@ -713,6 +751,12 @@ static double cb_number(NSDictionary *dict, NSString *key, double fallback) {
   return [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : fallback;
 }
 
+/* Every wire number that is about to become a fixed-width integer goes through here as
+ * well as through cb_clamp — see cb_clamp's own comment for why any of this exists. */
+static int cb_number_int(NSDictionary *dict, NSString *key, double fallback, int lo, int hi) {
+  return (int)cb_clamp(cb_number(dict, key, fallback), (double)lo, (double)hi);
+}
+
 static int cb_bool(NSDictionary *dict, NSString *key, int fallback) {
   id value = dict[key];
   return [value isKindOfClass:[NSNumber class]] ? ([value boolValue] ? 1 : 0) : fallback;
@@ -963,12 +1007,14 @@ static BOOL cb_fetch(cb_timer *timer_out, cb_settings *settings_out, double *now
     settings_out->long_break_ms = cb_number(settings, @"longBreakMin", 15.0) * 60000.0;
     settings_out->countdown = cb_bool(settings, @"menubarCountdown", 1);
     settings_out->hidden = cb_bool(settings, @"menubarHidden", 0);
-    settings_out->long_every = (int)cb_number(settings, @"longEvery", 4.0);
+    /* Floored at 1, not at 0: it is a divisor on both sides of the wire (settleBoundary's
+     * `breakNumber % longEvery`, and the popover's own position denominator). */
+    settings_out->long_every = cb_number_int(settings, @"longEvery", 4.0, 1, CB_COUNT_MAX);
   }
 
   /* `now` is the daemon's own clock and the only one this file trusts for a deadline. */
   *now_out = cb_number(doc, @"now", *now_out);
-  *cycle_out = (int)cb_number(doc, @"cycle", 0.0);
+  *cycle_out = cb_number_int(doc, @"cycle", 0.0, 0, CB_COUNT_MAX);
 
   NSDictionary *timer = doc[@"timer"];
   if ([timer isKindOfClass:[NSDictionary class]]) {
@@ -1018,7 +1064,7 @@ static BOOL cb_fetch_waiting(cb_waiting *out) {
 
   cb_waiting built;
   memset(&built, 0, sizeof(built));
-  built.total = (int)cb_number(doc, @"total", (double)waiting.count);
+  built.total = cb_number_int(doc, @"total", (double)waiting.count, 0, CB_COUNT_MAX);
 
   int port = cb_port();
   for (NSDictionary *entry in waiting) {
@@ -1037,7 +1083,7 @@ static BOOL cb_fetch_waiting(cb_waiting *out) {
     char title[CB_TITLE_MAX * 4];
     cb_copy_string(entry[@"title"], title, sizeof(title));
     if (title[0] == '\0') snprintf(title, sizeof(title), "(untitled)");
-    long round = (long)cb_number(entry, @"round", 0.0);
+    long round = (long)cb_clamp(cb_number(entry, @"round", 0.0), 0.0, (double)CB_COUNT_MAX);
     cb_row_label(title, round, built.rows[built.count].label, sizeof(built.rows[0].label));
     snprintf(built.rows[built.count].url, sizeof(built.rows[0].url), "%s", url);
     built.count++;
@@ -2584,12 +2630,23 @@ static void cb_tick(void) {
    * to one fetch per crossing, the poll being the backstop if that one is lost.
    *
    * `d.phase != CB_IDLE` is cb_derive's spelling of "there is a timer": the protocol has
-   * no idle phase, so a running timer always derives to one of the other three. */
-  if (d.answered && d.phase != CB_IDLE && !d.paused && d.remaining_s <= 0 && !zero_fetched) {
+   * no idle phase, so a running timer always derives to one of the other three.
+   *
+   * ONTO cb_poll_queue, like every other request this process makes, and not onto a global
+   * concurrent queue. That was the one dispatch in this file that opted out of the serial
+   * ordering cb_poll_queue exists for, and it opted out at the exact moment a reader is
+   * most likely to be pressing something: the countdown has just hit zero, so the popover
+   * is open and Restart is under the cursor. A concurrent GET can be in flight while the
+   * Restart POST lands, finish after it, and write the PRE-restart document over the fresh
+   * one — the item then shows 00:00 again until the next poll, and a second press "fixes"
+   * it. Serial makes that ordering rather than a hope, which is cb_dispatch_action's own
+   * reasoning applied to the one caller that had been left out of it. */
+  if (d.answered && d.phase != CB_IDLE && !d.paused && d.remaining_s <= 0 && !zero_fetched &&
+      cb_poll_queue != nil) {
     [cb_state_lock lock];
     cb_state_zero_fetched = 1;
     [cb_state_lock unlock];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ cb_poll_once(); });
+    dispatch_async(cb_poll_queue, ^{ cb_poll_once(); });
   }
 }
 

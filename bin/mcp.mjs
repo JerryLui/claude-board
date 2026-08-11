@@ -58,6 +58,13 @@ const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000
 const WAIT_GRACE_MS = Math.min(5_000, Math.max(250, Math.round(TIMEOUT_MS * 0.05)));
 const PROGRESS_MS = Number(process.env.CLAUDE_BOARD_PROGRESS_MS) || 20_000; // ~20s cadence
 const POST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;
+// How long the THREAD-CREATING post itself may run, as opposed to how long this call
+// waits for it (POST_TIMEOUT_MS above). Longer on purpose: that one post carries no board
+// id, so a response lost after the body went out leaves a board this process cannot name,
+// and the retry the failure message invites mints a second board, thread and tab. Letting
+// the post outlive the call that made it is what turns that retry back into one board --
+// see postThisRound. Bounded, not absent: a post nobody is waiting for still has to end.
+const CREATE_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_CREATE_TIMEOUT_MS) || POST_TIMEOUT_MS * 3;
 const NO_OPEN = process.env.CLAUDE_BOARD_NO_OPEN === '1';
 const OPEN_CMD = process.env.CLAUDE_BOARD_OPEN_CMD || 'open';
 // Overrides process.platform for canOpenTab() below ONLY -- there is no second OS on
@@ -220,14 +227,35 @@ function httpJson(method, urlStr, body, { timeoutMs, signal } = {}) {
  * opened really did write nothing. A connection that died AFTER the request body went
  * out may have applied the whole round and lost only the response — the daemon's work is
  * synchronous once the body is read — so "nothing was posted or written" would be false
- * there. The retry itself is safe either way (`ask` carries a requestId the daemon
- * dedupes on); the message still has to be true. */
+ * there. The retry itself is safe on a round pushed into an existing board (`ask` carries
+ * a requestId the daemon dedupes on); the message still has to be true.
+ *
+ * A THREAD-CREATING post is the exception, and it used to be told the same story it
+ * cannot keep: there is no board to scope a requestId to yet, so the daemon has no way to
+ * recognise a repeat of it, and a retry mints a second board, thread and tab. The two
+ * markers postThisRound puts on the error name which case this is — the post is still
+ * running (retry, and it joins that post) or it is over unconfirmed (a retry is a second
+ * board, so look before leaping). */
 function daemonUnreachableMessage(err, { sent = false } = {}) {
+  // A post this call gave up on but did not cancel: the connection is alive (a dead one
+  // would have failed, not run late), so this is a slow daemon, not an absent one — and
+  // the revive command every other branch ends with would kill the very post that is still
+  // going. Nothing to revive, one thing to do.
+  if (err && err.createStillInFlight) {
+    return [
+      `claude-board did not answer this board post in time (${err.code || err.message}).`,
+      `The post had already gone out and is STILL RUNNING here. Call ask again with the same ` +
+      `arguments: it waits that post out and pushes this round into whatever board it made. Do ` +
+      `not pass fresh, and do not restart the daemon — either one turns this into a second board.`,
+    ].join('\n');
+  }
   return [
     `claude-board daemon is not reachable at ${BASE_URL} (${err.code || err.message}).`,
-    sent
-      ? `The request had already been sent, so the round may or may not have landed. Retrying this same call is safe: it carries an idempotency key and the daemon will not duplicate it.`
-      : `Nothing was posted or written.`,
+    !sent
+      ? `Nothing was posted or written.`
+      : err && err.createPost
+        ? `The board post had already gone out, so a board may or may not have been created. A thread's first post carries no idempotency key the daemon could recognise it by, so calling ask again may well create a SECOND board and tab: check the board index (or the tab that may have opened) first.`
+        : `The request had already been sent, so the round may or may not have landed. Retrying this same call is safe: it carries an idempotency key and the daemon will not duplicate it.`,
     `Revive it with: launchctl kickstart -k gui/$(id -u)/claude-board`,
     `If it was never installed on this machine, run ./install.sh from the claude-board repository first.`,
   ].join('\n');
@@ -294,6 +322,23 @@ function isTransportError(err) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** `promise`, with a deadline on THIS caller rather than on the work: when `ms` passes the
+ * caller is rejected with `makeError()` and the promise is left running. That is the whole
+ * difference from an aborting timeout, and the reason postThisRound uses it — a request
+ * that may already have changed the daemon's state is worth more still running than
+ * cancelled. Both settlement paths are handled, so a promise this call walked away from
+ * never surfaces as an unhandled rejection. */
+function withDeadline(promise, ms, makeError) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(makeError()), ms);
+    timer.unref();
+    promise.then(
+      value => { clearTimeout(timer); resolve(value); },
+      err => { clearTimeout(timer); reject(err); }
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -517,7 +562,8 @@ const ASK_TOOL = {
           'Block on this round even though it carries no question, so the reviewer\'s comments ' +
           'on it come back in this same call\'s packet instead of riding a later round. Only has ' +
           'an effect when blocks is exactly one html block (a page board); default false. A ' +
-          'question round blocks regardless of this flag.',
+          'question round blocks regardless of this flag. A real boolean, never a quoted string: ' +
+          '"false" is refused, not obeyed.',
       },
       fresh: {
         type: 'boolean',
@@ -531,7 +577,8 @@ const ASK_TOOL = {
           'you cannot see a board URL of your own in the conversation so far, and leave it off ' +
           'for every later round, or each round opens a board of its own. Harmless when there ' +
           'is no board yet — one board, one thread, one tab — and it closes any round still ' +
-          'open on the board it walks away from. Default false.',
+          'open on the board it walks away from. Default false. A real boolean, never a quoted ' +
+          'string: "false" is refused, not obeyed.',
       },
     },
     required: ['title', 'blocks'],
@@ -642,6 +689,9 @@ async function declareBoundary(session) {
   session.boardId = null;
   session.thread = null;
   session.url = null;
+  // The abandoned board's first-post key with it: it names a round on a board this
+  // conversation has walked away from, and the next post mints its own.
+  session.createRequestId = null;
   // Same gate as safeBoardUrl, and for the same reason: this string goes into a URL path
   // segment. A daemon that once answered with something that is not a board id gets no
   // second chance to have it sent back.
@@ -657,50 +707,137 @@ async function declareBoundary(session) {
   }
 }
 
+/** A post's idempotency key: 128 bits of a sha256 over the parts that decide what the
+ * round IS, so two calls the daemon should treat as one retry hash alike and two calls it
+ * must keep apart do not. Never random — a random key would make every retry a new round,
+ * which is the failure it exists to stop. */
+function requestIdFor(parts) {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
+}
+
+/** This call gave up on the thread-creating post; the post itself is still running. */
+function createDeadlineError() {
+  return Object.assign(
+    new Error(`the daemon did not answer the board post within ${formatDuration(POST_TIMEOUT_MS)}`),
+    // The body went out and the daemon is synchronous once it has read it, so "nothing was
+    // posted or written" is exactly what this must not say.
+    { code: 'ETIMEDOUT', requestSent: true }
+  );
+}
+
 /** Post this call's blocks, minting the thread's board on the first call and
  * pushing a round into it on every later one.
  *
  * Thread creation is guarded by an in-flight promise on `session`, because
  * `session.boardId == null` is read before an await and written after one: two `ask`
  * calls arriving in the same tick would otherwise both see null, both POST a brand-new
- * board and both open a tab, breaking "one thread per conversation". The promise is
- * cleared in `finally`, so a failed first post leaves the session clean for the next
- * call to retry rather than wedging the thread forever. */
+ * board and both open a tab, breaking "one thread per conversation". The promise lives
+ * exactly as long as the post does — not as long as the call that made it — so a call
+ * that gave up waiting still leaves the next one something to join, and a post that has
+ * genuinely failed leaves the session clean for the next call to retry rather than
+ * wedging the thread forever. */
 async function postThisRound(session, title, blocks, wait, fresh) {
-  if (session.creatingThread) {
-    // Someone else is minting the thread. Wait it out — if it succeeded we push a
-    // round into its board, if it failed we fall through and try to create it.
-    try { await session.creatingThread; } catch { /* the creator reports its own failure */ }
+  // What this call IS, as the daemon keys it: title, blocks, wait — no board id, because
+  // the first post has none to be scoped by. Computed once, up front: both the join below
+  // and the push at the end need it.
+  const contentId = requestIdFor([title, blocks, Boolean(wait)]);
+
+  // Re-read the guard after EVERY await, never once on the way in. `session.creatingThread`
+  // is null-checked before an await and written after one, so a single read let a call
+  // that yielded — waiting out someone else's mint, or declaring a boundary — fall through
+  // into the create branch beside a concurrent call that had already started minting: two
+  // boards, two threads, two tabs out of one conversation, the exact outcome the guard
+  // exists to prevent.
+  let boundaryDeclared = false;
+  let joinedMint = false;
+  for (;;) {
+    if (session.creatingThread) {
+      // Someone else is minting the thread. Wait it out — if it succeeded we push a
+      // round into its board, if it failed we loop and (unless a third call has started
+      // one meanwhile) create it.
+      let joined = null;
+      try { joined = await session.creatingThread; } catch { /* the creator reports its own failure */ }
+      if (joined) {
+        joinedMint = true;
+        // ...unless that post IS this call: same title, same blocks, same wait means this
+        // is the retry of it (the call that made it gave up before its answer arrived),
+        // and the answer is already in hand. Return it rather than posting the round a
+        // second time. Re-posting cannot be made safe from here: the daemon's dedupe is an
+        // identity over the round's RESOLVED content (src/server.mjs, `roundContentDrifted`),
+        // so a file this round references that was regenerated between the two — the
+        // artifact loop the manual prescribes, and the whole reason that gate exists — is
+        // a genuinely new round to the daemon, and the retry duplicates instead of joining.
+        if (session.createRequestId === contentId) {
+          // Never `isFirstBoard`: the tab belongs to the call that actually made this post.
+          // ponytail: when that call gave up before its answer landed, nobody opens a tab
+          // at all — the daemon's own stranded announcement (ADR 55) is what tells the
+          // reviewer the board is there. The upgrade, if a silent board ever proves worse
+          // than a duplicate one, is a session flag recording that a tab was opened.
+          return { posted: joined, isFirstBoard: false };
+        }
+      }
+      continue;
+    }
+    // After that wait and before the create-vs-push branch below: a boundary declared while
+    // another call was mid-mint has to walk away from the board that call actually made,
+    // not from the null it saw on the way in. Once per call, and the loop re-checks the
+    // guard afterwards because the boundary's own await is a yield like any other.
+    //
+    // Never for a board THIS CALL just waited out, though. `fresh` says "this conversation
+    // has posted no board", so it walks away from what a PREVIOUS conversation left behind
+    // — and a board minted milliseconds ago by a concurrent `ask` on this same shim is not
+    // that, it is this conversation. Abandoning it closed a live round under the call still
+    // blocked on it and minted a second board for one conversation: the ordering (plain
+    // ask first, fresh second) that the guard alone does not cover.
+    if (fresh && !boundaryDeclared && !joinedMint) {
+      boundaryDeclared = true;
+      await declareBoundary(session);
+      continue;
+    }
+    break;
   }
 
-  // After that wait and before the create-vs-push branch below: a boundary declared while
-  // another call was mid-mint has to walk away from the board that call actually made,
-  // not from the null it saw on the way in.
-  // ponytail: two `ask` calls declaring a boundary in the same tick would both clear and
-  // both mint, giving two threads. Not guarded, because the second call is by definition
-  // not fresh — this conversation has posted a board by then — so that shape is a caller
-  // error whose only symptom is the extra thread the caller asked for. The upgrade, if it
-  // ever matters, is the same in-flight-promise guard `creatingThread` already is.
-  if (fresh) await declareBoundary(session);
-
   if (session.boardId == null) {
+    // A first post has no board id to scope a key to, so its key is the content alone —
+    // and the session remembers it, because the daemon has now seen this round under THAT
+    // key and under no other. The push below sends it back on a retry of this same call
+    // (see there), which is what makes the daemon answer "already applied" instead of
+    // amending a second copy of every block into the round it just minted.
+    const createRequestId = requestIdFor([title, blocks, Boolean(wait)]);
+    session.createRequestId = createRequestId;
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), cwd: process.cwd(), thread: session.thread ?? null },
-        { timeoutMs: POST_TIMEOUT_MS }
+        { title, blocks, wait: Boolean(wait), cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId },
+        { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
       session.thread = posted.thread;
       return posted;
     })();
     // Assigned synchronously, before the first await below: a concurrent `ask`
-    // entering here in the same tick sees it and waits instead of racing.
+    // entering here in the same tick sees it and waits instead of racing. Cleared when the
+    // post SETTLES, not when this call returns: a call that gave up on a post still running
+    // is precisely the case the next call has to be able to join.
     session.creatingThread = creating;
+    const clearGuard = () => { if (session.creatingThread === creating) session.creatingThread = null; };
+    creating.then(clearGuard, clearGuard);
     try {
-      return { posted: await creating, isFirstBoard: true };
-    } finally {
-      session.creatingThread = null;
+      // The deadline is on THIS call, not on the post (see withDeadline). A thread's first
+      // post carries no board id, so there is nothing for a requestId to be scoped to and
+      // the daemon cannot recognise a repeat of it: a response lost here would leave a
+      // board this process cannot name, and the retry the error message invites would mint
+      // a second board, thread and tab while the first sat orphaned on a live awaited
+      // round. Leaving the post running instead means the retry finds it on the guard
+      // above, waits it out, and pushes its round into the board it actually made.
+      return { posted: await withDeadline(creating, POST_TIMEOUT_MS, createDeadlineError), isFirstBoard: true };
+    } catch (err) {
+      // Which of the two unconfirmed cases this is, for the message to tell the truth.
+      if (err && typeof err === 'object') {
+        err.createPost = true;
+        if (session.creatingThread === creating) err.createStillInFlight = true;
+      }
+      throw err;
     }
   }
 
@@ -717,10 +854,16 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   // because it changes what round.awaited ends up as (src/board.mjs `mintAwait`): a call
   // that only flips `wait` between two otherwise-identical posts is a different request,
   // not a retry.
-  const requestId = createHash('sha256')
-    .update(JSON.stringify([session.boardId, title, blocks, Boolean(wait)]))
-    .digest('hex')
-    .slice(0, 32);
+  //
+  // Except when this call is the RETRY of the post that created this board — same title,
+  // same blocks, same wait — which the daemon only ever saw under the content-only key
+  // above. Board-scoping it there would hand the daemon a key it has never seen, and the
+  // "safe to retry" the failure message promises would append the whole round again. (A
+  // retry that arrives while that post is still running never reaches here at all: the
+  // join above hands back its answer instead. This covers the one that arrives after.)
+  const requestId = session.createRequestId === contentId
+    ? contentId
+    : requestIdFor([session.boardId, title, blocks, Boolean(wait)]);
   let posted;
   try {
     posted = await httpJson(
@@ -792,6 +935,26 @@ function isAwaited(blocks, wait) {
   return hasQuestionBlock(blocks) || (Boolean(wait) && isPageRoundShape(blocks));
 }
 
+/** A schema-declared boolean flag, read as the decision it is rather than for truthiness.
+ * `wait` and `fresh` are `type: 'boolean'` in the tool schema, but nothing enforces a
+ * caller's types, and a model that emits the STRING `'false'` reads as TRUE to a bare
+ * `if (fresh)`: `ask` would then abandon every round still open on the live board — a
+ * reviewer's question closed under them, on the one input where being wrong destroys work
+ * someone is looking at — and, on `wait`, block a content-only round for the full cap.
+ * Absent stays absent (both default false); anything that is not a boolean is refused by
+ * name, the same way a missing title is, rather than guessed at. */
+function boolArg(value, name) {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== 'boolean') {
+    throw new ToolError(
+      `ask requires "${name}" to be a boolean (true or false), not ${JSON.stringify(value)}. ` +
+      `A string is not a boolean — "false" would have read as true. Nothing was posted, written or abandoned; ` +
+      `call ask again with a real boolean.`
+    );
+  }
+  return value;
+}
+
 /** `session` carries the in-memory, per-shim-process state a live thread needs: the
  * board id to push follow-up rounds into, and the in-flight thread-creation guard. One
  * shim == one conversation == one thread, and `fresh` (ADR 69) is what moves it on to the
@@ -810,10 +973,12 @@ async function askTool(args, session, { sendProgress, cancelled }) {
 
   const title = args && args.title;
   const blocks = args && args.blocks;
-  const wait = args && args.wait;
-  const fresh = args && args.fresh;
   if (typeof title !== 'string' || !title) throw new ToolError('ask requires a non-empty string "title"');
   if (!Array.isArray(blocks)) throw new ToolError('ask requires a "blocks" array');
+  // Read as decisions, never as truthiness — see boolArg. Refused here, before anything is
+  // posted, abandoned or written.
+  const wait = boolArg(args && args.wait, 'wait');
+  const fresh = boolArg(args && args.fresh, 'fresh');
 
   let posted;
   let isFirstBoard;
@@ -914,7 +1079,42 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     return packetResult(text, packet);
   }
 
-  const text = `Board submitted.\n${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
+  // The board was closed under this call: the conversation that owned it declared itself
+  // over (ADR 69's boundary, or a direct abandon), and the daemon answers the blocked wait
+  // at once instead of leaving it on a round nothing will ever answer. Its own branch,
+  // because every other ending is a lie here — falling through to "Board submitted." below
+  // reads a round of synthesised `unanswered` back as the reviewer's decisions, and the
+  // timeout wording above would send the agent to reopen a board that is closed for good.
+  // What survives is the comments: one left before the session walked away is owed to this
+  // packet like any other, so they are summarised, not dropped.
+  if (packet.status === 'abandoned') {
+    const text =
+      `Board abandoned: this round was closed before anyone answered it, because the conversation ` +
+      `that owned the board declared itself over — a later ask started a new board, or the board ` +
+      `was abandoned directly. No response is coming, and nothing below is a decision the reviewer ` +
+      `made: this is neither an answer nor the wall-clock cap. Any comments below were left before ` +
+      `it closed and still count. Post to the current board if the question still stands.\n` +
+      `${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
+    return packetResult(text, packet);
+  }
+
+  if (packet.status === 'submitted') {
+    const text = `Board submitted.\n${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
+    return packetResult(text, packet);
+  }
+
+  // Every ending this shim knows is branched above, so this is one it does not: a daemon
+  // newer than the shim talking to it, most likely (`abandoned` arrived exactly that way).
+  // It gets named, not dressed as a submit. "Board submitted." used to be the fall-through
+  // for anything unrecognised, which is how a round of synthesised `unanswered` gets read
+  // back as the reviewer's decisions — the one failure this whole surface exists to
+  // prevent, and the fall-through would have made it again for the next status added.
+  const text =
+    `The wait ended with a status this shim has no branch for: ${JSON.stringify(packet.status)}. ` +
+    `Nothing below is a decision anyone can vouch for — do not read the answers as the reviewer's, ` +
+    `say plainly that the outcome is unrecognised, and open the board yourself. If the daemon is ` +
+    `newer than this shim, ./install.sh from the claude-board repository updates both.\n` +
+    `${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
   return packetResult(text, packet);
 }
 
@@ -956,7 +1156,7 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
 // that minted it is gone, which clears both and starts the next one over. This process
 // outlives `/clear`, so the flag is the only thing that can tell those two apart.
 // Nothing call-scoped lives here (see askTool's comment).
-const session = { boardId: null, thread: null, url: null, creatingThread: null };
+const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null };
 
 /** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has
  * something to cancel. Without it a cancelled call leaks three things: the progress

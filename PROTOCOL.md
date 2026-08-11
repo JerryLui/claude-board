@@ -474,7 +474,7 @@ except for `cwd`.
 ```js
 {
   board, thread, title, round,
-  status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'error'
+  status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'abandoned' | 'error'
   answers:  [ { id, round, prompt, widget, status, choice, note } ],
   comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, resolved, lost? } ],
   url,
@@ -490,7 +490,11 @@ packet. `discuss` means the reviewer chose Discuss in chat: partial answers
 are included and the agent must stop posting boards for the rest of the session. `timeout` is the
 wall-clock cap (default 40m, ADR.md entry 47) and carries an explicit no-response — an empty `answers`, and no
 comments beyond the undelivered ones described next, which are owed to a timed-out round exactly
-as they are to any other.
+as they are to any other. `abandoned` is the round being closed under a blocked call — the
+conversation that owned the board declared itself over (`fresh`, ADR.md entry 69) or the board was
+abandoned directly — and it is terminal in a way `timeout` is not: the round will never reopen, so
+the caller posts to the current board rather than to this one. It carries whatever the store held
+plus the same owed comments, and the shim names it as its own outcome, never as a submit.
 
 **Scope: one packet is one round, with one exception.** `answers` holds exactly the question
 blocks whose `round` is the packet's `round`, and `comments` exactly the comments left in it.
@@ -735,8 +739,12 @@ already run on the same blocks: see "Round `awaited` / `awaitDeadline`" above.
 
 Pushing into a live board **amends** the latest round in place — a block whose incoming id
 already exists on the board replaces it, everything else is appended to that same round — while
-that round is still `open` **and carries a question block somewhere in it**. Otherwise it mints a
-new round. Either way the response is `{ boardId, thread, round, url, clients, awaited }`, `round`
+that round is still `open`, **carries a question block somewhere in it**, and **its own wait has
+not lapsed**. Otherwise it mints a new round. A wait-lapsed round stays `status: 'open'` forever
+(only a submit or an abandon moves `status`), so `open` alone would send every later question in
+the conversation into a round nothing is listening to.
+
+Either way the response is `{ boardId, thread, round, url, clients, awaited }`, `round`
 naming whichever round was amended or minted and `awaited` carrying that round's own minted
 `awaited` flag. The flag is on the response because the poster cannot always compute it: the shim
 checks the raw blocks it sent and has no way to know that an `html` block's `source` failed to
@@ -745,10 +753,24 @@ deciding whether to wait should prefer this field and fall back to its own shape
 it is absent (a daemon older than this field).
 
 A **retry** carrying a `requestId` this board has already applied is answered from what that id
-already did (`deduped: true`) while the round it guarded is still `open` **and its wait has not
-lapsed**. A round whose `awaitDeadline` has passed can never hand a caller a packet again, so it is
-never the answer to a retry: the post falls through and mints the next round, against a live
-deadline.
+already did (`deduped: true`) while the round it guarded is still `open`, **its wait has not
+lapsed**, **and the content that round resolved has not changed on disk**. A round whose
+`awaitDeadline` has passed can never hand a caller a packet again, so it is never the answer to a
+retry: the post falls through and mints the next round, against a live deadline.
+
+The content gate is what makes `requestId` an identity over what a round *resolved to* rather than
+over the bytes of the request. `requestId` is derived from the raw blocks, and a raw block names a
+file by **path**, so "post an artifact, regenerate the file it references, ask again" re-sends a
+byte-identical body: keyed on the body alone, the reviewer keeps seeing the old snapshot while the
+caller is told the new one landed. On a retry the daemon re-resolves the guarded round's
+`source` blocks and compares each against the `sha` it snapshotted; any difference makes this a
+different request. By-value content needs no such gate: it travels in the body, so changing it
+changes `requestId`.
+
+A retry refused by any of those three gates **mints the next round**. It is never amended into the
+round it was refused against, even when that round is open and asks something: appending would
+leave the reviewer one round holding both snapshots and both copies of the question, and the packet
+reporting two answers for the one question that was asked.
 
 The question is what makes a round amendable, because amending exists for one situation: the agent
 is still assembling a round the reviewer has not answered yet. A round that asks nothing is
@@ -1288,6 +1310,13 @@ CLAUDE_BOARD_TIMEOUT_MS       wall-clock cap on the blocking wait, default 40m (
 CLAUDE_BOARD_PROGRESS_MS      notifications/progress cadence, default 20_000 (20s)
 CLAUDE_BOARD_POST_TIMEOUT_MS  timeout on POST /api/board only, default 10_000; never applied
                                to the /wait call, which must survive the full wall-clock cap
+CLAUDE_BOARD_CREATE_TIMEOUT_MS
+                               how long the THREAD-CREATING post may run, as opposed to how
+                               long the call waits for it (above), default 3x that. The first
+                               post carries no board id, so a lost response leaves a board the
+                               shim cannot name and the retry mints a second one; letting the
+                               post outlive the call that made it is what lets the retry join
+                               it instead
 CLAUDE_BOARD_RETRY_MS         reattach backoff after the daemon drops a held-open wait,
 CLAUDE_BOARD_RETRY_MAX_MS      default 250ms doubling to 2_000ms: short enough that a launchd
                                restart reattaches at once, capped so a longer outage is not a

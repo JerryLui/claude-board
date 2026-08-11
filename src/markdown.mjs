@@ -269,6 +269,35 @@ export function slugify(text, used, ordinals) {
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const escAttr = s => esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+// esc() above escapes EVERY `&`, which is right for a fragment that must reach the
+// page as its literal source bytes (a code span, a fence, raw HTML rendered as
+// text) and wrong for ordinary prose: CommonMark says a character reference in
+// source is the character it names, so `&amp;` is an `&`, `&lt;` is a `<` and
+// `caf&eacute;` is `café`. Escaping the `&` of one produced `&amp;amp;`, which the
+// browser paints as the literal text `&amp;` -- the source's own escape hatch shown
+// back at the reviewer verbatim, in the surface whose whole promise is a faithful
+// view of the source.
+//
+// escText passes a `&` through UNTOUCHED when it already begins a character
+// reference (named, decimal or hex) and escapes it otherwise, so the reference
+// survives into the markup and the BROWSER decodes it -- no entity table here, and
+// no second opinion about which names exist. This is the same test marked's own
+// renderer applies to text (`escapeTestNoEncode` in the vendored bundle), so the
+// two agree by construction. `<` and `>` are still escaped unconditionally: only
+// the `&` rule differs.
+//
+// escAttr deliberately does NOT get this treatment and keeps escaping every `&`.
+// An attribute value is where the difference stops being cosmetic: the href/src of
+// a link is scheme-checked HERE (safeUrl, below) but character-reference-decoded by
+// the BROWSER afterwards, so passing `javascript&colon;alert(1)` through unescaped
+// would hand the browser a `javascript:` URL that the allowlist never saw -- the
+// scheme regex cannot match across the `&`. Full escaping keeps the bytes the
+// allowlist vetted and the bytes the browser parses identical, which is the whole
+// point of vetting them. Alt text rides along on the same escaper; a decoded
+// reference there is worth less than one escaper with one rule.
+const CHAR_REF = /&(?!(?:#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/g;
+const escText = s => String(s).replace(CHAR_REF, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 // C0 controls (and DEL) are stripped from a URL before its scheme is tested and
 // before it is emitted. The scheme regex only matches at offset 0 and JS `\s` does
 // not cover \x01-\x08 / \x0e-\x1f, while a raw destination happily admits them -- so
@@ -395,8 +424,17 @@ function legacyInlineDestination(raw, isImage) {
 // between a matched opening and closing run of the SAME length is never a split
 // point. A run with no matching close is not a code span (CommonMark rule) and its
 // backticks are ordinary characters the scan continues straight through. */
+// The leading-pipe strip allows GFM's up-to-three spaces of block indentation in
+// front of it. `^\|` alone anchored at column 0, so an INDENTED table -- which
+// marked tokenizes as a table exactly like an unindented one -- kept its leading
+// pipe, which then split as an ordinary separator and produced one empty cell in
+// front of every real one. renderTable asks for exactly `header.length` columns, so
+// the whole row shifted right by one and the LAST column of every row was dropped
+// off the end: silent content loss in the surface whose promise is a faithful view
+// of the source. Three spaces is the boundary CommonMark draws (four would be an
+// indented code block, and marked would not have called it a table at all).
 function splitTableRowCells(row) {
-  const s = row.replace(/^\|/, '').replace(/\| *$/, '');
+  const s = row.replace(/^ {0,3}\|/, '').replace(/\| *$/, '');
   const cells = [];
   let cur = '';
   let i = 0;
@@ -431,10 +469,20 @@ function splitTableRowCells(row) {
   return cells.map(c => c.trim().replace(/\\\|/g, '|'));
 }
 
+/** How many characters of fenced code ONE document may hand the syntax
+ * highlighter, in total. Deliberately the same 8192 as src/render.mjs's
+ * MAX_HIGHLIGHT_CHARS (which bounds a single call, and carries the measurements
+ * that chose the number): the promise that file makes -- "a slow request, not a
+ * hang" -- is only true per document if the document as a whole can't buy the
+ * worst case more than once. Not imported from there; markdown.mjs sits UPSTREAM
+ * of render.mjs (see this file's header on why highlighting arrives by injection
+ * rather than import), so the two share a value, not a symbol. */
+const MAX_DOC_HIGHLIGHT_CHARS = 8192;
+
 /**
  * Render markdown to HTML and extract anchors.
  * @param {string} md
- * @param {{ highlight?: (text: string, lang: string) => string }} [opts] -
+ * @param {{ highlight?: (text: string, lang: string, budget: { remaining: number }) => string }} [opts] -
  *   `highlight`, when given, is called for a non-mermaid fenced code block's text
  *   and `lang` and must return the fence's WHOLE markup -- `<pre><code>...`
  *   already `tok-*`-classed, optionally wrapped in the language-label div
@@ -442,11 +490,20 @@ function splitTableRowCells(row) {
  *   renderCode below and ADR.md entry 65 for why this is an injected argument
  *   rather than an import). Omitted, a fence renders exactly as it always has:
  *   plain, escaped, unhighlighted -- every caller in test/check-pure.mjs relies on
- *   that default.
+ *   that default. The third argument is this document's highlighting budget, one
+ *   `{ remaining }` counter shared by every fence in it and spent by the
+ *   implementation (only it knows which fences cost anything); see
+ *   MAX_DOC_HIGHLIGHT_CHARS above and highlightFenceHtml in src/render.mjs.
  * @returns {{ html: string, anchors: Array<{kind: 'md', ref: string, label: string}> }}
  */
 export function mdToHtmlAndAnchors(md, opts = {}) {
   const { highlight } = opts;
+  // Handed to every fence in this document by renderCode below, and spent by the
+  // highlighter on the other side of that call; see both comments. Same number as
+  // src/render.mjs's own per-call cap on purpose -- "one cutoff's worth of
+  // tokenizer work", now counted per document instead of per call, so the bound
+  // that file measured and documented is the bound a whole markdown block obeys.
+  const fenceHighlightBudget = { remaining: MAX_DOC_HIGHLIGHT_CHARS };
   const anchors = [];
   // Every heading this pass could place in the source, in document order (see
   // scanHeadings below, which is what src/resolve.mjs consumes). Set by
@@ -469,8 +526,12 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
 
   function renderInlineToken(t) {
     switch (t.type) {
-      case 'escape': return esc(t.text);
-      case 'text': return t.tokens ? renderInline(t.tokens) : esc(t.text);
+      // escText, not esc: prose is the context CommonMark decodes character
+      // references in (see escText above). An `escape` token's text is the single
+      // backslash-escaped character on its own, so a `\&` still escapes -- the `&`
+      // arrives here with nothing after it to look like a reference.
+      case 'escape': return escText(t.text);
+      case 'text': return t.tokens ? renderInline(t.tokens) : escText(t.text);
       case 'strong': return '<strong>' + renderInline(t.tokens) + '</strong>';
       case 'em': return '<em>' + renderInline(t.tokens) + '</em>';
       case 'del': return '<del>' + renderInline(t.tokens) + '</del>';
@@ -492,7 +553,7 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
         const tag = '<a href="' + escAttr(href) + '" target="_blank" rel="noopener noreferrer">' + renderInline(t.tokens) + '</a>';
         return legacy ? tag + esc(t.raw.slice(legacy.consumed)) : tag;
       }
-      default: return esc(t.text ?? t.raw ?? '');
+      default: return escText(t.text ?? t.raw ?? '');
     }
   }
 
@@ -535,7 +596,7 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
       case 'list': return renderList(t, quoted, listDepth);
       // 'text' reaches here only for a stray top-level text token (marked's
       // block-level catch-all); give it the same paragraph treatment.
-      case 'text': return '<p>' + (t.tokens ? renderInline(t.tokens) : esc(t.text)) + '</p>';
+      case 'text': return '<p>' + (t.tokens ? renderInline(t.tokens) : escText(t.text)) + '</p>';
       default: return '';
     }
   }
@@ -583,31 +644,51 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
     // back to plain escaped text, byte-for-byte what this branch has always
     // returned -- no label, since there is no highlighter here to decide whether
     // `lang` names a vendored grammar.
-    if (highlight) return highlight(t.text, t.lang || '');
+    //
+    // The third argument is this document's share of the syntax highlighter's
+    // budget. src/render.mjs caps ONE call (MAX_HIGHLIGHT_CHARS -- Prism's
+    // tokenizers backtrack quadratically, and that cap is what keeps a single big
+    // block a slow request rather than a hang). A markdown document holds as many
+    // fences as it likes, and each one was its own call, so the cap bounded nothing
+    // at document level: a wall of just-under-cap fences paid the worst case once
+    // per fence and blocked the event loop for as long as it took. One counter,
+    // handed to every fence in this document, is what makes the bound that file
+    // measured a bound on the whole block. It is SPENT on the other side, by the
+    // highlighter, because only that side knows whether a given fence costs
+    // anything -- see highlightFenceHtml.
+    if (highlight) return highlight(t.text, t.lang || '', fenceHighlightBudget);
     return '<pre><code>' + esc(t.text) + '</code></pre>';
   }
 
+  // Each row is split into cells ONCE, before its columns are walked. The split
+  // used to happen inside the per-column helper, which re-scanned the whole row for
+  // every column in it -- O(columns x row length), i.e. quadratic in the column
+  // count, on the daemon's single thread. A wide table is not exotic (a generated
+  // matrix, a benchmark grid) and the block cap is 512 KiB, where the old shape
+  // measured in minutes of a fully blocked event loop: no health check, no other
+  // board, no open stream. Splitting per row makes it linear in the row's length,
+  // and the work is re-paid on every `section:` resolution of the same file, so the
+  // factor removed here is removed from each of those too.
   function renderTable(t) {
     const lines = t.raw.replace(/\n+$/, '').split('\n');
-    const bodyLines = lines.slice(2, 2 + t.rows.length);
+    const headerCells = splitTableRowCells(lines[0] ?? '');
     let out = '<table><tr>';
     for (let i = 0; i < t.header.length; i++) {
-      out += '<th' + alignAttr(t.align[i]) + '>' + renderCellText(lines[0], i) + '</th>';
+      out += '<th' + alignAttr(t.align[i]) + '>' + renderCellText(headerCells, i) + '</th>';
     }
     out += '</tr>';
     for (let r = 0; r < t.rows.length; r++) {
+      const rowCells = splitTableRowCells(lines[2 + r] ?? '');
       out += '<tr>';
       for (let c = 0; c < t.rows[r].length; c++) {
-        out += '<td' + alignAttr(t.align[c]) + '>' + renderCellText(bodyLines[r] ?? '', c) + '</td>';
+        out += '<td' + alignAttr(t.align[c]) + '>' + renderCellText(rowCells, c) + '</td>';
       }
       out += '</tr>';
     }
     return out + '</table>';
 
-    function renderCellText(rowText, col) {
-      const cells = splitTableRowCells(rowText);
-      const text = cells[col] ?? '';
-      return renderInline(Lexer.lexInline(text));
+    function renderCellText(cells, col) {
+      return renderInline(Lexer.lexInline(cells[col] ?? ''));
     }
   }
   const alignAttr = a => (a ? ' align="' + a + '"' : '');
@@ -642,7 +723,7 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
     }
     let body = '';
     for (const t of item.tokens) {
-      if (t.type === 'text') body += t.tokens ? renderInline(t.tokens) : esc(t.text);
+      if (t.type === 'text') body += t.tokens ? renderInline(t.tokens) : escText(t.text);
       else if (t.type === 'checkbox') body += renderCheckbox(t);
       else body += renderBlockToken(t, quoted, listDepth + 1);
     }

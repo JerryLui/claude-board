@@ -187,6 +187,24 @@ export const VOID_ELEMENTS = new Set([
   'link', 'meta', 'param', 'source', 'track', 'wbr',
 ]);
 
+// The two elements whose start tag switches the HTML tree builder into foreign
+// content, and therefore the only ones where a trailing `/` on a start tag means
+// anything at all. In HTML proper the tokenizer sets the self-closing flag and the
+// tree builder never acknowledges it: `<div/>` opens a div that stays open and
+// swallows its following siblings, exactly as if the slash were not there. Honoring
+// the slash everywhere made this parser close an element the browser had left open,
+// so every index after it shifted and a comment resolved against the wrong element
+// (or was reported lost on an element that is plainly still on the page) -- the same
+// class of divergence the quoted-`<`-in-attribute fix above closed. Inside SVG or
+// MathML the flag IS acknowledged, for every descendant too, so foreignness is
+// inherited down the subtree rather than tested tag by tag.
+//
+// Exported for the same reason VOID_ELEMENTS is: test/dom-stand-in.mjs models the
+// BROWSER for this suite, and the point of this rule is that the browser and the
+// resolver agree about which elements a start tag leaves open. Two copies of the
+// set is two chances to disagree again.
+export const FOREIGN_ROOTS = new Set(['svg', 'math']);
+
 // Named entities decoded when reconstructing an element's text. The five XML ones
 // plus the typographic set a hand-written html stage actually uses: the hint is
 // minted in the BROWSER from `textContent`, which has already decoded every entity,
@@ -432,6 +450,12 @@ export function parseHtmlTree(html) {
   // `aria-label="< Back"` are ordinary agent markup, not hostile. Still unambiguously
   // terminated by the closing quote, so no backtracking is reintroduced.
   const tokenRe = /<![^>]*>|<\/([a-zA-Z][\w-]*)(?![\w-])[^>]*>|<([a-zA-Z][\w-]*)(?![\w-])((?:"[^"]*"|'[^']*'|[^><"'])*?)(\/?)>|([^<]+)|(<)/g;
+  // Stack index of the open <svg>/<math> we are inside, or -1. Only the OUTERMOST
+  // one is recorded (foreignness is inherited, so a nested one changes nothing),
+  // and it goes stale exactly when the stack is truncated to at or below it -- by a
+  // close tag, an auto-close, or the end of a subtree -- which the `>= stack.length`
+  // test below catches without any bookkeeping on the pop paths.
+  let foreignAt = -1;
   let m;
   while ((m = tokenRe.exec(src)) != null) {
     if (m[1]) {
@@ -443,6 +467,16 @@ export function parseHtmlTree(html) {
       const tag = m[2].toLowerCase();
       const selfClosed = m[4] === '/';
       autoCloseFor(stack, tag);
+      // Retire a stale foreignAt HERE, after every pop this tag causes and before
+      // the implied-parent pushes below. Testing it after those pushes reads the
+      // re-grown stack and can find a closed <svg>'s index still "in range": in
+      // `<table><svg></svg><td/>` the two implied pushes (tbody, tr) put the stack
+      // back past index 2, so the `/` on `<td/>` was honoured as if the td were
+      // still inside foreign content and the td closed immediately -- making the
+      // next element its SIBLING where a browser makes it a CHILD, and shifting
+      // every index after it. Both parsers shared the ordering, so parity could not
+      // catch it; test/check-pure.mjs pins the shape itself.
+      if (foreignAt >= stack.length) foreignAt = -1;
       for (let guard = 0; guard < 4; guard++) {
         const implied = impliedParentFor(stack[stack.length - 1].tag, tag);
         if (!implied) break;
@@ -456,7 +490,10 @@ export function parseHtmlTree(html) {
         tokenRe.lastIndex = end === -1 ? src.length : end + 1;
         continue;
       }
-      if (!VOID_ELEMENTS.has(tag) && !selfClosed) stack.push(node);
+      const foreign = foreignAt !== -1 || FOREIGN_ROOTS.has(tag);
+      if (VOID_ELEMENTS.has(tag) || (selfClosed && foreign)) continue;
+      if (foreignAt === -1 && foreign) foreignAt = stack.length;
+      stack.push(node);
     } else if (m[5]) {
       stack[stack.length - 1].content.push({ tag: '#text', text: decodeEntities(m[5]) });
     } else if (m[6]) {

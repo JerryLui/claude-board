@@ -433,6 +433,47 @@ function loadIndexAgainstDaemon(port, secret) {
   };
 }
 
+/** Split a status line into the half that has to match ACROSS the two surfaces exactly and
+ * the countdown that cannot.
+ *
+ * The two surfaces are two processes reading the same running deadline at two different
+ * instants -- a spawned probe, then a real HTTP round trip and a 50ms settle -- so their
+ * countdowns are computed from two different `now`s. `formatCountdown` rounds to the
+ * nearest second, so any gap at all can land the two on different sides of a rounding
+ * boundary, and a gap of a second or more (which is what four checks running at once
+ * costs) puts them a whole second apart every time. Compared with a strict equal, that is
+ * a flake at rest and a PERSISTENT failure under load -- a check that fails for a reason
+ * it was never about, on a suite whose whole value is that green means something.
+ *
+ * What it is about survives intact here: the phase word, the cycle position, the
+ * separator, the "(paused)" suffix and the shape of the countdown are all in `fixed` and
+ * still compared exactly (that is the half a real divergence -- "Short break" against
+ * "Break" -- lives in), and the countdown itself is compared as a NUMBER against the gap
+ * the caller actually measured. */
+function splitStatusLine(text) {
+  const match = /^(.*·\s)(\d+):(\d{2})(.*)$/.exec(text || '');
+  if (!match) return { fixed: text, seconds: null };
+  return {
+    fixed: `${match[1]}<countdown>${match[4]}`,
+    seconds: Number(match[2]) * 60 + Number(match[3]),
+  };
+}
+
+/** `spanMs` is the real wall-clock time between the two readings, so the tolerance is
+ * whatever the machine actually cost rather than a constant chosen on an idle one. Plus
+ * one second for the rounding boundary the two are allowed to fall either side of. */
+function assertSameStatusLine(popoverText, indexText, spanMs, label) {
+  const popover = splitStatusLine(popoverText);
+  const index = splitStatusLine(indexText);
+  assert.equal(popover.fixed, index.fixed,
+    `${label}: popover said ${JSON.stringify(popoverText)}, the index page said ${JSON.stringify(indexText)}`);
+  if (popover.seconds === null || index.seconds === null) return;
+  const slack = Math.ceil(spanMs / 1000) + 1;
+  assert.ok(Math.abs(popover.seconds - index.seconds) <= slack,
+    `${label}: the two countdowns are ${Math.abs(popover.seconds - index.seconds)}s apart, more than the ${slack}s that separated the two readings -- ` +
+    `popover ${JSON.stringify(popoverText)}, index ${JSON.stringify(indexText)}`);
+}
+
 async function main() {
   await check('the client compiles, and links into the same binary install.sh builds', async () => {
     for (const build of builds) {
@@ -728,6 +769,26 @@ async function main() {
   // reached this suite unnoticed).
   // -------------------------------------------------------------------------------------
 
+  await check('the cross-surface comparison tolerates the gap between two readings and NOTHING else -- a divergence in any word still fails', () => {
+    // The comparison below is the one place in this file where two independently produced
+    // strings are held against each other, and it was a strict equal across two instants
+    // that round differently -- a flake at rest and a persistent failure under a loaded
+    // suite. The tolerance it grew is the reason to pin what it will and will not accept
+    // here, in four lines, rather than trust that a future "simplification" of
+    // assertSameStatusLine keeps its reach: a whole second of clock is forgiven, and every
+    // other difference is still a failure. Otherwise the flake fix quietly becomes the
+    // coverage loss it was meant to avoid.
+    assertSameStatusLine('Work 1/4 · 07:30', 'Work 1/4 · 07:29', 1_100, 'a second of real gap');
+    assert.throws(() => assertSameStatusLine('Break · 03:00', 'Long break · 03:00', 1_100, 'a phase word'),
+      /Break/, 'a divergent phase word is exactly what this comparison exists to catch');
+    assert.throws(() => assertSameStatusLine('Work 1/4 · 07:30', 'Work 2/4 · 07:30', 1_100, 'a position'),
+      /1\/4/, 'and so is a divergent cycle position');
+    assert.throws(() => assertSameStatusLine('Work 1/4 · 07:30', 'Work 1/4 · 07:30 (paused)', 1_100, 'a suffix'),
+      /paused/, 'and a suffix one surface names and the other does not');
+    assert.throws(() => assertSameStatusLine('Work 1/4 · 07:30', 'Work 1/4 · 06:30', 1_100, 'a real drift'),
+      /apart/, 'a minute of drift is a real disagreement, not the gap between two readings');
+  });
+
   await check('criteria 4 and 6: a running phase\'s popover status line is the SAME string the real index page renders from the same daemon', async () => {
     // Idle is compared like any other state. It used to be carved out: the index page
     // said "Idle (25 min)" where the popover said "Idle", and the gap was an open
@@ -744,13 +805,18 @@ async function main() {
     ]) {
       const doc = phase === null ? runningDoc(null) : runningDoc({ phase, deadline, paused: false });
       await withDaemon(doc, async ({ probeHome, port, secret }) => {
+        // Both readings are timed, because the running countdown inside these two strings
+        // is read at two different instants and the tolerance is that gap -- see
+        // assertSameStatusLine for why a strict equal here is a persistent failure under
+        // a loaded suite rather than an occasional flake.
+        const readingsStartedAt = Date.now();
         const popoverState = await probe({ home: probeHome, port });
         const tab = loadIndexAgainstDaemon(port, secret);
         try {
           const indexText = await tab.statusText();
+          const spanMs = Date.now() - readingsStartedAt;
           assert.ok(indexText, `setup: the index page must render a status text for phase ${phase}`);
-          assert.equal(popoverState.status, indexText,
-            `phase ${phase}: popover said ${JSON.stringify(popoverState.status)}, the index page said ${JSON.stringify(indexText)}`);
+          assertSameStatusLine(popoverState.status, indexText, spanMs, `phase ${phase}`);
           if (phase === null) {
             assert.equal(indexText, 'Idle',
               'an absent timer is the bare word on both surfaces -- no duration, since nothing is counting down');
@@ -787,6 +853,11 @@ async function main() {
             const indexText = await tab.statusText();
             assert.ok(indexText, `setup: the index page must render a status text for a paused ${phase}`);
             assert.match(indexText, /\(paused\)$/, `setup: the index page's own paused line must name the state too: ${JSON.stringify(indexText)}`);
+            // STRICT here, unlike the running comparison above, and deliberately so: a
+            // paused timer carries a frozen `remainingMs` rather than a deadline, so both
+            // surfaces render the same number no matter how far apart they read it. There
+            // is no gap to tolerate, so tolerating one would only lose a whole second of
+            // this check's reach.
             assert.equal(popoverState.status, indexText,
               `a paused ${phase}: popover said ${JSON.stringify(popoverState.status)}, the index page said ${JSON.stringify(indexText)}`);
             // Criterion 7, unaffected by any of the above: the menu bar TITLE (the digits
@@ -1239,6 +1310,130 @@ async function main() {
       '/api/pomodoro/resume',
       '/api/waiting',             // the waiting rows
     ], 'every route this process can reach: the five Timer actions, and two reads');
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Two hardening items on the client's own edges: what it does with a number the wire
+  // should never have carried, and which queue its one un-serialized request went out on.
+  // -------------------------------------------------------------------------------------
+
+  await check('a hand-edited `cycle` outside any real range is BOUNDED at the wire -- the popover\'s OWN position is never negative and never past the cycle length, whatever the document says', async () => {
+    // A hand-edited `cycle` reaches this client intact whatever it says: `Number.isInteger`
+    // is true of `1e300` and of `-3` alike, so `normalizeDoc` (src/pomodoro.mjs) keeps it
+    // and the route serves it. Converting that to `int` in C is undefined behaviour rather
+    // than a wraparound with a defined answer, and the reported symptom was a NEGATIVE
+    // position in the popover's own line.
+    //
+    // Asserted DIRECTLY on the popover's own numbers, and on values chosen so that neither
+    // of the two things that were already absorbing the fault can absorb these. Both are
+    // real, and both made the first version of this check vacuous:
+    //
+    //   - arm64 SATURATES the cast, so `1e300` becomes INT_MAX, and cb_derive's
+    //     pre-existing `if (position > every) position = every` then clamps that back to a
+    //     perfectly sane 4/4. Every large POSITIVE cycle is absorbed that way. The negative
+    //     values below are not: that clamp only ever pulls the position DOWN, so a negative
+    //     one walks straight through it and out to the status line.
+    //   - comparing against the real index page cannot pin this either, because JS clamps
+    //     the same document independently (`Math.min(cycle + 1, longEvery)`) and arrives at
+    //     its own sane answer with no help from this client at all.
+    const now = Date.now();
+    const running = runningDoc({ phase: 'work', deadline: now + 5 * 60_000, paused: false });
+    for (const [label, cycle] of [
+      ['far past what an int can hold, upwards', 1e300],
+      ['far past what an int can hold, downwards', -1e300],
+      ['a plain negative, small enough that no saturation is involved at all', -3],
+    ]) {
+      await withDaemon({ ...running, cycle }, async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port });
+        assert.equal(state.phase, 'work', `${label}: setup -- the interval must still be the running one`);
+        const position = /^Work (-?\d+)\/(-?\d+) · \d{2}:\d{2}$/.exec(state.status);
+        assert.ok(position, `${label}: the popover's line must still be well formed: ${JSON.stringify(state.status)}`);
+        const [, num, denom] = position.map(Number);
+        assert.equal(denom, 4, `${label}: the denominator is the document's own longEvery`);
+        assert.ok(num >= 1 && num <= denom,
+          `${label}: the position must sit inside the cycle it is measured against, got ${num}/${denom} from ${JSON.stringify(state.status)}`);
+        assert.ok(Number(state.remaining) >= 0, `${label}: and no negative countdown: ${state.remaining}`);
+      });
+    }
+
+    // Agreement with the real index page is claimed only where the page HAS a sane answer
+    // of its own: at `1e300` both clamp to 4/4, and that the two arrive there together is
+    // still worth pinning. At a negative cycle they part company on purpose -- the page
+    // prints `Math.min(cycle + 1, longEvery)` unguarded and this client refuses to print a
+    // negative at all, which is the fix rather than a divergence to reconcile.
+    await withDaemon({ ...running, cycle: 1e300 }, async ({ probeHome, port, secret }) => {
+      const readingsStartedAt = Date.now();
+      const state = await probe({ home: probeHome, port });
+      const tab = loadIndexAgainstDaemon(port, secret);
+      try {
+        const indexText = await tab.statusText();
+        assert.match(indexText, /^Work 4\/4 · /, `setup: the index page clamps the same absurd cycle to 4/4: ${JSON.stringify(indexText)}`);
+        assertSameStatusLine(state.status, indexText, Date.now() - readingsStartedAt, 'an absurd cycle');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+  });
+
+  await check('an absurd deadline, remainder or longEvery is bounded too -- the countdown, the arc and the position stay well-formed numbers', async () => {
+    // The other three wire values that cross into a fixed-width type or into `llround`.
+    // None is checked against the index page: the JS side carries doubles all the way to
+    // the string, so the two genuinely disagree about how to spell 1e300, and the claim
+    // worth making about this client is only that it prints a well-formed, in-range answer
+    // instead of stepping into undefined behaviour.
+    for (const [label, timer, settings] of [
+      ['a deadline past the end of time', { phase: 'break', deadline: 1e300, paused: false }, {}],
+      ['a frozen remainder past the end of time', { phase: 'work', paused: true, remainingMs: 1e300 }, {}],
+      ['a longEvery past the end of time', { phase: 'work', deadline: Date.now() + 60_000, paused: false }, { longEvery: 1e300 }],
+    ]) {
+      await withDaemon(runningDoc(timer, settings), async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port });
+        assert.equal(state.answered, 'yes', `${label}: the client must still answer`);
+        assert.match(state.text, /^\d+:\d{2}$/, `${label}: the countdown must still be digits: ${state.text}`);
+        const remaining = Number(state.remaining);
+        assert.ok(Number.isFinite(remaining) && remaining >= 0, `${label}: remaining=${state.remaining}`);
+        const fraction = Number(state.fraction);
+        assert.ok(Number.isFinite(fraction) && fraction >= 0 && fraction <= 1, `${label}: fraction=${state.fraction}`);
+        assert.doesNotMatch(state.status, /-\d/, `${label}: no negative may reach the popover's line: ${JSON.stringify(state.status)}`);
+      });
+    }
+  });
+
+  await check('structurally: every request this process makes goes out on the ONE serial queue -- including the zero-crossing re-fetch, which used to take a concurrent one', async () => {
+    // Structural, and it has to be. The zero-crossing re-fetch lives in `cb_tick`, which
+    // runs only inside the real AppKit run loop -- it creates the status item -- and there
+    // is no headless way to reach that; the whole reason this file drives `--menubar
+    // --probe` is that the AppKit half cannot be checked at all (see this file's own
+    // header). What IS checkable is the property the fix consists of, and it is a property
+    // of the file rather than of one call: cb_poll_queue is serial precisely so a POST and
+    // the poll that reads its effect back cannot be in flight at once, and a re-fetch
+    // dispatched onto a global CONCURRENT queue opted out of that at the worst possible
+    // moment -- the countdown has just hit zero, so the popover is open and Restart is
+    // under the cursor, and a GET that started before the POST can land after it and write
+    // the pre-restart document back over it.
+    const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    assert.equal(/dispatch_get_global_queue/.test(source), false,
+      'no request in this file may go out on a concurrent queue -- cb_poll_queue is the only queue requests are allowed on');
+
+    // Every dispatch that runs a poll, wherever it is, names the serial queue. The main
+    // queue is left alone on purpose: the one dispatch onto it is an AppKit activation,
+    // which is the queue that work genuinely belongs on and touches no request.
+    const pollDispatches = [...source.matchAll(/dispatch_(?:async|after)\(([^;]*?)\^\{[^}]*cb_poll_once\(\)/g)];
+    assert.ok(pollDispatches.length >= 4, `setup: the poll dispatches must still be findable, found ${pollDispatches.length}`);
+    for (const [, args] of pollDispatches) {
+      assert.match(args, /cb_poll_queue/, `a poll dispatched onto something other than cb_poll_queue: ${args.trim()}`);
+    }
+
+    // And the zero-crossing one specifically, by name, so a future edit cannot satisfy the
+    // count above while moving this exact caller back off the queue. Matched on the two
+    // identifiers and nothing between them: pinning the line's exact spacing would make a
+    // reformat a failing check with the behaviour untouched, which is a check that has
+    // stopped being about what it says it is about.
+    const tickStart = source.indexOf('static void cb_tick(void) {');
+    const tickEnd = source.indexOf('/* --- Entry points', tickStart);
+    assert.ok(tickStart > 0 && tickEnd > tickStart, 'setup: cb_tick must still be findable by name');
+    assert.match(source.slice(tickStart, tickEnd), /dispatch_async\(\s*cb_poll_queue\s*,[^;]*?cb_poll_once\s*\(\s*\)/,
+      'the boundary re-fetch must be dispatched onto the serial poll queue');
   });
 
   // -------------------------------------------------------------------------------------

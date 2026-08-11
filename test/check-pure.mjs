@@ -399,6 +399,59 @@ check('AC 11: a pipe inside a table cell\'s code span no longer splits the cell 
   assert.equal(out, '<table><tr><th>a</th><th>b</th></tr><tr><td><code>x|y</code></td><td>z</td></tr></table>');
 });
 
+check('an INDENTED table renders every column -- GFM allows up to three spaces in front of the leading pipe, and the last column used to fall off the end', () => {
+  // splitTableRowCells stripped the leading pipe with `^\|`, anchored at column 0.
+  // marked tokenizes an indented table exactly like an unindented one, so at 1-3
+  // spaces of indent the pipe survived the strip, split as an ordinary separator and
+  // produced an empty cell in front of every real one. renderTable asks for exactly
+  // header.length columns, so every row shifted right by one and the LAST column was
+  // silently dropped -- content loss in the surface whose promise is a faithful view
+  // of the source. Ablation: restore `^\|` and every indented case below loses `c`/`3`.
+  const flush = mdToHtml('| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n');
+  for (const indent of [' ', '  ', '   ']) {
+    const md = `${indent}| a | b | c |\n${indent}|---|---|---|\n${indent}| 1 | 2 | 3 |\n`;
+    assert.equal(mdToHtml(md), flush, `${indent.length} space(s) of indent must render byte-identically to no indent`);
+  }
+  // Four spaces is an indented code block, not a table -- the boundary the strip is
+  // deliberately drawn at, asserted so widening it later is a visible change.
+  assert.ok(mdToHtml('    | a | b |\n    |---|---|\n').includes('<pre><code>'),
+    'four spaces is CommonMark\'s indented code block; the leading-pipe strip must not reach that far');
+});
+
+check('a character reference in source renders as the character it names, not as its own literal source text', () => {
+  // esc() escaped every `&`, so a source `&amp;` left this module as `&amp;amp;` and
+  // the reviewer read the literal text "&amp;" where the file says "&". CommonMark
+  // decodes character references in prose; the fix passes a `&` that already begins
+  // one through untouched and lets the browser decode it, exactly as marked's own
+  // renderer does. Ablation: escape every `&` again and the first four go double.
+  assert.equal(mdToHtml('A &amp; B'), '<p>A &amp; B</p>');
+  assert.equal(mdToHtml('&lt;tag&gt; stays text'), '<p>&lt;tag&gt; stays text</p>');
+  assert.equal(mdToHtml('caf&eacute;'), '<p>caf&eacute;</p>');
+  assert.equal(mdToHtml('&#38; and &#x26;'), '<p>&#38; and &#x26;</p>');
+
+  // A bare ampersand is not a reference and still escapes -- exactly once, as before.
+  assert.equal(mdToHtml('Risk & Reward'), '<p>Risk &amp; Reward</p>');
+  assert.equal(mdToHtml('a &notaref b'), '<p>a &amp;notaref b</p>');
+  // A BACKSLASH-escaped one is literal source text, so it must still double: `\&amp;`
+  // is the author asking for the five characters, not for an ampersand.
+  assert.equal(mdToHtml('\\&amp;'), '<p>&amp;amp;</p>');
+
+  // Code and raw HTML are the contexts CommonMark does NOT decode: they show the
+  // file's own bytes, entity and all, and must keep the full escape.
+  assert.equal(mdToHtml('`&amp;`'), '<p><code>&amp;amp;</code></p>');
+  assert.ok(mdToHtml('```\n&amp;\n```\n').includes('<pre><code>&amp;amp;</code></pre>'));
+  assert.ok(mdToHtml('<a href="x?a=1&amp;b=2">hi</a>').includes('&amp;amp;'),
+    'raw HTML renders as its own source text (AC 9), so nothing in it decodes either');
+
+  // The attribute context keeps the full escape too, and this one is load-bearing:
+  // safeUrl vets the scheme HERE, the browser decodes character references AFTER, so
+  // a reference that would decode into a scheme must never reach the attribute
+  // intact. `javascript&colon;` decodes to `javascript:` in a real browser.
+  const sneaky = mdToHtml('[x](javascript&colon;alert(1))');
+  assert.ok(!sneaky.includes('javascript&colon;'), 'a `&` in a URL must stay escaped -- the allowlist cannot see a scheme hidden behind a character reference');
+  assert.ok(sneaky.includes('javascript&amp;colon;'), 'and it is the escaped form that reaches the attribute');
+});
+
 check('AC 12: GFM is on -- task lists, strikethrough, autolinks and tables all render', () => {
   const tasks = mdToHtml('- [ ] todo\n- [x] done\n');
   assert.ok(tasks.includes('<input type="checkbox" disabled> todo'));
@@ -1282,6 +1335,72 @@ check('resolveDomAnchor tolerates extractHint\'s own truncation ellipsis on a lo
   const truncated = extractHint(longText); // ends in an ellipsis, per extractHint's own contract
   assert.ok(truncated.endsWith('…'));
   assert.ok(resolveDomAnchor(html, '1.1', truncated));
+});
+
+check('a `/`-suffixed non-void start tag anchors the element the BROWSER resolves, not one the resolver invented', () => {
+  // HTML5's tree builder never acknowledges the self-closing flag on an HTML
+  // element, so `<div/>` opens a div that STAYS OPEN and takes what follows as its
+  // children. parseHtmlTree gated on the flag for every non-void tag, so the
+  // resolver closed a div the browser had left open: every following element became
+  // a top-level sibling server-side and a child on screen, and every index past the
+  // `<div/>` shifted. A comment left on the button below either resolved against the
+  // wrong element or came back `resolved: false` -- "you commented on something
+  // that's gone" about an element plainly still on the page. Ablation: gate on
+  // `selfClosed` for every tag again and every assertion here flips.
+  const html = '<div class="panel"/><button>Send</button><p>after</p>';
+  // The browser's own reading of the same bytes first (test/dom-stand-in.mjs is this
+  // suite's browser), so the expected ref is not this file's second opinion.
+  const panel = parseHTML(html).querySelector('div.panel');
+  assert.equal(panel.children.length, 2, 'in a browser the trailing slash closes nothing: the button and the paragraph are both the div\'s children');
+  assert.equal(panel.children[0].textContent, 'Send');
+  assert.equal(panel.children[1].textContent, 'after');
+
+  // `1.1` is "the first child of the first top-level element" -- what the client
+  // mints for that button. It has to resolve, and the ref that only made sense
+  // under the old, browser-disagreeing shape must not.
+  assert.ok(resolveDomAnchor(html, '1.1', 'Send'), 'the button is the div\'s first child, server-side as in the page');
+  assert.equal(resolveDomAnchor(html, '2', 'Send'), false, 'it is not a top-level sibling of the div -- that was the divergence');
+  assert.ok(resolveDomAnchor(html, '1.2', 'after'), 'the paragraph is the div\'s second child');
+
+  // SVG is where the flag really is acknowledged, for the whole subtree, so it must
+  // keep working the other way -- the fix is "follow the browser", not "ignore the
+  // slash".
+  const svg = '<svg><circle/><rect/></svg><p>after</p>';
+  assert.ok(resolveDomAnchor(svg, '2', 'after'), 'a closed <svg> leaves the paragraph a top-level sibling, exactly as a browser has it');
+});
+
+check('a CLOSED <svg> earlier in the document does not make a later `/`-suffixed HTML element self-closing -- the foreign-content flag must not outlive its subtree', () => {
+  // The bookkeeping that tracks "am I inside SVG/MathML" is a stack INDEX, retired
+  // when the stack shrinks back to it. Retiring it after the implied-parent pushes
+  // instead of before read the re-grown stack: `<td>` inside `<table>` pushes an
+  // implied `<tbody>` and `<tr>`, putting the stack back past a closed `<svg>`'s old
+  // index, so the `/` on `<td/>` was honoured as if the td sat in foreign content.
+  // The td closed immediately and `<span>` became its SIBLING -- while the same
+  // markup WITHOUT the svg (and a real browser, in both) makes the span its CHILD.
+  // A comment on that span then anchors to a different element depending on whether
+  // an unrelated svg appeared earlier in the stage. test/check-parser-parity.mjs
+  // cannot see this: both parsers share the ordering, so they agree on the wrong
+  // answer. Hence the absolute shape below, not a parity assertion. Ablation: move
+  // the `foreignAt >= stack.length` reset back below the implied-parent loop in
+  // src/anchor.mjs and the first case regresses to a `td`/`span` sibling pair.
+  const shape = nodes => nodes.map(n => ({ tag: n.tag, children: shape(n.children) }));
+  const expected = [{ tag: 'tbody', children: [{ tag: 'tr', children: [{ tag: 'td', children: [{ tag: 'span', children: [] }] }] }] }];
+
+  const [withSvg] = parseHtmlTree('<table><svg></svg><td/><span>x</span></table>').children;
+  assert.deepEqual(shape(withSvg.children.slice(1)), expected,
+    'the span is the td\'s child: a closed <svg> two elements earlier must not reach the `/` on <td/>');
+  assert.equal(withSvg.children[0].tag, 'svg', 'setup failure: the svg itself is still the table\'s first child');
+
+  const [withoutSvg] = parseHtmlTree('<table><td/><span>x</span></table>').children;
+  assert.deepEqual(shape(withoutSvg.children), expected, 'and removing the svg changes nothing -- which is the whole point');
+
+  // The same shape one level down: a foreign subtree that has genuinely closed
+  // leaves ordinary HTML ordinary, however deep the implied scaffolding went.
+  const nested = parseHtmlTree('<div><svg><circle/></svg><div/><span>x</span></div>').children[0];
+  assert.deepEqual(shape(nested.children), [
+    { tag: 'svg', children: [{ tag: 'circle', children: [] }] },
+    { tag: 'div', children: [{ tag: 'span', children: [] }] },
+  ]);
 });
 
 check('resolveDomAnchor requires a non-empty hint, and degrades to false rather than throwing on malformed input', () => {
@@ -6021,6 +6140,88 @@ check('N2: a long non-separator line after a table-shaped line is probed in line
   assert.ok(elapsed < 2000, `table-separator probe took ${elapsed}ms on 200KB`);
 });
 
+check('N2: a WIDE table is rendered in time linear in its length, not quadratic in its column count', () => {
+  // renderCellText re-split the whole row for every column in it, so a table cost
+  // O(columns x row length). Measured on this machine, same table shape as below:
+  // 500 columns 40ms, 1000 162ms, 2000 582ms, 8000 8962ms -- a clean 4x per
+  // doubling, putting a 512 KiB table (~24k columns) at about two MINUTES of the
+  // daemon's one thread, with health, every other board and every open SSE stream
+  // stopped behind it. Nothing about the input is adversarial: a generated matrix
+  // or a benchmark grid is exactly this shape, and the cost is re-paid on every
+  // `section:` resolution of the same file. Splitting each row ONCE makes it linear:
+  // the same table below renders in ~90ms. Ablation: move the split back inside the
+  // per-column helper and this check runs for minutes and trips the file's deadline.
+  const cols = 24000;
+  const row = prefix => '|' + Array.from({ length: cols }, (_, i) => ` ${prefix}${i} `).join('|') + '|';
+  const md = row('c') + '\n|' + Array.from({ length: cols }, () => '---').join('|') + '|\n' + row('v') + '\n';
+  assert.ok(md.length > 400 * 1024 && md.length <= 512 * 1024, `setup: the table must be a realistic 512 KiB block, got ${md.length} bytes`);
+  const started = Date.now();
+  const html = mdToHtml(md);
+  const elapsed = Date.now() - started;
+  // The bound is this section's usual ~20-50x the measured time, so a loaded or
+  // 2-core CI box cannot make it a false red; the contract it stands for is ~1s.
+  assert.ok(elapsed < 2000, `a ${Math.round(md.length / 1024)}KB wide table took ${elapsed}ms`);
+  // Linear or not, it still has to render every column it was given.
+  assert.equal((html.match(/<th/g) || []).length, cols, 'every header cell must render');
+  assert.equal((html.match(/<td/g) || []).length, cols, 'every body cell must render');
+});
+
+check('N2: a markdown block full of just-under-cap code fences is bounded as a BLOCK, not once per fence', () => {
+  // src/render.mjs's MAX_HIGHLIGHT_CHARS caps one CALL, and each fence was its own
+  // call, so a document could buy the cap's worst case as many times as it liked and
+  // the "slow request, not a hang" promise held for no realistic document. Measured
+  // here: 20 fences of 8000 adversarial typescript characters (an unterminated regex
+  // literal -- a truncated or minified .js) cost 5911ms of one blocked thread when
+  // every fence tokenizes, against 285ms once the budget is spent across the whole
+  // document. Ablation: remove MAX_DOC_HIGHLIGHT_CHARS from src/markdown.mjs's
+  // renderCode and this goes back to seconds and keeps climbing with fence count.
+  const fence = '```typescript\n/' + 'a'.repeat(8000) + '\n```\n\n';
+  const text = fence.repeat(20);
+  const started = Date.now();
+  const board = createBoard({ title: 'N2 fences', blocks: [{ kind: 'markdown', text }] });
+  const elapsed = Date.now() - started;
+  // 5000, not the 2000 this started at: the fixed path measures ~285ms here but has
+  // been seen at 1157ms on a box under real CPU load, and the ablation is ~17s, so
+  // nothing this check is for gets past a 5s bound.
+  assert.ok(elapsed < 5000, `a markdown block of 20 near-cap fences took ${elapsed}ms`);
+  const html = board.blocks[0].html;
+  assert.equal((html.match(/<pre>/g) || []).length, 20, 'setup failure: all 20 fences must have rendered');
+  // What the budget costs is colour, and only colour: the fence keeps its language
+  // label, its rows and its exact bytes, which is the same degradation a single
+  // over-cap block already took.
+  assert.equal((html.match(/class="fence-lang"/g) || []).length, 20, 'every fence keeps its language label -- the budget declines tokenization, it does not blank the fence');
+  const document = parseHTML(html);
+  const bodies = [...document.querySelectorAll('pre code')].map(el => el.textContent);
+  assert.equal(bodies.length, 20);
+  for (const body of bodies) assert.equal(body, '/' + 'a'.repeat(8000), 'every fence still copies back byte-identically, budget or no budget');
+});
+
+check('the fence budget buys tokenizing, and pays for nothing else: a fence that never reaches the tokenizer does not spend it', () => {
+  // Two ways a fence reaches the highlighter and does no tokenizer work at all: no
+  // info string, and an info string naming a language this build never vendored (a
+  // reviewer's ```cobol, ```zig, ```make). Charging either bought nothing and
+  // silently stripped the colour off the next fence that could have used the
+  // budget. Each dump below is on its own big enough to exhaust the whole document
+  // allowance, so if it is charged the javascript fence after it goes plain.
+  // Ablation: charge on `lang` being non-empty (or unconditionally) in
+  // highlightFenceHtml and the 'unvendored language' row fails; charge
+  // unconditionally and both rows do.
+  // 8100 + ~1KB is over the 8192-character document allowance and each part is
+  // under it, so the two fences fit only because the first one is free. A dump
+  // bigger than the whole allowance would be declined on affordability instead and
+  // prove nothing about charging.
+  const js = 'const x = "hi"; // note\n'.repeat(40); // ~1KB, comfortably inside the budget
+  const dump = 'x'.repeat(8100) + '\n';
+  for (const [name, info] of [['no info string', ''], ['an unvendored language', 'cobol']]) {
+    const text = '```' + info + '\n' + dump + '```\n\n```javascript\n' + js + '```\n';
+    const board = createBoard({ title: name, blocks: [{ kind: 'markdown', text }] });
+    const fences = board.blocks[0].html.split('<pre>').slice(1);
+    assert.equal(fences.length, 2, `setup failure (${name}): expected two fences`);
+    assert.ok(fences[1].includes('class="tok-'),
+      `${name}: a fence the tokenizer never ran on must not spend the budget the javascript fence after it needs`);
+  }
+});
+
 check('N2: underscore-heavy prose with no closing delimiter is scanned in linear time', () => {
   // Ablation: restore the lazy /(^|[\s(])_(?=\S)([\s\S]*?\S)_(?=$|[\s).,;:!?])/g
   // pair: 3.4s at 256KB, ~54s at 1MB -- reachable from ordinary prose, no crafting.
@@ -7979,7 +8180,11 @@ async function checkAsync(name, fn) {
 async function withPomodoroFetch(handler, fn) {
   const original = globalThis.fetch;
   const calls = [];
-  globalThis.fetch = (url, opts) => {
+  // Tagged so loadIndexWithPomodoro below can ENFORCE the precondition it documents
+  // rather than trust it. The widget fetches during init, so a load outside this
+  // helper puts a real request on the wire from a pure check and leaves the rest of
+  // the file guessing which fetch answered it.
+  const stub = (url, opts) => {
     const call = {
       url: String(url),
       method: (opts && opts.method) || 'GET',
@@ -7989,6 +8194,8 @@ async function withPomodoroFetch(handler, fn) {
     calls.push(call);
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(handler(call)) });
   };
+  stub.pomodoroStub = true;
+  globalThis.fetch = stub;
   try {
     await fn(calls);
   } finally {
@@ -8044,6 +8251,8 @@ const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEver
  * `hash` defaults to none, which is what every check that is not about the
  * fragment wants. */
 function loadIndexWithPomodoro({ hash = '' } = {}) {
+  assert.ok(globalThis.fetch && globalThis.fetch.pomodoroStub,
+    'setup failure: loadIndexWithPomodoro must run inside withPomodoroFetch -- initPomodoroWidget fetches while loading, so an unstubbed load sends a real request out of a pure check');
   const document = parseHTML(renderIndexPage({ threads: [] }));
   const intervals = [];
   const fakeSetInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
@@ -8284,6 +8493,33 @@ function extractIndexScriptFn(name) {
   return fn;
 }
 
+await checkAsync('a pomodoro-widget check that throws while the widget is loading cannot poison the rest of this file: the fetch stub is always restored, and an unstubbed load fails loudly instead of reaching the network', async () => {
+  // Every widget check here replaces globalThis.fetch, and checkAsync catches a
+  // failure and keeps going -- so a stub that outlived its own check would silently
+  // answer, and RECORD, every request the checks after it make, turning one red into
+  // a file of nonsense. Two guards, both asserted rather than assumed:
+  const original = globalThis.fetch;
+  const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: Date.now() };
+
+  // 1. A throw from inside the stub's scope (init is where these throw, since
+  // loadIndexWithPomodoro runs the real script) still restores it.
+  await assert.rejects(
+    withPomodoroFetch(() => doc, async () => {
+      loadIndexWithPomodoro();
+      throw new Error('the widget blew up while loading');
+    }),
+    /blew up while loading/);
+  assert.equal(globalThis.fetch, original, 'the real fetch must be back after a failed check, stub and all');
+  assert.ok(!globalThis.fetch.pomodoroStub);
+
+  // 2. The precondition loadIndexWithPomodoro documents is enforced: initPomodoroWidget
+  // fetches while loading, so an unstubbed load would put a real request on the wire
+  // from a check that is supposed to be pure -- and leave an unhandled rejection
+  // behind rather than a legible failure.
+  assert.throws(() => loadIndexWithPomodoro(), /must run inside withPomodoroFetch/);
+  assert.equal(globalThis.fetch, original, 'and a refused load leaves the global exactly as it found it');
+});
+
 await checkAsync('pomodoro widget: no timer running renders a calm idle state (the state named, no duration and no countdown) and leaves the switch off but live', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
@@ -8301,9 +8537,12 @@ await checkAsync('pomodoro widget: no timer running renders a calm idle state (t
   // down, in the place a countdown sits, reads as a countdown that has stopped. The
   // state is the whole of the line now, and it is the same word the Popover has always
   // used -- so this asserts NO number rather than a particular one.
-  assert.doesNotMatch(status.textContent, /\d/, 'an absent timer names the state and nothing else -- no duration, since nothing is counting down');
-  assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no timer must never render a countdown');
-  assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'no timer must never render a cycle position either');
+  // One assertion, not three: `/\d/` already denies every digit, so the `\d\d:\d\d`
+  // countdown and `\d+/\d+` cycle-position patterns that used to follow it could
+  // never fail -- dead assertions reading as coverage they did not provide. Both are
+  // strict subsets of this line, and both are named in its message so nothing is
+  // lost but the two lines that could not run.
+  assert.doesNotMatch(status.textContent, /\d/, 'an absent timer names the state and nothing else: no duration (nothing is counting down), no mm:ss countdown, no n/m cycle position');
   assert.equal(toggle.getAttribute('aria-checked'), 'false', 'idle is the switch\'s off state');
   assert.equal(toggle.getAttribute('aria-label'), 'Start pomodoro', 'idle: the switch\'s job is to START one, and its name has to say so');
   // The predecessor set `hidden` here and relied on it to disappear -- which it
@@ -8806,25 +9045,38 @@ await checkAsync('pomodoro widget: the round-banner tick syncs from settings.not
 // The client-side half: a change has to reach a real network
 // call, and nothing here may let a REAL request
 // out. withPomodoroFetch keeps globalThis.fetch stubbed for the whole
-// withPomodoroFetch(...) call, so the wait below (comfortably longer than
-// indexpage.mjs's own debounce) is what lets the debounced call actually
-// fire while it is still safely captured by the stub -- letting it fire
-// AFTER fetch is restored would send a real request out from this test.
-function waitOutPreviewDebounce() {
-  return new Promise(resolve => setTimeout(resolve, 250));
+// withPomodoroFetch(...) call, so the wait below is what lets the debounced
+// call actually fire while it is still safely captured by the stub -- letting it
+// fire AFTER fetch is restored would send a real request out from this test.
+//
+// It WAITS FOR THE CALL rather than sleeping a fixed 250ms past indexpage.mjs's
+// 150ms debounce. A fixed sleep is a bet that the machine will run a timer roughly
+// on time, and `JOBS=10` (test/run.mjs runs check files concurrently) is exactly
+// the condition that loses that bet: the debounce timer lands after the sleep has
+// already returned, the check reads zero preview calls, and "exactly one preview"
+// fails as if the client never fired. Polling for the call turns the fixed wait
+// into a floor, not a ceiling. The settle window afterwards is what keeps the
+// "exactly one" assertions honest -- a stray SECOND preview was scheduled at
+// roughly the same moment as the one we waited for, so it has to be given the same
+// room to arrive.
+async function waitForPreviews(calls, expected) {
+  const previews = () => calls.filter(c => c.url === '/api/pomodoro/preview').length;
+  const deadline = Date.now() + 10_000;
+  while (previews() < expected && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => setTimeout(r, 250));
 }
 
 await checkAsync('pomodoro widget: changing a cue picker posts a preview immediately, before Save, and never writes the stored settings', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
-  const calls = await withPomodoroFetch(() => doc, async () => {
+  const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
     await flushPomodoro();
     document.querySelector('details#pomodoro-settings').open = true;
     const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
     cueWork.value = CUE_C;
     cueWork.dispatchEvent(new StandInEvent('change'));
-    await waitOutPreviewDebounce();
+    await waitForPreviews(seen, 1);
   });
   const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
   assert.equal(previews.length, 1, 'exactly one preview request, once the debounce settles');
@@ -8883,13 +9135,13 @@ await checkAsync('pomodoro widget: ticking Round banners fires no test banner --
 await checkAsync('pomodoro widget: selecting None previews it like any other value -- no special-cased silence on the client, the server owns "plays nothing"', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
-  const calls = await withPomodoroFetch(() => doc, async () => {
+  const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
     await flushPomodoro();
     const cueBreak = document.querySelector('form#pomodoro-settings-form select[name="cueBreak"]');
     cueBreak.value = NO_CUE;
     cueBreak.dispatchEvent(new StandInEvent('change'));
-    await waitOutPreviewDebounce();
+    await waitForPreviews(seen, 1);
   });
   const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
   assert.equal(previews.length, 1);
@@ -8899,7 +9151,7 @@ await checkAsync('pomodoro widget: selecting None previews it like any other val
 await checkAsync('pomodoro widget: a rapid run of changes on the same picker (a held arrow key) collapses to one preview of the value it lands on, never a chorus', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
-  const calls = await withPomodoroFetch(() => doc, async () => {
+  const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
     await flushPomodoro();
     const cueWork = document.querySelector('form#pomodoro-settings-form select[name="cueWork"]');
@@ -8910,7 +9162,7 @@ await checkAsync('pomodoro widget: a rapid run of changes on the same picker (a 
       cueWork.value = value;
       cueWork.dispatchEvent(new StandInEvent('change'));
     }
-    await waitOutPreviewDebounce();
+    await waitForPreviews(seen, 1);
   });
   const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
   assert.equal(previews.length, 1, 'four rapid changes on one picker must collapse into exactly one preview request, never one per change');
@@ -8920,7 +9172,7 @@ await checkAsync('pomodoro widget: a rapid run of changes on the same picker (a 
 await checkAsync('pomodoro widget: changing TWO different pickers in quick succession still previews both -- the debounce is per field, not one shared gate', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
-  const calls = await withPomodoroFetch(() => doc, async () => {
+  const calls = await withPomodoroFetch(() => doc, async (seen) => {
     const { document } = loadIndexWithPomodoro();
     await flushPomodoro();
     const form = document.querySelector('form#pomodoro-settings-form');
@@ -8930,7 +9182,7 @@ await checkAsync('pomodoro widget: changing TWO different pickers in quick succe
     cueWork.dispatchEvent(new StandInEvent('change'));
     cueBreak.value = NO_CUE;
     cueBreak.dispatchEvent(new StandInEvent('change'));
-    await waitOutPreviewDebounce();
+    await waitForPreviews(seen, 2);
   });
   const previews = calls.filter(c => c.url === '/api/pomodoro/preview');
   assert.equal(previews.length, 2, 'two different pickers changed close together must each still preview -- a shared debounce would drop the first');
@@ -8940,7 +9192,7 @@ await checkAsync('pomodoro widget: changing TWO different pickers in quick succe
 await checkAsync('pomodoro widget: closing the panel without saving reverts a previewed cue back to the stored value -- a preview is not a write', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
-  await withPomodoroFetch(() => doc, async () => {
+  await withPomodoroFetch(() => doc, async (seen) => {
     const { document, intervals } = loadIndexWithPomodoro();
     await flushPomodoro();
     const panel = document.querySelector('details#pomodoro-settings');
@@ -8952,7 +9204,7 @@ await checkAsync('pomodoro widget: closing the panel without saving reverts a pr
     panel.open = false;                    // ...then closes without Save
     pomodoroTickFn(intervals)();           // the repaint tick is what actually re-syncs (pomodoroSyncForm's own guard)
     assert.equal(cueWork.value, CUE_A, 'closing without saving must revert the picker to the daemon\'s actual stored cue, exactly like every other abandoned edit');
-    await waitOutPreviewDebounce();        // let the still-pending preview fire against the stub, not the real fetch
+    await waitForPreviews(seen, 1);        // let the still-pending preview fire against the stub, not the real fetch
   });
 });
 

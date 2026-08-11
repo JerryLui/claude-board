@@ -87,7 +87,7 @@
 // (src/anchor.mjs) does the identical hoist server-side; both documents this
 // file ever builds (the outer page AND an html stage's own srcdoc)
 // go through this same parseHTML, so both get it.
-import { autoCloseFor, impliedParentFor, decodeEntities, VOID_ELEMENTS, HEAD_ONLY_TAGS } from '../src/anchor.mjs';
+import { autoCloseFor, impliedParentFor, decodeEntities, VOID_ELEMENTS, FOREIGN_ROOTS, HEAD_ONLY_TAGS } from '../src/anchor.mjs';
 // StandInWindow's getComputedStyle below used to
 // resolve a requested custom property against the imported `palettes` object
 // directly -- a hand-written copy of theme precedence that never read this
@@ -180,6 +180,9 @@ export function parseNodes(html) {
   const root = new Element('#root');
   const stack = [root];
   const top = () => stack[stack.length - 1];
+  // Stack index of the open <svg>/<math> we are inside, or -1; see the start-tag
+  // branch below and parseHtmlTree's identically-named local.
+  let foreignAt = -1;
 
   function appendNode(node) {
     const parent = top();
@@ -234,6 +237,11 @@ export function parseNodes(html) {
       // implies must exist first (a `<td>` straight inside `<table>` gets both an
       // implied `<tbody>` and an implied `<tr>`, via the guarded loop below).
       autoCloseFor(stack, tagName);
+      // Retire a stale foreignAt after the pops and BEFORE the implied pushes, for
+      // the reason parseHtmlTree's identical line carries: the implied pushes
+      // re-grow the stack, so testing afterwards can find a closed <svg>'s index
+      // still in range and honour a `/` on an ordinary HTML element.
+      if (foreignAt >= stack.length) foreignAt = -1;
       for (let guard = 0; guard < 4; guard++) {
         const implied = impliedParentFor(top().tag, tagName);
         if (!implied) break;
@@ -261,7 +269,17 @@ export function parseNodes(html) {
         continue; // never pushed onto the stack -- always a leaf
       }
 
-      if (!VOID_TAGS.has(tagName) && !selfClosing) stack.push(el);
+      // A trailing `/` on a NON-void start tag is ignored by a real browser, so it
+      // is ignored here -- `<div/>` opens a div that stays open. The exception is
+      // foreign content (SVG/MathML), where the tree builder does acknowledge the
+      // self-closing flag, for the whole subtree. Same rule, same set, same
+      // bookkeeping as src/anchor.mjs's parseHtmlTree, which is the module a `dom`
+      // anchor is actually resolved against: agreeing with it is this parser's
+      // entire job (see test/check-parser-parity.mjs).
+      const foreign = foreignAt !== -1 || FOREIGN_ROOTS.has(tagName);
+      if (VOID_TAGS.has(tagName) || (selfClosing && foreign)) continue;
+      if (foreignAt === -1 && foreign) foreignAt = stack.length;
+      stack.push(el);
       continue;
     }
     const nextLt = html.indexOf('<', state.i);

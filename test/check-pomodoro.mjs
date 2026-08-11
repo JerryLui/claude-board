@@ -4,7 +4,7 @@
 // and nothing here shells out.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -22,6 +22,8 @@ import {
   settleBoundary,
   forwardTimer,
   restartTimer,
+  pauseTimer,
+  applyClockStep,
   normalizeDoc,
   readDoc,
   writeDoc,
@@ -968,6 +970,254 @@ async function main() {
       assert.equal(doc.timer.phase, 'work');
       assert.equal(doc.timer.deadline, now + DEFAULT_SETTINGS.workMin * 60_000);
     } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------------
+  // The expiry rule is not reachable around. A deadline that went past while nobody was
+  // there is EXPIRED wherever it is next touched -- and pause was the one control that
+  // used to launder such an interval back into a live loop, because it clamps the
+  // remainder at zero and resume then anchors that zero to a fresh `now`.
+  // -------------------------------------------------------------------------------
+
+  await check('pauseTimer: an interval whose deadline went past hours ago EXPIRES rather than pausing -- pause is not a way around the expiry rule', () => {
+    const now = Date.now();
+    const dead = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 3 * 60 * 60 * 1000, paused: false } };
+    const next = pauseTimer(dead, now);
+    assert.equal(next.timer, null, 'the interval is discarded, not frozen at a zero remainder');
+    assert.equal(next.cycle, 2, 'expiring costs the interval, never the pomodoros already completed today');
+    // The same document, settled by the boundary rule, reaches the same verdict -- which
+    // is the property that matters: one expiry rule, not two that can drift.
+    assert.equal(settleBoundary(dead, now).doc.timer, null);
+  });
+
+  await check('pauseTimer: a deadline late but still INSIDE the grace pauses normally, at a zero remainder -- the expiry rule is the only thing pause now defers to', () => {
+    const now = Date.now();
+    const barely = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - (EXPIRY_GRACE_MS - 1_000), paused: false } };
+    const next = pauseTimer(barely, now);
+    assert.equal(next.timer.paused, true, 'a boundary the daemon was about to settle anyway is still a pausable interval');
+    assert.equal(next.timer.remainingMs, 0, 'clamped, never negative');
+  });
+
+  await check('engine.pause + engine.resume: an interval that died while the lid was closed can no longer be laundered back into the loop -- no advance, and no "Break started" for an interval that ended hours ago', async () => {
+    // The whole defect, end to end through the engine: pause froze a three-hour-dead
+    // interval as `remainingMs: 0`, resume anchored that zero to a fresh `now`, and the
+    // reconcile that followed read a deadline exactly due, took the ADVANCE branch and
+    // rang a real boundary. Asserted on the BOUNDARY, because that is the half a reader
+    // hears -- a banner and a cue for a break that was over before lunch.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-expired-pause-'));
+    const boundaries = [];
+    const engine = createPomodoro({ home: h, onBoundary: b => boundaries.push(b) });
+    try {
+      const now = Date.now();
+      writeDoc({ ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 3 * 60 * 60 * 1000, paused: false } }, h);
+
+      engine.pause(now);
+      assert.equal(readDoc(h, now).timer, null, 'pausing a dead interval ends it, on disk');
+
+      engine.resume(now);
+      assert.equal(readDoc(h, now).timer, null, 'and there is nothing left for resume to re-anchor');
+
+      // Long enough for any deadline resume could have minted (`now + 0`) to have come
+      // due and fired through the armed setTimeout.
+      await new Promise(resolve => setTimeout(resolve, 150));
+      assert.deepEqual(boundaries, [], `no boundary may be reported for an interval that ended hours ago: ${JSON.stringify(boundaries)}`);
+      assert.equal(readDoc(h, Date.now()).cycle, 1, 'and the pomodoros already completed today are untouched');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------------
+  // The wall clock being SET, which is a different thing from time passing. Every check
+  // below drives the shell's own clock: a fixed mid-morning instant that advances in real
+  // time and can be stepped, so a step is a step and never an accidental crossing of the
+  // 05:00 pomodoro day boundary at whatever hour the suite happens to run (QUIRKS.md's
+  // own "a fixture dated with localDateStr passes all day and fails before dawn").
+  // `mono` is left real: the monotonic clock is precisely the one a step does not move,
+  // and using the real one is what makes these steps look like real steps.
+  // -------------------------------------------------------------------------------
+
+  /** A steppable wall clock anchored at 10:00 on a fixed date. `step(ms)` is NTP. */
+  function steppableClock() {
+    const base = new Date(2026, 7, 5, 10, 0, 0).getTime();
+    const startedAt = Date.now();
+    let stepMs = 0;
+    return {
+      base,
+      now: () => base + (Date.now() - startedAt) + stepMs,
+      step(ms) { stepMs += ms; },
+    };
+  }
+
+  await check('applyClockStep: rebases a running deadline by a real step, and by nothing else', () => {
+    const doc = { ...defaultDoc(), timer: { phase: 'work', deadline: 1_000_000, paused: false } };
+    assert.equal(applyClockStep(doc, 90_000).timer.deadline, 1_090_000, 'a 90-second correction moves the deadline 90 seconds');
+    assert.equal(applyClockStep(doc, -90_000).timer.deadline, 910_000, 'and a backward one moves it back');
+    assert.equal(applyClockStep(doc, 40), doc, 'ordinary measurement noise is not a step, and is a no-op by reference');
+    assert.equal(applyClockStep(doc, 6 * 60_000), doc, 'a forward jump too large to tell from a lid closing is left to the expiry rule');
+    assert.equal(applyClockStep(doc, -6 * 60_000).timer.deadline, 1_000_000 - 6 * 60_000, 'a BACKWARD jump carries no such ceiling -- sleep can only ever make the wall clock run ahead');
+    assert.equal(applyClockStep(doc, NaN), doc);
+    const idle = defaultDoc();
+    assert.equal(applyClockStep(idle, 90_000), idle, 'nothing running, nothing to rebase');
+    const paused = { ...defaultDoc(), timer: { phase: 'work', paused: true, remainingMs: 60_000 } };
+    assert.equal(applyClockStep(paused, 90_000), paused, 'a paused timer has no wall-clock deadline to correct');
+  });
+
+  await check('a wall-clock step FORWARD while an interval is armed advances the boundary instead of discarding it -- the widget is not left frozen at 00:00 and the break is not silently lost', async () => {
+    // The failure this exists for: `arm` baked `deadline - now` into one relative libuv
+    // delay, so an NTP correction of a couple of minutes left the document reading 00:00
+    // for the rest of that delay and then, when it finally fired, settleBoundary read a
+    // deadline two minutes past and discarded the interval -- no next phase, no boundary,
+    // no banner. The interval had run its full length in REAL time; only the clock moved.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-step-fwd-'));
+    const clock = steppableClock();
+    const boundaries = [];
+    const engine = createPomodoro({ home: h, now: clock.now, onBoundary: b => boundaries.push(b) });
+    try {
+      writeDoc({ ...defaultDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
+      engine.boot();
+      clock.step(2 * 60_000); // NTP, mid-wait: the wall clock moves, the monotonic one does not
+      await new Promise(resolve => setTimeout(resolve, 400));
+
+      assert.deepEqual(boundaries.map(b => b.phase), ['break'], `the work interval must still earn its break: ${JSON.stringify(boundaries)}`);
+      const onDisk = readDoc(h, clock.now());
+      assert.equal(onDisk.timer.phase, 'break', 'and the advance must have landed on disk, not only in the callback');
+      assert.equal(onDisk.timer.paused, false);
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('a wall-clock step BACKWARD while an interval is armed settles the boundary when it is really due, rather than leaving the countdown to run the step out a second time', async () => {
+    // The other direction, and the unambiguous one: the timer fires on its own monotonic
+    // schedule, the wall clock now says the deadline is half an hour away, and without the
+    // correction the interval would count that half hour down all over again.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-step-back-'));
+    const clock = steppableClock();
+    const boundaries = [];
+    const engine = createPomodoro({ home: h, now: clock.now, onBoundary: b => boundaries.push(b) });
+    try {
+      writeDoc({ ...defaultDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
+      engine.boot();
+      clock.step(-30 * 60_000);
+      await new Promise(resolve => setTimeout(resolve, 400));
+
+      assert.deepEqual(boundaries.map(b => b.phase), ['break'], `the boundary must land when the interval really ran out: ${JSON.stringify(boundaries)}`);
+      assert.equal(readDoc(h, clock.now()).timer.phase, 'break');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('a FOUR HOUR forward jump is still a lid that was closed, not a clock correction -- the interval is discarded with no boundary, exactly as before', async () => {
+    // The ablation that keeps the rebase above honest. A forward jump has two causes and
+    // one signature (see applyClockStep's own comment), so the fix is bounded by size:
+    // anything past a few minutes is left to the expiry rule, which is what stops "the
+    // lid was closed over lunch" from turning into a break nobody was there for.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-step-sleep-'));
+    const clock = steppableClock();
+    const boundaries = [];
+    const engine = createPomodoro({ home: h, now: clock.now, onBoundary: b => boundaries.push(b) });
+    try {
+      writeDoc({ ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
+      engine.boot();
+      clock.step(4 * 60 * 60 * 1000);
+      await new Promise(resolve => setTimeout(resolve, 400));
+
+      assert.deepEqual(boundaries, [], 'nothing schedules a break that was already over before anyone could take it');
+      const onDisk = readDoc(h, clock.now());
+      assert.equal(onDisk.timer, null, 'the interval is discarded');
+      assert.equal(onDisk.cycle, 2, 'and the pomodoros already completed today are untouched');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('a step is noticed in seconds, not at the end of the interval -- an armed wait is re-derived from the wall clock in slices, so the document never sits frozen against a stepped clock', async () => {
+    // The "frozen" half, and the reason `arm` slices at all. A minute-long interval used
+    // to be one 60-second libuv delay: step the clock 59 seconds forward one tick after
+    // arming it and the document read 00:00 remaining for a full minute with nothing
+    // scheduled to look at it. Sliced, the daemon re-derives the deadline from the wall
+    // clock within seconds and writes the correction back, which is what the widget and
+    // the status item read.
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-step-slice-'));
+    const clock = steppableClock();
+    const deadline = clock.base + 60_000;
+    const engine = createPomodoro({ home: h, now: clock.now });
+    try {
+      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline, paused: false } }, h);
+      engine.boot();
+      clock.step(59_000);
+      // Polled rather than slept out: the slice is a few seconds, and a fixed sleep sized
+      // for a loaded machine is either flaky or slower than it needs to be.
+      const giveUp = Date.now() + 30_000;
+      let onDisk = readDoc(h, clock.now());
+      while (onDisk.timer && onDisk.timer.deadline === deadline && Date.now() < giveUp) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        onDisk = readDoc(h, clock.now());
+      }
+      assert.ok(onDisk.timer, 'the interval must still be running -- neither frozen nor discarded');
+      assert.ok(Math.abs(onDisk.timer.deadline - (deadline + 59_000)) < 2_000,
+        `the persisted deadline must have been rebased by the step within one slice, got ${onDisk.timer.deadline - deadline}ms of correction`);
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------------
+  // A boundary that cannot be written down. The timer callback runs with no request
+  // handler's try/catch anywhere on the stack, so an uncaught throw out of it is an
+  // uncaught exception at the top of the event loop -- which bin/daemon.mjs answers by
+  // exiting, into a launchd restart that lands on the same due boundary and throws again.
+  // -------------------------------------------------------------------------------
+
+  await check('a writeDoc that throws at the timer boundary costs the daemon one log line, never the process -- a store that has gone read-only cannot restart-loop the clock', async () => {
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-readonly-'));
+    const realError = console.error;
+    const logged = [];
+    const engine = createPomodoro({ home: h });
+    try {
+      const now = Date.now();
+      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 120, paused: false } }, h);
+      engine.boot(now);
+
+      // ENOSPC, a revoked Documents grant and a read-only volume all reach atomicWrite the
+      // same way: the open(2) for the temp file fails. Closing the directory is the one
+      // shape of that a check can produce on demand.
+      chmodSync(h, 0o500);
+      console.error = (...args) => logged.push(args.join(' '));
+      let blocked = true;
+      try { closeSync(openSync(path.join(h, '.probe'), 'wx')); blocked = false; } catch { /* as intended */ }
+      if (!blocked) {
+        console.error = realError;
+        console.log('  (skipped: this user can write a 0500 directory, so the failure cannot be staged)');
+        return;
+      }
+
+      // Without the wrapper this line never returns: the throw escapes the setTimeout
+      // callback, node reports an uncaught exception, and this whole check file exits.
+      await new Promise(resolve => setTimeout(resolve, 400));
+      console.error = realError;
+
+      assert.ok(logged.some(line => /pomodoro/.test(line)),
+        `the failure must be named on the daemon's own log rather than swallowed: ${JSON.stringify(logged)}`);
+      // Still usable afterwards: the engine did not tear anything down on its way through
+      // the failure, so the clock comes back on its own once the store does.
+      chmodSync(h, 0o700);
+      const recovered = engine.boot(Date.now());
+      assert.equal(recovered.timer.phase, 'break', 'the boundary the write failed on settles as soon as the store is writable again');
+      assert.equal(readDoc(h, Date.now()).timer.phase, 'break', 'and that settlement really landed on disk');
+    } finally {
+      console.error = realError;
+      chmodSync(h, 0o700);
       engine.close();
       rmSync(h, { recursive: true, force: true });
     }

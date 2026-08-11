@@ -52,8 +52,37 @@ export function mintBoardId() {
   return `b_${hex(16)}`;
 }
 
-export function mintThreadId() {
-  return `th_${hex(4)}`;
+/** How many times a thread id is re-rolled against `taken` before the width itself
+ * gives way. Any store that refuses this many draws in a row is not a store the 32-bit
+ * space fits any more, and looping forever inside a request handler is the one outcome
+ * that must not happen. */
+const THREAD_MINT_TRIES = 32;
+
+/** A thread id no board in `taken` already carries.
+ *
+ * The width is unchanged and deliberately short -- a thread is a label, nothing is
+ * authorised by knowing one -- but "short" stopped being free once thread ids became
+ * ROUTING keys: `drainUndeliveredComments` (src/server.mjs) carries an undelivered
+ * comment to the next packet of the same THREAD across every board in the store, and
+ * `boundCwdForThread` answers "which project directory is this thread bound to" the
+ * same way. Two unrelated sessions drawing one 32-bit id (a birthday collision at a few
+ * thousand threads, on a store that only ever grows) therefore stopped being a cosmetic
+ * clash in the index and became a cross-project content leak in one direction and a
+ * permanently lost comment in the other.
+ *
+ * `taken` is a set of the thread ids already in the store (`has`, nothing else), so a
+ * collision is refused at mint time rather than made unlikely: the caller that can see
+ * the store passes one, and everything else -- every test, every legacy call -- mints
+ * exactly as it always did. The escape hatch after THREAD_MINT_TRIES refusals widens the
+ * draw instead of throwing, because failing the post would cost the reviewer a question
+ * they actually asked, and a wider id is legal everywhere a narrow one is (nothing
+ * parses a thread id; the index and the drain both compare whole strings). */
+export function mintThreadId(taken = null) {
+  for (let i = 0; i < THREAD_MINT_TRIES; i++) {
+    const id = `th_${hex(4)}`;
+    if (!taken || !taken.has(id)) return id;
+  }
+  return `th_${hex(16)}`;
 }
 
 function sha256(text) {
@@ -375,7 +404,12 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
 function normalizeCompareSide(side, round, counters, cwd, ids) {
   if (!side) return { label: '', block: null };
   return {
-    label: side.label ?? '',
+    // `byValueText` like every sibling label on the board (an option's label and
+    // description, twelve lines up): this one was the single by-value string on a posted
+    // block that reached the store unbounded and uncoerced, so the only ceiling on a
+    // compare side's label was `readJsonBody`'s 25 MB -- persisted, re-rendered on every
+    // read, and handed to a client that renders it as a heading.
+    label: byValueText(side.label ?? '', 'compare side label'),
     block: side.block ? normalizeBlock(side.block, round, counters, cwd, ids, false) : null,
   };
 }
@@ -533,8 +567,14 @@ function mintAwait(blocks, round, wait, postedAt, awaitTimeoutMs) {
  * `threadCwd` (additive) is the project directory already bound to `thread`, when the
  * caller is starting a second board in a thread that exists; the request may agree with
  * it but never change it. `wait` is round 1's own declared-awaited flag (ADR.md entry
- * 45); see `mintAwait` above for the two ways a round becomes awaited. */
-export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS }) {
+ * 45); see `mintAwait` above for the two ways a round becomes awaited.
+ *
+ * `takenThreads` is the set of thread ids the store already holds, when the caller is in
+ * a position to know (src/server.mjs walks the store once on this path anyway, for
+ * `threadCwd`). It only ever narrows what `mintThreadId` may draw -- see its own comment
+ * for why a collision is a routing fault rather than a cosmetic one -- and is irrelevant
+ * when the caller names the thread. */
+export function createBoard({ title, blocks, cwd = null, thread = null, threadCwd = null, wait = false, awaitTimeoutMs = DEFAULT_AWAIT_TIMEOUT_MS, takenThreads = null }) {
   const now = new Date().toISOString();
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
@@ -543,7 +583,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
   const { awaited, awaitDeadline } = mintAwait(normalized, 1, wait, now, awaitTimeoutMs);
   return {
     id: mintBoardId(),
-    thread: thread || mintThreadId(),
+    thread: thread || mintThreadId(takenThreads),
     title: title || '',
     cwd: boundCwd,
     createdAt: now,
@@ -686,6 +726,62 @@ export function abandonOpenRounds(board) {
   return closed;
 }
 
+/** Every block of round `n`, top-level and nested alike, in stored order. The same tree
+ * `findBlock` below walks (a question's `context`, a variant option's `block`, a compare
+ * side's `block`), collected rather than searched. */
+function roundBlocks(board, n) {
+  const out = [];
+  const visit = b => {
+    if (!b) return;
+    out.push(b);
+    if (b.kind === 'question') {
+      for (const c of b.context || []) visit(c);
+      for (const o of b.options || []) visit(o.block);
+    }
+    if (b.kind === 'compare') {
+      visit(b.left?.block);
+      visit(b.right?.block);
+    }
+  };
+  for (const b of board.blocks) if (b.round === n) visit(b);
+  return out;
+}
+
+/** Has any content this round holds BY REFERENCE stopped matching the file it was read
+ * from? Re-resolves each referencing block against the board's own project directory and
+ * compares the sha it snapshotted at post time.
+ *
+ * This is what makes the `requestId` dedupe (src/server.mjs) an identity over resolved
+ * CONTENT rather than over the request body. `requestId` is a hash of the raw blocks
+ * (bin/mcp.mjs), and a raw block names a file by PATH: the loop the manual actually
+ * prescribes -- post an artifact, regenerate the file it references, re-issue the
+ * identical `ask` -- sends a byte-identical body, so a body-keyed dedupe answered it as
+ * a retry and the reviewer went on looking at v1 while the agent believed v2 had landed.
+ * The bytes on disk are the one part of that request that did change, and this is what
+ * sees it.
+ *
+ * By-value content needs no equivalent: it travels IN the body, so changing it changes
+ * `requestId` and the dedupe never fires in the first place.
+ *
+ * Called only on a candidate retry, never on the ordinary post path -- it re-reads every
+ * referenced file, which is the same read the post itself would do (and bounded by the
+ * same `MAX_REF_BYTES`), so a retry pays one extra pass and nothing else does.
+ *
+ * An html block whose `source` carries `lines`/`section` is skipped: `normalizeBlock`
+ * refuses that shape outright and stores `sha256('')` for it, a value no file will ever
+ * match, so re-resolving it would report drift on every single retry forever. */
+export function roundContentDrifted(board, n) {
+  for (const block of roundBlocks(board, n)) {
+    const source = block.source;
+    if (!source) continue;
+    if (block.kind === 'html' && (source.lines || source.section)) continue;
+    const result = resolveRef(source, { cwd: board.cwd });
+    const sha = result.error ? sha256('') : result.sha;
+    if (sha !== block.sha) return true;
+  }
+  return false;
+}
+
 /** Find a block by id anywhere in the tree: top-level, or nested arbitrarily deep
  * inside a question's `context` or a compare block's `left`/`right` sides — both
  * of which can themselves hold another question/compare/etc (normalizeBlock
@@ -790,6 +886,24 @@ function normalizeStatus(a) {
   return a.choice != null ? 'answered' : 'unanswered';
 }
 
+/** Per-submit ceilings on the two arrays a submit can repeat without limit.
+ *
+ * `byValueText` bounds one string; neither of these loops bounded how MANY strings, so
+ * the only ceiling on a submit was `readJsonBody`'s 25 MB body -- and a comment is
+ * append-only with no in-product removal, so one such request left a permanently
+ * degraded board document behind (measured by the audit: a 19.6 MB body persisted a
+ * 156 MB board, after which every read of it -- the index, `GET /api/waiting`, each
+ * `/wait` poll -- re-parsed those 156 MB synchronously on the daemon's one thread).
+ *
+ * The numbers are "far past anything a human does on one page, nowhere near a
+ * denial-of-service": a reviewer leaving 500 pins on one artifact is not a reviewer,
+ * and a widget whose ranking runs past 200 options is not a question. Refused loudly
+ * (a 400 naming the array and the cap), never truncated, for exactly the reason
+ * `byValueText` states: silently keeping half of what the reviewer wrote is a
+ * paraphrase of their answer. */
+export const MAX_SUBMIT_COMMENTS = 500;
+export const MAX_ANSWER_CHOICES = 200;
+
 /** Apply a submit request to the board in place: merge answers (synthesising an
  * explicit `unanswered` entry for every question block never answered), append
  * comments, mark the round sent, and set board.state. Returns nothing; caller
@@ -805,6 +919,19 @@ function normalizeStatus(a) {
  * is not a request the human made. */
 export function applySubmit(board, { action, answers, comments }, round) {
   const now = new Date().toISOString();
+
+  // Both length gates run BEFORE anything is merged, so an over-cap submit changes
+  // nothing at all: this function mutates `board` in place and the caller persists
+  // whatever comes back, so a throw halfway through would leave a partly-applied
+  // answer set on the board it was refusing.
+  if (Array.isArray(comments) && comments.length > MAX_SUBMIT_COMMENTS) {
+    throw new Error(`submit carries ${comments.length} comments, over the ${MAX_SUBMIT_COMMENTS}-comment cap for one send`);
+  }
+  for (const a of answers || []) {
+    if (a && Array.isArray(a.choice) && a.choice.length > MAX_ANSWER_CHOICES) {
+      throw new Error(`answer ${a.id} carries ${a.choice.length} choices, over the ${MAX_ANSWER_CHOICES}-choice cap`);
+    }
+  }
 
   const allQuestions = questionBlocks(board);
   const answerable = new Set(allQuestions.filter(b => b.round === round).map(b => b.id));
@@ -860,7 +987,14 @@ export function applySubmit(board, { action, answers, comments }, round) {
       n,
       blockId: c.blockId,
       anchor: sanitizeAnchor(c.anchor),
-      text: c.text,
+      // Coerced and bounded at the trust boundary exactly like `choice` and `note`
+      // twelve lines up, whose own comment names this: comment text was the one
+      // reviewer-authored string stored RAW. Unbounded it is what actually persists a
+      // 156 MB board (see MAX_SUBMIT_COMMENTS above); uncoerced, an object or a number
+      // reaches the agent as a `text` that is not a string, against PROTOCOL.md's
+      // packet contract, and every downstream `String(...)` papers over it instead of
+      // the submit being refused at the door.
+      text: byValueText(c.text, 'comment text'),
       createdAt: now,
       round,
       // The block's OWN kind at the moment this anchor was minted:

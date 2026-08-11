@@ -203,6 +203,7 @@ one case that matters is also the one no automated check here can produce.
 - [Real mermaid node ids are prefixed, and `^=` will not see them](#real-mermaid-node-ids-are-prefixed-and--will-not-see-them)
 - [`setPointerCapture` on pointerdown steals the click from what you clicked](#setpointercapture-on-pointerdown-steals-the-click-from-what-you-clicked)
 - [The stand-in has no layout: no `IntersectionObserver`](#the-stand-in-has-no-layout-no-intersectionobserver)
+- [The stand-in's `querySelector` refuses the `>` child combinator](#the-stand-ins-queryselector-refuses-the--child-combinator)
 - [`.code-row` is an inline box, and `display: block` double-spaces the copy](#code-row-is-an-inline-box-and-display-block-double-spaces-the-copy)
 - [CSS `anchor()` needs its anchor earlier in the DOM, and failure computes `bottom: auto`](#css-anchor-needs-its-anchor-earlier-in-the-dom-and-failure-computes-bottom-auto)
 - [The cascade resolver cannot see an interaction pseudo-class](#the-cascade-resolver-cannot-see-an-interaction-pseudo-class)
@@ -290,6 +291,16 @@ here — rounds are pages now (ADR 42), decided by one class and one variable ra
 than an observed scroll position, which is what lets `test/check-round-pager.mjs`
 assert directly. When an observer is unavoidable, install `StandInIntersectionObserver`
 and fire its callback yourself, in both directions.
+
+### The stand-in's `querySelector` refuses the `>` child combinator
+
+Its selector engine implements only the subset `src/ui.mjs` actually uses, and the
+child combinator is outside it: `querySelector('.parent > .child')` throws rather than
+silently matching nothing. The message names the ceiling, so the cost is one confused
+minute, not a wrong green — but a check that wants a direct-child relation should
+select the descendant and assert `.parentElement` (the existing checks' idiom), or
+extend the stand-in deliberately rather than working around it with a looser selector
+that would keep matching after a DOM restructure.
 
 ### `.code-row` is an inline box, and `display: block` double-spaces the copy
 
@@ -755,6 +766,21 @@ what it posts, or the call returns immediately with `status: 'posted'` before ev
 blocking-path outcome) fails for a reason having nothing to do with the mechanism under
 test. A fixture's *shape*, not just its content, decides which return path a check
 exercises.
+
+### An un-aborted `/wait` outlives the assertion that gave up on it
+
+`Promise.race([fetch(.../wait), timeoutPromise])` reads like a ceiling and is not one: the
+losing `fetch` is still an open socket, and the daemon behind it goes on polling for the
+full 40-minute cap. Node then refuses to exit while that handle is alive, so a check whose
+assertion has already FAILED still runs to `test/run.mjs`'s 180s deadline (or, alone with
+output piped, produces nothing for forty minutes) -- the failure is real but the presentation
+says "hang", which points at the wrong thing entirely. Measured while ablating the abandoned-
+round exit from `waitForRound`.
+
+Race an `AbortController` signal in and `abort()` it as soon as the race settles, before the
+assertions run -- `test/check-http.mjs`'s wall-clock-ceiling and abandoned-round checks both
+do. The same applies to any second `/wait` later in the check: it is only unreachable
+because an earlier assertion threw, which is not a property to rely on.
 
 ### Every read is gated, so every HTTP check needs a credential
 

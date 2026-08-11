@@ -339,15 +339,47 @@ export function checkProse({
 // Getting the shim's live tools/list. A minimal scripted JSON-RPC 2.0 client over a child
 // process's stdio, mined from `check-grill`'s own `McpClient` — same shape, kept local since
 // this only ever needs initialize/tools-list, never a held-open wait.
+//
+// Every failure this can have is a failure to ANSWER, so both sides of the seam are
+// defended: the spawn refuses a shim that is not there (a partial install — an interrupted
+// ./install.sh, a half-copied clone), and the client rejects on a child that dies, on a
+// child that never starts, and on a deadline. A request with none of those simply never
+// resolves, and a caller awaiting it hangs forever with nothing on stderr and no clue what
+// it is waiting for — which is exactly what a missing bin/mcp.mjs used to do here.
 // ---------------------------------------------------------------------------
+
+/** How long one JSON-RPC call may go unanswered before the caller is failed. Generous:
+ * the shim answers initialize and tools/list without touching the network, so any real
+ * answer arrives in milliseconds and this only ever fires on a shim that is broken.
+ * Overridable per call for a check that wants the failure sooner. */
+const REQUEST_TIMEOUT_MS = 15_000;
 
 class McpClient {
   constructor(child) {
     this.child = child;
     this.buf = '';
+    this.stderr = '';
     this.nextId = 1;
     this.pending = new Map();
+    // Why the child died, once it has. Kept so a request made after the fact fails with
+    // the same cause rather than waiting out its deadline for a process that is gone.
+    this.dead = null;
     child.stdout.on('data', chunk => this._onData(chunk));
+    if (child.stderr) child.stderr.on('data', chunk => { this.stderr += chunk.toString('utf8'); });
+    // A shim that cannot be executed at all (no such file when the path is a directory, no
+    // permission) fails here; a shim that is missing or throws on import fails as a
+    // non-zero exit instead, because it is `node` that runs and `node` exists.
+    child.on('error', err => this._died(`could not run the claude-board shim: ${err.message}`));
+    child.on('exit', (code, signal) => this._died(
+      `the claude-board shim exited (${signal ? `signal ${signal}` : `code ${code}`}) without answering`
+    ));
+  }
+  _died(reason) {
+    if (!this.dead) this.dead = new Error(`${reason}${this.stderr.trim() ? `\n${this.stderr.trim()}` : ''}`);
+    for (const [id, pend] of [...this.pending]) {
+      this.pending.delete(id);
+      pend.reject(this.dead);
+    }
   }
   _onData(chunk) {
     this.buf += chunk.toString('utf8');
@@ -360,18 +392,37 @@ class McpClient {
       try { msg = JSON.parse(line); } catch { continue; }
       if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
         const pend = this.pending.get(msg.id);
-        if (pend) { this.pending.delete(msg.id); pend(msg); }
+        if (pend) { this.pending.delete(msg.id); pend.resolve(msg); }
       }
     }
   }
-  request(method, params) {
+  request(method, params, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+    if (this.dead) return Promise.reject(this.dead);
     const id = this.nextId++;
-    const p = new Promise(resolve => this.pending.set(id, resolve));
-    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    return p;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(
+          `the claude-board shim did not answer ${method} within ${timeoutMs}ms` +
+          `${this.stderr.trim() ? `\n${this.stderr.trim()}` : ''}`
+        ));
+      }, timeoutMs);
+      timer.unref();
+      const settle = fn => value => { clearTimeout(timer); fn(value); };
+      this.pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+      try {
+        this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+      } catch (err) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(new Error(`could not write ${method} to the claude-board shim: ${err.message}`));
+      }
+    });
   }
   notify(method, params) {
-    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+    try {
+      this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+    } catch { /* the child is gone; the next request reports it */ }
   }
   close() {
     try { this.child.stdin.end(); } catch { /* already closed */ }
@@ -381,19 +432,31 @@ class McpClient {
 
 /** Spawns `mcpPath` (the shim entry point, e.g. `<repoRoot>/bin/mcp.mjs`), does
  * initialize + tools/list, and returns the live `tools` array. `env` is merged over
- * `process.env`, the same shape `child_process.spawn` always takes. */
-export async function getLiveTools({ mcpPath, env = {} } = {}) {
+ * `process.env`, the same shape `child_process.spawn` always takes. `timeoutMs` caps each
+ * call rather than the whole run.
+ *
+ * Refuses a path that is not there before spawning anything: a partial install is the
+ * ordinary way this fails, and "no shim at <path>" is a fixable sentence where a `node`
+ * child exiting 1 with a MODULE_NOT_FOUND stack is a puzzle. */
+export async function getLiveTools({ mcpPath, env = {}, timeoutMs } = {}) {
   if (!mcpPath) throw new Error('getLiveTools requires mcpPath: the absolute path to the shim entry point');
+  if (!existsSync(mcpPath)) {
+    throw new Error(
+      `no claude-board shim at ${mcpPath}: this install is incomplete. ` +
+      `Re-run ./install.sh from the claude-board repository.`
+    );
+  }
   const child = spawn(process.execPath, [mcpPath], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
   const client = new McpClient(child);
+  const opts = timeoutMs ? { timeoutMs } : undefined;
   try {
     await client.request('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
       clientInfo: { name: 'prose-check', version: '0.0.0' },
-    });
+    }, opts);
     client.notify('notifications/initialized', {});
-    const res = await client.request('tools/list', {});
+    const res = await client.request('tools/list', {}, opts);
     if (res.error) throw new Error(`tools/list failed: ${res.error.message}`);
     return res.result.tools;
   } finally {

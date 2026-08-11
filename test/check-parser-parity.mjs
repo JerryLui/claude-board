@@ -122,17 +122,51 @@ check('an explicit closing tag closes everything implicitly opened above it: <ul
   assertTreesAgree('<ul><li>a<li>b</ul><p>after</p>');
 });
 
-// Both sides treat a self-closing `<div/>` as actually self-closing, which is
-// WRONG per HTML5 (a non-void element's trailing `/` is ignored by a real
-// browser; `<div/>after` should nest "after" INSIDE the div) -- src/anchor.mjs's
-// tokenizer gates on the same `selfClosed` flag for every non-void tag, not just
-// void ones, and always did. Not this file's job to fix (a product-code
-// correctness question, out of scope here), but
-// sharing the same tag-omission functions means the stand-in inherits the SAME
-// wrongness rather than a DIFFERENT one, which is what this check locks in: the
-// two sides must keep agreeing, correct or not.
-check('(pre-existing, shared) self-closing <div/> is wrongly treated as void by both sides alike -- not fixed here, but agreement is locked in', () => {
+// Both sides used to treat a self-closing `<div/>` as actually self-closing, and
+// this file locked that shared wrongness in as "at least they agree". They now
+// agree on the CORRECT answer instead: HTML5's tree builder never acknowledges the
+// self-closing flag on an HTML element, so `<div/>after<span>inner</span>` leaves
+// the div open and nests both of them inside it -- which is what the browser the
+// reviewer is actually looking at does, and therefore what the element a comment
+// anchors to has to be. The one place the flag does count is foreign content, so
+// the SVG cases below are the other half of the same rule.
+check('a self-closing <div/> is not self-closing: the div stays open and the following elements nest INSIDE it, as in a browser', () => {
   assertTreesAgree('<div/>text after<span>inner</span></div>');
+  const [div] = parseHtmlTree('<div/>text after<span>inner</span></div>').children;
+  assert.equal(div.tag, 'div');
+  assert.equal(div.children.length, 1, 'the <span> is the div\'s child, not its sibling -- an ignored `/` leaves the element open');
+  assert.equal(div.children[0].tag, 'span');
+});
+
+check('a non-void element with a trailing / never ends early, so a later sibling keeps its index', () => {
+  assertTreesAgree('<ul><li/><li/><li/></ul>');
+  assertTreesAgree('<div><p/><p>second</p></div>');
+  assertTreesAgree('<div><span/>a</div><span>sibling</span>');
+});
+
+check('inside SVG/MathML the self-closing flag IS honoured, on the root and on its descendants alike', () => {
+  assertTreesAgree('<svg/><p>after</p>');
+  assertTreesAgree('<div><svg><circle/><rect/></svg><span>after</span></div>');
+  assertTreesAgree('<math/><p>after</p>');
+  const [div] = parseHtmlTree('<div><svg><circle/><rect/></svg><span>after</span></div>').children;
+  assert.deepEqual(shapeFromAnchorTree(div.children), [
+    { tag: 'svg', children: [{ tag: 'circle', children: [] }, { tag: 'rect', children: [] }] },
+    { tag: 'span', children: [] },
+  ], 'circle and rect are siblings inside the svg, and the span follows the svg -- not one nested chain');
+});
+
+check('foreignness ends with the foreign subtree: a <div/> after a closed <svg> is an ordinary open div again', () => {
+  assertTreesAgree('<svg><circle/></svg><div/><span>inner</span>');
+  // Parity alone cannot catch getting this one wrong -- both sides run the same
+  // bookkeeping in the same order, so they would agree on the wrong tree; the shape
+  // itself is pinned in test/check-pure.mjs. It stays in this corpus so the two
+  // sides cannot drift apart on it either.
+  assertTreesAgree('<table><svg></svg><td/><span>x</span></table>');
+  const shape = shapeFromAnchorTree(parseHtmlTree('<svg><circle/></svg><div/><span>inner</span>').children);
+  assert.deepEqual(shape, [
+    { tag: 'svg', children: [{ tag: 'circle', children: [] }] },
+    { tag: 'div', children: [{ tag: 'span', children: [] }] },
+  ]);
 });
 
 // --- the repo's own baseline fixture, which every OTHER check in this suite ----

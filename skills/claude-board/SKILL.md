@@ -160,7 +160,7 @@ round of content only returns the instant it lands.
 ```js
 {
   board, thread, title, round,
-  status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'error'
+  status,                           // 'posted' | 'submitted' | 'discuss' | 'timeout' | 'abandoned' | 'error'
   answers:  [ { id, round, prompt, widget, status, choice, note } ],
   comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, resolved, lost? } ],
   url,
@@ -177,6 +177,12 @@ round of content only returns the instant it lands.
   place rather than opening a fresh one: the blocks land on a round with no live deadline and
   nothing waiting on it, and you get `posted` straight back instead of an answer. Anything the
   reviewer had typed on it arrives as an ordinary comment on your next packet.
+- **`abandoned`**: the round was closed while you were still waiting on it, because the
+  conversation that owned the board declared itself over — a later `ask` with `fresh: true`
+  started a new board, or the board was abandoned directly. Nobody answered and nobody will:
+  it is not a timeout and not a submit, and no answer in the packet is a decision. Read any
+  comments (they were left before it closed and still count), then post to the *current*
+  board if the question stands. This round never reopens, so never re-post into it.
 - **`error`**: posted, but the wait did not complete, so nothing was answered and nothing
   about intent can be inferred. Report the message verbatim, name `url`, and stop rather
   than re-posting into a board that may already hold the round.

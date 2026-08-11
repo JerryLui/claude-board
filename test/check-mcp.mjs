@@ -34,6 +34,10 @@ import net from 'node:net';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { recoveryCommand } from '../src/handoff.mjs';
 import { startServer } from '../src/server.mjs';
+// The product's own spawn of the shim (src/prose-check.mjs ships from src/ so a caller
+// outside this repo can import it): the other side of the same stdio seam this file
+// drives by hand, and the one a partial install breaks.
+import { getLiveTools } from '../src/prose-check.mjs';
 import { runCheck } from './run.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -147,13 +151,16 @@ class McpClient {
  * runs inside an interactive Claude Code session, so CLAUDE_CODE_ENTRYPOINT is
  * already set in process.env and must be explicitly deleted to test the
  * "absent" refusal path rather than silently inheriting `cli`. */
-function spawnShim(overrides) {
+function spawnShim(overrides, { cwd } = {}) {
   const env = { ...process.env };
   for (const [k, v] of Object.entries(overrides)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
   }
-  const child = spawn(process.execPath, [mcpBin], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  // `cwd` is not decoration: the shim posts `cwd: process.cwd()` with the board, and that
+  // is what the daemon resolves every by-path block against. A check about a referenced
+  // FILE has to put the shim in the directory that file lives in.
+  const child = spawn(process.execPath, [mcpBin], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
   return new McpClient(child);
 }
 
@@ -300,8 +307,10 @@ function openSseStream(port, boardId) {
 
 /** Whatever is listening on the port need not be the daemon: during a restart
  * window any local process can bind it first. This one answers a POST with a
- * board id and a `url` of the test's choosing, and a /wait that returns at once. */
-function startHostileDaemon({ boardId, url }) {
+ * board id and a `url` of the test's choosing, and a /wait that returns at once —
+ * with `waitStatus` as the packet's status, which is also how a status no shim has a
+ * branch for gets in front of one. */
+function startHostileDaemon({ boardId, url, waitStatus = 'submitted' }) {
   const send = (res, status, obj) => {
     const body = JSON.stringify(obj);
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
@@ -317,10 +326,88 @@ function startHostileDaemon({ boardId, url }) {
     if (req.method === 'GET' && u.pathname.endsWith('/wait')) {
       return send(res, 200, {
         board: boardId, thread: 'th_hostile', title: 'hostile', round: 1,
-        status: 'submitted', answers: [], comments: [], url,
+        status: waitStatus, answers: [], comments: [], url,
       });
     }
     return send(res, 404, { error: 'not found' });
+  });
+  return new Promise(resolve => {
+    srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => srv.close() }));
+  });
+}
+
+/** A daemon that takes its time answering the THREAD-CREATING post and answers every
+ * later one at once. That is the shape of a lost first response: the board is created,
+ * the caller just never hears which one it is — a shim inactivity timeout, a kickstart, an
+ * ./install.sh taking an update mid-request. Records the body of every post it received,
+ * which is the only place "did this shim ask for a second board?" can be read. */
+function startSlowCreateDaemon({ delayMs, boardId = 'slow-board-1' }) {
+  const posts = [];
+  const send = (res, status, obj) => {
+    const body = JSON.stringify(obj);
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+  };
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://internal');
+    if (req.method === 'POST' && u.pathname === '/api/board') {
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* recorded as {} */ }
+        posts.push(body);
+        const answer = () => send(res, 200, {
+          boardId, thread: 'th_slow', round: body.boardId ? 2 : 1,
+          url: `/b/${boardId}`, clients: 0, awaited: false,
+        });
+        if (body.boardId) return answer();
+        setTimeout(answer, delayMs).unref();
+      });
+      return;
+    }
+    return send(res, 404, { error: 'not found' });
+  });
+  return new Promise(resolve => {
+    srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, posts, close: () => srv.close() }));
+  });
+}
+
+/** The same lost first response, but with the REAL daemon behind it: a transparent proxy
+ * that holds the thread-creating post's response back by `delayMs` and passes everything
+ * else straight through. The board really is created, in a real store, with a real dedupe
+ * gate on the other side — which a stub daemon cannot stand in for. */
+function startSlowCreateProxy(targetPort, delayMs) {
+  const srv = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      let parsed = {};
+      try { parsed = JSON.parse(body.toString('utf8') || '{}'); } catch { /* not JSON: no delay */ }
+      const slow = req.method === 'POST' && req.url === '/api/board' && !parsed.boardId;
+      const upstream = http.request(
+        {
+          hostname: '127.0.0.1', port: targetPort, path: req.url, method: req.method,
+          headers: { ...req.headers, host: `127.0.0.1:${targetPort}` },
+        },
+        up => {
+          const outChunks = [];
+          up.on('data', c => outChunks.push(c));
+          up.on('end', () => {
+            const send = () => {
+              res.writeHead(up.statusCode, up.headers);
+              res.end(Buffer.concat(outChunks));
+            };
+            if (slow) setTimeout(send, delayMs).unref();
+            else send();
+          });
+        }
+      );
+      upstream.on('error', () => { res.writeHead(502); res.end('{}'); });
+      if (body.length) upstream.write(body);
+      upstream.end();
+    });
   });
   return new Promise(resolve => {
     srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => srv.close() }));
@@ -394,6 +481,11 @@ async function submitBoard(baseUrl, boardId, body, boardHome = home) {
 // No explicit id: ids are minted per board, so two concurrent posts get q1/q2
 // rather than the second silently replacing the first.
 const QUESTION = { kind: 'question', prompt: 'Looks right?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
+
+// Content only, so the call returns the instant the post lands rather than blocking on
+// /wait — what a check about the POST itself wants (see QUIRKS.md, "a check-mcp.mjs
+// fixture with no question block no longer blocks on /wait").
+const NOTE = { kind: 'markdown', text: 'Nothing here to answer.' };
 
 const home = mkdtempSync(path.join(tmpdir(), 'claude-board-mcp-'));
 let server, port, base;
@@ -1100,6 +1192,327 @@ async function main() {
     }
   });
 
+  // --- a boundary declared beside a concurrent ask still mints ONE board ------
+  // The guard above is read before an await and written after one, so reading it once —
+  // on the way in — was not enough: `fresh` awaits the boundary declaration, and a
+  // concurrent call slips into that gap, sees no board and no guard, and starts minting.
+  // The first call then wakes up, still sees no board, and mints a second one: two
+  // threads, two tabs, and whichever board the reviewer does not open sits awaited
+  // forever.
+
+  await check('an ask declaring a boundary beside a concurrent ask mints one board, not two', async () => {
+    const knownIds = listBoardIds(home);
+    const boundaryClient = spawnShim(baseEnv);
+    try {
+      const callA = boundaryClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Fresh A', blocks: [QUESTION], fresh: true }, _meta: { progressToken: 'fresh-A' },
+      });
+      const callB = boundaryClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Plain B', blocks: [QUESTION] }, _meta: { progressToken: 'fresh-B' },
+      });
+
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await sleep(400); // ample time for a second board file to show up if one is coming
+
+      const minted = [...listBoardIds(home)].filter(id => !knownIds.has(id));
+      assert.deepEqual(
+        minted, [boardId],
+        `a boundary declared beside a concurrent ask must not mint a second board (got ${minted.length})`
+      );
+
+      await submitBoard(base, boardId, {
+        answers: [
+          { id: 'q1', status: 'answered', choice: 'Yes', note: '' },
+          { id: 'q2', status: 'answered', choice: 'Yes', note: '' },
+        ],
+      });
+      const [resA, resB] = await withTimeout(Promise.all([callA, callB]), 8000, 'both asks must return');
+      assert.equal(resA.result.board, boardId);
+      assert.equal(resB.result.board, boardId, 'both calls belong to the one board this conversation has');
+    } finally {
+      boundaryClient.close();
+    }
+  });
+
+  // ...and in the other order, which the guard alone does not cover. The plain ask mints
+  // first; the `fresh` one waits that mint out, and then declared its boundary against the
+  // board it had just been handed — closing a live round under the call still blocked on
+  // it and minting a second board for one conversation. `fresh` means "this conversation
+  // has posted no board", and a board minted milliseconds ago by a concurrent ask on this
+  // same shim IS this conversation.
+
+  await check('a boundary declared after a concurrent ask joins that board instead of abandoning it', async () => {
+    const knownIds = listBoardIds(home);
+    const reverseClient = spawnShim(baseEnv);
+    try {
+      const plain = reverseClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Plain first', blocks: [QUESTION] }, _meta: { progressToken: 'rev-plain' },
+      });
+      const declaring = reverseClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Fresh second', blocks: [QUESTION], fresh: true }, _meta: { progressToken: 'rev-fresh' },
+      });
+
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await sleep(400);
+
+      const minted = [...listBoardIds(home)].filter(id => !knownIds.has(id));
+      assert.deepEqual(minted, [boardId], `one conversation, one board (got ${minted.length})`);
+
+      const stored = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8'));
+      assert.equal(stored.rounds[0].status, 'open', 'the live round must not be abandoned by the call that joined it');
+
+      await submitBoard(base, boardId, {
+        answers: [
+          { id: 'q1', status: 'answered', choice: 'Yes', note: '' },
+          { id: 'q2', status: 'answered', choice: 'No', note: '' },
+        ],
+      });
+      const [resPlain, resFresh] = await withTimeout(Promise.all([plain, declaring]), 8000, 'both asks must return');
+      assert.equal(
+        resPlain.result.status, 'submitted',
+        'the first call must still get its reviewer, not an abandoned board pulled out from under it'
+      );
+      assert.equal(resPlain.result.board, boardId);
+      assert.equal(resFresh.result.board, boardId, 'and the declaring call belongs to that same board');
+    } finally {
+      reverseClient.close();
+    }
+  });
+
+  // --- a lost FIRST response does not become a second board ------------------
+  // The thread-creating post is the one post with no board id to scope an idempotency key
+  // to, so a response lost after the body went out leaves a board this shim cannot name.
+  // Abandoning that post is what made the retry — which the failure message itself invites
+  // — mint a second board, thread and tab, and leave the first orphaned on a live round.
+
+  await check('a first post whose response is lost is joined by the retry, not doubled', async () => {
+    const slow = await startSlowCreateDaemon({ delayMs: 1500 });
+    const slowClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_PORT: String(slow.port),
+      CLAUDE_BOARD_POST_TIMEOUT_MS: '200',   // this call's patience
+      CLAUDE_BOARD_CREATE_TIMEOUT_MS: '9000', // the post's own, deliberately longer
+    });
+    try {
+      const first = await withTimeout(slowClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Lost response', blocks: [NOTE] },
+      }), 8000, 'the first ask must fail on its own deadline rather than hang');
+      assert.equal(first.result.isError, true, 'a post nobody answered in time is a failure, not a silent success');
+      assert.doesNotMatch(
+        first.result.content[0].text, /Nothing was posted or written/,
+        'the body went out and the daemon is synchronous after it: that sentence would be false'
+      );
+      assert.match(
+        first.result.content[0].text, /still running/i,
+        'the agent has to be told the post is still live, and that a retry joins it'
+      );
+      assert.doesNotMatch(
+        first.result.content[0].text, /launchctl kickstart/,
+        'the daemon is slow, not dead — restarting it would kill the very post that is still going'
+      );
+
+      // The retry, exactly as the message invites it: same title, same blocks.
+      const second = await withTimeout(slowClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Lost response', blocks: [NOTE] },
+      }), 15000, 'the retry must return');
+      assert.equal(second.result.isError, false, `the retry must succeed: ${second.result.content[0].text}`);
+      assert.equal(second.result.board, 'slow-board-1', 'and land on the board the lost post actually made');
+
+      const creates = slow.posts.filter(p => !p.boardId);
+      assert.equal(creates.length, 1, 'exactly one board may ever be asked for: a retry is not a second thread');
+      assert.deepEqual(
+        slow.posts.filter(p => p.boardId), [],
+        'and the retry posts nothing at all: the answer to the request it is repeating was already in hand'
+      );
+    } finally {
+      slowClient.close();
+      slow.close();
+    }
+  });
+
+  // --- the same retry, with the REAL dedupe gate behind it -------------------
+  // The daemon recognises a retry by the round's RESOLVED content, not by the request
+  // body: a by-path block whose file was regenerated in between is a genuinely NEW round
+  // to it, which is exactly what makes re-posting the retry unsafe. The artifact loop the
+  // manual prescribes — post a rendered file, regenerate it, re-issue the identical ask —
+  // drifts on purpose, so this is the ordinary case rather than an exotic one. A retry
+  // that reposts here lands round 2 and leaves round 1 open behind it; the join has the
+  // answer already and must use it.
+
+  await check('a retry of a lost first post adds no round even when the file it references drifted', async () => {
+    const stageDir = tempHome('drift-retry');
+    const stagePath = path.join(stageDir, 'stage.html');
+    const page = marker => `<!doctype html><html><body><h1>${marker}</h1></body></html>`;
+    writeFileSync(stagePath, page('ARTIFACT_V1'), 'utf8');
+
+    const proxy = await startSlowCreateProxy(port, 1200);
+    const ask = { title: 'Rendered artifact', blocks: [{ kind: 'html', source: { path: 'stage.html' } }] };
+    const knownIds = listBoardIds(home);
+    // cwd, not just env: the shim posts `cwd: process.cwd()` and the daemon resolves
+    // `stage.html` against it.
+    const driftClient = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_PORT: String(proxy.port),
+      CLAUDE_BOARD_POST_TIMEOUT_MS: '200',
+      CLAUDE_BOARD_CREATE_TIMEOUT_MS: '9000',
+    }, { cwd: stageDir });
+    try {
+      const first = await withTimeout(driftClient.request('tools/call', {
+        name: 'ask', arguments: ask,
+      }), 8000, 'the first ask must fail on its own deadline');
+      assert.equal(first.result.isError, true, 'setup: the first call gives up before its answer arrives');
+
+      // The file is regenerated while the post nobody heard from is still running.
+      writeFileSync(stagePath, page('ARTIFACT_V2'), 'utf8');
+
+      const retry = await withTimeout(driftClient.request('tools/call', {
+        name: 'ask', arguments: ask,
+      }), 15000, 'the retry must return');
+      assert.equal(retry.result.isError, false, `the retry must succeed: ${retry.result.content[0].text}`);
+      assert.equal(retry.result.round, 1, 'the retry is the same round, not the next one');
+
+      const boardId = retry.result.board;
+      assert.deepEqual(
+        [...listBoardIds(home)].filter(id => !knownIds.has(id)), [boardId],
+        'one board for the two calls'
+      );
+      const afterRetry = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8'));
+      assert.equal(
+        afterRetry.rounds.length, 1,
+        'a retry that re-posts is a duplicate round here: the drift gate cannot recognise it, and round 1 is left open behind it'
+      );
+
+      // And the key the first post carried still works once it HAS landed: same call, same
+      // bytes on disk, so the daemon answers it as the retry it is rather than minting a
+      // second round. (This is the path the join above cannot cover — the post is over.)
+      writeFileSync(stagePath, page('ARTIFACT_V1'), 'utf8');
+      const late = await withTimeout(driftClient.request('tools/call', {
+        name: 'ask', arguments: ask,
+      }), 15000, 'the late retry must return');
+      assert.equal(late.result.round, 1, 'still round 1: the first post carried a key the daemon can recognise it by');
+      const afterLate = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8'));
+      assert.equal(afterLate.rounds.length, 1, 'and no round was added');
+    } finally {
+      driftClient.close();
+      proxy.close();
+    }
+  });
+
+  // --- a stringized boolean is refused, never read as truthy -----------------
+  // `wait` and `fresh` are booleans in the schema, but nothing enforces a caller's types
+  // and a model that emits the string 'false' reads as TRUE to a bare truthiness test. On
+  // `fresh` that abandons every round still open on the live board: the reviewer's
+  // question closed under them, mid-answer, and a second board minted in its place.
+
+  await check('a stringized fresh:\'false\' / wait:\'true\' is refused, not read as true', async () => {
+    const knownIds = listBoardIds(home);
+    const stringClient = spawnShim(baseEnv);
+    const readBoardFile = id => JSON.parse(readFileSync(path.join(home, 'boards', `${id}.json`), 'utf8'));
+    try {
+      const live = stringClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Live board', blocks: [QUESTION] }, _meta: { progressToken: 'string-live' },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await sleep(150); // the board is fully written before anything is compared against it
+      const before = readBoardFile(boardId);
+
+      const refused = await withTimeout(stringClient.request('tools/call', {
+        // Content only, so that a shim which reads the string as TRUE gets all the way to
+        // a posted round and fails the assertions below on what it DID, rather than
+        // blocking on a board it should never have minted and failing on a deadline.
+        name: 'ask', arguments: { title: 'Stringized flag', blocks: [NOTE], fresh: 'false' },
+      }), 8000, 'a refused ask must return at once');
+      assert.equal(refused.result.isError, true, 'a string is not a boolean: refuse it');
+      assert.match(refused.result.content[0].text, /"fresh"/, 'name the argument that is wrong');
+      assert.match(refused.result.content[0].text, /boolean/i, 'and what it should have been');
+
+      // The same rule on the same trust boundary for `wait`, which the acceptance names
+      // beside `fresh`: a string there blocks a round that has nothing to wait for.
+      const refusedWait = await withTimeout(stringClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Stringized wait', blocks: [NOTE], wait: 'true' },
+      }), 8000, 'a refused ask must return at once');
+      assert.equal(refusedWait.result.isError, true, 'a string is not a boolean here either');
+      assert.match(refusedWait.result.content[0].text, /"wait"/, 'name the argument that is wrong');
+
+      assert.deepEqual(
+        [...listBoardIds(home)].filter(id => !knownIds.has(id)), [boardId],
+        'a refused ask must not mint a board'
+      );
+      const stored = readBoardFile(boardId);
+      assert.equal(stored.rounds[0].status, 'open', 'and must not close the round the reviewer is looking at');
+      assert.equal(stored.rounds.length, before.rounds.length, 'nor add a round');
+      assert.equal(stored.blocks.length, before.blocks.length, 'nor append its blocks to the round the reviewer is reading');
+
+      // The proof the live call was never abandoned: it is still waiting, and the
+      // reviewer's answer still reaches it.
+      await submitBoard(base, boardId, { answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: 'still mine' }] });
+      const liveRes = await withTimeout(live, 8000, 'the live call must still be waiting for its reviewer');
+      assert.equal(liveRes.result.status, 'submitted', 'the round a string flag would have abandoned still answers its own call');
+      assert.equal(liveRes.result.answers[0].note, 'still mine');
+    } finally {
+      stringClient.close();
+    }
+  });
+
+  // --- a board abandoned under a blocked ask ends AS abandoned ---------------
+  // The daemon answers a blocked /wait at once when the board is abandoned under it, with
+  // its own terminal status. With no branch for it the shim fell through to "Board
+  // submitted." and read a round of synthesised `unanswered` back as the reviewer's
+  // decisions: honest data under false prose, and the prose is the half the agent reads.
+
+  await check('a board abandoned under a blocked ask returns as abandoned, not as a submit', async () => {
+    const knownIds = listBoardIds(home);
+    const abandonClient = spawnShim(baseEnv);
+    try {
+      const call = abandonClient.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Abandoned under the call', blocks: [QUESTION] },
+        _meta: { progressToken: 'tok-abandon' },
+      });
+      const boardId = await waitForNewBoardFile(home, knownIds);
+      await sleep(250); // the wait GET is established and held open
+
+      const abandoned = await fetch(`${base}/api/board/${boardId}/abandon`, { method: 'POST', headers: writeHeaders() });
+      assert.equal(abandoned.status, 200, `the abandon must land (got ${abandoned.status})`);
+
+      const done = await withTimeout(call, 8000, 'an abandoned board must release the blocked ask promptly');
+      const result = done.result;
+      assert.equal(result.isError, false, 'an abandoned board is an outcome, not a failure');
+      assert.equal(result.status, 'abandoned', 'the status the daemon sent must survive to the agent');
+      const text = result.content[0].text;
+      assert.match(text, /abandoned/i, 'the text the agent actually reads must name what happened');
+      assert.doesNotMatch(text, /submitted/i, 'nobody submitted anything: that word here reports a decision that was never made');
+      assert.doesNotMatch(text, /no response needed/i, 'a round closed under the caller is not a round with nothing to answer');
+      assert.doesNotMatch(text, /reopen it/i, 'and it never reopens, so the timeout advice would send the agent nowhere');
+    } finally {
+      abandonClient.close();
+    }
+  });
+
+  // --- and a status this shim has never heard of is named, not dressed up -----
+  // `abandoned` arrived as a daemon-side addition to a shim that had no branch for it, and
+  // fell through to "Board submitted." with a round of synthesised `unanswered` reported
+  // as the reviewer's decisions. Fixing that one status leaves the next one to repeat it,
+  // so the fall-through itself is the defect: the submitted prose belongs to `submitted`.
+
+  await check('a packet status this shim does not know is reported by name, not as a submit', async () => {
+    const unknown = await startHostileDaemon({ boardId: 'b_unknown_status', url: `${base}/b/b_unknown_status`, waitStatus: 'quantum' });
+    const unknownClient = spawnShim({ ...baseEnv, CLAUDE_BOARD_PORT: String(unknown.port) });
+    try {
+      const res = await withTimeout(unknownClient.request('tools/call', {
+        name: 'ask', arguments: { title: 'Unknown status', blocks: [QUESTION] },
+      }), 8000, 'an unknown status must still end the call');
+      const text = res.result.content[0].text;
+      assert.equal(res.result.status, 'quantum', 'the packet is relayed as it arrived: the data was never the problem');
+      assert.match(text, /quantum/, 'the prose has to name the status it could not interpret');
+      assert.doesNotMatch(text, /^Board submitted\./, 'an unrecognised ending is not a submit');
+      assert.match(text, /not a decision|do not read/i, 'and the answers below it must be disowned, not presented as the reviewer\'s');
+    } finally {
+      unknownClient.close();
+      unknown.close();
+    }
+  });
+
   // --- session continuity: the second ask pushes ROUND 2 into the same board -
 
   await check('a second ask on the same connection pushes round 2 into the same board', async () => {
@@ -1602,6 +2015,53 @@ async function main() {
     } finally {
       try { first.kill('SIGKILL'); } catch { /* already gone */ }
     }
+  });
+
+  // --- a partial install fails the caller instead of hanging it -------------
+  // The other side of this stdio seam: the product's own spawn of the shim
+  // (src/prose-check.mjs `getLiveTools`, which any installed clone can be asked for). A
+  // shim that is missing or cannot run answers nothing, and a client that waits for an
+  // answer with no deadline and no exit listener waits forever — no output, no exit code,
+  // nothing to read. That hang is what stranded a load test of this very suite.
+
+  await check('a missing or broken shim fails the caller by name instead of hanging', async () => {
+    const dir = tempHome('partial-install');
+
+    const absent = path.join(dir, 'bin', 'mcp.mjs');
+    await assert.rejects(
+      withTimeout(getLiveTools({ mcpPath: absent }), 6000, 'a missing shim must fail, not hang'),
+      /no claude-board shim at .*mcp\.mjs/,
+      'name the path that is not there and the install that is incomplete'
+    );
+
+    // Present but unrunnable — the other half of a partial install. `node` itself exists,
+    // so the spawn succeeds and the failure is an exit code with a stack on stderr.
+    const broken = path.join(dir, 'broken-mcp.mjs');
+    writeFileSync(broken, "throw new Error('half-installed shim');\n");
+    await assert.rejects(
+      withTimeout(getLiveTools({ mcpPath: broken }), 8000, 'a broken shim must fail, not hang'),
+      err => {
+        assert.match(err.message, /exited/, 'a child that dies without answering must reject the call it left pending');
+        assert.match(err.message, /half-installed shim/, 'and carry its stderr: that is the only statement of the cause');
+        return true;
+      }
+    );
+  });
+
+  await check('a shim that starts but never answers fails on a deadline', async () => {
+    const dir = tempHome('silent-shim');
+    const silent = path.join(dir, 'silent-mcp.mjs');
+    // Starts, holds stdin open, answers nothing: a wedged shim is the one failure no exit
+    // code reports, so only a deadline can end it.
+    writeFileSync(silent, 'process.stdin.resume();\n');
+
+    const started = Date.now();
+    await assert.rejects(
+      withTimeout(getLiveTools({ mcpPath: silent, timeoutMs: 400 }), 6000, 'a silent shim must fail on its deadline'),
+      /did not answer initialize within 400ms/,
+      'the deadline must name the call it gave up on'
+    );
+    assert.ok(Date.now() - started < 5000, `the deadline must actually fire, took ${Date.now() - started}ms`);
   });
 
   // --- the suite runner enforces its own deadline --------------------------

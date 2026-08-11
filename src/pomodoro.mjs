@@ -118,6 +118,16 @@ export function roundBannersEnabled(settings) {
  * lid closing is minutes to hours late, never single-digit seconds. */
 export const EXPIRY_GRACE_MS = 30_000;
 
+/** The EXPIRED test itself, in ONE place, so every control that can be pressed against an
+ * interval whose deadline has already gone past reaches the same verdict settleBoundary
+ * would. A running timer (never a paused one — a paused timer has no wall-clock deadline
+ * to be late for) whose deadline is more than the grace in the past belongs to an interval
+ * nobody was there for. */
+function isExpired(timer, now) {
+  if (!timer || timer.paused) return false;
+  return typeof timer.deadline === 'number' && now - timer.deadline > EXPIRY_GRACE_MS;
+}
+
 export function defaultDoc() {
   return {
     settings: { ...DEFAULT_SETTINGS },
@@ -286,9 +296,7 @@ export function settleBoundary(doc, now) {
   if (!doc.timer || doc.timer.paused) return { doc, boundary: null };
   if (now < doc.timer.deadline) return { doc, boundary: null };
 
-  const late = now - doc.timer.deadline;
-
-  if (late > EXPIRY_GRACE_MS) {
+  if (isExpired(doc.timer, now)) {
     return { doc: { ...doc, timer: null }, boundary: null };
   }
 
@@ -387,9 +395,20 @@ export function restartTimer(doc, now) {
  * the old one around invites some future reader to use it by mistake. Clamped to 0 so a
  * pause that lands a hair after the real deadline (the request arrived while the
  * armed setTimeout was already in flight — see createPomodoro's reconcile) never
- * produces a negative remainder. */
+ * produces a negative remainder.
+ *
+ * The EXPIRED rule (isExpired above) is applied FIRST and outranks the pause, because
+ * pausing was the one way around it. An interval whose deadline went past hours ago —
+ * the lid closed mid-work, so the armed setTimeout has not come due yet in the only
+ * time it counts — froze here as `remainingMs: 0` (the clamp), and resumeTimer below
+ * then anchored that zero to a fresh `now`, so the very next reconcile found a deadline
+ * exactly due, took the ADVANCE branch and rang a real "Break started" for an interval
+ * that ended before lunch. Expiring it instead is the same answer settleBoundary gives
+ * the same document, which is the point: pause is a control on a live interval, not a
+ * way to launder a dead one back into the loop. */
 export function pauseTimer(doc, now) {
   if (!doc.timer || doc.timer.paused) return doc;
+  if (isExpired(doc.timer, now)) return { ...doc, timer: null };
   const { deadline, ...rest } = doc.timer;
   return { ...doc, timer: { ...rest, paused: true, remainingMs: Math.max(0, deadline - now) } };
 }
@@ -419,6 +438,63 @@ export function resumeTimer(doc, now) {
  * a rollover performs, asked for by hand and inside the day rather than at its edge. */
 export function resetTimer(doc, _now) {
   return { ...doc, timer: null, cycle: 0 };
+}
+
+/** Below this, a difference between how far the wall clock moved and how far the
+ * monotonic clock moved is ordinary measurement noise (two clocks read a few
+ * instructions apart, a timer that fired a hair late), not a clock being SET. A second
+ * is orders of magnitude above that noise and orders of magnitude below the smallest
+ * step worth correcting. */
+const CLOCK_STEP_MS = 1_000;
+
+/** ponytail: the ceiling on a FORWARD rebase, and the one heuristic in this file.
+ *
+ * A forward jump of the wall clock relative to the monotonic clock has exactly two
+ * causes and, from inside node, ONE signature: the clock was set forward, or the machine
+ * slept. Both leave the armed setTimeout firing at its own monotonic delay with the wall
+ * clock far past the deadline, and node exposes no clock that keeps running across a
+ * sleep to tell them apart (`performance.now()` is the monotonic one, and it is the one
+ * that stops). So the size of the jump is the only evidence there is: a real clock
+ * correction is seconds to a couple of minutes, and a lid closing is the tens of minutes
+ * to hours EXPIRY_GRACE_MS's own comment already describes. Five minutes sits between
+ * them.
+ *
+ * Being wrong either way is small and symmetric — a five-minute nap keeps its interval
+ * where the rule would have discarded it, an implausible five-minute-plus clock step
+ * discards one the rule could have kept — and both are strictly better than today's
+ * behaviour, which discards the interval either way with no break and no banner.
+ * THE UPGRADE PATH: a clock that keeps counting across sleep (`CLOCK_BOOTTIME`,
+ * `mach_continuous_time`) makes the two causes distinguishable outright, and this
+ * ceiling can then go. Nothing else in this file depends on it.
+ *
+ * BACKWARD steps carry no ceiling and need none: sleeping can only ever make the wall
+ * clock run AHEAD of the monotonic one, so a wall clock that has fallen behind is
+ * unambiguously a clock that was set. */
+const MAX_FORWARD_STEP_MS = 5 * 60_000;
+
+/** Move a running interval's absolute deadline by a wall-clock STEP, so the interval
+ * keeps the real time it had left rather than the wall-clock time it was written with.
+ *
+ * Returns `doc` unchanged, BY REFERENCE, for everything that is not a step: no timer, a
+ * paused timer (which carries `remainingMs` and so has no wall-clock deadline to
+ * correct), a difference too small to be a step, and a forward jump too large to
+ * distinguish from sleep — that last one is deliberately left to settleBoundary's EXPIRED
+ * rule, which is the right answer for a machine that was asleep and the accepted cost for
+ * an implausibly large clock correction.
+ *
+ * `stepMs` is `(wall elapsed) - (monotonic elapsed)` measured across one armed interval of
+ * the timer below. The daemon's own document stores an ABSOLUTE deadline (this file's
+ * opening comment says why), and an absolute deadline is exactly the thing a clock step
+ * invalidates: NTP moves the clock 90 seconds forward and a work interval with 20 minutes
+ * left is suddenly 90 seconds "late", discarded by a rule written for a lid that was
+ * closed. Rebasing the deadline by the same 90 seconds restores what the reader is
+ * actually owed. */
+export function applyClockStep(doc, stepMs) {
+  if (!doc.timer || doc.timer.paused) return doc;
+  if (!Number.isFinite(stepMs) || Math.abs(stepMs) < CLOCK_STEP_MS) return doc;
+  if (stepMs > MAX_FORWARD_STEP_MS) return doc;
+  if (typeof doc.timer.deadline !== 'number') return doc;
+  return { ...doc, timer: { ...doc.timer, deadline: doc.timer.deadline + stepMs } };
 }
 
 // ---------------------------------------------------------------------------------
@@ -685,19 +761,73 @@ export function writeDoc(doc, home = boardHome()) {
 // The impure shell: read, call the pure function, write, arm the next real boundary.
 // ---------------------------------------------------------------------------------
 
+/** No armed wait ever runs longer than this before the wall clock is consulted again.
+ *
+ * A `setTimeout` delay is RELATIVE and counted on a monotonic clock; the deadline it is
+ * counting toward is ABSOLUTE wall time. Baking one into the other once, at the start of a
+ * 25-minute interval, is what made this module quietly depend on the very thing its own
+ * opening comment says it never asks — whether the timer fired on time. It does not, after
+ * a clock step: the widget sat at 00:00 for the rest of the armed delay (frozen, because
+ * nothing was going to look at the document until it elapsed) and then settleBoundary read
+ * a deadline long past and discarded the interval, no break and no banner.
+ *
+ * Re-arming in slices costs one small file read every five seconds while an interval is
+ * running — a few hundred bytes, against a daemon that already heartbeats its SSE clients
+ * — and buys two things: a step is NOTICED inside five seconds instead of at the end of
+ * the interval, and each slice is a fresh (wall, monotonic) sample pair, which is what
+ * makes a step measurable at all (applyClockStep above).
+ *
+ * A sixth of EXPIRY_GRACE_MS, deliberately: a step detected at the very worst moment
+ * still leaves the rebased boundary comfortably inside the grace that decides what a late
+ * deadline means, rather than on its edge. */
+const MAX_ARM_MS = 5_000;
+
+/** How long the clock waits before retrying a boundary that threw. Long enough that a
+ * durable failure (a full disk, a store gone read-only) costs one attempt and one log line
+ * every minute rather than a hot loop — re-arming on the unchanged deadline would compute a
+ * delay of 0 and spin the daemon's only thread — and short enough that the clock comes back
+ * on its own once the disk does, with no restart. */
+const RECONCILE_RETRY_MS = 60_000;
+
 /** Boots and owns the live clock for one daemon instance. `onBoundary({ phase, settings
  * })` is the seam a real notification hangs off (src/notify.mjs) — ponytail:
  * this module still fires nothing itself, by design ("no tool learns of
  * the timer" extends to this module too; the no-op default below is what a caller that
- * wants no notifications, e.g. a check, gets for free). */
-export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {}) {
+ * wants no notifications, e.g. a check, gets for free).
+ *
+ * `now` and `mono` are the shell's two clocks, injectable for the same reason every pure
+ * function above takes `now` as an argument: a check cannot step the machine's wall clock,
+ * and the whole of the clock-step rule below is about the two disagreeing. `now` is wall
+ * time in epoch ms (it is what lands in the document, so it has to be the real thing);
+ * `mono` is any monotonic millisecond counter, i.e. one that a clock being SET does not
+ * move. Neither is used anywhere but here — the routes and the checks that drive them keep
+ * passing their own `now` per call, exactly as before. */
+export function createPomodoro({
+  home = boardHome(),
+  onBoundary = () => {},
+  now: nowFn = Date.now,
+  mono = () => performance.now(),
+} = {}) {
   let timeoutHandle = null;
+  /** The (wall, monotonic) pair sampled when the current wait was armed, and the whole of
+   * what the step detector has to work from. Null whenever nothing is armed, so a
+   * reconcile that did not come from an armed wait can never be handed a stale pair. */
+  let armedAt = null;
 
   function clearArmed() {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
       timeoutHandle = null;
     }
+    armedAt = null;
+  }
+
+  /** How far the wall clock moved that the monotonic clock did not, across the wait that
+   * just elapsed. Zero when there is nothing to compare against, which is the honest
+   * answer for a boot or for any reconcile that did not come from an armed wait. */
+  function clockStepSince(now) {
+    if (!armedAt) return 0;
+    return (now - armedAt.wall) - (mono() - armedAt.mono);
   }
 
   function arm(doc, now) {
@@ -708,13 +838,31 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     // before NTP syncs, a restored VM snapshot) or a hand-edited file, both of which
     // readDoc promises to survive -- re-armed every millisecond without ever reaching
     // the deadline, so it never converged. Measured at 846 re-arms per second on the
-    // daemon's only thread. Clamping instead re-arms once per MAX_TIMEOUT_MS and lets
-    // reconcile settle it when the deadline finally arrives.
-    const delay = Math.min(Math.max(0, doc.timer.deadline - now), MAX_TIMEOUT_MS);
-    timeoutHandle = setTimeout(() => reconcile(Date.now()), delay);
+    // daemon's only thread. MAX_ARM_MS (its own comment above) is the far tighter of the
+    // two ceilings and the one that actually bites; MAX_TIMEOUT_MS stays spelled out
+    // because it is a fact about node's own setTimeout that a future edit to MAX_ARM_MS
+    // must not be able to walk past.
+    const delay = Math.min(Math.max(0, doc.timer.deadline - now), MAX_ARM_MS, MAX_TIMEOUT_MS);
+    // `nowFn()` and not the caller's `now`, even though the delay above is computed from the
+    // caller's: this pair exists only to answer "did the wall clock jump between arming and
+    // firing", and the firing end reads `nowFn()`. Sampling the two ends from two different
+    // clocks -- every route passes no `now` at all, but a check may pass a fabricated one --
+    // would report the difference between those clocks as a clock step.
+    armedAt = { wall: nowFn(), mono: mono() };
+    timeoutHandle = setTimeout(() => reconcile(nowFn(), true), delay);
     // Belt and suspenders with close() below, same reasoning as the SSE heartbeat a
     // few lines over in src/server.mjs: a live pomodoro must never be the reason an
     // in-process check's node process fails to exit on its own.
+    timeoutHandle.unref?.();
+  }
+
+  /** The failure path's own re-arm: one attempt per RECONCILE_RETRY_MS, on nothing but the
+   * clock, deliberately NOT on the document's deadline (which is still due, so arming on it
+   * would compute a delay of 0 and spin). No `armedAt` pair is left behind — a retry is not
+   * a wait against a deadline, so there is no step to measure across it. */
+  function armRetry() {
+    clearArmed();
+    timeoutHandle = setTimeout(() => reconcile(nowFn(), false), RECONCILE_RETRY_MS);
     timeoutHandle.unref?.();
   }
 
@@ -723,15 +871,50 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
   // that disk is the single source of truth (same call this repo already made for
   // src/store.mjs's searchBoards, "no side index that could drift"), and it's cheap:
   // this file is a few hundred bytes next to a board parse.
-  function reconcile(now) {
+  //
+  // WRAPPED WHOLE, and that is the point of the shape rather than a decoration on it (the
+  // same wrapper src/stranded.mjs's `persist` and `announce` carry, for the same reason).
+  // This runs from a bare setTimeout: by the time it does, no request handler's try/catch
+  // is anywhere on the stack, so an uncaught throw here is an uncaught exception at the top
+  // of the event loop, which bin/daemon.mjs answers by exiting -- and launchd restarts the
+  // daemon straight back onto the SAME due boundary, which throws again. A full disk turned
+  // one failed `writeDoc` into a permanent restart loop with every blocked `/wait` and every
+  // open stream going down on each pass. The cost of the failure is now one log line and one
+  // retry a minute; the clock recovers on its own when the disk does.
+  //
+  // `readDoc` sits OUTSIDE the try on purpose: it never throws (see its own comment), so the
+  // document this returns on the failure path is still the honest one.
+  //
+  // `fromTimer` says whether an armed wait is what led here, which is the only situation in
+  // which `armedAt` describes anything: a boot, or a retry, has no wait behind it to have
+  // measured a clock step across.
+  function reconcile(now, fromTimer = false) {
     const doc = readDoc(home, now);
-    const { doc: next, boundary } = settleBoundary(doc, now);
-    if (next !== doc) writeDoc(next, home);
-    arm(next, now);
-    // `settings` rides along here, not inside settleBoundary's own boundary object: the
-    // pure function (above) knows nothing about notification toggles, only the loop --
-    // src/notify.mjs reads settings.notify/settings.sound off this.
-    if (boundary) onBoundary({ ...boundary, settings: next.settings });
+    let next = doc;
+    try {
+      // The clock-step correction, ahead of the boundary rule that would otherwise read a
+      // stepped clock as a deadline nobody was there for (applyClockStep above says why).
+      // A no-op by reference for everything that is not a step, so the `next !== doc` write
+      // below is unchanged for every ordinary boundary.
+      const stepped = applyClockStep(doc, fromTimer ? clockStepSince(now) : 0);
+      const settled = settleBoundary(stepped, now);
+      next = settled.doc;
+      if (next !== doc) writeDoc(next, home);
+      arm(next, now);
+      // `settings` rides along here, not inside settleBoundary's own boundary object: the
+      // pure function (above) knows nothing about notification toggles, only the loop --
+      // src/notify.mjs reads settings.notify/settings.sound off this.
+      if (settled.boundary) onBoundary({ ...settled.boundary, settings: next.settings });
+    } catch (err) {
+      // Named, never swallowed silently: a clock that has stopped settling boundaries is a
+      // thing a reader will notice and a thing whoever reads the daemon's log needs told.
+      console.error(`claude-board: the pomodoro boundary could not be settled: ${(err && err.message) || err}`);
+      // Also reached when `onBoundary` itself throws, in which case the interval already
+      // advanced and was already correctly armed -- the retry then merely wakes once, finds
+      // nothing due, and re-arms properly. One spare wakeup is the whole cost of not
+      // needing a second try/catch to tell the two failures apart.
+      armRetry();
+    }
     return next;
   }
 
@@ -747,14 +930,14 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * does NOT start a fresh timer when there is none — a daemon restart alone must
      * not begin a pomodoro nobody asked for; that is ensureTimer's job, called by
      * whichever slice wires the session-start hook. */
-    boot(now = Date.now()) {
+    boot(now = nowFn()) {
       return reconcile(now);
     },
     /** The session-start seam ("starting when one is already running is
      * a no-op", extended to "starting is starting a NEW work interval"). Safe to call
      * on every session start: startWork is a no-op against anything already in
      * `timer`, running, paused or mid-break alike. */
-    ensureTimer(now = Date.now()) {
+    ensureTimer(now = nowFn()) {
       const doc = readDoc(home, now);
       const next = startWork(doc, now);
       if (next !== doc) {
@@ -770,7 +953,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * stops actually being counted down by anything, not merely on paper. Skipping
      * this on a no-op (pausing nothing, or pausing an already-paused timer) leaves
      * whatever was already armed exactly as it was. */
-    pause(now = Date.now()) {
+    pause(now = nowFn()) {
       const doc = readDoc(home, now);
       const next = pauseTimer(doc, now);
       if (next !== doc) {
@@ -788,7 +971,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * fire: no expiry, no advance to the next phase, no notification, until some
      * unrelated event (a restart's `boot()`, another pause/resume) happens to
      * reconcile it. */
-    resume(now = Date.now()) {
+    resume(now = nowFn()) {
       const doc = readDoc(home, now);
       const next = resumeTimer(doc, now);
       if (next !== doc) {
@@ -808,7 +991,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * Deliberately does not pass an `onBoundary` callback anywhere in this path —
      * `arm` only ever schedules the NEXT natural boundary's setTimeout, it
      * never itself fires notification code, so nothing here can. */
-    forward(now = Date.now()) {
+    forward(now = nowFn()) {
       const doc = readDoc(home, now);
       const next = forwardTimer(doc, now);
       if (next !== doc) {
@@ -819,7 +1002,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
     },
     /** Restart (src/server.mjs POST /api/pomodoro/restart). Same shape as forward
      * above, applying the pure restartTimer instead. */
-    restart(now = Date.now()) {
+    restart(now = nowFn()) {
       const doc = readDoc(home, now);
       const next = restartTimer(doc, now);
       if (next !== doc) {
@@ -835,7 +1018,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * reset-while-running would leave the just-cleared interval's timeout alive to fire
      * later, land back on disk (finding `!doc.timer`, a no-op in settleBoundary) but not
      * before wasting a tick pretending the reset never happened. */
-    reset(now = Date.now()) {
+    reset(now = nowFn()) {
       const doc = readDoc(home, now);
       const next = resetTimer(doc, now);
       writeDoc(next, home);
@@ -850,7 +1033,7 @@ export function createPomodoro({ home = boardHome(), onBoundary = () => {} } = {
      * already running, and re-arming against an UNCHANGED deadline here would be a
      * no-op clearTimeout+setTimeout pair that only invites a future reader to wonder
      * why writing settings touches the live clock at all. */
-    settings(patch, now = Date.now()) {
+    settings(patch, now = nowFn()) {
       const doc = readDoc(home, now);
       const next = mergeSettings(doc, patch);
       writeDoc(next, home);

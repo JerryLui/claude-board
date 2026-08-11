@@ -885,12 +885,18 @@ const MAX_HIGHLIGHT_CHARS = 8192;
  * belonging to one row's wrapper closing a `<span class="tok-comment">` opened in
  * the row before it). Splitting per leaf run before any wrapping happens keeps
  * every span self-contained within the one row it is ever wrapped inside. */
+/** Does this text and grammar actually reach Prism, or take the plain fallback?
+ * Over MAX_HIGHLIGHT_CHARS (see its comment for the measurements) a block takes
+ * the same branch a missing grammar takes: same code path, same output shape, so
+ * the gutter, the diff fill and copy fidelity are unaffected either way. Named
+ * rather than inlined because highlightFenceHtml below has to answer the same
+ * question to decide whether a fence costs anything, and two spellings of "is
+ * this tokenized" is how the answer drifts. */
+const willTokenize = (text, grammar) => Boolean(grammar && text && text.length <= MAX_HIGHLIGHT_CHARS);
+
 function highlightRows(text, grammar) {
   const leaves = [];
-  // Over MAX_HIGHLIGHT_CHARS (see its comment for the measurements) a block takes
-  // the same fallback branch a missing grammar takes: same code path, same output
-  // shape, so the gutter, the diff fill and copy fidelity are unaffected.
-  if (grammar && text && text.length <= MAX_HIGHLIGHT_CHARS) flattenTokens(Prism.tokenize(text, grammar), undefined, leaves);
+  if (willTokenize(text, grammar)) flattenTokens(Prism.tokenize(text, grammar), undefined, leaves);
   else leaves.push([text, undefined]);
 
   const rows = [];
@@ -1015,11 +1021,30 @@ function renderCodeBlock(block) {
  * caller, and TOKEN_CLASS/highlightRows/flattenTokens above the only
  * tokenize-and-wrap implementation in the tree: a `kind: 'code'` block and a fence
  * inside markdown both bottom out here. */
-export function highlightFenceHtml(text, lang) {
-  const rows = highlightRows(text, grammarFor(lang));
+export function highlightFenceHtml(text, lang, budget = null) {
+  // `budget` is src/markdown.mjs's per-document allowance (MAX_DOC_HIGHLIGHT_CHARS
+  // there), a `{ remaining }` counter this function spends. MAX_HIGHLIGHT_CHARS
+  // bounds ONE call, which bounds nothing when a document holds a hundred
+  // just-under-cap fences and each one is its own call, so the caller counts across
+  // the whole document and hands the counter down.
+  //
+  // The counter is spent HERE, not by the caller, because only this side knows
+  // whether the fence costs anything: a fence with no info string, or one naming a
+  // language this build never vendored, does no tokenizer work at all. Charging
+  // those bought nothing and silently stripped the colour off the next fence that
+  // could have used the budget -- an 8 KB ```cobol dump paying for a ```javascript
+  // fence's highlighting. Declining tokenization (out of budget) takes the same
+  // branch an unvendored language takes -- rows, gutter, diff fill and bytes all
+  // unchanged, colour dropped -- but keeps the language LABEL, which names a fact
+  // about the fence that is still true.
+  const grammar = grammarFor(lang);
+  const affordable = !budget || text.length <= budget.remaining;
+  const tokenize = affordable && willTokenize(text, grammar);
+  if (tokenize && budget) budget.remaining -= text.length;
+  const rows = highlightRows(text, tokenize ? grammar : undefined);
   const body = lang === 'diff' ? diffCodeBody(rows, classifyDiffLines(text), { gutter: false }) : rows.join('\n');
   const pre = `<pre><code>${body}</code></pre>`;
-  if (!lang || !grammarFor(lang)) return pre;
+  if (!lang || !grammar) return pre;
   return `<div class="fence-lang" data-lang="${escAttr(lang)}">${pre}</div>`;
 }
 
