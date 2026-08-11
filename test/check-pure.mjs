@@ -5690,6 +5690,91 @@ check('choose-between-rendered-variants (scope): a STANDALONE html stage\'s repo
   assert.ok(!frame.style.height, 'a standalone stage sends the same \'height\' message every html stage does (stageAgentScript cannot tell which kind of card it is in) -- the parent must decline to apply it outside a .choice-variant card');
 });
 
+check('choose-between-rendered-variants: a mock the cap CLIPS scrolls under the wheel, in place -- the notch is forwarded to the stage, chains back to the page at both ends, and never reaches an unclipped card (ablation 1: drop forwardStageWheel\'s "travel <= 0" gate and the short mock\'s notch is consumed; ablation 2: drop either chaining guard and the notch stops going back to the page at that end; ablation 3: delete the stage\'s \'scrollBy\' branch and nothing moves at all)', () => {
+  // The gap this closes: an option's stage is 'pointer-events: none' (ADR.md
+  // entry 78, and this must not relax it), so a wheel over the mock lands on
+  // the CARD -- and the parent cannot scroll an opaque-origin document either.
+  // A mock taller than the 600px cap was therefore clipped with everything
+  // past the cap unreachable in place.
+  //
+  // What a stand-in cannot supply is the gesture or the layout: the wheel is
+  // dispatched here rather than turned, and the scroll it asks for is captured
+  // rather than performed (QUIRKS.md "The stand-in has no layout"). What it DOES
+  // reach is the whole decision path -- clipped or not, which end the reader is
+  // at, the shape of the message, and that the real stage script acts on it.
+  const board = createBoard({
+    title: 'variants',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'Tall', block: { kind: 'html', html: '<body data-standin-scroll-height="900"><p>tall mock</p></body>' } },
+        { label: 'Short', block: { kind: 'html', html: '<body data-standin-scroll-height="400"><p>short mock</p></body>' } },
+      ],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const cards = document.querySelectorAll('.choice-variant');
+  const frames = document.querySelectorAll('.html-stage');
+  withCapturedRAF((drain) => { frames.forEach(f => f.loadSrcdoc()); drain(); });
+  assert.equal(frames[0].style.height, '600px', 'setup failure: the tall mock must be the clipped one');
+  assert.equal(frames[1].style.height, '400px', 'setup failure: the short mock must not be clipped');
+
+  // Captured, not performed: the stand-in lays nothing out, so this stands in
+  // for the stage document actually moving -- and it is the real
+  // stageAgentScript's own call, reached over the real channel, not a stub of
+  // the handler.
+  const moved = [];
+  frames[0].contentWindow.scrollBy = (opts) => { moved.push(opts); };
+  frames[1].contentWindow.scrollBy = () => { throw new Error('an unclipped mock must never be scrolled'); };
+
+  const notch = (card, props) => {
+    const ev = new StandInEvent('wheel', { deltaY: 120, deltaMode: 0, ...props });
+    card.dispatchEvent(ev);
+    return ev;
+  };
+
+  const down = notch(cards[0]);
+  assert.deepEqual(moved, [{ top: 120, left: 0, behavior: 'auto' }],
+    'a notch over a clipped mock must reach the stage as a pixel delta -- the mock cannot receive the wheel itself, which is the whole reason for the message');
+  assert.equal(down.defaultPrevented, true, 'and the page must not scroll under the reader at the same time');
+
+  // Unclipped: nothing is hidden, so the gesture is the page's, untouched.
+  const short = notch(cards[1]);
+  assert.equal(short.defaultPrevented, false,
+    'a card with nothing hidden must leave the wheel to the page -- consuming it there would make an ordinary scroll past the variant sticky');
+
+  // Units: a browser reporting LINES rather than pixels must still move the
+  // mock by a notch, not by three pixels.
+  moved.length = 0;
+  notch(cards[0], { deltaY: 3, deltaMode: 1 });
+  assert.deepEqual(moved, [{ top: 48, left: 0, behavior: 'auto' }], 'a line-mode wheel must be converted to pixels');
+
+  // Chaining, top end: the stage has never reported an offset, so it is at the
+  // top -- an upward notch belongs to the page.
+  moved.length = 0;
+  const up = notch(cards[0], { deltaY: -120 });
+  assert.deepEqual(moved, [], 'at the top of the mock an upward notch must go back to the page');
+  assert.equal(up.defaultPrevented, false);
+
+  // Chaining, bottom end: 900 of content in a 600 frame is 300px of travel, so
+  // a stage reporting 300 is showing its last pixel.
+  frames[0].contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'scroll', top: 300 }, '*');
+  const past = notch(cards[0]);
+  assert.deepEqual(moved, [], 'at the bottom of the mock a downward notch must go back to the page -- a card that keeps consuming it traps the reader');
+  assert.equal(past.defaultPrevented, false);
+
+  // And the stage side is shape-checked like every other inbound number on this
+  // channel: a stage is agent-authored, and so is anything that reaches it.
+  frames[0].contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'scroll', top: 0 }, '*');
+  [{ delta: '120' }, { delta: NaN }, { delta: Infinity }, {}, { delta: { valueOf: () => 120 } }].forEach((fields) => {
+    frames[0].contentWindow.postMessage({ cb: 'cb-stage', type: 'scrollBy', ...fields });
+    assert.deepEqual(moved, [], `a malformed delta must never reach scrollBy: ${JSON.stringify(fields)}`);
+  });
+  frames[0].contentWindow.postMessage({ cb: 'cb-stage', type: 'scrollBy', delta: 120 });
+  assert.deepEqual(moved, [{ top: 120, left: 0, behavior: 'auto' }],
+    'and the well-formed one still moves the mock, so the check above rejects the messages rather than the mechanism being dead');
+});
+
 check('choose-between-rendered-variants: an html option\'s iframe is rendered pointer-events: none -- a real click can never reach it, only the card around it can ever record a pick', () => {
   // SECURITY, not polish: without this, a real, trusted
   // click over the visible mock content of an html-kind option would land

@@ -1247,7 +1247,9 @@ exists.
 style. The cap stops a hostile or viewport-sized report growing a card without limit; the floor
 stops a report that measured a collapsed sliver of chrome from locking the card there forever,
 since a taller report never arrives from content that is not reflowing. Applied only to a stage
-inside a `.choice-variant` card.
+inside a `.choice-variant` card. What the cap hides is not lost: the same reported height is what
+tells the parent this stage has somewhere to scroll, which is what `scrollBy` below forwards a
+wheel notch for.
 
 `scroll` exists because ADR 40's page-board header condenses on the reader's scroll, but on a page
 board the document itself never scrolls — the artifact scrolls inside the opaque-origin frame — so
@@ -1261,11 +1263,27 @@ the parent cannot observe it short of being told.
 | `locate` | `{ requestId, refs }` | asks for the current `{left, top}` of every ref |
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
+| `scrollBy` | `{ delta }` | "move yourself this many pixels" — one forwarded wheel notch |
 
 `scroll` is the one bidirectional type on this channel. Inbound it is sent only as a reset,
 `top: 0`, by the board's back-to-top control, since the parent cannot scroll a cross-origin
 document itself. Both directions aim at whichever element most recently identified itself as the
 scroller, never at the document by assumption.
+
+`scrollBy` exists because a variant option's stage is the one surface where the reviewer's own
+wheel can never reach the mock: the frame is `pointer-events: none` inside a `.choice-variant`
+card, so the gesture lands on the card in the parent document, which cannot scroll an
+opaque-origin document either. The parent forwards the notch instead — sent only while the stage
+reported a `height` past `STAGE_HEIGHT_CAP` (i.e. the cap is genuinely hiding something) and only
+until its own last reported `top` reaches that end, so the notch chains back to the page at the
+mock's top and bottom rather than trapping the reader in the card. Relative, not absolute: the
+parent knows how far the reviewer turned, never where the stage currently is. It is a pixel
+delta whichever unit the wheel reported, and it applies `behavior: 'auto'` — one notch is
+already the reader's granularity.
+
+Forwarding a notch is not a hole in the rule above it: no pointer event reaches the stage, so
+this adds no path from a stage to its own selection, and the expand control (the lens) remains
+the only place a stage becomes genuinely live.
 
 The hover stylesheet is injected lazily, the first time `commentMode` turns true. A read-only
 archive never sends `mode` at all (`setCommentMode` refuses to enable comment mode when

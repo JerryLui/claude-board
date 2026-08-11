@@ -237,6 +237,7 @@ one case that matters is also the one no automated check here can produce.
 - [Growing the viewport after load mis-positions anchor pins](#growing-the-viewport-after-load-mis-positions-anchor-pins)
 - [A pin over an html stage arrives after the round flip, not with it](#a-pin-over-an-html-stage-arrives-after-the-round-flip-not-with-it)
 - [Preview harness](#preview-harness)
+- [A driven tab does not paint, and half the stage channel needs a paint](#a-driven-tab-does-not-paint-and-half-the-stage-channel-needs-a-paint)
 
 ### `ResizeObserver` does not necessarily deliver an initial observation
 
@@ -669,6 +670,28 @@ throwaway script that calls `createBoard` / `addRound` / `renderBoardPage` and d
 the HTML somewhere, then serve that directory over http — Chrome automation refuses
 `file:` URLs. Do not serve out of `/tmp` on this machine: a stray `/tmp/inspect.py`
 shadows the stdlib and breaks `python3 -m http.server`.
+
+### A driven tab does not paint, and half the stage channel needs a paint
+
+Driving that page through Chrome automation, the tab renders only while something asks
+it for pixels. Between screenshots there is no rendering opportunity, so
+`requestAnimationFrame` never runs, `ResizeObserver` never delivers, and a programmatic
+scroll never fires its `scroll` event. Every stage report that hangs off one of those
+— `height` first of all, and every `scroll` — simply does not arrive, and the parent
+sits at its pre-report defaults (no `style.height` on a variant frame, no recorded
+offset) looking exactly like a broken feature.
+
+Take a screenshot to force the frame, then measure. Interleave one per step when a
+sequence depends on reports landing between steps; a `setTimeout` of any length does
+not substitute, because the wait itself is not a paint.
+
+Separately: the extension's `computer` scroll action dispatches **no** `wheel` event —
+it moves the scroll position programmatically. A capture-phase `wheel` listener on
+`window` sees nothing while the page visibly scrolls. Wheel handling has to be driven
+with a dispatched `WheelEvent` (which reaches listeners but is `isTrusted: false` and
+performs no native scroll), so hit-testing — which element a real notch lands on over
+a `pointer-events: none` iframe — stays a question only a human at the trackpad can
+answer.
 
 ---
 

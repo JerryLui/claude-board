@@ -1186,13 +1186,13 @@ check('every live message type (a real post()/postToStage() call site) has an en
   assert.deepEqual(missing, [], `undocumented live message type(s): ${missing.join(', ')}`);
 });
 
-check('the nine live types are exactly ready/hover/click/positions/height/scroll/mode/locate/band', () => {
+check('the ten live types are exactly ready/hover/click/positions/height/scroll/scrollBy/mode/locate/band', () => {
   // Pinned by hand once, so a type silently renamed (not just added) is also
   // caught: the check above only ever notices ADDITIONS relative to the
   // comment, never a live type and its comment entry drifting to two
   // different names in lockstep.
   const live = liveMessageTypes(renderSrcText, uiSrcText);
-  assert.deepEqual([...live].sort(), ['band', 'click', 'height', 'hover', 'locate', 'mode', 'positions', 'ready', 'scroll'].sort());
+  assert.deepEqual([...live].sort(), ['band', 'click', 'height', 'hover', 'locate', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
 });
 
 check('the deleted \'select\' type is not live, and is not required to be documented', () => {

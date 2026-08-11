@@ -1712,6 +1712,34 @@ export function stageAgentScript() {
     if (scroller) scroller.scrollTop = top;
   }
 
+  /** Move this document BY 'delta' -- one wheel notch a reviewer turned over a
+   * variant card, forwarded by the parent (src/ui.mjs's wheel listener).
+   * A clipped option's stage is the one surface where no real wheel can ever
+   * reach this document at all: the frame is 'pointer-events: none' inside a
+   * '.choice-variant' card (ADR.md entry 78, unchanged by this), so the
+   * gesture lands on the card in the parent -- which cannot scroll an
+   * opaque-origin document either. Hence a message, aimed at whatever last
+   * scrolled, exactly like scrollTo above.
+   *
+   * 'auto', never the 'smooth' scrollTo uses: a notch is already the reader's
+   * own granularity, and a per-notch animation has the next notch arriving on
+   * top of an unfinished one -- the whole gesture stutters. Same
+   * feature-detection floor as scrollTo, for the same reason (a 'scrollBy'
+   * that silently does nothing never throws). */
+  function scrollByStep(delta) {
+    var target = scroller || window;
+    if (typeof target.scrollBy === 'function') {
+      try {
+        target.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+        return;
+      } catch (e) { /* older two-argument signature only; fall through */ }
+      target.scrollBy(0, delta);
+      return;
+    }
+    if (scroller) { scroller.scrollTop += delta; return; }
+    if (typeof target.scrollTo === 'function') target.scrollTo(0, scrollTopNow() + delta);
+  }
+
   // The board's theme control paints this document too, so a
   // rendered artifact needs none of its own. The parent resolves its own
   // three-state control (light / dark / the attribute's ABSENCE, meaning
@@ -1767,6 +1795,19 @@ export function stageAgentScript() {
       // otherwise be handed to scrollTo.
       if (typeof data.top !== 'number' || !isFinite(data.top)) return;
       scrollTo(data.top);
+      return;
+    }
+    if (data.type === 'scrollBy') {
+      // Parent -> stage only, no outbound half: a wheel notch turned over a
+      // clipped variant card, which is a gesture this document can never
+      // receive on its own (scrollByStep's own comment above). Relative, not
+      // absolute, deliberately -- the parent knows how far the reviewer just
+      // turned, never where this document currently is; the offset is this
+      // side's fact, and the browser clamps it at both ends for free.
+      // Shape-checked the same way every other inbound number on this channel
+      // is.
+      if (typeof data.delta !== 'number' || !isFinite(data.delta)) return;
+      scrollByStep(data.delta);
       return;
     }
     if (data.type === 'band') {

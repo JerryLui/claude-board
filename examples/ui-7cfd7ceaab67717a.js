@@ -1183,7 +1183,69 @@
   function handleStageHeight(data, frame) {
     if (!Number.isFinite(data.height) || data.height <= 0) return;
     if (!frame.closest('.choice-variant')) return;
+    // Kept beside the height it clamps, not derived later from the box: this
+    // is the mock's OWN reported content height, and the difference between it
+    // and the cap is exactly how much of the mock the cap is hiding -- the one
+    // number forwardWheel (below) needs to know whether there is anything to
+    // scroll at all.
+    frame.__cbStageContentH = data.height;
     frame.style.height = Math.max(STAGE_HEIGHT_FLOOR, Math.min(data.height, STAGE_HEIGHT_CAP)) + 'px';
+  }
+
+  /** One wheel notch in pixels, whatever unit the event reports it in. Chrome
+   * sends pixels (deltaMode 0) and is what this board is driven in, but a
+   * browser that reports LINES (1) or PAGES (2) -- an archive opened in
+   * Firefox, say -- would otherwise move a mock three pixels a notch, which
+   * reads as a broken card rather than as a unit mismatch. 16px is an ordinary
+   * line box; a page is one frameful, which is what the cap already is. */
+  function wheelPixels(ev) {
+    if (ev.deltaMode === 1) return ev.deltaY * 16;
+    if (ev.deltaMode === 2) return ev.deltaY * STAGE_HEIGHT_CAP;
+    return ev.deltaY;
+  }
+
+  /** A wheel turned over a variant option's card, forwarded to the clipped
+   * stage under it (src/render.mjs's 'scrollBy'). Everything a mock taller than
+   * STAGE_HEIGHT_CAP hides is otherwise unreachable in place: the frame is
+   * 'pointer-events: none' (ADR.md entry 78) so the wheel never reaches the
+   * mock's own document, and the parent cannot scroll an opaque-origin document
+   * itself. Forwarding the NOTCH rather than relaxing that rule is the whole
+   * point -- no pointer event reaches the stage, so this adds no path from a
+   * stage to its own selection; the lens (the expand control) stays the place
+   * a stage becomes genuinely live.
+   *
+   * Returns nothing; the caller is the listener, and the only side effects are
+   * the message and, when the notch is consumed, preventDefault.
+   *
+   * ponytail: the wheel is the only gesture wired. A reader with no wheel --
+   * touch, or keyboard alone -- reads a clipped mock through the expand
+   * control, which is in the tab order and opens the same artifact live and
+   * full-screen. The upgrade path, if that stops being enough, is the
+   * parent-drawn scrollbar this deliberately does not build: a thumb sized
+   * from the height the stage already reports, dragged in the parent document,
+   * writing the same message. */
+  function forwardStageWheel(card, ev) {
+    var frame = card.querySelector('.html-stage');
+    if (!frame || !isWiredStage(frame)) return;
+    // How far this mock can still travel: what it reported as its own content
+    // height, less the frame the cap clipped it to. Zero or less means nothing
+    // is hidden -- the ordinary case, and it must stay the cheap one: the page
+    // keeps the gesture untouched.
+    var travel = (frame.__cbStageContentH || 0) - STAGE_HEIGHT_CAP;
+    if (travel <= 0) return;
+    var delta = wheelPixels(ev);
+    if (typeof delta !== 'number' || !isFinite(delta) || delta === 0) return;
+    // CHAINING, not trapping: at either end of the mock the notch goes back to
+    // the page, so a reader scrolling past a variant is never held by it.
+    // 'top' is the stage's own last report (handleStageScroll) and can be one
+    // message behind mid-gesture -- worth exactly one forwarded notch that the
+    // stage's own browser then clamps, against a page that would otherwise
+    // stick under the cursor.
+    var top = typeof frame.__cbStageTop === 'number' ? frame.__cbStageTop : 0;
+    if (delta < 0 && top <= 0) return;
+    if (delta > 0 && top >= travel) return;
+    ev.preventDefault();
+    postToStage(frame, { type: 'scrollBy', delta: delta });
   }
 
   function handleStagePositions(data) {
@@ -3163,6 +3225,13 @@
       ev.preventDefault();
       selectVariant(card);
     });
+    // A clipped mock scrolls under the wheel, in place -- see forwardStageWheel
+    // for why the notch travels as a message and what stays untouched.
+    // Non-passive deliberately: consuming the notch is the whole mechanism, and
+    // a passive listener cannot preventDefault. It consumes one only while the
+    // mock genuinely has somewhere left to go, so the page's own scrolling is
+    // unaffected everywhere else.
+    card.addEventListener('wheel', function (ev) { forwardStageWheel(card, ev); }, { passive: false });
   });
 
   qsa('textarea[data-answer-for]', root).forEach(function (ta) {
