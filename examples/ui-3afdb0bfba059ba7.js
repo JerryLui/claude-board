@@ -3317,8 +3317,9 @@
       // place cannot also leave a stray second entry for the same queue item.
       refreshPins(document);
       // Chat-style order (the Tray, CONTEXT.md): the list is meant to follow the
-      // newest entry, same as an ordinary chat input -- with the 40vh cap
-      // (src/styles.mjs), the 4th queued comment already overflows, and with no
+      // newest entry, same as an ordinary chat input -- with the list capped at
+      // three items (src/styles.mjs), the 4th queued comment already overflows,
+      // and with no
       // scroll the reviewer types, the input clears, and the new entry lands
       // below the fold with nothing on screen to say so. '.comment-list-wrap'
       // is the ONE element that actually scrolls ('overflow-y: auto') --

@@ -1597,18 +1597,24 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    moment a send control landed inside it (ADR.md entry 45, AC 4) that has to
    stay reachable at every comment count: unbounded growth pushed the Tray's own
    top edge off the top of a short viewport well before the list got long,
-   taking the send control with it. 'max-height' below puts a ceiling on
-   the Tray itself: it stops growing at roughly
-   40% of the viewport height, so the artifact's upper half stays visible under
-   it no matter how many comments are queued. 'min()' keeps the older,
-   dock-relative ceiling alongside the flat one rather than replacing it --
+   taking the send control with it. The working ceiling is on
+   '.comment-list-wrap' (its own rule below): the list shows the three NEWEST
+   queued comments and scrolls for the rest -- src/ui.mjs keeps it pinned to
+   the bottom on every queue, so the visible three are always the latest --
+   which holds the whole Tray to a few rows over the artifact at any queue
+   length. The 45px in that calc is the measured single-line '.comment-item'
+   box (12.5px type over two rows, 8px padding, 1px borders); a comment long
+   enough to wrap is taller and shows fewer whole entries, and the partial
+   entry at the fold is itself the cue that there is more to scroll.
+   'max-height' on the Tray itself stays as the backstop, not the mechanism:
+   'min()' keeps the older, dock-relative ceiling alongside the 40vh one --
    tied to the SAME '--round-pager-dock-h' the 'bottom' value already reads (no
-   second number to keep in sync) -- as the floor for a viewport short enough
-   that 40vh alone would still let the Tray's top edge climb into the
+   second number to keep in sync) -- for a viewport short enough
+   that even a three-item Tray's top edge would climb into the
    condensed header pill's own headroom (ADR.md entry 40): "the rest of the
    viewport, minus the Tray's own bottom offset, minus 72px of headroom for
-   the pill plus its own gap". Whichever number is smaller wins, so the Tray's
-   top edge can never rise above either limit, at ANY comment count.
+   the pill plus its own gap". Whichever number is smallest wins, so the Tray's
+   top edge can never rise above any of the limits, at ANY comment count.
    '.comment-list-wrap' is what actually absorbs the
    overflow: 'flex: 1 1 auto; min-height: 0' lets it shrink below its content's
    natural height and scroll internally, while the compose form and
@@ -1644,11 +1650,14 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
      bar, which need the room. */
   padding: var(--space-3); }
 /* The scrollable half: only the LIST of already-left comments grows without
-   bound and scrolls internally once it outgrows the Tray's own max-height
-   above -- the hint, the compose form and the send control are none of them
-   inside this box, so they never scroll out of reach regardless of how many
-   comments are queued. */
-.comment-list-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+   bound and scrolls internally once it outgrows its own max-height -- three
+   single-line items, their two gaps and the list's own top margin (see the
+   Tray comment above for where 45px comes from and why a wrapped comment
+   shows fewer whole entries) -- the hint, the compose form and the send
+   control are none of them inside this box, so they never scroll out of
+   reach regardless of how many comments are queued. */
+.comment-list-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  max-height: calc(3 * 45px + 2 * var(--space-2) + var(--space-3)); }
 /* The click-to-comment gesture's own hint, back in exactly
    one place -- the awaited page board's empty Tray, because comment
    mode already starts ON there (src/ui.mjs), so the mode toggle itself is no
