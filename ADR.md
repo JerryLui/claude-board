@@ -82,3 +82,4 @@ link where it is worth reading.
 | 93 | [A click surfaces the existing tab](.agents/adr/0093-a-click-surfaces-the-existing-tab.md) | 2026-08-11 | narrows 57; relates to 72 |
 | 94 | [The ring is work's alone](.agents/adr/0094-the-ring-is-works-alone.md) | 2026-08-11 | narrows 84; relates to 83 |
 | 95 | [Mermaid is vendored, closing the CSP's last external-host allowance](.agents/adr/0095-mermaid-is-vendored-closing-the-csp-s-last.md) | 2026-08-11 | widens 62; relates to 70 |
+| 96 | [The Notice is transient, never standing](.agents/adr/0096-the-notice-is-transient-never-standing.md) | 2026-08-11 | relates to 28 |

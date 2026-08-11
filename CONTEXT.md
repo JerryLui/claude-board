@@ -75,8 +75,15 @@ notified, alerted, signalled.
 
 **Banner**: the native macOS notification the daemon raises for a Stranded round, naming the
 project and carrying its board so that clicking it lands there. The only notification this
-product raises about a round, there being no browser-side one. _Avoid_: alert, toast,
-notification (unqualified) — also collides with macOS's own banner/alert distinction.
+product raises *about a round*; the Notice below is in-page and is about an interaction, not
+a round. _Avoid_: alert, toast, notification (unqualified) — also collides with macOS's own
+banner/alert distinction.
+
+**Notice**: the in-page message the board raises when a gesture cannot land, saying why —
+today, that Comment mode is on and so answers are locked. Transient and self-dismissing,
+never standing, and never more than one at a time. _Avoid_: toast, banner (the macOS one),
+hint (names the per-option text this product deleted), cue (ADR 20 spends it on the Banner's
+naming).
 
 **Block**: the atomic piece of a board — markdown, code, mermaid, html, compare, or question.
 Everything a board shows is one. _Avoid_: card, section, element.
