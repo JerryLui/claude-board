@@ -31,13 +31,13 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readSecret, secretPath, SECRET_HEADER } from '../src/secret.mjs';
+import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
 
 // CLAUDE_BOARD_HOME/CLAUDE_BOARD_PORT are PROTOCOL.md's; the rest are additive env
 // vars documented in PROTOCOL.md "MCP surface", never repurposing an existing name.
 
-const PORT = Number(process.env.CLAUDE_BOARD_PORT) || 7391;
+const PORT = daemonPort();
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_TIMEOUT_MS) || 40 * 60 * 1000; // 40m default (ADR.md entry 47)
 // The shim outlives the daemon's own identical cap by this much, and only this much.

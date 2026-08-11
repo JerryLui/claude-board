@@ -86,7 +86,12 @@ process.exit(0);
 `;
 const STUB_LAUNCHCTL = `#!/usr/bin/env node
 import fs from 'node:fs';
-fs.appendFileSync(process.env.STUB_LAUNCHCTL_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.STUB_LAUNCHCTL_LOG, JSON.stringify(args) + '\\n');
+// The pid gate's launchd side: report the health stub's pid as the supervised job's.
+if (args[0] === 'print' && process.env.STUB_LAUNCHCTL_PRINT_PID) {
+  process.stdout.write('\\tpid = ' + process.env.STUB_LAUNCHCTL_PRINT_PID + '\\n');
+}
 process.exit(0);
 `;
 const claudeStub = path.join(binDir, 'claude-stub.mjs');
@@ -110,7 +115,7 @@ writeFileSync(healthStub, `import http from 'node:http';
 import crypto from 'node:crypto';
 const identities = process.argv.slice(3).map(p => crypto.createHash('sha256').update(p, 'utf8').digest('hex'));
 http.createServer((req, res) => {
-  if (req.url === '/api/health') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, daemon: identities })); return; }
+  if (req.url === '/api/health') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, daemon: identities, pid: process.pid })); return; }
   res.writeHead(404); res.end();
 }).listen(Number(process.argv[2]), '127.0.0.1');
 `);
@@ -170,6 +175,7 @@ const installEnv = {
   CLAUDE_BOARD_PORT: String(installHealthPort),
   STUB_CLAUDE_LOG: claudeLog,
   STUB_LAUNCHCTL_LOG: launchctlLog,
+  STUB_LAUNCHCTL_PRINT_PID: String(healthProc.pid),
 };
 delete installEnv.CLAUDE_BOARD_REF_ROOTS;
 delete installEnv.CLAUDE_BOARD_HOME;
@@ -355,8 +361,8 @@ async function main() {
 
   const cloneServerPath = path.join(cloneDir, 'src', 'server.mjs');
   const originalServerText = readFileSync(cloneServerPath, 'utf8');
-  const NEEDLE = 'return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID });';
-  const REPLACEMENT = "return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID, marker: 'edited-clone-marker' });";
+  const NEEDLE = 'return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID, pid: process.pid });';
+  const REPLACEMENT = "return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID, pid: process.pid, marker: 'edited-clone-marker' });";
   await check('sanity: the health-response marker edit actually matches the real source text', async () => {
     assert.ok(originalServerText.includes(NEEDLE), 'src/server.mjs must still contain the exact health-response line this check edits');
   });

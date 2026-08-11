@@ -140,6 +140,24 @@ async function main() {
     assert.deepEqual(opened, [url], 'the printed URL is exactly what got handed to the opener');
   });
 
+  await check('finds a custom port from the record beside the secret, with no env set', async () => {
+    // daemonPort()'s middle branch: `claude mcp add` registers no environment, so a
+    // custom-port install is only reachable through the record install.sh writes.
+    // A shell with no CLAUDE_BOARD_PORT exported must still land on the daemon.
+    writeFileSync(path.join(home, 'port'), String(port));
+    const recorder = makeOpenRecorder(home);
+    const env = {
+      ...process.env,
+      CLAUDE_BOARD_SECRET_FILE: secretFile,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    };
+    delete env.CLAUDE_BOARD_PORT;
+    const { stdout } = await execFileP(process.execPath, [demoBin], { env, encoding: 'utf8', timeout: 15_000 });
+    assert.match(stdout.trim(), new RegExp(`^http://127\\.0\\.0\\.1:${port}/b/b_[0-9a-f]{32}$`),
+      'the record alone must carry the demo to the daemon\'s actual port');
+  });
+
   await check('fails fast, before any network call, when there is no local secret', async () => {
     // Pointed at a port with nothing on it too, deliberately (same reasoning as
     // test/check-mcp.mjs's identically-named check): that is what proves this

@@ -85,6 +85,10 @@ not name one is refused. This is the only thing in the system that ever deletes 
 so how long a board survives is the reader's decision and nothing else's.
 
 Daemon listens on `127.0.0.1:7391` (`CLAUDE_BOARD_PORT` overrides, for the checks).
+Non-daemon callers (shim, demo, authorize) resolve the port as `CLAUDE_BOARD_PORT`,
+else the port record install.sh writes beside the secret, else 7391 —
+`daemonPort()` in `src/secret.mjs`. The daemon itself never reads the record:
+launchd's plist environment is the one authority for what it binds.
 
 ## Identifiers
 
@@ -540,7 +544,7 @@ GET  /b/<asset>                     the shared script or stylesheet a page names
                                     daemon's only static route. Disjoint from the line
                                     above: an asset name contains a dot, which a board id
                                     cannot
-GET  /api/health                    { ok: true, version, daemon }  (open: install.sh polls it)
+GET  /api/health                    { ok: true, version, daemon, pid }  (open: install.sh polls it)
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread

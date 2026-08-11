@@ -18,9 +18,9 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { readSecret, secretPath, SECRET_HEADER } from '../src/secret.mjs';
+import { readSecret, secretPath, daemonPort, SECRET_HEADER } from '../src/secret.mjs';
 
-const PORT = Number(process.env.CLAUDE_BOARD_PORT) || 7391;
+const PORT = daemonPort();
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const OPEN_CMD = process.env.CLAUDE_BOARD_OPEN_CMD || 'open';
 const REQUEST_TIMEOUT_MS = Number(process.env.CLAUDE_BOARD_POST_TIMEOUT_MS) || 10_000;

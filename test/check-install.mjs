@@ -102,6 +102,13 @@ if (args[0] === 'bootstrap') {
   }
   process.exit(0);
 }
+// The pid gate asks launchd which process it supervises; this stub starts nothing,
+// so the answer is whatever pid the check says the "supervised" daemon has.
+if (args[0] === 'print') {
+  const jobPid = process.env.STUB_LAUNCHCTL_PRINT_PID;
+  if (jobPid) process.stdout.write('\\tpid = ' + jobPid + '\\n');
+  process.exit(0);
+}
 process.exit(0);
 `;
 
@@ -207,7 +214,7 @@ http.createServer((req, res) => {
     const identities = [sha(path.join(repoRoot, 'bin', 'daemon.mjs'))];
     for (const p of daemonPaths(workDir, 0, [])) identities.push(sha(p));
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, version: 'stub', daemon: identities }));
+    res.end(JSON.stringify({ ok: true, version: 'stub', daemon: identities, pid: process.pid }));
     return;
   }
   res.writeHead(404);
@@ -256,6 +263,10 @@ const env = {
   STUB_CLAUDE_STATE: claudeState,
   STUB_LAUNCHCTL_LOG: launchctlLog,
   STUB_LAUNCHCTL_STATE: launchctlState,
+  // What `launchctl print` reports as the job's pid: the health stub's own, so the
+  // gate's health-pid == job-pid comparison holds for every run that doesn't
+  // deliberately break it.
+  STUB_LAUNCHCTL_PRINT_PID: String(healthProc.pid),
 };
 // Never inherit this check process's own reference allowlist: the plist assertion
 // below is about install.sh's resolved DEFAULT, and a developer who exports
@@ -2097,6 +2108,33 @@ http.createServer((req, res) => {
     }
   });
 
+  await check('the health gate refuses a right-digest daemon that is not the launchd job', async () => {
+    // The digest's one gap: a hand-run `node bin/daemon.mjs` beside a degraded install
+    // is the same program at the same path, so its digest matches. Only the pid tells
+    // them apart -- health names the answerer's, `launchctl print` names the job's, and
+    // here they are made to disagree while the digest is exactly right.
+    const root = path.join(workDir, 'samepath-run');
+    const registrations = path.join(root, 'claude-registrations.json');
+    const r = spawnSync('bash', [installScript], {
+      env: {
+        ...env,
+        CLAUDE_BOARD_HEALTH_TRIES: '4',
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+        CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+        STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-samepath.log'),
+        STUB_CLAUDE_STATE: registrations,
+        STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-samepath.log'),
+        STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-samepath.json'),
+        STUB_LAUNCHCTL_PRINT_PID: String(healthProc.pid + 1),
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(r.status, 0, 'a right-digest wrong-pid listener must fail the install');
+    assert.match(r.stderr, /not the daemon\s+this install just set up/, 'and be named as the foreign-listener problem');
+    assert.ok(!existsSync(registrations), 'a failed install must not have rewritten the MCP registration');
+  });
+
   // --- carry-forward: the port is a choice, like the roots and the store ------------
 
   await check('a custom CLAUDE_BOARD_PORT survives a reinstall that never mentions it', async () => {
@@ -2126,6 +2164,8 @@ http.createServer((req, res) => {
         CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
         CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
         CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
+        // The pid gate compares against the custom-port stub, not the main one.
+        STUB_LAUNCHCTL_PRINT_PID: String(stub.pid),
       };
 
       const chosen = spawnSync('bash', [installScript], {

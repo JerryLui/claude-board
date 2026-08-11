@@ -1232,11 +1232,14 @@ HEALTH_TRIES="${CLAUDE_BOARD_HEALTH_TRIES:-$HEALTH_TRIES}"
 # the daemon's own program path arrives through execve, so a path that is not valid UTF-8
 # is decoded the same way on both sides and still matches itself.
 #
-# Known ceiling: on the DEGRADED (no-launcher) path the installed daemon is
-# `node $DAEMON_PATH` out of this clone, and a hand-run `node bin/daemon.mjs` from the same
-# clone is the same program at the same path — no identity the daemon could report
-# distinguishes them. With a launcher bundle in use (the normal path) the installed daemon
-# runs from inside the bundle, and this is exact.
+# The digest alone has one gap: on the DEGRADED (no-launcher) path the installed daemon
+# is `node $DAEMON_PATH` out of this clone, and a hand-run `node bin/daemon.mjs` from the
+# same clone is the same program at the same path — identical digests. So the gate also
+# requires the answering process to BE the one launchd supervises: health carries the
+# daemon's pid, `launchctl print` names the job's pid, and the two must agree. That is
+# exact on both paths, and catches a previous install's daemon still holding the port
+# (right digest, wrong pid) the same way. A mid-probe restart makes the pids disagree for
+# one iteration; the loop just tries again, so the race costs a retry, not the install.
 if [ "$USE_LAUNCHER" -eq 1 ]; then
   HEALTH_DAEMON_PATH="$BUNDLED_DAEMON_PATH"
 else
@@ -1258,7 +1261,14 @@ for _ in $(seq 1 "$HEALTH_TRIES"); do
   HEALTH_BODY="$(curl -fsS --noproxy '*' --max-time 2 "$HEALTH_URL" 2>/dev/null)" || HEALTH_BODY=""
   case "$HEALTH_BODY" in
     '') ;;
-    *"$HEALTH_DAEMON_ID"*) HEALTHY=1; break ;;
+    *"$HEALTH_DAEMON_ID"*)
+      HEALTH_PID="$(printf '%s' "$HEALTH_BODY" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')"
+      JOB_PID="$("$LAUNCHCTL_CMD" print "$TARGET" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -n 1)"
+      if [ -n "$HEALTH_PID" ] && [ "$HEALTH_PID" = "$JOB_PID" ]; then
+        HEALTHY=1; break
+      fi
+      HEALTH_FOREIGN=1
+      ;;
     *) HEALTH_FOREIGN=1 ;;
   esac
   sleep 0.25

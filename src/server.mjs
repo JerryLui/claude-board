@@ -13,9 +13,9 @@
 // never as an enumeration of the routes that need them: a route added later is gated by
 // default rather than by whoever adds it remembering. The exception list for (4) is
 // `GET /api/health` (install.sh polls it with plain curl to decide whether the service
-// came up, and it reveals only a version string and an opaque daemon identity — see
-// DAEMON_ID) and `GET /auth/<token>`, which is the route that HANDS OUT the credential
-// and so cannot require it.
+// came up, and it reveals only a version string, an opaque daemon identity — see
+// DAEMON_ID — and the process pid) and `GET /auth/<token>`, which is the route that
+// HANDS OUT the credential and so cannot require it.
 //
 // A credential is one of exactly two things (src/secret.mjs):
 //
@@ -580,10 +580,14 @@ function isAuthorizedWrite(req, parts, secret) {
  *
  *  - `/api/health`: install.sh polls it with plain `curl` to decide whether the service
  *    actually came up, and gating it would make a fresh install report failure on a
- *    daemon that is working perfectly. It answers `{ ok, version, daemon }` and nothing
- *    else — no board, no path, no store contents. `daemon` is DAEMON_ID above: a digest
- *    of this process's own program path, so the gate can tell the daemon it just
+ *    daemon that is working perfectly. It answers `{ ok, version, daemon, pid }` and
+ *    nothing else — no board, no path, no store contents. `daemon` is DAEMON_ID above: a
+ *    digest of this process's own program path, so the gate can tell the daemon it just
  *    installed from any other listener on the port, and a path is still never disclosed.
+ *    `pid` closes that gate's one gap: two daemons at the SAME path (a hand-run
+ *    `node bin/daemon.mjs` beside the degraded no-launcher install) share a digest, but
+ *    only one is the process launchd supervises, and install.sh asks launchd which. A
+ *    pid is nothing a local process couldn't read off `lsof -i` already.
  *  - `/auth/<token>`: the route that hands a browser its credential. Requiring one here
  *    would be a bootstrap loop. It is protected by the token being single-use, unguessable
  *    and seconds-lived instead (src/handoff.mjs).
@@ -2187,7 +2191,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'GET' && url.pathname === '/api/health') {
-        return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID });
+        return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID, pid: process.pid });
       }
 
       if (req.method === 'GET' && parts[0] === 'auth' && parts.length === 2) {

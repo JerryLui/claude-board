@@ -59,6 +59,23 @@ export function secretPath() {
   return process.env.CLAUDE_BOARD_SECRET_FILE || path.join(os.homedir(), '.config', 'claude-board', 'secret');
 }
 
+/** The port the daemon is on, resolved the way every non-daemon caller must:
+ * `CLAUDE_BOARD_PORT` when set, else the port record install.sh writes beside the
+ * secret, else the default. The record exists because `claude mcp add` registers the
+ * shim with no environment — a custom-port user would otherwise have to export
+ * CLAUDE_BOARD_PORT in every shell for the shim/demo/authorize to find the daemon the
+ * installer itself pointed launchd at. The daemon does NOT read this: launchd hands it
+ * the port in the plist environment, and that stays the one authority for what to bind. */
+export function daemonPort() {
+  const fromEnv = Number(process.env.CLAUDE_BOARD_PORT);
+  if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65536) return fromEnv;
+  try {
+    const record = Number(readFileSync(path.join(path.dirname(secretPath()), 'port'), 'utf8').trim());
+    if (Number.isInteger(record) && record > 0 && record < 65536) return record;
+  } catch {}
+  return 7391;
+}
+
 /** The secret, or null when there isn't one. Trimmed, because the file is written by
  * a shell and a trailing newline is not part of the credential. Never throws: a
  * missing or unreadable secret is a state both callers have to handle out loud
