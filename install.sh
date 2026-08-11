@@ -49,6 +49,280 @@
 
 set -euo pipefail
 
+# --- BEGIN transcript styling (byte-identical in uninstall.sh) ---
+# Shared print vocabulary for the two scripts' terminal output: colour gating, the
+# palette, step/detail lines, the header, the success banner, footer entries, a spinner
+# for a blocking step, and capture-and-surface for third-party command output. Neither
+# script sources the other -- this fence is copied byte for byte into both, and
+# test/check-install.mjs fails the moment the two drift, the same convention as
+# is_throwaway_bundle_path below. Edit here, then paste the whole fence over the copy in
+# the other script; do not hand-edit the copy.
+#
+# COLOUR. On when stdout is a terminal ([ -t 1 ]). Off when NO_COLOR is set (to
+# anything, empty included -- it is the variable being SET that means "no colour", not
+# its value), when TERM is "dumb", or when stdout is not a terminal.
+# CLAUDE_BOARD_COLOR=1 or =always forces it on OVER every one of those -- the seam a
+# test needs to reach the coloured path at all, since piped stdio ([ -t 1 ] false) is
+# the only stdout a test harness ever gives this script. Decided once, right here;
+# nothing below re-checks it mid-run, so a script that changes stdout's terminal-ness
+# after sourcing this (nothing here does) would not be noticed.
+#
+# PALETTE. Six roles, one shell variable each, holding the real escape sequence when
+# colour is on and an EMPTY STRING when it is off:
+#   CBS_STEP    step name column                     (blue)
+#   CBS_BOLD    value / emphasis                      (bold, no colour)
+#   CBS_DIM     a path, or other secondary text       (dim)
+#   CBS_OK      a ticked step, the success banner     (bold green)
+#   CBS_WARN    a warned step                         (bold amber -- ANSI yellow; there
+#               is no 8-colour amber, and a 256-colour code would not be as portable)
+#   CBS_ERR     a failed step                         (bold red)
+#   CBS_RESET   closes any of the above
+# This is the WHOLE colour mechanism: every function below is built only from these
+# seven variables, so with colour off they contribute nothing, and stripping ANSI from
+# a coloured run reproduces the piped run line for line by construction -- no print site
+# anywhere has to remember to special-case plain output.
+#
+# STEP LINES. cbs_step_ok / cbs_step_warn / cbs_step_fail STEP RESULT [PATH]. Two
+# leading spaces, the glyph (unconditionally unicode -- macOS ships a UTF-8 locale, so
+# ✓ ! ✗ are used outright, no ASCII fallback), the step name in a fixed-width column,
+# the result text, then PATH -- when given -- dimmed at the end. cbs_step_ok writes to
+# STDOUT. cbs_step_warn and cbs_step_fail write to STDERR, and so does every
+# cbs_detail call beneath them: stdout carries only the transcript of a run that is
+# going well, nothing else. cbs_detail TEXT prints one indented, dimmed line beneath a
+# warned or failed step -- call it once per line of detail, right after the step line
+# it belongs to.
+#
+# HEADER / BANNER / FOOTER, all to stdout. cbs_header NAME [PORT] prints the one-line
+# opener (PORT omitted prints just the name). cbs_success MESSAGE prints the closing
+# banner. cbs_footer_entry LABEL VALUE prints one footer line under it.
+#
+# SPINNER. cbs_spinner_start LABEL, then cbs_spinner_stop right before the step
+# resolves. A no-op pair -- nothing started, nothing printed -- unless stdout is a
+# terminal, TERM is not "dumb" (which genuinely cannot reposition a cursor, so there is
+# nothing safe for a spinner to do there), and CLAUDE_BOARD_VERBOSE is not set; a piped
+# run (every run this repo's test suite makes) never launches the background process at
+# all. cbs_spinner_stop's own erase is colour-free BY CONSTRUCTION, not by checking
+# colour state: a bare carriage return plus a fixed run of plain spaces, never an ANSI
+# escape, because colour being off is not the same claim as "nothing was drawn" -- the
+# spinner still ran, in plain text, and still has to be erased. The caller must call
+# cbs_spinner_stop on EVERY path out of the blocking step, success and failure alike,
+# before printing the real step line that is meant to overwrite the spinner's last
+# line -- this fence installs no EXIT trap of its own, on purpose, so it can neither
+# clobber nor be clobbered by a trap the calling script sets for something else (see
+# install.sh's own EXIT trap on $LAUNCHER_BUILD_DIR).
+#
+# CAPTURE-AND-SURFACE. cbs_run_captured CMD [ARGS...] runs a third-party command with
+# its stdout and stderr merged and captured into CBS_LAST_CAPTURE, printing nothing
+# itself, and returns the command's own exit status without ever tripping `set -e` --
+# the caller is expected to branch on a failure, not have the script die on one.
+# Under CLAUDE_BOARD_VERBOSE it instead lets the command through live, straight to
+# this script's own stdout/stderr, and leaves CBS_LAST_CAPTURE empty. cbs_print_captured
+# prints CBS_LAST_CAPTURE back out as cbs_detail lines, for the step whose command
+# just failed; call it only on the branch that decided to. A run that captured nothing
+# prints nothing.
+#
+# VERBOSE. CLAUDE_BOARD_VERBOSE, read from the environment and actually normalised here
+# to "0" or "1" -- unset or exactly "0" is off, any other non-empty value (CLAUDE_BOARD_
+# VERBOSE=true included) is on, so a truthy-looking value never silently reads as off at
+# one of the `= "1"` comparisons below. install.sh additionally parses its own --verbose
+# flag and sets CLAUDE_BOARD_VERBOSE=1 from it, before calling anything below that reads
+# this variable (the spinner, cbs_run_captured); uninstall.sh takes no flags of its own,
+# so for its copy of this fence CLAUDE_BOARD_VERBOSE is exactly what the environment,
+# normalised, says.
+if [ -n "${CLAUDE_BOARD_VERBOSE:-}" ] && [ "$CLAUDE_BOARD_VERBOSE" != "0" ]; then
+  CLAUDE_BOARD_VERBOSE=1
+else
+  CLAUDE_BOARD_VERBOSE=0
+fi
+
+if [ -n "${CLAUDE_BOARD_COLOR:-}" ] && { [ "$CLAUDE_BOARD_COLOR" = "1" ] || [ "$CLAUDE_BOARD_COLOR" = "always" ]; }; then
+  _CBS_COLOR_ON=1
+elif [ -n "${NO_COLOR+set}" ] || [ "${TERM:-}" = "dumb" ] || [ ! -t 1 ]; then
+  _CBS_COLOR_ON=0
+else
+  _CBS_COLOR_ON=1
+fi
+
+if [ "$_CBS_COLOR_ON" -eq 1 ]; then
+  CBS_STEP=$'\033[34m';   CBS_BOLD=$'\033[1m';    CBS_DIM=$'\033[2m'
+  CBS_OK=$'\033[1;32m';   CBS_WARN=$'\033[1;33m'; CBS_ERR=$'\033[1;31m'
+  CBS_RESET=$'\033[0m'
+else
+  CBS_STEP='';  CBS_BOLD=''; CBS_DIM=''
+  CBS_OK='';    CBS_WARN=''; CBS_ERR=''
+  CBS_RESET=''
+fi
+
+# Internal formatter behind the three step-status functions -- not part of the
+# documented API above. Padding is computed on the PLAIN text before any colour is
+# wrapped around it: an escape sequence counts as characters to printf's field width,
+# so padding an already-coloured string would throw the column out of alignment the
+# moment colour is on. 11 and 24 are column widths chosen to match the rendered
+# checklist this fence implements, not anything derived at runtime.
+cbs__step_line() {
+  # $1=glyph  $2=glyph's colour var  $3=step  $4=result  $5=path (optional)
+  _cbs_step_field="$(printf '%-11s' "$3")"
+  if [ -n "${5:-}" ]; then
+    _cbs_result_field="$(printf '%-24s' "$4")"
+    printf '  %s%s%s  %s%s%s%s%s%s%s\n' \
+      "$2" "$1" "$CBS_RESET" \
+      "$CBS_STEP" "$_cbs_step_field" "$CBS_RESET" \
+      "$_cbs_result_field" \
+      "$CBS_DIM" "$5" "$CBS_RESET"
+  else
+    printf '  %s%s%s  %s%s%s%s\n' \
+      "$2" "$1" "$CBS_RESET" \
+      "$CBS_STEP" "$_cbs_step_field" "$CBS_RESET" \
+      "$4"
+  fi
+}
+
+cbs_step_ok()   { cbs__step_line '✓' "$CBS_OK"   "$1" "$2" "${3:-}"; }
+cbs_step_warn() { cbs__step_line '!' "$CBS_WARN" "$1" "$2" "${3:-}" >&2; }
+cbs_step_fail() { cbs__step_line '✗' "$CBS_ERR"  "$1" "$2" "${3:-}" >&2; }
+
+cbs_detail() {
+  printf '        %s%s%s\n' "$CBS_DIM" "$1" "$CBS_RESET" >&2
+}
+
+cbs_header() {
+  if [ -n "${2:-}" ]; then
+    _cbs_name_field="$(printf '%-48s' "$1")"
+    printf '  %s%s%s%sport%s %s%s%s\n' \
+      "$CBS_BOLD" "$_cbs_name_field" "$CBS_RESET" \
+      "$CBS_DIM" "$CBS_RESET" \
+      "$CBS_BOLD" "$2" "$CBS_RESET"
+  else
+    printf '  %s%s%s\n' "$CBS_BOLD" "$1" "$CBS_RESET"
+  fi
+}
+
+cbs_success() {
+  printf '  %s●  %s%s\n' "$CBS_OK" "$1" "$CBS_RESET"
+}
+
+cbs_footer_entry() {
+  _cbs_label_field="$(printf '%-6s' "$1")"
+  printf '     %s%s%s  %s\n' "$CBS_DIM" "$_cbs_label_field" "$CBS_RESET" "$2"
+}
+
+# Fixed width of the spinner's own line: 2 leading spaces, the 11-wide step column, a
+# 2-space gap, a 4-digit elapsed field and "s" -- 2+11+2+4+1. Fixed, not measured, so
+# cbs_spinner_stop can erase it with a matching run of plain spaces (see below) instead
+# of an ANSI escape; 4 digits covers up to 9999 seconds, far past any real blocking step
+# this repo has (the longest, the health wait, gives up within a few minutes).
+CBS_SPINNER_LINE_WIDTH=20
+
+# Started right before a blocking step, stopped right after -- see the API comment
+# above for the caller's obligation to always stop it. CBS_SPINNER_PID empty means
+# "nothing running", both before the first start and after every stop, so
+# cbs_spinner_stop is always safe to call even when no spinner was ever started.
+CBS_SPINNER_PID=""
+
+cbs_spinner_start() {
+  CBS_SPINNER_PID=""
+  [ -t 1 ] || return 0
+  # TERM=dumb cannot reposition its cursor at all, so there is no safe way for a spinner
+  # to update in place -- skipped outright, not just left uncoloured. This is the one
+  # place the spinner checks TERM directly rather than going through the colour toggle:
+  # colour being off is a separate claim from "cannot redraw a line", and a spinner is
+  # still wanted on every OTHER terminal regardless of colour.
+  [ "${TERM:-}" = "dumb" ] && return 0
+  [ "$CLAUDE_BOARD_VERBOSE" = "1" ] && return 0
+  _cbs_spinner_field="$(printf '%-11s' "$1")"
+  # Subshell, so $_cbs_start and $_cbs_elapsed never leak into the caller's shell.
+  # Backgrounded and left running -- deliberately not `wait`ed here, since the whole
+  # point is that the caller's own blocking command runs concurrently with this. The
+  # elapsed field is fixed-width (%4d) so every line this prints is exactly
+  # CBS_SPINNER_LINE_WIDTH characters wide, colour codes aside -- see cbs_spinner_stop.
+  ( _cbs_start="$(date +%s)"
+    while :; do
+      _cbs_elapsed=$(( $(date +%s) - _cbs_start ))
+      printf '\r  %s%s%s  %4ds' "$CBS_STEP" "$_cbs_spinner_field" "$CBS_RESET" "$_cbs_elapsed"
+      sleep 1
+    done
+  ) &
+  CBS_SPINNER_PID=$!
+}
+
+cbs_spinner_stop() {
+  [ -n "$CBS_SPINNER_PID" ] || return 0
+  kill "$CBS_SPINNER_PID" 2>/dev/null || true
+  wait "$CBS_SPINNER_PID" 2>/dev/null || true
+  CBS_SPINNER_PID=""
+  # Erases the spinner's last line WITHOUT an ANSI escape: a run with colour off has to
+  # carry zero escape bytes on stdout, and \033[K is one even though it carries no
+  # colour of its own -- the spinner runs (in plain text) whenever stdout is a
+  # terminal, independently of whether colour is on, so its erase cannot lean on colour
+  # being on to justify using an escape. A bare \r returns to column 0,
+  # CBS_SPINNER_LINE_WIDTH plain spaces overwrite whatever the spinner drew, then a
+  # second bare \r returns to column 0 again so the real step line that prints next
+  # starts clean.
+  printf '\r%*s\r' "$CBS_SPINNER_LINE_WIDTH" ''
+}
+
+# CBS_LAST_CAPTURE is a plain script variable, not function-local (this fence follows
+# the rest of this script in never using `local` -- see is_throwaway_bundle_path's
+# _tmproot below for the same convention -- partly for style and partly because
+# `local x=$(cmd)` masks a failing $(cmd)'s exit status from `set -e`, which the `||`
+# idiom below is written specifically to preserve instead).
+CBS_LAST_CAPTURE=""
+
+cbs_run_captured() {
+  _cbs_status=0
+  if [ "$CLAUDE_BOARD_VERBOSE" = "1" ]; then
+    CBS_LAST_CAPTURE=""
+    "$@" || _cbs_status=$?
+    return "$_cbs_status"
+  fi
+  CBS_LAST_CAPTURE="$("$@" 2>&1)" || _cbs_status=$?
+  return "$_cbs_status"
+}
+
+cbs_print_captured() {
+  [ -n "$CBS_LAST_CAPTURE" ] || return 0
+  while IFS= read -r _cbs_line; do
+    cbs_detail "$_cbs_line"
+  done <<< "$CBS_LAST_CAPTURE"
+}
+# --- END transcript styling ---
+
+# --verbose: this script's own flag, not the fence's -- restores the live third-party
+# output cbs_run_captured otherwise swallows, the full config header, and the standing
+# macOS prose in full, and (as a side effect of the fence's own check) suppresses the
+# spinner. Parsed once, here, before anything below reads CLAUDE_BOARD_VERBOSE.
+for _cbs_install_arg in "$@"; do
+  case "$_cbs_install_arg" in
+    --verbose) CLAUDE_BOARD_VERBOSE=1 ;;
+  esac
+done
+
+# --- transcript helpers -------------------------------------------------------
+# Built on the fence's palette, not part of it -- these are specific to this script's own
+# checklist, so they live here rather than in the shared block. Defined early: the config
+# header below is this script's first output and already needs cbs_config_line.
+
+# Cosmetic only: shortens a path under $HOME to ~/... the way the chosen rendering does.
+# Never used for anything but a printed line -- every path this script actually acts on
+# stays the real, unabbreviated value.
+display_path() {
+  case "$1" in
+    "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# One config-header line: a dim label, the value, and an optional dim "[FROM]" tag. Used
+# both by the condensed header (only a value that differs from a default earns a line)
+# and, under --verbose, by the full one.
+cbs_config_line() {  # LABEL VALUE [FROM]
+  if [ -n "${3:-}" ]; then
+    printf '     %s%s:%s  %s %s[%s]%s\n' "$CBS_DIM" "$1" "$CBS_RESET" "$2" "$CBS_DIM" "$3" "$CBS_RESET"
+  else
+    printf '     %s%s:%s  %s\n' "$CBS_DIM" "$1" "$CBS_RESET" "$2"
+  fi
+}
+
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 DAEMON_PATH="$REPO_DIR/bin/daemon.mjs"
 MCP_PATH="$REPO_DIR/bin/mcp.mjs"
@@ -195,16 +469,16 @@ if [ -z "$NODE_BIN" ]; then
     */.nodenv/*|*/nodenv/versions/*|*/nodenv/shims/*)
       for stable in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
         if [ -x "$stable" ]; then
-          echo "==> note: node on PATH is version-managed ($NODE_BIN), which moves on upgrade;"
-          echo "    baking $stable into the plist instead (set CLAUDE_BOARD_NODE to override)"
+          cbs_step_warn "node" "version-managed node found ($NODE_BIN); baking $stable instead"
+          cbs_detail "set CLAUDE_BOARD_NODE to override"
           NODE_BIN="$stable"
           break
         fi
       done
       if [ "$NODE_BIN" = "$(command -v node || true)" ]; then
-        echo "==> warning: only a version-managed node was found ($NODE_BIN)."
-        echo "    The service will break the next time that version is removed; re-run this"
-        echo "    script after installing node system-wide, or set CLAUDE_BOARD_NODE."
+        cbs_step_warn "node" "only a version-managed node was found ($NODE_BIN)"
+        cbs_detail "breaks the next time that version is removed"
+        cbs_detail "install node system-wide, or set CLAUDE_BOARD_NODE, then re-run"
       fi
       ;;
   esac
@@ -260,10 +534,13 @@ fi
 # CARRY-FORWARD, the shape all three install-time choices below share (port, reference
 # roots, store). Each is resolved by the same precedence -- explicit variable, then the
 # record file next to the secret, then a one-time migration out of the plist an older
-# install wrote, then the default -- and each prints where its value came from, because a
-# choice that changes silently across a `git pull && ./install.sh` is the failure the
-# mechanism exists to prevent. The plist stopped being the record once the launcher started
-# baking these values (step 2); the files in $SECRET_DIR are it now.
+# install wrote, then the default -- because a choice that changes silently across a
+# `git pull && ./install.sh` is the failure the mechanism exists to prevent. Reference
+# roots and store name where their value came from in the condensed header whenever it
+# differs from the default; the port's provenance is --verbose-only, since the number
+# alone (always shown, for the verify command) is what a silent-drift reader needs on the
+# bounded run. The plist stopped being the record once the launcher started baking these
+# values (step 2); the files in $SECRET_DIR are it now.
 #
 # The port earns it most sharply: reverting a custom one to the default means the old daemon
 # still holds the custom port, the new job binds the default, and launchd throttles the
@@ -396,32 +673,39 @@ else
   EFFECTIVE_BOARD_HOME="$HOME/Library/Application Support/claude-board"
 fi
 
-echo "==> claude-board install"
-echo "    repo:   $REPO_DIR"
-echo "    daemon: $DAEMON_PATH"
-echo "    mcp:    $MCP_PATH"
-# Spelled out rather than folded into ${REF_ROOTS:-...}: an apostrophe in that word is a
-# quote character to bash even inside double quotes, and swallows the rest of the script
-# up to the next one. QUIRKS.md.
-if [ -n "$REF_ROOTS" ]; then
-  echo "    reference roots: $REF_ROOTS"
-else
-  echo "    reference roots: none (a reference resolves inside the board project directory only)"
+cbs_header "claude-board" "$PORT"
+# The condensed header prints only a value that differs from its built-in default;
+# repo/daemon/mcp are dropped outright (always derivable from the clone, never a choice).
+# --verbose restores the full header, every value named regardless. The widen line is the
+# one value ALWAYS printed when it fires, independent of this rule (ADR.md entry 36) -- an
+# unasked-for widen that prints nothing is the failure carry-forward exists to prevent, so
+# it must not be folded away by any later tightening of this header.
+if [ "$CLAUDE_BOARD_VERBOSE" = "1" ]; then
+  cbs_config_line "repo" "$REPO_DIR"
+  cbs_config_line "daemon" "$DAEMON_PATH"
+  cbs_config_line "mcp" "$MCP_PATH"
 fi
-echo "                     [$REF_ROOTS_FROM]"
-# Its own line, never folded into the one above (ADR.md entry 36): an unasked-for widen
-# that prints nothing is the failure carry-forward exists to prevent.
+if [ "$CLAUDE_BOARD_VERBOSE" = "1" ] || [ "$REF_ROOTS" != "$DEFAULT_REF_ROOTS" ]; then
+  # Spelled out rather than folded into ${REF_ROOTS:-...}: an apostrophe in that word is a
+  # quote character to bash even inside double quotes, and swallows the rest of the script
+  # up to the next one. QUIRKS.md.
+  if [ -n "$REF_ROOTS" ]; then
+    cbs_config_line "reference roots" "$REF_ROOTS" "$REF_ROOTS_FROM"
+  else
+    cbs_config_line "reference roots" "none (resolves inside the board project directory only)" "$REF_ROOTS_FROM"
+  fi
+fi
 if [ -n "$REF_ROOTS_WIDENED" ]; then
-  echo "                     widened by the current defaults: $REF_ROOTS_WIDENED"
+  cbs_config_line "widened by the current defaults" "$REF_ROOTS_WIDENED"
 fi
 if [ -n "$BOARD_HOME_FROM" ]; then
-  echo "    store:  $BOARD_HOME"
-  echo "                     [$BOARD_HOME_FROM]"
-else
-  echo "    store:  ~/Library/Application Support/claude-board [default]"
+  cbs_config_line "store" "$BOARD_HOME" "$BOARD_HOME_FROM"
+elif [ "$CLAUDE_BOARD_VERBOSE" = "1" ]; then
+  cbs_config_line "store" "~/Library/Application Support/claude-board" "default"
 fi
-echo "    port:   $PORT"
-echo "                     [$PORT_FROM]"
+if [ "$CLAUDE_BOARD_VERBOSE" = "1" ]; then
+  cbs_config_line "port" "$PORT" "$PORT_FROM"
+fi
 
 # --- 0. the local secret ----------------------------------------------------
 # The credential separating this machine's shim from any other local process (SECURITY.md).
@@ -434,14 +718,14 @@ echo "                     [$PORT_FROM]"
 mkdir -p "$SECRET_DIR"
 chmod 700 "$SECRET_DIR"
 if [ -s "$SECRET_FILE" ]; then
-  echo "==> local secret already present at $SECRET_FILE (left as it is; never rotated)"
+  cbs_step_ok "secret" "already present"
 else
   # OS CSPRNG, 32 bytes as hex. The umask keeps it from being briefly world-readable
   # between creation and chmod; the chmod runs anyway, so a pre-existing empty file with
   # looser modes is corrected rather than trusted.
   ( umask 077; "$NODE_BIN" -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))' > "$SECRET_FILE" )
   chmod 600 "$SECRET_FILE"
-  echo "==> generated local secret at $SECRET_FILE"
+  cbs_step_ok "secret" "generated" "$(display_path "$SECRET_FILE")"
 fi
 
 # Write the carry-forward records, into the same 0700 directory as the secret.
@@ -587,12 +871,15 @@ USE_LAUNCHER=0
 # run has lost its grant, and a notice printed on every reinstall stops meaning anything.
 LAUNCHER_IS_NEW=0
 
+# $1=short reason, styled as the "launcher" step's warned result. Every cause shares this
+# one consequence line -- the daemon still runs as node itself, so a board reference into
+# ~/Documents, ~/Desktop or ~/Downloads fails with EPERM, macOS having no application of
+# ours to grant. Callers add whatever detail is specific to their own cause (a fix
+# instruction, or cbs_print_captured for a cause that ran a captured command) right after
+# calling this.
 launcher_degraded() {
-  echo "==> warning: $1."
-  echo "    Installing WITHOUT the launcher bundle: the daemon runs as node itself, so a"
-  echo "    board reference into ~/Documents, ~/Desktop or ~/Downloads will fail with"
-  echo "    'cannot read <path>: EPERM' — macOS has no application of ours to grant."
-  echo "    Everything else works. To fix: xcode-select --install, then re-run this script."
+  cbs_step_warn "launcher" "$1"
+  cbs_detail "a reference into ~/Documents will fail with EPERM"
 }
 
 # bin/launcher.c uses a QUOTED #include for its generated header, which searches the
@@ -604,11 +891,19 @@ launcher_degraded() {
 # still named -- an older install.sh generated one in place, so it is plausible and
 # innocent, and refusing would turn a stale file into a failed install.
 if [ -f "$REPO_DIR/bin/launcher_paths.h" ]; then
-  echo "==> warning: ignoring $REPO_DIR/bin/launcher_paths.h — the launcher is compiled from a copy staged outside the clone, so this file cannot affect the built bundle."
+  cbs_step_warn "launcher" "ignoring stray $REPO_DIR/bin/launcher_paths.h"
+  cbs_detail "compiled from a copy staged outside the clone -- this file cannot affect the build"
 fi
 
 LAUNCHER_BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/claude-board-launcher.XXXXXX")"
-trap 'rm -rf "$LAUNCHER_BUILD_DIR"' EXIT
+# cbs_spinner_stop rides along with the build-dir cleanup: the fence installs no EXIT
+# trap of its own so this script can own one (see the fence's own header comment), and
+# this is that obligation. Both spinners below (launcher build+sign, health wait) start
+# and stop around a window that can end in an unguarded pipeline assignment failing under
+# `set -e`, not just their own ordinary exit -- without this, a background spinner
+# outlives the script and keeps overwriting the terminal's prompt forever. Safe to call
+# even when no spinner is running (CBS_SPINNER_PID empty is a no-op).
+trap 'cbs_spinner_stop; rm -rf "$LAUNCHER_BUILD_DIR"' EXIT
 
 STAGED_APP="$LAUNCHER_BUILD_DIR/${LABEL}.app"
 STAGED_INFO="$STAGED_APP/Contents/Info.plist"
@@ -642,6 +937,26 @@ if ! PAYLOAD_DIGEST="$(payload_digest "$REPO_DIR" 2>&1)"; then
   PAYLOAD_DIGEST_ERR="$PAYLOAD_DIGEST"
   PAYLOAD_DIGEST=""
 fi
+
+# The two multi-command build steps below, each wrapped as a function so cbs_run_captured
+# -- which takes a single command -- can capture the whole step's merged output at once
+# rather than once per invocation. No per-command 2>&1 inside either: cbs_run_captured's
+# own capture already merges the function's combined stdout and stderr.
+build_launcher_binary() {
+  "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/notify.o" "$STAGED_NOTIFY_SRC" \
+    && "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/menubar.o" "$STAGED_MENUBAR_SRC" \
+    && "$CC_CMD" -O2 -Wall -o "$STAGED_APP/Contents/MacOS/$LABEL" \
+         -iquote "$LAUNCHER_BUILD_DIR" "$STAGED_LAUNCHER_SRC" \
+         "$LAUNCHER_BUILD_DIR/notify.o" "$LAUNCHER_BUILD_DIR/menubar.o" \
+         -framework Foundation -framework UserNotifications -framework AppKit
+}
+
+stage_launcher_payload() {
+  mkdir -p "$STAGED_APP/Contents/Resources/bin" "$STAGED_APP/Contents/Resources/src" \
+    && cp "$REPO_DIR/bin/daemon.mjs" "$STAGED_APP/Contents/Resources/bin/daemon.mjs" \
+    && cp -RL "$REPO_DIR/src/." "$STAGED_APP/Contents/Resources/src/" \
+    && { [ ! -f "$LAUNCHER_ICON_SRC" ] || cp "$LAUNCHER_ICON_SRC" "$STAGED_APP/Contents/Resources/${LABEL}.icns"; }
+}
 
 if [ "$LAUNCHER_NEWLINE_IN_PATH" -eq 1 ]; then
   launcher_degraded "one of the values baked into the launcher (an interpreter, daemon, clone, home, store or reference-root path) contains a newline, which cannot be written into a C string literal"
@@ -770,11 +1085,13 @@ INFO
      && [ "$RECORDED_EXEC_STAMP" = "$(sha256_file "$APP_EXEC")" ] \
      && "$CODESIGN_CMD" --verify "$APP_PATH" >/dev/null 2>&1; then
     USE_LAUNCHER=1
-    echo "==> launcher bundle already current at $APP_PATH (untouched, so its Documents grant survives)"
+    cbs_step_ok "launcher" "already current" "$(display_path "$APP_PATH")"
   elif ! command -v "$CC_CMD" >/dev/null 2>&1; then
-    launcher_degraded "no C compiler ('$CC_CMD') found — the Xcode Command Line Tools are not installed"
+    launcher_degraded "no C compiler, installing without the bundle"
+    cbs_detail "fix: xcode-select --install, then re-run"
   elif ! command -v "$CODESIGN_CMD" >/dev/null 2>&1; then
-    launcher_degraded "no '$CODESIGN_CMD' found, so the launcher bundle cannot be signed"
+    launcher_degraded "no codesign, installing without the bundle"
+    cbs_detail "fix: xcode-select --install, then re-run"
   # -Wall but NOT -Werror: a future compiler inventing a warning must not fail a routine
   # reinstall. -iquote, not -I, so no include path reaches back into the clone.
   #
@@ -784,36 +1101,38 @@ INFO
   # notification's delegate only fires on a running app (ADR.md entries 57 and 72;
   # bin/notify.m's header for why one binary, bin/menubar.m's for why one bundle).
   #
-  # All of it inside the `if !`, so a compile failure degrades rather than aborting.
-  elif ! {
-    "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/notify.o" "$STAGED_NOTIFY_SRC" 2>&1 \
-      && "$CC_CMD" -O2 -Wall -fobjc-arc -c -o "$LAUNCHER_BUILD_DIR/menubar.o" "$STAGED_MENUBAR_SRC" 2>&1 \
-      && "$CC_CMD" -O2 -Wall -o "$STAGED_APP/Contents/MacOS/$LABEL" \
-           -iquote "$LAUNCHER_BUILD_DIR" "$STAGED_LAUNCHER_SRC" \
-           "$LAUNCHER_BUILD_DIR/notify.o" "$LAUNCHER_BUILD_DIR/menubar.o" \
-           -framework Foundation -framework UserNotifications -framework AppKit 2>&1
-  }; then
-    launcher_degraded "the launcher failed to compile (output above)"
+  # All of it inside the `if !`, so a compile failure degrades rather than aborting. Wrapped
+  # as a function so cbs_run_captured -- a single command -- can capture all three
+  # invocations' merged output as one, surfaced only if this step ends up failing. The
+  # spinner starts here: this is the first genuinely slow step in the chain, "launcher
+  # compile and sign", and every branch below stops it before printing its own resolving
+  # step line (see the EXIT trap above for the path where none of them get to run it).
+  elif ! { cbs_spinner_start "launcher"; cbs_run_captured build_launcher_binary; }; then
+    cbs_spinner_stop
+    launcher_degraded "the launcher failed to compile"
+    cbs_print_captured
   # The payload, staged BEFORE signing so the signature covers it (see the step header).
   # mkdir -p first, then cp with an explicit "/." source and "/" destination rather than
   # relying on cp -R's directory-exists-or-not behaviour, which differs by case. The icon
   # rides along under the same signature; copied only if present, matching the plist key,
   # so a clone with no icns builds an unbranded bundle rather than no bundle.
-  elif ! {
-    mkdir -p "$STAGED_APP/Contents/Resources/bin" "$STAGED_APP/Contents/Resources/src" \
-      && cp "$REPO_DIR/bin/daemon.mjs" "$STAGED_APP/Contents/Resources/bin/daemon.mjs" \
-      && cp -RL "$REPO_DIR/src/." "$STAGED_APP/Contents/Resources/src/" \
-      && { [ ! -f "$LAUNCHER_ICON_SRC" ] || cp "$LAUNCHER_ICON_SRC" "$STAGED_APP/Contents/Resources/${LABEL}.icns"; }
-  }; then
-    launcher_degraded "could not stage bin/daemon.mjs and src/ into the bundle before signing"
+  elif ! cbs_run_captured stage_launcher_payload; then
+    cbs_spinner_stop
+    launcher_degraded "could not stage the daemon into the bundle"
+    cbs_print_captured
   # --force so a re-sign replaces rather than refuses. --identifier explicitly, never
   # inherited from Info.plist: this string IS the grant's name, and editing a plist alone
   # must not be able to change it.
-  elif ! "$CODESIGN_CMD" --force --sign - --identifier "$BUNDLE_ID" "$STAGED_APP" 2>&1; then
-    launcher_degraded "the launcher bundle failed to sign (output above)"
-  elif ! "$CODESIGN_CMD" --verify "$STAGED_APP" >/dev/null 2>&1; then
+  elif ! cbs_run_captured "$CODESIGN_CMD" --force --sign - --identifier "$BUNDLE_ID" "$STAGED_APP"; then
+    cbs_spinner_stop
+    launcher_degraded "the launcher bundle failed to sign"
+    cbs_print_captured
+  elif ! cbs_run_captured "$CODESIGN_CMD" --verify "$STAGED_APP"; then
+    cbs_spinner_stop
     launcher_degraded "the launcher bundle did not verify after signing"
+    cbs_print_captured
   else
+    cbs_spinner_stop
     mkdir -p "$APP_DIR"
     # Signed in staging and swapped in whole, so a failed compile or sign leaves the
     # installed bundle -- and its grant -- exactly as it was. Removing the old one while
@@ -825,7 +1144,7 @@ INFO
     # actually find on disk rather than of the staged copy.
     printf '%s\n%s\n' "$LAUNCHER_STAMP" "$(sha256_file "$APP_EXEC")" > "$LAUNCHER_STAMP_FILE"
     USE_LAUNCHER=1
-    echo "==> built and signed $APP_PATH ($BUNDLE_ID)"
+    cbs_step_ok "launcher" "built and signed" "$(display_path "$APP_PATH")"
     LAUNCHER_IS_NEW=1
   fi
 fi
@@ -916,11 +1235,12 @@ PLIST
 # An unparseable plist is otherwise invisible: bootstrap fails, this script exits 0, and
 # the user is told the service is running.
 if ! "$PLUTIL_CMD" -lint "$PLIST_PATH" >/dev/null; then
-  echo "error: generated plist at $PLIST_PATH is not valid — refusing to continue" >&2
+  cbs_step_fail "plist" "generated plist is not valid"
+  cbs_detail "refusing to continue: $PLIST_PATH"
   exit 1
 fi
 
-echo "==> wrote $PLIST_PATH"
+cbs_step_ok "plist" "written" "$(display_path "$PLIST_PATH")"
 
 # --- 3. load / reload it, idempotently --------------------------------------
 # bootout-then-bootstrap rather than a conditional: a bootout of an unloaded job fails
@@ -936,7 +1256,6 @@ UID_N="$(id -u)"
 DOMAIN="gui/${UID_N}"
 TARGET="${DOMAIN}/${LABEL}"
 
-echo "==> loading service ($LAUNCHCTL_CMD)"
 "$LAUNCHCTL_CMD" bootout "$TARGET" >/dev/null 2>&1 || true
 
 BOOTSTRAPPED=0
@@ -948,13 +1267,15 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.5
 done
 if [ "$BOOTSTRAPPED" -ne 1 ]; then
-  echo "error: launchctl bootstrap $TARGET kept failing — the previous job may still be running" >&2
-  echo "       try: launchctl bootout $TARGET && bash $0" >&2
+  cbs_step_fail "service" "launchctl bootstrap $TARGET kept failing"
+  cbs_detail "the previous job may still be running"
+  cbs_detail "try: launchctl bootout $TARGET && bash $0"
   exit 1
 fi
 
 "$LAUNCHCTL_CMD" enable "$TARGET" >/dev/null 2>&1 || true
 "$LAUNCHCTL_CMD" kickstart -k "$TARGET" >/dev/null 2>&1 || true
+cbs_step_ok "service" "loaded"
 
 # --- 4. prove it actually bound before claiming success ----------------------
 # "Wrote a plist and called launchctl" is not "running": a syntax error in the daemon, a
@@ -1029,7 +1350,8 @@ else
 fi
 HEALTH_DAEMON_ID="$(sha256_string "$HEALTH_DAEMON_PATH")"
 
-echo "==> waiting for $HEALTH_URL"
+cbs_spinner_start "health"
+HEALTH_START_SECONDS="$SECONDS"
 HEALTHY=0
 # Set when something answered the probe but was not this install's daemon, so the failure
 # below can name that instead of "the daemon never answered".
@@ -1053,46 +1375,51 @@ for _ in $(seq 1 "$HEALTH_TRIES"); do
   esac
   sleep 0.25
 done
+cbs_spinner_stop
 if [ "$HEALTHY" -ne 1 ] && [ "$HEALTH_FOREIGN" -eq 1 ]; then
-  echo "error: something is already listening on 127.0.0.1:${PORT}, and it is not the daemon" >&2
-  echo "       this install just set up ($HEALTH_DAEMON_PATH)." >&2
-  echo "       A hand-run 'node bin/daemon.mjs', a daemon from another clone, or an unrelated" >&2
-  echo "       program has the port — so the job launchd was just handed cannot bind, and" >&2
-  echo "       KeepAlive is retrying it in a loop. Find it with:" >&2
-  echo "         lsof -nP -iTCP:${PORT} -sTCP:LISTEN" >&2
-  echo "       then stop it and re-run this script, or pick another port with CLAUDE_BOARD_PORT." >&2
-  echo "       logs: $OUT_LOG" >&2
-  echo "             $ERR_LOG" >&2
+  cbs_step_fail "health" "something else is listening on 127.0.0.1:${PORT}, not the daemon"
+  cbs_detail "this install just set up ($HEALTH_DAEMON_PATH)"
+  cbs_detail "a hand-run 'node bin/daemon.mjs', another clone's daemon, or an unrelated program"
+  cbs_detail "has the port -- KeepAlive is retrying a job that cannot bind"
+  cbs_detail "find it: lsof -nP -iTCP:${PORT} -sTCP:LISTEN"
+  cbs_detail "then stop it and re-run, or pick another port with CLAUDE_BOARD_PORT"
+  cbs_detail "logs: $(display_path "$OUT_LOG")"
+  cbs_detail "      $(display_path "$ERR_LOG")"
   exit 1
 fi
 if [ "$HEALTHY" -ne 1 ]; then
-  echo "error: the daemon never answered $HEALTH_URL — it is NOT running" >&2
-  echo "       logs: $OUT_LOG" >&2
-  echo "             $ERR_LOG" >&2
+  cbs_step_fail "health" "never answered $HEALTH_URL"
+  cbs_detail "the daemon is NOT running"
+  cbs_detail "logs: $(display_path "$OUT_LOG")"
+  cbs_detail "      $(display_path "$ERR_LOG")"
   # Named precisely rather than left to the logs, which say "EPERM" and mean "nobody has
   # clicked Allow yet".
   if [ "$USE_LAUNCHER" -eq 1 ] && [ "$REPO_IN_PROTECTED_DIR" -eq 1 ]; then
-    echo >&2
-    echo "       Most likely cause: macOS is refusing $LABEL access to $(dirname "$REPO_DIR")," >&2
-    echo "       which is where this clone lives, so the daemon cannot read its own code." >&2
-    echo "       Fix it in System Settings -> Privacy & Security -> Files and Folders (find" >&2
-    echo "       $LABEL), then: launchctl kickstart -k $TARGET" >&2
+    cbs_detail "most likely cause: macOS is refusing $LABEL access to $(dirname "$REPO_DIR")"
+    cbs_detail "which is where this clone lives, so the daemon cannot read its own code"
+    cbs_detail "fix: System Settings -> Privacy & Security -> Files and Folders (find $LABEL)"
+    cbs_detail "then: launchctl kickstart -k $TARGET"
   fi
   exit 1
 fi
+HEALTH_ELAPSED_SECONDS=$((SECONDS - HEALTH_START_SECONDS))
+cbs_step_ok "health" "responding" "${HEALTH_ELAPSED_SECONDS}s"
 
 # --- 5. MCP registration ---------------------------------------------------
 # Claude Code owns this config, not this repo. Remove-then-add unconditionally: the remove
 # is an ignored no-op on a fresh machine and clears a stale registration from another clone
 # path, so a second run neither duplicates nor errors. Last, so nothing above can fail with
-# this half-rewritten.
-echo "==> registering MCP server '$LABEL' ($MCP_CMD)"
+# this half-rewritten. `claude mcp add`'s own stdout chatter (it prints two lines about
+# writing its config) is captured, not shown, on a good run.
 "$MCP_CMD" mcp remove "$LABEL" --scope user >/dev/null 2>&1 || true
-if ! "$MCP_CMD" mcp add "$LABEL" --scope user -- "$NODE_BIN" "$MCP_PATH"; then
-  echo "error: '$MCP_CMD mcp add' failed — the daemon is running, but Claude Code has no" >&2
-  echo "       registration for it. Re-run this script once that command works." >&2
+if ! cbs_run_captured "$MCP_CMD" mcp add "$LABEL" --scope user -- "$NODE_BIN" "$MCP_PATH"; then
+  cbs_step_fail "mcp" "'$MCP_CMD mcp add' failed"
+  cbs_detail "the daemon is running, but Claude Code has no registration for it"
+  cbs_detail "re-run this script once that command works"
+  cbs_print_captured
   exit 1
 fi
+cbs_step_ok "mcp" "registered with claude"
 
 # --- 6. The manual ---------------------------------------------------------
 # skills/claude-board/SKILL.md -> where Claude Code looks for a personal skill. Not a
@@ -1103,18 +1430,18 @@ fi
 # Unconditional overwrite -- no hash record, no did-they-edit-it branch. The file is this
 # repo's and a copy that quietly stops matching the shim is the failure this step prevents.
 # Non-fatal: a daemon and a registration are the install.
-echo "==> installing the board's manual to $SKILL_DEST_DIR/SKILL.md"
 if [ ! -f "$SKILL_SRC" ]; then
-  echo "warning: $SKILL_SRC is missing — skills that name the claude-board skill will not" >&2
-  echo "         find it. The daemon and the MCP registration are unaffected." >&2
+  cbs_step_warn "manual" "$SKILL_SRC is missing"
+  cbs_detail "skills that name the claude-board skill will not find it"
+  cbs_detail "the daemon and the MCP registration are unaffected"
 elif ! (mkdir -p "$SKILL_DEST_DIR" && cp "$SKILL_SRC" "$SKILL_DEST_DIR/SKILL.md"); then
-  echo "warning: could not write $SKILL_DEST_DIR/SKILL.md. The daemon and the MCP" >&2
-  echo "         registration are unaffected." >&2
+  cbs_step_warn "manual" "could not write $SKILL_DEST_DIR/SKILL.md"
+  cbs_detail "the daemon and the MCP registration are unaffected"
+else
+  cbs_step_ok "manual" "installed" "$(display_path "$SKILL_DEST_DIR/SKILL.md")"
 fi
+echo
 
-echo
-echo "claude-board installed and running."
-echo
 # Same proxy trap as the health gate above: with a proxy exported and no loopback
 # exemption, the plain form reports a board that is up as down.
 PROXY_IN_ENV=0
@@ -1122,19 +1449,14 @@ for _proxy_var in ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_pr
   if [ -n "${!_proxy_var:-}" ]; then PROXY_IN_ENV=1; break; fi
 done
 if [ "$PROXY_IN_ENV" -eq 1 ]; then
-  echo "verify:  curl -s --noproxy '*' http://127.0.0.1:${PORT}/api/health"
-  echo "         (--noproxy because this shell exports a proxy; the board is loopback-only)"
+  VERIFY_CMD="curl -s --noproxy '*' http://127.0.0.1:${PORT}/api/health"
 else
-  echo "verify:  curl -s http://127.0.0.1:${PORT}/api/health"
+  VERIFY_CMD="curl -s http://127.0.0.1:${PORT}/api/health"
 fi
-# For a browser holding nothing -- cleared cookies, a second profile, another browser. The
-# same command the daemon's own refusal page prints.
-echo "authorize a browser:  $NODE_BIN $REPO_DIR/bin/authorize.mjs"
-# Literally what bin/mcp.mjs prints on an unreachable daemon: gui/\$(id -u), unresolved, so
-# the string is copy-pasteable from either place.
-echo 'revive:  launchctl kickstart -k gui/$(id -u)/claude-board'
-echo "logs:    $OUT_LOG"
-echo "         $ERR_LOG"
+# Authorize and revive are dropped from this footer: the daemon's own refusal page already
+# prints the authorize command, and bin/mcp.mjs already prints the revive command on an
+# unreachable daemon, so neither is lost by dropping it here.
+#
 # A correctly signed, perfectly runnable bundle is still refused with "Notifications are
 # not allowed for this application" until LaunchServices knows about it. It picks up
 # ~/Applications on its own eventually, which the first pomodoro boundary cannot wait for.
@@ -1180,16 +1502,26 @@ fi
 # pomodoro boundary, where the dialog has no context. `|| true` under `set -e` because a No
 # answers the question rather than breaking the install. Idempotent: macOS prompts once per
 # bundle and answers from its own record after that.
+#
+# Nothing may print after the success banner and its footer (ADR.md entry 100), so this
+# call -- and the prose it needs -- run here, above them. The prose itself is one of the
+# three standing macOS paragraphs: printed in full only when this bundle is new, or under
+# --verbose; otherwise the single pointer line below the footer carries it. The call
+# itself still runs every time regardless -- it is idempotent, and cheap insurance against
+# a grant that got revoked since the last run.
 if [ "$USE_LAUNCHER" -eq 1 ] && [ -x "$APP_EXEC" ]; then
-  # Printed BEFORE the call, which blocks until the dialog is answered -- an unexplained
-  # pause with a dialog behind the terminal is the shape of a hung installer. Later runs
-  # print it and return instantly, the price of not knowing which run is the first.
-  echo "==> if macOS asks whether \"$LABEL\" may send notifications, say Allow"
-  echo "    (pomodoro boundaries, and a round waiting on a board nobody is looking at)"
+  if [ "$LAUNCHER_IS_NEW" -eq 1 ] || [ "$CLAUDE_BOARD_VERBOSE" = "1" ]; then
+    # Printed BEFORE the call, which blocks until the dialog is answered -- an unexplained
+    # pause with a dialog behind the terminal is the shape of a hung installer.
+    echo "==> if macOS asks whether \"$LABEL\" may send notifications, say Allow"
+    echo "    (pomodoro boundaries, and a round waiting on a board nobody is looking at)"
+  fi
   "$APP_EXEC" --notify-authorize >/dev/null 2>&1 || true
 fi
 
-if [ "$USE_LAUNCHER" -eq 1 ]; then
+# The other two standing paragraphs: file access/Files and Folders and the
+# launcher-attribution + Alerts block, both new-bundle-only for the same reason.
+if [ "$USE_LAUNCHER" -eq 1 ] && ( [ "$LAUNCHER_IS_NEW" -eq 1 ] || [ "$CLAUDE_BOARD_VERBOSE" = "1" ] ); then
   echo "launcher: $APP_PATH ($BUNDLE_ID)"
   # Every successful run, not just the one that built it: this is the answer to "why can't
   # the board read that file", and whoever hits that rarely watched the install scroll past.
@@ -1202,4 +1534,18 @@ if [ "$USE_LAUNCHER" -eq 1 ]; then
   echo "          Both kinds of notification come from it -- pomodoro boundaries and a round"
   echo "          left waiting. To make them stay on screen until dismissed:"
   echo "          System Settings -> Notifications -> $LABEL -> Alerts."
+fi
+
+# --- 7. the banner and its footer -------------------------------------------
+# The last thing this script prints, whatever else ran above (ADR.md entry 100). Exactly
+# two footer entries, verify and logs -- authorize and revive are conveyed elsewhere (see
+# above). No blank line between the banner and the footer, so the two read as one group
+# and the bounded (already-current, nothing-new) case stays inside the line budget.
+cbs_success "claude-board installed and running"
+cbs_footer_entry "verify" "$VERIFY_CMD"
+cbs_footer_entry "logs" "$(display_path "$LOG_DIR")/daemon.{out,err}.log"
+# The collapsed form of the three standing paragraphs above: whenever none of them printed
+# in full, this single pointer line still carries what they would have said.
+if [ "$USE_LAUNCHER" -eq 1 ] && [ "$LAUNCHER_IS_NEW" -eq 0 ] && [ "$CLAUDE_BOARD_VERBOSE" != "1" ]; then
+  printf '     %smacOS file access and notifications: README → "Install"%s\n' "$CBS_DIM" "$CBS_RESET"
 fi

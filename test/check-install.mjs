@@ -916,8 +916,10 @@ async function main() {
         encoding: 'utf8',
       });
       assert.equal(r.status, 0, `install must still succeed with a rogue header present:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
-      assert.match(r.stdout, /warning:.*launcher_paths\.h/, 'install.sh must name the leftover header and say it is being ignored');
+      // Every warning goes to stderr now, so stdout carries only a run that is going well.
+      assert.match(r.stderr, /launcher_paths\.h/, 'install.sh must name the leftover header and say it is being ignored');
       assert.doesNotMatch(r.stdout, /error/i, 'the warning must be non-fatal');
+      assert.doesNotMatch(r.stdout, /launcher_paths\.h/, 'and must not also leak onto stdout');
 
       const builtExec = path.join(rogueAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
       assert.ok(existsSync(builtExec), 'the launcher must still build');
@@ -1012,8 +1014,10 @@ async function main() {
       encoding: 'utf8',
     });
     assert.equal(r.status, 0, `a missing compiler must not fail the install:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
-    assert.match(r.stdout, /warning: no C compiler/, 'it must say why, in as many words');
-    assert.match(r.stdout, /EPERM/, 'and name the symptom the user will otherwise hit with no explanation');
+    // Every warning goes to stderr now.
+    assert.match(r.stderr, /no C compiler/, 'it must say why, in as many words');
+    assert.match(r.stderr, /EPERM/, 'and name the symptom the user will otherwise hit with no explanation');
+    assert.doesNotMatch(r.stdout, /no C compiler|EPERM/, 'and none of it may leak onto stdout');
     assert.ok(!existsSync(path.join(noCcAppDir, 'claude-board.app')), 'no bundle should have been built');
 
     // ...and the plist it wrote falls back to running node directly, so the daemon
@@ -1077,7 +1081,11 @@ async function main() {
         encoding: 'utf8',
       });
       assert.equal(r.status, 0, `a launcher that will not compile must not fail the install:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
-      assert.match(r.stdout, /warning: the launcher failed to compile/, 'it must say why, in as many words');
+      // Every warning goes to stderr now, and the compiler's own captured output (clang's
+      // real error about menubar.m not being Objective-C) is attributed to the launcher
+      // step, not left to a vague "(output above)" that capturing now makes false.
+      assert.match(r.stderr, /the launcher failed to compile/, 'it must say why, in as many words');
+      assert.doesNotMatch(r.stdout, /the launcher failed to compile/, 'and must not leak onto stdout');
       assert.ok(!existsSync(path.join(brokenAppDir, 'claude-board.app')), 'a half-built bundle must not be installed');
 
       // ...and the daemon still runs, which is the whole of criterion 13: the fallback
@@ -1792,7 +1800,10 @@ async function main() {
       encoding: 'utf8',
     });
     assert.equal(r.status, 0, `a clone with no manual must still install:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
-    assert.match(r.stderr, /warning/i, 'a missing manual must be announced, not silent');
+    // Styled as a warned "manual" step now rather than a literal "warning:" line -- the
+    // glyph and colour carry that now, so this checks the step is warned and named, not
+    // the word itself.
+    assert.match(r.stderr, /manual.*is missing/s, 'a missing manual must be announced, not silent');
   });
 
   // --- preflight: the three refusals that must cost nothing ---------------------
@@ -1910,10 +1921,11 @@ async function main() {
         CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
       });
       const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+      // Every warning goes to stderr now.
       assert.match(
-        r.stdout, /version-managed/,
+        r.stderr, /version-managed/,
         `${label} must be recognised as version-managed -- either the substitution note or the warning, `
-        + `never silence:\nstdout:\n${r.stdout}`,
+        + `never silence:\nstderr:\n${r.stderr}`,
       );
       assert.ok(!existsSync(root), `${label}: the aborted run must still have written nothing`);
     }
@@ -1931,7 +1943,7 @@ async function main() {
       CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
     });
     const plain = spawnSync('bash', [installScript], { env: plainEnv, encoding: 'utf8' });
-    assert.doesNotMatch(plain.stdout, /version-managed/, 'a plain interpreter path must not be flagged');
+    assert.doesNotMatch(plain.stderr, /version-managed/, 'a plain interpreter path must not be flagged');
   });
 
   await check('a version-managed node on PATH is not baked into the plist when a stable one exists', async () => {
@@ -1971,15 +1983,16 @@ async function main() {
     const bakedIn = p => launcher.includes(Buffer.from(`${p}\0`, 'utf8'));
 
     const stable = ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node'].find(p => existsSync(p));
+    // Every warning goes to stderr now.
     if (stable) {
       assert.ok(bakedIn(stable), 'a stable interpreter must win over the version-managed one');
       assert.ok(!bakedIn(shim), 'and the version-managed path must not be what the launcher runs');
-      assert.match(r.stdout, /version-managed/, 'the substitution must be announced, not silent');
+      assert.match(r.stderr, /version-managed/, 'the substitution must be announced, not silent');
     } else {
       // No stable interpreter anywhere: baking the version-managed path is the only
       // option left, but it must come with the warning that says why it may break.
       assert.ok(bakedIn(shim));
-      assert.match(r.stdout, /warning: only a version-managed node/);
+      assert.match(r.stderr, /only a version-managed node/);
     }
   });
 
@@ -2210,7 +2223,13 @@ http.createServer((req, res) => {
       const carried = spawnSync('bash', [installScript], { env: carriedEnv, encoding: 'utf8' });
       assert.equal(carried.status, 0, `stdout:\n${carried.stdout}\nstderr:\n${carried.stderr}`);
       assert.equal(portOf(), String(customPort), 'a reinstall must not revert a custom port to the default');
-      assert.match(carried.stdout, /carried forward from/, 'and must say where the port came from, never silently');
+      // The condensed header does not carry a port-provenance line by default -- only the
+      // port itself, which cbs_header always shows because the verify command needs it.
+      // --verbose restores the full header, provenance included, so the "never silently"
+      // claim is checked there instead of on the bounded default run.
+      const carriedVerbose = spawnSync('bash', [installScript, '--verbose'], { env: carriedEnv, encoding: 'utf8' });
+      assert.equal(carriedVerbose.status, 0, `stdout:\n${carriedVerbose.stdout}\nstderr:\n${carriedVerbose.stderr}`);
+      assert.match(carriedVerbose.stdout, /carried forward from/, 'and --verbose must say where the port came from, never silently');
 
       // And the one-time migration, for a machine whose plist predates the record: delete
       // the record, leave the plist, and the port still survives -- the same fallback
@@ -2264,7 +2283,10 @@ http.createServer((req, res) => {
     const healed = spawnSync('bash', [installScript], { env: healEnv, encoding: 'utf8' });
     assert.equal(healed.status, 0, `stdout:\n${healed.stdout}\nstderr:\n${healed.stderr}`);
     assert.ok(!existsSync(record), 'a zero-byte store record must be taken away, not read back forever');
-    assert.match(healed.stdout, /store: {2}~\/Library\/Application Support\/claude-board \[default\]/, 'and the run must resolve the default store');
+    // The condensed header prints only a value that differs from its built-in default, so
+    // a healed, default store earns no line at all -- the old assertion pinned the exact
+    // default-store line this change deletes on purpose.
+    assert.doesNotMatch(healed.stdout, /store:/, 'and the run must resolve the default store silently, with no header line for it');
   });
 
   await check('a newline in any value the launcher bakes degrades the install instead of compiling it in', async () => {
@@ -2294,7 +2316,8 @@ http.createServer((req, res) => {
       // Named by the guard rather than discovered by the compiler: without the guard this
       // still degrades, but only after a wasted build and with "failed to compile" on
       // screen, which points the reader at their toolchain instead of at their value.
-      assert.match(r.stdout, /contains a newline/, `${label}: the newline must be named as the reason`);
+      // Every warning goes to stderr now.
+      assert.match(r.stderr, /contains a newline/, `${label}: the newline must be named as the reason`);
       assert.ok(!existsSync(path.join(appDirHere, 'claude-board.app')), `${label}: no bundle may be built from it`);
     }
   });
@@ -2605,6 +2628,32 @@ http.createServer((req, res) => {
     }
   });
 
+  await check('uninstall prints through the same checklist vocabulary as install, and the keep-list still prints in full', async () => {
+    // The install side of this criterion is proven where install.sh's own step lines are
+    // asserted; this is uninstall's half. Each step this script performs must print
+    // through the shared fence -- a ticked, two-space-indented, glyph-then-padded-name
+    // line -- rather than falling back to a bare `==>` line the way every step used to.
+    // `cleanup` (the stale serve_roots record) is deliberately excluded: this run's
+    // fixture never plants that record, so the step is silent by design (see the
+    // dedicated checks above for that case both ways).
+    for (const step of ['job', 'plist', 'launcher', 'mcp', 'pomodoro', 'manual']) {
+      assert.match(
+        uninstallResult.stdout,
+        new RegExp(`^  \\u2713  ${step}\\b`, 'm'),
+        `the ${step} step must print through the shared checklist vocabulary (a ticked line), not a bare ==> line`,
+      );
+    }
+    // The "left in place on purpose" list is the one thing the spec says must NOT
+    // collapse the way the rest of the transcript does: full heading, every path, the
+    // per-record loop, and both closing paragraphs, all still present.
+    assert.match(uninstallResult.stdout, /left in place on purpose:/, 'the keep-list heading must survive');
+    assert.ok(uninstallResult.stdout.includes(storeDir), 'the store path must still be named in full');
+    assert.ok(uninstallResult.stdout.includes(secretFile), 'the secret path must still be named in full');
+    assert.ok(uninstallResult.stdout.includes(logDir), 'the logs path must still be named in full');
+    assert.match(uninstallResult.stdout, /Privacy & Security/, 'the Privacy & Security paragraph must survive');
+    assert.match(uninstallResult.stdout, /SessionStart hook snippet/, 'the settings.json paragraph must survive');
+  });
+
   await check('uninstall resolves a custom store from the board_home record rather than the default path', async () => {
     // #26: uninstall.sh read CLAUDE_BOARD_HOME from the environment only, so a machine
     // installed with a custom store -- recorded by install.sh precisely so a later run in a
@@ -2683,8 +2732,11 @@ http.createServer((req, res) => {
     assert.equal(second.status, 0, `a second uninstall must not fail\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
     // pomodoro.json is already gone from the run above -- the second run must say so
     // rather than erroring on a missing file, the same "already absent" idempotency
-    // every other removal in uninstall.sh gets.
-    assert.match(second.stdout, /no pomodoro state at/, 'a second uninstall must report the timer file as already absent, not silently skip it');
+    // every other removal in uninstall.sh gets. Re-laid-out under the checklist: the
+    // path now sits in its own dimmed column rather than glued onto the result text
+    // with "at", so the two are asserted separately instead of as one contiguous phrase.
+    assert.match(second.stdout, /no pomodoro state/, 'a second uninstall must report the timer file as already absent, not silently skip it');
+    assert.ok(second.stdout.includes(pomodoroFile), 'and must still name the file it found absent');
     assert.doesNotMatch(second.stdout, /removed .*pomodoro\.json/, 'and must not claim to have removed it again');
   });
 
@@ -2727,6 +2779,364 @@ http.createServer((req, res) => {
     } finally {
       rmSync(freshWorkDir, { recursive: true, force: true });
     }
+  });
+
+  // --- the checklist transcript: line budget, capture-on-failure, --verbose -----------
+
+  /** Runs install.sh twice against `lineCountEnv` and returns the second (already-current)
+   * run's stdout line count. Shared by the default and non-default-store cases below. */
+  function alreadyCurrentLineCount(lineCountEnv) {
+    const first = spawnSync('bash', [installScript], { env: lineCountEnv, encoding: 'utf8' });
+    assert.equal(first.status, 0, `first run must succeed:\nstdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+
+    // The second run is an already-current bundle: nothing about it is new, and the
+    // transcript is at its shortest for whatever config this run carries.
+    const second = spawnSync('bash', [installScript], { env: lineCountEnv, encoding: 'utf8' });
+    assert.equal(second.status, 0, `second run must succeed:\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    assert.match(second.stdout, /already current/, 'setup sanity: the second run must find the bundle already current');
+    return second.stdout.replace(/\n$/, '').split('\n').length;
+  }
+
+  await check('a re-install with an already-current launcher bundle and the default config prints no more than 13 stdout lines', async () => {
+    // No CLAUDE_BOARD_HOME or CLAUDE_BOARD_REF_ROOTS: the true out-of-the-box case the
+    // render depicts, where every carried-forward value is still the built-in default and
+    // earns no header line -- the roomiest case, and the tightest bound.
+    const root = path.join(workDir, 'linecount-default-run');
+    const lineCountEnv = {
+      ...env,
+      ...quietStubs('linecount-default'),
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+    };
+    delete lineCountEnv.CLAUDE_BOARD_HOME;
+    delete lineCountEnv.CLAUDE_BOARD_REF_ROOTS;
+
+    const lineCount = alreadyCurrentLineCount(lineCountEnv);
+    assert.ok(lineCount <= 13, `expected at most 13 stdout lines on the default config, got ${lineCount}`);
+  });
+
+  await check('a re-install with an already-current launcher bundle and a non-default store prints no more than 14 stdout lines', async () => {
+    // The headline claim of the whole task, and the case that actually stresses the
+    // budget rather than documenting a gap in it: a machine that ever set
+    // CLAUDE_BOARD_HOME carries a board_home record forever, so its store line prints on
+    // every later reinstall, and this is still "a successful re-install on a machine
+    // whose launcher bundle is already current". A widen on top of a custom store would
+    // be 15 and is a known, deliberate exception (ADR.md entry 36 makes the widen line
+    // non-negotiable) -- out of scope for this bound.
+    const root = path.join(workDir, 'linecount-store-run');
+    const lineCountEnv = {
+      ...env,
+      ...quietStubs('linecount-store'),
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+      CLAUDE_BOARD_HOME: path.join(root, 'Store'),
+    };
+    delete lineCountEnv.CLAUDE_BOARD_REF_ROOTS;
+
+    const lineCount = alreadyCurrentLineCount(lineCountEnv);
+    assert.ok(lineCount <= 14, `expected at most 14 stdout lines with a non-default store, got ${lineCount}`);
+  });
+
+  await check('a failing MCP registration prints its captured output, attributed to the mcp step', async () => {
+    // A stub standing in for `claude` that fails `mcp add` after printing to both of its
+    // own streams -- cbs_run_captured merges them, so both must surface, and only on
+    // install.sh's stderr, indented beneath the step that ran the command.
+    const root = path.join(workDir, 'mcp-fail-run');
+    const failingClaudeStub = path.join(root, 'bin', 'failing-claude.mjs');
+    mkdirSync(path.dirname(failingClaudeStub), { recursive: true });
+    writeFileSync(failingClaudeStub, [
+      '#!/usr/bin/env node',
+      'const args = process.argv.slice(2);',
+      "if (args[0] === 'mcp' && args[1] === 'remove') process.exit(1);",
+      "if (args[0] === 'mcp' && args[1] === 'add') {",
+      "  process.stdout.write('CAPTURE-MARKER-STDOUT-LINE\\n');",
+      "  process.stderr.write('CAPTURE-MARKER-STDERR-LINE\\n');",
+      '  process.exit(1);',
+      '}',
+      'process.exit(1);',
+      '',
+    ].join('\n'));
+    chmodSync(failingClaudeStub, 0o755);
+
+    const mcpFailEnv = {
+      ...env,
+      ...quietStubs('mcp-fail'),
+      CLAUDE_BOARD_MCP_CMD: failingClaudeStub,
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+    };
+    const r = spawnSync('bash', [installScript], { env: mcpFailEnv, encoding: 'utf8' });
+    assert.notEqual(r.status, 0, 'a failing MCP registration must fail the install');
+    assert.match(r.stderr, /mcp add' failed/, 'the mcp step must be named as the one that failed');
+    assert.match(r.stderr, /CAPTURE-MARKER-STDOUT-LINE/, "the failed command's own stdout must be captured and shown");
+    assert.match(r.stderr, /CAPTURE-MARKER-STDERR-LINE/, 'and its stderr too -- cbs_run_captured merges both');
+    assert.doesNotMatch(r.stdout, /CAPTURE-MARKER/, 'captured output must never reach stdout');
+  });
+
+  await check('--verbose restores the full config header and the standing prose in full, even on a repeat run', async () => {
+    const root = path.join(workDir, 'verbose-run');
+    const verboseEnv = {
+      ...env,
+      ...quietStubs('verbose'),
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+    };
+    // First run builds the bundle (LAUNCHER_IS_NEW=1); the second is the ordinary
+    // reinstall that would otherwise collapse the standing prose to the pointer line.
+    const first = spawnSync('bash', [installScript], { env: verboseEnv, encoding: 'utf8' });
+    assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+
+    const second = spawnSync('bash', [installScript, '--verbose'], { env: verboseEnv, encoding: 'utf8' });
+    assert.equal(second.status, 0, `stdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    assert.match(second.stdout, /already current/, 'setup sanity: the second run must find the bundle already current');
+    assert.match(second.stdout, /repo:/, '--verbose must restore the full config header');
+    assert.match(
+      second.stdout, /Privacy & Security -> Files and Folders/,
+      '--verbose must restore the standing prose in full, even though this bundle is not new',
+    );
+    assert.doesNotMatch(
+      second.stdout, /macOS file access and notifications: README/,
+      'and must not also print the collapsed pointer line on top of the full prose',
+    );
+  });
+
+  await check('stripping ANSI from a real, coloured install.sh run reproduces the same install\'s plain run, line for line', async () => {
+    // The transcript-styling block's own suite below proves this against a synthetic
+    // driver script that calls the fence's functions directly -- useful for pinning the
+    // mechanism, but "the same install" is the actual claim, and this is the one check
+    // that runs bash install.sh itself, twice, against the same throwaway root.
+    const root = path.join(workDir, 'colour-equivalence-run');
+    const colourEnv = {
+      ...env,
+      ...quietStubs('colour-equivalence'),
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+    };
+    // First run builds the bundle; the second (compared below) is the ordinary,
+    // already-current reinstall -- warned node line included, so both streams carry
+    // something to compare.
+    const first = spawnSync('bash', [installScript], { env: colourEnv, encoding: 'utf8' });
+    assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+
+    const plain = spawnSync('bash', [installScript], { env: colourEnv, encoding: 'utf8' });
+    assert.equal(plain.status, 0, `stdout:\n${plain.stdout}\nstderr:\n${plain.stderr}`);
+    const coloured = spawnSync('bash', [installScript], {
+      env: { ...colourEnv, CLAUDE_BOARD_COLOR: '1' }, encoding: 'utf8',
+    });
+    assert.equal(coloured.status, 0, `stdout:\n${coloured.stdout}\nstderr:\n${coloured.stderr}`);
+
+    const ansi = /\x1b\[[0-9;]*m/g;
+    const strip = s => s.replace(ansi, '');
+    // Setup sanity first: if the coloured run carried no escapes at all, the equality
+    // checks below would be proving nothing.
+    assert.notEqual(coloured.stdout, plain.stdout, 'setup sanity: the coloured run must actually carry colour on stdout');
+    assert.notEqual(coloured.stderr, plain.stderr, 'setup sanity: and on stderr too');
+    assert.equal(strip(coloured.stdout), plain.stdout, 'stripping ANSI from the coloured run\'s stdout must reproduce the plain run\'s, line for line');
+    assert.equal(strip(coloured.stderr), plain.stderr, 'and the same for stderr');
+  });
+
+  // --- the shared transcript-styling block (colour, step lines, header/banner/footer) ---
+  //
+  // install.sh and uninstall.sh each carry a byte-identical copy of this block (neither
+  // sources the other, same reason and same convention as is_throwaway_bundle_path
+  // above), so drift is the first thing to check for. The rest exercises the block's
+  // colour mechanism directly -- a tiny driver script that extracts the block's own text
+  // and calls its functions, in the same style as the is_throwaway_bundle_path checks
+  // above, rather than a full install.sh run: nothing here needs a launcher, a plist or
+  // a health gate, only the print vocabulary itself.
+
+  /** Extracts the fence's contents from install.sh. Asserted non-null everywhere it is
+   * used, so a regex miss fails loudly instead of quietly running an empty driver. */
+  function extractCbsBlock() {
+    const block = readFileSync(installScript, 'utf8').match(
+      /# --- BEGIN transcript styling.*?\n([\s\S]*?)\n# --- END transcript styling ---/,
+    )?.[1];
+    assert.ok(block, 'setup sanity: the transcript-styling block text must be extractable from install.sh');
+    return block;
+  }
+
+  // One call per documented function, covering every one of the seven palette
+  // variables (CBS_STEP, CBS_BOLD, CBS_DIM, CBS_OK, CBS_WARN, CBS_ERR, CBS_RESET) at
+  // least once, so a colour check against this probe's output is a claim about the
+  // whole block, not one function some of them.
+  const CBS_PROBE = [
+    'cbs_header "claude-board" "7391"',
+    'cbs_step_ok "secret" "already present"',
+    'cbs_step_ok "launcher" "built and signed" "~/Applications/claude-board.app"',
+    'cbs_step_warn "launcher" "no C compiler, installing without the bundle"',
+    'cbs_detail "a reference into ~/Documents will fail with EPERM"',
+    'cbs_step_fail "health" "never answered http://127.0.0.1:7391/api/health"',
+    'cbs_detail "logs: ~/Library/Logs/claude-board/daemon.err.log"',
+    'cbs_success "claude-board installed and running"',
+    'cbs_footer_entry "verify" "curl -s http://127.0.0.1:7391/api/health"',
+    'cbs_footer_entry "logs" "~/Library/Logs/claude-board/daemon.{out,err}.log"',
+  ].join('\n');
+
+  /** Runs CBS_PROBE against the real, extracted block text under `extraEnv`. Never
+   * passes CLAUDE_BOARD_VERBOSE or a PATH -- every function CBS_PROBE calls is a bash
+   * builtin (printf, case, test), so nothing here needs an external command resolved. */
+  function runCbsProbe(extraEnv) {
+    const driver = `set -euo pipefail\n${extractCbsBlock()}\n${CBS_PROBE}\n`;
+    const r = spawnSync('bash', ['-c', driver], {
+      encoding: 'utf8', env: { HOME: '/Users/somebody', ...extraEnv },
+    });
+    assert.equal(r.status, 0, `the probe script must exit 0\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    return r;
+  }
+
+  const CBS_ANSI = /\x1b\[[0-9;]*m/g;
+
+  await check('transcript styling: the shared block is byte-identical in install.sh and uninstall.sh', async () => {
+    const fn = src => src.match(
+      /# --- BEGIN transcript styling.*?\n([\s\S]*?)\n# --- END transcript styling ---/,
+    )?.[1];
+    const installBlock = fn(readFileSync(installScript, 'utf8'));
+    const uninstallBlock = fn(readFileSync(uninstallScript, 'utf8'));
+    // Asserted to have MATCHED before being compared -- see the identical reasoning on
+    // is_throwaway_bundle_path above: a regex miss on both sides would otherwise pass
+    // an equality check vacuously.
+    assert.ok(installBlock, 'install.sh must carry the transcript-styling block where this can read it');
+    assert.ok(uninstallBlock, 'uninstall.sh must carry the transcript-styling block where this can read it');
+    assert.equal(uninstallBlock, installBlock, 'the transcript-styling block has drifted between the two scripts');
+  });
+
+  await check('transcript styling: colour is present when CLAUDE_BOARD_COLOR forces it on over a piped stdout', async () => {
+    // spawnSync's stdio is always a pipe, so [ -t 1 ] is false here exactly as it is in
+    // every other check in this file -- this is the whole point of the forcing
+    // variable: without it, the coloured path would be unreachable from this suite.
+    const forced1 = runCbsProbe({ CLAUDE_BOARD_COLOR: '1' });
+    assert.match(forced1.stdout, CBS_ANSI, 'CLAUDE_BOARD_COLOR=1 must put ANSI escapes on stdout despite piped stdio');
+    assert.match(forced1.stderr, CBS_ANSI, 'and on stderr, where the warned/failed lines land');
+    const forcedAlways = runCbsProbe({ CLAUDE_BOARD_COLOR: 'always' });
+    assert.match(forcedAlways.stdout, CBS_ANSI, 'CLAUDE_BOARD_COLOR=always must do the same');
+  });
+
+  await check('transcript styling: colour is absent on a plain piped run, under NO_COLOR, and under TERM=dumb', async () => {
+    const piped = runCbsProbe({});
+    assert.doesNotMatch(piped.stdout, CBS_ANSI, 'a plain piped run must carry no ANSI escapes on stdout');
+    assert.doesNotMatch(piped.stderr, CBS_ANSI, 'or on stderr');
+
+    // NO_COLOR set to the EMPTY string, deliberately: it is the variable being set that
+    // turns colour off, not any particular value it holds.
+    const noColor = runCbsProbe({ NO_COLOR: '' });
+    assert.doesNotMatch(noColor.stdout, CBS_ANSI, 'NO_COLOR (even empty) must turn colour off');
+
+    const dumb = runCbsProbe({ TERM: 'dumb' });
+    assert.doesNotMatch(dumb.stdout, CBS_ANSI, 'TERM=dumb must turn colour off');
+  });
+
+  await check('transcript styling: cbs_spinner_stop erases its line with plain spaces, never an ANSI escape', async () => {
+    // The spinner itself only ever starts when stdout is a real terminal ([ -t 1 ]),
+    // which spawnSync's piped stdio never is -- so cbs_spinner_start can never be
+    // proven to actually draw a spinner from this suite. What CAN be proven here,
+    // deterministically and without a pty, is the half that used to leak an escape
+    // regardless of colour: cbs_spinner_stop's own erase. CBS_SPINNER_PID is forced to
+    // a real, already-reaped child's pid, so the `[ -n "$CBS_SPINNER_PID" ]` guard is
+    // entered exactly as it would be after a real spinner run -- kill/wait on an
+    // already-reaped pid are harmless no-ops (the function's own `|| true` covers
+    // both) -- reaching the erase printf without needing a terminal at all.
+    const runErase = extraEnv => {
+      const driver = `set -euo pipefail\n${extractCbsBlock()}\n`
+        + 'sleep 0 &\nCBS_SPINNER_PID=$!\nwait "$CBS_SPINNER_PID" 2>/dev/null || true\n'
+        + 'cbs_spinner_stop\nprintf "END"\n';
+      const r = spawnSync('bash', ['-c', driver], {
+        encoding: 'utf8', env: { HOME: '/Users/somebody', ...extraEnv },
+      });
+      assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+      return r;
+    };
+
+    // Every env combination the erase should be indifferent to, TERM=dumb and NO_COLOR
+    // included -- the fix moved the erase off ANSI entirely rather than special-casing
+    // colour-off, so it must stay escape-free even when colour is forced ON.
+    for (const extraEnv of [{}, { NO_COLOR: '1' }, { TERM: 'dumb' }, { CLAUDE_BOARD_COLOR: '1' }]) {
+      const r = runErase(extraEnv);
+      assert.doesNotMatch(
+        r.stdout, /\x1b/,
+        `cbs_spinner_stop must never write an ANSI escape byte (env: ${JSON.stringify(extraEnv)})`,
+      );
+      assert.match(
+        r.stdout, /^\r {20}\rEND$/,
+        `the erase must be a bare \\r, CBS_SPINNER_LINE_WIDTH plain spaces, then a second bare \\r (env: ${JSON.stringify(extraEnv)})`,
+      );
+    }
+  });
+
+  await check('transcript styling: the spinner is skipped outright under TERM=dumb, which cannot reposition a cursor', async () => {
+    // Cannot be shown behaviourally from this suite either: cbs_spinner_start's very
+    // first line already refuses under piped stdio ([ -t 1 ]), before TERM is ever
+    // consulted, so a real terminal would be needed to watch the TERM=dumb branch fire
+    // on its own. Checked structurally instead -- the guard has to exist in the
+    // function's own source.
+    const fnMatch = extractCbsBlock().match(/cbs_spinner_start\(\) \{([\s\S]*?)\n\}/);
+    assert.ok(fnMatch, 'setup sanity: cbs_spinner_start must be extractable');
+    assert.match(
+      fnMatch[1], /\[\s*"\$\{TERM:-\}"\s*=\s*"dumb"\s*\]/,
+      'cbs_spinner_start must refuse to start a spinner outright when TERM is dumb',
+    );
+  });
+
+  await check('transcript styling: CLAUDE_BOARD_COLOR overrides NO_COLOR and TERM=dumb', async () => {
+    // The forcing variable has to win over every OFF condition too, or a test running
+    // under a CI environment that already sets NO_COLOR could never reach the coloured
+    // path either.
+    const r = runCbsProbe({ CLAUDE_BOARD_COLOR: '1', NO_COLOR: '1', TERM: 'dumb' });
+    assert.match(r.stdout, CBS_ANSI, 'CLAUDE_BOARD_COLOR must beat NO_COLOR and TERM=dumb, not just an ordinary piped stdout');
+  });
+
+  await check('transcript styling: stripping ANSI from a coloured run reproduces the piped run line for line', async () => {
+    const coloured = runCbsProbe({ CLAUDE_BOARD_COLOR: '1' });
+    const plain = runCbsProbe({});
+    const strip = s => s.replace(CBS_ANSI, '');
+    // Setup sanity first: if the coloured run were identical to the plain one before
+    // stripping, the equality checks below would be proving nothing.
+    assert.notEqual(coloured.stdout, plain.stdout, 'setup sanity: the coloured run must actually carry colour');
+    assert.equal(strip(coloured.stdout), plain.stdout, 'stdout must match the piped run line for line once colour is stripped');
+    assert.equal(strip(coloured.stderr), plain.stderr, 'stderr must match the piped run line for line once colour is stripped');
+  });
+
+  await check('transcript styling: step, detail, header, banner and footer lines match the rendered checklist layout', async () => {
+    // Pins the layer's own output against the exact bytes of the chosen rendering
+    // (install-B-checklist.html), plain-run values only -- colour is proven separately
+    // above. A regression here is a column width or a glyph moving under whichever of
+    // the two scripts starts calling these functions for real.
+    const r = runCbsProbe({});
+    const stdoutLines = r.stdout.split('\n');
+    assert.equal(stdoutLines[0], '  claude-board                                    port 7391');
+    assert.ok(stdoutLines.includes('  ✓  secret     already present'));
+    assert.ok(stdoutLines.includes('  ✓  launcher   built and signed        ~/Applications/claude-board.app'));
+    assert.ok(stdoutLines.includes('  ●  claude-board installed and running'));
+    assert.ok(stdoutLines.includes('     verify  curl -s http://127.0.0.1:7391/api/health'));
+    assert.ok(stdoutLines.includes('     logs    ~/Library/Logs/claude-board/daemon.{out,err}.log'));
+
+    const stderrLines = r.stderr.split('\n');
+    assert.ok(stderrLines.includes('  !  launcher   no C compiler, installing without the bundle'));
+    assert.ok(stderrLines.includes('        a reference into ~/Documents will fail with EPERM'));
+    assert.ok(stderrLines.includes('  ✗  health     never answered http://127.0.0.1:7391/api/health'));
+    assert.ok(stderrLines.includes('        logs: ~/Library/Logs/claude-board/daemon.err.log'));
+  });
+
+  await check('transcript styling: a warned or failed step and its detail lines go to stderr, never stdout', async () => {
+    const r = runCbsProbe({});
+    assert.doesNotMatch(r.stdout, /no C compiler/, 'a warned step must not appear on stdout');
+    assert.doesNotMatch(r.stdout, /never answered/, 'a failed step must not appear on stdout');
+    assert.doesNotMatch(r.stdout, /EPERM|daemon\.err\.log/, 'detail lines beneath a warned\/failed step must not appear on stdout either');
+    assert.doesNotMatch(r.stderr, /already present|built and signed|installed and running/, 'and the good-path lines must never leak onto stderr');
   });
 
   // Last, so it sees the state every check above left behind. See REAL_PATHS.
