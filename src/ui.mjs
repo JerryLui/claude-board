@@ -2846,6 +2846,91 @@ export const ui = `
     openCommentForm(blockId, 'dom', anchor.ref, buildHint(root, el), '', findPendingCommentForAnchor(pendingComments, blockId, anchor));
   });
 
+  // --- the Notice: raised by a blocked gesture, never by the mode turning on --
+  //
+  // Comment mode's own cues -- the toggle, the pointer cursor, the hover
+  // outline -- attach only to blocks that can take a comment; an option card,
+  // a rank row and the Defer button get none of them, so the gesture a
+  // reviewer actually tries (picking an answer, reordering a rank list,
+  // deferring a question) is silently swallowed by exactly the guards above
+  // and below, and reads as broken. This is the fix: a single transient
+  // message, minted by the blocked gesture itself, gone on its own after 5s
+  // if nobody dismisses it first (ADR.md entry 96 has the full account of
+  // what that rules out). One Notice, whichever gesture raised it -- the
+  // wording never names the gesture, only the state that blocked it.
+
+  var NOTICE_LOCKED_TEXT = 'Comment mode is on, answers locked.';
+  var NOTICE_LOCKED_MS = 5000;
+  var lockedNoticeTimer = null;
+
+  // Built once, eagerly, right here at hydrate -- present in the document
+  // (empty, 'visibility: hidden', which excludes it from the accessibility
+  // tree exactly as if it were absent) long before any click could ever
+  // populate it. role="alert" content set in the SAME tick as the element's
+  // OWN insertion is the classic case a screen reader skips on a first
+  // appearance -- a live region a screen reader already knows about, whose
+  // content and visibility change LATER, is the one shape every appearance
+  // shares, first included, so there is exactly one announcement pattern to
+  // reason about rather than a special-cased first time.
+  var lockedNoticeEl = document.createElement('div');
+  lockedNoticeEl.className = 'notice';
+  lockedNoticeEl.setAttribute('role', 'alert');
+  var lockedNoticeMsgEl = document.createElement('span');
+  lockedNoticeMsgEl.className = 'notice-msg';
+  lockedNoticeEl.appendChild(lockedNoticeMsgEl);
+  var lockedNoticeX = document.createElement('button');
+  lockedNoticeX.type = 'button';
+  lockedNoticeX.className = 'notice-x';
+  lockedNoticeX.setAttribute('aria-label', 'Dismiss');
+  lockedNoticeX.textContent = '×';
+  // The x is the only control here -- deliberately no second way to turn
+  // commenting off from a message that is gone in 5s either way.
+  lockedNoticeX.addEventListener('click', dismissLockedNotice);
+  lockedNoticeEl.appendChild(lockedNoticeX);
+  var lockedNoticeBarEl = document.createElement('span');
+  lockedNoticeBarEl.className = 'notice-bar';
+  lockedNoticeEl.appendChild(lockedNoticeBarEl);
+  // The questions-left pill floats in this EXACT spot too (both centered
+  // above the send bar, same idiom) -- '.notice-open' on this shared host
+  // couples the pill's own visibility to the Notice's, below, so the pill
+  // yields for as long as the Notice is up instead of the two overlapping.
+  var lockedNoticeHostEl = document.querySelector('.send-bar') || document.body;
+  lockedNoticeHostEl.appendChild(lockedNoticeEl);
+
+  function dismissLockedNotice() {
+    if (lockedNoticeTimer) { clearTimeout(lockedNoticeTimer); lockedNoticeTimer = null; }
+    lockedNoticeEl.classList.remove('visible');
+    lockedNoticeHostEl.classList.remove('notice-open');
+  }
+
+  /** Show the one Notice this page ever has. A second blocked click while it
+   * is already up must reset its 5s and mint nothing new -- exactly what
+   * re-running this against an already-'.visible' element does: the timer
+   * restarts, nothing is rebuilt or re-announced. */
+  function raiseLockedNotice() {
+    var wasUp = lockedNoticeEl.classList.contains('visible');
+    if (!wasUp) {
+      // A screen reader announces role="alert" off a genuine content change
+      // to an already-known live region -- setting the text (even to the
+      // same string) on every fresh appearance is what makes a LATER
+      // blocked click, long after an earlier Notice faded, get announced
+      // too, not just the very first one on the page.
+      lockedNoticeMsgEl.textContent = NOTICE_LOCKED_TEXT;
+      lockedNoticeEl.classList.add('visible');
+      lockedNoticeHostEl.classList.add('notice-open');
+    }
+    // The accent bar counts ITS OWN 5s down, restarted every time the
+    // dismiss timer is (QUIRKS.md doesn't cover this one: forcing a reflow
+    // between clearing and re-adding the class is the ordinary way to
+    // replay a CSS animation, and reading a layout property the DOM
+    // stand-in doesn't model is a harmless no-op there).
+    lockedNoticeBarEl.classList.remove('notice-bar-run');
+    void lockedNoticeBarEl.offsetWidth;
+    lockedNoticeBarEl.classList.add('notice-bar-run');
+    if (lockedNoticeTimer) clearTimeout(lockedNoticeTimer);
+    lockedNoticeTimer = setTimeout(dismissLockedNotice, NOTICE_LOCKED_MS);
+  }
+
   /** Select 'card''s option, deselecting every sibling under the same question.
    * 'aria-disabled' is this div's equivalent of a real <button>'s 'disabled'
    * attribute (src/render.mjs sets it once the block's round is historical) --
@@ -2870,7 +2955,13 @@ export const ui = `
    * control calls this function; it does not maintain a second notion of what
    * is selected, and every guard above applies to it identically. */
   function selectVariant(card) {
-    if (readonly || commentMode || card.getAttribute('aria-disabled') === 'true') return;
+    if (readonly || commentMode || card.getAttribute('aria-disabled') === 'true') {
+      // Only comment mode earns the Notice -- an aria-disabled card (a
+      // historical round's own option) is inert for an unrelated reason, and
+      // telling the reviewer "commenting is on" there would misname why.
+      if (commentMode && !readonly && card.getAttribute('aria-disabled') !== 'true') raiseLockedNotice();
+      return;
+    }
     var qid = card.getAttribute('data-question-id');
     var choice = card.getAttribute('data-choice');
     selections[qid] = choice;
@@ -2894,8 +2985,15 @@ export const ui = `
     btn.addEventListener('click', function () {
       // commentMode: the generic click-to-anchor listener (below) owns
       // this click instead -- see its own comment for why every ordinary widget
-      // handler stands down rather than firing alongside it.
-      if (readonly || commentMode) return;
+      // handler stands down rather than firing alongside it. The Notice is
+      // what tells the reviewer why (raised by this exact blocked click,
+      // never by the toggle turning on) -- readonly stays silent, since a
+      // historical option is a native disabled <button> there and this
+      // handler never runs for a real click on one at all.
+      if (readonly || commentMode) {
+        if (commentMode && !readonly) raiseLockedNotice();
+        return;
+      }
       selections[qid] = choice;
       touched[qid] = true;
       qsa('.choice-single[data-question-id="' + qid + '"]').forEach(function (b) {
@@ -2911,7 +3009,11 @@ export const ui = `
     if (!Array.isArray(selections[qid])) selections[qid] = [];
     if (selections[qid].indexOf(choice) !== -1) btn.classList.add('selected');
     btn.addEventListener('click', function () {
-      if (readonly || commentMode) return;
+      // Same guard, same Notice -- see the .choice-single wiring just above.
+      if (readonly || commentMode) {
+        if (commentMode && !readonly) raiseLockedNotice();
+        return;
+      }
       var arr = Array.isArray(selections[qid]) ? selections[qid].slice() : [];
       var idx = arr.indexOf(choice);
       if (idx === -1) arr.push(choice); else arr.splice(idx, 1);
@@ -3003,7 +3105,11 @@ export const ui = `
     if (!Array.isArray(selections[qid])) selections[qid] = rankOrder(list);
     var dragging = null;
     list.addEventListener('dragstart', function (ev) {
-      if (readonly || commentMode || ev.target.tagName !== 'LI') return;
+      if (readonly || commentMode || ev.target.tagName !== 'LI') {
+        // Same guard, same Notice -- see the .choice-single wiring above.
+        if (commentMode && !readonly && ev.target.tagName === 'LI') raiseLockedNotice();
+        return;
+      }
       dragging = ev.target;
       dragging.classList.add('dragging');
     });
@@ -3047,7 +3153,11 @@ export const ui = `
     // Send reported it deferred anyway.
     btn.classList.toggle('active', !!deferred[qid]);
     btn.addEventListener('click', function () {
-      if (readonly || commentMode) return;
+      // Same guard, same Notice -- see the .choice-single wiring above.
+      if (readonly || commentMode) {
+        if (commentMode && !readonly) raiseLockedNotice();
+        return;
+      }
       deferred[qid] = !deferred[qid];
       btn.classList.toggle('active', !!deferred[qid]);
       updateQuestionsLeftPill();

@@ -19,7 +19,7 @@
 //
 // NO REAL NOTIFICATION MAY EVER FIRE FROM THIS SUITE. `osascript` is a stub on PATH here
 // from the first line of this file, and the grace is a few milliseconds throughout rather
-// than the shipped fifteen seconds -- which is also why test/run.mjs pushes the grace out
+// than the shipped five seconds -- which is also why test/run.mjs pushes the grace out
 // of reach for every OTHER check in the suite: they post awaited rounds and walk away
 // too, which is exactly the shape this rule announces.
 
@@ -35,7 +35,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 import { SECRET_HEADER } from '../src/secret.mjs';
-import { createBoard, addRound } from '../src/board.mjs';
+import { createBoard, addRound, amendRound } from '../src/board.mjs';
 import { readBoard, writeBoard } from '../src/store.mjs';
 import { STRANDED_BANNER, SUPPRESSED } from '../src/board.mjs';
 import { roundIsAwaitedOpen } from '../src/badge.mjs';
@@ -759,6 +759,178 @@ async function layerOne() {
     await tick();
     assert.equal(banners.length, 0);
     assert.equal(announcedAt(board.id), null);
+    watch.close();
+  });
+
+  // --- ticket: a round nobody can see always rings -----------------------------------
+  //
+  // The gap this ticket closes: the mark that keeps a round from ringing twice (ADR 74)
+  // is per round and permanent, and until now nothing invalidated it when the round it
+  // named was AMENDED -- so a re-post that changed a round's content, with the reviewer
+  // still gone, rang once for the content it replaced and then fell silent for good.
+
+  await check('AC: a round posted while no board tab is open anywhere rings, whether it is the thread\'s first round or its twentieth', async () => {
+    const { banners, watch } = stand();
+    const board = seedBoard(); // round 1
+    // Nineteen more rounds, each already closed out (answered, exactly as a thread that
+    // has been running a while looks), standing in for a long history that must not be
+    // what decides this -- only whether anyone is watching NOW.
+    const stored = readBoard(board.id, home);
+    stored.rounds[0].status = 'sent';
+    stored.rounds[0].awaited = false;
+    for (let n = 2; n <= 19; n++) {
+      stored.rounds.push({ n, postedAt: stored.rounds[0].postedAt, status: 'sent', sentAt: stored.rounds[0].postedAt, title: 'closed out', awaited: false, awaitDeadline: null });
+    }
+    writeBoard(stored, home);
+    addAwaitedRound(board.id, 'round twenty?');
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1, 'the twentieth round rings exactly as the first would');
+    assert.equal(bannerOn(board.id).round, 20, 'and names the round actually waiting, not round 1');
+    watch.close();
+  });
+
+  await check('AC: a round posted while a board tab is open does not ring', async () => {
+    const { looking, banners, watch } = stand();
+    const board = seedBoard();
+    looking.set(board.id, true); // the reviewer is looking, right now, when the round lands
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 0, 'a round posted into a board someone is actually watching never rings');
+    watch.close();
+  });
+
+  await check('AC: a re-post that amends a round already open rings on the same terms as a new round', async () => {
+    // The concrete gap: round 1 rings once (nobody watching), and is THEN amended --
+    // still nobody watching, still never returned to -- with new content the reviewer
+    // has never been told about. "If the reviewer cannot see it, it rings" says this must
+    // ring again; before this fix the permanent per-round mark said otherwise.
+    const { banners, watch } = stand();
+    const board = seedBoard();
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1, 'round 1 rings once, unwatched');
+    assert.equal(bannerOn(board.id).round, 1);
+
+    // The amend, exactly as handlePostBoard performs it: a fresh call to amendRound,
+    // persisted, then the daemon's own two calls in the order server.mjs makes them --
+    // `amended` before `evaluate`, since the mark has to be moved before evaluate decides
+    // whether there is anything left to announce.
+    const fresh = readBoard(board.id, home);
+    const result = amendRound(fresh, { blocks: [QUESTION('Ship now, or later?')], cwd: projectDir });
+    writeBoard(fresh, home);
+    watch.amended(board.id, result.round);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 2, 'the amended round rings again -- unseen content, on the same terms as a new round');
+    assert.equal(bannerOn(board.id).round, 1, 'still round 1: the amend did not mint a new round number');
+  });
+
+  await check('regression: an amend must not regress the mark past round-1, or an OLDER already-answered-for round rings again while the amended one stays silent', async () => {
+    // The severe defect a review caught: `nextToAnnounce` always names the OLDEST
+    // still-waiting round past the mark, and a board can hold more than one awaited-open
+    // round at once (ADR.md entry 45 -- an awaited page round, never sendable per ADR 35,
+    // beside a later question round; exactly the shape `waitingArtifactBoard` in the
+    // layer-2 checks below models). Clearing the mark to nothing on an amend reopened
+    // every round at or below the one just amended, not just that one: an OLDER round
+    // already announced and already returned from rang a SECOND time -- breaking "at most
+    // once ever" (ADR.md entry 74) -- while the round genuinely amended, the whole point
+    // of this ticket, never rang at all.
+    const { looking, banners, watch } = stand();
+    // Round 1: an awaited PAGE round (ADR 35: never sent, so it stays awaited-open for
+    // the rest of the board's life -- the fact the old implementation tripped over).
+    const board = createBoard({
+      title: 'two awaited rounds', blocks: [{ kind: 'html', html: '<p>an artifact, waiting on a comment</p>' }],
+      cwd: projectDir, wait: true, awaitTimeoutMs: AWAIT_MS,
+    });
+    writeBoard(board, home);
+
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1, 'round 1 rings, unwatched');
+    assert.equal(bannerOn(board.id).round, 1);
+
+    looking.set(board.id, true); // a genuine return: the gate opens, the mark stays at 1
+    watch.evaluate(board.id, target(board.id));
+    assert.equal(bannerOn(board.id).returned, true);
+    looking.set(board.id, false);
+
+    addAwaitedRound(board.id, 'Ship now, or later?'); // round 2, a genuinely new round
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 2, 'round 2 rings, never having been told about before');
+    assert.equal(bannerOn(board.id).round, 2);
+
+    // Round 2 is re-posted while nobody is watching -- still open, still asks something.
+    const fresh = readBoard(board.id, home);
+    const result = amendRound(fresh, { blocks: [QUESTION('or this one?')], cwd: projectDir });
+    writeBoard(fresh, home);
+    watch.amended(board.id, result.round);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+
+    assert.equal(banners.length, 3, 'round 2 rings again for the content the reviewer never saw');
+    assert.equal(bannerOn(board.id).round, 2, 'the mark names round 2, the round actually amended -- it never regresses to round 1');
+
+    // And round 1 -- already announced, already returned from -- earns nothing from any
+    // of this, however many more times the board is re-evaluated.
+    for (let i = 0; i < 3; i++) {
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+    }
+    assert.equal(banners.length, 3, 'round 1 never rings a second time: the amend touched round 2 alone');
+    watch.close();
+  });
+
+  await check('AC: an amend to a round that has never rung leaves the grace running, and it still rings only once', async () => {
+    // The other half of "watched exactly like a new one": an amend before the round's
+    // very first ring must not create a SECOND countdown or a second banner -- the
+    // existing grace, re-decided at fire time against whatever is on disk by then, was
+    // already correct for this case (see `announce`'s own re-read), and `amended` is a
+    // no-op here because there is no mark yet to clear.
+    const { banners, watch } = stand();
+    const board = seedBoard();
+    watch.evaluate(board.id, target(board.id)); // arms the grace, does not fire yet
+    const fresh = readBoard(board.id, home);
+    const result = amendRound(fresh, { blocks: [QUESTION('actually, ship now?')], cwd: projectDir });
+    writeBoard(fresh, home);
+    watch.amended(board.id, result.round); // no mark exists yet: a no-op
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1, 'exactly one banner, for the amended content, not two');
+    watch.close();
+  });
+
+  await check('AC: a round that rings, is then opened and answered, does not ring again', async () => {
+    const { looking, banners, watch } = stand();
+    const board = seedBoard();
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1, 'it rings once, unwatched');
+
+    // Opened: the reviewer arrives.
+    looking.set(board.id, true);
+    watch.evaluate(board.id, target(board.id));
+    assert.equal(bannerOn(board.id).returned, true, 'a genuine return');
+
+    // Answered: exactly as handleSubmit leaves the round -- `sent`, no longer awaited --
+    // and the daemon's own `answered` call withdrawing whatever is still on screen.
+    const stored = readBoard(board.id, home);
+    stored.rounds[0].status = 'sent';
+    stored.rounds[0].awaited = false;
+    writeBoard(stored, home);
+    watch.answered(board.id, 1);
+
+    // They leave, and come back, any number of times: nothing about this round is ever
+    // worth a second banner again.
+    for (let i = 0; i < 3; i++) {
+      looking.set(board.id, false);
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+      looking.set(board.id, true);
+      watch.evaluate(board.id, target(board.id));
+    }
+    assert.equal(banners.length, 1, 'answered, and never rings again');
     watch.close();
   });
 
@@ -1505,6 +1677,57 @@ process.exit(0);
     }
   });
 
+  await check('a failed durable write during an amend withdraws nothing: the banner stays up, and the record is unchanged', async () => {
+    // Finding 2's fix, pinned the same way `returned`'s own read-only checks above pin
+    // its half of the identical order: WRITE FIRST, WITHDRAW SECOND. `amended` used to
+    // withdraw before it even tried to persist, with no restore on a failed write --
+    // exactly the "banner gone, board still naming the stale round" shape `returned`'s
+    // own comment (two checks up) warns against. On a read-only store the move to
+    // round-1 cannot land, so nothing may be withdrawn either, and the record -- on disk
+    // and in whatever this daemon reads next -- has to still name the round it always
+    // named.
+    const { banners, watch } = stand();
+    const board = seedBoard();
+    const boardsDir = path.join(home, 'boards');
+    const mode = statSync(boardsDir).mode;
+    try {
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+      assert.equal(banners.length, 1, 'round 1 rings, unwatched');
+      const before = bannerOn(board.id);
+      assert.ok(before, 'durably recorded');
+
+      const fresh = readBoard(board.id, home);
+      const result = amendRound(fresh, { blocks: [QUESTION('or this one?')], cwd: projectDir });
+      writeBoard(fresh, home);
+
+      chmodSync(boardsDir, 0o500);
+      watch.amended(board.id, result.round);
+      assert.deepEqual(banners[0].child.killed, [], 'nothing is withdrawn: the write that would have moved the mark never landed');
+      assert.deepEqual(readBoard(board.id, home)[STRANDED_BANNER], before,
+        'the on-disk record is byte-for-byte unchanged -- the write failed, so nothing moved');
+
+      // What this daemon believes has to agree with what is on disk, not with what
+      // `amended` tried and failed to write: a later `evaluate` must not act as though
+      // the mark had already moved to round 0.
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+      assert.equal(banners.length, 1, 'still just the one banner: the amend never actually freed round 1');
+
+      // The store recovers, and the same amend -- retried, as the real caller would --
+      // behaves normally again.
+      chmodSync(boardsDir, mode);
+      watch.amended(board.id, result.round);
+      watch.evaluate(board.id, target(board.id));
+      await tick();
+      assert.equal(banners.length, 2, 'once the store can be written, the amend rings again');
+      assert.equal(bannerOn(board.id).round, 1, 'still round 1: the amend never minted a new round number');
+    } finally {
+      chmodSync(boardsDir, mode);
+      watch.close();
+    }
+  });
+
   await check('when the Board is deleted before persist re-reads it, the write reports failure, no Banner is claimed as recorded, and nothing throws', async () => {
     // `persist`'s other failure branch, never exercised until now: `const fresh =
     // readBoard(board.id, home); if (!fresh) return false;`. The failed-write check above
@@ -2029,8 +2252,8 @@ process.exit(0);
     watch.close();
   });
 
-  await check('the grace is fifteen seconds by default, and every unusable value falls back to it', async () => {
-    assert.equal(DEFAULT_STRANDED_GRACE_MS, 15_000, 'the default the spec fixes: one SSE heartbeat');
+  await check('the grace is five seconds by default [was fifteen], and every unusable value falls back to it', async () => {
+    assert.equal(DEFAULT_STRANDED_GRACE_MS, 5_000, 'the default the spec fixes, narrowed 2026-08-11 -- every unseen round otherwise carries fifteen seconds of dead time');
     // '' is the one that matters: `Number('')` is 0, and blanking a plist entry is how an
     // operator turns a knob off -- which under a `>= 0` test became a zero grace, i.e. the
     // false positive on a reconnecting tab that this whole rule exists to avoid.
@@ -2040,7 +2263,7 @@ process.exit(0);
       const board = seedBoard();
       watch.evaluate(board.id, target(board.id));
       await tick(60);
-      assert.equal(banners.length, 0, `CLAUDE_BOARD_STRANDED_GRACE_MS=${JSON.stringify(bad)} must fall back to the shipped fifteen seconds, not fire at once`);
+      assert.equal(banners.length, 0, `CLAUDE_BOARD_STRANDED_GRACE_MS=${JSON.stringify(bad)} must fall back to the shipped five seconds, not fire at once`);
       watch.close();
     }
     delete process.env.CLAUDE_BOARD_STRANDED_GRACE_MS;
@@ -2048,9 +2271,32 @@ process.exit(0);
     const board = seedBoard();
     watch.evaluate(board.id, target(board.id));
     await tick(120);
-    assert.equal(banners.length, 0, 'with the variable unset the shipped fifteen seconds applies, so nothing fires yet');
+    assert.equal(banners.length, 0, 'with the variable unset the shipped five seconds applies, so nothing fires yet');
     watch.close();
     process.env.CLAUDE_BOARD_STRANDED_GRACE_MS = '1';
+  });
+
+  // AC: "An unseen round rings 5s after it is posted. The wait stays overridable." The
+  // check above already pins the fallback default; this pins the override actually being
+  // honoured end to end -- a grace set to a few milliseconds fires well inside 5s, and one
+  // set past 5s does not fire before it.
+  await check('the wait stays overridable: a shorter grace fires before 5s, a longer one has not fired by 5s', async () => {
+    await withGrace(30, async () => {
+      const { banners, watch } = stand();
+      const board = seedBoard();
+      watch.evaluate(board.id, target(board.id));
+      await tick(200);
+      assert.equal(banners.length, 1, 'CLAUDE_BOARD_STRANDED_GRACE_MS overrides the default down, well under 5s');
+      watch.close();
+    });
+    await withGrace(5000, async () => {
+      const { banners, watch } = stand();
+      const board = seedBoard();
+      watch.evaluate(board.id, target(board.id));
+      await tick(200);
+      assert.equal(banners.length, 0, 'and overrides it up: a 5s grace has not fired 200ms in');
+      watch.close();
+    });
   });
 }
 
@@ -2189,6 +2435,25 @@ async function layerTwo() {
     await tick(200);
     assert.equal(spawnsFor('unwatched').length, 1, 'and still exactly one after the grace has come round again');
     assert.ok(announcedAt(boardId), 'the marker went onto the board document');
+  });
+
+  await check('AC end to end: a re-post that amends a round already open rings again, through the real POST route', async () => {
+    // The wiring this ticket adds to handlePostBoard: `stranded.amended` is called on the
+    // amend branch, before the unconditional `stranded.evaluate` -- so this is the one
+    // check in the file that proves the two are actually connected, not just that
+    // `createStrandedWatch.amended` behaves correctly in isolation (layer 1 above).
+    const { boardId } = await postRound(port, askBoard('amend-rings-again'));
+    await waitForRows('amend-rings-again', 1);
+    assert.equal(bannerOn(boardId).round, 1, 'round 1 rang once, unwatched');
+
+    // Still nobody watching: a second post that amends round 1 (askBoard's question is
+    // still open, so this lands on amendRound, not addRound).
+    const amended = await postRound(port, { boardId, blocks: [QUESTION('or this one?')] });
+    assert.equal(amended.round, 1, 'setup: this really did amend round 1, not mint round 2');
+
+    const rows = await waitForRows('amend-rings-again', 2);
+    assert.deepEqual(rows.map(r => r[0]), ['spawn', 'spawn'], 'a second banner, for the content the reviewer has never seen');
+    assert.equal(bannerOn(boardId).round, 1, 'still round 1');
   });
 
   await check('a board that has been announced still serves the page it has on disk', async () => {
@@ -2372,7 +2637,7 @@ async function layerTwo() {
     });
   });
 
-  await check('criterion 3: a round landing on a board whose tab is open but hidden raises the same banner', async () => {
+  await check('criterion 3: a round landing on a board whose tab is open but hidden rings, and so does an amend to it', async () => {
     // A first round that asks nothing: an open tab, hidden, and nothing yet to strand.
     const { boardId } = await postRound(port, {
       title: 'Hidden tab', blocks: [{ kind: 'markdown', text: 'an artifact' }], cwd: projectFor('hidden-tab'),
@@ -2387,10 +2652,16 @@ async function layerTwo() {
       await waitForRows('hidden-tab', 1);
       assert.equal(spawnsFor('hidden-tab').length, 1, 'the round lands on a tab that is open but not looked at');
 
+      // The round just rung is still open and now asks something, so this lands on
+      // amendRound, not addRound (see `waitingArtifactBoard`'s own comment on that split).
+      // A hidden tab is exactly as unwatched as a closed one for AC purposes -- "if the
+      // reviewer cannot see it, it rings" does not distinguish the two -- so the amend
+      // rings again here too, on the same terms test/check-stranded.mjs's other AC checks
+      // pin for a fully closed tab.
       await postRound(port, { boardId, blocks: [QUESTION('and another?')] });
-      await tick(250);
-      assert.equal(spawnsFor('hidden-tab').length, 1,
-        'criterion 7: this absence has already been announced, so further rounds add nothing');
+      await waitForRows('hidden-tab', 2);
+      assert.equal(spawnsFor('hidden-tab').length, 2,
+        'an amend the reviewer cannot see rings again, even with a tab open behind it');
     } finally {
       tab.req.destroy();
     }
@@ -2439,7 +2710,11 @@ async function layerTwo() {
   });
 
   await check('criterion 9: a stranded round on one board raises nothing for any other board', async () => {
-    const mine = await postRound(port, askBoard('board-alone'));
+    // `mine` posts a genuinely new second round below (not an amend to the round already
+    // carrying the mark) -- `waitingArtifactBoard` is what buys that, exactly as the
+    // restart checks above use it, so this stays a check about cross-board isolation
+    // rather than also exercising the amend-rings-again behaviour.
+    const mine = await postRound(port, waitingArtifactBoard('board-alone'));
     const theirs = await postRound(port, askBoard('board-watched'));
     await waitForRows('board-alone', 1);
     await waitForRows('board-watched', 1);
@@ -2475,7 +2750,13 @@ async function layerTwo() {
   });
 
   await check('criterion 7: restarting the daemon does not re-announce a board it has already announced', async () => {
-    const { boardId } = await postRound(port, askBoard('restarted'));
+    // A genuinely NEW round, not an amend: `waitingArtifactBoard`'s own comment is why --
+    // its first round asks nothing, so the follow-up below mints round 2 rather than
+    // amending round 1. An amend to the round already carrying the mark now rings again
+    // on purpose (the ticket this file's own AC checks cover); this check is about
+    // something else, a further round earning nothing without a genuine return, and has
+    // to stay clear of the amend path to keep testing that.
+    const { boardId } = await postRound(port, waitingArtifactBoard('restarted'));
     await waitForRows('restarted', 1);
     assert.ok(announcedAt(boardId));
 
@@ -2501,7 +2782,10 @@ async function layerTwo() {
     const own = await startServer({ home, port: 0 });
     let successor = null;
     try {
-      const { boardId } = await postRound(own.port, askBoard('stop-and-start'));
+      // A genuinely new round below, not an amend -- see the restart check just above for
+      // why `waitingArtifactBoard` rather than `askBoard` is what keeps this check about
+      // restart durability rather than about the amend-rings-again behaviour.
+      const { boardId } = await postRound(own.port, waitingArtifactBoard('stop-and-start'));
       await waitForRows('stop-and-start', 1);
       const rec = bannerOn(boardId);
       assert.ok(rec);

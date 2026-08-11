@@ -1103,6 +1103,13 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   // regardless of which branch above ran; see `broadcastWaiting`'s own comment for why
   // this fires on every post rather than only the ones that provably changed it.
   broadcastWaiting(stream, waiting, board);
+  // An amend replaces the content a standing mark may have already promised the reviewer
+  // they had been told about (ticket: a round nobody can see always rings). Told BEFORE
+  // `evaluate` below, and for the same reason that call reads the board back off disk
+  // rather than trusting anything captured earlier: the mark this clears, if it clears
+  // one, has to be gone by the time `evaluate` decides whether there is anything left to
+  // announce.
+  if (pushMode === 'amend') stranded.amended(board.id, round);
   // A round has just landed: if nobody is looking at this board, it is Stranded and the
   // daemon says so after the grace (criteria 1 and 3). After the persist and the push,
   // deliberately -- the rule reads the board back off disk, and the banner it may raise

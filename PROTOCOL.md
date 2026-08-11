@@ -956,11 +956,23 @@ so it can never buy a board a second banner; it is spent outright the first time
 reaches the board, so a board opened and closed is never announced afterwards; and it covers only a
 round that never carried an `awaitDeadline` at all, so a round whose wait has *lapsed* — which
 keeps `status: 'open'` for good — stays the awaited case and is not announced as a content-only
-one. A first round already abandoned earns none of it either. It is re-decided after
+one. A first round already abandoned earns none of it either. The mark is per round and
+permanent for the life of that round (ADR.md entry 74) — narrowed by one exception (ADR.md
+entry 97): an amend to the round the mark currently names moves the mark back to that round's
+number minus one, with the gate forced open, so the amended round is watched exactly like a new
+one and may ring again for content the reviewer has never seen. Moved, never cleared outright —
+a board can carry more than one awaited-open round at once (an awaited page round beside a later
+question round, ADR.md entry 45), and clearing the mark to nothing reopened every round at or
+below the one just amended, not only that one, so an OLDER round already announced rang a second
+time while the round actually amended stayed silent. And gated on the board being genuinely
+unattended when the amend lands: one the reviewer is currently on, or inside its look-away
+window, is left entirely to the ordinary Attended/return-gate handling below, which needs the
+mark undisturbed to open the gate on. It is re-decided after
 every event that can change the answer — a round landing, a Watcher arriving or leaving, an
-`attended` report, a submit — never polled, and it fires after a grace of 15000ms
-(`CLAUDE_BOARD_STRANDED_GRACE_MS` overrides, and the launcher passes it through), which is one SSE
-heartbeat, so a tab that is merely reconnecting is never mistaken for an absent reviewer.
+`attended` report, a submit, an amend to an already-open round — never polled, and it fires
+after a grace of 5000ms (`CLAUDE_BOARD_STRANDED_GRACE_MS` overrides, and the launcher passes
+it through), so a tab that is merely reconnecting, or one about to open on its own for the
+thread's first round, is never mistaken for an absent reviewer.
 
 A board is Attended while a Watcher reports its tab focused, **and for two minutes after that tab
 last had focus** (`CLAUDE_BOARD_ATTENDED_WINDOW_MS` overrides, and the launcher passes it through;
@@ -972,9 +984,12 @@ the board on the bare grace; it survives a reconnect only because the page repor
 with every `attended` report, and a fresh Watcher seeds its stamp from that rather than from the
 fact of being connected.
 
-One banner per **round**, once, ever (ADR.md entry 74). Further rounds landing on a board that has
-announced anything add nothing, and neither does the announced round being answered, abandoned or
-lapsing — a round becoming the oldest waiting one is not a reviewer coming back. Returning takes the banner
+One banner per **round**, once, ever (ADR.md entry 74) — unless that exact round is later amended
+while the board is unattended, which moves the mark back one and lets it ring again for the
+content that changed (ADR.md entry 97); an amend while the board is Attended does not. Further
+rounds landing on a board that has announced anything add nothing, and neither does the announced
+round being answered, abandoned or lapsing — a round becoming the oldest waiting one is not a
+reviewer coming back. Returning takes the banner
 off the screen and lets the board announce a round it has never announced; it never un-announces
 the round already marked. The click carries the board's own URL plus the `#stranded-round`
 sentinel, which resolves to the oldest round still waiting at the moment it is clicked (not
@@ -987,9 +1002,9 @@ The banner is recorded on the board document as `strandedBanner`,
 `{ at, until, round, returned, pid } | null`: when it went up, when the process serving it will exit
 and withdraw it (the round's deadline or the launcher's hard ceiling, whichever is sooner — a
 Suppressed board's content-only first round has no deadline at all, and that ceiling alone bounds
-it), the
-highest round announced — the **mark**, permanent for the life of that round — whether the reviewer
-has returned since, and the pid of the process serving the click. It is stripped from everything a
+it), the highest round announced — the **mark**, permanent for the life of that round unless an
+amend to it moves it back one (ADR.md entry 97) — whether the reviewer has returned since, and the
+pid of the process serving the click. It is stripped from everything a
 client sees, so the served page stays byte-identical to `pages/<id>.html`. A daemon restart reads it
 back and does not re-announce; a record written before `returned` existed reads as a shut gate.
 

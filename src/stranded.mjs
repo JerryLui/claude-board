@@ -16,21 +16,24 @@ import { readDoc as readPomodoroDoc, roundBannersEnabled } from './pomodoro.mjs'
 import { folderName } from './indexpage.mjs';
 
 /** How long a board has to go without being Attended before the daemon announces that a
- * round on it is Stranded (CONTEXT.md "Stranded"). Fifteen seconds is exactly one
- * src/server.mjs `DEFAULT_SSE_HEARTBEAT_MS`, and that is the whole point of the number: a
- * tab that is going to come back -- an EventSource reconnecting after a daemon restart, a
- * laptop waking, a socket some idle timer dropped -- has already come back by then, so what
- * is left standing after the grace is a reviewer who is genuinely gone (ADR.md entry 55).
+ * round on it is Stranded (CONTEXT.md "Stranded"). Five seconds [was fifteen; narrowed
+ * 2026-08-11 -- every unseen round was carrying fifteen seconds of dead time for a race
+ * this narrow]: a tab that is going to come back -- an EventSource reconnecting after a
+ * daemon restart, a laptop waking, a socket some idle timer dropped -- reconnects on the
+ * order of a round trip, not fifteen seconds of it, so what is left standing after the
+ * grace is a reviewer who is genuinely gone (ADR.md entry 55) or, in the narrow case this
+ * grace still exists for, a tab about to open on its own for the thread's first round
+ * (see the Decisions this file's spec records).
  *
  * An environment variable rather than a settings row, exactly like src/server.mjs's SSE
  * heartbeat and wait-cap constants: this is a characteristic of the machine, not a
- * preference, and a check has to be able to drive the whole rule without sleeping fifteen
- * real seconds. Zero, negative, empty and unparseable all fall back to the default --
+ * preference, and a check has to be able to drive the whole rule without sleeping real
+ * seconds. Zero, negative, empty and unparseable all fall back to the default --
  * `Number('')` is 0 and blanking a plist entry (`<string></string>`) is the ordinary
  * way an operator turns one off, so accepting 0 would turn "I meant to unset this" into
  * a zero grace, i.e. exactly the false positive on a reconnecting tab that entry 55
  * exists to remove. */
-export const DEFAULT_STRANDED_GRACE_MS = 15_000;
+export const DEFAULT_STRANDED_GRACE_MS = 5_000;
 
 function strandedGraceMs() {
   const v = Number(process.env.CLAUDE_BOARD_STRANDED_GRACE_MS);
@@ -434,8 +437,8 @@ export function createStrandedWatch({
   }
 
   /** The grace has elapsed. Everything is re-decided here rather than trusted from when
-   * the timer was armed: fifteen seconds is long enough for the tab to come back, the
-   * round to be answered, or the wait to lapse.
+   * the timer was armed: a reconnecting tab, an answer, or a lapsed wait can all land in
+   * the few seconds the grace buys.
    *
    * Wrapped whole, because this is a timer callback -- see `persist` above for what an
    * uncaught throw out of one costs. `readPomodoroDoc` and `folderName` are as capable
@@ -661,6 +664,86 @@ export function createStrandedWatch({
       const rec = recordOn(boardOf(boardId));
       if (!rec || rec.round !== round) return false;
       return terminate(boardId, rec);
+    },
+
+    /** The round this board's mark might name was just amended (`handlePostBoard`'s
+     * `pushMode === 'amend'`): whatever the reviewer was or was not told about that round
+     * is now stale, since its content just changed under the mark. A re-post that amends
+     * a round already open has to ring on the same terms as a new round -- if the
+     * reviewer cannot see it, it rings -- and the permanent per-round mark (ADR.md entry
+     * 74) was built for a round whose CONTENT does not move once it has had its one
+     * banner, so it does not by itself know an amend needs a fresh answer. This is that
+     * knowledge, watching an amended round exactly like a new one: it moves whatever
+     * stood in the way back one round, and the caller's own `evaluate` right after this is
+     * what re-arms the grace, exactly as it would for a round that had never been touched.
+     *
+     * MOVED TO `round - 1`, NEVER CLEARED OUTRIGHT (ADR.md entry 97, narrowed for this).
+     * `nextToAnnounce` names the OLDEST waiting round past the mark, not the round this
+     * call is about -- a board can carry more than one awaited-open round at once (ADR.md
+     * entry 45: an awaited page round beside a later question round, exactly the shape
+     * `waitingArtifactBoard` in test/check-stranded.mjs models), and a page round is never
+     * sent, so it stays "waiting" for the rest of the board's life. Clearing the mark to
+     * nothing used to hand `nextToAnnounce` a mark of 0 as well -- reopening every round
+     * at or below the one just amended, not just that round, so an OLDER round already
+     * announced and returned from was announced a SECOND time (breaking the "at most once
+     * ever" this file's own header promises) while the round actually amended, sitting
+     * behind it, stayed silent. `round - 1` is the narrowest move that still lets THIS
+     * round be found again: everything at or below it stays exactly as accounted for as
+     * it already was, and `nextToAnnounce`'s `find(r => r.n > mark)` lands on `round`
+     * itself, the same round `announce` would have found for it as a brand new arrival.
+     *
+     * The gate travels open (`returned: true`) whatever it stood at, for the same reason
+     * the move is narrow rather than a clear: `mayAnnounce`'s first gate reads `returned`
+     * off THIS record, and a mark moved backward while the gate stayed shut would block
+     * the very round this call exists to free. Reusing the field for that is exactly what
+     * `returned` already means everywhere else in this file -- "nothing here still blocks
+     * announcing" -- not literally "the reviewer walked back in just now".
+     *
+     * GATED ON THE BOARD BEING UNATTENDED RIGHT NOW, and this is not an optimisation --
+     * skipping it changes the answer. A board that is currently Attended (a tab focused,
+     * or inside its look-away window) is about to run `evaluate`'s own `attendedFor`
+     * branches on the SAME event, and those already do the right thing with the mark
+     * exactly as it stands: `attendedFor === Infinity` calls `returned`, which opens the
+     * gate on the EXISTING record and needs that record to still name the round it
+     * actually announced, not one moved out from under it; a finite window leaves the
+     * record's `returned` state to decide, the same as it would for a brand-new round
+     * arriving in that window. "If the reviewer cannot see it, it rings" cuts the other
+     * way when they can.
+     *
+     * A no-op past that gate unless the board's own mark actually names THIS round -- an
+     * amend to a round that has never rung, or a board marked for some other round,
+     * leaves nothing to move (only the latest open round is ever amended, so the second
+     * case does not arise today, but it is checked rather than assumed).
+     *
+     * WRITE FIRST, WITHDRAW SECOND -- `returned`'s own ordering and for the same reason
+     * (see that function's comment): withdrawing before the write lands, on a write that
+     * then fails, leaves the banner gone AND the board still naming the STALE round,
+     * which is worse than either alone. On a failed write the old record is restored byte
+     * for byte and nothing is withdrawn -- the banner stays up, naming the round it always
+     * named, consistent and recoverable. */
+    amended(boardId, round) {
+      if (sse.attendedRemainingMs(boardId) > 0) return;
+      const board = boardOf(boardId);
+      const rec = recordOn(board);
+      if (!rec || rec.round !== round) return;
+      cancel(boardId);
+      // Captured before anything below can change it: this is what `terminate` reaches
+      // the delivered banner by when this daemon has no child handle of its own.
+      const withdrawable = { ...rec };
+      const saved = board[STRANDED_BANNER];
+      if (saved) {
+        board[STRANDED_BANNER] = { ...saved, round: round - 1, returned: true, pid: null };
+        if (!persist(board)) {
+          board[STRANDED_BANNER] = saved; // the document goes back exactly as it was
+          return;
+        }
+      }
+      // The degraded path: a record this daemon could not write durably is held in
+      // memory, so the move happens there instead. Mutated rather than replaced --
+      // `recordOn` handed back this very object.
+      const held = unpersisted.get(boardId);
+      if (held) { held.round = round - 1; held.returned = true; held.pid = null; }
+      terminate(boardId, withdrawable);
     },
 
     /** Every open round on this board has been abandoned (ADR.md entry 69): the reviewer

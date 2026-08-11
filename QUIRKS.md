@@ -1280,8 +1280,8 @@ discriminate either.
 ### The board's banner works; macOS Focus is what hides it
 
 `notifyRound` (`src/notify.mjs`) fires on the daemon's own stranded rule: a round left
-awaited with no Watcher looking at its board, after the fifteen-second grace (ADR.md
-entries 55, 58; CONTEXT.md "Stranded"). When a reviewer reports it "never fires", check the
+awaited with no Watcher looking at its board, after the five-second grace (ADR.md
+entries 55, 58, 97; CONTEXT.md "Stranded"). When a reviewer reports it "never fires", check the
 OS before the code.
 
 Focus config lives in `~/Library/DoNotDisturb/DB/`: `ModeConfigurations.json` for the
@@ -1301,7 +1301,7 @@ nothing for the other, and there is no longer a per-origin or per-browser-profil
 to chase (ADR.md entry 58).
 
 Verifying it end to end takes a board nobody is Attending: post a round to a board with no tab open
-on it, or close the only tab watching one, then wait past the fifteen-second grace. A board
+on it, or close the only tab watching one, then wait past the five-second grace. A board
 a reviewer is actually looking at correctly raises nothing, so testing with the board in
 front of you proves the wrong thing.
 
@@ -1329,13 +1329,14 @@ of reach for every other check, so `npm run check` stays green and only
 
 Since the stranded rule landed (`createStrandedWatch`, `src/stranded.mjs`), a board with an
 open awaited round and nobody watching it is announced with a real `osascript` banner after
-fifteen seconds — and "post an awaited round, then walk away" is what almost every check
-that boots a daemon does. Measured, not assumed: `node test/check-http.mjs` on its own, with
-a 200ms grace and a stub counting invocations, produced **nine** banners.
+five seconds [was fifteen; narrowed 2026-08-11] — and "post an awaited round, then walk away"
+is what almost every check that boots a daemon does. Measured, not assumed: `node
+test/check-http.mjs` on its own, with a 200ms grace and a stub counting invocations, produced
+**nine** banners.
 
 `test/run.mjs` therefore sets `CLAUDE_BOARD_STRANDED_GRACE_MS` to a day for the whole suite,
 so `npm run check` is silent. **A check run on its own does not get that**, so a single
-`node test/check-<whatever>.mjs` that keeps a daemon alive past fifteen seconds will put
+`node test/check-<whatever>.mjs` that keeps a daemon alive past five seconds will put
 banners on your screen. The checks that mean to exercise the rule
 (`check-stranded.mjs`, `check-notify-round.mjs`, `check-notify-click.mjs`) set the variable
 themselves and stand a fake `osascript` ahead of the real one on `PATH`; anything else that

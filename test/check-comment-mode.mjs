@@ -52,7 +52,8 @@ import assert from 'node:assert/strict';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { styles } from '../src/styles.mjs';
+import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -138,6 +139,64 @@ function loadBoard() {
   // it for the same reason.
   new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
+}
+
+/** A deterministic stand-in for wall-clock time, for the Notice's 5s fade --
+ * nothing else in this file waits on a real timer. src/ui.mjs's own
+ * setTimeout/clearTimeout calls are bare (never window.setTimeout), so naming
+ * them as extra `new Function` parameters below shadows the real Node globals
+ * they would otherwise silently inherit (QUIRKS.md "A `new Function` harness
+ * inherits the host's globals"), exactly like this file already does for
+ * `EventSource`. advance(ms) runs every callback whose scheduled time has now
+ * passed, in due order -- including one a running callback itself schedules
+ * (a reset re-registers a fresh id, walked like any other still-pending one). */
+function createFakeTimers() {
+  let now = 0;
+  let nextId = 1;
+  const pending = new Map(); // id -> { due, fn }
+  function fakeSetTimeout(fn, ms) {
+    const id = nextId++;
+    pending.set(id, { due: now + (ms || 0), fn });
+    return id;
+  }
+  function fakeClearTimeout(id) {
+    pending.delete(id);
+  }
+  function advance(ms) {
+    const target = now + ms;
+    for (;;) {
+      let dueId = null;
+      let due = null;
+      for (const [id, entry] of pending) {
+        if (entry.due <= target && (!due || entry.due < due.due)) { dueId = id; due = entry; }
+      }
+      if (!due) break;
+      pending.delete(dueId);
+      now = due.due;
+      due.fn();
+    }
+    now = target;
+  }
+  return { setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, advance };
+}
+
+/** Parse `html` and run the real `ui` client script against it with
+ * setTimeout/clearTimeout bound to `timers` (a createFakeTimers() instance)
+ * instead of the real clock -- the shared shape loadBoardWithTimers and the
+ * Notice's own dedicated fixtures below both run through. */
+function runWithTimers(html, timers) {
+  const document = parseHTML(html);
+  const window = document.defaultView;
+  const location = { protocol: 'http:' };
+  new Function('document', 'window', 'location', 'EventSource', 'setTimeout', 'clearTimeout', ui)(
+    document, window, location, undefined, timers.setTimeout, timers.clearTimeout);
+  return document;
+}
+
+/** loadBoard(), with the client script's setTimeout/clearTimeout bound to a
+ * fake clock this check controls instead of the real one. */
+function loadBoardWithTimers(timers) {
+  return runWithTimers(pageHtml, timers);
 }
 
 /** Turns comment mode on via the actual toggle button -- never by reaching in and
@@ -464,6 +523,19 @@ function loadSoloRankBoard() {
   return { document, qid: rankQid };
 }
 
+/** loadSoloRankBoard(), with the client script's setTimeout/clearTimeout bound
+ * to a fake clock (runWithTimers, above) -- needed only for the Notice a
+ * blocked drag raises; every other rank check in this file never touches a
+ * timer at all and stays on the plain loader above. */
+function loadSoloRankBoardWithTimers(timers) {
+  const rankBoard = createBoard({
+    title: 'Ticket 02 -- the Notice, on a blocked rank-list drag',
+    blocks: [{ kind: 'question', prompt: 'Order these', widget: 'rank', options: [{ label: 'Alpha' }, { label: 'Beta' }, { label: 'Gamma' }] }],
+  });
+  const document = runWithTimers(renderBoardPage(rankBoard), timers);
+  return { document, qid: rankBoard.blocks[0].id };
+}
+
 check('comment mode off: a dragstart on a rank item proceeds normally -- the ordinary interaction is not stolen', () => {
   const { document } = loadSoloRankBoard();
   const li = document.querySelector('.rank-list li');
@@ -486,6 +558,23 @@ check('comment mode on: a dragstart on a rank item is stood down by the SAME gua
 
   assert.equal(li.classList.contains('dragging'), false,
     'with comment mode on, a dragstart on a rank item must be stood down, exactly like choosing an option or pressing Defer -- a click mid-drag must anchor, not reorder');
+});
+
+check('comment mode: a blocked dragstart on a rank-list row raises the same Notice a blocked option click does -- identical text, no per-gesture copy', () => {
+  const timers = createFakeTimers();
+  const { document } = loadSoloRankBoardWithTimers(timers);
+  enableCommentMode(document);
+  const li = document.querySelector('.rank-list li');
+  assert.ok(li, 'setup failure: no rank-list item rendered');
+  assert.equal(document.querySelector('.notice.visible'), null, 'setup failure: no Notice must be up before the blocked drag');
+
+  li.dispatchEvent(new StandInEvent('dragstart'));
+
+  assert.equal(li.classList.contains('dragging'), false, 'setup failure: the drag itself must still be stood down');
+  const notice = document.querySelector('.notice');
+  assert.equal(notice.classList.contains('visible'), true, 'a blocked dragstart on a rank-list row must raise the Notice, exactly like a blocked option click');
+  assert.equal(notice.querySelector('.notice-msg').textContent, 'Comment mode is on, answers locked.',
+    `the dragstart-raised Notice must read the exact same locked-answers text, got ${JSON.stringify(notice.querySelector('.notice-msg').textContent)}`);
 });
 
 // --- the hint carries both identity and containing context --------------------
@@ -1313,6 +1402,296 @@ check('a round with only question blocks: the comment-mode toggle still renders 
   const textAnswer = captured.body.answers.find(a => a.id === qText.id);
   assert.ok(textAnswer, 'the text question must be in the collected answers');
   assert.equal(textAnswer.choice, 'a free-text answer');
+});
+
+// =================================================================================
+// The Notice (ADR.md entry 96): with comment mode on, clicking a question
+// option is a blocked click, not a dead one -- one row per acceptance
+// criterion, driven through the real gesture against a fake clock rather than
+// a real one (createFakeTimers/loadBoardWithTimers, above).
+// =================================================================================
+
+check('comment mode: the Notice is already in the DOM at hydrate -- empty, hidden, role="alert" -- before any blocked click ever happens', () => {
+  // Its FIRST raise, later, is then a content/visibility change to an
+  // already-known live region, the exact same shape every LATER raise
+  // already was -- not a brand-new node appearing already lit, which is the
+  // shape a screen reader is liable to skip announcing on a genuine first
+  // appearance. No enableCommentMode() and no click here on purpose: this
+  // check is about the state right after hydrate, before anything happens.
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+
+  const notice = document.querySelector('.notice');
+  assert.ok(notice, 'the Notice element must be built and inserted into the page eagerly, at hydrate -- not lazily on the first blocked click');
+  assert.equal(notice.getAttribute('role'), 'alert', 'the pre-mounted Notice must already carry role="alert"');
+  assert.equal(notice.classList.contains('visible'), false, 'the pre-mounted Notice must not be shown before anything has raised it');
+  const msg = notice.querySelector('.notice-msg');
+  assert.ok(msg, 'setup failure: the pre-mounted Notice has no message element');
+  assert.equal(msg.textContent, '', 'the pre-mounted Notice\'s own message must start empty -- its text is set only once something actually raises it, never baked in at construction time');
+  assert.ok(notice.parentElement && notice.parentElement.classList.contains('send-bar'),
+    'the pre-mounted Notice must already be inside the round footer (the send bar), not appended there for the first time on click');
+});
+
+check('comment mode: clicking a question option raises a Notice reading the exact locked-answers text, instead of doing nothing', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  assert.equal(document.querySelector('.notice.visible'), null, 'setup failure: the Notice must not be shown before any blocked click -- raised by the click, never by the mode turning on');
+
+  const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
+  assert.ok(yes, 'setup failure: no "Yes" option rendered');
+  yes.dispatchEvent(new StandInEvent('click'));
+
+  const notice = document.querySelector('.notice');
+  assert.ok(notice, 'clicking a question option with comment mode on must raise a Notice');
+  assert.equal(notice.classList.contains('visible'), true, 'the raised Notice must actually be shown, not merely present and hidden');
+  const msg = notice.querySelector('.notice-msg');
+  assert.ok(msg, 'setup failure: the Notice has no message element');
+  assert.equal(msg.textContent, 'Comment mode is on, answers locked.',
+    `expected the exact locked-answers wording, got ${JSON.stringify(msg.textContent)}`);
+  assert.equal(yes.classList.contains('selected'), false, 'the blocked click must not ALSO select the option');
+});
+
+check("comment mode: the Notice floats inside the round footer (the send bar) and carries an x, the only control on it", () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
+
+  const notice = document.querySelector('.notice');
+  assert.ok(notice, 'setup failure: no Notice raised');
+  assert.ok(notice.parentElement && notice.parentElement.classList.contains('send-bar'),
+    'the Notice must float inside the round footer (the send bar), not somewhere else on the page');
+  const controls = notice.querySelectorAll('button');
+  assert.equal(controls.length, 1, 'the x must be the ONLY control on the Notice -- no second, "turn commenting off" action');
+  assert.equal(controls[0].classList.contains('notice-x'), true, 'setup failure: the Notice\'s one control is not its dismiss x');
+  assert.equal(controls[0].getAttribute('aria-label'), 'Dismiss', 'the x carries no visible text of its own, so it must be labelled for a screen reader');
+});
+
+check('comment mode: a raised Notice makes the questions-left pill YIELD instead of covering its "N questions left" text -- both float in the identical spot above the send bar', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+
+  const pill = document.querySelector('.questions-left-pill');
+  assert.ok(pill, 'setup failure: no questions-left pill rendered');
+  assert.equal(pill.classList.contains('visible'), true, 'setup failure: the shared fixture (two open, unanswered questions) must start with the pill showing');
+  assert.equal(resolveComputedProperty(styles, pill, false, 'display'), 'inline-flex',
+    'setup failure: the pill must be actually showing (computed display, not just the .visible class) before any Notice is raised');
+
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(pill.classList.contains('visible'), true, 'the blocked click must not touch the pill\'s OWN state -- it still has unanswered questions to report');
+  assert.equal(resolveComputedProperty(styles, pill, false, 'display'), 'none',
+    'a raised Notice must make the questions-left pill yield (computed display: none) rather than sit underneath it, covered, for the Notice\'s whole 5s');
+
+  document.querySelector('.notice-x').dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(resolveComputedProperty(styles, pill, false, 'display'), 'inline-flex',
+    'dismissing the Notice must let the pill reappear -- in whatever state updateQuestionsLeftPill actually left it, not a state the Notice owns');
+});
+
+check('comment mode: the Notice fades on its own 5s after the blocked click that raised it, with no interaction', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
+  const notice = document.querySelector('.notice');
+  assert.equal(notice.classList.contains('visible'), true, 'setup failure: the Notice did not show');
+
+  timers.advance(4999);
+  assert.equal(notice.classList.contains('visible'), true, 'the Notice must still be up just before its 5s has elapsed');
+
+  timers.advance(1);
+  assert.equal(notice.classList.contains('visible'), false, 'the Notice must fade on its own once its 5s has elapsed, with nobody having clicked its x');
+});
+
+check("comment mode: the Notice's own x dismisses it immediately, ahead of its 5s", () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
+  const notice = document.querySelector('.notice');
+
+  notice.querySelector('.notice-x').dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(notice.classList.contains('visible'), false, "clicking the Notice's own x must dismiss it right away");
+});
+
+check('comment mode: a second (and third, DIFFERENT-KIND) blocked gesture, while the Notice is already up, resets its 5s each time and never mints a second Notice', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
+  const no = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('No') !== -1);
+  assert.ok(yes && no, 'setup failure: need two distinct options on the shared fixture\'s single-select question');
+  const deferBtn = document.querySelector('.btn-defer');
+  assert.ok(deferBtn, 'setup failure: no Defer button rendered on the shared fixture');
+
+  yes.dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.querySelectorAll('.notice.visible').length, 1, 'setup failure: the first blocked click must raise exactly one Notice');
+  assert.equal(document.querySelectorAll('.notice').length, 1, 'setup failure: there must be exactly one Notice element on the page, full stop -- the pre-mounted one, never a duplicate');
+
+  timers.advance(4000); // short of the first click's own 5s
+  no.dispatchEvent(new StandInEvent('click')); // a second, DIFFERENT locked option
+
+  assert.equal(document.querySelectorAll('.notice').length, 1, 'a second blocked click must never mint a second Notice element -- one pre-mounted Notice on the page, never one per option');
+  assert.equal(document.querySelectorAll('.notice.visible').length, 1, 'a second blocked click must never leave two Notices SHOWING either');
+  const notice = document.querySelector('.notice');
+  assert.equal(notice.classList.contains('visible'), true, 'setup failure: the Notice must still be showing right after the second click');
+
+  timers.advance(4000); // 8000ms since the very first click, but only 4000ms since the reset
+  assert.equal(notice.classList.contains('visible'), true, 'the second blocked click must have reset the 5s -- the Notice must still be up 8s after the first click alone would have faded it');
+
+  // A THIRD blocked gesture here, of a different KIND entirely (Defer, not an
+  // option) -- the reset/no-duplicate contract is about the Notice, not about
+  // which gesture raised it, so this has to hold across gesture kinds too,
+  // not just across two clicks on the same widget.
+  deferBtn.dispatchEvent(new StandInEvent('click'));
+  assert.equal(deferBtn.classList.contains('active'), false, 'the blocked Defer click must not ALSO defer the question');
+  assert.equal(document.querySelectorAll('.notice').length, 1, 'a third blocked gesture, of a different kind, must still mint no second Notice element');
+  assert.equal(document.querySelectorAll('.notice.visible').length, 1, 'a third blocked gesture, of a different kind, must still leave only one Notice showing');
+
+  timers.advance(4000); // 12000ms since the first click; only 4000ms since the Defer reset
+  assert.equal(notice.classList.contains('visible'), true,
+    'the Defer click must have reset the 5s too -- the Notice must still be up here, past where the SECOND click\'s own reset alone would have faded it (9000ms)');
+
+  timers.advance(1000); // 5000ms since the Defer reset
+  assert.equal(notice.classList.contains('visible'), false, 'the Notice must fade 5s after the LAST blocked gesture (the Defer click), not any earlier one');
+});
+
+check("the Notice takes its colours entirely from the board's own palette variables, never a hardcoded one -- legible in both themes without being told which is active", () => {
+  function ruleBody(selector) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = styles.match(new RegExp(escaped + '\\s*\\{([^}]*)\\}'));
+    assert.ok(m, `setup failure: no "${selector}" rule found in src/styles.mjs`);
+    return m[1];
+  }
+  for (const selector of ['.notice', '.notice.visible', '.notice-x', '.notice-bar']) {
+    const body = ruleBody(selector);
+    assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b/, `"${selector}" must theme off a palette variable, not a hardcoded hex colour`);
+    assert.doesNotMatch(body, /\brgba?\(/, `"${selector}" must theme off a palette variable, not a hardcoded rgb()/rgba() colour`);
+  }
+  assert.match(ruleBody('.notice'), /background:\s*var\(--panel\)/, "the Notice must wear the board's own panel surface, per ADR.md entry 96 -- not an inverted or accent-tinted one");
+  assert.match(ruleBody('.notice'), /color:\s*var\(--ink\)/, "the Notice must use the board's own ink colour");
+  assert.match(ruleBody('.notice'), /border:\s*1px solid var\(--hairline-2\)/, 'the Notice must wear the board\'s own hairline border');
+});
+
+check('comment mode: the Notice carries role="alert" so a screen reader announces it the moment a blocked click raises it', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
+
+  const notice = document.querySelector('.notice');
+  assert.equal(notice.getAttribute('role'), 'alert',
+    'the Notice must carry role="alert" (an implicit assertive live region) so a screen reader announces it unprompted, with no separate aria-live wiring needed');
+});
+
+check('comment mode: a later, separate appearance of the Notice (after an earlier one fully faded) mutates the live region\'s own text again, so a screen reader is not left to notice a bare visibility change on its own', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  const yes = document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1);
+
+  yes.dispatchEvent(new StandInEvent('click'));
+  const notice = document.querySelector('.notice');
+  const firstMsgNode = notice.querySelector('.notice-msg').childNodes[0];
+  assert.ok(firstMsgNode, 'setup failure: the Notice\'s message element has no text node');
+
+  timers.advance(5000); // let the first appearance fully fade
+  assert.equal(notice.classList.contains('visible'), false, 'setup failure: the Notice must have faded by now');
+
+  yes.dispatchEvent(new StandInEvent('click')); // a later, separate blocked click
+  assert.equal(notice.classList.contains('visible'), true, 'setup failure: the later click must raise the Notice again');
+  const secondMsgNode = notice.querySelector('.notice-msg').childNodes[0];
+
+  assert.notEqual(secondMsgNode, firstMsgNode,
+    'a later, separate appearance must mutate the live region\'s own text node (even to the identical string) -- a screen reader announces role="alert" off a content change, not off a bare visibility toggle, so a re-show that never touches the text risks going unannounced');
+});
+
+check('comment mode: clicking a locked multi-select option and a locked variant option each raise the same one Notice too, not just single-select', () => {
+  // A dedicated fixture: the shared BLOCK_SPEC board above carries only a
+  // single-select and a text question, and multi-select / choose-between-
+  // rendered-variants each need their own option shape (a 'block' per option
+  // for the variant widget -- see test/check-http.mjs's own fixture for the
+  // same shape).
+  const multiVariantBoard = createBoard({
+    title: 'Ticket 02 -- the Notice, on the other option widgets',
+    blocks: [
+      { kind: 'question', prompt: 'Pick any', widget: 'multi', options: [{ label: 'Alpha' }, { label: 'Beta' }] },
+      {
+        kind: 'question',
+        prompt: 'Which mockup?',
+        widget: 'choose-between-rendered-variants',
+        options: [
+          { label: 'Sidebar nav', block: { kind: 'markdown', text: 'Nav rail on the left.' } },
+          { label: 'Top nav', block: { kind: 'markdown', text: 'Nav bar across the top.' } },
+        ],
+      },
+    ],
+  });
+  const timers = createFakeTimers();
+  const document = runWithTimers(renderBoardPage(multiVariantBoard), timers);
+  enableCommentMode(document);
+
+  const multiBtn = document.querySelector('.choice-multi');
+  assert.ok(multiBtn, 'setup failure: no multi-select option rendered on the fixture');
+  multiBtn.dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.querySelectorAll('.notice.visible').length, 1, 'clicking a locked multi-select option must raise the Notice too');
+  assert.equal(multiBtn.classList.contains('selected'), false, 'the blocked click must not also select the multi-select option');
+
+  const variantCard = document.querySelector('.choice-variant');
+  assert.ok(variantCard, 'setup failure: no variant option rendered on the fixture');
+  variantCard.dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.querySelectorAll('.notice.visible').length, 1, 'clicking a locked variant option while the Notice is already up must still leave only one Notice SHOWING, not a second one');
+  assert.equal(document.querySelectorAll('.notice').length, 1, 'clicking a locked variant option while the Notice is already up must mint no second Notice element either');
+  assert.equal(variantCard.classList.contains('selected'), false, 'the blocked click must not also select the variant option');
+});
+
+check('comment mode: clicking a locked Defer button raises the same Notice a blocked option click does -- identical text, no per-gesture copy', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers);
+  enableCommentMode(document);
+  const deferBtn = document.querySelector('.btn-defer');
+  assert.ok(deferBtn, 'setup failure: no Defer button rendered on the shared fixture');
+  assert.equal(deferBtn.classList.contains('active'), false, 'setup failure: nothing should start deferred');
+  assert.equal(document.querySelector('.notice.visible'), null, 'setup failure: no Notice must be up before the blocked click');
+
+  deferBtn.dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(deferBtn.classList.contains('active'), false, 'the blocked click must not ALSO defer the question');
+  const notice = document.querySelector('.notice');
+  assert.equal(notice.classList.contains('visible'), true, 'clicking a locked Defer button must raise the Notice, exactly like a blocked option click');
+  assert.equal(notice.querySelector('.notice-msg').textContent, 'Comment mode is on, answers locked.',
+    `the Defer-raised Notice must read the exact same locked-answers text, got ${JSON.stringify(notice.querySelector('.notice-msg').textContent)}`);
+});
+
+check('comment mode off: clicking a question option raises no Notice at all -- comment mode being ON is what the Notice is about', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers); // comment mode never enabled here
+  document.querySelectorAll('.choice-single').find(el => el.textContent.indexOf('Yes') !== -1)
+    .dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(document.querySelector('.notice.visible'), null, 'with comment mode off, an ordinary (unblocked) click on a question option must raise no Notice');
+});
+
+check('comment mode off: clicking Defer still defers the question, and raises no Notice', () => {
+  const timers = createFakeTimers();
+  const document = loadBoardWithTimers(timers); // comment mode never enabled here
+  const deferBtn = document.querySelector('.btn-defer');
+  assert.ok(deferBtn, 'setup failure: no Defer button rendered on the shared fixture');
+
+  deferBtn.dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(deferBtn.classList.contains('active'), true,
+    'with comment mode off, clicking Defer must still defer the question -- the ordinary interaction is not stolen');
+  assert.equal(document.querySelector('.notice.visible'), null, 'with comment mode off, clicking Defer must raise no Notice');
 });
 
 if (failures) {

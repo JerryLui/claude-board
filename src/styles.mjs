@@ -1244,6 +1244,63 @@ body.comment-mode .blocks { cursor: crosshair; }
 .round-countdown { display: none; color: var(--muted); font-size: 12.5px; align-self: center; white-space: nowrap; }
 .round-countdown.visible { display: inline; }
 
+/* the Notice (ADR.md entry 96): a transient message the blocked click itself
+   raises with comment mode on -- an option card gets none of comment mode's
+   own cues (no cursor, no hover outline), so the click a reviewer actually
+   tries reads as a dead option with nothing on the page to say why. Floats
+   centered above the send bar, same nested-and-absolute idiom
+   '.questions-left-pill' already uses (and inherits that bar's
+   'body.readonly .send-bar { display: none }' the same free way). It wears
+   the board's own card chrome -- panel surface, hairline border -- rather
+   than an inverted or accent-tinted one: this is the page speaking, not the
+   system. Built once by src/ui.mjs and kept in the DOM, toggled by
+   '.visible' alone like every other single-decider control here, so a
+   dismissed Notice both fades AND drops out of the accessibility tree
+   (visibility's own transition delay) rather than lingering as an invisible
+   node a screen reader could still reach. */
+.notice { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%);
+  margin-bottom: var(--space-3); display: flex; align-items: center; gap: var(--space-3);
+  overflow: hidden; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--hairline-2); border-radius: var(--r-md);
+  padding: 11px 16px; box-shadow: var(--shadow-2);
+  font: inherit; font-size: 13px; white-space: nowrap; z-index: 21;
+  opacity: 0; visibility: hidden;
+  transition: opacity var(--dur) var(--ease), visibility 0s linear var(--dur); }
+.notice.visible { opacity: 1; visibility: visible; transition: opacity var(--dur) var(--ease); }
+.notice-x { border: 0; background: transparent; color: var(--muted); font: inherit;
+  font-size: 17px; line-height: 1; padding: 2px 4px; cursor: pointer; }
+.notice-x:hover { color: var(--ink); }
+/* the thin accent bar counting the 5s down -- restarted (src/ui.mjs) every
+   time the dismiss timer is, independent of '.visible' so a second blocked
+   click resets the bar along with the timer it tracks. 'forwards' holds the
+   animation's END state (scaleX(0)) once it completes at 5s -- without it
+   the bar snaps back to its 0%-keyframe start the instant the animation
+   ends, which lands squarely inside the 160ms opacity fade (--dur) still
+   running the Notice itself out, so the bar visibly REFILLS while the
+   message is fading. */
+.notice-bar { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--accent); transform-origin: left; }
+.notice-bar.notice-bar-run { animation: notice-countdown 5s linear forwards; }
+@keyframes notice-countdown { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+/* the Notice and the questions-left pill float in the EXACT same spot above
+   the send bar (both 'position: absolute; left: 50%; bottom: 100%;
+   translateX(-50%)', by design -- the Notice wears the pill's own placement
+   idiom). A raised Notice sits above the pill in paint order (it is
+   appended after it, and layered above it via 'z-index'), so with unanswered
+   questions and the round-pager rail off screen -- exactly when the pill is
+   showing its own "N questions left" text -- a Notice would otherwise cover
+   it for the whole 5s. The pill yields instead: '.notice-open' on their
+   shared host ('.send-bar', toggled alongside '.notice.visible', src/ui.mjs)
+   hides it for exactly as long as the Notice is up, and it reappears (in
+   whatever state 'updateQuestionsLeftPill' actually left it) the moment the
+   Notice is dismissed or fades. Never a sibling combinator ('~'/'+') to
+   reach the pill from the Notice's own position in the markup -- QUIRKS.md:
+   the DOM stand-in's selector engine (and its cascade resolver, used to
+   compute effective styles in test/check-pure.mjs) support neither one, so
+   a rule built on either would be real-browser-only and unable to be pinned
+   here the way every other rule in this file is. */
+.send-bar.notice-open .questions-left-pill { display: none; }
+
 /* --- the round pager: the board's pages, always both controls (ADR.md entry 42,
    criterion 26) ---------------------------------------------------------------
 

@@ -69,9 +69,11 @@ telling the reviewer it is there. Covers the board with no tab and the board bur
 three windows alike, and it is what a Banner fires on. _Avoid_: orphaned, unattended, unseen.
 
 **Announced**: of a round, that a Banner has been raised for it. Permanent for the life of the
-round: returning to the board takes the Banner off the screen without un-announcing the round,
-so a round is Announced at most once and no glance can buy it a second Banner. _Avoid_:
-notified, alerted, signalled.
+round, with one exception: amending the round while its board is unattended un-announces it, so
+it may be Announced again for the content that changed (amending it while the board is Attended
+does not). Short of that, returning to the board takes the Banner off the screen without
+un-announcing the round, so an unamended round is Announced at most once and no glance can buy it
+a second Banner. _Avoid_: notified, alerted, signalled.
 
 **Banner**: the native macOS notification the daemon raises for a Stranded round, naming the
 project and carrying its board so that clicking it lands there. The only notification this

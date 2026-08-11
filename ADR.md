@@ -61,7 +61,7 @@ link where it is worth reading.
 | 71 | [The store is prunable by hand, and the promise not to prune it is dropped](.agents/adr/0071-the-store-is-prunable-by-hand-and-the-promise-is-dropped.md) | 2026-08-10 | relates to 70 |
 | 72 | [The status item is a second process of the same bundle](.agents/adr/0072-status-item-is-a-second-process-of-the.md) | 2026-08-10 | replaces the deleted 9; narrowed by 57 |
 | 73 | [Attended survives a look-away for two minutes](.agents/adr/0073-attended-survives-a-look-away-for-two.md) | 2026-08-10 | narrows 58 |
-| 74 | [A round is announced once, and the mark outlives the absence](.agents/adr/0074-round-is-announced-once-and-the-mark.md) | 2026-08-10 | narrows 55 |
+| 74 | [A round is announced once, and the mark outlives the absence](.agents/adr/0074-round-is-announced-once-and-the-mark.md) | 2026-08-10 | narrows 55; narrowed by 97 |
 | 75 | [The bundle is an agent app, not a background-only one](.agents/adr/0075-bundle-is-an-agent-app-not-background.md) | 2026-08-10 | narrows 57; relates to 72 |
 | 76 | [A launch that did not come from launchd refuses to supervise](.agents/adr/0076-no-argument-launch-refuses-to-supervise.md) | 2026-08-10 | relates to 75 |
 | 77 | [The index polls for its rows](.agents/adr/0077-index-polls-for-its-rows.md) | 2026-08-10 | SSE half amended by 87 |
@@ -83,3 +83,4 @@ link where it is worth reading.
 | 94 | [The ring is work's alone](.agents/adr/0094-the-ring-is-works-alone.md) | 2026-08-11 | narrows 84; relates to 83 |
 | 95 | [Mermaid is vendored, closing the CSP's last external-host allowance](.agents/adr/0095-mermaid-is-vendored-closing-the-csp-s-last.md) | 2026-08-11 | widens 62; relates to 70 |
 | 96 | [The Notice is transient, never standing](.agents/adr/0096-the-notice-is-transient-never-standing.md) | 2026-08-11 | relates to 28 |
+| 97 | [An amend to the marked round moves it back one, unless the reviewer is Attended](.agents/adr/0097-an-amend-to-the-marked-round-moves-it-back-one.md) | 2026-08-11 | narrows 74 |

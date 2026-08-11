@@ -308,7 +308,7 @@ function openSseStream(port, boardId) {
 /** Stop an in-process daemon a single check stood up for itself. `close()` alone waits for
  * every open connection and an SSE stream never ends, so the connections go too -- the same
  * shape bin/daemon.mjs uses, and what makes the stranded watch this server owns stop with
- * it rather than announcing the check's own boards fifteen seconds later. */
+ * it rather than announcing the check's own boards a grace period later. */
 function stopLocalServer(s) {
   s.close();
   s.closeIdleConnections?.();
