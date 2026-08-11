@@ -87,6 +87,10 @@
 # directly, exactly as every version before the bundle did); what it does not get
 # is the ability to read a board reference out of ~/Documents, ~/Desktop or
 # ~/Downloads. That is a loud warning, not a failure.
+#
+# The hard requirements — macOS, node 22 or newer, and the `claude` CLI — are checked in
+# the preflight section below, BEFORE this script writes, builds, signs or registers
+# anything. Each of them used to surface late and under a false name (see that section).
 
 set -euo pipefail
 
@@ -99,7 +103,6 @@ LAUNCHCTL_CMD="${CLAUDE_BOARD_LAUNCHCTL_CMD:-launchctl}"
 PLUTIL_CMD="${CLAUDE_BOARD_PLUTIL_CMD:-plutil}"
 LAUNCH_AGENTS_DIR="${CLAUDE_BOARD_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 LOG_DIR="${CLAUDE_BOARD_LOG_DIR:-$HOME/Library/Logs/claude-board}"
-PORT="${CLAUDE_BOARD_PORT:-7391}"
 SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
 APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
 CC_CMD="${CLAUDE_BOARD_CC:-cc}"
@@ -108,14 +111,19 @@ SKILLS_DIR="${CLAUDE_BOARD_SKILLS_DIR:-$HOME/.claude/skills}"
 SKILL_SRC="$REPO_DIR/skills/claude-board/SKILL.md"
 SKILL_DEST_DIR="$SKILLS_DIR/claude-board"
 
-# Needed before the roots/store resolution just below, which now carries a previous
+# Needed before the roots/store/port resolution just below, which now carries a previous
 # choice forward by reading it back from here rather than from the plist -- see that
 # resolution's comments and "Carry-forward across reinstalls" further down. The
 # directory itself is created (0700) in step 0; these are just its filenames, alongside
-# the secret and the launcher build stamp it already holds.
+# the secret and the launcher build stamp it already holds. Three records, one per
+# install-time choice that must survive a reinstall run from a shell that never mentions
+# it: the reference roots, the store, and the port (the last added because reverting a
+# custom port to the default is a bind failure and a KeepAlive throttle loop).
+# uninstall.sh names all three in its "left in place on purpose" summary.
 SECRET_DIR="$(dirname "$SECRET_FILE")"
 REF_ROOTS_RECORD_FILE="$SECRET_DIR/ref_roots"
 BOARD_HOME_RECORD_FILE="$SECRET_DIR/board_home"
+PORT_RECORD_FILE="$SECRET_DIR/port"
 # `/file/` and its allowlist are gone (ADR.md entry 38); this is only the old record's
 # filename, kept so the cleanup below can name and delete whatever an older install left.
 SERVE_ROOTS_RECORD_FILE="$SECRET_DIR/serve_roots"
@@ -178,6 +186,177 @@ APP_EXEC="$APP_PATH/Contents/MacOS/${LABEL}"
 # defined below) — the launcher runs from ~/Applications, never from the build directory,
 # which is removed the moment this script exits.
 BUNDLED_DAEMON_PATH="$APP_PATH/Contents/Resources/bin/daemon.mjs"
+
+# --- preflight: the ways this machine cannot run the service at all -----------
+# Everything past this section writes, builds, signs or registers something, so every
+# refusal that belongs to the MACHINE rather than to the install belongs here. Each of
+# these used to surface late and under a false name: a non-macOS host got as far as
+# `launchctl: command not found`; a node too old to parse the daemon's own source built
+# and signed a bundle, wrote the plist, and then failed the health gate as "the daemon is
+# NOT running"; and a missing `claude` CLI failed at step 5 of 6, with the plist written,
+# the daemon up and the registration this repo does not own already torn down. A refusal
+# that names the real cause and touches nothing is worth more than a partial install that
+# names the wrong one.
+#
+# The Xcode Command Line Tools are deliberately NOT a preflight check: a machine without
+# `cc` still gets a working daemon (step 1b degrades), so that stays a loud warning.
+
+# The clone first: cheapest to check, and it decides whether there is anything to install.
+if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$LAUNCHER_SRC" ] || [ ! -d "$REPO_DIR/src" ]; then
+  echo "error: bin/daemon.mjs, bin/mcp.mjs, bin/launcher.c or src/ not found under $REPO_DIR — run this script from a claude-board clone" >&2
+  exit 1
+fi
+# src/ is staged into the launcher bundle whole (step 1b below), so it has to exist even on
+# the degraded (no-launcher) path -- a clone missing it is not a partial install, it is one
+# bin/daemon.mjs's own `../src/server.mjs` import could never have satisfied either.
+
+# macOS only, and not as a matter of taste: the service is a launchd agent, the daemon's
+# file reads are attributed by TCC to an ad-hoc signed .app bundle, and the notifications
+# come from UserNotifications. There is no degraded mode to fall back to on another
+# kernel, so this refuses rather than failing four steps later inside `launchctl`.
+KERNEL="$(uname -s 2>/dev/null || true)"
+if [ "$KERNEL" != "Darwin" ]; then
+  echo "error: claude-board installs on macOS only — this host reports '${KERNEL:-an unknown kernel}'." >&2
+  echo "       The service is a launchd agent with a TCC-attributed app bundle; there is no" >&2
+  echo "       equivalent to fall back to here." >&2
+  exit 1
+fi
+
+# $HOME is baked into the launcher (CLAUDE_BOARD_HOME_DIR) and is the root of nearly every
+# default path above, so an empty one produces an install rooted at "/" -- checked here
+# rather than discovered as a permission error halfway through step 0.
+if [ -z "${HOME:-}" ]; then
+  echo "error: HOME is empty — every path this script writes is derived from it." >&2
+  exit 1
+fi
+
+# The interpreter path is baked into the launcher bundle and into the MCP registration, so
+# it has to still exist in six months. `command -v node` alone does not clear that bar on a
+# machine using a version manager: it resolves to a versioned directory
+# (~/.nvm/versions/node/v24.18.0/bin, ~/.local/share/mise/installs/node/24.4.0/bin,
+# ~/Library/Application Support/fnm/node-versions/v24.4.0/installation/bin, ...), and the
+# next upgrade deletes it — leaving launchd pointing at a path that is gone, reported as
+# "daemon is not reachable" in every session. A rewritten plist cannot even fix it once a
+# launcher bundle is in use, because the path is compiled into the signed binary.
+#
+# A shim directory (mise/shims, nodenv/shims, fnm's per-shell multishell path) is no better
+# than a versioned one: it is a dispatcher that resolves through the version manager's own
+# config at call time, and launchd runs it with none of the shell environment that config
+# assumes. Both shapes are matched below.
+#
+# So: a version-manager path is only used when there is no stable alternative, and the
+# substitution — or the lack of one — is announced rather than silent. CLAUDE_BOARD_NODE
+# overrides both.
+NODE_BIN="${CLAUDE_BOARD_NODE:-}"
+if [ -z "$NODE_BIN" ]; then
+  NODE_BIN="$(command -v node || true)"
+  case "$NODE_BIN" in
+    */.nvm/*|*/.volta/*|*/.asdf/*|*/n/versions/*|\
+    */.fnm/*|*/fnm/node-versions/*|*/fnm_multishells/*|\
+    */mise/installs/*|*/mise/shims/*|*/rtx/installs/*|*/rtx/shims/*|\
+    */.nodenv/*|*/nodenv/versions/*|*/nodenv/shims/*)
+      for stable in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+        if [ -x "$stable" ]; then
+          echo "==> note: node on PATH is version-managed ($NODE_BIN), which moves on upgrade;"
+          echo "    baking $stable into the plist instead (set CLAUDE_BOARD_NODE to override)"
+          NODE_BIN="$stable"
+          break
+        fi
+      done
+      if [ "$NODE_BIN" = "$(command -v node || true)" ]; then
+        echo "==> warning: only a version-managed node was found ($NODE_BIN)."
+        echo "    The service will break the next time that version is removed; re-run this"
+        echo "    script after installing node system-wide, or set CLAUDE_BOARD_NODE."
+      fi
+      ;;
+  esac
+fi
+if [ -z "$NODE_BIN" ]; then
+  echo "error: node not found on PATH" >&2
+  exit 1
+fi
+if [ ! -x "$NODE_BIN" ]; then
+  echo "error: node interpreter '$NODE_BIN' is not executable" >&2
+  exit 1
+fi
+
+# Kept in step with package.json's `engines.node`; test/check-install.mjs fails if the two
+# drift. An older node does not fail at install time on its own -- it fails when the daemon
+# it is pointed at tries to parse syntax it does not know, which arrives here as a health
+# gate that times out and names the wrong cause.
+MIN_NODE_MAJOR=22
+NODE_VERSION="$("$NODE_BIN" --version 2>/dev/null || true)"
+NODE_MAJOR="${NODE_VERSION#v}"
+NODE_MAJOR="${NODE_MAJOR%%.*}"
+case "$NODE_MAJOR" in
+  ''|*[!0-9]*)
+    echo "error: could not read a version from '$NODE_BIN --version' (got: ${NODE_VERSION:-nothing})." >&2
+    echo "       claude-board needs node ${MIN_NODE_MAJOR} or newer." >&2
+    exit 1
+    ;;
+esac
+if [ "$NODE_MAJOR" -lt "$MIN_NODE_MAJOR" ]; then
+  echo "error: node $NODE_VERSION at $NODE_BIN is too old — claude-board needs node ${MIN_NODE_MAJOR} or newer." >&2
+  echo "       Install a newer node (or point CLAUDE_BOARD_NODE at one) and re-run this script." >&2
+  exit 1
+fi
+
+# The MCP registration is step 5 of 6, and it is the half this repo does not own: without
+# the Claude Code CLI there is nothing to register with, and no amount of daemon is a
+# working install. Checked here so that failure costs nothing rather than arriving after
+# the plist, the bundle and the running service.
+if ! command -v "$MCP_CMD" >/dev/null 2>&1; then
+  echo "error: the Claude Code CLI ('$MCP_CMD') was not found." >&2
+  echo "       claude-board registers its MCP server with it (step 5 below), so an install" >&2
+  echo "       without it would leave a running daemon no session can reach. Install Claude" >&2
+  echo "       Code — or set CLAUDE_BOARD_MCP_CMD to its path — and re-run this script." >&2
+  exit 1
+fi
+
+# An empty CLAUDE_BOARD_HOME is not a choice, it is a mistake with a sticky consequence:
+# it used to bake CLAUDE_BOARD_STORE_DIR "" into the signed launcher AND leave a zero-byte
+# carry-forward record, so every later reinstall read the empty record back and did it
+# again. Refused by name here; unset the variable to get the default store.
+if [ -n "${CLAUDE_BOARD_HOME+set}" ] && [ -z "$CLAUDE_BOARD_HOME" ]; then
+  echo "error: CLAUDE_BOARD_HOME is set but empty — unset it to use the default store" >&2
+  echo "       (~/Library/Application Support/claude-board), or give it a real path." >&2
+  exit 1
+fi
+
+# The port, carried forward across reinstalls exactly the way the roots and the store are,
+# and for a sharper reason: it is baked into the plist, the health gate, the shim's advice
+# and every URL printed below, and a reinstall from a clean shell used to revert a custom
+# one to the default. The old daemon still holds the custom port, the new job tries the
+# default, and if anything else has that -- or the old job is still shutting down -- launchd
+# throttles the restart loop with nothing on screen naming the cause.
+#
+# Kept in step with src/handoff.mjs's DEFAULT_PORT (test/check-install.mjs asserts they
+# match). Precedence, like the two records below: an explicit variable, then the record,
+# then a one-time migration out of the plist an older install wrote, then the default.
+DEFAULT_PORT=7391
+if [ -n "${CLAUDE_BOARD_PORT:-}" ]; then
+  PORT="$CLAUDE_BOARD_PORT"
+  PORT_FROM="CLAUDE_BOARD_PORT"
+elif [ -s "$PORT_RECORD_FILE" ]; then
+  PORT="$(cat "$PORT_RECORD_FILE")"
+  PORT_FROM="carried forward from $PORT_RECORD_FILE"
+elif PORT="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_PORT raw -o - "$PLIST_PATH" 2>/dev/null)" && [ -n "$PORT" ]; then
+  PORT_FROM="carried forward from $PLIST_PATH (migrated to $PORT_RECORD_FILE)"
+else
+  PORT="$DEFAULT_PORT"
+  PORT_FROM="default"
+fi
+# Validated whichever of those four it came from: a corrupt record or a hand-edited plist
+# bakes its bytes into the plist and the launcher just as readily as a typo in the variable
+# does, and `<string></string>` in a launchd job is a daemon that binds the wrong thing.
+case "$PORT" in
+  ''|*[!0-9]*) PORT_OK=0 ;;
+  *) if [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then PORT_OK=1; else PORT_OK=0; fi ;;
+esac
+if [ "$PORT_OK" -ne 1 ]; then
+  echo "error: the port must be a number between 1 and 65535 — got '$PORT' [$PORT_FROM]." >&2
+  exit 1
+fi
 
 # The allowlist a content reference may resolve inside, on top of the board's own
 # project directory (ADR.md entry 3, src/resolve.mjs): colon-separated absolute paths,
@@ -293,11 +472,16 @@ fi
 if [ -n "${CLAUDE_BOARD_HOME+set}" ]; then
   BOARD_HOME="$CLAUDE_BOARD_HOME"
   BOARD_HOME_FROM="CLAUDE_BOARD_HOME"
-elif [ -f "$BOARD_HOME_RECORD_FILE" ]; then
+elif [ -s "$BOARD_HOME_RECORD_FILE" ]; then
   # Same carry-forward replacement as the two roots above. Unlike them there is no
   # default to fall back to below this -- BOARD_HOME_FROM empty means "the operator
   # never chose one", and that has to stay distinguishable from "chose the default
   # explicitly" for the plist logic further down (BOARD_HOME_XML) to keep working.
+  #
+  # -s, not -f: a zero-byte record is not a store choice, it is the residue an empty
+  # CLAUDE_BOARD_HOME used to leave behind (now refused outright in the preflight). Read
+  # back as "no choice", it falls through to the default below and the persistence step
+  # deletes the file, so a machine carrying one heals itself on the next run.
   BOARD_HOME="$(cat "$BOARD_HOME_RECORD_FILE")"
   BOARD_HOME_FROM="carried forward from $BOARD_HOME_RECORD_FILE"
 elif BOARD_HOME="$("$PLUTIL_CMD" -extract EnvironmentVariables.CLAUDE_BOARD_HOME raw -o - "$PLIST_PATH" 2>/dev/null)"; then
@@ -348,51 +532,10 @@ if [ -n "$BOARD_HOME_FROM" ]; then
 else
   echo "    store:  ~/Library/Application Support/claude-board [default]"
 fi
-
-if [ ! -f "$DAEMON_PATH" ] || [ ! -f "$MCP_PATH" ] || [ ! -f "$LAUNCHER_SRC" ] || [ ! -d "$REPO_DIR/src" ]; then
-  echo "error: bin/daemon.mjs, bin/mcp.mjs, bin/launcher.c or src/ not found under $REPO_DIR — run this script from a claude-board clone" >&2
-  exit 1
-fi
-# src/ is staged into the launcher bundle whole (step 1b below), so it has to exist even on
-# the degraded (no-launcher) path -- a clone missing it is not a partial install, it is one
-# bin/daemon.mjs's own `../src/server.mjs` import could never have satisfied either.
-
-# The interpreter path is baked into the plist and into the MCP registration, so it
-# has to still exist in six months. `command -v node` alone does not clear that bar on
-# a machine using nvm: it resolves to ~/.nvm/versions/node/v24.18.0/bin/node, and the
-# next `nvm install` leaves launchd pointing at a directory that is gone — a daemon
-# that will not start, reported as "daemon is not reachable" in every session. A
-# version-manager path is therefore only used when there is no stable alternative, and
-# the substitution is announced rather than silent. CLAUDE_BOARD_NODE overrides both.
-NODE_BIN="${CLAUDE_BOARD_NODE:-}"
-if [ -z "$NODE_BIN" ]; then
-  NODE_BIN="$(command -v node || true)"
-  case "$NODE_BIN" in
-    */.nvm/*|*/.fnm/*|*/.volta/*|*/.asdf/*|*/n/versions/*)
-      for stable in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
-        if [ -x "$stable" ]; then
-          echo "==> note: node on PATH is version-managed ($NODE_BIN), which moves on upgrade;"
-          echo "    baking $stable into the plist instead (set CLAUDE_BOARD_NODE to override)"
-          NODE_BIN="$stable"
-          break
-        fi
-      done
-      if [ "$NODE_BIN" = "$(command -v node || true)" ]; then
-        echo "==> warning: only a version-managed node was found ($NODE_BIN)."
-        echo "    The service will break the next time that version is removed; re-run this"
-        echo "    script after installing node system-wide, or set CLAUDE_BOARD_NODE."
-      fi
-      ;;
-  esac
-fi
-if [ -z "$NODE_BIN" ]; then
-  echo "error: node not found on PATH" >&2
-  exit 1
-fi
-if [ ! -x "$NODE_BIN" ]; then
-  echo "error: node interpreter '$NODE_BIN' is not executable" >&2
-  exit 1
-fi
+# And the port, for the third time the same reason: it is carried forward now, so which
+# port this install is about must not be something the reader has to infer from the plist.
+echo "    port:   $PORT"
+echo "                     [$PORT_FROM]"
 
 # --- 0. the local secret ----------------------------------------------------
 # The credential that tells this machine's shim from any other local process
@@ -439,8 +582,14 @@ printf '%s' "$REF_ROOTS" > "$REF_ROOTS_RECORD_FILE"
 if [ -n "$BOARD_HOME_FROM" ]; then
   printf '%s' "$BOARD_HOME" > "$BOARD_HOME_RECORD_FILE"
 else
+  # Also the repair for a zero-byte record an older run left behind: read as "no choice"
+  # above, it is deleted here rather than left to be re-read forever.
   rm -f "$BOARD_HOME_RECORD_FILE"
 fi
+# The port goes in unconditionally, like the roots and unlike the store: it always has a
+# resolved value, today's default is tomorrow's carried-forward value, and a machine whose
+# daemon is on 7391 must keep landing on 7391 even if that default ever moves.
+printf '%s' "$PORT" > "$PORT_RECORD_FILE"
 # ADR.md entry 38: `/file/` and its allowlist are gone, so there is nothing left to carry
 # this record forward for. An install that predates the deletion left one behind; this
 # removes it on the very next run rather than leaving a stale file nothing reads again.
@@ -459,9 +608,17 @@ sha256_file() {
 
 # The same digest over a string rather than a file, used by step 1b to fold several
 # file hashes and an identifier into the one stamp that decides whether the launcher
-# bundle needs rebuilding. Callers keep the argument ASCII (digests and an identifier,
-# never a raw path), because a process argument reaches node as a UTF-8 string and a
-# filename is not obliged to be one.
+# bundle needs rebuilding. That caller keeps the argument ASCII (digests and an
+# identifier, never a raw path), because a process argument reaches node as a UTF-8 string
+# and a filename is not obliged to be one: a stray byte would be replaced on the way in,
+# and a stamp that cannot tell two builds apart is a bundle that never gets rebuilt.
+#
+# The health gate at step 4 is the one deliberate exception, and it is exempt for the
+# reason the rule exists rather than despite it: it hashes the daemon's program PATH, and
+# compares the result against a digest the daemon computed from its own `process.argv[1]`
+# -- which arrived through execve and was decoded by node exactly the way this argument is.
+# Both sides lose the same bytes to the same replacement, so a path that is not valid UTF-8
+# still matches itself, which is the only property that comparison needs.
 sha256_string() {
   "$NODE_BIN" -e '
     const crypto = require("node:crypto");
@@ -645,10 +802,15 @@ cp "$LAUNCHER_MENUBAR_SRC" "$STAGED_MENUBAR_SRC"
 
 # The one filename byte c_escape cannot handle. Absurd in practice, a broken build if it
 # ever happens, and cheaper to refuse by name than to debug from a compiler error.
-# BUNDLED_DAEMON_PATH and REPO_DIR are checked alongside DAEMON_PATH because both are
-# baked into the header below too (BUNDLED_DAEMON_PATH as CLAUDE_BOARD_DAEMON, REPO_DIR
-# as CLAUDE_BOARD_REPO_ROOT_VALUE).
-case "$NODE_BIN$DAEMON_PATH$BUNDLED_DAEMON_PATH$REPO_DIR" in
+#
+# EVERY value the header below bakes is in this test, not just the two paths it started
+# with: a newline in $HOME, in the store or in the reference roots produces exactly the
+# same unterminated string literal as one in the daemon path, and the guard used to let
+# all three through to the compiler. The seventh #define, CLAUDE_BOARD_PATH, is the only
+# one absent — it is a constant in this script, so nothing outside it can put a byte
+# there. (Baked as: NODE_BIN, BUNDLED_DAEMON_PATH, HOME, EFFECTIVE_BOARD_HOME, REF_ROOTS,
+# REPO_DIR; DAEMON_PATH rides along because the degraded path still runs it by name.)
+case "$NODE_BIN$DAEMON_PATH$BUNDLED_DAEMON_PATH$REPO_DIR$HOME$EFFECTIVE_BOARD_HOME$REF_ROOTS" in
   *$'\n'*) LAUNCHER_NEWLINE_IN_PATH=1 ;;
   *) LAUNCHER_NEWLINE_IN_PATH=0 ;;
 esac
@@ -663,7 +825,7 @@ if ! PAYLOAD_DIGEST="$(payload_digest "$REPO_DIR" 2>&1)"; then
 fi
 
 if [ "$LAUNCHER_NEWLINE_IN_PATH" -eq 1 ]; then
-  launcher_degraded "the node or daemon path contains a newline, which cannot be baked into the launcher"
+  launcher_degraded "one of the values baked into the launcher (an interpreter, daemon, clone, home, store or reference-root path) contains a newline, which cannot be written into a C string literal"
 elif [ -n "$PAYLOAD_DIGEST_ERR" ]; then
   launcher_degraded "$PAYLOAD_DIGEST_ERR"
 else
@@ -1058,15 +1220,61 @@ fi
 # and this clone living under ~/Documents made it pay the full two minutes every run.
 HEALTH_TRIES="${CLAUDE_BOARD_HEALTH_TRIES:-$HEALTH_TRIES}"
 
+# WHICH daemon has to answer, not merely that something did. "A listener on the port" was
+# the whole test, so a hand-run `node bin/daemon.mjs`, or a previous install's daemon still
+# holding the port, let this script report "installed and running" over a launchd job that
+# could not bind and is being throttled into a restart loop. src/server.mjs answers
+# /api/health with a digest of its own program path (DAEMON_ID there); the path this run
+# just pointed launchd at is known exactly, so the two are compared.
+#
+# A digest rather than the path because /api/health is the one uncredentialed route — see
+# isOpenRoute in src/server.mjs. sha256_string sends its argument through node's argv like
+# the daemon's own program path arrives through execve, so a path that is not valid UTF-8
+# is decoded the same way on both sides and still matches itself.
+#
+# Known ceiling: on the DEGRADED (no-launcher) path the installed daemon is
+# `node $DAEMON_PATH` out of this clone, and a hand-run `node bin/daemon.mjs` from the same
+# clone is the same program at the same path — no identity the daemon could report
+# distinguishes them. With a launcher bundle in use (the normal path) the installed daemon
+# runs from inside the bundle, and this is exact.
+if [ "$USE_LAUNCHER" -eq 1 ]; then
+  HEALTH_DAEMON_PATH="$BUNDLED_DAEMON_PATH"
+else
+  HEALTH_DAEMON_PATH="$DAEMON_PATH"
+fi
+HEALTH_DAEMON_ID="$(sha256_string "$HEALTH_DAEMON_PATH")"
+
 echo "==> waiting for $HEALTH_URL"
 HEALTHY=0
+# Set when something answered the probe but was not this install's daemon, so the failure
+# below can name that instead of "the daemon never answered".
+HEALTH_FOREIGN=0
 for _ in $(seq 1 "$HEALTH_TRIES"); do
-  if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
-    HEALTHY=1
-    break
-  fi
+  # --noproxy '*': a corporate or VPN Mac exports ALL_PROXY / http_proxy / https_proxy with
+  # no loopback exemption, and curl then asks that proxy for 127.0.0.1 — which answers 502,
+  # or nothing at all. The daemon is up and healthy; the probe simply never reaches it, and
+  # this script used to declare it dead and exit right here, BEFORE the MCP registration and
+  # the manual — i.e. a genuinely broken install on a machine where nothing was wrong.
+  HEALTH_BODY="$(curl -fsS --noproxy '*' --max-time 2 "$HEALTH_URL" 2>/dev/null)" || HEALTH_BODY=""
+  case "$HEALTH_BODY" in
+    '') ;;
+    *"$HEALTH_DAEMON_ID"*) HEALTHY=1; break ;;
+    *) HEALTH_FOREIGN=1 ;;
+  esac
   sleep 0.25
 done
+if [ "$HEALTHY" -ne 1 ] && [ "$HEALTH_FOREIGN" -eq 1 ]; then
+  echo "error: something is already listening on 127.0.0.1:${PORT}, and it is not the daemon" >&2
+  echo "       this install just set up ($HEALTH_DAEMON_PATH)." >&2
+  echo "       A hand-run 'node bin/daemon.mjs', a daemon from another clone, or an unrelated" >&2
+  echo "       program has the port — so the job launchd was just handed cannot bind, and" >&2
+  echo "       KeepAlive is retrying it in a loop. Find it with:" >&2
+  echo "         lsof -nP -iTCP:${PORT} -sTCP:LISTEN" >&2
+  echo "       then stop it and re-run this script, or pick another port with CLAUDE_BOARD_PORT." >&2
+  echo "       logs: $OUT_LOG" >&2
+  echo "             $ERR_LOG" >&2
+  exit 1
+fi
 if [ "$HEALTHY" -ne 1 ]; then
   echo "error: the daemon never answered $HEALTH_URL — it is NOT running" >&2
   echo "       logs: $OUT_LOG" >&2
@@ -1123,7 +1331,20 @@ fi
 echo
 echo "claude-board installed and running."
 echo
-echo "verify:  curl -s http://127.0.0.1:${PORT}/api/health"
+# Two spellings of the same command, decided by the environment the reader is standing in:
+# with a proxy exported and no loopback exemption, the plain form asks the proxy for
+# 127.0.0.1 and reports a board that is up as down — the same trap the health gate above
+# now sidesteps, and a copy-pasteable line that fails is worse than none.
+PROXY_IN_ENV=0
+for _proxy_var in ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy; do
+  if [ -n "${!_proxy_var:-}" ]; then PROXY_IN_ENV=1; break; fi
+done
+if [ "$PROXY_IN_ENV" -eq 1 ]; then
+  echo "verify:  curl -s --noproxy '*' http://127.0.0.1:${PORT}/api/health"
+  echo "         (--noproxy because this shell exports a proxy; the board is loopback-only)"
+else
+  echo "verify:  curl -s http://127.0.0.1:${PORT}/api/health"
+fi
 # Boards are served only to an authorized browser. The tab a session opens is
 # authorized for you; this is the one command for a browser that holds nothing
 # (cleared cookies, a second profile, a different browser), and it is the same

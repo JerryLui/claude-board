@@ -13,8 +13,9 @@
 // never as an enumeration of the routes that need them: a route added later is gated by
 // default rather than by whoever adds it remembering. The exception list for (4) is
 // `GET /api/health` (install.sh polls it with plain curl to decide whether the service
-// came up, and it reveals only a version string) and `GET /auth/<token>`, which is the
-// route that HANDS OUT the credential and so cannot require it.
+// came up, and it reveals only a version string and an opaque daemon identity — see
+// DAEMON_ID) and `GET /auth/<token>`, which is the route that HANDS OUT the credential
+// and so cannot require it.
 //
 // A credential is one of exactly two things (src/secret.mjs):
 //
@@ -46,7 +47,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore } from './store.mjs';
 import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
@@ -332,6 +333,24 @@ function readPkgVersion() {
 
 const PKG_VERSION = readPkgVersion();
 
+/** Which daemon this is, for install.sh's health gate and nothing else.
+ *
+ * "Something answered on the port" is not "the service I just installed came up": a
+ * hand-run `node bin/daemon.mjs`, or a previous install's daemon still holding the port,
+ * answers exactly the same — while the job launchd was just handed cannot bind, fails,
+ * and gets throttled into a restart loop. install.sh knows the one program path it
+ * pointed launchd at (the copy inside the bundle, or the clone's bin/daemon.mjs on the
+ * degraded path) and compares this against a digest of it.
+ *
+ * The DIGEST, never the path: `/api/health` is the one route with no credential on it
+ * (isOpenRoute), so anything added here is readable by any local process. A digest keeps
+ * that route's disclosure exactly where it was — a version string and, now, an opaque
+ * 64-hex identity — while still being reproducible by the one caller that already knows
+ * the path. `process.argv[1]` rather than this module's own URL, because the identity
+ * that matters is what the launcher/launchd exec'd, and it cannot change under a running
+ * process, so this is computed once. */
+const DAEMON_ID = createHash('sha256').update(String(process.argv[1] || ''), 'utf8').digest('hex');
+
 /** Wall-clock ceiling on a single /wait call, the server-side twin of the shim's
  * CLAUDE_BOARD_TIMEOUT_MS (PROTOCOL.md "MCP shim environment"): a waiter nobody ever
  * answers gets an explicit `timeout` packet instead of polling the store forever.
@@ -561,8 +580,10 @@ function isAuthorizedWrite(req, parts, secret) {
  *
  *  - `/api/health`: install.sh polls it with plain `curl` to decide whether the service
  *    actually came up, and gating it would make a fresh install report failure on a
- *    daemon that is working perfectly. It answers `{ ok, version }` and nothing else —
- *    no board, no path, no store contents.
+ *    daemon that is working perfectly. It answers `{ ok, version, daemon }` and nothing
+ *    else — no board, no path, no store contents. `daemon` is DAEMON_ID above: a digest
+ *    of this process's own program path, so the gate can tell the daemon it just
+ *    installed from any other listener on the port, and a path is still never disclosed.
  *  - `/auth/<token>`: the route that hands a browser its credential. Requiring one here
  *    would be a bootstrap loop. It is protected by the token being single-use, unguessable
  *    and seconds-lived instead (src/handoff.mjs).
@@ -1983,7 +2004,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       if (req.method === 'GET' && url.pathname === '/api/health') {
-        return sendJson(res, 200, { ok: true, version: PKG_VERSION });
+        return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID });
       }
 
       if (req.method === 'GET' && parts[0] === 'auth' && parts.length === 2) {

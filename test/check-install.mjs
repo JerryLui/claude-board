@@ -25,6 +25,9 @@ import http from 'node:http';
 // an absent variable as an empty allowlist on purpose. Imported rather than copied so
 // the two cannot drift.
 import { DEFAULT_REF_ROOTS } from '../src/resolve.mjs';
+// Same reason, for the port install.sh falls back to when nothing else names one: the
+// number lives in two files that must not drift.
+import { DEFAULT_PORT } from '../src/handoff.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const installScript = path.join(repoRoot, 'install.sh');
@@ -163,12 +166,48 @@ const launchctlState = path.join(workDir, 'launchctl-state.json');
 // In its own process, not this one: every install run below is a spawnSync, which
 // blocks this event loop for its whole duration, so an in-process listener would
 // accept nothing exactly while the script is polling it.
+//
+// It also has to say WHICH daemon it is. install.sh's health gate no longer accepts "something
+// answered on the port": the answer must carry a digest of the program path of the daemon that
+// run just pointed launchd at (src/server.mjs's DAEMON_ID), or a hand-run node makes a
+// throttle-looping install report success. One stub stands in for every install this suite
+// performs -- a different CLAUDE_BOARD_APP_DIR per check, plus the degraded ones that run a
+// clone's own bin/daemon.mjs -- so it answers with every identity it could legitimately be,
+// rescanned per request because those bundles and clones appear as the suite goes. A real daemon
+// reports exactly one; the direction that matters (a listener that is NOT the installed daemon
+// must fail the install) has its own check below, on its own port and its own stub.
 const healthStub = path.join(binDir, 'health-stub.mjs');
 writeFileSync(healthStub, `import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
+const workDir = process.argv[3];
+const repoRoot = process.argv[4];
+const sha = s => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+
+/** Every bin/daemon.mjs under the scanned roots, as install.sh would name it: the copy
+ * staged inside a built bundle (Contents/Resources/bin/daemon.mjs) and the clone's own. */
+function daemonPaths(dir, depth, out) {
+  if (depth > 8) return out;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) daemonPaths(full, depth + 1, out);
+    else if (entry.isFile() && entry.name === 'daemon.mjs' && path.basename(dir) === 'bin') out.push(full);
+  }
+  return out;
+}
+
 http.createServer((req, res) => {
   if (req.url === '/api/health') {
+    // The temp tree only: this repo's own bin/daemon.mjs is named directly rather than
+    // walked to, so no request ever pays for a walk of the whole clone.
+    const identities = [sha(path.join(repoRoot, 'bin', 'daemon.mjs'))];
+    for (const p of daemonPaths(workDir, 0, [])) identities.push(sha(p));
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, version: 'stub' }));
+    res.end(JSON.stringify({ ok: true, version: 'stub', daemon: identities }));
     return;
   }
   res.writeHead(404);
@@ -184,7 +223,7 @@ const healthPort = await new Promise(resolve => {
     probe.close(() => resolve(p));
   });
 });
-const healthProc = spawn(process.execPath, [healthStub, String(healthPort)], { stdio: 'ignore' });
+const healthProc = spawn(process.execPath, [healthStub, String(healthPort), workDir, repoRoot], { stdio: 'ignore' });
 // Wait until it is actually answering, so no install run below races its startup.
 for (let i = 0; i < 50; i++) {
   if (spawnSync('curl', ['-fsS', '--max-time', '1', `http://127.0.0.1:${healthPort}/api/health`]).status === 0) break;
@@ -225,6 +264,16 @@ delete env.CLAUDE_BOARD_REF_ROOTS;
 
 function runInstall() {
   return spawnSync('bash', [installScript], { env, encoding: 'utf8' });
+}
+
+/** A throwaway $HOME for a check that needs install.sh to resolve every default somewhere
+ * else. UNDER workDir rather than straight under tmpdir(), because the health stub above
+ * answers with the identity of every daemon it can find below workDir -- and install.sh's
+ * gate now requires the answer to name the daemon THIS run just installed, which for these
+ * checks lives at $fakeHome/Applications/claude-board.app/.../bin/daemon.mjs. Removed by
+ * its own check either way, and by workDir's teardown if that ever fails. */
+function fakeHomeUnderWorkDir(prefix) {
+  return mkdtempSync(path.join(workDir, prefix));
 }
 
 /** Stub log/state paths of a check's own, for an install run that exists to prove
@@ -625,6 +674,23 @@ async function main() {
       withdraw > remove,
       'and AFTER the rm: under `set -e` an rm that fails would otherwise abort with the record '
       + 'already gone, leaving a runnable bundle that can never notify (see uninstall.sh step 1b)',
+    );
+    // ...and OUTSIDE the branch that tests whether the bundle is still there. Nested inside
+    // it, the ordinary way a person gets rid of an app -- drag it to the Trash, then run the
+    // uninstaller -- left the record behind permanently: a live bundle id naming a path that
+    // no longer exists, which macOS answers with "claude-board.app is damaged and can't be
+    // opened" weeks later, on a machine with nothing installed. `lsregister -u` works fine on
+    // an absent path, so there is nothing to gain from the condition. Structural, for the
+    // same reason the rest of this check is: the suite only ever uninstalls from a temp root,
+    // where nothing was registered to observe.
+    const bundleBranch = uninstallCode.indexOf('if [ -d "$APP_PATH" ]');
+    assert.ok(bundleBranch !== -1, 'setup sanity: the bundle-exists branch must still be here');
+    const branchEnd = uninstallCode.indexOf('\nfi\n', bundleBranch);
+    assert.ok(branchEnd !== -1, 'setup sanity: that branch must still be closed by a top-level fi');
+    assert.ok(
+      withdraw > branchEnd,
+      'the withdrawal must run whether or not the bundle is still on disk -- a bundle trashed by '
+      + 'hand before the uninstall is exactly the case that left a permanent "damaged app" record',
     );
     // `is_throwaway_bundle_path` is duplicated across the two scripts by necessity (neither
     // sources the other), so drift is the failure mode: a root install.sh refuses to
@@ -1412,7 +1478,7 @@ async function main() {
     // alone, that record would silently keep missing the render directory forever, on
     // every future `git pull && ./install.sh`, and every artifact a page board tries to
     // show would come back a "cannot read" error card despite the install looking clean.
-    const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-oldrecord-'));
+    const fakeHome = fakeHomeUnderWorkDir('claude-board-oldrecord-');
     try {
       const secretDir = path.join(fakeHome, 'config', 'claude-board');
       mkdirSync(secretDir, { recursive: true, mode: 0o700 });
@@ -1496,7 +1562,7 @@ async function main() {
     // next to its secret that nothing will ever read again -- install.sh's job is to take
     // it away on the very next run, the same way it already does for a BOARD_HOME record
     // nobody chose (the `rm -f` beside the ref/board-home persistence step).
-    const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-serveroots-'));
+    const fakeHome = fakeHomeUnderWorkDir('claude-board-serveroots-');
     try {
       const secretDir = path.join(fakeHome, 'config', 'claude-board');
       mkdirSync(secretDir, { recursive: true, mode: 0o700 });
@@ -1718,6 +1784,145 @@ async function main() {
     assert.match(r.stderr, /warning/i, 'a missing manual must be announced, not silent');
   });
 
+  // --- preflight: the three refusals that must cost nothing ---------------------
+  //
+  // A non-macOS host, a node older than package.json's engines floor, and a missing
+  // `claude` CLI are the ways this machine cannot run the service at all. Each used to be
+  // discovered late and under a false name -- the last of them at step 5 of 6, with the
+  // plist written, a bundle signed and the daemon already running. What every check here
+  // asserts alongside the exit code is that NOTHING was written: the whole per-run root
+  // directory must still not exist, which is stronger than naming individual paths and
+  // catches a future write that lands before the refusal.
+
+  /** Env for a run expected to be refused, with every path install.sh could write under
+   * one root of its own, and that root's path for the after-the-fact assertion. */
+  function preflightRun(tag, extra) {
+    const root = path.join(workDir, `preflight-${tag}`);
+    return {
+      root,
+      env: {
+        ...env,
+        ...quietStubs(`preflight-${tag}`),
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+        CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
+        CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+        CLAUDE_BOARD_HOME: path.join(root, 'Store'),
+        ...extra,
+      },
+    };
+  }
+
+  await check('preflight refuses a non-macOS host, naming the real cause, before writing anything', async () => {
+    // `uname` is resolved through PATH, so a stub in front of it is the whole fixture --
+    // no seam of its own, and the check exercises the exact line a Linux user would hit.
+    const fakeUnameDir = path.join(workDir, 'fake-uname-bin');
+    mkdirSync(fakeUnameDir, { recursive: true });
+    const fakeUname = path.join(fakeUnameDir, 'uname');
+    writeFileSync(fakeUname, '#!/bin/sh\necho Linux\n');
+    chmodSync(fakeUname, 0o755);
+
+    const { root, env: e } = preflightRun('os', { PATH: `${fakeUnameDir}:${process.env.PATH}` });
+    const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.notEqual(r.status, 0, 'a non-Darwin kernel must fail the install');
+    assert.match(r.stderr, /macOS only/, 'and say so, rather than failing later inside launchctl');
+    assert.match(r.stderr, /Linux/, 'naming what the host actually reported');
+    assert.ok(!existsSync(root), 'a refused install must not have written anything at all');
+  });
+
+  await check('preflight refuses a node older than the engines floor, before writing anything', async () => {
+    const oldNodeDir = path.join(workDir, 'old-node-bin');
+    mkdirSync(oldNodeDir, { recursive: true });
+    const oldNode = path.join(oldNodeDir, 'node');
+    // Answers --version as an old node and is otherwise the real interpreter: the point is
+    // that the refusal happens on the VERSION, before anything executes it for real.
+    writeFileSync(oldNode, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "v18.20.4"; exit 0; fi\nexec ${process.execPath} "$@"\n`);
+    chmodSync(oldNode, 0o755);
+
+    const { root, env: e } = preflightRun('old-node', { CLAUDE_BOARD_NODE: oldNode });
+    const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.notEqual(r.status, 0, 'node 18 must fail the install');
+    assert.match(r.stderr, /too old/, 'and the message must name the real cause');
+    assert.match(r.stderr, /v18\.20\.4/, 'including the version it actually found');
+    assert.ok(!existsSync(root), 'a refused install must not have written anything at all');
+  });
+
+  await check('preflight refuses a missing claude CLI, before writing anything', async () => {
+    const { root, env: e } = preflightRun('no-claude', { CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli' });
+    const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.notEqual(r.status, 0, 'no CLI to register with must fail the install');
+    assert.match(r.stderr, /claude-board-no-such-cli/, 'the message must name the command it looked for');
+    assert.match(r.stderr, /Claude Code/, 'and what that command is');
+    assert.ok(
+      !existsSync(root),
+      'this is the one that used to fail at step 5 of 6, after the plist, the bundle and the daemon were already there',
+    );
+  });
+
+  await check("install.sh's minimum node major is package.json's engines floor, not a number of its own", async () => {
+    const declared = readFileSync(installScript, 'utf8').match(/^MIN_NODE_MAJOR=(\d+)$/m);
+    assert.ok(declared, 'install.sh must still declare MIN_NODE_MAJOR as a plain assignment');
+    const engines = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).engines.node;
+    const floor = engines.match(/(\d+)/);
+    assert.ok(floor, `package.json engines.node must carry a major version: ${engines}`);
+    assert.equal(declared[1], floor[1], 'the installer refuses the same node package.json says it needs');
+  });
+
+  await check("the version-manager list covers mise, nodenv and fnm's real macOS roots, and nothing stable", async () => {
+    // #28: nvm/volta/asdf/n were matched, so a mise, nodenv or fnm user got their moving
+    // interpreter COMPILED INTO the signed launcher with nothing on screen -- and the next
+    // `node` upgrade breaks launchd exec permanently, which no plist edit can repair.
+    //
+    // Each case runs install.sh only as far as the preflight: the CLI is deliberately
+    // missing, so the run aborts a few lines after the interpreter is resolved. That keeps
+    // this to milliseconds and writes nothing, while still exercising the real detection on
+    // the real path shape rather than a regex lifted out of the script.
+    const cases = [
+      ['mise, versioned install', path.join('.local', 'share', 'mise', 'installs', 'node', '24.4.0', 'bin')],
+      ['mise, shim', path.join('.local', 'share', 'mise', 'shims')],
+      ['nodenv, versioned install', path.join('.nodenv', 'versions', '22.1.0', 'bin')],
+      ['nodenv, shim', path.join('.nodenv', 'shims')],
+      ['fnm, macOS default root', path.join('Library', 'Application Support', 'fnm', 'node-versions', 'v24.4.0', 'installation', 'bin')],
+      ['fnm, per-shell multishell path', path.join('fnm_multishells', '4321_1700000000000', 'bin')],
+    ];
+    for (const [label, rel] of cases) {
+      const dir = path.join(workDir, 'vm', label.replace(/[^a-z]+/gi, '-'), rel);
+      mkdirSync(dir, { recursive: true });
+      const shim = path.join(dir, 'node');
+      writeFileSync(shim, `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
+      chmodSync(shim, 0o755);
+
+      const { root, env: e } = preflightRun(`vm-${label.replace(/[^a-z]+/gi, '-')}`, {
+        PATH: `${dir}:${process.env.PATH}`,
+        CLAUDE_BOARD_NODE: '',
+        CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
+      });
+      const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+      assert.match(
+        r.stdout, /version-managed/,
+        `${label} must be recognised as version-managed -- either the substitution note or the warning, `
+        + `never silence:\nstdout:\n${r.stdout}`,
+      );
+      assert.ok(!existsSync(root), `${label}: the aborted run must still have written nothing`);
+    }
+
+    // The other direction, on the same machinery: an ordinary directory is not a version
+    // manager, and a false positive here would print a scary note on every stable install.
+    const plainDir = path.join(workDir, 'vm-plain', 'bin');
+    mkdirSync(plainDir, { recursive: true });
+    const plainNode = path.join(plainDir, 'node');
+    writeFileSync(plainNode, `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
+    chmodSync(plainNode, 0o755);
+    const { env: plainEnv } = preflightRun('vm-plain', {
+      PATH: `${plainDir}:${process.env.PATH}`,
+      CLAUDE_BOARD_NODE: '',
+      CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
+    });
+    const plain = spawnSync('bash', [installScript], { env: plainEnv, encoding: 'utf8' });
+    assert.doesNotMatch(plain.stdout, /version-managed/, 'a plain interpreter path must not be flagged');
+  });
+
   await check('a version-managed node on PATH is not baked into the plist when a stable one exists', async () => {
     const fakeNvm = path.join(workDir, 'home', '.nvm', 'versions', 'node', 'v0.0.0', 'bin');
     mkdirSync(fakeNvm, { recursive: true });
@@ -1800,6 +2005,229 @@ async function main() {
     const launcher = readFileSync(path.join(overrideAppDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board'));
     assert.ok(launcher.includes(Buffer.from(`${chosen}\0`, 'utf8')), 'the override must be the interpreter the launcher execs');
     assert.equal(JSON.parse(readFileSync(registrations, 'utf8'))['claude-board'].command[0], chosen);
+  });
+
+  // --- the health gate: a proxy must not hide the daemon, a stranger must not pass for it ---
+
+  await check('a proxy in the environment does not hide the local daemon, and the steps after the gate still run', async () => {
+    // #11, the most expensive installer bug there was: on a corporate or VPN Mac,
+    // ALL_PROXY/*_proxy with no loopback exemption made curl ask the proxy for 127.0.0.1.
+    // The daemon was up and healthy; the probe simply never reached it, so install.sh
+    // declared it dead and exited BEFORE the MCP registration and the manual -- a
+    // genuinely broken install on a machine where nothing was wrong. The proxy address
+    // here is a closed port, which is exactly what a wrong proxy behaves like.
+    const root = path.join(workDir, 'proxy-run');
+    const registrations = path.join(root, 'claude-registrations.json');
+    const skills = path.join(root, 'skills');
+    const dead = 'http://127.0.0.1:1/';
+    const r = spawnSync('bash', [installScript], {
+      env: {
+        ...env,
+        ALL_PROXY: dead, all_proxy: dead, HTTP_PROXY: dead, http_proxy: dead, HTTPS_PROXY: dead, https_proxy: dead,
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+        CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+        CLAUDE_BOARD_SKILLS_DIR: skills,
+        STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-proxy.log'),
+        STUB_CLAUDE_STATE: registrations,
+        STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-proxy.log'),
+        STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-proxy.json'),
+      },
+      encoding: 'utf8',
+    });
+    // (Ablation: drop --noproxy from the probe and this exits 1 with "it is NOT running".)
+    assert.equal(r.status, 0, `an install behind a proxy must succeed:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    // The two steps that come AFTER the gate, which are what the bug actually cost:
+    assert.ok(
+      JSON.parse(readFileSync(registrations, 'utf8'))['claude-board'],
+      'the MCP registration must have run -- it is the step the failed gate used to skip',
+    );
+    assert.ok(existsSync(path.join(skills, 'claude-board', 'SKILL.md')), 'and the manual must have been copied');
+    // ...and the command the reader is told to verify with must work in the shell they are
+    // standing in, which the plain one does not.
+    assert.match(r.stdout, /curl -s --noproxy/, 'the printed verify command must be the proxy-proof one');
+  });
+
+  await check('the health gate refuses a listener that is not the daemon this install just set up', async () => {
+    // #29: the gate accepted anything that answered /api/health, so a hand-run
+    // `node bin/daemon.mjs` -- or a daemon from another clone still holding the port --
+    // made a launchd job that CANNOT bind (and is being throttled into a restart loop)
+    // report "installed and running". This stub answers exactly like a healthy daemon
+    // whose program path is somewhere else, which is what that hand-run node is.
+    const foreignStub = path.join(binDir, 'foreign-health-stub.mjs');
+    writeFileSync(foreignStub, `import http from 'node:http';
+import crypto from 'node:crypto';
+const other = crypto.createHash('sha256').update('/somewhere/else/bin/daemon.mjs', 'utf8').digest('hex');
+http.createServer((req, res) => {
+  if (req.url === '/api/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, version: 'stub', daemon: other }));
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+}).listen(Number(process.argv[2]), '127.0.0.1');
+`);
+    const foreignPort = await freePort();
+    const foreign = spawn(process.execPath, [foreignStub, String(foreignPort)], { stdio: 'ignore' });
+    try {
+      assert.ok(await waitForHealthy(foreignPort, 5000), 'setup: the foreign listener must be answering');
+      const root = path.join(workDir, 'foreign-run');
+      const registrations = path.join(root, 'claude-registrations.json');
+      const r = spawnSync('bash', [installScript], {
+        env: {
+          ...env,
+          CLAUDE_BOARD_PORT: String(foreignPort),
+          CLAUDE_BOARD_HEALTH_TRIES: '4',
+          CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+          CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+          CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+          STUB_CLAUDE_LOG: path.join(workDir, 'claude-invocations-foreign.log'),
+          STUB_CLAUDE_STATE: registrations,
+          STUB_LAUNCHCTL_LOG: path.join(workDir, 'launchctl-invocations-foreign.log'),
+          STUB_LAUNCHCTL_STATE: path.join(workDir, 'launchctl-state-foreign.json'),
+        },
+        encoding: 'utf8',
+      });
+      assert.notEqual(r.status, 0, 'a stranger on the port must fail the install');
+      assert.match(r.stderr, /not the daemon\s+this install just set up/, 'and the message must say which problem this is');
+      assert.doesNotMatch(r.stdout, /installed and running/);
+      assert.ok(!existsSync(registrations), 'a failed install must not have rewritten the MCP registration');
+    } finally {
+      foreign.kill();
+    }
+  });
+
+  // --- carry-forward: the port is a choice, like the roots and the store ------------
+
+  await check('a custom CLAUDE_BOARD_PORT survives a reinstall that never mentions it', async () => {
+    // #27: the port had no record, so `git pull && ./install.sh` from a clean shell reverted
+    // a custom port to the default -- whereupon the running daemon still held the custom one,
+    // the new job tried a port it could not have, and KeepAlive throttled the restart loop
+    // with nothing on screen naming the cause.
+    const root = path.join(workDir, 'port-carry');
+    const secretDir = path.join(root, 'config', 'claude-board');
+    const record = path.join(secretDir, 'port');
+    const agents = path.join(root, 'LaunchAgents');
+    const plist = path.join(agents, 'claude-board.plist');
+    const portOf = () => {
+      const asJson = spawnSync('plutil', ['-convert', 'json', '-o', '-', plist], { encoding: 'utf8' });
+      assert.equal(asJson.status, 0, asJson.stderr);
+      return JSON.parse(asJson.stdout).EnvironmentVariables.CLAUDE_BOARD_PORT;
+    };
+    const customPort = await freePort();
+    // The gate is real, so the custom port needs a daemon of its own answering on it.
+    const stub = spawn(process.execPath, [healthStub, String(customPort), workDir, repoRoot], { stdio: 'ignore' });
+    try {
+      assert.ok(await waitForHealthy(customPort, 5000), 'setup: the custom-port stub must be answering');
+      const base = {
+        ...env,
+        ...quietStubs('port-carry'),
+        CLAUDE_BOARD_LAUNCH_AGENTS_DIR: agents,
+        CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+        CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+        CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
+      };
+
+      const chosen = spawnSync('bash', [installScript], {
+        env: { ...base, CLAUDE_BOARD_PORT: String(customPort) }, encoding: 'utf8',
+      });
+      assert.equal(chosen.status, 0, `stdout:\n${chosen.stdout}\nstderr:\n${chosen.stderr}`);
+      assert.equal(portOf(), String(customPort), 'the chosen port must reach the plist');
+      assert.equal(readFileSync(record, 'utf8'), String(customPort), 'and be recorded for the next run');
+
+      // The reinstall: a clean shell, no variable, exactly `git pull && ./install.sh`.
+      const carriedEnv = { ...base };
+      delete carriedEnv.CLAUDE_BOARD_PORT;
+      const carried = spawnSync('bash', [installScript], { env: carriedEnv, encoding: 'utf8' });
+      assert.equal(carried.status, 0, `stdout:\n${carried.stdout}\nstderr:\n${carried.stderr}`);
+      assert.equal(portOf(), String(customPort), 'a reinstall must not revert a custom port to the default');
+      assert.match(carried.stdout, /carried forward from/, 'and must say where the port came from, never silently');
+
+      // And the one-time migration, for a machine whose plist predates the record: delete
+      // the record, leave the plist, and the port still survives -- the same fallback
+      // REF_ROOTS and CLAUDE_BOARD_HOME have.
+      rmSync(record);
+      const migrated = spawnSync('bash', [installScript], { env: carriedEnv, encoding: 'utf8' });
+      assert.equal(migrated.status, 0, `stdout:\n${migrated.stdout}\nstderr:\n${migrated.stderr}`);
+      assert.equal(portOf(), String(customPort), 'an install predating the record must migrate its port out of the plist');
+      assert.equal(readFileSync(record, 'utf8'), String(customPort), 'and write the record so this happens once');
+    } finally {
+      stub.kill();
+    }
+  });
+
+  await check("install.sh's default port is src/handoff.mjs's, not a number of its own", async () => {
+    const declared = readFileSync(installScript, 'utf8').match(/^DEFAULT_PORT=(\d+)$/m);
+    assert.ok(declared, 'install.sh must still declare DEFAULT_PORT as a plain assignment');
+    assert.equal(Number(declared[1]), DEFAULT_PORT, 'the installer and the shim must agree on the default port');
+  });
+
+  // --- guards on the values that get baked in --------------------------------------
+
+  await check('an empty CLAUDE_BOARD_HOME is refused, and a zero-byte record left by an older run heals itself', async () => {
+    // #41: an empty variable used to bake CLAUDE_BOARD_STORE_DIR "" into the signed
+    // launcher AND leave a zero-byte carry-forward record, which every later reinstall read
+    // back and honoured -- a sticky wrong answer from a single stray `CLAUDE_BOARD_HOME=`.
+    const { root, env: e } = preflightRun('empty-home', { CLAUDE_BOARD_HOME: '' });
+    const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.notEqual(r.status, 0, 'an empty store path must be refused, not baked');
+    assert.match(r.stderr, /CLAUDE_BOARD_HOME is set but empty/);
+    assert.ok(!existsSync(root), 'and refused before anything is written');
+
+    // The other half: a machine that already carries the zero-byte record must recover on
+    // its own, rather than needing the file deleted by hand.
+    const home = fakeHomeUnderWorkDir('empty-record-');
+    const secretDir = path.join(home, 'config', 'claude-board');
+    mkdirSync(secretDir, { recursive: true, mode: 0o700 });
+    const record = path.join(secretDir, 'board_home');
+    writeFileSync(record, '');
+    const healEnv = {
+      ...env,
+      ...quietStubs('empty-record'),
+      HOME: home,
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(home, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(home, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(home, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(home, 'skills'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
+    };
+    delete healEnv.CLAUDE_BOARD_HOME;
+    const healed = spawnSync('bash', [installScript], { env: healEnv, encoding: 'utf8' });
+    assert.equal(healed.status, 0, `stdout:\n${healed.stdout}\nstderr:\n${healed.stderr}`);
+    assert.ok(!existsSync(record), 'a zero-byte store record must be taken away, not read back forever');
+    assert.match(healed.stdout, /store: {2}~\/Library\/Application Support\/claude-board \[default\]/, 'and the run must resolve the default store');
+  });
+
+  await check('a newline in any value the launcher bakes degrades the install instead of compiling it in', async () => {
+    // #40: the guard covered the interpreter and daemon paths only, so a newline in $HOME,
+    // the store or the reference roots reached the generated C header -- where it ends the
+    // string literal early. Both cases below are values a launcher #define carries.
+    for (const [label, extra] of [
+      ['reference roots', { CLAUDE_BOARD_REF_ROOTS: `${workDir}/roots-a\n${workDir}/roots-b` }],
+      ['the store', { CLAUDE_BOARD_HOME: `${workDir}/store-a\nstore-b` }],
+    ]) {
+      const root = path.join(workDir, `newline-${label.replace(/[^a-z]+/gi, '-')}`);
+      const appDirHere = path.join(root, 'Applications');
+      const r = spawnSync('bash', [installScript], {
+        env: {
+          ...env,
+          ...quietStubs(`newline-${label.replace(/[^a-z]+/gi, '-')}`),
+          CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+          CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+          CLAUDE_BOARD_APP_DIR: appDirHere,
+          CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills'),
+          CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+          ...extra,
+        },
+        encoding: 'utf8',
+      });
+      assert.equal(r.status, 0, `${label}: the install must degrade, not fail:\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+      // Named by the guard rather than discovered by the compiler: without the guard this
+      // still degrades, but only after a wasted build and with "failed to compile" on
+      // screen, which points the reader at their toolchain instead of at their value.
+      assert.match(r.stdout, /contains a newline/, `${label}: the newline must be named as the reason`);
+      assert.ok(!existsSync(path.join(appDirHere, 'claude-board.app')), `${label}: no bundle may be built from it`);
+    }
   });
 
   // --- plist XML injection --------------------------------
@@ -1964,7 +2392,7 @@ async function main() {
   });
 
   await check('a SessionStart hook in ~/.claude/settings.json survives install.sh and uninstall.sh byte-identical', async () => {
-    const fakeHome = mkdtempSync(path.join(tmpdir(), 'claude-board-fakehome-'));
+    const fakeHome = fakeHomeUnderWorkDir('claude-board-fakehome-');
     try {
       const claudeDir = path.join(fakeHome, '.claude');
       mkdirSync(claudeDir, { recursive: true });
@@ -2098,6 +2526,56 @@ async function main() {
     assert.ok(uninstallResult.stdout.includes(storeDir), 'must name the store path');
     assert.ok(uninstallResult.stdout.includes(secretFile), 'must name the secret path');
     assert.ok(uninstallResult.stdout.includes(logDir), 'must name the logs path');
+    // The carry-forward records are choices, not residue, so they survive -- and a record
+    // that survives unnamed is the residue this summary exists to prevent. The port joined
+    // them when it became a carried choice of its own.
+    for (const record of ['ref_roots', 'port']) {
+      const p = path.join(path.dirname(secretFile), record);
+      assert.ok(existsSync(p), `setup sanity: install.sh must have written ${record}`);
+      assert.ok(uninstallResult.stdout.includes(p), `must name the ${record} record it left in place`);
+    }
+  });
+
+  await check('uninstall resolves a custom store from the board_home record rather than the default path', async () => {
+    // #26: uninstall.sh read CLAUDE_BOARD_HOME from the environment only, so a machine
+    // installed with a custom store -- recorded by install.sh precisely so a later run in a
+    // clean shell can find it -- got its pomodoro.json left behind AND was told the DEFAULT
+    // directory was "your review history", pointing the reader at a folder that is not theirs.
+    const home = fakeHomeUnderWorkDir('uninstall-custom-store-');
+    const secretDir = path.join(home, 'config', 'claude-board');
+    mkdirSync(secretDir, { recursive: true, mode: 0o700 });
+    const customStore = path.join(home, 'Elsewhere', 'boards');
+    mkdirSync(path.join(customStore, 'boards'), { recursive: true });
+    const keeper = path.join(customStore, 'boards', 'keep.json');
+    const keeperContent = JSON.stringify({ id: 'keep', title: 'review history that must survive' });
+    writeFileSync(keeper, keeperContent);
+    const pomodoro = path.join(customStore, 'pomodoro.json');
+    writeFileSync(pomodoro, JSON.stringify({ deadline: 1, cycles: 0 }));
+    writeFileSync(path.join(secretDir, 'board_home'), customStore);
+
+    const uEnv = {
+      ...env,
+      ...quietStubs('uninstall-custom-store'),
+      HOME: home,
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(home, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(home, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(home, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(home, 'skills'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
+    };
+    // The whole point: the shell running the uninstall never says where the store is.
+    delete uEnv.CLAUDE_BOARD_HOME;
+
+    const r = spawnSync('bash', [uninstallScript], { env: uEnv, encoding: 'utf8' });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.ok(!existsSync(pomodoro), 'the timer document in the CUSTOM store must be removed');
+    assert.ok(existsSync(keeper), 'and the review history beside it must survive');
+    assert.equal(readFileSync(keeper, 'utf8'), keeperContent, 'byte for byte');
+    assert.ok(r.stdout.includes(customStore), 'the summary must name the store the user actually has');
+    assert.ok(
+      !r.stdout.includes(path.join(home, 'Library', 'Application Support', 'claude-board')),
+      'and must not name the default one it does not use',
+    );
   });
 
   // ADR.md entry 5: install.sh no longer installs `/grill` or any other

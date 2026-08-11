@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in claude-board is broken, or not doing what the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the posture on issues and PRs
+        here: welcome, no response-time promise.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, and what went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "e.g. 14.5 (Sonoma)"
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: "Node version (`node -v`)"
+      placeholder: "e.g. v22.11.0"
+    validations:
+      required: true
+  - type: textarea
+    id: health
+    attributes:
+      label: "Output of `curl -s http://127.0.0.1:7391/api/health`"
+      description: Run this even if the daemon seems dead; the failure itself is useful.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        Daemon logs live at `~/Library/Logs/claude-board/daemon.out.log` by default
+        (or under `$CLAUDE_BOARD_LOG_DIR` if you set it). Paste whatever lines look
+        related.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+    validations:
+      required: false

@@ -1625,9 +1625,9 @@ shim on one shared cap and asserts the ROUND was closed on disk.
 
 A worktree agent's own tracked files live under `.claude/worktrees/<name>/...`, but
 this repo's `SPEC_*.md`/`TICKETS_*.md` are gitignored and only exist in the SHARED
-checkout (`/Users/jerry/Documents/claude-board/SPEC_*.md`), read/edited there on
-purpose. That trains a reasonable habit — "this repo's absolute path is
-`/Users/jerry/Documents/claude-board/...`" — that is wrong for every TRACKED file:
+checkout (`<shared checkout>/SPEC_*.md`, e.g. `~/Documents/claude-board/SPEC_*.md`),
+read/edited there on purpose. That trains a reasonable habit — "this repo's absolute
+path is `<shared checkout>/...`" — that is wrong for every TRACKED file:
 the shared checkout and a worktree are two separate git checkouts, so the same
 filename under each root is two different files, and nothing about `Read`ing the
 former warns you it isn't the one your `Bash` commands (which default to the

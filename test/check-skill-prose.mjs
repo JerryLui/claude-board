@@ -19,6 +19,7 @@ import { checkProseFile, formatFailures, parseBlockShapes, parsePacketStatuses }
 
 const SKILL_PATH = fileURLToPath(new URL('../skills/claude-board/SKILL.md', import.meta.url));
 const PROTOCOL_PATH = fileURLToPath(new URL('../PROTOCOL.md', import.meta.url));
+const README_PATH = fileURLToPath(new URL('../README.md', import.meta.url));
 
 let failed = 0;
 function check(name, fn) {
@@ -33,6 +34,7 @@ function check(name, fn) {
 
 const prose = readFileSync(SKILL_PATH, 'utf8');
 const protocol = readFileSync(PROTOCOL_PATH, 'utf8');
+const readme = readFileSync(README_PATH, 'utf8');
 
 // --- the generic battery, against a live shim ---------------------------------
 const result = await checkProseFile(SKILL_PATH);
@@ -250,6 +252,51 @@ check('the commenting-rule absence check fails if PROTOCOL.md regains the old cl
   const reverted = protocol.replace(marker,
     "so every option's whole-block comment button still works regardless of kind (it\nrenders in the parent document, not the iframe).");
   assert.match(reverted, /regardless of kind/i);
+});
+
+// --- README agreement -------------------------------------------------------------
+// README.md is a second, separately-maintained doc that also shows the call shape, and
+// the fresh-eyes audit (2026-08-11, N2) caught it stale — a name and an argument (`fresh`)
+// behind the live shim. Nothing above touches README.md at all (`checkProseFile` was run
+// against SKILL_PATH only), so pin the same live-schema facts against README's own worked
+// example, the same way SKILL.md is pinned above it in this file.
+const README_CALL_RE = /mcp__claude-board__ask\(\{([^}]*)\}\)/;
+check('README calls the tool by its real MCP-qualified name, mcp__claude-board__ask', () => {
+  assert.match(readme, /mcp__claude-board__ask/, 'README must name the tool as mcp__claude-board__ask, not a short or invented form');
+});
+check('README\'s worked call names exactly the live schema\'s arguments -- none missing, none invented', () => {
+  const m = readme.match(README_CALL_RE);
+  assert.ok(m, 'README must show a worked `mcp__claude-board__ask({ ... })` call to pin the argument list against');
+  const shown = m[1].split(',').map(s => s.trim()).filter(Boolean).sort();
+  const real = [...result.schemaProps].sort();
+  assert.deepEqual(shown, real, `README's call shows [${shown.join(', ')}], the live schema has [${real.join(', ')}]`);
+});
+check('the README call-shape check fails on prose that lost the `fresh` argument', () => {
+  const dropped = readme.replace(README_CALL_RE, m => m.replace(/,\s*fresh/, ''));
+  const m = dropped.match(README_CALL_RE);
+  const shown = m[1].split(',').map(s => s.trim()).filter(Boolean).sort();
+  assert.notDeepEqual(shown, [...result.schemaProps].sort(), 'dropping `fresh` from README\'s worked call did not change what the check compares');
+});
+
+// --- README discloses the menu bar + pomodoro -----------------------------------------
+// N3: a menu-bar status item and a pomodoro timer install alongside the daemon, and the
+// audit's fresh-eyes pass found neither word anywhere in the README. Pinned here rather
+// than left to review, since a doc pass rewriting the top of the file is exactly the kind
+// of edit that could silently drop a disclosure paragraph.
+check('README discloses the menu-bar status item', () => {
+  assert.match(readme, /menu[- ]bar/i, 'README must mention the menu-bar status item that installs alongside the daemon');
+});
+check('README discloses the pomodoro timer', () => {
+  assert.match(readme, /pomodoro/i, 'README must mention the pomodoro timer that installs alongside the daemon');
+});
+check('README names the menu-bar opt-out and that it survives reinstall', () => {
+  assert.match(readme, /pomodoro settings/i, 'README must point at the pomodoro settings as where the status item is hidden from');
+  assert.match(readme, /survives? logout and reinstall/i, 'README must state the hide choice survives logout and reinstall');
+});
+check('the disclosure checks fail on a README that lost the menu-bar paragraph', () => {
+  const stripped = readme.replace(/Installing also gives you two things[\s\S]*?survives logout and reinstall\.\n/, '');
+  assert.doesNotMatch(stripped, /menu[- ]bar/i, 'stripping the disclosure paragraph did not remove every menu-bar mention -- the absence check would not have caught its loss');
+  assert.doesNotMatch(stripped, /pomodoro settings/i);
 });
 
 if (failed) {

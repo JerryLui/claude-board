@@ -99,10 +99,18 @@ chmodSync(launchctlStub, 0o755);
 // install.sh refuses to report success until the daemon answers /api/health, and
 // launchctl is stubbed (starts nothing) -- so this stands in for it, exactly like
 // test/check-install.mjs's own healthStub.
+//
+// The gate checks WHICH daemon answered, not just that one did (src/server.mjs's DAEMON_ID,
+// a digest of the daemon's own program path), so the stub has to name the identity every
+// install.sh run below is expecting: the daemon staged inside the bundle it just built, and
+// -- for a run that degraded -- the clone's own. Both are fixed paths here, since this file
+// installs from exactly one clone into exactly one fake HOME.
 const healthStub = path.join(binDir, 'health-stub.mjs');
 writeFileSync(healthStub, `import http from 'node:http';
+import crypto from 'node:crypto';
+const identities = process.argv.slice(3).map(p => crypto.createHash('sha256').update(p, 'utf8').digest('hex'));
 http.createServer((req, res) => {
-  if (req.url === '/api/health') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true })); return; }
+  if (req.url === '/api/health') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true, daemon: identities })); return; }
   res.writeHead(404); res.end();
 }).listen(Number(process.argv[2]), '127.0.0.1');
 `);
@@ -131,7 +139,15 @@ async function waitForHealthy(port, deadlineMs) {
 }
 
 const installHealthPort = await freePort();
-const healthProc = spawn(process.execPath, [healthStub, String(installHealthPort)], { stdio: 'ignore' });
+const healthProc = spawn(process.execPath, [
+  healthStub, String(installHealthPort),
+  // The two paths install.sh can point launchd at from here, spelled exactly as it spells
+  // them: the bundle's staged copy (the normal path) and the clone's own (if a run ever
+  // degrades). Written out rather than derived from the constants below, which are declared
+  // after this spawn.
+  path.join(fakeHome, 'Applications', 'claude-board.app', 'Contents', 'Resources', 'bin', 'daemon.mjs'),
+  path.join(workDir, 'clone', 'bin', 'daemon.mjs'),
+], { stdio: 'ignore' });
 if (!await waitForHealthy(installHealthPort, 5000)) {
   throw new Error('install-time health stub never came up');
 }
@@ -299,12 +315,48 @@ async function main() {
     }
   });
 
+  await check('the installed daemon reports the identity install.sh computes for it — the premise the health gate rests on', async () => {
+    // The gate compares a digest install.sh builds from the path it just pointed launchd at
+    // against one src/server.mjs builds from its own process.argv[1]. If those two ever stop
+    // agreeing, EVERY install fails at the gate on a daemon that came up perfectly — so this
+    // asserts the agreement against a real signed bundle and a really running daemon, with
+    // the installer's OWN function doing the installer's half rather than a re-implementation
+    // of it here.
+    const fn = readFileSync(installScript, 'utf8').match(/^sha256_string\(\) \{\n[\s\S]*?^\}$/m);
+    assert.ok(fn, 'install.sh must still define sha256_string as a top-level function');
+    const probeDir = path.join(workDir, 'identity-probe');
+    mkdirSync(probeDir, { recursive: true });
+    const probe = path.join(probeDir, 'probe.sh');
+    writeFileSync(probe, [
+      'set -euo pipefail',
+      `NODE_BIN="${process.execPath}"`,
+      fn[0],
+      'sha256_string "$1"',
+      '',
+    ].join('\n'));
+    const computed = spawnSync('bash', [probe, resourcesBin], { encoding: 'utf8' });
+    assert.equal(computed.status, 0, `sha256_string must not fail:\n${computed.stdout}\n${computed.stderr}`);
+    const expected = computed.stdout.trim();
+    assert.equal(expected.length, 64, 'a sha256 hex digest');
+
+    const d = await runBundledLauncher();
+    try {
+      const body = await (await fetch(`http://127.0.0.1:${d.port}/api/health`)).json();
+      assert.equal(
+        body.daemon, expected,
+        'the running daemon must answer with the identity install.sh expects for the path it installed',
+      );
+    } finally {
+      d.cleanup();
+    }
+  });
+
   // --- an edit to the clone does not change what runs ----------------------------------
 
   const cloneServerPath = path.join(cloneDir, 'src', 'server.mjs');
   const originalServerText = readFileSync(cloneServerPath, 'utf8');
-  const NEEDLE = 'return sendJson(res, 200, { ok: true, version: PKG_VERSION });';
-  const REPLACEMENT = "return sendJson(res, 200, { ok: true, version: PKG_VERSION, marker: 'edited-clone-marker' });";
+  const NEEDLE = 'return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID });';
+  const REPLACEMENT = "return sendJson(res, 200, { ok: true, version: PKG_VERSION, daemon: DAEMON_ID, marker: 'edited-clone-marker' });";
   await check('sanity: the health-response marker edit actually matches the real source text', async () => {
     assert.ok(originalServerText.includes(NEEDLE), 'src/server.mjs must still contain the exact health-response line this check edits');
   });

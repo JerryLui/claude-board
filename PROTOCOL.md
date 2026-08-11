@@ -536,7 +536,7 @@ GET  /b/<asset>                     the shared script or stylesheet a page names
                                     daemon's only static route. Disjoint from the line
                                     above: an asset name contains a dot, which a board id
                                     cannot
-GET  /api/health                    { ok: true, version }        (open: install.sh polls it)
+GET  /api/health                    { ok: true, version, daemon }  (open: install.sh polls it)
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread

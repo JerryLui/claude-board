@@ -39,9 +39,13 @@
 #
 # It also removes $SECRET_DIR/serve_roots if a machine still has one — a record the
 # `/file/` route used to carry forward, now that the route and its allowlist are gone
-# (ADR.md entry 38). Unlike ref_roots/board_home below, this is not a choice worth
+# (ADR.md entry 38). Unlike ref_roots/board_home/port below, this is not a choice worth
 # keeping: the thing it configured no longer exists, so it is taken back outright
 # rather than named in the "left in place on purpose" summary. See step 2d.
+#
+# The board_home record is also READ rather than merely reported: it is where install.sh
+# writes a custom store, and without it a custom-store uninstall left the timer document
+# behind and named the wrong directory as the user's review history. See STORE_DIR below.
 #
 # Three things are left ON PURPOSE and named by path in the summary this script
 # prints at the end: the store (the user's review history), the local secret, and
@@ -63,7 +67,9 @@
 #   CLAUDE_BOARD_MCP_CMD             default: claude
 #   CLAUDE_BOARD_LAUNCHCTL_CMD       default: launchctl
 #   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret (report only)
-#   CLAUDE_BOARD_HOME                default: ~/Library/Application Support/claude-board
+#   CLAUDE_BOARD_HOME                default: the store install.sh recorded in
+#                                     $SECRET_DIR/board_home, or ~/Library/Application
+#                                     Support/claude-board if it never recorded one
 #                                     (this script removes exactly one file inside it —
 #                                     $CLAUDE_BOARD_HOME/pomodoro.json, by exact name,
 #                                     see step 2b — and otherwise only reports the path;
@@ -81,7 +87,6 @@ LAUNCHCTL_CMD="${CLAUDE_BOARD_LAUNCHCTL_CMD:-launchctl}"
 LAUNCH_AGENTS_DIR="${CLAUDE_BOARD_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 LOG_DIR="${CLAUDE_BOARD_LOG_DIR:-$HOME/Library/Logs/claude-board}"
 SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
-STORE_DIR="${CLAUDE_BOARD_HOME:-$HOME/Library/Application Support/claude-board}"
 
 APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
 SKILLS_DIR="${CLAUDE_BOARD_SKILLS_DIR:-$HOME/.claude/skills}"
@@ -89,6 +94,26 @@ SKILLS_DIR="${CLAUDE_BOARD_SKILLS_DIR:-$HOME/.claude/skills}"
 LABEL="claude-board"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
 SECRET_DIR="$(dirname "$SECRET_FILE")"
+
+# Where the store actually is, which is not always where the default says. install.sh
+# writes the operator's chosen CLAUDE_BOARD_HOME into $SECRET_DIR/board_home precisely so a
+# later run -- in a shell that never exported the variable -- can find it again; this script
+# has the same problem and used to ignore the same answer. The consequence was not cosmetic:
+# a custom-store uninstall left pomodoro.json behind (step 2b removes it BY PATH) and then
+# named the default directory as "your review history" in the summary, pointing the reader
+# at a folder that is not theirs.
+#
+# Precedence matches install.sh: an explicit variable wins, then the record, then the
+# default. -s rather than -f on the record, for the same reason install.sh reads it that
+# way: a zero-byte record is residue, not a choice.
+BOARD_HOME_RECORD_FILE="$SECRET_DIR/board_home"
+if [ -n "${CLAUDE_BOARD_HOME:-}" ]; then
+  STORE_DIR="$CLAUDE_BOARD_HOME"
+elif [ -s "$BOARD_HOME_RECORD_FILE" ]; then
+  STORE_DIR="$(cat "$BOARD_HOME_RECORD_FILE")"
+else
+  STORE_DIR="$HOME/Library/Application Support/claude-board"
+fi
 APP_PATH="$APP_DIR/${LABEL}.app"
 LAUNCHER_STAMP_FILE="$SECRET_DIR/launcher.stamp"
 SKILL_DIR="$SKILLS_DIR/${LABEL}"
@@ -169,12 +194,27 @@ is_throwaway_bundle_path() {
 if [ -d "$APP_PATH" ]; then
   rm -rf "$APP_PATH"
   echo "==> removed $APP_PATH"
-  if ! is_throwaway_bundle_path "$APP_PATH" && [ -x "$LSREGISTER" ]; then
-    "$LSREGISTER" -u "$APP_PATH" >/dev/null 2>&1 || true
-    echo "==> withdrew its LaunchServices record"
-  fi
 else
   echo "==> no launcher bundle at $APP_PATH"
+fi
+# Outside that branch on purpose, and this is the fix for the worst leftover this script
+# can produce. The withdrawal used to be nested inside "the bundle is still here", so the
+# ordinary way a person gets rid of an app -- drag it to the Trash, then run the uninstaller
+# -- left the record behind FOREVER: a live bundle id naming a path that no longer exists,
+# which macOS resolves a banner to and answers with "claude-board.app is damaged and can't
+# be opened", weeks later, on a machine with nothing installed. `lsregister -u` works fine
+# on a path that is already gone (QUIRKS.md), so withdrawing unconditionally costs a
+# no-op in the case that used to be the only one handled.
+#
+# Still AFTER the rm above rather than before it: under `set -e` an rm that fails (a `uchg`
+# flag, a read-only mount) would otherwise abort with the record already withdrawn, leaving
+# a bundle still on disk, still runnable, and permanently unable to post a notification --
+# and in the window between the two, any LaunchServices rescan re-registers exactly the
+# record being removed. Dying after the rm instead leaves a stale record, which is no worse
+# than never having run.
+if ! is_throwaway_bundle_path "$APP_PATH" && [ -x "$LSREGISTER" ]; then
+  "$LSREGISTER" -u "$APP_PATH" >/dev/null 2>&1 || true
+  echo "==> withdrew its LaunchServices record"
 fi
 if [ -f "$LAUNCHER_STAMP_FILE" ]; then
   rm -f "$LAUNCHER_STAMP_FILE"
@@ -254,16 +294,17 @@ echo "left in place on purpose:"
 echo "  store (your review history):  $STORE_DIR"
 echo "  local secret:                 $SECRET_FILE"
 echo "  logs:                         $LOG_DIR"
-# The two carry-forward records, kept for the same reason the secret is: they are your
-# configuration, not the bundle's. install.sh writes them so a reinstall keeps the roots
-# and store you chose, now that the launcher bakes those in and the plist no longer
-# carries them to be read back. The launcher stamp above IS removed, because it describes
-# a bundle that no longer exists; these describe choices that outlive it. Named
+# The three carry-forward records, kept for the same reason the secret is: they are your
+# configuration, not the bundle's. install.sh writes them so a reinstall keeps the roots,
+# the store and the port you chose, now that the launcher bakes the first two in and the
+# plist is rewritten from scratch on every run rather than read back. The launcher stamp
+# above IS removed, because it describes a bundle that no longer exists; these describe
+# choices that outlive it. Named
 # individually rather than as "$SECRET_DIR/*" so nobody hand-deletes the secret with them.
 # (`serve_roots` isn't named here: `/file/` and its allowlist are gone — ADR.md entry 38
 # — and step 2d above removes any record an older install left, so there is nothing left
 # for this summary to name.)
-for record in "$SECRET_DIR/ref_roots" "$SECRET_DIR/board_home"; do
+for record in "$SECRET_DIR/ref_roots" "$SECRET_DIR/board_home" "$SECRET_DIR/port"; do
   if [ -f "$record" ]; then
     echo "  install-time choice:          $record"
   fi

@@ -7086,7 +7086,7 @@ function headlineRe(text) {
 }
 
 check('folderName: the last path segment only, and null for no cwd', () => {
-  assert.equal(folderName('/Users/jerry/Documents/claude-board/sub/dir'), 'dir');
+  assert.equal(folderName('/Users/alex/Documents/claude-board/sub/dir'), 'dir');
   assert.equal(folderName(null), null);
   assert.equal(folderName(''), null);
 });
