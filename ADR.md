@@ -84,3 +84,5 @@ link where it is worth reading.
 | 95 | [Mermaid is vendored, closing the CSP's last external-host allowance](.agents/adr/0095-mermaid-is-vendored-closing-the-csp-s-last.md) | 2026-08-11 | widens 62; relates to 70 |
 | 96 | [The Notice is transient, never standing](.agents/adr/0096-the-notice-is-transient-never-standing.md) | 2026-08-11 | relates to 28 |
 | 97 | [An amend to the marked round moves it back one, unless the reviewer is Attended](.agents/adr/0097-an-amend-to-the-marked-round-moves-it-back-one.md) | 2026-08-11 | narrows 74 |
+| 98 | [The comment toggle follows commentability](.agents/adr/0098-comment-toggle-follows-commentability.md) | 2026-08-11 | widens 46 |
+| 99 | [The packet says `lost`, not `resolved`](.agents/adr/0099-packet-says-lost-not-resolved.md) | 2026-08-11 | relates to 28 |

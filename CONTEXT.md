@@ -129,6 +129,10 @@ status. _Avoid_: response, result, reply.
 inside it — a node in a stage's markup or a node in a diagram, the only two things that are
 Commentable. _Avoid_: pin, target, selector.
 
+**Tray**: the floating surface an awaited page board shows for commenting — the queued
+comments, the composer and the send controls in one panel over the Stage. _Avoid_: panel
+(generic), drawer, dock (the pager's).
+
 **Reference**: a pointer a block carries instead of its content, resolved and snapshotted at
 post time. The agent supplies references and question text; it never drafts the content being
 rendered. _Avoid_: link, include, embed.
