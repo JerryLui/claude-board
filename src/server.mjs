@@ -59,7 +59,7 @@ import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from 
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
 import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, closeLapsedAwaitedRounds, waitingRounds } from './badge.mjs';
-import { createPomodoro, readDoc as readPomodoroDoc, roundBannersEnabled } from './pomodoro.mjs';
+import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
 import { resolveRefRoots } from './resolve.mjs';
@@ -881,30 +881,6 @@ function boundCwdForThread(thread, boards) {
   return inThread.length ? inThread[0].cwd : null;
 }
 
-/** Is a fresh board's auto-open Suppressed (ADR.md entry 91)? Two conjuncts, and the
- * second is not bookkeeping.
- *
- * A Watcher standing somewhere is the reason to defer. But deferring TRADES the tab for a
- * Banner, and the reviewer owns a switch that turns round Banners off (`roundBannersEnabled`,
- * src/pomodoro.mjs, which src/stranded.mjs re-reads before every announcement). With that
- * switch off there is nothing on the other side of the trade: no tab and no Banner is a
- * board that nothing at all tells the reviewer about, which is worse than the focus theft
- * this rule exists to avoid. Off, a fresh board opens its tab exactly as it always has.
- *
- * Read fresh on every post, never captured at boot, for the same reason the stranded rule
- * re-reads it: a switch flipped mid-day takes effect on the next board, not the next
- * restart.
- *
- * Never throws. This runs inside the branch whose catch answers 400, and an unreadable
- * pomodoro document must cost the suppression rather than the post it is riding on. */
-function autoOpenSuppressed(home, sse) {
-  try {
-    return sse.anyWatcher() && roundBannersEnabled(readPomodoroDoc(home).settings);
-  } catch {
-    return false;
-  }
-}
-
 async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   let body;
   try {
@@ -1090,7 +1066,10 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
       // The create branch only, so nothing about a later round can revise it, and before
       // the render below so `stripDaemonOnly` is what keeps it off the page rather than
       // the ordering of two writes.
-      board[SUPPRESSED] = autoOpenSuppressed(home, sse);
+      // The Watcher alone decides (ADR.md entry 91). The round-banner switch does not
+      // enter into it: src/stranded.mjs exempts the one Banner a Suppressed board is
+      // owed from that switch, so suppressing here can never leave the board unannounced.
+      board[SUPPRESSED] = sse.anyWatcher();
     }
   } catch (err) {
     return sendJson(res, 400, { error: String(err.message || err) });

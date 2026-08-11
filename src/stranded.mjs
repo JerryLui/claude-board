@@ -475,11 +475,6 @@ export function createStrandedWatch({
       if (attendedFor > 0) return arm(boardId, target, attendedFor, true);
       const board = boardOf(boardId);
       if (!board || !mayAnnounce(board)) return;
-      // The reviewer's own switch (ticket 03): off means this whole rule is silent, while
-      // the pomodoro clock's own banners carry on. Read fresh here, not captured at boot,
-      // for the same reason notifyBoundary re-reads on every interval -- a toggle flipped
-      // mid-day takes effect on the next banner, not the next restart.
-      if (!roundBannersEnabled(readPomodoroDoc(home).settings)) return;
       // The oldest round still waiting that has never been announced (ADR.md entry 74):
       // what this banner is ABOUT, what the record below names, and what bounds the child
       // that serves the click. In the ordinary case it is simply the oldest waiting round;
@@ -497,6 +492,16 @@ export function createStrandedWatch({
       // resolves it, on load and on hashchange/focus/visibilitychange so a tab that was
       // already open moves too).
       const oldest = nextToAnnounce(board);
+      // The reviewer's own switch (ticket 03): off silences this rule for ordinary
+      // stranded rounds, while the pomodoro clock's own banners carry on. It does not
+      // silence the one Banner a Suppressed board's first round is owed: suppression
+      // traded that board's tab for exactly this announcement, so honouring the switch
+      // here too would leave a board nothing at all tells the reviewer about (ADR.md
+      // entry 91). Read fresh, not captured at boot, for the same reason notifyBoundary
+      // re-reads on every interval -- a toggle flipped mid-day takes effect on the next
+      // banner, not the next restart.
+      const owedToSuppression = Boolean(board[SUPPRESSED] && oldest && oldest.n === 1);
+      if (!owedToSuppression && !roundBannersEnabled(readPomodoroDoc(home).settings)) return;
       const at = Date.now();
       // What bounds the process serving this banner's click. Normally the round's own
       // deadline; on a Suppressed board's content-only first round there is no deadline to

@@ -2811,26 +2811,29 @@ async function layerTwo() {
     }
   });
 
-  await check('ADR 91: with round banners switched off, a fresh board is not Suppressed -- it opens its tab', async () => {
-    // Suppression TRADES the tab for a Banner. With the Banner switched off there is
-    // nothing on the other side of the trade, and suppressing anyway would be a board that
-    // opened no tab and raised no notification: nothing at all would tell the reviewer it
-    // exists. The tab side of this is test/check-mcp.mjs's (it needs a real shim and a real
-    // opener); this is the daemon's half of the same decision.
+  await check('ADR 91: the Banner a Suppressed board is owed fires despite the round-banner switch', async () => {
+    // Suppression TRADES the tab for a Banner, so the switch that silences ordinary
+    // stranded rounds does not silence this one: honouring it here too would mean a board
+    // that opened no tab AND raised no notification, which nothing at all tells the
+    // reviewer about. The tab side of this is test/check-mcp.mjs's (it needs a real shim
+    // and a real opener); this is the daemon's half of the same decision.
     const settingsPath = path.join(home, 'pomodoro.json');
     writeFileSync(settingsPath, JSON.stringify({ settings: { notifyRounds: false } }));
-    const { boardId: watched } = await postRound(port, askBoard('watched-but-silent'));
+    const { boardId: watched } = await postRound(port, askBoard('watched-still-banners'));
     const tab = await openStream(port, watched);
     try {
       const posted = await postRound(port, {
         title: 'An artifact, nothing asked',
         blocks: [{ kind: 'html', html: '<p>an artifact, nothing asked</p>' }],
-        cwd: projectFor('silent-switch'),
+        cwd: projectFor('banner-outranks-switch'),
       });
-      assert.equal(posted.suppressed, false,
-        'a Watcher is standing right there, and the board still opens: the switch is the second conjunct');
-      await tick(250);
-      assert.equal(spawnsFor('silent-switch').length, 0, 'and nothing announces it either, which is what the switch asked for');
+      assert.equal(posted.suppressed, true,
+        'a Watcher is standing right there, and the switch does not enter into the decision');
+      let spawns = [];
+      for (let i = 0; i < 40 && spawns.length === 0; i++) { await tick(100); spawns = spawnsFor('banner-outranks-switch'); }
+      assert.equal(spawns.length, 1, 'the one Banner suppression owes fires despite the switch');
+      await tick(300);
+      assert.equal(spawnsFor('banner-outranks-switch').length, 1, 'and only once');
     } finally {
       tab.req.destroy();
       rmSync(settingsPath, { force: true });

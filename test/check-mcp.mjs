@@ -1782,11 +1782,13 @@ async function main() {
     }
   });
 
-  await check('a fresh board opens its tab despite a Watcher when round banners are switched off', async () => {
+  await check('a fresh board opens no tab despite the round-banner switch being off', async () => {
     const dhome = tempHome('open-banners-off');
-    // The reviewer's own switch (the index settings panel). Suppression trades the tab for
-    // a Banner; with the Banner off there is nothing on the other side of the trade, and a
-    // board that opened no tab AND raised no Banner is one nothing at all tells them about.
+    // The reviewer's own switch (the index settings panel) silences ordinary round
+    // Banners; it does not un-suppress the open. The Banner suppression owes ignores the
+    // switch (src/stranded.mjs), so the shim holding the tab back here can never leave
+    // the board unannounced -- and the reviewer who switched Banners off does not buy
+    // back the focus theft ADR.md entry 91 removes.
     writeFileSync(path.join(dhome, 'pomodoro.json'), JSON.stringify({ settings: { notifyRounds: false } }));
     const local = await startServer({ home: dhome, port: 0 });
     const recorder = makeOpenRecorder(dhome);
@@ -1808,8 +1810,9 @@ async function main() {
       await withTimeout(client.request('tools/call', {
         name: 'ask', arguments: { title: 'Fresh, banners off', blocks: [{ kind: 'markdown', text: 'nothing asked' }] },
       }), 10_000, 'the ask must return');
-      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1,
-        'the same Watcher that suppresses the open above suppresses nothing with the Banner switched off');
+      await sleep(500);
+      assert.equal(recorder.opened().length, 0,
+        'the Watcher suppresses the open with or without the Banner switch');
     } finally {
       client.close();
       tab.req.destroy();

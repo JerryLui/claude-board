@@ -766,11 +766,11 @@ it is absent (a daemon older than this field).
 
 **`suppressed`** answers whether this *board's* auto-open was Suppressed (CONTEXT.md "Suppressed";
 ADR.md entry 91), in which case a caller that would otherwise open a tab must not, and the stranded
-banner announces the board instead. Two conditions, both required at the instant the board is
-created: some board on this daemon — any board, any project, focused or not — already has a
-Watcher, **and** round banners are switched on. Suppression trades the tab for a banner, so with
-the banner switched off (`notifyRounds: false`, "Pomodoro settings" above) there is nothing on the
-other side of the trade, and a fresh board opens its tab exactly as it always has. A Watcher whose
+banner announces the board instead. One condition, taken at the instant the board is created:
+some board on this daemon — any board, any project, focused or not — already has a Watcher. The
+round-banner switch (`notifyRounds: false`, "Pomodoro settings" above) does not enter into it:
+suppression trades the tab for a banner, so the one banner a Suppressed board's first round is
+owed fires despite the switch, which keeps silencing ordinary stranded rounds. A Watcher whose
 tab has gone does not count: the test is a subscription this daemon can still write an event to,
 not merely one it has not yet reaped.
 
