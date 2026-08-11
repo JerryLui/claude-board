@@ -289,16 +289,18 @@ static double cb_phase_length_ms(cb_phase phase, const cb_settings *settings) {
  * ONE SIGNAL, ONE DIMENSION (ADR 84), and not one of them is a colour. The tomato
  * silhouette is drawn in every state, so it says nothing and never has to; what varies is
  * two fields and no more. `ring` is time remaining, and it is the only thing that carries
- * it. `mark` is the phase-or-paused mark in the centre, and it is the only thing that
- * carries that. Alpha is left to say one thing alone — the daemon has stopped answering —
- * which is why idle and paused derive at full weight here and are told apart by shape.
+ * it — during work, the one interval whose remaining time the glyph reports at all.
+ * `mark` is the phase-or-paused mark in the centre, and it is the only thing that carries
+ * that. Alpha is left to say one thing alone — the daemon has stopped answering — which is
+ * why idle and paused derive at full weight here and are told apart by shape.
  *
  * So: idle is the silhouette alone; running work is the silhouette and the ring; a running
- * break is the silhouette, the ring and the rest bar, SHORT AND LONG ALIKE (the long
- * break's filled disc is retired — the two breaks have no dimension left to spend on being
- * told apart, and the popover says which one in words); and paused, in every phase, is the
- * silhouette and the two bars with no ring at all. A paused Timer therefore no longer says
- * which phase it is paused in, which is accepted: it has nothing to be late for. */
+ * break is the silhouette and the rest bar, SHORT AND LONG ALIKE and with no ring on either
+ * (the long break's filled disc is retired — the two breaks have no dimension left to spend
+ * on being told apart, and the popover says which one in words); and paused, in every
+ * phase, is the silhouette and the two bars, also with no ring. A paused Timer therefore no
+ * longer says which phase it is paused in, which is accepted: it has nothing to be late
+ * for. The ring's own reasons for being work-only are at the assignment below. */
 static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settings *settings,
                             double now_ms, int cycle) {
   cb_display d;
@@ -322,9 +324,27 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
 
   d.phase = timer->phase;
   d.paused = timer->paused ? 1 : 0;
-  /* Paused takes the centre and gives up the ring: a stopped ring and a running one differ
-   * only by not moving, which a glance at a menu bar cannot see. Two bars can be seen. */
-  d.ring = d.paused ? 0 : 1;
+  /* The ring is WORK'S, and a running work interval's. Two states give it up and for two
+   * different reasons:
+   *
+   *   - PAUSED, because a stopped ring and a running one differ only by not moving, which a
+   *     glance at a menu bar cannot see. Two bars can be seen.
+   *   - a BREAK, short and long alike, because the ring is not legible enough to be worth
+   *     the ink there. CB_RING_R + CB_RING_STROKE/2 lands 0.15 units inside the outline's
+   *     own inner edge — at CB_SCALE that is about a tenth of a point, so a break drew the
+   *     outline, a near-touching second arc AND the rest bar, and the whole glyph read as a
+   *     thickened tomato rather than as three marks. It was the densest thing in the menu
+   *     bar during the one interval nobody is meant to be watching it.
+   *
+   * A break's remaining time is not lost: the digits beside the glyph still count it down
+   * for anyone who wants the number, and the popover says the phase in words. What the
+   * glyph says now is the thing a break actually needs to say — not working — and the ring
+   * becomes a second reading of the phase rather than only of the clock: ring means work.
+   *
+   * It also lands the two surfaces on the same picture. src/pomodoro-widget.mjs's REST_ICON
+   * is the silhouette plus the one bar and has never had a ring in it; the break glyph here
+   * is now that same drawing rather than that drawing plus an arc. */
+  d.ring = (!d.paused && timer->phase == CB_WORK) ? 1 : 0;
   if (d.paused) d.mark = CB_MARK_PAUSED;
   else if (timer->phase == CB_BREAK || timer->phase == CB_LONG_BREAK) d.mark = CB_MARK_REST;
   else d.mark = CB_MARK_NONE;
@@ -352,8 +372,9 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
    * is already past where it would have been, which is honest — the interval they are in
    * is longer than the one they just configured, and the digits say so too.
    *
-   * Derived while paused too, though nothing draws it then: it is what the ring comes back
-   * to on resume, and the probe reports it either way. */
+   * Derived in every running state, including the ones that draw no ring — a break, and a
+   * pause: it is what the ring comes back to when work resumes, and the probe reports it
+   * either way, which is what lets a check pin the sweep without a window server. */
   double total = cb_phase_length_ms(timer->phase, settings);
   d.fraction = total > 0.0 ? remaining / total : 0.0;
   if (d.fraction > 1.0) d.fraction = 1.0;
@@ -1510,8 +1531,9 @@ static void cb_draw(cb_display d) {
    * Twelve o'clock is 90 degrees in a y-up space and the sweep runs clockwise from there,
    * the direction every dial in the world runs.
    *
-   * Nothing draws inside r 4.9, so the centre is free for the mark below; a fill here — the
-   * shape this used to take — would have occluded it. */
+   * Work is the only state that draws it (cb_derive), so the ring and a centre mark never
+   * appear together any more — but it still keeps clear of r 4.9, because a fill here, the
+   * shape this used to take, is what occluded the centre and is not coming back. */
   if (d.ring && d.fraction > 0.0) {
     NSBezierPath *ring = cb_path();
     ring.lineWidth = CB_RING_STROKE;

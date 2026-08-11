@@ -70,7 +70,7 @@ link where it is worth reading.
 | 81 | [The popover takes focus](.agents/adr/0081-the-popover-takes-focus.md) | 2026-08-10 | relates to 72; relates to 75 |
 | 82 | [Forward and Restart preserve paused](.agents/adr/0082-forward-and-restart-preserve-paused.md) | 2026-08-10 | relates to 81 |
 | 83 | [Paused says so with shape, not a number](.agents/adr/0083-paused-says-so-with-shape-not-a-number.md) | 2026-08-10 | narrows 80; narrowed by 88 |
-| 84 | [One signal, one dimension, in the status glyph](.agents/adr/0084-one-signal-one-dimension-in-the-status-glyph.md) | 2026-08-10 | narrows 80; relates to 83 |
+| 84 | [One signal, one dimension, in the status glyph](.agents/adr/0084-one-signal-one-dimension-in-the-status-glyph.md) | 2026-08-10 | narrows 80; relates to 83; narrowed by 94 |
 | 85 | [The tab carries one mark](.agents/adr/0085-the-tab-carries-one-mark.md) | 2026-08-10 | relates to 84 |
 | 86 | [The status item learns by push and survives by poll](.agents/adr/0086-the-status-item-learns-by-push-and-survives-by-poll.md) | 2026-08-10 | replaces 79; relates to 77; relates to 72 |
 | 87 | [The index page holds the stream, not only the poll](.agents/adr/0087-the-index-page-holds-the-stream-not-only-the-poll.md) | 2026-08-10 | amends 77; relates to 86 |
@@ -80,3 +80,4 @@ link where it is worth reading.
 | 91 | [A fresh board defers to an open tab](.agents/adr/0091-a-fresh-board-defers-to-an-open-tab.md) | 2026-08-11 | narrows 55; widened by 92 |
 | 92 | [The Banner covers a Suppressed content-only board](.agents/adr/0092-the-banner-covers-a-suppressed-content-only-board.md) | 2026-08-11 | widens 55; widens 91 |
 | 93 | [A click surfaces the existing tab](.agents/adr/0093-a-click-surfaces-the-existing-tab.md) | 2026-08-11 | narrows 57; relates to 72 |
+| 94 | [The ring is work's alone](.agents/adr/0094-the-ring-is-works-alone.md) | 2026-08-11 | narrows 84; relates to 83 |

@@ -531,7 +531,10 @@ async function main() {
     });
   });
 
-  await check('criterion 3: a break\'s arc is measured against breakMin, not against the work length', async () => {
+  await check('criterion 3: a break\'s fraction is measured against breakMin, not against the work length', async () => {
+    // A break draws no ring, so this fraction reaches no pixel -- it pins the phase-to-
+    // duration mapping itself, which the digits and any future reader of `fraction` share,
+    // and it is the check that would notice cb_phase_length_ms losing the break case.
     const now = Date.now();
     await withDaemon(runningDoc({ phase: 'break', deadline: now + 2 * 60_000, paused: false },
       { workMin: 25, breakMin: 8 }), async ({ probeHome, port }) => {
@@ -1008,7 +1011,7 @@ async function main() {
   // is still uncovered is whether the two fields reach pixels that look like anything.
   // -------------------------------------------------------------------------------------
 
-  await check('the glyph vocabulary, state by state: the silhouette always, a ring only while running, and one centre mark at a time', async () => {
+  await check('the glyph vocabulary, state by state: the silhouette always, a ring only while WORK runs, and one centre mark at a time', async () => {
     const now = Date.now();
     // Every state the item can be in, and what each one draws. The silhouette is not in
     // this table because it has no field: it is drawn unconditionally, which is the whole
@@ -1017,8 +1020,11 @@ async function main() {
       { name: 'idle', timer: null, ring: 'no', mark: 'none' },
       { name: 'running work', timer: { phase: 'work', deadline: now + 5 * 60_000, paused: false }, ring: 'yes', mark: 'none' },
       { name: 'paused work', timer: { phase: 'work', paused: true, remainingMs: 90_000 }, ring: 'no', mark: 'paused' },
-      { name: 'running short break', timer: { phase: 'break', deadline: now + 3 * 60_000, paused: false }, ring: 'yes', mark: 'rest' },
-      { name: 'running long break', timer: { phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }, ring: 'yes', mark: 'rest' },
+      // No ring on either break: the ring is work's alone now -- see cb_derive's own
+      // account of why an arc a tenth of a point inside the outline was not worth the ink
+      // next to the rest bar. The digits still carry a break's remaining time.
+      { name: 'running short break', timer: { phase: 'break', deadline: now + 3 * 60_000, paused: false }, ring: 'no', mark: 'rest' },
+      { name: 'running long break', timer: { phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }, ring: 'no', mark: 'rest' },
       { name: 'paused short break', timer: { phase: 'break', paused: true, remainingMs: 60_000 }, ring: 'no', mark: 'paused' },
       { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 60_000 }, ring: 'no', mark: 'paused' },
     ];
