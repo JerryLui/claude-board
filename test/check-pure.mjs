@@ -9521,7 +9521,7 @@ await checkAsync('pomodoro widget: a hashchange to any OTHER fragment leaves the
 check('settings panel: reads as general settings -- five captioned sections in order, and the store control sits in its own', () => {
   const html = renderIndexPage({ threads: [] });
   const captions = [...html.matchAll(/<div class="pomodoro-settings-caption">([^<]*)<\/div>/g)].map(m => m[1]);
-  assert.deepEqual(captions, ['Pomodoro', 'Banners', 'Cues', 'Menu bar', 'Store'],
+  assert.deepEqual(captions, ['Pomodoro', 'Cues', 'Banners', 'Menu bar', 'Store'],
     'the panel must name every section it holds -- a panel where only Cues is captioned reads as the pomodoro\'s with an unlabelled top half');
   // The device is the one the panel already had: a hairline BETWEEN sections, so one
   // fewer than there are captions (nothing sits above the first).

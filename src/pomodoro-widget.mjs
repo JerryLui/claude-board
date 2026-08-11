@@ -160,19 +160,6 @@ export function pomodoroWidget() {
       <label class="pomodoro-field">Short break (min)<input type="number" name="breakMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Long break (min)<input type="number" name="longBreakMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Long break every<input type="number" name="longEvery" min="1" max="100" step="1"></label>
-      <hr class="pomodoro-settings-divider">
-      <div class="pomodoro-settings-caption">Banners</div>
-      <label class="pomodoro-field pomodoro-field-check">Notify<input type="checkbox" name="notify"></label>
-      <!-- Round banners' own tick, independent of Notify above (ADR.md entry 58;
-           CONTEXT.md's Banner) -- Notify gates a pomodoro boundary's banner, this one
-           gates a Stranded round's, and unlike the pickers below it fires no test
-           banner of its own on the way on: that audition stays Notify's alone
-           (src/indexpage.mjs's onPomodoroNotifyChange), so this checkbox's 'change'
-           reaches no handler beyond the ordinary sync/submit every other field here
-           already gets. It is what earns this section its own caption rather than
-           sitting under Pomodoro: it gates a Stranded ROUND's banner, which has nothing
-           to do with the clock. -->
-      <label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>
       <!-- The 'sound' checkbox is gone (retired, not kept as a
            master mute) -- Cues below is its replacement, three independent
            pickers rather than one on/off switch. A hairline + caption, not a
@@ -193,6 +180,19 @@ export function pomodoroWidget() {
       <label class="pomodoro-field">Work<select name="cueWork" aria-label="Work cue">${cueOptions}</select></label>
       <label class="pomodoro-field">Short break<select name="cueBreak" aria-label="Short break cue">${cueOptions}</select></label>
       <label class="pomodoro-field">Long break<select name="cueLongBreak" aria-label="Long break cue">${cueOptions}</select></label>
+      <hr class="pomodoro-settings-divider">
+      <div class="pomodoro-settings-caption">Banners</div>
+      <label class="pomodoro-field pomodoro-field-check">Notify<input type="checkbox" name="notify"></label>
+      <!-- Round banners' own tick, independent of Notify above (ADR.md entry 58;
+           CONTEXT.md's Banner) -- Notify gates a pomodoro boundary's banner, this one
+           gates a Stranded round's, and unlike the pickers above it fires no test
+           banner of its own on the way on: that audition stays Notify's alone
+           (src/indexpage.mjs's onPomodoroNotifyChange), so this checkbox's 'change'
+           reaches no handler beyond the ordinary sync/submit every other field here
+           already gets. It is what earns this section its own caption rather than
+           sitting under Pomodoro: it gates a Stranded ROUND's banner, which has nothing
+           to do with the clock. -->
+      <label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>
       <!-- The macOS status item's two preferences (the item is a second process
            of the same bundle, ADR 72). They are edited HERE and
            nowhere else -- the item owns no state of its own, it only READS the
@@ -249,7 +249,7 @@ export function pomodoroWidget() {
            the pomodoro's; the surrounding pomodoro- names are the panel's history, kept
            because renaming markup nobody sees buys nothing. What the READER sees is now
            a general settings panel: the cogwheel is named "Settings", and every section
-           in it -- Pomodoro, Banners, Cues, Store -- says which it is.
+           in it -- Pomodoro, Cues, Banners, Store -- says which it is.
 
            Inside the same form as the fields above, which has one consequence worth
            naming: Enter in the window field submits the form, i.e. SAVES SETTINGS. It
