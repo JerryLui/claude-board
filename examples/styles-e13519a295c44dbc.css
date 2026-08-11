@@ -730,7 +730,7 @@ body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice
 .comment-form button:hover:not(:disabled) { filter: brightness(1.08); }
 .comment-form button:disabled { opacity: 0.5; }
 
-/* mermaid: client-rendered SVG from the CDN; pre.mermaid holds raw source until then */
+/* mermaid: client-rendered SVG from the daemon's own vendored copy; pre.mermaid holds raw source until then */
 .mermaid-block pre.mermaid { background: none; border: none; overflow-x: auto; margin: 0; }
 .mermaid-block pre.mermaid svg { max-width: 100%; height: auto; }
 .mermaid-block .missing { color: var(--warning); font-size: 12.5px; }

@@ -492,7 +492,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === thisFile) {
   // file this loop removed, so the alternative is only ever committed dead weight.
   const current = new Set(SHARED_ASSETS.map(a => a.name));
   for (const entry of readdirSync(dir)) {
-    if (/^(?:ui|styles)-[0-9a-f]{16}\.(?:js|css)$/.test(entry) && !current.has(entry)) unlinkSync(path.join(dir, entry));
+    if (/^(?:ui|styles|mermaid)-[0-9a-f]{16}\.(?:js|css)$/.test(entry) && !current.has(entry)) unlinkSync(path.join(dir, entry));
   }
   for (const asset of SHARED_ASSETS) {
     writeFileSync(path.join(dir, asset.name), asset.contents, 'utf8');

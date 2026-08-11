@@ -9,7 +9,7 @@ conversation boundary makes threads accumulate several times faster, and ADR 70 
 archive already written.
 
 **Decision:** a prune deletes whole boards older than a window named at the call, plus any shared
-asset no surviving page still references. It is fired only from the settings panel on the index,
+asset no surviving page or asset still names. It is fired only from the settings panel on the index,
 deletes on one click without previewing, and runs at no other time — not on read, not at daemon
 start, not on a schedule. The written promise is dropped rather than narrowed.
 

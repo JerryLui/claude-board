@@ -46,7 +46,7 @@ import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { themeBootScript } from '../src/theme.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, Element } from './dom-stand-in.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -391,6 +391,69 @@ await check('rendered, but the node the anchor names is gone from THIS diagram: 
   const pins = layer.querySelectorAll('.anchor-pin');
   assert.equal(pins.length, 1);
   assert.equal(pins[0].classList.contains('pin-lost'), true, 'a comment naming a node no longer in the diagram must render lost');
+});
+
+// --- the window.mermaid clobber (AC 6, security lows) -----------------------
+//
+// "A DOM element with an id/name of 'mermaid' becomes window.mermaid" -- the
+// platform's own named-property exposure on Window, for free, no script
+// required. The old loader (`window.mermaid || (await import(cdn)).default`)
+// trusted that slot by TRUTHINESS, so a clobbering element (truthy, but with
+// neither `.run` nor `.initialize`) was accepted as "the engine", cached into
+// mermaidMod forever (the `if (!mermaidMod)` guard never re-fires), and every
+// later call -- this render pass AND every future theme redraw -- threw
+// inside its own try/catch reaching for a method that was never there. The
+// diagram never rendered, but the code MECHANISM was never given a real
+// chance to load the actual engine either, silently, for the rest of the
+// page's life. src/ui.mjs's looksLikeMermaidEngine guards this by shape
+// instead: the fixture below is exactly such a clobber (a real Element,
+// truthy, no run/initialize), and the assertion is that this page ends up in
+// the SAME honest degraded state as "no window.mermaid was ever set at all"
+// (the CDN/engine-unreachable check above) -- never a throw, and never a
+// diagram that renders nothing at all.
+
+await check('the window.mermaid clobber: a DOM element sitting in that slot is never mistaken for the engine -- same honest fallback as no engine at all', async () => {
+  const clobberBoard = createBoard({
+    title: 'AC 6 -- window.mermaid clobber',
+    blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }],
+  });
+  const clobberBlockId = clobberBoard.blocks[0].id;
+  applySubmit(clobberBoard, {
+    action: 'send',
+    answers: [],
+    comments: [{ blockId: clobberBlockId, anchor: { kind: 'mermaid', ref: 'A' }, text: 'still resolves by node id, engine or not' }],
+  }, 1);
+  const html = renderBoardPage(clobberBoard);
+
+  // A real Element (imported from the same stand-in the rest of this file
+  // uses), not a plain object -- so this is a genuine DOM-element shape, not a
+  // hand-tuned "obviously not the engine" stub. `id="mermaid"` documents WHY a
+  // real browser would ever put this exact value in window.mermaid; it plays
+  // no mechanical role here (this file assigns window.mermaid directly, the
+  // same seam every other check in it uses -- named-property exposure itself
+  // is a browser platform behaviour with no equivalent to simulate).
+  const clobber = new Element('div');
+  clobber.setAttribute('id', 'mermaid');
+  assert.equal(typeof clobber.run, 'undefined', 'setup failure: this fixture must not accidentally carry a run method');
+  assert.equal(typeof clobber.initialize, 'undefined', 'setup failure: this fixture must not accidentally carry an initialize method');
+
+  const document = await loadBoard(html, clobber);
+  const section = document.querySelector('.mermaid-block');
+  assert.equal(section.querySelectorAll('.stage-wrap svg').length, 0,
+    'a clobbering element must never be driven as if it were mermaid -- no svg can have come from calling .run() on a <div>');
+  const missing = section.querySelector('.missing');
+  assert.ok(missing, 'a clobbered window.mermaid must degrade to the same raw-source fallback as no engine at all, not throw and not render nothing');
+
+  const layer = section.querySelector('.pin-layer');
+  const pins = layer.querySelectorAll('.anchor-pin');
+  assert.equal(pins.length, 1, 'the comment must still get a pin from the server\'s own verdict, exactly as the no-engine-at-all case does');
+  assert.equal(pins[0].classList.contains('pin-lost'), false, 'node A is genuinely still in the source, so this pin must not render lost even with no live SVG to confirm it against');
+
+  // And the clobber never got a second life: the expand control (gated on a
+  // live SVG existing) must be gone, exactly like the plain engine-unavailable
+  // case a few checks up -- proving this ISN'T a state the code thinks is a
+  // normal offline diagram.
+  assert.equal(findExpandControl(document), null, 'with the clobber correctly rejected, there is nothing rendered to expand');
 });
 
 // --- the diagram lens ------------------------------

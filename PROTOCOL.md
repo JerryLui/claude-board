@@ -43,9 +43,9 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `test/check-*.mjs` | the suite; `test/run.mjs` carries an explicit list of them rather than globbing, so a new check runs only once its filename is added there |
 
 Zero *installed* dependencies: no `npm install`, no `node_modules`, no bundler, no build step;
-ESM (`.mjs`) throughout. `marked` and `prismjs` are vendored as pinned, digest-guarded source
-under `src/vendor/` (ADR 62) and run server-side at post time. Mermaid is the sole thing
-fetched at view time, and stays client-side from its CDN.
+ESM (`.mjs`) throughout. `marked`, `prismjs` and mermaid are vendored as pinned, digest-guarded
+source under `src/vendor/` (ADR 62); `marked`/`prismjs` run server-side at post time, mermaid
+client-side at view time, from the daemon's own origin rather than a CDN.
 
 ## Paths
 
@@ -58,17 +58,21 @@ $CLAUDE_BOARD_HOME/boards/<boardId>.json    the board document, the only mutable
 $CLAUDE_BOARD_HOME/pages/<boardId>.html     emitted projection, openable with its folder
 $CLAUDE_BOARD_HOME/pages/ui-<hash>.js       the shared client script a page names
 $CLAUDE_BOARD_HOME/pages/styles-<hash>.css  the shared stylesheet a page names
+$CLAUDE_BOARD_HOME/pages/mermaid-<hash>.js  the shared diagram engine, named by ui.js
+                                             rather than by any page (vendored, ADR 62)
 $CLAUDE_BOARD_HOME/pomodoro.json            the pomodoro clock and its settings (ADR 8)
 ```
 
 A page does not carry the client script or the stylesheet; it *names* them, as a bare
-sibling filename hashed from their contents (ADR 70). A bare name is the one reference that
-resolves the same served (`GET /b/<name>`, the daemon's only static route) and opened from
-Finder (the file next to the page), so an archive still opens with the daemon stopped — as
-long as its folder travels with it. The assets are append-only: changing either payload
-mints a new name and leaves the old file untouched, so a page written a year ago keeps
-loading the exact bytes it was rendered against. Pages already on disk before this split
-keep their inlined copies forever; nothing rewrites a written archive.
+sibling filename hashed from their contents (ADR 70). The diagram engine is a third such
+sibling, loaded the same content-addressed way, but named only by `ui.js` rather than by
+any page's own markup — a board loads it on demand, when it actually has a diagram. A bare
+name is the one reference that resolves the same served (`GET /b/<name>`, the daemon's only
+static route) and opened from Finder (the file next to the page), so an archive still opens
+with the daemon stopped — as long as its folder travels with it. The assets are append-only:
+changing any payload mints a new name and leaves the old file untouched, so a page written a
+year ago keeps loading the exact bytes it was rendered against. Pages already on disk before
+this split keep their inlined copies forever; nothing rewrites a written archive.
 
 `pomodoro.json` is the one thing here that is not a board, and the one thing `uninstall.sh`
 removes from this directory — by exact name, never a glob. It is configuration this repo
@@ -80,7 +84,7 @@ Nothing in this directory expires. No read, no daemon start and no timer has eve
 a board, and none does now. What does exist is a **prune**, fired by hand from the
 settings panel on the index (`POST /api/store/prune`, ADR 71): it deletes every board
 older than a window the caller names — document and emitted page together — and then any
-shared asset no surviving page still names. The window has no default; a prune that does
+shared asset no surviving page or asset still names. The window has no default; a prune that does
 not name one is refused. This is the only thing in the system that ever deletes a board,
 so how long a board survives is the reader's decision and nothing else's.
 
@@ -550,7 +554,8 @@ POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread
                                     -> { boardId, thread, round, url, clients, suppressed,
                                     awaited }
-GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet
+GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet. Secret only:
+                                    never cookie-reachable -- `handleWait` also writes
 GET  /api/board/:id/events          SSE: round pushes, state changes
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
 POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
@@ -607,7 +612,7 @@ POST /api/pomodoro/notifyTest       no body -> { ok: true }; raises one test ban
 POST /api/store/prune               { days } -> { ok: true, boards, assets }, the counts
                                     removed. Deletes every board older than `days`
                                     (document and page) plus every shared asset no
-                                    surviving page names. `days` is REQUIRED and never
+                                    surviving page or asset names. `days` is REQUIRED and never
                                     defaulted: a call without it is a 400. The only
                                     route that deletes a board, and nothing but a click
                                     in the index's settings panel calls it (ADR 71)
@@ -617,7 +622,8 @@ Posting and waiting are separate routes on purpose, so splitting `ask` into post
 cheap.
 
 **Four gates, in order:** loopback `Host` (403), same-origin on every non-GET (403), a credential
-on every non-GET (401), a credential on every GET but two (401). Both credential gates are written
+on every non-GET -- plus the one GET that writes, `/wait` (401, secret only) -- and a credential
+on every other GET but two (401, secret or cookie). Both credential gates are written
 as "everything, minus an explicit exception list", so a route added later is gated by default
 rather than by whoever adds it remembering.
 
@@ -656,7 +662,8 @@ why a local secret exists at all.
 ## The browser session cookie
 
 **Every route but `GET /api/health` and `GET /auth/:token` requires a credential**, reads
-included. The browser cannot read a 0600 file, so it holds this instead:
+included -- except `GET /api/board/:id/wait`, which this cookie alone never satisfies (secret
+only, above). The browser cannot read a 0600 file, so it holds this instead:
 
 ```
 Set-Cookie: cb_session=<HMAC-SHA256(secret, "claude-board/session/v1")>;
@@ -1020,6 +1027,12 @@ A server-side wall-clock ceiling matching `CLAUDE_BOARD_TIMEOUT_MS` (default 40m
 the call returns 200 with a packet whose `status` is `timeout`, carrying whatever partial answers
 the store holds. A client that disconnects ends the wait outright — nothing is written and the
 poll stops.
+
+**Secret-only, unlike every other GET.** `handleWait` writes -- it persists the board on the
+timeout branch above and, on every branch, marks every undelivered comment `delivered: true`
+once the response has actually left -- so this is gated exactly like a write: the secret
+header, never the session cookie alone. The only caller is `bin/mcp.mjs`, which already sends
+the secret on every request, reads included.
 
 ## The pomodoro routes (ADR 8, 20, 67)
 

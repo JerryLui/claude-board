@@ -60,7 +60,7 @@ import { ui, MERMAID_TOKEN_MAP } from '../src/ui.mjs';
 import { themeBootScript, THEME_CHANGE_EVENT } from '../src/theme.mjs';
 import { palettes } from '../src/styles.mjs';
 import { MERMAID_NODE_SELECTOR, parseMermaidDomId } from '../src/anchor.mjs';
-import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, StandInEventSource, Element } from './dom-stand-in.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -597,6 +597,49 @@ await check('mermaid (M1): initialize runs before EVERY run(), not just the very
     'M1: round 2 must be initialized (and therefore drawn) with the CURRENT light palette');
   assert.notEqual(liveVars.primaryColor, palettes.dark['--panel-2'],
     'M1\'s exact failure: a round arriving with nothing in between to trigger a redraw drawn in the STALE palette from whenever the engine first loaded');
+});
+
+// =================================================================================
+// AC 6 (security lows): the window.mermaid clobber must not PERMANENTLY poison
+// mermaidMod. test/check-mermaid-anchor.mjs's own clobber check proves round 1
+// degrades honestly (no crash, the raw-source fallback); this proves the sharper
+// half M1 (above) already exercises the machinery for -- mermaidMod is cached
+// across rounds, so accepting a clobber by truthiness (the OLD `window.mermaid
+// || ...` shape) would have wedged EVERY later round's diagram too, silently,
+// for the rest of the page's life, on an element that has nothing to do with
+// mermaid. The fix (looksLikeMermaidEngine, src/ui.mjs) means round 1 rejecting
+// the clobber must leave mermaidMod exactly as able to pick up a real engine
+// later as if round 1 had never run at all.
+// =================================================================================
+
+await check('the window.mermaid clobber does not permanently poison mermaidMod -- a later round, once the slot holds a real engine, still renders', async () => {
+  const board = createBoard({ title: 'AC 6 -- clobber must not wedge later rounds', blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
+  // A real Element, exactly the shape test/check-mermaid-anchor.mjs's own
+  // clobber check uses -- truthy, no run/initialize.
+  const clobber = new Element('div');
+  clobber.setAttribute('id', 'mermaid');
+  const { document, es, window } = loadBoardWithEventSource(renderBoardPage(board), clobber);
+  await flush();
+
+  assert.ok(document.querySelector('.mermaid-block .missing'), 'setup failure: round 1 must take the engine-unavailable fallback against a clobbering element');
+  assert.equal(document.querySelectorAll('pre.mermaid svg').length, 0, 'setup failure: round 1 must not have rendered a live diagram');
+
+  // The slot now holds a REAL (mocked) engine -- standing in for whatever
+  // legitimately ends up there later on a real page (the vendored script's own
+  // load, which this stand-in cannot simulate settling -- see
+  // test/dom-stand-in.mjs's own comment on why a dynamically inserted <script
+  // src> always fails here). Round 2 arrives over SSE with its own fresh
+  // diagram, exactly like M1's push above.
+  const mock = mockMermaidThemeAware();
+  window.mermaid = mock;
+  const round2 = addRound(board, { blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }] });
+  const round2BlockId = board.blocks.find(b => b.round === round2).id;
+  es.dispatch('round', JSON.stringify(buildRoundPushPayload(board, round2, 'new-round', [round2BlockId])));
+  await flush();
+
+  const svg = document.querySelector('pre.mermaid svg');
+  assert.ok(svg, 'round 2 must render a real diagram -- if round 1\'s clobber had been cached as "the engine" (the old truthy-only shape), this render would still be reaching for a DOM element\'s own nonexistent .initialize/.run, exactly as it did in round 1');
+  assert.equal(mock.initCalls.length, 1, 'the real engine must have been initialized for round 2 -- proving round 2 actually drove the real mock, not silently no-oping against whatever round 1 left in mermaidMod');
 });
 
 // =================================================================================

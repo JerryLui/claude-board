@@ -406,15 +406,31 @@ async function main() {
   // --- the fix this task's own regression risk was: recoveryCommand() must still name
   // the CLONE's bin/authorize.mjs, not a path inside the bundle it cannot reach ---------
 
-  await check('the "not authorized" refusal page names the clone\'s bin/authorize.mjs, not a path inside the bundle', async () => {
+  await check('the "not authorized" refusal names the clone\'s bin/authorize.mjs, not a path inside the bundle', async () => {
     const d = await runBundledLauncher();
     try {
-      const res = await fetch(`http://127.0.0.1:${d.port}/`, { headers: { accept: 'text/html' } }); // no secret: deliberately unauthorized
-      assert.equal(res.status, 401);
-      const html = await res.text();
       const expectedCommand = `node ${path.join(cloneDir, 'bin', 'authorize.mjs')}`;
-      assert.ok(html.includes(expectedCommand), `the refusal page must print the clone's recovery command; got:\n${html}`);
-      assert.ok(!html.includes('Contents/Resources'), 'the refusal page must not print a path inside the bundle');
+
+      // The JSON body -- an API/curl caller, one that already holds a terminal on this
+      // machine -- still carries the fully pasteable, absolute command, and it must
+      // resolve against the CLONE's repoRoot (CLAUDE_BOARD_REPO_ROOT), never a path
+      // inside the bundle's Contents/Resources, which does not carry bin/authorize.mjs
+      // at all (src/handoff.mjs's own comment on why).
+      const api = await fetch(`http://127.0.0.1:${d.port}/`, {}); // no secret, no Accept: text/html
+      assert.equal(api.status, 401);
+      const recover = (await api.json()).recover;
+      assert.ok(recover.includes(expectedCommand), `the JSON refusal must print the clone's recovery command; got: ${recover}`);
+      assert.ok(!recover.includes('Contents/Resources'), 'the recovery command must not point inside the bundle');
+
+      // The rendered HTML page -- a browser tab, unauthenticated and possibly
+      // cross-origin-shaped -- gets the security fix for the refusal-page low: no path
+      // at all, neither the clone's nor the bundle's.
+      const page = await fetch(`http://127.0.0.1:${d.port}/`, { headers: { accept: 'text/html' } });
+      assert.equal(page.status, 401);
+      const html = await page.text();
+      assert.ok(html.includes('node bin/authorize.mjs'), 'the refusal page must still name the fix, in its relative form');
+      assert.ok(!html.includes(cloneDir), 'the refusal page must not print the absolute clone path');
+      assert.ok(!html.includes('Contents/Resources'), 'nor a path inside the bundle');
     } finally {
       d.cleanup();
     }

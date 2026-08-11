@@ -149,6 +149,13 @@ function sha256(text) {
  *   the filesystem root      `/` is not a project
  *   $HOME, or above it       `/Users`, `/home`, `~` -- every project at once, plus keys,
  *                             browser profiles and shell history
+ *
+ * Called twice, deliberately: once at bind time (`bindBoardCwd`, src/board.mjs), and
+ * again by `resolvePath` below on every single reference this board ever resolves. The
+ * first call decides what gets stored on the board; the second re-decides what the
+ * stored name is allowed to mean RIGHT NOW. A realpath done once and trusted forever is
+ * a check-to-use gap the moment the name is a directory someone else can replace -- see
+ * `resolvePath`'s `root` for the attack that gap left open.
  */
 export function resolveBoardCwd(cwd) {
   if (cwd == null) return { path: null };
@@ -403,12 +410,20 @@ export function resolvePath(ref, cwd, roots = resolveRefRoots(process.env.CLAUDE
   if (!cwd) {
     return { error: `cannot resolve ${ref.path}: this board has no project directory` };
   }
-  let root;
-  try {
-    root = realpathSync(cwd);
-  } catch (err) {
-    return { error: `cannot resolve project directory: ${err.code || err.message}` };
-  }
+  // `cwd` was already validated once, at bind time (`bindBoardCwd` -> `resolveBoardCwd`,
+  // src/board.mjs) -- rejected there if it wasn't a directory, was `/`, or was `$HOME`
+  // or above. But that was a realpath of this same NAME, done before this particular
+  // reference was ever asked for, and a directory's realpath is not a fact fixed at
+  // bind time: replace the project directory itself with a symlink to `$HOME` in the
+  // time between and a bare `realpathSync(cwd)` here would return `$HOME`, silently
+  // handing it out as the confinement root a moment before a ref like `.ssh/id_rsa`
+  // resolved "inside" it -- the exact escalation confinement exists to stop, reopened
+  // by trusting a decision instead of remaking it. So the bind-time guard runs again
+  // HERE, on whatever the name resolves to right now, rather than on what it resolved
+  // to whenever the board was created.
+  const boundRoot = resolveBoardCwd(cwd);
+  if (boundRoot.error) return { error: boundRoot.error };
+  const root = boundRoot.path;
   // The same treatment for a relative path, which reaches every absolute path on the
   // disk through enough `../` and so leaked the identical oracle.
   const candidate = path.resolve(root, ref.path);

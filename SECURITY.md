@@ -91,13 +91,25 @@ constructs itself rather than passing its own through (`bin/launcher.c`, `OVERRI
 `PASSTHROUGH_NAMES`). The four variables that decide what the daemon may read and
 write — `HOME`, `PATH`, `CLAUDE_BOARD_HOME`, `CLAUDE_BOARD_REF_ROOTS` — are compiled in,
 alongside `CLAUDE_BOARD_NODE`, `CLAUDE_BOARD_DAEMON` and `CLAUDE_BOARD_REPO_ROOT`. `PATH`
-is baked fixed, since the daemon shells out to `osascript` and `open`. Only a short
-allowlist of timing and port knobs is read from the plist, none of which can change what
-directory the grant reaches. Everything else, `NODE_OPTIONS` and
-`CLAUDE_BOARD_SECRET_FILE` included, is never placed in the child's environment at all —
-and with `HOME` baked, `~/.config/claude-board/secret` is the only secret path the process
-can reach. The two boundary variables are therefore **not** written into the plist when a
-launcher bundle is in use, since a copy there would read as though rewriting the plist
+is baked fixed, since the daemon shells out to `osascript` and `open`. A short allowlist
+is read from the plist beyond that — `PASSTHROUGH_NAMES` — and seven of its eight entries
+are timing and port knobs (`CLAUDE_BOARD_PORT` through `CLAUDE_BOARD_HANDOFF_TTL_MS`), none
+of which can change what directory the grant reaches. The eighth, `TMPDIR`, is not a knob:
+it names a directory, and it is relayed verbatim rather than compiled in. What it does not
+reach: the four variables named above — `HOME`, `PATH`, `CLAUDE_BOARD_HOME`,
+`CLAUDE_BOARD_REF_ROOTS` — stay compiled in and are never derived from it; this repo ships
+with zero npm dependencies (everything under `src/vendor/` is vendored in-tree), and nothing
+on the request path in `bin/daemon.mjs` or `src/` reads `process.env.TMPDIR` or calls
+`os.tmpdir()`, so a rewritten `TMPDIR` cannot retarget what board data is read, written or
+served. What it can reach: wherever Node's own runtime, or the `osascript`/`open` binaries
+themselves, would drop a scratch file if they ever consulted it — the same directory macOS's
+own launchd session already sets `TMPDIR` to for most processes on its own account
+(`test/check-launcher-env.mjs`), not a new one the grant did not already have.
+
+Everything else, `NODE_OPTIONS` and `CLAUDE_BOARD_SECRET_FILE` included, is never placed
+in the child's environment at all — and with `HOME` baked, `~/.config/claude-board/secret`
+is the only secret path the process can reach. The two boundary variables are therefore
+**not** written into the plist when a launcher bundle is in use, since a copy there would read as though rewriting the plist
 could still move the boundary; a customised value is carried across reinstalls through a
 record file in the 0700 directory beside the secret.
 
@@ -128,7 +140,19 @@ first — the same port-squatting window the shim already lives with, now entere
 seconds for the length of a login session rather than once per session start. The
 credential is re-read from disk after any failed request rather than cached for the
 process's life, so rotating the secret file takes effect on the next poll instead of
-requiring a logout.
+requiring a logout. That peer-authentication gap is real but bounded: the credential
+reaches whoever is squatting the port, and goes no further than that.
+
+What stops it going further: all three of this process's HTTP request sites —
+`cb_request`'s own session, `CBStreamProbe` and `CBEventStream` — implement
+`NSURLSessionTaskDelegate`'s `willPerformHTTPRedirection:` and return
+`completionHandler(nil)`, refusing every redirect unconditionally, not only an off-origin
+one. Before this, none of them supplied a delegate at all, so `NSURLSession`'s default
+behaviour was to auto-follow a `302` and carry the `x-claude-board-secret` header to
+whatever host the response's `Location:` named — laundered off the machine entirely through
+this TCC-granted bundle, at the hands of whichever local process was squatting the port. A
+loopback client here never has a request that is correctly redirected, so refusing every
+redirect costs nothing legitimate.
 
 It does hold one capability the daemon's HTTP surface does not, and it is the next section:
 a click on a waiting row asks the scriptable browsers whether one of them is already
@@ -229,6 +253,19 @@ anything above `$HOME` are never usable as roots; and that a root or a spec that
 validation is dropped rather than widened, so a malformed `CLAUDE_BOARD_REF_ROOTS` grants
 nothing rather than granting a neighbouring directory nobody named.
 
+That realpath discipline covers the reference being resolved; the confinement root it is
+checked against gets the same treatment now, not just a one-time trust. The project
+directory (`cwd`, which becomes `root` for every reference resolved inside it) is validated
+by the same `resolveBoardCwd` twice: once when the board is created (`bindBoardCwd`,
+`src/board.mjs`), and again — a genuine re-validation, not a cached answer — by
+`resolvePath` (`src/resolve.mjs`) at reference-resolution time, on every single reference
+that board ever resolves, rather than trusting the bind-time result for the board's whole
+life. The re-validation is what stops a project directory swapped for a symlink to `$HOME`
+or `/` in the gap between board creation and reference resolution: without it, a bare
+`realpathSync(cwd)` at resolution time would silently hand out whatever the swapped name now
+resolves to as the confinement root, a moment before a reference like `.ssh/id_rsa` was
+checked against it and read.
+
 #### What the default allowlist is
 
 `~/.claude/skills`, `~/.claude/commands`,
@@ -270,7 +307,11 @@ asked of that one descriptor rather than of the name again.
 #### Another local process reading your boards, or forging an answer on one
 
 Every route but `GET /api/health` and `GET /auth/<token>` requires a credential — the index, a board
-page, archive search, the blocking wait and the event stream alike. (`/auth/<token>` is
+page, archive search, the blocking wait and the event stream alike. Not every one of those
+accepts the *same* credential, though: `GET /api/board/:id/wait` also writes — `handleWait`
+persists the board on its timeout branch and spends undelivered comments on every branch — so
+it is gated exactly like a write, the secret only, never the cookie alone; every other route in
+that list accepts either. (`/auth/<token>` is
 the route that *hands out* the credential, so it cannot require one; it is protected by
 the token being unguessable, single-use and seconds-lived.) There are exactly two
 credentials: the secret file above, and a cookie the daemon derives from it and hands to
@@ -304,7 +345,7 @@ same-origin write check stands in front of all of it.
 
 It is on the list with its eyes open (ADR 71). `POST /api/store/prune` deletes every board older than
 a window the request names, documents and emitted pages together, plus any shared asset
-no surviving page still references. It is admitted not because it reaches less than
+no surviving page or asset still names. It is admitted not because it reaches less than
 `submit` — it reaches further — but because the control that fires it lives in the index
 page's settings panel, and that page is exactly a browser holding only the cookie;
 requiring the secret would make the one surface the design names unable to use it. What
@@ -340,6 +381,74 @@ a correct origin. `html` is the one kind whose `source` may name a file rather t
 carrying markup by value (`ADR.md` entry 7), and it gets no extra footing for it: whether
 the markup was typed into the request body or read off disk by the daemon, it is
 agent-authored and untrusted either way.
+
+#### Third-party code executing in the board's own origin
+
+A board with a diagram on it loads mermaid — a real, third-party JavaScript engine that runs
+in the board page's OWN origin, not inside a sandboxed iframe: it can see `#board-data` (every
+answer and comment on the board) and, since `connect-src 'self'` admits it, it can POST a
+submit under the session cookie. That is a materially different trust boundary than the
+vendored `marked`/`prismjs` above, which never execute at all — they are used purely as
+tokenizers, walked and escaped by hand. Worth pricing on its own terms rather than folding into
+the paragraph above.
+
+mermaid 11.16.1 — upstream's own single self-contained IIFE build, `dist/mermaid.min.js`, not
+the ESM entry — is vendored at `src/vendor/mermaid/mermaid.min.js`, byte-identical to the npm
+publish and digest-pinned in `test/fixtures/vendor-manifest.json` alongside every other
+vendored file (`ADR.md` entry 62's manifest, extended to a third package). `src/assets.mjs`
+serves it as a third content-addressed sibling asset, named the same way the script and
+stylesheet already were (ADR 70) — though loaded on demand rather than referenced in every
+page's markup: `src/ui.mjs` inserts a classic `<script>` element for it only when a board
+actually has a diagram, so a board with none never fetches it. `CSP_CLAUSES`
+(`src/render.mjs`) now reads `script-src 'self' 'unsafe-inline'` and `font-src data:` —
+narrowed from the CDN host `font-src` used to admit, kept only for an artifact's own
+inline `data:` font — no clause on either
+`CSP` or `INDEX_CSP` names an external host any more. This used to be different: the engine was
+`import()`-ed at runtime from `cdn.jsdelivr.net`, version-pinned but not byte-pinned (a dynamic
+`import()` cannot carry an `integrity` attribute), so a compromised jsdelivr could have served
+different bytes at that exact path and reached read-every-board plus forge-an-answer on every
+board rendered after it. Vendoring closes that: the bytes that run are the bytes recorded in
+the manifest, checked with no network by `test/check-vendor-digest.mjs`, which also loads the
+real vendored file into a Node `vm` context and calls into it, not just hashes it.
+
+Be precise about what changed and what did not. The engine still executes in the board page's
+own origin, with the same reach it always had — that has **not** changed, and this is not a
+hole that closes, only one it no longer leaves open to whoever can serve a path on someone
+else's CDN. What changed is narrower: the bytes are now fixed, local and digest-checked, rather
+than fetched live from a host nobody here controls.
+
+It cost something, and the cost is worth naming here rather than only in a functional changelog,
+because someone re-reading this section later will otherwise be tempted to re-admit the host. An
+`html` stage renders at an opaque origin (`sandbox="allow-scripts"`, no `allow-same-origin`), where
+`'self'` matches nothing and a relative URL resolves to nothing — so a stage cannot reach the
+vendored engine at all. The old CDN clause was a *host* source, which does match from an opaque
+origin, and that is what used to let a rendered artifact draw its own mermaid diagrams. Dropping it
+removed the only source a stage ever had: an artifact carrying diagrams now shows its raw mermaid
+source instead, immediately and unconditionally. That degradation was accepted deliberately. The
+alternative is re-admitting an external host into `script-src`, which would hand back the exact
+read-every-board-and-forge-an-answer exposure described just above — a worse trade than a diagram
+rendering as text.
+
+`'self'` is what admits every sibling — script, stylesheet and the mermaid engine alike — on
+both surfaces a page can be read on: served, the origin is the daemon's; opened from Finder,
+Chrome's origin for a `file:` document is `file://` and a sibling `file:` URL matches it. It
+admits exactly one route, `GET /b/<name>`, which serves nothing but a file in `pages/` whose
+name matches `(ui|styles|mermaid)-<16 hex>.(js|css)` — an anchored pattern, checked where the
+name becomes a path (`src/store.mjs`), so no name off the wire can escape that directory or
+reach anything else in it. Planting a script there needs write access to the store, which is
+the "any process running as you" boundary — see [Not defended, by
+design](#not-defended-by-design). `'self'` is deliberately not widened to a bare `file:` scheme
+source, which would also make an archive work but would let an archived board's untrusted
+`html` stage — it inherits the page's policy through its `srcdoc` — pull any script off the
+reader's disk.
+
+`script-src` and `style-src` both also carry `'unsafe-inline'`, and in `script-src` it is
+load-bearing, not laziness: the theme boot script (`src/theme.mjs`'s `themeBootScript`) is an
+inline `<script>`, run ahead of the referenced stylesheet so the page never paints the wrong
+theme for a frame, and there is no way to keep it inline without the clause that admits it. So
+the CSP does **not** stop an injected inline `<script>` on a board page — the escaping described
+above is what does that. `'unsafe-inline'` in `script-src` means the CSP was never the thing
+carrying that particular weight.
 
 #### The agent answering its own question
 
@@ -418,32 +527,6 @@ board URLs. That has not been done. What is done instead is bounding it:
 If you run other services on loopback and this matters to you, use a separate browser
 profile for boards.
 
-**Third-party code executing in the board's own origin.** A board with a diagram on it
-does `await import('https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.esm.min.mjs')`
-(`src/ui.mjs`), which is why `script-src` names a host nobody here controls
-(`src/render.mjs`, `src/server.mjs`). Unlike a referenced `html` stage, that module does
-not land in a sandboxed opaque-origin iframe — it runs in the board page itself, where
-`#board-data` holds every answer and every comment and `connect-src 'self'` is the ability
-to POST a submit under the session cookie. The version is pinned exactly and both
-`script-src` allowlists name that version-pinned path rather than the bare host, so an
-upstream 11.x publish cannot change what runs and no other version can be pulled from the
-same origin. What remains: dynamic `import()` takes no `integrity` attribute, so there
-is no hash — anything that can serve different bytes *at that path* gets read-every-board
-plus forge-an-answer, on every board rendered after it. Closing it means vendoring mermaid
-into the signed payload and dropping the host from the CSP. The availability consequence —
-boards render fine without network, diagrams do not — is the smaller half of it.
-
-`script-src` and `style-src` also carry `'self'` since ADR 70, because a page now names its
-script and stylesheet instead of inlining them. That admits exactly one route,
-`GET /b/<name>`, which serves nothing but a file in `pages/` whose name matches
-`(ui|styles)-<16 hex>.(js|css)` — an anchored pattern, checked where the name becomes a path
-(`src/store.mjs`), so no name off the wire can escape that directory or reach anything else
-in it. Planting a script there needs write access to the store, which is the
-running-as-you boundary directly below. `'self'` is deliberately not widened to a bare
-`file:` source, which would also make an archive work but would let an archived board's
-untrusted `html` stage — it inherits the page's policy through its `srcdoc` — pull any
-script off the reader's disk.
-
 ### Not defended, by design
 
 **Any process running as you.** It can read `~/.config/claude-board/secret` and is
@@ -481,9 +564,9 @@ That is a narrow race, not an eliminated one. It is also inside the boundary abo
 process could read the secret file instead.
 
 **An archived board.** `pages/<boardId>.html` opens from disk with no credential at all,
-with the two shared files beside it (ADR 70); the gate is on the daemon, not on the
-archive. Anything that can read that directory can read those boards, which is the same
-statement as "the store is owner-only" above.
+with the three shared files beside it (mermaid joined ui/styles, ADR 70); the gate is on
+the daemon, not on the archive. Anything that can read that directory can read those
+boards, which is the same statement as "the store is owner-only" above.
 
 **Anything multi-user or remote.** There is no authentication, no accounts, no
 cross-machine access, and none is planned. Do not expose the port.

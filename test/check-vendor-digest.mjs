@@ -223,6 +223,53 @@ async function main() {
     assert.deepEqual([...SUPPORTED_LANGUAGES].sort(), [...seenLangs, 'diff'].sort(),
       'SUPPORTED_LANGUAGES must be exactly the langForPath languages (AC 2\'s enumerated list) plus diff -- no more, no less');
   });
+
+  await checkAsync('vendored mermaid (src/vendor/mermaid/mermaid.min.js) loads and exposes a real, callable engine', async () => {
+    const { MERMAID_ASSET, MERMAID_SOURCE, loadMermaidEngineForNode } = await import('../src/vendor/mermaid/index.mjs');
+    const { SHARED_ASSETS, ASSET_NAME } = await import('../src/assets.mjs');
+
+    assert.match(MERMAID_ASSET, ASSET_NAME, `MERMAID_ASSET (${MERMAID_ASSET}) must itself be a well-formed asset name`);
+    assert.ok(SHARED_ASSETS.some(a => a.name === MERMAID_ASSET && a.contents === MERMAID_SOURCE),
+      'SHARED_ASSETS (src/assets.mjs) must carry the same vendored bytes under the same name -- this is what the daemon actually serves and writes');
+
+    // Runs the REAL vendored bytes -- see src/vendor/mermaid/index.mjs's own
+    // comment on why `vm.runInThisContext`, not `import()`, is what makes that
+    // possible at all for this particular upstream shape.
+    const engine = loadMermaidEngineForNode();
+    // The exact shape src/ui.mjs's clobber guard (looksLikeMermaidEngine) checks
+    // for -- proven here against the real engine, not a mock, so a future change
+    // to either side can't silently drift apart.
+    assert.equal(typeof engine, 'object');
+    assert.equal(typeof engine.run, 'function');
+    assert.equal(typeof engine.initialize, 'function');
+
+    // A real call, not just a shape check: initialize() validates and stores its
+    // config, real theme-variable keys included (a subset of MERMAID_TOKEN_MAP,
+    // src/ui.mjs), so a garbled vendor drop that merely LOOKED right (same
+    // exported names, broken internals) would throw here.
+    engine.initialize({
+      startOnLoad: false,
+      theme: 'base',
+      themeVariables: { primaryColor: '#112233', primaryTextColor: '#eeeeee', lineColor: '#445566' },
+    });
+
+    // What this does NOT prove: that mermaid.run() can draw an actual diagram
+    // under Node. It needs a real DOM to lay out and measure an SVG -- mermaid.parse()
+    // alone reaches into a DOMPurify sanitization path that needs a live
+    // `document` this process doesn't have (reproduced: throws
+    // 'Zs.addHook is not a function' the moment a real diagram source is parsed,
+    // even against test/dom-stand-in.mjs's document, which is real enough for
+    // marked/Prism's pure-text work but not for DOMPurify's own feature
+    // detection). That is a real-browser-only ceiling this repo already accepts
+    // for mermaid elsewhere (test/check-mermaid-anchor.mjs's own header: "The
+    // mermaid CDN is never actually reached here... a real window.mermaid is
+    // supplied as a plain mock") -- verified by hand instead, in real headless
+    // Chrome, loading this exact vendored file via a classic <script src> over
+    // a `file:` URL with the network off: window.mermaid comes back
+    // `{run: function, initialize: function}` and a real flowchart renders to
+    // an <svg>. Reproduce with `chrome --headless=new --dump-dom` against a
+    // two-file fixture (an HTML page plus this vendored script beside it).
+  });
 }
 
 main()

@@ -659,7 +659,14 @@ function wantsHtmlRefusal(req, pathname) {
 function sendCredentialRefusal(req, res, pathname) {
   const command = recoveryCommand();
   if (wantsHtmlRefusal(req, pathname)) {
-    return sendHtml(res, 401, renderRefusalPage(command), { 'cache-control': 'no-store' });
+    // The one caller of `recoveryCommand({ absolute: false })`: this page renders to
+    // any TAB that lands on the read gate -- a cross-origin-shaped navigation is
+    // exactly the caller this gate cannot tell apart from a legitimate one -- so unlike
+    // `command` above (read by something that already holds a terminal here: the JSON
+    // `recover` field below, bin/mcp.mjs's own error text) it must not name the
+    // reader's home directory or the account it belongs to. See recoveryCommand's own
+    // comment for why the relative form is still actionable.
+    return sendHtml(res, 401, renderRefusalPage(recoveryCommand(undefined, { absolute: false })), { 'cache-control': 'no-store' });
   }
   return sendJson(res, 401, { error: 'no claude-board credential', recover: command });
 }
@@ -2376,6 +2383,26 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         const boardId = parts[2];
         const action = parts[3];
         if (req.method === 'GET' && action === 'wait') {
+          // S1: this GET is not a read. `handleWait` writes the board on its timeout
+          // branch and, on every branch, spends undelivered comments (marks them
+          // `delivered: true`) once the response lands -- see the comments on
+          // `handleWait` and `drainUndeliveredComments` above for why both of those are
+          // deliberate and must stay exactly as they are. Gate 4 above already let this
+          // request through on the weaker READ credential (secret, or a same-origin
+          // cookie), which is the gap: a cookie is precisely what a CSRF-shaped
+          // cross-origin GET can ride in on, and no browser page ever legitimately
+          // calls this route (only bin/mcp.mjs does, and it sends the secret header on
+          // every request, reads included, for exactly this reason -- see its own
+          // comment). So the mutation is gated exactly as a write is --
+          // `isAuthorizedWrite`, the same function every POST answers to -- rather than
+          // made idempotent: `wait` is deliberately off every one of the three
+          // cookie-write allowlists above, so this reduces to "the secret only," with
+          // no new list to maintain and no risk of a future action silently widening it.
+          if (!isAuthorizedWrite(req, parts, secret)) {
+            res.writeHead(401);
+            res.end();
+            return;
+          }
           return await handleWait(req, res, boardId, url, home, sse, streamHub, waitingCache);
         }
         if (req.method === 'GET' && action === 'events') {

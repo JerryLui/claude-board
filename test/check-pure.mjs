@@ -22,7 +22,7 @@ import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
 // by golden strings re-derived from the current source. See the fixture's header.
 import { mdToHtmlAndAnchors as legacyMdToHtmlAndAnchors } from './fixtures/markdown-pre-marked.mjs';
 import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, COMMENT_ICON, highlightFenceHtml } from '../src/render.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, INDEX_CSP, COMMENT_ICON, highlightFenceHtml } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
@@ -3961,12 +3961,13 @@ check('an amend that replaces a block clears the reviewer\'s local field state f
 
 // This check used to read "the emitted page has no external script or stylesheet
 // reference -- everything needed to open standalone is inlined", and rejected any
-// `<link rel=stylesheet>` or `<script src=>` outright (QUIRKS.md, "No external assets,
-// ever"). ADR 70 supersedes that rule: a page now REFERENCES the shared script and
-// stylesheet rather than carrying 438KB of byte-identical copies of them. What replaces
-// it is narrower and stricter -- the reference must be a BARE SIBLING FILENAME, which is
-// the single form that resolves identically from a page served at `/b/<id>` and from the
-// same bytes double-clicked in Finder. An absolute path, a URL, a protocol-relative
+// `<link rel=stylesheet>` or `<script src=>` outright (QUIRKS.md, "No external assets —
+// not even mermaid, now three bare sibling filenames"). ADR 70 supersedes that rule: a
+// page now REFERENCES the shared script and stylesheet rather than carrying 438KB of
+// byte-identical copies of them. What replaces it is narrower and stricter -- the
+// reference must be a BARE SIBLING FILENAME, which is the single form that resolves
+// identically from a page served at `/b/<id>` and from the same bytes double-clicked in
+// Finder. An absolute path, a URL, a protocol-relative
 // `//host/x` or a subdirectory would each break the Finder surface (AC 9), so each is
 // still a failure here; that is what this check now defends.
 check('the emitted page references the shared script and stylesheet as BARE SIBLING FILENAMES, and nothing else external', () => {
@@ -4550,6 +4551,54 @@ check('S2: swapping an ANCESTOR directory for a symlink is refused too -- macOS 
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+check('cwd confinement is revalidated at reference-resolution time, not trusted from an earlier bind -- swapping the project directory for a symlink to $HOME in between is refused, not used as root', () => {
+  // createBoard validates cwd via resolveBoardCwd at BIND time (bindBoardCwd,
+  // src/board.mjs) -- rejected there if it were $HOME or the filesystem root. Every
+  // later resolveRef/resolvePath call then re-realpaths that same cwd STRING and used
+  // to trust whatever it got back as the confinement root, without ever re-running that
+  // rejection. Two separate realpaths of one name is a check-to-use gap: replace the
+  // project directory itself with a symlink to $HOME in between -- something an
+  // attacker who can write inside the project's own parent directory can do without
+  // touching the board -- and the second realpath returns $HOME, so a ref like
+  // '.ssh/id_rsa' resolves "inside root" and would have been read out.
+  // Ablation: revert resolvePath's `root` to a bare `realpathSync(cwd)` and this reads
+  // the planted secret.
+  const base = realpathSync(mkdtempSync(path.join(tmpdir(), 'claude-board-cwdswap-')));
+  const prevHome = process.env.HOME;
+  try {
+    const fakeHome = path.join(base, 'home');
+    mkdirSync(fakeHome);
+    writeFileSync(path.join(fakeHome, 'id_ed25519'), '-----BEGIN PRIVATE KEY-----\nexfiltrated\n', 'utf8');
+    process.env.HOME = fakeHome; // os.homedir() reads $HOME first on POSIX
+
+    const project = path.join(base, 'project');
+    mkdirSync(project);
+
+    // Bind time: exactly what createBoard runs, and it must accept an ordinary directory.
+    const bound = resolveBoardCwd(project);
+    assert.equal(bound.error, undefined, 'an ordinary project directory must bind cleanly');
+    assert.equal(bound.path, project);
+
+    // The attacker's window: the project directory is replaced by a symlink to $HOME,
+    // under the exact name resolveBoardCwd just accepted -- the board's stored cwd.
+    rmSync(project, { recursive: true, force: true });
+    symlinkSync(fakeHome, project);
+
+    const viaResolvePath = resolvePath({ path: 'id_ed25519' }, bound.path, []);
+    assert.equal(viaResolvePath.path, undefined, 'the swapped-in $HOME must not become the confinement root');
+    assert.match(viaResolvePath.error, /\$HOME/, 'refused for being $HOME, the same reason bind time would have refused it');
+
+    const viaResolveRef = resolveRef({ path: 'id_ed25519' }, { cwd: bound.path, roots: [] });
+    assert.equal(viaResolveRef.text, undefined, 'a ref must not resolve inside $HOME because the project dir now points there');
+    assert.ok(!String(viaResolveRef.text ?? '').includes('exfiltrated'));
+    assert.match(viaResolveRef.error, /\$HOME/);
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    rmSync(base, { recursive: true, force: true });
   }
 });
 
@@ -9566,27 +9615,51 @@ check('a markdown link opens in a new tab and drops its opener', () => {
   assert.ok(!bad.includes('javascript:'));
 });
 
-check('the mermaid CDN is pinned to one exact version everywhere, because the CSP match is a prefix', () => {
-  // `script-src ... https://cdn.jsdelivr.net/npm/mermaid@11.16.1/` is a prefix match, so
-  // it allows that version and refuses every other spelling -- including the unpinned
-  // `mermaid@11` that resolves to the same bytes today. Three parties have to agree on
-  // the string: this policy, the board's own loader in src/ui.mjs, and the renderer
-  // templates, whose CDN fallback is the ONLY engine that can load inside a stage (an
-  // opaque origin resolves the vendored `assets/mermaid.min.js` to nothing -- ADR.md
-  // entry 32). Those templates live in ~/.claude/skills and are unreachable
-  // from this repo, so what is pinned here is the fact they were pinned against: the
-  // version this policy names, and that it names exactly one. Widen or bump it and the
-  // check goes red at the commit, rather than the diagrams going blank on the next
-  // board nobody thought to look at.
-  const pins = [...CSP.matchAll(/cdn\.jsdelivr\.net\/npm\/(mermaid@[^/\s;]*)/g)].map(m => m[1]);
-  assert.ok(pins.length >= 2, `the CSP must name the mermaid CDN in both script-src and font-src, found ${pins.length}`);
-  assert.deepEqual([...new Set(pins)], ['mermaid@11.16.1'],
-    `the CSP must name exactly one exact mermaid version; a floating major (mermaid@11) is refused by its own prefix match. Got: ${pins.join(', ')}`);
+check('no board or index CSP names an external host -- mermaid is vendored, not a CDN pin any more', () => {
+  // Superseded: this used to pin the one exact `mermaid@<version>` string the CSP
+  // named in both script-src and font-src, the board's own loader in src/ui.mjs, and
+  // (unreachably, from this repo) a skill-side renderer's own CDN fallback all had to
+  // agree on, because a CSP source expression ending in `/` is a prefix match -- a
+  // floating major would have been refused, and a drift between the three would have
+  // gone blank on the next board nobody thought to look at. Mermaid is vendored now (a
+  // digest-pinned file under src/vendor/mermaid/, loaded the same content-addressed,
+  // same-origin way as every other sibling asset -- see src/ui.mjs), so there is no
+  // longer a version string for three parties to keep in sync: the policy simply names
+  // no external host at all, for mermaid or anything else. What that leaves to pin is
+  // the negative -- offline and structural, so a reintroduced CDN allowance (mermaid's
+  // or any other) fails here rather than on the next `/security-review`. `font-src`
+  // itself is not gone: it keeps exactly `data:`, for an artifact's own inline font
+  // (skills/claude-board/SKILL.md tells artifact authors to inline every font as a
+  // `data:` URI, since an `html` stage renders at an opaque origin) -- the AC here is
+  // no external host, not no clause.
+  // Checked against a CLOSED SET of allowed source expressions, not against a pattern
+  // for the hosts we happen to remember. The previous gate here was `!/https?:\/\//`
+  // plus a literal `jsdelivr` test, and both miss the shape a real regression takes: a
+  // CSP host source needs no scheme, so `unpkg.com/npm/...` or `font-src data:
+  // fonts.gstatic.com` sails through every one of them. Enumerating what a source is
+  // ALLOWED to be inverts that -- an external host fails by construction, in any
+  // spelling, including one nobody here thought to name.
+  const ALLOWED_CSP_SOURCES = new Set(["'none'", "'self'", "'unsafe-inline'", 'data:', 'blob:']);
+  for (const [name, csp] of [['CSP', CSP], ['INDEX_CSP', INDEX_CSP]]) {
+    for (const clause of csp.split(';')) {
+      const [directive, ...sources] = clause.trim().split(/\s+/).filter(Boolean);
+      if (!directive) continue;
+      for (const src of sources) {
+        assert.ok(ALLOWED_CSP_SOURCES.has(src),
+          `${name}'s ${directive} names ${src}, which is not in the closed set of allowed source expressions (${[...ALLOWED_CSP_SOURCES].join(' ')}) -- no external host may reach either policy, however it is spelled. Got: ${csp}`);
+      }
+    }
+  }
 
+  // And the loader itself: no dynamic import() of a URL -- src/ui.mjs's mermaid
+  // loader is a same-origin classic <script src> element instead (see that file's own
+  // comment on why: an ES module fetch is CORS-gated over `file:` regardless of
+  // same-origin-ness, and upstream's own build only works as a classic script in the
+  // first place). Matched as an actual CALL (a string/template literal argument),
+  // not just the substring "import(" -- this file's own client-script comments say
+  // 'import()' in prose, which must not trip a check about real code.
   const ui = readFileSync(path.join(repoRoot, 'src/ui.mjs'), 'utf8');
-  const uiPins = [...ui.matchAll(/cdn\.jsdelivr\.net\/npm\/(mermaid@[^/\s'"`]*)/g)].map(m => m[1]);
-  assert.deepEqual([...new Set(uiPins)], ['mermaid@11.16.1'],
-    `the board's own mermaid loader must import the version its CSP allows. Got: ${uiPins.join(', ') || 'no jsdelivr import at all'}`);
+  assert.ok(!/import\(\s*['"`]/.test(ui), `src/ui.mjs must contain no dynamic import(<url>) call any more, found one: ${ui.match(/.{0,40}import\(\s*['"`].{0,40}/)?.[0]}`);
 });
 
 // =================================================================================

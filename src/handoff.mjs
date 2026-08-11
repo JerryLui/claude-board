@@ -100,17 +100,29 @@ export function shellQuote(s) {
 }
 
 /** The ONE command that re-authorizes a browser holding no credential — a cleared
- * cookie jar, a second profile, a different browser. Absolute, so it can be pasted from
- * anywhere; named verbatim by the refusal page, by bin/mcp.mjs when it cannot mint a
- * handoff, and by README.md. All three read it from here so they cannot drift apart.
+ * cookie jar, a second profile, a different browser. Absolute by default, so it can be
+ * pasted from anywhere; named verbatim by the refusal page's JSON error body, by
+ * bin/mcp.mjs when it cannot mint a handoff, and by README.md. All three read it from
+ * here so they cannot drift apart.
  *
  * Carries the port when it is not the default. bin/authorize.mjs
  * reads CLAUDE_BOARD_PORT from the shell that runs it, not from the daemon it is
  * recovering, so on a non-default-port install the command as printed talked to 7391 —
  * which is either nothing at all, or somebody else's service, to which it would then
- * present this daemon's secret. */
-export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT) {
-  const cmd = `node ${shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs'))}`;
+ * present this daemon's secret.
+ *
+ * `{ absolute: false }` drops `repoRoot()` and prints the bare `node
+ * bin/authorize.mjs` instead. The one caller that wants this is the HTML refusal page
+ * (src/server.mjs `sendCredentialRefusal`): it renders to any TAB that lands on the
+ * read gate, a cross-origin-shaped navigation included, and the absolute form is
+ * `repoRoot()` — on a stock macOS clone, a real `/Users/<name>/...` path — so printing
+ * it there names both the reader's home directory and the account it belongs to, to a
+ * caller the gate could not verify. The relative form is still actionable: run it from
+ * inside the clone, which is the fix this whole route exists to point at. Every other
+ * caller keeps the absolute form, because it is read by something that already holds a
+ * terminal on this machine — pasting it works from any cwd, which is the point there. */
+export function recoveryCommand(port = Number(process.env.CLAUDE_BOARD_PORT) || DEFAULT_PORT, { absolute = true } = {}) {
+  const cmd = `node ${absolute ? shellQuote(path.join(repoRoot(), 'bin', 'authorize.mjs')) : 'bin/authorize.mjs'}`;
   return port === DEFAULT_PORT ? cmd : `CLAUDE_BOARD_PORT=${port} ${cmd}`;
 }
 

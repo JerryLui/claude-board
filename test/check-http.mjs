@@ -13,7 +13,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
-import { HANDOFF_TOKEN_RE, recoveryCommand } from '../src/handoff.mjs';
+import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
 import { startServer, activeWaitCount, buildPacketWithUndelivered, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
 import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
 // The one cap every by-value string on a board shares (src/resolve.mjs), read rather
@@ -2237,7 +2237,24 @@ async function main() {
       );
       // ...and still allow what the page genuinely needs, or the whole UI is dead:
       assert.ok(/script-src[^;]*'unsafe-inline'/.test(csp), 'the page inlines its own module script');
-      assert.ok(/script-src[^;]*cdn\.jsdelivr\.net/.test(csp), 'mermaid is a dynamic import from the CDN');
+      // Mermaid is vendored (a digest-pinned file under src/vendor/mermaid/, loaded the
+      // same content-addressed, same-origin way as the page's other two siblings -- see
+      // src/ui.mjs), so no clause may name an external host for it or anything else.
+      // A closed set of allowed source expressions rather than a test for the one host
+      // that used to be here: a CSP host source needs no scheme, so a literal
+      // `cdn.jsdelivr.net` test (or an `https?:` one) would pass `unpkg.com/npm/...`
+      // straight through. This is the served header, so it is the last place a host
+      // could reach a real browser -- see test/check-pure.mjs for the same gate on the
+      // policy strings themselves.
+      const allowedCspSources = new Set(["'none'", "'self'", "'unsafe-inline'", 'data:', 'blob:']);
+      for (const clause of csp.split(';')) {
+        const [directive, ...sources] = clause.trim().split(/\s+/).filter(Boolean);
+        if (!directive) continue;
+        for (const src of sources) {
+          assert.ok(allowedCspSources.has(src),
+            `the served ${directive} names ${src}, which is not an allowed source expression -- no external host may reach the header, however it is spelled. Got: ${csp}`);
+        }
+      }
       assert.ok(/connect-src[^;]*'self'/.test(csp), 'submit and the SSE stream are same-origin fetches');
     }
   });
@@ -2341,19 +2358,30 @@ async function main() {
     const refused = await rawRequest(port, 'GET', `/b/${boardId}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
     assert.equal(refused.status, 401);
     assert.match(refused.headers['content-type'] || '', /text\/html/, 'a navigation gets a page');
-    assert.ok(refused.body.includes(recoveryCommand()), `the refusal must name the exact command: ${recoveryCommand()}`);
-    assert.match(refused.body, /bin\/authorize\.mjs/, 'and it must be a real, absolute path the reader can paste');
+    // The page renders to any TAB that lands here -- a cross-origin-shaped navigation
+    // among them -- so unlike the JSON `recover` field below (read by something that
+    // already holds a terminal on this machine) it must not name this reader's home
+    // directory or the account it belongs to. It gets the RELATIVE recovery command,
+    // never the absolute one `recoveryCommand()` defaults to (Low: refusal-page
+    // path/username disclosure).
+    const pageCommand = recoveryCommand(undefined, { absolute: false });
+    assert.ok(refused.body.includes(pageCommand), `the refusal must name the exact command: ${pageCommand}`);
+    assert.match(refused.body, /node bin\/authorize\.mjs/, 'a bare relative command, actionable from inside the reader\'s own clone');
+    assert.ok(!refused.body.includes(repoRoot()), 'the refusal page must not disclose the absolute clone path');
+    assert.doesNotMatch(refused.body, /\/Users\//, 'nor, inside it, the username');
     assert.doesNotMatch(
       String(refused.headers['www-authenticate'] || ''), /./,
       'no WWW-Authenticate: a browser password prompt in front of the page explaining the fix is worse than no page at all'
     );
 
     // An API/XHR caller gets the status and no markup. Same code, so "no credential" is
-    // one number everywhere and PROTOCOL.md can document one number.
+    // one number everywhere and PROTOCOL.md can document one number. This caller
+    // already holds a terminal on the machine (curl, the shim), so its JSON body keeps
+    // the fully pasteable absolute command -- this low is scoped to the rendered page.
     const api = await rawRequest(port, 'GET', '/api/search?q=trip', `127.0.0.1:${port}`, { headers: BROWSER_NAV });
     assert.equal(api.status, 401, 'the same status for an API caller');
     assert.doesNotMatch(api.headers['content-type'] || '', /text\/html/, 'but not a page of markup');
-    assert.match(JSON.parse(api.body).recover, /bin\/authorize\.mjs/, 'it still names the fix, as one JSON field');
+    assert.equal(JSON.parse(api.body).recover, recoveryCommand(), 'it still names the fix, as one JSON field, in its pasteable absolute form');
   });
 
   await check('SEC: a handoff authorizes a browser exactly once, and lands it on a clean URL', async () => {
@@ -2396,7 +2424,7 @@ async function main() {
     const replay = await rawRequest(port, 'GET', `/auth/${minted.token}`, `127.0.0.1:${port}`, { headers: BROWSER_NAV });
     assert.equal(replay.status, 401, 'a handoff is single-use: replaying it is refused');
     assert.equal([].concat(replay.headers['set-cookie'] || []).length, 0, 'and hands out no cookie');
-    assert.ok(replay.body.includes(recoveryCommand()), 'the replay refusal is the same page as any other refusal');
+    assert.ok(replay.body.includes(recoveryCommand(undefined, { absolute: false })), 'the replay refusal is the same page as any other refusal');
 
     // Never-existed is the same answer as already-used: a poller must not learn that it
     // found a real token and merely arrived late.
@@ -2511,6 +2539,94 @@ async function main() {
       body: JSON.stringify({ title: 'Escalation attempt 2', cwd: home, blocks: [{ kind: 'markdown', text: '# no' }] }),
     });
     assert.equal(asBoardPost.status, 401, 'nor to create a board — the route that resolves a file stays behind the secret alone');
+  });
+
+  await check('S1: a cross-origin-shaped GET /wait carrying only the cookie is refused, and drains nothing', async () => {
+    // AC 3's exact wording: a cross-origin-shaped GET /wait with a cookie must leave
+    // `delivered` flags and the board document unchanged. `handleWait` writes on its
+    // timeout branch and always spends undelivered comments (marks them `delivered:
+    // true`) once the response lands (see its own comments and drainUndeliveredComments'
+    // above) -- exactly the two things this proves untouched.
+    //
+    // "Cross-origin-shaped" means the one case isSameOriginRead cannot see through: NO
+    // Origin and NO Sec-Fetch-Site at all -- what an old browser sends on a genuinely
+    // cross-origin request (a modern one sets Sec-Fetch-Site: cross-site, which
+    // isSameOriginRead already refuses; see its own comment on why absence has to pass
+    // for the ordinary bookmark case). A daemon that cannot tell that shape apart from a
+    // legitimate same-origin GET is exactly why the MUTATION needs its own gate rather
+    // than a stronger read check -- this is the residual the audit named MEDIUM.
+    //
+    // Setup follows the ADR 35 pattern above: an artifact round submitted with a comment
+    // of its own (not awaited, so it is a drain candidate) and a question round in the
+    // SAME thread to wait on.
+    const html = '<!doctype html><html><body><h1>S1 page</h1></body></html>';
+    const artifact = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'S1 artifact', blocks: [{ kind: 'html', html }] }),
+    })).json();
+    const artifactBlock = readBoard(artifact.boardId, home).blocks[0].id;
+    await fetch(`${base}/api/board/${artifact.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1, action: 'send', answers: [],
+        comments: [{ blockId: artifactBlock, anchor: { kind: 'block' }, text: 'S1_UNDELIVERED' }],
+      }),
+    });
+
+    const asking = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'S1 question',
+        thread: artifact.thread,
+        blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    const askQid = readBoard(asking.boardId, home).blocks[0].id;
+
+    const cookie = sessionCookieHeader();
+    const before = snapshotTree(home);
+
+    // The exploitable shape: only the cookie, no Origin, no Sec-Fetch-Site. `fetch()`
+    // cannot forge these anyway (see rawRequest's own comment), so a bare cookie is
+    // already indistinguishable from cross-origin without them.
+    const bareCookie = await rawRequest(port, 'GET', `/api/board/${asking.boardId}/wait?round=1`, `127.0.0.1:${port}`, {
+      headers: { cookie },
+    });
+    assert.equal(bareCookie.status, 401, 'a GET /wait carrying only the cookie, with nothing to prove same-origin, must be refused');
+    assert.equal(bareCookie.body, '', 'a write-gated refusal carries no body, same as any other write refusal');
+
+    // Even a well-formed SAME-origin cookie request must be refused: no browser page
+    // ever legitimately calls this route (bin/mcp.mjs holds the secret and sends it on
+    // every request, reads included -- see its own comment), so `wait` stays
+    // deliberately off every cookie-write allowlist rather than being added to one.
+    const sameOriginCookie = await rawRequest(port, 'GET', `/api/board/${asking.boardId}/wait?round=1`, `127.0.0.1:${port}`, {
+      headers: { origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin', cookie },
+    });
+    assert.equal(sameOriginCookie.status, 401, 'a same-origin GET /wait carrying only the cookie must also be refused -- this route is secret-only');
+
+    assert.notEqual(readBoard(artifact.boardId, home).comments[0].delivered, true,
+      'the pending comment must still be undelivered -- neither forged /wait may spend it');
+    const after = snapshotTree(home);
+    assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort(), 'no file may be added or removed by either forged /wait');
+    for (const rel of before.keys()) {
+      assert.equal(after.get(rel).sha, before.get(rel).sha, `${rel} must be byte-identical -- a forged /wait must write nothing`);
+    }
+
+    // The budget: the secret-holding caller this route exists for still works exactly
+    // as before, and still delivers the comment neither forged attempt above could
+    // spend -- this is a gate on the credential, not a blanket refusal of /wait.
+    await fetch(`${base}/api/board/${asking.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: askQid, status: 'answered', choice: 'Yes', note: '' }], comments: [] }),
+    });
+    const packet = await (await fetch(`${base}/api/board/${asking.boardId}/wait?round=1`)).json();
+    assert.equal(packet.status, 'submitted', 'the legitimate secret-holding wait still resolves normally');
+    assert.deepEqual(packet.comments.map(c => c.text), ['S1_UNDELIVERED'], 'and still drains the pending comment -- the fix gates the credential, not the feature');
+    assert.equal(readBoard(artifact.boardId, home).comments[0].delivered, true, 'now delivered, by the authorized caller');
   });
 
   await check('SEC: the documented recovery command re-authorizes a browser that holds nothing', async () => {

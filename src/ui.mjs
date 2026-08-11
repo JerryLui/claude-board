@@ -3,7 +3,7 @@
 //
 // Hydrates from the embedded board JSON; wires the four answer widgets (single,
 // multi, text, rank) and the per-question defer toggle; renders mermaid
-// client-side from its CDN; wires comments anchored at block and at element
+// client-side from its own vendored copy; wires comments anchored at block and at element
 // level (a dom path + hint inside an html stage, a mermaid node id inside a
 // rendered diagram) on the two kinds ADR.md entry 28 leaves commentable --
 // 'html' and 'mermaid', wherever they appear, and nothing else.
@@ -54,6 +54,13 @@ import {
 import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
 import { THEME_CHANGE_EVENT } from './theme.mjs';
 import { palettes } from './styles.mjs';
+// The vendored mermaid engine's own content-addressed sibling filename -- needed
+// here (not just in src/assets.mjs, which serves it) because the CLIENT SCRIPT
+// below has to know what to fetch. Spliced into the `ui` template literal by
+// value, same discipline as MERMAID_TOKEN_MAP just below: see
+// src/vendor/mermaid/index.mjs's own header for why both this file and
+// src/assets.mjs import the name from there rather than from each other.
+import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 
 // Mermaid variable -> CSS token, read at call time from the live computed style
 // rather than hardcoded a second time in the client script below. 'background'
@@ -3183,7 +3190,7 @@ export const ui = `
     }
   });
 
-  // --- mermaid: client-side from the CDN, exactly as /visualize does today ---
+  // --- mermaid: client-side, from the daemon's own vendored copy -----------
 
   // The real MERMAID_TOKEN_MAP module constant above, spliced in by value
   // (JSON.stringify, same discipline as MERMAID_NODE_SELECTOR above) so this
@@ -3191,6 +3198,12 @@ export const ui = `
   // test/check-mermaid-theme.mjs actually checks against src/styles.mjs's
   // palettes.
   var MERMAID_TOKEN_MAP = ${JSON.stringify(MERMAID_TOKEN_MAP)};
+  // The vendored engine's own bare sibling filename (src/vendor/mermaid/index.mjs),
+  // spliced in the same way -- this is what loadMermaidEngine() below fetches, and
+  // it resolves identically served (relative to '/b/<id>') and opened from Finder
+  // (relative to the archive's own folder), exactly like the page's other two
+  // siblings (ADR 70).
+  var MERMAID_ASSET = ${JSON.stringify(MERMAID_ASSET)};
 
   // Resolved the SAME way src/styles.mjs's own selectors resolve :root's
   // tokens: an explicit data-theme attribute wins outright; absent that, the
@@ -3254,9 +3267,9 @@ export const ui = `
     var result = mermaidQueue.then(fn, fn);
     // Never let one task's own bug wedge the chain for every task queued
     // after it -- each fn below already narrows its OWN real failures
-    // internally (offline, CDN, an unresolved theme token); anything
-    // reaching here would be a bug in this file, not mermaid's, and the
-    // chain has to keep moving regardless.
+    // internally (an engine that failed to load, an unresolved theme token);
+    // anything reaching here would be a bug in this file, not mermaid's, and
+    // the chain has to keep moving regardless.
     mermaidQueue = result.then(function () {}, function () {});
     return result;
   }
@@ -3273,6 +3286,40 @@ export const ui = `
   var mermaidRedrawGeneration = 0;
 
   var mermaidMod = null;
+  // A DOM element carrying an id or name of "mermaid" becomes 'window.mermaid'
+  // for free -- the platform's own named-property exposure on Window -- so
+  // truthiness alone cannot tell that apart from a genuinely loaded engine
+  // (the "window.mermaid clobber"). Checked by SHAPE instead, against the
+  // engine's own real API: 'run'/'initialize' both callable. mermaidMod is
+  // cached forever once set (the 'if (!mermaidMod)' guard below), so accepting
+  // a clobbering element here would not just misfire once -- it would poison
+  // every render and every future theme redraw for the rest of the page's
+  // life, permanently, on an element that has nothing to do with mermaid.
+  function looksLikeMermaidEngine(candidate) {
+    return !!candidate && typeof candidate.run === 'function' && typeof candidate.initialize === 'function';
+  }
+  // Load the vendored engine (src/vendor/mermaid/) as a CLASSIC script --
+  // never 'import()', and never 'type="module"'. Two independent reasons, both
+  // load-bearing: mermaid.min.js is upstream's own classic-script build (a
+  // top-level 'var' that only reaches globalThis under classic-script
+  // scoping -- an ES module's top-level 'var' stays module-scoped, so
+  // 'import()'ing it hands back nothing); and separately, a module fetch is
+  // CORS-gated regardless of same-origin-ness, so Chrome refuses one outright
+  // over 'file:' -- verified against real Chrome, both ways -- which is
+  // exactly the surface a Finder-opened board with a diagram has to keep
+  // working on with the network off. A dynamically inserted script element
+  // uses the same classic subresource-loading path this page's own two static
+  // tags already rely on (ADR 70), just triggered at runtime instead of being
+  // on every page, so a board with no diagram never pays for it.
+  function loadMermaidEngine() {
+    return new Promise(function (resolve, reject) {
+      var el = document.createElement('script');
+      el.addEventListener('load', function () { resolve(); });
+      el.addEventListener('error', function () { reject(new Error('mermaid engine failed to load')); });
+      el.setAttribute('src', MERMAID_ASSET);
+      document.head.appendChild(el);
+    });
+  }
   async function runMermaidRenderPass(root) {
     var nodes = qsa('pre.mermaid', root);
     if (!nodes.length) return;
@@ -3287,19 +3334,17 @@ export const ui = `
     });
     try {
       if (!mermaidMod) {
-        // PINNED to an exact version, never a floating range. A bare major resolved at
-        // request time, so the bytes that ran were whatever 11.x jsdelivr served that day
-        // -- and they run in the BOARD PAGE'S OWN ORIGIN, alongside #board-data and under
-        // connect-src 'self', so a bad publish could read every answer and submit as the
-        // reviewer. Dynamic import() cannot carry an SRI hash, so the version is the only
-        // pin available. Bumping it is deliberate work: change it here and in the one
-        // allowlist, src/render.mjs's CSP_CLAUSES (both CSP and INDEX_CSP build from it,
-        // and its script-src and font-src carry the version) -- which pins the VERSION,
-        // not the file: a CSP source expression ending in / is a prefix match, so every
-        // file under this package version is in policy, and a compromised jsdelivr could
-        // still serve a different one of them. See SECURITY.md on what that leaves open.
-        mermaidMod = window.mermaid
-          || (await import('https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.esm.min.mjs')).default;
+        // Never trust a pre-set window.mermaid by truthiness -- only accept it
+        // if it already has the real shape (a test's own mock, chiefly; a
+        // clobbering DOM element never does), otherwise load the vendored copy
+        // for real. A load that still doesn't leave the right shape behind
+        // takes the SAME catch as every other failure below, so a clobber (or
+        // a load that silently fails to attach) degrades exactly like an
+        // engine that was never reachable at all -- the source fallback,
+        // never mermaidMod cached as something useless forever.
+        if (!looksLikeMermaidEngine(window.mermaid)) await loadMermaidEngine();
+        if (!looksLikeMermaidEngine(window.mermaid)) throw new Error('mermaid engine did not load in the expected shape');
+        mermaidMod = window.mermaid;
       }
       // Initialize before EVERY run(), not once ever, on
       // whatever mermaidMod already is -- gating this behind "only the first
@@ -3310,17 +3355,17 @@ export const ui = `
       // the diagram is drawn from the same tokens as everything around it.
       var vars = mermaidThemeVariables();
       // An unresolved token must not reach initialize -- funnel it
-      // through the SAME catch as offline/CDN failure below, so it degrades
+      // through the SAME catch as a load/shape failure below, so it degrades
       // the same honest way: the source fallback, never a wiped diagram.
       if (!vars) throw new Error('mermaid theme token unresolved');
       mermaidMod.initialize({ startOnLoad: false, theme: 'base', themeVariables: vars });
       await mermaidMod.run({ nodes: nodes, suppressErrors: true });
-    } catch (e) { /* offline, CDN failure, or an unresolved theme token: fall through to the source fallback below */ }
+    } catch (e) { /* engine unavailable (never loaded, wrong shape, or a bad chart), or an unresolved theme token: fall through to the source fallback below */ }
     nodes.forEach(function (n) {
       var svg = n.querySelector('svg');
       if (svg) { wireMermaidBlock(n, svg); return; }
       // 'no svg' here is supposed to mean mermaid genuinely
-      // could not draw this node (offline/CDN unreachable, or -- under
+      // could not draw this node (engine unavailable, or -- under
       // suppressErrors -- mermaid's own error graphic, which IS an <svg> and
       // so already took the branch above). 'data-processed' already true
       // with STILL no svg only happens if some OTHER pass claimed this node
@@ -3337,7 +3382,7 @@ export const ui = `
       wrap.querySelector('code').textContent = n.textContent;
       n.replaceWith(wrap);
       // still wire pins (lost-styled, since there's no live SVG to position
-      // against) so an offline/CDN-unreachable view names what it can't show,
+      // against) so an engine-unavailable view names what it can't show,
       // rather than rendering nothing for mermaid comments at all. wireMermaidBlock
       // no-ops safely if wrap isn't inside a .mermaid-block section.
       wireMermaidBlock(wrap, null);
@@ -3362,7 +3407,7 @@ export const ui = `
   // recovered from the generated id, never the generated id itself) without
   // stacking a second click listener (isMermaidBlockWired, above).
   async function runMermaidRedrawPass() {
-    if (!mermaidMod) return; // never loaded (offline/CDN unreachable) -- nothing live to redraw
+    if (!mermaidMod) return; // engine never loaded -- nothing live to redraw
     var nodes = qsa('pre.mermaid', document);
     if (!nodes.length) return;
     // Validate BEFORE the destructive restore below -- an unresolved

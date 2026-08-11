@@ -710,18 +710,52 @@ static NSString *cb_secret_path(void) {
  * most one every CB_POLL_S, which is not a busy loop by any measure. */
 static NSString *cb_cached_secret = nil;
 
+/* `cb_cached_secret` above is read and written from more than one GCD queue at once: the
+ * poll queue (every `cb_request` call) and CBEventStream's own private delegate queue
+ * (`didCompleteWithError:`'s `cb_forget_secret()`, on the SSE session's own queue — NOT
+ * `cb_poll_queue` — since a reconnect ATTEMPT is what `cb_stream_schedule_reconnect`
+ * serializes onto the poll queue, not the drop notification that precedes it) are two
+ * independent serial queues that never rendezvous with each other. An unguarded `static`
+ * object pointer is not safe against that: an assignment retains the new value and
+ * releases the old one, and two threads racing the same assignment can double-release a
+ * value the other thread still holds, which is a crash in the one process holding the
+ * reader's TCC identity. `cb_secret_lock` below is created exactly once, however many
+ * threads reach for it first, and every read and write of `cb_cached_secret` happens
+ * inside it — never the blocking file read itself, which stays outside the lock so a slow
+ * disk cannot stall an unrelated queue's own access to the cache. */
+static NSLock *cb_secret_lock(void) {
+  static NSLock *lock = nil;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    lock = [[NSLock alloc] init];
+  });
+  return lock;
+}
+
 static NSString *cb_secret(void) {
-  if (cb_cached_secret != nil) return cb_cached_secret;
+  [cb_secret_lock() lock];
+  NSString *cached = cb_cached_secret;
+  [cb_secret_lock() unlock];
+  if (cached != nil) return cached;
+
   NSString *file = cb_secret_path();
   if (file == nil) return nil;
   NSString *raw = [NSString stringWithContentsOfFile:file encoding:NSUTF8StringEncoding error:NULL];
   NSString *trimmed =
       [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-  cb_cached_secret = trimmed.length > 0 ? trimmed : nil;
-  return cb_cached_secret;
+  NSString *value = trimmed.length > 0 ? trimmed : nil;
+
+  [cb_secret_lock() lock];
+  cb_cached_secret = value;
+  [cb_secret_lock() unlock];
+  return value;
 }
 
-static void cb_forget_secret(void) { cb_cached_secret = nil; }
+static void cb_forget_secret(void) {
+  [cb_secret_lock() lock];
+  cb_cached_secret = nil;
+  [cb_secret_lock() unlock];
+}
 
 static int cb_port(void) {
   NSString *value = [[[NSProcessInfo processInfo] environment] objectForKey:@"CLAUDE_BOARD_PORT"];
@@ -774,6 +808,55 @@ static int cb_bool(NSDictionary *dict, NSString *key, int fallback) {
   return [value isKindOfClass:[NSNumber class]] ? ([value boolValue] ? 1 : 0) : fallback;
 }
 
+/* `cb_request`'s own delegate, whose entire job is refusing every HTTP redirect outright.
+ * `[NSURLSession sharedSession]` — what this function used before — has no delegate at
+ * all, and NSURLSession auto-follows a redirect when nothing tells it not to: a `302
+ * Location:` pointing off this machine would silently carry the `x-claude-board-secret`
+ * header above wherever it named, laundered through this signed, TCC-granted process.
+ * Refusing EVERY redirect, not just an off-origin one — a loopback client never has a
+ * request that is correctly redirected, so there is no case where following one is right,
+ * and telling off-origin apart from same-origin would be machinery kept alive for a
+ * distinction this client has no use for. Returning `nil` to the completion handler is the
+ * refusal: NSURLSession then hands the redirect response itself back as the final answer,
+ * exactly as if this process had never heard of redirects at all. */
+@interface CBNoRedirectDelegate : NSObject <NSURLSessionTaskDelegate>
+@end
+
+@implementation CBNoRedirectDelegate
+- (void)URLSession:(NSURLSession *)session
+                          task:(NSURLSessionTask *)task
+    willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+                    newRequest:(NSURLRequest *)request
+             completionHandler:(void (^)(NSURLRequest *))completionHandler {
+  (void)session;
+  (void)task;
+  (void)response;
+  (void)request;
+  completionHandler(nil);
+}
+@end
+
+/* Created once and reused for the rest of the process's life — a fresh NSURLSession per
+ * call would be pure churn against a delegate that never needs to change. `cb_request`
+ * below is reachable from more than one queue at once (the timer-driven poll on
+ * `cb_poll_queue`, and — via `cb_poll_once` — the zero-crossing re-fetch dispatched on the
+ * global concurrent queue, which this file does not own and does not fix here), so a plain
+ * lazily-assigned static is exactly the S5 bug again: two threads racing past a `== nil`
+ * check both assign, and ARC releases the loser's session while it is still in use.
+ * `dispatch_once`, the same idiom `cb_secret_lock()` above uses, creates it exactly once
+ * however many threads reach for it first, and needs no lock on the read path after
+ * that. */
+static NSURLSession *cb_request_session(void) {
+  static NSURLSession *session = nil;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
+                                             delegate:[[CBNoRedirectDelegate alloc] init]
+                                        delegateQueue:nil];
+  });
+  return session;
+}
+
 /* One request, synchronously, and — until `cb_stream_probe` below, ticket 01's test seam
  * only — the only place in this file that speaks HTTP. NEVER call this on the main thread
  * while the item is up: it blocks, and the whole point of the poll queue below is that the
@@ -819,7 +902,7 @@ static NSData *cb_request(NSString *method, const char *path, NSData *body) {
   __block NSData *reply = nil;
   __block NSInteger status = 0;
   dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+  NSURLSessionDataTask *task = [cb_request_session()
       dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
           if (error == nil && [response isKindOfClass:[NSHTTPURLResponse class]]) {
@@ -898,6 +981,25 @@ static NSData *cb_request(NSString *method, const char *path, NSData *body) {
   self.statusCode = [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
   dispatch_semaphore_signal(self.headersSem);
   completionHandler(NSURLSessionResponseAllow);
+}
+
+/* Refuses every redirect, the same policy and the same reason `CBNoRedirectDelegate` above
+ * carries for `cb_request`'s own session: this probe is a real HTTP client on real
+ * loopback, holding the same secret header, and `NSURLSessionDataDelegate` already
+ * inherits `NSURLSessionTaskDelegate`, so this method is reachable with no change to the
+ * `@interface` above. A refused redirect's response lands in `didReceiveResponse:` above
+ * exactly like any other, `statusCode` and all — a redirecting stub is therefore reported
+ * the same as any other non-200 answer, never followed. */
+- (void)URLSession:(NSURLSession *)session
+                          task:(NSURLSessionTask *)task
+    willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+                    newRequest:(NSURLRequest *)request
+             completionHandler:(void (^)(NSURLRequest *))completionHandler {
+  (void)session;
+  (void)task;
+  (void)response;
+  (void)request;
+  completionHandler(nil);
 }
 
 /* Every chunk the stream delivers, appended and re-decoded whole rather than parsed
@@ -1345,6 +1447,25 @@ static void cb_stream_schedule_reconnect(void) {
     if (self.connectedSem != nil) dispatch_semaphore_signal(self.connectedSem);
   }
   completionHandler(NSURLSessionResponseAllow);
+}
+
+/* Refuses every redirect, the same policy and the same reason `CBNoRedirectDelegate` (near
+ * `cb_request`) and `CBStreamProbe`'s own copy above both carry — this connection is held
+ * for the length of a login session and authorized by the same secret header, so it is no
+ * less exposed to a hijacked port's `Location:` than either of them. A refused redirect's
+ * response arrives at `didReceiveResponse:` above like any other: `status != 200` leaves
+ * the connection never marked live, and `didCompleteWithError:` below runs its ordinary
+ * reconnect-and-forget-the-secret path once the response body (if any) finishes. */
+- (void)URLSession:(NSURLSession *)session
+                          task:(NSURLSessionTask *)task
+    willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+                    newRequest:(NSURLRequest *)request
+             completionHandler:(void (^)(NSURLRequest *))completionHandler {
+  (void)session;
+  (void)task;
+  (void)response;
+  (void)request;
+  completionHandler(nil);
 }
 
 /* Ticket 03: every way this connection can end — the daemon dropping it, never answering at

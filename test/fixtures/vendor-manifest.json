@@ -1,6 +1,9 @@
 {
   "marked/LICENSE": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c",
   "marked/marked.esm.js": "2c9b2113f8ef95ad21349952644fc1b3f759f0f92aff2ad4016a574b5ce19de5",
+  "mermaid/LICENSE": "ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80",
+  "mermaid/index.mjs": "567a7564b041f9370284037654416865403f2181b7019aa240cba6acf3f5d5cf",
+  "mermaid/mermaid.min.js": "18327bef70d96fb505fe7287d9f6a7362ebf07ff6576ddfaffb1a06f3e1a2954",
   "prism/LICENSE": "2b947f0901a7ffcf08a89957da9783c0e9c6e72cb6ce8e959f501ab5409e4d2b",
   "prism/components/prism-bash.cjs": "6c67db1a4c86269dc754b588d0ad3a0cdb295044fd466ea6f66bbf01dec306bd",
   "prism/components/prism-c.cjs": "326fe0f50c2f00c5c9cf741b693654e215017b5d16a86c1c7938455cc64b340b",

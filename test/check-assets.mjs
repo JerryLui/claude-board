@@ -32,7 +32,7 @@ import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
 import { readBoard, writeSharedAssets } from '../src/store.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { sharedAssets, assetsNamedBy, SCRIPT_ASSET, STYLE_ASSET, ASSET_NAME } from '../src/assets.mjs';
+import { sharedAssets, assetsNamedBy, SCRIPT_ASSET, STYLE_ASSET, MERMAID_ASSET, ASSET_NAME } from '../src/assets.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
 import { parseHTML } from './dom-stand-in.mjs';
@@ -261,10 +261,18 @@ async function main() {
     .replace(`<script defer src="${SCRIPT_ASSET}"></script>`, `<script type="module">${ui}</script>`);
   writeFileSync(legacyPath, legacyHtml, 'utf8');
 
-  await check('AC 10: setup -- the stand-in really is an old-shaped page, carrying both payloads and naming no sibling', () => {
+  await check('AC 10: setup -- the stand-in really is an old-shaped page, carrying both payloads and naming no sibling FILE', () => {
     assert.ok(legacyHtml.includes(ui) && legacyHtml.includes(styles), 'setup failure: the stand-in does not carry the payloads');
     assert.deepEqual(referencesIn(legacyHtml), [], 'setup failure: the stand-in still references something');
-    assert.deepEqual(assetsNamedBy(legacyHtml), [], 'setup failure: the stand-in names a shared asset');
+    // NOT an empty array any more: this page inlines the whole `ui` string
+    // verbatim, and `ui` itself now names the vendored mermaid engine's bare
+    // filename as a literal (src/ui.mjs's own splice, next to MERMAID_TOKEN_MAP)
+    // -- assetsNamedBy over-reports by design (it scans bytes, not tags), so it
+    // correctly finds that mention even though nothing here is an actual
+    // `<script src>`/`<link href>` reference. `referencesIn`, just above, is
+    // still the one that proves "no sibling FILE reference" -- that stays [].
+    assert.deepEqual(assetsNamedBy(legacyHtml), [MERMAID_ASSET],
+      'setup failure: the stand-in must name exactly the mermaid engine (transitively, via its inlined ui string) and nothing else');
   });
 
   await check('AC 10: a page already on disk is never rewritten -- not by a read, not by another board being posted', async () => {
@@ -308,10 +316,23 @@ async function main() {
     for (const name of referenced) {
       assert.ok(assetsOnDisk.has(name), `a page names ${name}, which is not in pages/`);
     }
-    // The three generations this run has produced: the current pair, plus the two of the
-    // next generation written above. All still there, none replaced.
-    assert.equal(assetsOnDisk.size, 4, `expected four asset files to have accumulated, found ${[...assetsOnDisk].join(', ')}`);
-    assert.deepEqual([...referenced].sort(), [SCRIPT_ASSET, STYLE_ASSET].sort(),
+    // The three generations this run has produced: the current ui/styles pair, plus the
+    // two of the next generation written above -- four files, all still there, none
+    // replaced -- PLUS the one vendored mermaid engine, written once (SHARED_ASSETS'
+    // never-overwrite guard, src/store.mjs) the first time any page was written in this
+    // run, and never duplicated since (it has no "next generation" to simulate here --
+    // see src/assets.mjs's own comment on why it sits outside sharedAssets()).
+    assert.equal(assetsOnDisk.size, 5, `expected five asset files to have accumulated, found ${[...assetsOnDisk].join(', ')}`);
+    // An ORDINARY board page never names mermaid directly -- it is loaded only from
+    // inside ui.js, on demand (src/ui.mjs), never from a page's own markup -- so this
+    // set would otherwise be just [SCRIPT_ASSET, STYLE_ASSET]. It carries MERMAID_ASSET
+    // too here only because the AC 10 fixture above inlines the whole `ui` string
+    // verbatim into a page, and `ui` itself names mermaid's filename as a literal (the
+    // same over-report `assetsNamedBy` is designed to produce, pinned by name at AC 10's
+    // own setup check). test/check-prune.mjs is where mermaid's transitive survival
+    // through an ORDINARY page (naming only ui.js, which in turn names mermaid.js) is
+    // pinned end to end, including a sweep that must not collect it.
+    assert.deepEqual([...referenced].sort(), [SCRIPT_ASSET, STYLE_ASSET, MERMAID_ASSET].sort(),
       'only the generation the pages were written against is referenced -- the other two are exactly what a prune exists to collect');
   });
 }

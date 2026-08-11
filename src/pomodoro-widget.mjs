@@ -41,9 +41,9 @@
 import { cueNames } from './cues.mjs';
 
 // Stroke-based inline glyph, same family as src/theme.mjs's three theme icons
-// and src/render.mjs's COMMENT_ICON. No external assets beyond the two bare
-// sibling filenames QUIRKS.md now admits (ADR.md entry 70) -- an icon is not one of them
-// (QUIRKS.md).
+// and src/render.mjs's COMMENT_ICON. No external assets beyond the three bare
+// sibling filenames QUIRKS.md now admits ("No external assets — not even mermaid,
+// now three bare sibling filenames"; ADR.md entry 70) -- an icon is not one of them.
 // The widget's name, drawn rather than written: the word "Pomodoro" used to
 // prefix the status text, which cost header width on every reader's screen to
 // repeat something the icon says once. `role="img"` + `<title>` is what keeps

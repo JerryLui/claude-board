@@ -183,11 +183,17 @@ static const char *const OVERRIDE_ENV[] = {
 enum { OVERRIDE_ENV_N = (int)(sizeof(OVERRIDE_ENV) / sizeof(OVERRIDE_ENV[0])) };
 
 /* The passthrough allowlist: copied from the parent's environment only if present, and
- * only under this exact name — no prefix match, no wildcard. Every name here is a
- * timing or port knob; none of them can change what directory gets read, served or
- * written, which is what makes it safe to leave these operator-tunable from the plist
- * without a rebuild. Anything not named here — NODE_OPTIONS chief among them, since it
- * is arbitrary code that runs the instant node starts, and CLAUDE_BOARD_SECRET_FILE,
+ * only under this exact name — no prefix match, no wildcard. Seven of these eight names
+ * are timing or port knobs; none of THOSE seven can change what directory gets read,
+ * served or written, which is what makes it safe to leave them operator-tunable from the
+ * plist without a rebuild. TMPDIR is the exception: it does name a directory. It is left
+ * on this list anyway because nothing on the daemon's request path (this repo ships no
+ * npm dependencies at all) reads process.env.TMPDIR or calls os.tmpdir(), and none of the
+ * variables that actually decide the read/write/serve boundary — HOME, CLAUDE_BOARD_HOME,
+ * CLAUDE_BOARD_REF_ROOTS, all in OVERRIDE_ENV above — are derived from it, so retargeting
+ * it cannot move that boundary; see SECURITY.md "The environment the daemon runs in" for
+ * the fuller version of this. Anything not named here — NODE_OPTIONS chief among them,
+ * since it is arbitrary code that runs the instant node starts, and CLAUDE_BOARD_SECRET_FILE,
  * since HOME is baked above precisely so the daemon's default secret path is the only
  * one it can reach — is simply absent from the child's environment: not stripped out of
  * it, just never copied in. */

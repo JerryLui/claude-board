@@ -24,14 +24,14 @@
 // entire failure mode worth defending against.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
-import { sharedAssets, assetsNamedBy, SCRIPT_ASSET, STYLE_ASSET, ASSET_NAME } from '../src/assets.mjs';
+import { sharedAssets, assetsNamedBy, SCRIPT_ASSET, STYLE_ASSET, MERMAID_ASSET, ASSET_NAME } from '../src/assets.mjs';
 import { writeSharedAssets } from '../src/store.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -276,6 +276,27 @@ async function main() {
     }
   });
 
+  await check('AC 13: mermaid survives a prune through an ORDINARY page, even though no page names it directly -- the sweep must follow the transitive reference via ui.js', async () => {
+    // An ordinary board, through the real daemon -- writePage (src/store.mjs) writes
+    // mermaid alongside ui.js/styles.css for every page (SHARED_ASSETS, src/assets.mjs),
+    // whether or not this particular board carries a mermaid block at all.
+    const survivor = (await post('Names mermaid only transitively', [{ kind: 'markdown', text: '# still here' }])).boardId;
+    assert.equal(existsSync(path.join(pagesDir, MERMAID_ASSET)), true,
+      'setup failure: the vendored engine must already be on disk, written alongside every page');
+    assert.deepEqual(assetsNamedBy(readFileSync(pagePath(survivor), 'utf8')).filter(n => n === MERMAID_ASSET), [],
+      'setup failure: an ORDINARY page must not name mermaid directly -- it is loaded only from inside ui.js, on demand (src/ui.mjs), never from a page\'s own markup');
+    assert.ok(assetsNamedBy(readFileSync(path.join(pagesDir, SCRIPT_ASSET), 'utf8')).includes(MERMAID_ASSET),
+      'setup failure: the CURRENT ui.js asset must itself name mermaid (src/ui.mjs splices MERMAID_ASSET into its own bytes) -- this is the transitive link a prune has to follow');
+
+    // A window nothing on disk is older than: no board goes, so this isolates the sweep
+    // half exactly like the orphan check below does.
+    const res = await prune({ days: 3650 });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.boards, 0, 'setup failure: this prune must remove no board');
+    assert.equal(existsSync(path.join(pagesDir, MERMAID_ASSET)), true,
+      'mermaid must survive the sweep even though no page names it directly -- src/store.mjs\'s sweepUnreferencedAssets has to scan every surviving ASSET\'s bytes too, not just every page\'s, or this is exactly the file it would wrongly reclaim');
+  });
+
   await check('AC 13: an asset no page has EVER named is reclaimed too -- the sweep is about references, not about which board went', async () => {
     const orphan = sharedAssets('/* named by nothing at all */', '/* nor this */');
     writeSharedAssets(home, orphan);
@@ -287,6 +308,30 @@ async function main() {
     for (const a of orphan) assert.equal(existsSync(path.join(pagesDir, a.name)), false, `${a.name} is named by nothing and must go`);
     for (const name of [SCRIPT_ASSET, STYLE_ASSET]) {
       assert.equal(existsSync(path.join(pagesDir, name)), true, `${name} is still named by a live page`);
+    }
+  });
+
+  await check('a sweep failure after boards are already gone still reports how many were removed, not a bare fs error', async () => {
+    // sweepUnreferencedAssets (src/store.mjs) reads every surviving ASSET's bytes too, not
+    // just every page's (the mermaid transitive-reference test above) -- so an asset-named
+    // entry that cannot be read as UTF8 text throws there. A directory is the deterministic
+    // way to hit that: readdirSync lists it, ASSET_NAME matches its name, and readFileSync
+    // on a directory throws EISDIR, never ENOENT, so the sweep's read loop rethrows it.
+    const doomed = (await post('Gone before the sweep trips', [{ kind: 'markdown', text: '# aged out' }])).boardId;
+    ageBoard(doomed, 40);
+    const trap = path.join(pagesDir, 'mermaid-1111111111111111.js');
+    mkdirSync(trap);
+    try {
+      const res = await prune({ days: 30 });
+      assert.equal(res.status, 500, `a sweep failure must still answer -- got ${res.status}: ${JSON.stringify(res.body)}`);
+      // The board above is unlinked, for real, before the sweep ever runs (pruneStore's own
+      // ordering comment) -- that destructive step already succeeded and must not vanish
+      // from the response just because the step after it failed.
+      assert.equal(existsSync(boardPath(doomed)), false, 'the aged board must actually be gone, sweep failure or not');
+      assert.match(res.body.error, /deleted 1 board/, `the error must name how many boards this call already removed, got: ${res.body.error}`);
+      assert.match(res.body.error, /EISDIR|illegal operation/i, `and still carry the underlying fs failure, got: ${res.body.error}`);
+    } finally {
+      rmSync(trap, { recursive: true, force: true }); // or every later prune in this file trips the same trap
     }
   });
 

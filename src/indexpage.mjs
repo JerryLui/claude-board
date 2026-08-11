@@ -259,8 +259,8 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
  * fallback whenever the stream is down, and it is the only thing that ever re-labels
  * "a minute ago" on a row nothing has changed, which no push could do — nothing
  * happened, and that is precisely when the label moves. Small, dependency-free,
- * inline (QUIRKS.md "No external assets — except two bare sibling filenames"; an
- * icon is not one of them),
+ * inline (QUIRKS.md "No external assets — not even mermaid, now three bare
+ * sibling filenames"; an icon is not one of them),
  * and wired entirely from this script rather than from `onclick` attributes: the
  * index page carries no CSP `<meta>` today (the board page does), and that is not
  * a license to wire any differently than a page that does.

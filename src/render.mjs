@@ -55,7 +55,7 @@ import {
  * at all to carry a header on. `frame-ancestors` and `form-action` are silently
  * ignored when a policy is delivered via `<meta>` (a browser platform
  * limitation, not a mistake here) — `default-src`/`script-src`/`style-src`/
- * `img-src`/`font-src`/`connect-src`/`base-uri` are all still honoured, which is
+ * `img-src`/`connect-src`/`base-uri` are all still honoured, which is
  * the half that actually constrains a mock's own script: with
  * `allow-same-origin` dropped (see renderHtmlBlock's own design comment) the
  * stage can no longer forge same-origin fetches at all, but an archived page's
@@ -64,24 +64,39 @@ import {
  * script, same-origin with a `file://` parent, self-navigating to an external
  * URL with no CSP to stop it). Scoped to what the page genuinely uses: its own
  * inline `<script>` (the theme boot script, so `'unsafe-inline'` is load-bearing,
- * not laziness), the two content-addressed siblings it names (`'self'`, ADR 70),
- * mermaid's dynamic `import()` from jsdelivr
- * (src/ui.mjs), and same-origin fetch/EventSource — nothing else can load, no
- * form can post anywhere, no `<base>` can re-point a relative URL.
+ * not laziness), the content-addressed siblings a page names (`'self'`, ADR 70),
+ * and same-origin fetch/EventSource — nothing else can load, no external host is
+ * named anywhere in this policy, no form can post anywhere, no `<base>` can
+ * re-point a relative URL.
  *
- * `'self'` is what admits the sibling script and stylesheet, and it does so on BOTH
- * surfaces: served, the origin is the daemon's; opened from Finder, Chrome's origin for a
- * `file:` document is `file://` and a sibling `file:` URL matches it. Verified against real
- * Chrome rather than assumed — a `file:` page under this exact meta policy loads both
- * siblings. Deliberately NOT widened to a bare `file:` scheme source, which would also work
- * but would hand an archived board's untrusted `html` stage (it inherits this policy
- * through its `srcdoc`) the ability to pull any script off the reader's disk. */
+ * `'self'` is what admits every sibling — script, stylesheet, and mermaid's vendored
+ * engine alike — and it does so on BOTH surfaces: served, the origin is the daemon's;
+ * opened from Finder, Chrome's origin for a `file:` document is `file://` and a sibling
+ * `file:` URL matches it. Verified against real Chrome rather than assumed — a `file:`
+ * page under this exact meta policy loads every sibling. Deliberately NOT widened to a
+ * bare `file:` scheme source, which would also work but would hand an archived board's
+ * untrusted `html` stage (it inherits this policy through its `srcdoc`) the ability to
+ * pull any script off the reader's disk.
+ *
+ * mermaid used to need its own allowance here — `script-src`/`font-src` both named
+ * `cdn.jsdelivr.net/npm/mermaid@<version>/`, a version-pinned prefix (the only pin a
+ * dynamic `import()` can carry, since it cannot ship an SRI hash) that still let a
+ * compromised jsdelivr serve any file under that one version. Vendored now (a
+ * digest-pinned file under src/vendor/mermaid/, loaded the same content-addressed,
+ * same-origin way as the other two siblings — see src/ui.mjs), that CDN allowance is
+ * gone outright rather than re-pinned: no clause in this policy names an external host
+ * at all. `font-src` keeps exactly `data:` — narrowed, not dropped: the CDN fetch it
+ * used to admit is gone, but an `html` stage renders at an opaque origin and inherits
+ * this policy through its `srcdoc` (see above), and the manual
+ * (skills/claude-board/SKILL.md) tells artifact authors to inline every font as a
+ * `data:` URI for exactly that reason. Without this clause `default-src 'none'` leaves
+ * a `data:` font with no source at all. */
 const CSP_CLAUSES = [
   "default-src 'none'",
-  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
+  "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
-  "font-src data: https://cdn.jsdelivr.net/npm/mermaid@11.16.1/",
+  "font-src data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",
   "base-uri 'none'",
@@ -2464,14 +2479,21 @@ ${roundPagerMarkup(board, initialRoundInView)}
  *
  * A bare 401 is a correct status and a useless answer: the reader sees an empty tab and
  * has no way to tell a broken install from a cleared cookie jar. So this names the exact
- * command, with an absolute path (src/handoff.mjs `recoveryCommand`), selectable and
- * pasteable.
+ * command, selectable and pasteable — whatever `recoveryCommand` (src/handoff.mjs) the
+ * caller hands in. The caller matters here: src/server.mjs's `sendCredentialRefusal`
+ * deliberately passes the RELATIVE form (`recoveryCommand(undefined, { absolute: false })`),
+ * never the absolute one, because this page renders to any TAB that lands on the read
+ * gate — a cross-origin-shaped navigation among them — and the absolute form is a real
+ * filesystem path (`/Users/<name>/...` on a stock macOS clone) this function would
+ * otherwise print verbatim to a caller the gate could not verify.
  *
- * It renders NOTHING about the request. No board id, no title, no store contents, not
- * even whether the board exists — the whole point of the gate is that an unauthorized
- * caller learns nothing behind it, and a "board not found" here would leak existence to
- * anything that could enumerate ids. Self-contained (inline style only, no script, no
- * network) so it renders under the same locked-down CSP every board page carries. */
+ * It renders NOTHING about the request, and nothing about the machine it runs on. No
+ * board id, no title, no store contents, not even whether the board exists — the whole
+ * point of the gate is that an unauthorized caller learns nothing behind it, and a
+ * "board not found" here would leak existence to anything that could enumerate ids; no
+ * absolute path or username either, for the same reason. Self-contained (inline style
+ * only, no script, no network) so it renders under the same locked-down CSP every board
+ * page carries. */
 export function renderRefusalPage(recoveryCommand) {
   // The seven tokens this page actually uses, emitted inline from the real palettes
   // rather than hand-copied out of them. Self-containment (see above) rules out a

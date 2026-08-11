@@ -2569,6 +2569,201 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------------
+  // No redirect is ever followed, at any of the three sites in bin/menubar.m that speak
+  // HTTP -- an unhandled 302 is exactly how a process that squats the daemon's port ahead
+  // of the real one (loopback is trusted here; owning port 7391 first is not) could
+  // otherwise launder the secret header to a host of its own choosing.
+  // -------------------------------------------------------------------------------------
+
+  /** Two stubs: one standing in for the daemon's own port -- which legitimately sees the
+   * secret header on its first hop, same as the real daemon would, since nothing on this
+   * side can tell a hijacked port apart from a live one before it answers -- and a second,
+   * wholly separate server the first's `302 Location:` points at. The second is the actual
+   * assertion surface: if any request site below ever followed the redirect, the secret
+   * would show up THERE, on a connection the fix has to make sure never opens at all. A
+   * real second server rather than an unreachable `https://elsewhere/` is deliberate: an
+   * unresolvable host "passes" whether the client tried and failed to reach it or never
+   * tried at all, proving nothing, while a live target that counts its own requests tells
+   * the two apart. */
+  function startRedirectStub() {
+    let redirectRequests = 0;
+    let targetRequests = 0;
+    let targetSawSecret = false;
+    const target = http.createServer((req, res) => {
+      targetRequests++;
+      if (req.headers[SECRET_HEADER]) targetSawSecret = true;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    return new Promise((resolve, reject) => {
+      target.once('error', reject);
+      target.listen(0, '127.0.0.1', () => {
+        const targetPort = target.address().port;
+        const stub = http.createServer((req, res) => {
+          redirectRequests++;
+          res.writeHead(302, { Location: `http://127.0.0.1:${targetPort}/` });
+          res.end();
+        });
+        stub.once('error', reject);
+        stub.listen(0, '127.0.0.1', () => {
+          resolve({
+            port: stub.address().port,
+            get redirectRequests() { return redirectRequests; },
+            get targetRequests() { return targetRequests; },
+            get targetSawSecret() { return targetSawSecret; },
+            close: () => Promise.all([
+              new Promise(r => stub.close(r)),
+              new Promise(r => target.close(r)),
+            ]),
+          });
+        });
+      });
+    });
+  }
+
+  await check('the menu bar sends no credential to a redirecting host, and never follows the redirect at all -- checked at each of the three request sites', async () => {
+    const stub = await startRedirectStub();
+    try {
+      const home = makeProbeHome(randomBytes(32).toString('hex'));
+      // Three sites, three ways to observe "refused": cb_request (the plain probe) folds a
+      // redirect into the same `answered=no` every other non-200 answer gets; cb_stream_probe
+      // and cb_stream_start (the one-shot `stream` probe and the held-open `live` probe) both
+      // report it as `stream=refused`, exactly as they would for any daemon that never
+      // answered with a 200 at all.
+      const cases = [
+        { name: 'cb_request (the plain probe)', args: [],
+          assertRefused: state => assert.equal(state.answered, 'no', 'a redirect must read exactly like any other non-200 answer -- refused, not followed') },
+        { name: 'cb_stream_probe (`--probe stream`)', args: ['stream', '1'],
+          assertRefused: state => assert.equal(state.stream, 'refused') },
+        { name: 'cb_stream_start (`--probe live`)', args: ['live', '1'],
+          assertRefused: state => assert.equal(state.stream, 'refused') },
+      ];
+      for (const c of cases) {
+        const before = stub.targetRequests;
+        const state = await probe({ home, port: stub.port, args: c.args });
+        assert.equal(state.code, 0, `${c.name} must report, not crash: ${state.stderr}`);
+        c.assertRefused(state);
+        assert.equal(stub.targetRequests, before,
+          `${c.name}: the redirect target must receive zero requests -- "not followed at all" means the connection to it never even opens`);
+      }
+      assert.ok(stub.redirectRequests >= cases.length,
+        'setup: the stub standing in for the daemon must actually have been asked by all three sites, or this proves nothing');
+      assert.equal(stub.targetSawSecret, false, 'the secret header must never reach the redirect target, under any of the three sites');
+    } finally {
+      await stub.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------------------
+  // cb_cached_secret is read and written from more than one GCD queue: the poll queue
+  // (every cb_request call) and, separately, CBEventStream's own private delegate queue
+  // (didCompleteWithError's cb_forget_secret(), on the SSE session's own queue -- not the
+  // poll queue, since cb_stream_schedule_reconnect only serializes the RECONNECT ATTEMPT
+  // onto it, not the drop notification that precedes that attempt). Two independent serial
+  // queues that never rendezvous, both touching one unguarded static object pointer, is a
+  // real data race: an assignment retains the new value and releases the old one, and two
+  // threads racing the same assignment can double-release a value the other still holds --
+  // a crash in the one process holding the reader's TCC identity.
+  //
+  // A black-box test cannot reliably force that race to fire in a bounded window -- it is
+  // the classic shape of bug that stays invisible until the wrong two nanoseconds line up,
+  // the same reasoning ticket 03's own structural pin (`cb_state_answered_at is written in
+  // exactly one place`, above) already applies to a different shared field. This pins the
+  // STRUCTURAL property that removes the race instead of trying to reproduce it: every
+  // touch of the shared pointer goes through one lock, and nothing touches it any other way.
+  // -------------------------------------------------------------------------------------
+
+  /** A minimal comment-and-string-aware stripper, local to this one check: block comments,
+   * line comments and `"..."` string literals are all dropped, so a plain identifier search
+   * below cannot be fooled by this file's own prose mentioning `cb_cached_secret` by name
+   * (as the block comment above cb_secret_lock does) into thinking that is a live touch of
+   * the pointer. Objective-C has no regex literals to confuse a scanner the way QUIRKS.md's
+   * `stripJsComments` entry warns a JS one can be -- a plain character walk is enough here. */
+  function stripObjCComments(text) {
+    let out = '';
+    let i = 0;
+    while (i < text.length) {
+      const two = text.slice(i, i + 2);
+      if (two === '/*') {
+        const end = text.indexOf('*/', i + 2);
+        i = end === -1 ? text.length : end + 2;
+        continue;
+      }
+      if (two === '//') {
+        const end = text.indexOf('\n', i + 2);
+        i = end === -1 ? text.length : end;
+        continue;
+      }
+      if (text[i] === '"') {
+        let j = i + 1;
+        while (j < text.length && text[j] !== '"') {
+          if (text[j] === '\\') j++;
+          j++;
+        }
+        out += text.slice(i, j + 1);
+        i = j + 1;
+        continue;
+      }
+      out += text[i];
+      i++;
+    }
+    return out;
+  }
+
+  await check('the cb_cached_secret accessor is lock-guarded, and it is the only place the shared secret pointer is ever touched -- the fix for a data race between the poll queue and the stream\'s own delegate queue', async () => {
+    const source = stripObjCComments(readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8'));
+    assert.match(source, /static NSLock \*cb_secret_lock\(void\)/, 'a lock guarding the secret cache must exist');
+
+    const secretStart = source.indexOf('static NSString *cb_secret(void) {');
+    const secretEnd = source.indexOf('\n}', secretStart) + 2;
+    const forgetStart = source.indexOf('static void cb_forget_secret(void) {');
+    const forgetEnd = source.indexOf('\n}', forgetStart) + 2;
+    const declarationStart = source.indexOf('static NSString *cb_cached_secret = nil;');
+    assert.ok(declarationStart > 0 && secretStart > declarationStart && forgetStart > secretStart,
+      'setup: the declaration and both accessors must still be findable by name, in order');
+    const declarationEnd = source.indexOf(';', declarationStart) + 1;
+
+    // Every occurrence of the identifier, comments and string literals excluded, must fall
+    // inside its own declaration or one of the two accessor bodies -- proving nothing else
+    // in the file reaches around them to touch the pointer directly.
+    const occurrences = [...source.matchAll(/\bcb_cached_secret\b/g)].map(m => m.index);
+    assert.ok(occurrences.length >= 4,
+      `setup: expected at least a declaration plus one read and one write in each accessor, found ${occurrences.length}`);
+    for (const at of occurrences) {
+      const insideDeclaration = at >= declarationStart && at < declarationEnd;
+      const insideSecret = at >= secretStart && at < secretEnd;
+      const insideForget = at >= forgetStart && at < forgetEnd;
+      assert.ok(insideDeclaration || insideSecret || insideForget,
+        `cb_cached_secret touched outside its declaration and its two lock-guarded accessors, at offset ${at} -- exactly the unguarded access the fix closes`);
+    }
+
+    // And inside each accessor, the touch is actually bracketed by the lock -- finding the
+    // lock nearby is not the same as the read or write happening inside it.
+    for (const [name, body] of [['cb_secret', source.slice(secretStart, secretEnd)], ['cb_forget_secret', source.slice(forgetStart, forgetEnd)]]) {
+      assert.match(body, /\[cb_secret_lock\(\) lock\]/, `${name} must lock before touching the cache`);
+      assert.match(body, /\[cb_secret_lock\(\) unlock\]/, `${name} must unlock after`);
+    }
+
+    // cb_request's own session is a second process-lifetime shared resource reachable from
+    // more than one queue at once: the timer-driven poll on cb_poll_queue, and -- via
+    // cb_poll_once, from the zero-crossing re-fetch -- the global concurrent queue. A plain
+    // lazily-assigned module-level static here is the exact same race in a new spot: two
+    // threads racing an `== nil` check both assign, and ARC releases the loser's session
+    // while it is still in use. Pinned the same way cb_secret_lock is pinned above --
+    // dispatch_once is the only allowed gate, and a hand-rolled check-then-assign must never
+    // come back.
+    assert.doesNotMatch(source, /static NSURLSession \*cb_request_session\s*=\s*nil;/,
+      'cb_request_session must never be a plain lazily-assigned module-level static -- that is the race this fix closes');
+    assert.doesNotMatch(source, /cb_request_session\s*==\s*nil/,
+      'nothing may check-then-assign cb_request_session by hand; dispatch_once is the only allowed gate');
+    const requestSessionStart = source.indexOf('static NSURLSession *cb_request_session(void) {');
+    assert.ok(requestSessionStart > 0, 'setup: cb_request_session must still be findable as a function, not a bare static');
+    const requestSessionEnd = source.indexOf('\n}', requestSessionStart) + 2;
+    assert.match(source.slice(requestSessionStart, requestSessionEnd), /dispatch_once\(&once,/,
+      'cb_request_session must create its session exactly once via dispatch_once, the same guard cb_secret_lock uses');
+  });
+
+  // -------------------------------------------------------------------------------------
   // The seam itself.
   // -------------------------------------------------------------------------------------
 

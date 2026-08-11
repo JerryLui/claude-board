@@ -1197,7 +1197,32 @@ export class Element extends EventTarget {
     }).join('');
     return '<' + tag + attrs + '>' + inner + '</' + tag + '>';
   }
-  appendChild(node) { node.parentElement = this; this.childNodes.push(node); return node; }
+  appendChild(node) {
+    node.parentElement = this;
+    this.childNodes.push(node);
+    // A dynamically created `<script src>` (src/ui.mjs's loadMermaidEngine,
+    // the vendored-engine loader) is the one element this stand-in has no real
+    // loading for: appending it here does not fetch, parse or run anything,
+    // unlike the page's own two STATIC script/link tags, which no check ever
+    // relies on the DOM to execute (they're read out of the page's bytes and
+    // run by hand through `new Function`, or via `readFileSync`, entirely
+    // outside this class -- see this file's header). Nothing calls THIS
+    // appendChild for either of those; only runtime code that builds and
+    // inserts an element itself does, which is exactly the case with no real
+    // network behind it. Firing 'error' asynchronously is the honest default
+    // -- the same "no real network" stance test/check-mermaid-anchor.mjs's own
+    // header already documents for mermaid's old dynamic import(), now
+    // generalised to a classic script element -- so a caller awaiting the
+    // load settles instead of hanging forever. A check driving the SUCCESS
+    // path never reaches this at all: it pre-seeds a shape-valid
+    // `window.mermaid` before the client script runs, which src/ui.mjs's own
+    // guard accepts without ever attempting a load (see that file's
+    // looksLikeMermaidEngine).
+    if (node.tag === 'script' && node.getAttribute('src')) {
+      queueMicrotask(() => node.dispatchEvent(new StandInEvent('error')));
+    }
+    return node;
+  }
   // src/ui.mjs's amend path inserts a newly-added top-level block BEFORE the
   // round's closing rail rather than after it. Real semantics, including the
   // one that matters here: a null (or unparented) reference node degrades to

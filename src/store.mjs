@@ -4,8 +4,10 @@
 // $CLAUDE_BOARD_HOME/pages/<boardId>.html     emitted projection, standalone-openable
 // $CLAUDE_BOARD_HOME/pages/ui-<hash>.js       the shared client script a page names
 // $CLAUDE_BOARD_HOME/pages/styles-<hash>.css  the shared stylesheet a page names
+// $CLAUDE_BOARD_HOME/pages/mermaid-<hash>.js  the shared diagram engine, named by ui.js
+//                                             rather than by any page (see sweep below)
 //
-// The two shared assets are siblings of the page ON PURPOSE (ADR 70): a bare filename is
+// The three shared assets are siblings of the page ON PURPOSE (ADR 70): a bare filename is
 // the one reference that resolves the same served (`/b/<name>`) and opened from Finder
 // (`./<name>`). They are content-addressed and append-only — see src/assets.mjs.
 //
@@ -379,10 +381,19 @@ function boardTimeMs(board) {
  * reference). For a garbage collector that is the safe direction: the failure it makes
  * impossible is deleting an asset a page still loads.
  *
- * ponytail: reads every surviving page in full, so a prune is O(bytes in `pages/`) —
- * tens of MB on a long-lived store, seconds at worst, and it only ever runs when a person
- * clicks. If that ever stops being true, the upgrade is a reference index written beside
- * the page; nothing here depends on the scan being a scan.
+ * Scanned for references: every `.html` page, AND every asset itself. Not every asset
+ * is named directly by a page any more (ADR 70's mermaid extension) — the vendored
+ * engine is loaded only from inside the SCRIPT asset, on demand, never from a page's own
+ * markup (src/ui.mjs's own comment on why) — so a page's bytes alone no longer answer
+ * "what does this archive depend on". Scanning every surviving asset's bytes too, not
+ * just every page's, is what lets that indirect reference (ui.js naming mermaid.js the
+ * same way a page names ui.js) keep the engine alive across a sweep; see
+ * src/assets.mjs's `assetsNamedBy` for the fuller version of this comment.
+ *
+ * ponytail: reads every surviving page and asset in full, so a prune is O(bytes in
+ * `pages/`) — tens of MB on a long-lived store, seconds at worst, and it only ever runs
+ * when a person clicks. If that ever stops being true, the upgrade is a reference index
+ * written beside the page; nothing here depends on the scan being a scan.
  *
  * ponytail: a prune that runs while a DIFFERENT process is midway through `writePage`
  * can delete an asset that write has already put down and is about to name (assets land
@@ -403,15 +414,17 @@ function sweepUnreferencedAssets(home) {
 
   const referenced = new Set();
   for (const f of files) {
-    if (!f.endsWith('.html') || f.includes('.tmp-')) continue;
-    let page;
+    const isPage = f.endsWith('.html');
+    const isAsset = ASSET_NAME.test(f);
+    if ((!isPage && !isAsset) || f.includes('.tmp-')) continue;
+    let text;
     try {
-      page = readFileSync(path.join(dir, f), 'utf8');
+      text = readFileSync(path.join(dir, f), 'utf8');
     } catch (err) {
       if (err.code === 'ENOENT') continue; // vanished under us: not a survivor
       throw err;
     }
-    for (const name of assetsNamedBy(page)) referenced.add(name);
+    for (const name of assetsNamedBy(text)) referenced.add(name);
   }
 
   const removed = [];
@@ -482,5 +495,19 @@ export function pruneStore(days, home = boardHome(), now = Date.now()) {
     deleteBoard(id, home);
     boards.push(id);
   }
-  return { boards, assets: sweepUnreferencedAssets(home) };
+  // The boards above are already gone -- unlinked one at a time, irreversibly -- by the
+  // time this runs (see the ordering comment above). A sweep failure must not swallow
+  // that: name how many boards this call already removed before naming what the sweep
+  // itself hit, so a 500 here is still actionable rather than an opaque fs error with no
+  // sense of how much of the prune actually happened.
+  let assets;
+  try {
+    assets = sweepUnreferencedAssets(home);
+  } catch (err) {
+    throw Object.assign(
+      new Error(`prune deleted ${boards.length} board(s), then failed sweeping assets: ${err.message}`),
+      { status: err.status || 500 }
+    );
+  }
+  return { boards, assets };
 }

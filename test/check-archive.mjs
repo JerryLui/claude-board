@@ -344,7 +344,7 @@ const lostCommentN = submittedComments.findIndex(c => c.text === 'this used to p
 //
 // Through src/store.mjs's `writePage` rather than a bare `writeFileSync`, since ADR 70:
 // an archive is a file plus the folder it sits in, and `writePage` is the code that puts
-// the two shared siblings there. Hand-writing the page would leave a folder no browser
+// the three shared siblings there. Hand-writing the page would leave a folder no browser
 // could open, and this file would then be proving the Finder surface works using bytes it
 // had assembled itself.
 
@@ -772,12 +772,12 @@ check('archive: the block-level "comment" button opens no form either -- disable
 });
 
 // Was "the emitted page still has no external script or stylesheet reference" -- ADR 70
-// replaced that rule with a narrower one (QUIRKS.md, "No external assets -- except two
-// bare sibling filenames"): every reference the page loads must be either self-carrying
-// (`data:`) or a bare sibling filename that really is sitting beside it. Both halves
-// matter here specifically, because this board carries compare/html/mermaid content and
-// nine comments -- the richest page the renderer emits, and the one most likely to sneak
-// a reference to something outside the folder.
+// replaced that rule with a narrower one (QUIRKS.md, "No external assets — not even
+// mermaid, now three bare sibling filenames"): every reference the page loads must be
+// either self-carrying (`data:`) or a bare sibling filename that really is sitting
+// beside it. Both halves matter here specifically, because this board carries
+// compare/html/mermaid content and nine comments -- the richest page the renderer
+// emits, and the one most likely to sneak a reference to something outside the folder.
 check('archive: every reference the emitted page loads resolves inside its own folder, even carrying compare/html/mermaid content and nine comments', () => {
   for (const [, tag, attrs] of fileContents.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
     const m = attrs.match(/\s(?:src|href)="([^"]*)"/);

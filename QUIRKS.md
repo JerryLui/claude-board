@@ -17,7 +17,7 @@ Tooling traps in this repo. Read before fighting something; append when somethin
 ## The rendered page: stylesheets and client-script literals
 
 - [The stylesheet and the markup are checked against each other](#the-stylesheet-and-the-markup-are-checked-against-each-other)
-- [No external assets, ever](#no-external-assets-ever)
+- [No external assets — not even mermaid, now three bare sibling filenames](#no-external-assets-not-even-mermaid-now-three-bare-sibling-filenames)
 - [Two stylesheets, one palette](#two-stylesheets-one-palette)
 - [A diagram lens holds a clone, and a theme change replaces what it cloned](#a-diagram-lens-holds-a-clone-and-a-theme-change-replaces-what-it-cloned)
 - [A CSS *comment* is shipped on the index page too, and one check reads its words](#a-css-comment-is-shipped-on-the-index-page-too-and-one-check-reads-its-words)
@@ -45,12 +45,19 @@ mermaid rules are built from `MERMAID_NODE_SELECTOR` (`src/anchor.mjs`) and chec
 by asking whether they would select a REAL node id, not by matching their spelling —
 prefer that shape for any new rule whose whole job is to select something.
 
-### No external assets — except two bare sibling filenames
+### No external assets — not even mermaid, now three bare sibling filenames
 
 `renderBoardPage` output must open from Finder with the network off. So: no web fonts
-(system stack only), no icon fonts, no CDN CSS. Icons are inline SVG. Mermaid is the
-one exception — imported at runtime from a CDN, degrading to raw source when it cannot
-be reached.
+(system stack only), no icon fonts, no CDN CSS. Icons are inline SVG. Mermaid used to be
+the one exception here — imported at runtime from a CDN, degrading to raw source when it
+could not be reached — until it was vendored (`src/vendor/mermaid/`, digest-pinned like
+every other vendored engine): it is now a THIRD bare sibling asset, loaded and degrading
+the same way the other two always have, and no CSP clause names an external host for it
+or anything else any more. The one thing carried over unchanged from the CDN days: a
+sibling that fails to load (missing, corrupted, a hand-edited archive missing the file)
+still degrades to the raw-source fallback rather than a wiped diagram — see src/ui.mjs's
+own comment on `looksLikeMermaidEngine` for the shape-checked guard that makes "loaded but
+not really the engine" degrade the identical honest way.
 
 This used to read "no external assets, ever", and the page test rejected any `<link
 rel=stylesheet>` or `<script src=>` outright. ADR 70 supersedes that: the client script
@@ -69,8 +76,18 @@ and stricter, and `test/check-pure.mjs` now enforces exactly it:
   CORS-blocks module scripts over `file:`, so a module reference silently breaks the
   Finder surface. `defer` is what preserves a module tag's execution timing.
 
-The cost, accepted in ADR 70: an archive is a file plus its folder, not one mailable
-file. `examples/sample-board.html` is committed with its two siblings for that reason.
+Mermaid's own sibling reference is NOT a static tag in the page's markup at all, unlike
+the other two (`ui-<hash>.js`/`styles-<hash>.css`, always present) — it is fetched by a
+`<script>` element src/ui.mjs's own client script builds and inserts at runtime, only when
+the page actually has a mermaid block, using a bare filename spliced into `ui`'s own text
+(so a board with no diagram never even names it). That is also why a prune
+(`sweepUnreferencedAssets`, `src/store.mjs`) has to scan every surviving ASSET's bytes for
+a further reference, not just every page's: an ordinary page's own markup never mentions
+mermaid at all, only `ui-<hash>.js`'s bytes do.
+
+The cost, accepted in ADR 70 and widened by mermaid's vendoring: an archive is a file plus
+its folder, not one mailable file. `examples/sample-board.html` is committed with its
+three siblings for that reason.
 
 ### Two stylesheets, one palette
 
@@ -241,7 +258,7 @@ what keeps the checks green while leaving the real answer to a real browser.
 
 ### Real mermaid node ids are prefixed, and `^=` will not see them
 
-Mermaid 11 (the CDN version the page pins) namespaces every flowchart node id with
+Mermaid 11 (the version vendored, `src/vendor/mermaid/`) namespaces every flowchart node id with
 the diagram's own generated svg id:
 
     mermaid-1785397890978-flowchart-shim-0     <- real
@@ -1771,6 +1788,7 @@ SHARED checkout's copy of a tracked file (see above).
 ## Vendoring a CJS-shaped npm package under `"type": "module"`
 
 - [`prismjs` has no ESM build, and its component files assume a shared global, not a module system](#prismjs-has-no-esm-build-and-its-component-files-assume-a-shared-global-not-a-module-system)
+- [`mermaid.min.js` is a classic-script IIFE, not CJS and not ESM -- neither `import()` nor `createRequire` loads it](#mermaidminjs-is-a-classic-script-iife-not-cjs-and-not-esm----neither-import-nor-createrequire-loads-it)
 - [`marked`'s own emphasis/strikethrough tokenizer is quadratic on unclosed delimiter runs](#markeds-own-emphasisstrikethrough-tokenizer-is-quadratic-on-unclosed-delimiter-runs----the-exact-class-of-bug-adr-62s-ceiling-asked-to-close)
 - [No `timeout`/`gtimeout` on a bare macOS box](#no-timeoutgtimeout-on-a-bare-macos-box----use-perl--e-alarm-n-exec-argv-cmd-to-bound-a-hanging-command)
 
@@ -1800,6 +1818,46 @@ file existing on disk with the right sha256 is not evidence it loads, so
 Check a future vendor drop's own npm dist for an ESM build (as `marked` ships) before reaching
 for `.cjs` + `createRequire`: it is the right tool only when upstream is genuinely CJS/UMD-shaped
 and rewriting it byte-for-byte is off the table.
+
+### `mermaid.min.js` is a classic-script IIFE, not CJS and not ESM -- neither `import()` nor `createRequire` loads it
+
+A third shape, distinct from prismjs's CJS/UMD one above: mermaid's own `dist/mermaid.min.js`
+build (the single self-contained one this repo vendors, `src/vendor/mermaid/`) is
+`"use strict";var __esbuild_esm_mermaid_nm;(__esbuild_esm_mermaid_nm||={}).mermaid=(()=>{…})();
+…globalThis["mermaid"]=globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;` -- no
+`module.exports`, no `require()`, no `import`/`export` anywhere. It is written for exactly one
+loading mechanism: a `<script>` tag, where a top-level `var` becomes a property of the real
+global object (classic-script scoping) so the assignment on the first line and the read on the
+last line are the SAME binding.
+
+It presents as `TypeError: Cannot read properties of undefined (reading 'mermaid')` on the very
+last line, with no hint that the first line is where it actually went wrong. `import()`ing this
+file (Node's loader, or a browser's, makes no difference) parses and runs it as an ES MODULE, and
+an ES module's top-level `var` stays MODULE-scoped -- it never touches `globalThis` at all. So the
+opening `(__esbuild_esm_mermaid_nm||={}).mermaid = …` sets a binding nothing else can ever see,
+and the closing `globalThis.__esbuild_esm_mermaid_nm["mermaid"]` reads back `undefined` off the
+real global, which was never touched. Reproduced directly: `import()`ing the file under plain Node
+throws that exact TypeError; `createRequire` doesn't help either, since nothing in the file ever
+calls `require()` or sets `module.exports` for CJS interop to find.
+
+What loads it correctly: `vm.runInThisContext(source)` (`src/vendor/mermaid/index.mjs`) runs the
+text with genuine top-level-SCRIPT scoping against the real global object -- the same semantics a
+`<script>` tag has, without needing a browser to get them. `globalThis.mermaid` comes back a real
+object with callable `.run`/`.initialize` afterward. This is also why src/ui.mjs's own runtime
+loader never uses `import()` either, even pointed at the same-origin vendored copy instead of a
+CDN URL: it would fail the identical way, plus a SEPARATE, independent way (a module fetch is
+CORS-gated over `file:` regardless of same-origin-ness -- see "No external assets" above). A
+dynamically inserted classic `<script src>` element is what src/ui.mjs uses instead, which needs
+no vm-style trick at all in a real browser -- `vm.runInThisContext` is a Node-only stand-in for
+proving under `test/check-vendor-digest.mjs` that the real vendored bytes actually execute, since
+this repo's suite has no real browser to run them in for real (see "The DOM stand-in's ceilings"
+above).
+
+Check a future vendor drop's own npm dist for whether it still ships this shape at all: mermaid's
+OWN `dist/mermaid.esm.min.mjs` entry is a genuine ES module (and was this repo's very first
+choice) -- rejected here not for a loading-mechanism reason but a vendoring-cost one, since it
+lazy-`import()`s 103 further chunk files (~3.49MB) that would all need vendoring too, against
+`mermaid.min.js`'s single 3.4MB file with zero `import()` calls.
 
 ### `marked`'s own emphasis/strikethrough tokenizer is quadratic on unclosed delimiter runs -- the exact class of bug ADR 62's ceiling asked to close
 
@@ -1854,7 +1912,7 @@ bisecting "how many reps until this blows up" actually wants.
 
 - [The stage is a constant `100vh` box, not a box that grows to its content](#the-stage-is-a-constant-100vh-box-not-a-box-that-grows-to-its-content)
 - [`handleStageHeight` has a floor as well as a cap](#handlestageheight-has-a-floor-as-well-as-a-cap)
-- [The mermaid CDN fallback is pinned to the version the board CSP names](#the-mermaid-cdn-fallback-is-pinned-to-the-version-the-board-csp-names)
+- [The board's own mermaid engine is vendored, and that broke stage-rendered diagrams on purpose](#the-boards-own-mermaid-engine-is-vendored-and-that-broke-stage-rendered-diagrams-on-purpose)
 
 Three constraints that look arbitrary at the call site. Each was settled deliberately; none
 is load-bearing enough for `.agents/adr/`, and all three break silently if changed.
@@ -1870,9 +1928,48 @@ that scrolls internally. Sizing it to the document breaks the artifact's own chr
 The floor is the 320px placeholder, beside the existing 600px cap. Without it a stage that sizes
 itself from the viewport reports its collapsed height on first paint and locks its card there.
 
-### The mermaid CDN fallback is pinned to the version the board CSP names
+### The board's own mermaid engine is vendored, and that broke stage-rendered diagrams on purpose
 
-The renderer templates pin it, and keep the vendored `assets/` copy — that copy is what answers
-when a page is opened from Finder rather than through a board. Bumping one without the other
-gives a page that renders in exactly one of the two places. The templates live in the renderer
-skills under `~/.claude/skills`, outside this repo; only the CSP pin is here.
+Superseded: this used to read "the mermaid CDN fallback is pinned to the version the board CSP
+names" -- three parties (the CSP's `script-src`/`font-src`, src/ui.mjs's own loader, and a
+skill-side renderer's fallback) had to agree on one `mermaid@<version>` string, because a CSP
+source expression ending in `/` is a prefix match and a drift between any two of them broke a
+diagram on exactly one of the surfaces it should have rendered on.
+
+The board's own mermaid rendering (a `kind: 'mermaid'` context block, `src/ui.mjs`) is vendored
+now: a digest-pinned file under `src/vendor/mermaid/` (`test/fixtures/vendor-manifest.json`),
+served as a third content-addressed sibling asset alongside `ui-<hash>.js`/`styles-<hash>.css`
+(`src/assets.mjs`), loaded by a dynamically inserted classic `<script src>` -- never `import()`,
+which both fails over `file:` (module fetches are CORS-gated regardless of same-origin-ness) and
+fails outright against this particular upstream build (mermaid.min.js is a classic-script IIFE;
+its top-level `var` only reaches `globalThis` under classic-script scoping, not module scoping --
+see `src/vendor/mermaid/index.mjs`'s own header). No CSP clause names an external host for it any
+more, so there is no version string left for anything else to drift against.
+
+That is a SEPARATE code path from a stage's own self-generated mermaid diagram (`html` block
+content, sandboxed with an opaque origin, so a same-origin vendored asset resolves to nothing
+inside it) -- and vendoring BROKE that path, deliberately and with the cost accepted. Say it
+plainly, because the shape of the breakage is easy to misread as a drift problem for later: it is
+neither conditional nor future.
+
+A stage is `sandbox="allow-scripts"` with no `allow-same-origin` (src/render.mjs), so it runs at an
+opaque origin. `'self'` matches nothing at an opaque origin and a relative URL resolves to nothing,
+so the vendored engine is unreachable from inside a stage by construction. The old
+`script-src ... https://cdn.jsdelivr.net/npm/mermaid@11.16.1/` was a HOST source, and a host source
+does match from an opaque origin -- which is why the skill-side renderer templates
+(`~/.claude/skills/visualize`, `~/.claude/skills/explain`, outside this repo) load mermaid from that
+URL and why it worked. `visualize/check.mjs` says so in its own words: "The pin is the whole reason
+a diagram renders on a board instead of falling back to its raw source."
+
+Dropping the host clause removed the only source a stage ever had. So every `/visualize` and
+`/explain` artifact posted to a board now shows raw mermaid source where its diagrams used to be --
+immediately, unconditionally, on the first board rendered after this landed. Not a version anchor
+that might drift; the load is refused by the CSP.
+
+The trade was made with that price named: closing the last external-host allowance is what the
+whole vendoring exists to do, and re-admitting the host for the stage case would reopen exactly the
+supply-chain hole it closed (a compromised publish at that path reads every answer on every board
+rendered after it). The degradation is the honest one the renderer already implements -- raw source,
+never a wiped diagram. If stage diagrams are ever wanted back, the only route that keeps the host
+out of the CSP is inlining the engine into the stage's own `srcdoc`, which costs ~3.4 MB per such
+stage inside the stored board document; that was weighed and declined.

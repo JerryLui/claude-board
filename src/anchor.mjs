@@ -773,9 +773,10 @@ export function resolveDomAnchorInSection(sectionHtml, ref, hint) {
  * what made the whole diagram gesture dead in a real browser — click, hover
  * affordance and pin rendering all keyed off that prefix and none of them ever
  * matched, while every check passed because the checks hand-wrote SVG bearing
- * the unprefixed id mermaid does not actually emit. Confirmed against mermaid@11
- * from the CDN, 2026-07-30. Both shapes are accepted: mermaid 10 emitted the
- * bare form, and an archived board holds whatever its own render produced. */
+ * the unprefixed id mermaid does not actually emit. Confirmed against mermaid@11,
+ * fetched from the CDN this repo used before vendoring it, 2026-07-30. Both
+ * shapes are accepted: mermaid 10 emitted the bare form, and an archived board
+ * holds whatever its own render produced. */
 export function parseMermaidDomId(domId) {
   const m = /(?:^|-)flowchart-(.+)-\d+$/.exec(String(domId ?? ''));
   return m ? m[1] : null;
@@ -800,7 +801,7 @@ export const MERMAID_NODE_SELECTOR = '[id*="-flowchart-"], [id^="flowchart-"]';
  * a real id; it cannot false-negative on a legitimate, still-present id, which is
  * the failure mode that actually matters for "an anchor that no longer resolves
  * reports what it lost" — a live anchor must never be misreported
- * lost. Parsing mermaid's grammar fully stays client-side, from its own CDN engine. */
+ * lost. Parsing mermaid's grammar fully stays client-side, from its own vendored engine. */
 export function mermaidRefResolves(source, ref) {
   if (!ref) return false;
   const text = String(source ?? '');
