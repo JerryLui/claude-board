@@ -1482,7 +1482,11 @@ function runInlineScripts(doc, win) {
     const src = scriptEl.textContent;
     if (!src) continue;
     try {
-      new Function('document', 'window', src)(doc, win);
+      // 'EventSource' declared and left unpassed, same reason as every other site
+      // in this suite that evaluates a script this way: whatever inline script a
+      // rendered page carries reads the name bound to undefined by this harness's
+      // own choice, never resolved off whatever this node build happens to expose.
+      new Function('document', 'window', 'EventSource', src)(doc, win);
     } catch (e) { /* one script's error must not stop the page */ }
   }
 }
@@ -1649,18 +1653,22 @@ export function parseHTML(htmlString) {
 //
 // src/ui.mjs reads a bare, unqualified `EventSource` (never `typeof EventSource
 // !== 'undefined'`-guarded for the constructor call itself -- only for whether to
-// open the subscription at all), resolved out of whatever global scope the check
-// running `new Function('document','window','location', ui)(...)` executes
-// in -- exactly like `globalThis.fetch` is already stubbed in
-// test/check-comment-mode.mjs. This is what closes the SSE gap:
-// "stub EventSource in the stand-in and fire a round push, then assert the pushed
-// content is actually anchorable" -- see test/check-anchor-push.mjs, which sets
-// `globalThis.EventSource` to a subclass of this before running `ui`, captures the
-// constructed instance, and calls `.dispatch('round', json)` to drive
-// applyRoundPush/applySubmittedPush exactly as a real server push would, through
-// the real `es.addEventListener('round', ...)` src/ui.mjs itself registers --
-// never by calling applyRoundPush directly, which would prove nothing about
-// whether the subscription is actually wired.
+// open the subscription at all), resolved out of whatever the check running
+// `new Function('document', 'window', 'location', 'EventSource', ui)(...)`
+// hands it: 'EventSource' is the FOURTH of the five arguments to `new Function`
+// itself, so it is the fourth parameter of the script `ui` (the fifth argument,
+// the body) runs as, and gets whatever the check passes as the fourth argument
+// of the CALL that follows -- never off `globalThis`, which a declared parameter
+// shadows anyway (QUIRKS.md: "a `new Function` harness inherits the host's
+// globals"). This is what closes the SSE gap: "stub
+// EventSource in the stand-in and fire a round push, then assert the pushed
+// content is actually anchorable" -- see test/check-anchor-push.mjs, which passes
+// a subclass of this stand-in as `new Function`'s declared `'EventSource'`
+// argument before running `ui`, captures the constructed instance, and calls
+// `.dispatch('round', json)` to drive applyRoundPush/applySubmittedPush exactly
+// as a real server push would, through the real `es.addEventListener('round',
+// ...)` src/ui.mjs itself registers -- never by calling applyRoundPush directly,
+// which would prove nothing about whether the subscription is actually wired.
 //
 // Deliberately not a full EventSource: no readyState transitions, no automatic
 // reconnect, no `Last-Event-ID` -- nothing in src/ui.mjs's own SSE handling

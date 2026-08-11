@@ -65,30 +65,29 @@ function buildSubmittedPushPayload(board, round) {
   return { round, board: boardForClient, html };
 }
 
-/** Load `pageHtml` through the real client script with a captured, stubbed
- * EventSource in place BEFORE the script runs (src/ui.mjs constructs it
- * synchronously, guarded only by `typeof EventSource !== 'undefined'`, so the
- * stub has to already be the global by the time this call happens -- exactly
- * like test/check-comment-mode.mjs already stubs `globalThis.fetch`). Returns
- * both the document and the constructed StandInEventSource instance so a check
- * can `.dispatch('round'|'submitted', JSON.stringify(payload))` on it. */
+/** Load `pageHtml` through the real client script with 'EventSource' declared as
+ * a named parameter of the `new Function` call and a captured, stubbed instance
+ * passed as its argument -- `new Function` hands the script only the names it is
+ * given; any name left off falls through to the node process's OWN globals,
+ * which is exactly the trap a `globalThis.EventSource` assign-then-restore dance
+ * used to fall into (a stray global left set by an earlier failed test, or a
+ * node build shipping its own). src/ui.mjs constructs one synchronously, guarded
+ * only by `typeof EventSource !== 'undefined'`, so the class has to be the value
+ * BOUND to the name for this to prove the subscription is wired, not merely
+ * happen to be reachable. Returns both the document and the constructed
+ * StandInEventSource instance so a check can
+ * `.dispatch('round'|'submitted', JSON.stringify(payload))` on it. */
 function loadBoardWithEventSource(pageHtml) {
-  const originalES = globalThis.EventSource;
   let captured = null;
   class CapturingEventSource extends StandInEventSource {
     constructor(url) { super(url); captured = this; }
   }
-  globalThis.EventSource = CapturingEventSource;
-  try {
-    const document = parseHTML(pageHtml);
-    const window = document.defaultView;
-    const location = { protocol: 'http:' };
-    new Function('document', 'window', 'location', ui)(document, window, location);
-    assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource -- fix the fixture (readonly must be false), not this file');
-    return { document, es: captured };
-  } finally {
-    globalThis.EventSource = originalES;
-  }
+  const document = parseHTML(pageHtml);
+  const window = document.defaultView;
+  const location = { protocol: 'http:' };
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
+  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource -- fix the fixture (readonly must be false), not this file');
+  return { document, es: captured };
 }
 
 function enableCommentMode(document) {
@@ -224,10 +223,14 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
   // Mint the comment through a REAL client session first, exactly like
   // test/check-archive.mjs's own mint-then-submit pattern -- so the anchor fed
   // into applySubmit is one the real gesture actually produced, not a
-  // hand-guessed index chain.
+  // hand-guessed index chain. This session only clicks and submits one form,
+  // never dispatches over a stream, so it wants no EventSource stand-in --
+  // 'EventSource' is still declared, bound to nothing, so the script sees no
+  // subscription rather than reaching past its declared scope for the node
+  // process's own global.
   const mintHtml = renderBoardPage(board);
   const mintDoc = parseHTML(mintHtml);
-  new Function('document', 'window', 'location', ui)(mintDoc, mintDoc.defaultView, { protocol: 'http:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(mintDoc, mintDoc.defaultView, { protocol: 'http:' }, undefined);
   enableCommentMode(mintDoc);
   const mintFrame = mintDoc.querySelectorAll('.html-stage')[0];
   mintFrame.loadSrcdoc();
@@ -303,10 +306,11 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   assert.equal(typeof round2Block.error, 'string', 'setup failure: the pushed block must actually fail to resolve');
 
   // Mint the comment through a REAL client session first, same pattern as the
-  // html-stage check above.
+  // html-stage check above -- 'EventSource' declared and left unpassed for the
+  // same reason: this session wants no stand-in.
   const mintHtml = renderBoardPage(board);
   const mintDoc = parseHTML(mintHtml);
-  new Function('document', 'window', 'location', ui)(mintDoc, mintDoc.defaultView, { protocol: 'http:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(mintDoc, mintDoc.defaultView, { protocol: 'http:' }, undefined);
   enableCommentMode(mintDoc);
   const mintTarget = mintDoc.querySelector(`[data-block-id="${round2BlockId}"] .resolve-error`);
   assert.ok(mintTarget, 'setup failure: no .resolve-error note in the minting session\'s mermaid block');

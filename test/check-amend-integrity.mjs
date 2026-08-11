@@ -2,10 +2,11 @@
 // D26-D30 below, all of which are the same shape: a push lands, and something
 // on screen goes on saying what was true before it.
 //
-// Harness idiom is test/check-anchor-push.mjs's, deliberately: a stubbed
-// EventSource in place before the real `ui` script runs, then the real payloads
-// dispatched at it. `resync` additionally needs `fetch`, stubbed the way
-// test/check-comment-mode.mjs already stubs it.
+// Harness idiom is test/check-anchor-push.mjs's, deliberately: 'EventSource' is
+// declared as a named parameter of the `new Function` call that runs the real
+// `ui` script, and a stubbed, captured instance is passed as its argument, so
+// the real payloads can be dispatched at it afterward. `resync` additionally
+// needs `fetch`, stubbed the way test/check-comment-mode.mjs already stubs it.
 //
 // Covered:
 //   D26. a resync catching up on a NESTED change (a compare side re-minted by
@@ -53,23 +54,21 @@ function buildRoundPushPayload(board, round, mode, blockIds) {
   return { round, mode, blockIds, html, board: boardForClient };
 }
 
+// Declare-and-pass, the harness idiom this file's own header comment names:
+// 'EventSource' is a named parameter of the `new Function` call, bound to a
+// captured, stubbed instance, rather than left off and picked up from
+// whatever the node process's own global happens to be.
 function loadBoardWithEventSource(pageHtml) {
-  const originalES = globalThis.EventSource;
   let captured = null;
   class CapturingEventSource extends StandInEventSource {
     constructor(url) { super(url); captured = this; }
   }
-  globalThis.EventSource = CapturingEventSource;
-  try {
-    const document = parseHTML(pageHtml);
-    const window = document.defaultView;
-    const location = { protocol: 'http:' };
-    new Function('document', 'window', 'location', ui)(document, window, location);
-    assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-    return { document, es: captured };
-  } finally {
-    globalThis.EventSource = originalES;
-  }
+  const document = parseHTML(pageHtml);
+  const window = document.defaultView;
+  const location = { protocol: 'http:' };
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
+  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
+  return { document, es: captured };
 }
 
 /** The blocks a round shows as its OWN children -- what the reviewer reads as

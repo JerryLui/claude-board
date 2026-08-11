@@ -5657,7 +5657,14 @@ function loadVariantBoard(board, protocol = 'http:') {
   const document = parseHTML(renderBoardPage(board));
   const window = document.defaultView;
   const location = { protocol };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' is DECLARED and never passed -- see the fuller explanation on
+  // indexScript's own sibling site further down this file (~line 7460) for why:
+  // left off the parameter list, the name resolves to whatever the HOST exposes,
+  // and node has shipped a global EventSource behind a flag since 22.x. Here it
+  // binds ui.mjs's own `typeof EventSource === 'undefined'` guard to undefined
+  // for the same reason, so this stand-in never opens a real connection against
+  // the relative board-events URL.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
 }
 

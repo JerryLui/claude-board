@@ -950,10 +950,19 @@ node --import /tmp/es-preload.mjs test/check-pure.mjs
 The fix is to DECLARE the name and never pass it — `new Function('document', 'setInterval',
 'EventSource', src)(doc, fakeSetInterval)` binds it to `undefined` inside the scope, so the
 guard fires by the check's choice rather than by the interpreter's build options. Done for
-every site that runs `indexScript`. **Still open for `src/ui.mjs`**: the
-`new Function('document', 'window', 'location', ui)` pattern appears across roughly ten
-check files and eight checks in `test/check-pure.mjs` fail under the preload above — that
-predates the index page's stream and is its own job.
+every site that runs `indexScript`, and since done for every site in this suite that runs
+`ui`/`themeBootScript` too — a `new Function` call whose body drives a real page's stream
+(`test/check-anchor-push.mjs` and friends) passes a stand-in as that same declared argument
+instead, the shape `test/check-index-live.mjs` already used for the index page.
+
+What holds the line now that both are done: `test/check-harness-globals.mjs`, a static check
+scanning every `test/*.mjs` file's own source for two shapes — a `new Function(...)` call
+whose body is a bare identifier (`ui`, `indexScript`, `themeBootScript`, ...) but that does
+not declare `'EventSource'` among its parameters, and any surviving
+`globalThis.EventSource = ` assignment (the shape this fix eliminated; a declared parameter
+shadows the global, so a stand-in left there stops arriving the moment the site is
+converted). Either shape reintroduced fails the suite by file and line, at the moment it
+lands, with no preload required to notice.
 
 The general shape, worth suspecting anywhere: a check that passes because of what the
 interpreter does or does not expose is not passing. If a script under test reads a global

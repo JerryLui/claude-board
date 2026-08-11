@@ -34,28 +34,27 @@ async function check(name, fn) {
 
 const Q = { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
 
-/** Loads the real `ui` script against a real board document, capturing the
- * EventSource it constructs so a check can `es.dispatch(...)` the daemon's own
- * pushes into it -- test/check-round-pager.mjs's `loadBoardWithEventSource`,
- * copied rather than imported (no shared test-helper module in this repo, by
- * convention: see that file's own header comment). */
+/** Loads the real `ui` script against a real board document, with 'EventSource'
+ * declared as a named parameter of the `new Function` call and a captured
+ * instance passed as its argument -- test/check-anchor-push.mjs's
+ * `loadBoardWithEventSource`, copied rather than imported (no shared
+ * test-helper module in this repo, by convention: see that file's own header
+ * comment). `new Function` hands the script only the names it is given; every
+ * name left undeclared falls through to the node process's OWN globals, which
+ * is what a `globalThis.EventSource` assign-then-restore dance used to risk --
+ * pinning the name here means the class handed to the script is always this
+ * call's own CapturingEventSource, never whatever the process happens to carry. */
 function loadBoardWithEventSource(html) {
-  const originalES = globalThis.EventSource;
   let captured = null;
   class CapturingEventSource extends StandInEventSource {
     constructor(url) { super(url); captured = this; }
   }
-  globalThis.EventSource = CapturingEventSource;
-  try {
-    const document = parseHTML(html);
-    const window = document.defaultView;
-    const location = { protocol: 'http:', hash: '' };
-    new Function('document', 'window', 'location', ui)(document, window, location);
-    assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-    return { document, window, location, es: captured };
-  } finally {
-    globalThis.EventSource = originalES;
-  }
+  const document = parseHTML(html);
+  const window = document.defaultView;
+  const location = { protocol: 'http:', hash: '' };
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
+  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
+  return { document, window, location, es: captured };
 }
 
 /** Stubs `fetch`, capturing every call's URL and parsed JSON body. Restore is
@@ -386,8 +385,13 @@ await check('readonly mode never reports, even with a watcher id and a real blur
     // EventSource is never opened in readonly mode (guarded in src/ui.mjs), so
     // there is no 'watcher' event to dispatch here at all -- the archive simply
     // never subscribes. This proves the SILENCE, not a code path that fires
-    // and is then swallowed.
-    new Function('document', 'window', 'location', ui)(document, window, location);
+    // and is then swallowed. 'EventSource' is declared here anyway and never
+    // passed, matching every other undriven call in this file: the readonly
+    // guard short-circuits before src/ui.mjs ever reads the name, but a
+    // declared-and-unpassed parameter is what keeps the process's own global
+    // out of the script's scope on principle, not by the accident of an
+    // earlier guard.
+    new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
     window.dispatchEvent(new StandInEvent('blur'));
     window.dispatchEvent(new StandInEvent('focus'));
     document.dispatchEvent(new StandInEvent('visibilitychange'));
@@ -396,6 +400,15 @@ await check('readonly mode never reports, even with a watcher id and a real blur
 });
 
 // --- The banner's own click sentinel, '#stranded-round' ----------------------
+//
+// None of the checks below dispatch anything over a stream -- they are all
+// about the '#stranded-round'/'#open-round' hash gesture, not SSE -- so every
+// `new Function` call in this section declares 'EventSource' as a named
+// parameter and never passes an argument for it. Declaring the name (bound to
+// undefined inside the script) is what keeps src/ui.mjs's own
+// `typeof EventSource !== 'undefined'` guard reading false on the strength of
+// what THIS call handed it, rather than on whatever the node process happens
+// to carry as its own global.
 
 /** round 1: still genuinely awaited. round 2: minted awaited (a question round
  * always is) then manually lapsed -- the exact shape closeLapsedAwaitedRounds
@@ -441,7 +454,7 @@ await check("'#stranded-round' skips a round already ANSWERED, however old -- th
   document.readyState = 'complete';
   const window = document.defaultView;
   const location = { protocol: 'http:', hash: '#stranded-round' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   const current = document.querySelector('.round-current');
   assert.ok(current, 'expected exactly one current round after the sentinel resolves');
   assert.equal(current.getAttribute('data-round'), '2',
@@ -459,7 +472,7 @@ await check("'#stranded-round' resolves to the OLDEST awaited round on load, nev
   document.readyState = 'complete';
   const window = document.defaultView;
   const location = { protocol: 'http:', hash: '#stranded-round' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   const current = document.querySelector('.round-current');
   assert.ok(current, 'expected exactly one current round after the sentinel resolves');
   assert.equal(current.getAttribute('data-round'), '1', "the banner's sentinel must land on round 1 (oldest still awaited), not round 2 (newest unsent but lapsed)");
@@ -470,7 +483,7 @@ await check("'#stranded-round' also resolves via 'hashchange' -- the commonest s
   const document = parseHTML(renderBoardPage(board));
   const window = document.defaultView;
   const location = { protocol: 'http:', hash: '' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '2', 'setup: the board opens on its newest round with no sentinel present');
   location.hash = '#stranded-round';
   window.dispatchEvent(new StandInEvent('hashchange'));
@@ -488,7 +501,7 @@ await check("'#stranded-round' also resolves via 'focus' -- revealing a tab alre
   // sitting at a stale sentinel with nothing to reset it) to isolate the
   // 'focus' fallback specifically.
   const location = { protocol: 'http:', hash: '' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   location.hash = '#stranded-round';
   window.dispatchEvent(new StandInEvent('focus'));
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '1', "'focus' alone, hash already at the sentinel, must still resolve it");
@@ -501,7 +514,7 @@ await check("the sentinel is consumed after resolving through the location.hash=
   const window = document.defaultView;
   assert.equal(window.history, undefined, 'setup sanity: this check must exercise the FALLBACK branch, so window.history must be absent, not the StandInHistory the next check attaches');
   const location = { protocol: 'http:', hash: '#stranded-round' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '1', 'setup: the initial load resolved the sentinel');
   assert.notEqual(location.hash, '#stranded-round', 'the hash must be consumed (cleared) once read, or a later ordinary refocus would keep re-triggering the jump');
   // The reviewer manually flips forward, of their own accord.
@@ -518,7 +531,7 @@ await check("the sentinel is consumed through window.history.replaceState in a R
   const window = document.defaultView;
   const location = { protocol: 'http:', pathname: `/b/${board.id}`, search: '', hash: '#stranded-round' };
   window.history = new StandInHistory(location);
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '1', 'setup: the initial load resolved the sentinel');
   assert.equal(window.history.replaceStateCalls.length, 1, 'the history.replaceState branch must be the one that ran -- window.history is present, so the location.hash="" fallback must NOT have been taken instead');
   assert.deepEqual(window.history.replaceStateCalls[0], { state: null, title: '', url: `/b/${board.id}` },
@@ -538,7 +551,7 @@ await check("'#open-round' (src/indexpage.mjs's own sentinel, unrelated to the b
   const document = parseHTML(renderBoardPage(board));
   const window = document.defaultView;
   const location = { protocol: 'http:', hash: '#open-round' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   assert.equal(document.querySelector('.round-current').getAttribute('data-round'), '2', "'#open-round' must still resolve to round 2 (the latest unsent round), exactly as it did before the banner's own sentinel existed");
 });
 

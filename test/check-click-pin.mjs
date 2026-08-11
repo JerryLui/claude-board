@@ -50,7 +50,9 @@ check('clicking an element, then submitting the opened comment form, draws a num
   const document = parseHTML(pageHtml);
   const window = document.defaultView;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
+  // inherits the host's globals" for why.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
 
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage iframe on the rendered page');
@@ -134,7 +136,9 @@ check('two different elements inside the same stage get two different, independe
   const document = parseHTML(twoElHtml);
   const window = document.defaultView;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
+  // inherits the host's globals" for why.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
 
   const frame = document.querySelector('.html-stage');
   const modeToggle = document.getElementById('comment-mode-toggle');

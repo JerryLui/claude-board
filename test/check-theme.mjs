@@ -57,7 +57,11 @@ function loadWithTheme(html, protocol, storage) {
   const window = document.defaultView;
   if (storage) window.localStorage = storage;
   const location = { protocol };
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
+  // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
+  // this scope so a guard reading it fires by this file's choice rather than by
+  // whether this node build happens to expose a global EventSource (behind a flag
+  // since 22.x) -- see QUIRKS.md's entry on the trap this closes.
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
   document.finishParsing();
   return document;
 }
@@ -231,9 +235,10 @@ check('theme: the control is present and NOT disabled in a read-only (file://) b
   // Same order a real page executes them in: the head boot script first
   // (readyState still 'loading' -- see loadWithTheme's own comment above),
   // then ui's own deferred module script, then the parser finishing (which is
-  // what actually wires the control's click listener).
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // what actually wires the control's click listener). 'EventSource' declared
+  // and left unpassed on both, same reason as loadWithTheme above.
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   document.finishParsing();
 
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: opening from file:// must add body.readonly');
@@ -350,7 +355,8 @@ check('theme: readyState starts "loading" (a real page\'s state when this inline
   window.localStorage = storage;
   const location = { protocol: 'http:' };
 
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
+  // 'EventSource' declared and left unpassed, same reason as loadWithTheme above.
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
 
   // Job 1 (data-theme) must already be correct -- synchronous, no
   // DOMContentLoaded needed. Fails if applyAttr(readStored()) is moved into

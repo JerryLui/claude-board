@@ -113,7 +113,16 @@ async function loadBoard(pageHtml, mermaidMock) {
   const window = document.defaultView;
   if (mermaidMock) window.mermaid = mermaidMock;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' is DECLARED and never passed, binding the name to undefined
+  // inside this scope so src/ui.mjs's own `typeof EventSource === 'undefined'`
+  // guard takes its early return because THIS FILE decided so, not because of
+  // whether this node build happens to expose a global EventSource (behind a
+  // flag since 22.x). Left off the list, the name would resolve to whatever
+  // the host provides, and an unflagged node would open a live connection to
+  // '/api/board/<id>/events' and throw -- from a check that is about the
+  // mermaid anchor gesture. Every sibling `new Function` call in this file
+  // declares it for the same reason.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   await flush();
   return document;
 }
@@ -890,7 +899,7 @@ async function loadReadonlyBoard(html, mermaidMock) {
   const document = parseHTML(html);
   const window = document.defaultView;
   if (mermaidMock) window.mermaid = mermaidMock;
-  new Function('document', 'window', 'location', ui)(document, window, { protocol: 'file:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'file:' });
   await flush();
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: the page did not enter readonly mode');
   return document;
@@ -1020,8 +1029,8 @@ async function loadBoardWithTheme(pageHtml, mermaidMock) {
   const window = document.defaultView;
   if (mermaidMock) window.mermaid = mermaidMock;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   // A freshly parsed document now starts `readyState
   // === 'loading'`, so the theme control's click listener is not wired until
   // `document.finishParsing()` simulates the parser reaching the end of the

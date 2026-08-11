@@ -127,7 +127,16 @@ function loadBoard() {
   const document = parseHTML(pageHtml);
   const window = document.defaultView;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' is DECLARED and never passed, binding the name to undefined
+  // inside this scope so src/ui.mjs's own `typeof EventSource === 'undefined'`
+  // guard takes its early return because THIS FILE decided so, not because of
+  // whether this node build happens to expose a global EventSource (behind a
+  // flag since 22.x). Left off the list, the name would resolve to whatever
+  // the host provides, and an unflagged node would open a live connection to
+  // '/api/board/<id>/events' and throw -- from a check that is about comment
+  // mode and anchors. Every sibling `new Function` call in this file declares
+  // it for the same reason.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
 }
 
@@ -167,7 +176,7 @@ function loadSoloStageBoard() {
   const document = parseHTML(soloHtml);
   const window = document.defaultView;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return { document, blockId: soloBlockId };
 }
 
@@ -451,7 +460,7 @@ function loadSoloRankBoard() {
   const document = parseHTML(rankHtml);
   const window = { addEventListener() {}, removeEventListener() {} };
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return { document, qid: rankQid };
 }
 
@@ -523,7 +532,7 @@ check('the plain html-stage hint is unchanged outside a compare (no context to a
   const document = parseHTML(soloHtml);
   const window = document.defaultView;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
 
   enableCommentMode(document);
   const frame = document.querySelector('.html-stage');
@@ -951,7 +960,7 @@ check('an element carrying a SENT dom comment is not a comment target, and its n
   assert.equal(sentBoard.comments.length, 1, 'setup failure: the comment was not stored');
 
   const document = parseHTML(renderBoardPage(sentBoard));
-  new Function('document', 'window', 'location', ui)(document, document.defaultView, { protocol: 'http:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
   enableCommentMode(document);
   const sentNote = errorNoteFor(document, sentDiagramId);
   const liveNote = errorNoteFor(document, liveDiagramId);
@@ -1050,7 +1059,7 @@ assert.equal(typeof wrapperCompareLeftBlock.error, 'string',
 function loadWrapperBoard() {
   const document = parseHTML(renderBoardPage(WRAPPER_BOARD));
   const window = document.defaultView;
-  new Function('document', 'window', 'location', ui)(document, window, { protocol: 'http:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
   return document;
 }
 
@@ -1263,7 +1272,7 @@ check('a round with only question blocks: the comment-mode toggle still renders 
   const [qChoice, qText] = onlyQuestionsBoard.blocks;
   const document = parseHTML(renderBoardPage(onlyQuestionsBoard));
   const window = document.defaultView;
-  new Function('document', 'window', 'location', ui)(document, window, { protocol: 'http:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
 
   // The toggle is page-global chrome, never conditional on what the board can
   // anchor -- it must render and flip both ways even here.

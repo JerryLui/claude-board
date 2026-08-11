@@ -92,28 +92,27 @@ function questionThenArtifactWithQuestion() {
   return board;
 }
 
-function loadBoard(html, protocol) {
+// 'EventSource' is declared and, unless `EventSourceStandIn` is given (see
+// loadBoardWithEventSource below), left unpassed -- see QUIRKS.md "A `new
+// Function` harness inherits the host's globals".
+function loadBoard(html, protocol, EventSourceStandIn) {
   const document = parseHTML(html);
   const window = document.defaultView;
   const location = { protocol: protocol || 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, EventSourceStandIn);
   return document;
 }
 
+// declare-and-pass, same shape as test/check-index-live.mjs -- no globalThis
+// save/restore needed.
 function loadBoardWithEventSource(html) {
-  const originalES = globalThis.EventSource;
   let captured = null;
   class CapturingEventSource extends StandInEventSource {
     constructor(url) { super(url); captured = this; }
   }
-  globalThis.EventSource = CapturingEventSource;
-  try {
-    const document = loadBoard(html);
-    assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-    return { document, es: captured };
-  } finally {
-    globalThis.EventSource = originalES;
-  }
+  const document = loadBoard(html, undefined, CapturingEventSource);
+  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
+  return { document, es: captured };
 }
 
 const click = el => el.dispatchEvent(new StandInEvent('click'));

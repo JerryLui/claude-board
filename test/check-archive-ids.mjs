@@ -166,19 +166,25 @@ assert.equal(fileContents, rendered, 'setup failure: the file on disk does not m
 
 function loadArchiveThemed(html) {
   const originalFetch = globalThis.fetch;
-  const originalES = globalThis.EventSource;
   globalThis.fetch = () => Promise.reject(new Error('the archive must never call fetch'));
-  class SpyEventSource {
-    constructor() { /* no-op: an archive must never construct one */ }
-  }
-  globalThis.EventSource = SpyEventSource;
 
   const document = parseHTML(html);
   const window = document.defaultView;
   const location = { protocol: 'file:' };
   try {
-    new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-    new Function('document', 'window', 'location', ui)(document, window, location);
+    // 'EventSource' is DECLARED and never passed, binding the name to undefined
+    // inside this scope so src/ui.mjs's own `typeof EventSource === 'undefined'`
+    // guard takes its early return because THIS FILE decided so, not because of
+    // whether this node build happens to expose a global EventSource (behind a
+    // flag since 22.x) -- and, since the parameter SHADOWS the global either way,
+    // not because of anything left on `globalThis.EventSource` either, which is
+    // why there is no longer a stand-in class or a save/restore dance here for
+    // it, unlike test/check-archive.mjs's loadArchive()/loadPageArchive(), which
+    // read back whether an EventSource was constructed and so thread their own
+    // spy through explicitly as this parameter's argument instead of leaving it
+    // unpassed.
+    new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
+    new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
     // A freshly parsed document now starts `readyState
     // === 'loading'`, so the theme control's click listener is not wired
     // until this simulates the parser reaching the end of the document (see
@@ -186,7 +192,6 @@ function loadArchiveThemed(html) {
     document.finishParsing();
   } finally {
     globalThis.fetch = originalFetch;
-    globalThis.EventSource = originalES;
   }
   return document;
 }
@@ -278,7 +283,11 @@ function loadLiveBoard() {
   const document = parseHTML(rendered);
   const window = document.defaultView;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' declared and never passed -- see loadArchiveThemed's own
+  // comment above. This call is the one in this file with no readonly gate at
+  // all (an ordinary live, http: session), so it is the one an unflagged node
+  // would actually have opened a connection from.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
 }
 

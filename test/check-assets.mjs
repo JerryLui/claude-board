@@ -87,14 +87,18 @@ function openFromFinder(diskPath, scriptText) {
   const document = parseHTML(html);
   const window = document.defaultView;
   const originalFetch = globalThis.fetch;
-  const originalES = globalThis.EventSource;
   globalThis.fetch = () => { throw new Error('a page opened from Finder must never call fetch'); };
-  globalThis.EventSource = class { constructor() { throw new Error('a page opened from Finder must never open an EventSource'); } };
+  // 'EventSource' is DECLARED and handed a throwing class as its own argument --
+  // never assigned to globalThis -- so the assertion this proves is stronger, not
+  // weaker: the page's script can no longer resolve the name past this harness at
+  // all, rather than merely finding nothing left on globalThis to construct.
+  const ThrowingEventSource = class {
+    constructor() { throw new Error('a page opened from Finder must never open an EventSource'); }
+  };
   try {
-    new Function('document', 'window', 'location', scriptText)(document, window, { protocol: 'file:' });
+    new Function('document', 'window', 'location', 'EventSource', scriptText)(document, window, { protocol: 'file:' }, ThrowingEventSource);
   } finally {
     globalThis.fetch = originalFetch;
-    globalThis.EventSource = originalES;
   }
   return document;
 }

@@ -73,33 +73,32 @@ function deferBlock(block) {
 }
 
 /** Parse `html` and run the real `ui` client script against it -- same idiom as
- * test/check-enter.mjs's loadBoard. */
-function loadBoard(html, protocol) {
+ * test/check-enter.mjs's loadBoard. 'EventSource' is declared and, unless
+ * `EventSourceStandIn` is given (see loadBoardWithEventSource below), left
+ * unpassed -- see QUIRKS.md "A `new Function` harness inherits the host's
+ * globals". */
+function loadBoard(html, protocol, EventSourceStandIn) {
   const document = parseHTML(html);
   const window = document.defaultView;
   const location = { protocol: protocol || 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, EventSourceStandIn);
   return document;
 }
 
-/** loadBoard, plus a captured, stubbed EventSource in place before the script
- * runs -- test/check-anchor-push.mjs's own idiom, reused here to drive a real
- * 'round' SSE push and prove the live transition (markRoundHistory stripping
- * the rail) matches what the server would have rendered instead. */
+/** loadBoard, plus a captured, stubbed EventSource declared and passed straight
+ * to the client script (same declare-and-pass shape as test/check-index-live.mjs,
+ * no globalThis save/restore needed) -- test/check-anchor-push.mjs's own idiom,
+ * reused here to drive a real 'round' SSE push and prove the live transition
+ * (markRoundHistory stripping the rail) matches what the server would have
+ * rendered instead. */
 function loadBoardWithEventSource(html) {
-  const originalES = globalThis.EventSource;
   let captured = null;
   class CapturingEventSource extends StandInEventSource {
     constructor(url) { super(url); captured = this; }
   }
-  globalThis.EventSource = CapturingEventSource;
-  try {
-    const document = loadBoard(html, 'http:');
-    assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-    return { document, es: captured };
-  } finally {
-    globalThis.EventSource = originalES;
-  }
+  const document = loadBoard(html, 'http:', CapturingEventSource);
+  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
+  return { document, es: captured };
 }
 
 /** loadBoard, plus a captured, stubbed IntersectionObserver in place before the

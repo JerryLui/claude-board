@@ -69,7 +69,9 @@ function loadBoard() {
   const document = parseHTML(pageHtml);
   const window = document.defaultView;
   const location = { protocol: 'http:' }; // not 'file:' -- this is the live, non-readonly path
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
+  // inherits the host's globals" for why.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
 }
 
@@ -187,7 +189,9 @@ check('C2: clicking an element in a mock whose srcdoc opens with its own <style>
   // needs the same fix.
   const window = document.defaultView;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
+  // inherits the host's globals" for why.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
 
   document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
   const frame = document.querySelector('.html-stage');

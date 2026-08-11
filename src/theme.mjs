@@ -20,8 +20,11 @@
 // only for an inline code reference. `node --check src/theme.mjs` only proves
 // this OUTER file parses; test/check-theme.mjs proves the EXTRACTED script
 // parses, by running it through
-// `new Function('document', 'window', 'location', themeBootScript)`, the same
-// technique every check in test/ already uses for `ui`.
+// `new Function('document', 'window', 'location', 'EventSource', themeBootScript)`,
+// the same technique every check in test/ already uses for `ui`. `EventSource` is
+// declared and never passed -- test/check-harness-globals.mjs requires that of every
+// harness in test/, so no name a client script reads can fall through to the host's
+// own globals (QUIRKS.md, "a `new Function` harness inherits the host's globals").
 
 /** The `localStorage` key an explicit override is stored under. Only 'light' or
  * 'dark' is ever written -- System is the ABSENCE of this key (removed with
@@ -88,7 +91,7 @@ export function themeToggle() {
  * never wrapped in `<script>` tags here. Both src/render.mjs and
  * src/indexpage.mjs do that at the call site (`<script>${themeBootScript}
  * </script>`), exactly like src/ui.mjs's `ui`, so this string can be run
- * directly through `new Function('document', 'window', 'location',
+ * directly through `new Function('document', 'window', 'location', 'EventSource',
  * themeBootScript)` -- see this file's header comment. An ES5-flavoured IIFE,
  * matching src/render.mjs's `stageAgentScript()` in code style: `var`,
  * function expressions, no arrow functions / template literals /

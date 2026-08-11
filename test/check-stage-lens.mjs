@@ -80,7 +80,9 @@ function loadBoard(html = pageHtml, protocol = 'http:') {
   const document = parseHTML(html);
   const window = document.defaultView;
   const location = { protocol };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' declared, never passed -- see QUIRKS.md "A `new Function` harness
+  // inherits the host's globals".
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
 }
 

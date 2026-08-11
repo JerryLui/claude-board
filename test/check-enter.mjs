@@ -86,7 +86,15 @@ function loadBoard(protocol) {
   const document = parseHTML(pageHtml);
   const window = document.defaultView;
   const location = { protocol: protocol || 'http:' };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' is DECLARED and never passed, binding the name to undefined
+  // inside this scope so src/ui.mjs's own `typeof EventSource === 'undefined'`
+  // guard takes its early return because THIS FILE decided so, not because of
+  // whether this node build happens to expose a global EventSource (behind a
+  // flag since 22.x). Left off the list, the name would resolve to whatever
+  // the host provides, and an unflagged node would open a live connection to
+  // '/api/board/<id>/events' and throw -- from a check that is about Cmd+Enter
+  // traversal. The two sibling sites below declare it for the same reason.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
 }
 
@@ -254,7 +262,7 @@ check('criterion 3: Cmd+Enter arriving at Send with nothing outstanding submits 
 check('criterion 4: Cmd+Enter on a round with no question block at all submits immediately, the same rule with nothing to be outstanding', () => {
   const noQBoard = createBoard({ title: 'No questions here', blocks: [{ kind: 'markdown', text: 'Just a pointer, nothing to answer.' }] });
   const document = parseHTML(renderBoardPage(noQBoard));
-  new Function('document', 'window', 'location', ui)(document, document.defaultView, { protocol: 'http:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
   const sendBtn = document.getElementById('send-btn');
   assert.equal(openBlocks(document).length, 0, 'setup failure: this fixture must render no question blocks');
   assert.equal(sendBtn.disabled, false, 'setup failure: the round is open, so Send must not start disabled');
@@ -428,7 +436,7 @@ check('criterion 9b: Cmd+Enter does nothing on a board with no open round (send-
   const sentBoard = createBoard({ title: 'Cmd+Enter -- no open round', blocks: BLOCK_SPEC });
   applySubmit(sentBoard, { action: 'send', answers: [], comments: [] }, 1);
   const document = parseHTML(renderBoardPage(sentBoard));
-  new Function('document', 'window', 'location', ui)(document, document.defaultView, { protocol: 'http:' });
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
   const sendBtn = document.getElementById('send-btn');
   assert.equal(sendBtn.disabled, true, 'setup failure: send-btn must render disabled once its only round has been sent');
 

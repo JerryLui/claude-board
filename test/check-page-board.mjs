@@ -94,30 +94,32 @@ function nonAwaitedPageBoard(html = ARTIFACT) {
   return createBoard({ title: 'Rendered artifact, unawaited', blocks: [{ kind: 'html', html }] });
 }
 
-function loadBoard(pageHtml, protocol = 'http:') {
+// 'EventSource' is a named parameter of the `new Function` call below, not
+// merely a global the script happens to see -- `new Function` hands the
+// script only the names it is given, so leaving the name off would let it
+// fall through to the node process's OWN global instead. `eventSource`
+// defaults to undefined: an ordinary loadBoard() call declares the name and
+// binds it to nothing, so src/ui.mjs's `typeof EventSource !== 'undefined'`
+// guard reads false and no subscription opens -- exactly the shape
+// loadBoardWithEventSource below opts back into by passing a real stand-in.
+function loadBoard(pageHtml, protocol = 'http:', eventSource = undefined) {
   const document = parseHTML(pageHtml);
   const window = document.defaultView;
   const location = { protocol };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, eventSource);
   return document;
 }
 
-/** loadBoard with a captured, stubbed EventSource in place before the script runs
- * -- test/check-round-end.mjs's own idiom, reused to drive a real 'round' push. */
+/** loadBoard with 'EventSource' bound to a captured, stubbed instance -- test/
+ * check-round-end.mjs's own idiom, reused to drive a real 'round' push. */
 function loadBoardWithEventSource(pageHtml) {
-  const originalES = globalThis.EventSource;
   let captured = null;
   class CapturingEventSource extends StandInEventSource {
     constructor(url) { super(url); captured = this; }
   }
-  globalThis.EventSource = CapturingEventSource;
-  try {
-    const document = loadBoard(pageHtml);
-    assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
-    return { document, es: captured };
-  } finally {
-    globalThis.EventSource = originalES;
-  }
+  const document = loadBoard(pageHtml, 'http:', CapturingEventSource);
+  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource');
+  return { document, es: captured };
 }
 
 /** Run `fn` with a stubbed global fetch and hand back every call it made --
@@ -168,13 +170,16 @@ function openPageBoard(board = pageBoard()) {
  * `wire()` and attaches the theme control's click listener. QUIRKS.md
  * ("test/check-archive.mjs's own loadBoard never runs themeBootScript") is the
  * trap this avoids: with `ui` alone, #theme-toggle is in the markup, is not
- * disabled, and does nothing at all when clicked. */
+ * disabled, and does nothing at all when clicked. Neither check in this file
+ * that uses this loader dispatches over a stream, so 'EventSource' is declared
+ * on both calls and never passed -- each script sees no subscription, rather
+ * than one bound to whatever the node process itself carries under that name. */
 function openPageBoardThemed(board = pageBoard(), protocol = 'http:') {
   const document = parseHTML(renderBoardPage(board));
   const window = document.defaultView;
   const location = { protocol };
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   document.finishParsing();
   const frame = document.querySelector('.html-stage');
   assert.ok(frame, 'setup failure: no .html-stage rendered');

@@ -269,7 +269,10 @@ check('loaded with location.protocol "file:", the page\'s body carries the reado
   const freshDocument = parseHTML(committedHtmlText);
   const window = freshDocument.defaultView;
   const location = { protocol: 'file:' };
-  new Function('document', 'window', 'location', ui)(freshDocument, window, location);
+  // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
+  // this scope so the guard fires by this file's choice rather than by whether this
+  // node build happens to expose a global EventSource (behind a flag since 22.x).
+  new Function('document', 'window', 'location', 'EventSource', ui)(freshDocument, window, location);
   assert.equal(freshDocument.body.classList.contains('readonly'), true,
     'body did not gain the readonly class when opened with location.protocol === "file:"');
 });

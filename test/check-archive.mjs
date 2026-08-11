@@ -86,12 +86,26 @@ function check(name, fn) {
  *
  * `script` defaults to the in-memory `ui` export, which is right for the minting session
  * below (an ordinary live page, never written to disk). Every ARCHIVE load in this file
- * passes the script the archive itself names, read back off disk -- see `openArchive`. */
-function loadBoard(html, protocol, script = ui) {
+ * passes the script the archive itself names, read back off disk -- see `openArchive`.
+ *
+ * 'EventSource' is DECLARED as a parameter of the evaluated script, closing the same trap
+ * every other check file in this suite closes: left off the list, the name would resolve
+ * to whatever this node build happens to expose (a global EventSource has sat behind a
+ * flag since 22.x), and the MINTING call below (an ordinary http: session, readonly false)
+ * would open a live connection to '/api/board/<id>/events' and throw, from a check that is
+ * about archived markup. `eventSource` defaults to undefined, which is exactly that fix for
+ * the minting call and every ordinary caller. loadArchive()/loadPageArchive() below are the
+ * one exception: they pass their own SpyEventSource through this parameter explicitly
+ * (never through globalThis) so "archive: never opens an SSE connection, even though
+ * EventSource exists in this environment" keeps proving the real `!readonly` gate against a
+ * name the script can actually see -- a blanket undefined here would make that check pass
+ * no matter what the gate did, since `typeof EventSource` would already read 'undefined'
+ * regardless of readonly. */
+function loadBoard(html, protocol, script = ui, eventSource) {
   const document = parseHTML(html);
   const window = document.defaultView;
   const location = { protocol };
-  new Function('document', 'window', 'location', script)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', script)(document, window, location, eventSource);
   return document;
 }
 
@@ -373,18 +387,19 @@ check('archive: the sibling files the page names are really beside it on disk, a
 
 function loadArchive() {
   const originalFetch = globalThis.fetch;
-  const originalES = globalThis.EventSource;
   let fetchCalled = false;
   let esConstructed = false;
   globalThis.fetch = (...args) => { fetchCalled = true; return Promise.reject(new Error('the archive must never call fetch')); };
   class SpyEventSource {
     constructor() { esConstructed = true; }
   }
-  globalThis.EventSource = SpyEventSource;
-  const document = loadBoard(fileContents, 'file:', archiveScript);
+  // Passed through loadBoard's own `eventSource` parameter directly, never via
+  // globalThis -- see loadBoard's comment on why this is one of the two callers
+  // that must.
+  const document = loadBoard(fileContents, 'file:', archiveScript, SpyEventSource);
   return {
     document,
-    restore() { globalThis.fetch = originalFetch; globalThis.EventSource = originalES; },
+    restore() { globalThis.fetch = originalFetch; },
     fetchCalled: () => fetchCalled,
     esConstructed: () => esConstructed,
   };
@@ -403,19 +418,19 @@ function loadArchive() {
 // loadArchive(), for the same reason: the archive must never reach for either.
 function loadArchiveThemed(storage) {
   const originalFetch = globalThis.fetch;
-  const originalES = globalThis.EventSource;
   globalThis.fetch = () => Promise.reject(new Error('the archive must never call fetch'));
-  class SpyEventSource {
-    constructor() { /* no-op: an archive must never construct one */ }
-  }
-  globalThis.EventSource = SpyEventSource;
 
   const document = parseHTML(fileContents);
   const window = document.defaultView;
   if (storage) window.localStorage = storage;
   const location = { protocol: 'file:' };
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // Unlike loadArchive()/loadPageArchive(), nothing here reads back whether an
+  // EventSource was constructed, so 'EventSource' is simply declared and left
+  // unpassed -- same as every ordinary site in this suite -- rather than stood
+  // up on globalThis: a declared parameter shadows the global either way, so a
+  // stand-in left there would never be seen even if one were still assigned.
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   // A freshly parsed document now starts `readyState
   // === 'loading'`, so the theme control's click listener is not wired until
   // this simulates the parser reaching the end of the document (see
@@ -425,7 +440,7 @@ function loadArchiveThemed(storage) {
 
   return {
     document,
-    restore() { globalThis.fetch = originalFetch; globalThis.EventSource = originalES; },
+    restore() { globalThis.fetch = originalFetch; },
   };
 }
 
@@ -898,18 +913,18 @@ const pageArchiveScript = namedScript(pageArchivePath, pageFileContents);
 
 function loadPageArchive() {
   const originalFetch = globalThis.fetch;
-  const originalES = globalThis.EventSource;
   let fetchCalled = false;
   let esConstructed = false;
   globalThis.fetch = () => { fetchCalled = true; return Promise.reject(new Error('the archive must never call fetch')); };
   class SpyEventSource {
     constructor() { esConstructed = true; }
   }
-  globalThis.EventSource = SpyEventSource;
-  const document = loadBoard(pageFileContents, 'file:', pageArchiveScript);
+  // Passed through loadBoard's own `eventSource` parameter directly -- see
+  // loadBoard's comment and loadArchive()'s identical call just above.
+  const document = loadBoard(pageFileContents, 'file:', pageArchiveScript, SpyEventSource);
   return {
     document,
-    restore() { globalThis.fetch = originalFetch; globalThis.EventSource = originalES; },
+    restore() { globalThis.fetch = originalFetch; },
     fetchCalled: () => fetchCalled,
     esConstructed: () => esConstructed,
   };

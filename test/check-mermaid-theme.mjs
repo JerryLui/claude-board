@@ -184,14 +184,21 @@ function mockMermaidThemeAware() {
  * what actually wires the theme control's click listener (themeBootScript's
  * `wire()`, deferred behind a `DOMContentLoaded` listener registered because
  * `readyState` was still 'loading' when it ran); every check below that
- * clicks the control depends on this having happened first. */
+ * clicks the control depends on this having happened first.
+ *
+ * Neither script gets a real EventSource here -- nothing in this file's
+ * theme-switch checks dispatches over a stream, only loadBoardWithEventSource
+ * further down does that. 'EventSource' is still declared as a named
+ * parameter of both `new Function` calls and simply never passed, so each
+ * script sees no subscription rather than reaching past its declared scope
+ * for whatever the node process itself carries under that name. */
 async function loadBoard(pageHtml, mermaidMock) {
   const document = parseHTML(pageHtml);
   const window = document.defaultView;
   if (mermaidMock) window.mermaid = mermaidMock;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   document.finishParsing();
   await flush();
   return document;
@@ -466,8 +473,13 @@ await check('mermaid (D2): a redraw overlapping the initial render never replace
   const window = document.defaultView;
   window.mermaid = mock;
   const location = { protocol: 'http:' };
-  new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // Inlined rather than calling loadBoard: this check needs to click BEFORE
+  // the `await flush()` loadBoard itself does, to land squarely inside the
+  // still-in-flight initial render. 'EventSource' declared and unpassed on
+  // both calls for the same reason as loadBoard's own -- see that function's
+  // comment.
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, undefined);
   // Wires the theme control's click listener (see
   // loadBoard's own comment) -- synchronous, so it does not disturb the
   // still-in-flight mermaid render this check depends on below.
@@ -512,31 +524,27 @@ function buildRoundPushPayload(board, round, mode, blockIds) {
   return { round, mode, blockIds, html, board: boardForClient };
 }
 
-/** Like loadBoard above, but ALSO stubs `EventSource` before the script runs
- * (test/check-anchor-push.mjs's loadBoardWithEventSource, reimplemented
- * locally for the same reason as buildRoundPushPayload above) so a check can
- * `.dispatch('round', ...)` a follow-up round. Does not flush -- callers
- * control that themselves. */
+/** Like loadBoard above, but declares 'EventSource' as a named parameter of the
+ * `ui` call and passes it a captured, stubbed instance (test/check-anchor-push.mjs's
+ * loadBoardWithEventSource, reimplemented locally for the same reason as
+ * buildRoundPushPayload above) so a check can `.dispatch('round', ...)` a
+ * follow-up round. themeBootScript never reads the name at all, so its own
+ * call still declares 'EventSource' but never passes anything for it, same as
+ * loadBoard above. Does not flush -- callers control that themselves. */
 function loadBoardWithEventSource(pageHtml, mermaidMock) {
-  const originalES = globalThis.EventSource;
   let captured = null;
   class CapturingEventSource extends StandInEventSource {
     constructor(url) { super(url); captured = this; }
   }
-  globalThis.EventSource = CapturingEventSource;
-  try {
-    const document = parseHTML(pageHtml);
-    const window = document.defaultView;
-    if (mermaidMock) window.mermaid = mermaidMock;
-    const location = { protocol: 'http:' };
-    new Function('document', 'window', 'location', themeBootScript)(document, window, location);
-    new Function('document', 'window', 'location', ui)(document, window, location);
-    document.finishParsing(); // see loadBoard's own comment
-    assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource -- fix the fixture (readonly must be false), not this file');
-    return { document, es: captured, window };
-  } finally {
-    globalThis.EventSource = originalES;
-  }
+  const document = parseHTML(pageHtml);
+  const window = document.defaultView;
+  if (mermaidMock) window.mermaid = mermaidMock;
+  const location = { protocol: 'http:' };
+  new Function('document', 'window', 'location', 'EventSource', themeBootScript)(document, window, location, undefined);
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, CapturingEventSource);
+  document.finishParsing(); // see loadBoard's own comment
+  assert.ok(captured, 'setup failure: the real ui script never constructed an EventSource -- fix the fixture (readonly must be false), not this file');
+  return { document, es: captured, window };
 }
 
 await check('mermaid (M1): initialize runs before EVERY run(), not just the very first ever -- a round pushed after a theme switch, with nothing in between to redraw, still gets the CURRENT palette', async () => {

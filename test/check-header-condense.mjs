@@ -49,7 +49,13 @@ function loadBoard(pageHtml, protocol = 'http:') {
   const document = parseHTML(pageHtml);
   const window = document.defaultView;
   const location = { protocol };
-  new Function('document', 'window', 'location', ui)(document, window, location);
+  // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
+  // this scope so src/ui.mjs's own `typeof EventSource === 'undefined'` guard takes
+  // its early return by this file's choice, not because of whether this node build
+  // happens to expose a global EventSource (behind a flag since 22.x) -- left off
+  // the list, an http: load here would open a live connection to
+  // '/api/board/<id>/events' and throw, from a check that is about the header alone.
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location);
   return document;
 }
 
@@ -468,3 +474,16 @@ check('AC 8: a page board is unaffected -- this document\'s own scroll event dri
     'refreshDocumentScrollChrome must gate itself off page-board bodies -- this document scrolling is not the stage scrolling');
   assert.equal(condensed(document), false);
 });
+
+// This file counted its failures and then exited 0 regardless, so every check above
+// could go red and test/run.mjs still scored the file green. That is how the
+// EventSource trap this file's harness carried stayed invisible while the rest of the
+// suite was swept: under a preloaded global EventSource, eight of these printed FAIL
+// into a run that still reported "all checks ok". `check` here is synchronous and
+// every call is top-level, so by the time evaluation reaches this line all of them
+// have run and `failures` is final.
+if (failures) {
+  console.error(`\n${failures} check(s) failed`);
+  process.exit(1);
+}
+console.log('\nall header-condense checks ok');

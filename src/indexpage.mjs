@@ -273,9 +273,12 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
  * declarations, no wrapping IIFE: renderIndexPage below inlines this into a
  * `<script type="module">`, whose own module scope already keeps `relTime` /
  * `refresh` off `window` without needing one — and leaving them un-wrapped is what
- * lets a check extract `relTime` by name via `new Function(indexScript + '; return
- * relTime;')()` to pin its boundaries directly, the same technique
- * `extractUiFunction` already uses on `ui`.
+ * lets a check extract `relTime` by name via `new Function('document',
+ * 'setInterval', 'EventSource', indexScript + '; return relTime;')()` to pin its
+ * boundaries directly, the same technique `extractUiFunction` already uses on `ui`.
+ * The names are declared even though the extraction only wants one function back:
+ * the body still runs top to bottom before it returns, so an undeclared name would
+ * reach the host's globals just as it does at any other site.
  *
  * `relTime` takes `now` as an explicit second argument (falling back to
  * `Date.now()`) rather than reading the clock itself, so that technique can pin
@@ -285,7 +288,7 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
  * `setInterval`, and — since the settings panel answers a URL fragment
  * (`openPomodoroSettingsFromFragment` below) — `window` and `location`, exactly
  * the pair `ui` already takes as `new Function('document', 'window', 'location',
- * ui)`. A check driving the REAL page markup has to supply all four; the
+ * 'EventSource', ui)`. A check driving the REAL page markup has to supply all four; the
  * function-extraction stand-ins above never reach the two new ones, because
  * `initPomodoroWidget` bails on a document with no `div#pomodoro-widget` in it
  * long before either is read.
