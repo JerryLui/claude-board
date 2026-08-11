@@ -23,18 +23,22 @@ ask({ title, blocks, wait, fresh })
 ```
 
 `title` names the round in the tab and on its page in the round pager. `blocks` is the ordered array the
-page shows. One call is one round: the first opens a tab, later calls push into the same
+page shows. One call is one round: the first surfaces the board, later calls push into the same
 board. Post a branch's questions together; only a question whose *shape* depends on an
 answer in this round waits for the next one.
 
+Surfacing it means a tab when no board tab is open anywhere, and otherwise a desktop
+notification — a new tab is not thrown in front of a reviewer already reading a board. Either
+way something tells them, and either way it is out of your hands.
+
 `fresh` (boolean, default `false`) says **you have posted no board in this conversation**, so this
-call starts a new board on a new thread and opens its own tab. Pass it on your first `ask` of a
+call starts a new board on a new thread and is surfaced as above. Pass it on your first `ask` of a
 conversation whenever you cannot see a board URL of your own further up. After a `/clear` that is
 always true — a cleared context holds no board — and it matters there: the board server keeps
 running across a `/clear`, so without `fresh` your first question lands as another round on the
-cleared conversation's board, under that work's title, with no tab opening. Leave it off for every
-later round, or each round gets a board of its own. It is harmless when there is nothing to leave
-(one board, one thread, one tab), and it closes any round still open on the board it walks away
+cleared conversation's board, under that work's title, and nothing surfaces it at all. Leave it off
+for every later round, or each round gets a board of its own. It is harmless when there is nothing
+to leave (one board, one thread), and it closes any round still open on the board it walks away
 from, so nothing is left waiting there.
 
 **Say the board's URL in chat after every round**, in your own reply, not only in what you post.

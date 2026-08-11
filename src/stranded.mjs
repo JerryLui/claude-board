@@ -1,6 +1,6 @@
-// The stranded rule: a board with an open, awaited round and no Watcher looking at it is
-// Stranded, and after a grace its oldest never-announced round gets one banner, once ever
-// (ADR.md entries 55, 58 and 74).
+// The stranded rule: a round on a board no Watcher is looking at -- Awaited, or the first
+// round of a board whose auto-open was Suppressed -- is Stranded, and after a grace the
+// oldest never-announced one gets one banner, once ever (ADR.md entries 55, 58, 74, 92).
 // `createStrandedWatch` is a factory, not a singleton -- call it
 // exactly ONCE PER REQUEST HANDLER, the same way src/server.mjs's `createRequestHandler`
 // builds a fresh SSE hub and handoff store on every call, so that two daemons sharing one
@@ -9,7 +9,7 @@
 // factory directly too, with the fakes described at `createStrandedWatch` below.
 
 import { readBoard, writeBoard, boardHome } from './store.mjs';
-import { STRANDED_BANNER } from './board.mjs';
+import { STRANDED_BANNER, SUPPRESSED } from './board.mjs';
 import { roundIsAwaitedOpen, waitingRounds } from './badge.mjs';
 import { notifyRound, withdrawClickChild, CLICK_LIFETIME_MAX_MS } from './notify.mjs';
 import { readDoc as readPomodoroDoc, roundBannersEnabled } from './pomodoro.mjs';
@@ -73,9 +73,10 @@ function registerStrandedWatch(watch) {
  * say WHEN a board stops being attended, and this rule has to arm a timer for that
  * moment because nothing fires when a look-away window expires.
  *
- * The rule in one sentence: a board with at least one open, awaited round on it and no
- * Watcher looking at it is Stranded, and after a grace the oldest such round that has
- * never been announced gets ONE banner -- once, ever (ADR.md entry 74, narrowing 55).
+ * The rule in one sentence: a board no Watcher is looking at, carrying either an open
+ * awaited round or a Suppressed board's own first round (ADR.md entry 92), is Stranded,
+ * and after a grace the oldest such round that has never been announced gets ONE banner
+ * -- once, ever (ADR.md entry 74, narrowing 55).
  * "One per absence" is NOT the rule this implements any more: the mark is per round and
  * permanent, a return withdraws the banner without erasing it, and a board announces a
  * different round only after the reviewer has genuinely come back. The banner's click
@@ -173,6 +174,11 @@ export function createStrandedWatch({
       const fresh = readBoard(board.id, home);
       if (!fresh) return false; // the board is gone; there is nothing to record on
       fresh[STRANDED_BANNER] = board[STRANDED_BANNER] ?? null;
+      // The other field this rule owns (ADR.md entry 91): written by `handlePostBoard`
+      // (src/server.mjs) and spent here by `spendSuppressed`. Copied only when the caller's
+      // board actually carries it, so a board minted before the field existed is not given
+      // one by a banner write that has nothing to do with it.
+      if (SUPPRESSED in board) fresh[SUPPRESSED] = board[SUPPRESSED];
       writeBoard(fresh, home);
       return true;
     } catch (err) {
@@ -181,13 +187,15 @@ export function createStrandedWatch({
     }
   }
 
-  // CONTEXT.md's Stranded is "Awaited while its board is not Attended", so this is the
-  // Awaited half, per round, is exactly `waitingRounds` (src/badge.mjs), which is why
-  // this rule calls it rather than keeping a filter of its own. `roundIsAwaitedOpen`
+  // CONTEXT.md's Stranded has two halves now, and only the older one is a filter over
+  // rounds: the Awaited half, per round, is exactly `waitingRounds` (src/badge.mjs),
+  // which is why this rule calls it rather than keeping a copy. `roundIsAwaitedOpen`
   // is the same predicate the countdown and the read-only downgrade already read, which
   // is what makes criterion 8 hold with no code of its own -- a round that was never
   // awaited carries `awaited: false`, one already answered is no longer `open`, and one
-  // whose wait lapsed was swept back to `awaited: false` by `readBoard` itself.
+  // whose wait lapsed was swept back to `awaited: false` by `readBoard` itself. The
+  // Suppressed half is a fact about the BOARD rather than about any round, and it lives
+  // in `nextToAnnounce` for that reason.
 
   /** The record for this board, wherever it is: the board document normally, and the
    * in-memory fallback below only when the durable write failed. The document is the
@@ -198,7 +206,7 @@ export function createStrandedWatch({
     return (board && board[STRANDED_BANNER]) || unpersisted.get(board && board.id) || null;
   }
 
-  /** The oldest awaited round on this board that has NEVER been announced, or null.
+  /** The oldest Stranded round on this board that has NEVER been announced, or null.
    *
    * The mark is per round and permanent for the life of that round (ADR.md entry 74), and
    * `rec.round` is where it is kept: the banner always names the oldest never-announced
@@ -209,10 +217,44 @@ export function createStrandedWatch({
    *
    * `roundIsAwaitedOpen` (via `waitingRounds`) is the same predicate the countdown and the
    * read-only downgrade already read, so "the wait ended" arrives here as a fact
-   * `readBoard` has already swept, with no timer of this rule's own. */
+   * `readBoard` has already swept, with no timer of this rule's own.
+   *
+   * THE SUPPRESSED CLAUSE (ADR.md entry 92). CONTEXT.md's Stranded is no longer "Awaited
+   * and unattended": a Suppressed board's FIRST round is Stranded with nothing Awaited at
+   * all, because no tab was opened for it and a content-only board -- a page board posted
+   * without wait -- would otherwise land in total silence, reachable only through chat or
+   * the index. Tested ahead of the awaited set rather than beside it, so the oldest
+   * candidate wins when a board is both: round 1 content-only, round 2 asking something.
+   *
+   * FOUR gates on it, and every one of them is load-bearing.
+   *
+   * `mark < 1` keeps it to ONE banner, once: round 1 is at or below every mark this rule
+   * can ever write, so the clause is spent the moment it fires and a return can never buy
+   * it a second one.
+   *
+   * `board[SUPPRESSED]` is spent by `spendSuppressed` the moment the reviewer reaches the
+   * board, which is what keeps this from announcing a board they have already read and
+   * closed. Without that, opening a Suppressed content-only board, reading it and closing
+   * the tab raised a Banner one grace later for the board just closed -- and the ordinary
+   * "a return opens the gate" machinery could not cover it, because a board that has never
+   * had a banner has no record for `returned` to open a gate on.
+   *
+   * The round must still be `open` -- an abandoned first round is a thread that walked
+   * away, and announcing it would be a banner about nothing.
+   *
+   * And it must never have carried an `awaitDeadline`. A first round that did is the
+   * Awaited case, which `waitingRounds` below already owns, and once its wait LAPSES
+   * `closeLapsedAwaitedRounds` (src/badge.mjs) clears `awaited` while deliberately leaving
+   * `status: 'open'` forever -- so without this gate a lapsed round falls through to here
+   * and is announced as though it were content-only, sending the reviewer to a round
+   * nothing can answer behind a click bounded by a deadline already in the past. The field
+   * and not the parse, exactly as in `announce` below: content-only means the deadline was
+   * never stamped, never that it cannot be read. */
   function nextToAnnounce(board) {
     const rec = recordOn(board);
     const mark = (rec && Number.isInteger(rec.round)) ? rec.round : 0;
+    const first = (board && board.rounds && board.rounds[0]) || null;
+    if (mark < 1 && board && board[SUPPRESSED] && first && first.status === 'open' && first.awaitDeadline == null) return first;
     return waitingRounds(board).find(r => r.n > mark) || null;
   }
 
@@ -239,7 +281,7 @@ export function createStrandedWatch({
   function mayAnnounce(board) {
     const rec = recordOn(board);
     if (rec && !rec.returned) return false;
-    return nextToAnnounce(board) != null; // criterion 8: nothing awaited, nothing stranded
+    return nextToAnnounce(board) != null; // criterion 8: nothing stranded, nothing to say
   }
 
   function cancel(boardId) {
@@ -338,9 +380,33 @@ export function createStrandedWatch({
    * A record whose gate is already open takes no write at all, which matters because this
    * runs on every `attended` report a tab sends and a page board's document can be
    * megabytes. */
+  /** The reviewer has reached this board, so its Suppressed auto-open is SPENT (ADR.md
+   * entries 91 and 92): the widened clause exists to announce a board nobody was ever shown,
+   * and being looked at is precisely not that.
+   *
+   * Its own durable write, beside the banner record rather than on it, because the case it
+   * covers is a board that has NEVER had a banner: a Suppressed content-only board opened,
+   * read and closed raised one a grace after the tab went, naming the board the reviewer
+   * had just finished with. `returned` below cannot carry that on its own -- with no record
+   * there is no gate for it to open, and inventing an empty record here would mark round 1
+   * as announced and cost a genuinely awaited round 2 its own banner.
+   *
+   * Exactly one write, ever, per board: the flag is only true until the first visit, and
+   * every visit after that finds it false and returns before touching the store. That
+   * matters because this runs on every `attended` report a tab sends, and a page board's
+   * document can be megabytes. A write that fails leaves the flag standing and the board
+   * may still raise its one banner -- degraded by exactly one banner, and self-correcting
+   * on the next visit. */
+  function spendSuppressed(board) {
+    if (!board || board[SUPPRESSED] !== true) return;
+    board[SUPPRESSED] = false;
+    if (!persist(board)) board[SUPPRESSED] = true; // the document goes back exactly as it was
+  }
+
   function returned(boardId) {
     cancel(boardId);
     const board = boardOf(boardId);
+    spendSuppressed(board);
     const rec = recordOn(board);
     if (!rec || rec.returned) {
       // Nothing to record. The in-memory handle is still worth checking: a banner raised
@@ -431,7 +497,19 @@ export function createStrandedWatch({
       // resolves it, on load and on hashchange/focus/visibilitychange so a tab that was
       // already open moves too).
       const oldest = nextToAnnounce(board);
-      const deadlineAt = Date.parse(oldest.awaitDeadline);
+      const at = Date.now();
+      // What bounds the process serving this banner's click. Normally the round's own
+      // deadline; on a Suppressed board's content-only first round there is no deadline to
+      // read (ADR.md entry 92), and the launcher's hard ceiling alone bounds it instead --
+      // the same ceiling `until` below takes a minimum with, so the two cannot disagree.
+      //
+      // The FIELD is tested, not the parse, and the difference matters: `Date.parse`
+      // answers NaN for an absent deadline and for an unparseable one alike, and only the
+      // first is this case. A round claiming a deadline this side cannot read still buys no
+      // click at all (src/notify.mjs's `clickSecondsUntil`) -- it is awaited forever as far
+      // as `roundIsAwaitedOpen` is concerned, so a bound invented for it would be a promise
+      // about a round nothing can close.
+      const deadlineAt = oldest.awaitDeadline == null ? at + CLICK_LIFETIME_MAX_MS : Date.parse(oldest.awaitDeadline);
       const child = notify(folderName(board.cwd), {
         url: target && target.url ? `${target.url}#stranded-round` : null,
         // The same one read of the bound socket the URL came from, handed over separately
@@ -439,7 +517,6 @@ export function createStrandedWatch({
         port: (target && target.port) || null,
         deadlineAt,
       });
-      const at = Date.now();
       // Recorded durably, all five parts together. `round` is the load-bearing one: it is
       // the MARK, permanent for the life of that round, and `returned` beside it is the
       // gate -- shut from the moment a banner is raised until the reviewer comes back

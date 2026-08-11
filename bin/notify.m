@@ -62,6 +62,19 @@
 static NSString *const kRoundCategory = @"claude-board.round";
 static NSString *const kOpenBoardAction = @"claude-board.open-board";
 
+/* bin/launcher.c's own tab surfacer (ADR.md entry 93), compiled into this same binary and
+ * declared here on exactly the footing cb_notify is declared over there: one definition,
+ * one build, a one-argument signature checkable against the other file by eye. It answers
+ * 1 only when it raised an already-open tab on this board, in which case this process must
+ * open NOTHING. Everything else -- no scriptable browser running, no tab on this board, no
+ * osascript, a script that failed or outran its budget -- is 0 and the plain open below.
+ * The board URL has already passed bin/launcher.c's cb_is_board_url before it reached this
+ * file at all, which is what makes it safe to splice into a script over there.
+ *
+ * The same function serves bin/menubar.m's waiting rows, which open the same board URLs by
+ * the same rule -- one answer to "is this board already open" rather than one per surface. */
+extern int cb_surface_tab(const char *board_url);
+
 /* Set from a signal handler, read only by the run loop below. `sig_atomic_t` and a plain
  * store are the whole of what a handler may safely do; the loop polls it once a second,
  * which is the price of not carrying a dispatch source for one boolean.
@@ -131,9 +144,11 @@ static void withdraw_own_notification(UNUserNotificationCenter *center, NSString
 }
 
 /* The one click this process exists to serve. Two flags rather than one, because the
- * open is itself asynchronous: `clicked` says the reviewer acted, `served` says
- * LaunchServices has answered, and the loop below waits a little longer for the second
- * so a click landing a second before the deadline still opens the board. */
+ * open is itself asynchronous: `clicked` says the reviewer acted, `served` says the board
+ * is in front of them -- LaunchServices has answered, or (ADR.md entry 93) a browser
+ * already showing it raised its own tab, which is synchronous and sets this on the spot --
+ * and the loop below waits a little longer for the second so a click landing a second
+ * before the deadline still opens the board. */
 @interface CBRoundDelegate : NSObject <UNUserNotificationCenterDelegate>
 @property(nonatomic, copy) NSString *boardURL;
 @property(nonatomic, assign) BOOL clicked;
@@ -171,12 +186,35 @@ static void withdraw_own_notification(UNUserNotificationCenter *center, NSString
     completionHandler();
     return;
   }
-  /* The default browser opens it, and the browser's own long-lived session is what
-   * authorizes the page (ADR.md entry 57): no credential travels with this URL, and a
-   * browser holding none lands on the refusal page src/render.mjs already renders,
-   * naming the recovery command to run. Whether an existing tab on this board comes
-   * forward or a second one opens is the browser's own behaviour, which is why the URL
-   * is the plain board URL and not something only this process could have minted. */
+  /* Handed back BEFORE the errand rather than after it, which is new with entry 93 and is
+   * the reason: surfacing a tab can wait on a human (an Automation prompt), and the block
+   * below is Notification Center's own "you may stop tracking this response", not this
+   * process's "the board is open". Holding it for twenty seconds to say something the
+   * system never asked to be told is how a click gets reported undelivered. `served` is
+   * the flag that actually gates this process's exit, and nothing touches it yet. */
+  completionHandler();
+
+  /* The tab this board is already open in comes forward, and nothing new is opened
+   * (ADR.md entry 93). Entry 57 left this to the browser -- and every browser answers it
+   * with a second tab, so a reviewer clicking a banner for the board already in front of
+   * them got a duplicate. The URL is unchanged by it: still the plain board URL, still
+   * nothing only this process could have minted, because what a scriptable browser is
+   * asked for is a tab already showing that page.
+   *
+   * Blocking, on the delegate's own thread, and that is the right shape HERE specifically:
+   * this process exists to serve this one click and has nothing else left to do while it
+   * waits. bin/menubar.m makes the same call off the main thread instead, because the
+   * thing it would otherwise block is a live status item. */
+  if (cb_surface_tab([self.boardURL UTF8String])) {
+    self.served = YES;
+    return;
+  }
+  /* Nothing was showing it, so the default browser opens it, and the browser's own
+   * long-lived session is what authorizes the page (ADR.md entry 57): no credential
+   * travels with this URL, and a browser holding none lands on the refusal page
+   * src/render.mjs already renders, naming the recovery command to run. This is also
+   * where an unscriptable browser (Firefox) lands every time, keeping entry 57's
+   * duplicate, which entry 93 accepts. */
   [[NSWorkspace sharedWorkspace] openURL:url
                            configuration:[NSWorkspaceOpenConfiguration configuration]
                        completionHandler:^(NSRunningApplication *app, NSError *error) {
@@ -187,7 +225,6 @@ static void withdraw_own_notification(UNUserNotificationCenter *center, NSString
     }
     self.served = YES;
   }];
-  completionHandler();
 }
 
 @end

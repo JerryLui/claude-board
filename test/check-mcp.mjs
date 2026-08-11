@@ -305,6 +305,16 @@ function openSseStream(port, boardId) {
   });
 }
 
+/** Stop an in-process daemon a single check stood up for itself. `close()` alone waits for
+ * every open connection and an SSE stream never ends, so the connections go too -- the same
+ * shape bin/daemon.mjs uses, and what makes the stranded watch this server owns stop with
+ * it rather than announcing the check's own boards fifteen seconds later. */
+function stopLocalServer(s) {
+  s.close();
+  s.closeIdleConnections?.();
+  s.closeAllConnections?.();
+}
+
 /** Whatever is listening on the port need not be the daemon: during a restart
  * window any local process can bind it first. This one answers a POST with a
  * board id and a `url` of the test's choosing, and a /wait that returns at once —
@@ -1690,6 +1700,120 @@ async function main() {
       await withTimeout(second, 8000, 'round 2 must return');
     } finally {
       openClient.close();
+    }
+  });
+
+  // --- a fresh board defers to an open tab (ADR 91) ------------------------
+  // Two halves of one claim, and the first is the second's control: the same call, the
+  // same recorded opener, differing only in whether a real event stream stands open
+  // somewhere on the daemon. Suppression is the DAEMON's decision (it is the only process
+  // that can see every board on the machine), so the only faithful stand-in for "a
+  // reviewer already has a board open" is a real `/api/board/:id/events` subscription --
+  // what an open tab holds -- and not a flag this check sets for itself.
+  //
+  // Each half gets its own in-process daemon, on its own home and port. The shared one
+  // above serves a dozen later checks that expect a tab to open, and a Watcher standing on
+  // it would silently suppress every one of them.
+
+  await check('a fresh board with no board tab connected anywhere opens its tab, exactly as before', async () => {
+    const dhome = tempHome('open-unwatched');
+    const local = await startServer({ home: dhome, port: 0 });
+    const recorder = makeOpenRecorder(dhome);
+    const client = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_HOME: dhome,
+      CLAUDE_BOARD_PORT: String(local.port),
+      CLAUDE_BOARD_NO_OPEN: undefined, // let it "open" for real, into the recorder
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      // Content-only, so `ask` returns the instant the post lands (QUIRKS.md: a fixture
+      // with no question block never reaches /wait) -- what is being counted here is tabs,
+      // not packets.
+      await withTimeout(client.request('tools/call', {
+        name: 'ask', arguments: { title: 'Fresh and unwatched', blocks: [{ kind: 'markdown', text: 'nothing asked' }] },
+      }), 10_000, 'the ask must return');
+      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1,
+        'nothing is watching any board on this daemon, so the first board opens its tab as it always has');
+      await sleep(300);
+      assert.equal(recorder.opened().length, 1, 'and exactly one tab, not two');
+    } finally {
+      client.close();
+      stopLocalServer(local.server);
+    }
+  });
+
+  await check('a fresh board opens no tab while ANOTHER board on the same daemon has a Watcher', async () => {
+    const dhome = tempHome('open-watched');
+    const local = await startServer({ home: dhome, port: 0 });
+    const recorder = makeOpenRecorder(dhome);
+    // Somebody else's board, in somebody else's thread, with a real stream on it. Posted
+    // straight over HTTP rather than through a second shim: what suppresses is the
+    // Watcher, and this board only has to be something for one to be watching.
+    const watched = await fetch(`http://127.0.0.1:${local.port}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Already open', blocks: [QUESTION] }),
+    }).then(r => r.json());
+    const tab = await openSseStream(local.port, watched.boardId);
+    const client = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_HOME: dhome,
+      CLAUDE_BOARD_PORT: String(local.port),
+      CLAUDE_BOARD_NO_OPEN: undefined,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      const res = await withTimeout(client.request('tools/call', {
+        name: 'ask', arguments: { title: 'Fresh but deferring', blocks: [{ kind: 'markdown', text: 'nothing asked' }] },
+      }), 10_000, 'the ask must return');
+      assert.equal(res.result.isError, false, 'suppressing the tab must not turn the call into a failure');
+      // The opener is spawned detached and this check never learns whether a browser
+      // appeared, so "no tab" can only be counted after giving one time to be recorded.
+      await sleep(500);
+      assert.deepEqual(recorder.opened(), [],
+        'any board, any project, focused or not: a tab standing anywhere is what this board defers to');
+    } finally {
+      client.close();
+      tab.req.destroy();
+      stopLocalServer(local.server);
+    }
+  });
+
+  await check('a fresh board opens its tab despite a Watcher when round banners are switched off', async () => {
+    const dhome = tempHome('open-banners-off');
+    // The reviewer's own switch (the index settings panel). Suppression trades the tab for
+    // a Banner; with the Banner off there is nothing on the other side of the trade, and a
+    // board that opened no tab AND raised no Banner is one nothing at all tells them about.
+    writeFileSync(path.join(dhome, 'pomodoro.json'), JSON.stringify({ settings: { notifyRounds: false } }));
+    const local = await startServer({ home: dhome, port: 0 });
+    const recorder = makeOpenRecorder(dhome);
+    const watched = await fetch(`http://127.0.0.1:${local.port}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ title: 'Already open', blocks: [QUESTION] }),
+    }).then(r => r.json());
+    const tab = await openSseStream(local.port, watched.boardId);
+    const client = spawnShim({
+      ...baseEnv,
+      CLAUDE_BOARD_HOME: dhome,
+      CLAUDE_BOARD_PORT: String(local.port),
+      CLAUDE_BOARD_NO_OPEN: undefined,
+      CLAUDE_BOARD_OPEN_CMD: recorder.script,
+      CLAUDE_BOARD_OPEN_LOG: recorder.log,
+    });
+    try {
+      await withTimeout(client.request('tools/call', {
+        name: 'ask', arguments: { title: 'Fresh, banners off', blocks: [{ kind: 'markdown', text: 'nothing asked' }] },
+      }), 10_000, 'the ask must return');
+      assert.equal((await recorder.waitForOpens(1, 10_000)).length, 1,
+        'the same Watcher that suppresses the open above suppresses nothing with the Banner switched off');
+    } finally {
+      client.close();
+      tab.req.destroy();
+      stopLocalServer(local.server);
     }
   });
 

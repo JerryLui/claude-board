@@ -52,14 +52,14 @@ import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, sto
 import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly, roundContentDrifted } from './board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, resolveComments, questionBlocks, stripDaemonOnly, SUPPRESSED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
 // imported rather than restated so the push path and the page path can never
 // disagree about what a page round is -- see buildRoundPushPayload below.
 import { isPageRound, roundIsAwaited, roundIsAwaitedOpen, roundWaitLapsed, closeLapsedAwaitedRounds, waitingRounds } from './badge.mjs';
-import { createPomodoro, readDoc as readPomodoroDoc } from './pomodoro.mjs';
+import { createPomodoro, readDoc as readPomodoroDoc, roundBannersEnabled } from './pomodoro.mjs';
 import { notifyBoundary, notifyTest } from './notify.mjs';
 import { isCue, cuePath } from './cues.mjs';
 import { resolveRefRoots } from './resolve.mjs';
@@ -177,6 +177,45 @@ export function createSseHub() {
     clientCount(boardId) {
       const board = subs.get(boardId);
       return board ? board.size : 0;
+    },
+    /** Does ANY board on this daemon have a Watcher -- any board, any project, focused
+     * or not? What a fresh board's auto-open is Suppressed on (ADR.md entry 91), and the
+     * one question no other process can answer: the shim sees one thread in one project
+     * directory, and the daemon is where every board on this machine is visible.
+     *
+     * Deliberately NOT `isAttended`/`attendedRemainingMs`: a tab left open behind the
+     * terminal is still a reviewer's place in a browser window, and yanking a new tab in
+     * front of it is the focus theft entry 91 is about, whether or not that tab happens
+     * to be looked at right now.
+     *
+     * WHY THIS IS NOT `subs.size > 0`, which is what it looks like it should be. A
+     * subscription is removed by `handleEvents`'s cleanup, which runs from the response's
+     * own `close` LISTENER -- and a socket is torn down before its listeners are called,
+     * so between a tab going away and this map hearing about it there is a window holding
+     * an entry no browser is on the other end of. It is microseconds on an idle machine
+     * and long enough to lose a race on a busy one (measured: `test/check-stranded.mjs`
+     * fails reliably under CPU contention and never fails without it).
+     *
+     * That window is not a flake to be slept through. The answer is written onto the board
+     * PERMANENTLY, so a board minted inside it is stamped Suppressed forever: no tab is
+     * opened for it, and a Banner is raised about a board that should simply have opened
+     * -- exactly inverted, and unrecoverable, from one lost race.
+     *
+     * So the test is what a Watcher IS (CONTEXT.md: an open board tab holding a live
+     * stream): a subscription this daemon can still WRITE an event to. `socket.writable`
+     * goes false when the peer hangs up, in the same turn the socket is torn down and
+     * strictly before any close listener runs, so it closes the listener-scheduling half
+     * of the window; what is left is only the genuine one, between a tab vanishing and
+     * this machine's TCP stack learning of it, which no local check can close and which
+     * every other reader of this hub already lives with. Backpressure does not enter into
+     * it -- a full write buffer leaves `writable` true and returns false from `write`. */
+    anyWatcher() {
+      for (const board of subs.values()) {
+        for (const { res } of board.values()) {
+          if (!res.writableEnded && !res.destroyed && res.socket && res.socket.writable) return true;
+        }
+      }
+      return false;
     },
     /** Record whether one Watcher's tab is Attended; returns whether the report was
      * APPLIED, which is what `handleAttended` gates the stranded rule on. A report
@@ -835,6 +874,30 @@ function boundCwdForThread(thread, boards) {
   return inThread.length ? inThread[0].cwd : null;
 }
 
+/** Is a fresh board's auto-open Suppressed (ADR.md entry 91)? Two conjuncts, and the
+ * second is not bookkeeping.
+ *
+ * A Watcher standing somewhere is the reason to defer. But deferring TRADES the tab for a
+ * Banner, and the reviewer owns a switch that turns round Banners off (`roundBannersEnabled`,
+ * src/pomodoro.mjs, which src/stranded.mjs re-reads before every announcement). With that
+ * switch off there is nothing on the other side of the trade: no tab and no Banner is a
+ * board that nothing at all tells the reviewer about, which is worse than the focus theft
+ * this rule exists to avoid. Off, a fresh board opens its tab exactly as it always has.
+ *
+ * Read fresh on every post, never captured at boot, for the same reason the stranded rule
+ * re-reads it: a switch flipped mid-day takes effect on the next board, not the next
+ * restart.
+ *
+ * Never throws. This runs inside the branch whose catch answers 400, and an unreadable
+ * pomodoro document must cost the suppression rather than the post it is riding on. */
+function autoOpenSuppressed(home, sse) {
+  try {
+    return sse.anyWatcher() && roundBannersEnabled(readPomodoroDoc(home).settings);
+  } catch {
+    return false;
+  }
+}
+
 async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
   let body;
   try {
@@ -1011,6 +1074,16 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
         awaitTimeoutMs: waitTimeoutMs(),
       });
       round = 1;
+      // A fresh board defers to an open tab (ADR.md entry 91). The decision is made HERE
+      // and not in the shim because "any board, any project" is a fact only this process
+      // can see, and because it has to outlive the response: the stranded rule reads it
+      // back off the document to decide that a Suppressed board's first round is Stranded
+      // even with nothing Awaited (ADR.md entry 92).
+      //
+      // The create branch only, so nothing about a later round can revise it, and before
+      // the render below so `stripDaemonOnly` is what keeps it off the page rather than
+      // the ordering of two writes.
+      board[SUPPRESSED] = autoOpenSuppressed(home, sse);
     }
   } catch (err) {
     return sendJson(res, 400, { error: String(err.message || err) });
@@ -1058,6 +1131,12 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
     round,
     url: boardUrl(req, board.id),
     clients: sse.clientCount(board.id),
+    // Whether this BOARD's auto-open was Suppressed (ADR.md entry 91) -- a property of the
+    // board, decided when it was created, so a push into an existing one reports what that
+    // creation decided rather than re-asking a question that is settled. The shim reads it
+    // on a thread's first board and skips the tab; it opens exactly as it always has when
+    // this is false, and when a daemon predating the field returns nothing at all.
+    suppressed: board[SUPPRESSED] === true,
     // The minted round's own awaited-ness, straight from `mintAwait` (src/board.mjs),
     // so the caller does not have to re-derive it from the blocks it sent. It cannot:
     // the shim checks the RAW blocks and has no way to know that an `html` block's

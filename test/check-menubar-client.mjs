@@ -18,9 +18,12 @@
 // The popover widened that seam rather than opening a second one. `--menubar --probe
 // <action>` performs ONE of the popover's five actions through the same cb_perform its
 // controls call and then reports, which is what makes "every one takes effect" checkable
-// at all; `--menubar --probe url <candidate>` runs the board-URL validator alone; and
-// `--menubar --probe icons` reports the bounding box of each icon the popover draws, which
-// is the one observable the SVG path-data walker has. The popover's rows are printed by the
+// at all; `--menubar --probe url <candidate>` runs the board-URL validator alone;
+// `--menubar --probe open <candidate>` runs ADR 93's decision -- raise the tab a board is
+// already open in, or open one -- against the real browsers on this machine with a stubbed
+// osascript; and `--menubar --probe icons` reports the bounding box of each icon the
+// popover draws, which is the one observable the SVG path-data walker has. The popover's
+// rows are printed by the
 // plain probe, because the rules that decide them — five at most, the overflow's
 // arithmetic, the row's wording, which action the switch performs and which word sits
 // beside it — are pure C functions sitting next to cb_derive for exactly this reason. What
@@ -51,6 +54,13 @@
 //     structurally against this file's own bytes as well as behaviourally through the
 //     seam. Driving a UI cannot prove a button is missing.
 //   - 11, "turning the countdown setting off leaves the icon and removes the text".
+//
+// And one criterion belonging to a different spec entirely, because this is the only place
+// bin/notify.m and bin/menubar.m are both genuinely compiled: "a Banner click for a board
+// already open in a scriptable browser raises that tab and opens no duplicate", and its
+// twin for a waiting row. Both surfaces make one call into one C function, so one seam
+// covers both -- see the ADR 93 section far below for what that seam does and does not
+// reach.
 //
 // Two later decisions are pinned here as well. ADR 88 narrows ADR 83: the menu bar TITLE
 // stays empty while paused and the glyph keeps its paused shape (ADR 83's own point,
@@ -98,7 +108,7 @@
 // child times out against a message naming the wrong problem entirely.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -145,11 +155,56 @@ const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-menubar-client-'))
 const cEscape = value => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 const headerDir = path.join(workDir, 'header');
 mkdirSync(headerDir, { recursive: true });
+
+// --- the osascript stub, and why the compiled-in PATH is the seam that reaches it -------
+//
+// ADR 93 has a board-opening click ask the scriptable browsers whether one of them is
+// already showing that board, through `osascript`, which bin/launcher.c resolves against
+// the launcher's COMPILED-IN PATH rather than against the environment (install.sh's
+// LAUNCHER_CHILD_PATH -- an inherited PATH would let anything that can rewrite the
+// world-writable plist choose what runs when a banner is clicked).
+//
+// That closes the usual stubbing door: no `PATH=` in front of a spawn can reach a real
+// bundle. It opens a better one here, because this file COMPILES ITS OWN BINARY -- so the
+// header below points the compiled-in PATH at a directory this check owns, and the
+// `osascript` in it is the one the binary under test finds. Nothing else in this file
+// spawns anything through that PATH (the supervising path is never run here), so pointing
+// it at a stub dir costs no other check anything.
+//
+// The stub answers from a FILE beside itself rather than from its environment, and takes
+// its interpreter by absolute path in the shebang, for one reason each: bin/launcher.c
+// hands the script a two-variable environment it builds itself (PATH and HOME, both
+// compiled in), so neither an env var nor `#!/usr/bin/env node` can reach it.
+const stubDir = path.join(workDir, 'stub-bin');
+mkdirSync(stubDir, { recursive: true });
+const osascriptStub = path.join(stubDir, 'osascript');
+const osascriptLog = path.join(stubDir, 'log');
+const osascriptAnswer = path.join(stubDir, 'answer');
+writeFileSync(osascriptStub, `#!${process.execPath}
+import fs from 'node:fs';
+import path from 'node:path';
+const dir = path.dirname(process.argv[1]);
+fs.appendFileSync(path.join(dir, 'log'), JSON.stringify(process.argv.slice(2)) + '\\n');
+const answer = fs.existsSync(path.join(dir, 'answer'))
+  ? fs.readFileSync(path.join(dir, 'answer'), 'utf8').trim()
+  : 'none';
+// 'fail' is an osascript that ran and refused -- a denied Automation grant, a browser that
+// went away mid-script. 'slow' is one that answers, late: proof the caller polls for an
+// answer rather than assuming the first read is the whole of it.
+if (answer === 'fail') process.exit(3);
+if (answer === 'slow') {
+  setTimeout(() => { process.stdout.write('none\\n'); }, 700);
+} else {
+  process.stdout.write(answer + '\\n');
+}
+`);
+chmodSync(osascriptStub, 0o755);
+
 writeFileSync(path.join(headerDir, 'launcher_paths.h'), [
   `#define CLAUDE_BOARD_NODE "${cEscape(process.execPath)}"`,
   `#define CLAUDE_BOARD_DAEMON "${cEscape(path.join(workDir, 'never-run.mjs'))}"`,
   `#define CLAUDE_BOARD_HOME_DIR "${cEscape(path.join(workDir, 'never-used-home'))}"`,
-  '#define CLAUDE_BOARD_PATH "/usr/bin:/bin:/usr/sbin:/sbin"',
+  `#define CLAUDE_BOARD_PATH "${cEscape(stubDir)}"`,
   `#define CLAUDE_BOARD_STORE_DIR "${cEscape(path.join(workDir, 'store'))}"`,
   `#define CLAUDE_BOARD_REF_ROOTS_VALUE "${cEscape(path.join(workDir, 'roots'))}"`,
   `#define CLAUDE_BOARD_REPO_ROOT_VALUE "${cEscape(path.join(workDir, 'repo'))}"`,
@@ -165,6 +220,42 @@ if (objects.every(b => b.status === 0)) {
   builds.push(spawnSync(ccCmd, ['-O2', '-Wall', '-Wextra', '-o', launcherExec, '-I', headerDir,
     path.join(repoRoot, 'bin', 'launcher.c'), path.join(workDir, 'notify.o'), path.join(workDir, 'menubar.o'),
     '-framework', 'Foundation', '-framework', 'UserNotifications', '-framework', 'AppKit'], { encoding: 'utf8' }));
+}
+
+// --- a browser that is running, and nothing else about it ---------------------------------
+//
+// ADR 93's gate is "only browsers already running are asked", and bin/launcher.c decides
+// that by looking for a process with the browser's own executable name -- so the way to
+// make a browser running, for a check, is to run a process with that name. This compiles
+// one: it does nothing, holds no window, and exists only to carry its filename into the
+// process table.
+//
+// That is the whole seam, and it is a real one rather than a stub: no env var, no
+// compile-time switch, nothing in bin/launcher.c that only exists for a test. What the
+// checks below assert is a SET COMPARISON -- the browsers consulted against the table
+// browsers actually running, computed independently here from `ps` -- which is what keeps
+// them honest on a reader's machine with Safari and Chrome open, where a check that
+// asserted an exact log would be flaky and one that asserted nothing would be worthless.
+const sleeperSrc = path.join(workDir, 'sleeper.c');
+writeFileSync(sleeperSrc, '#include <unistd.h>\nint main(void) { for (;;) pause(); return 0; }\n');
+const fakeAppDir = path.join(workDir, 'fake-apps');
+mkdirSync(fakeAppDir, { recursive: true });
+
+/** Every table browser in bin/launcher.c's BROWSERS, read out of its own bytes so this
+ * list cannot drift from the shipped one, paired with the dialect the file assigns it. */
+function browserTable() {
+  const c = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
+  const start = c.indexOf('} BROWSERS[] = {');
+  const end = c.indexOf('};', start);
+  assert.ok(start > 0 && end > start, 'setup: bin/launcher.c must still declare a BROWSERS table');
+  return [...c.slice(start, end).matchAll(/\{\s*"([^"]+)",\s*"([^"]+)",\s*([01])\s*\}/g)]
+    .map(m => ({ process: m[1], app: m[2], chromium: m[3] === '1' }));
+}
+
+/** Which of them are running RIGHT NOW, named the way the script addresses them. */
+function runningBrowsers() {
+  const names = processNames();
+  return browserTable().filter(b => names.has(b.process)).map(b => b.app).sort();
 }
 
 // --- the probe --------------------------------------------------------------------------
@@ -283,6 +374,9 @@ async function probe({ home, port, args = [] }) {
     else if (line.startsWith('caption=')) state.caption = line.slice(8);
     else if (line.startsWith('status=')) state.status = line.slice(7);
     else if (line.startsWith('url=')) state.url = line.slice(4);
+    // `--menubar --probe open` (ADR 93): `open=raised|opened|refused` -- see the branch's
+    // own comment in bin/menubar.m for why `opened` is a decision rather than an open.
+    else if (line.startsWith('open=')) state.open = line.slice(5);
     // `--menubar --probe stream` (ticket 01): `stream=connected|refused` first, then
     // `event=<name>|timeout` once the wait is over -- see cb_stream_probe's own comment.
     else if (line.startsWith('stream=')) state.stream = line.slice(7);
@@ -295,6 +389,70 @@ async function probe({ home, port, args = [] }) {
     else if (line.startsWith('run=')) state.run = line.slice(4);
   }
   return state;
+}
+
+// --- reading the stub osascript back -----------------------------------------------------
+
+/** What the stub is to answer for the next probe, and a fresh log to read it against.
+ * `raised` and `none` are the two things a real script returns; `fail` is a nonzero exit
+ * (a denied Automation grant); `slow` answers `none` after a beat. */
+function armOsascript(answer) {
+  writeFileSync(osascriptAnswer, `${answer}\n`);
+  rmSync(osascriptLog, { force: true });
+}
+
+/** Every osascript invocation since the last `armOsascript`, as what it was actually asked:
+ * which application, which dialect, and the URL the script matches tabs against. Read out
+ * of the script text rather than out of a side channel, because the script text IS what
+ * crosses to the browser -- a check that trusted a summary line could not catch a URL
+ * spliced in wrong. */
+function osascriptCalls() {
+  if (!existsSync(osascriptLog)) return [];
+  return readFileSync(osascriptLog, 'utf8').trim().split('\n').filter(Boolean).map(line => {
+    const argv = JSON.parse(line);
+    assert.equal(argv[0], '-e', `osascript must be handed one -e script, got ${JSON.stringify(argv)}`);
+    const script = argv[1];
+    const app = (script.match(/^if application "([^"]+)" is not running then return "none"$/m) || [])[1];
+    const base = (script.match(/^set b to "([^"]*)"$/m) || [])[1];
+    return {
+      argv,
+      script,
+      app,
+      base,
+      // The one line that differs between the dialects, and the one that would raise the
+      // wrong thing if a browser were given the other file's script.
+      dialect: /^set active tab index of w to n$/m.test(script) ? 'chromium'
+        : /^set current tab of w to t$/m.test(script) ? 'safari' : 'unknown',
+    };
+  });
+}
+
+/** Every process name on this machine right now, by the accounting name `ps -c` prints --
+ * which is the same name proc_name reports and the same one bin/launcher.c matches on. */
+function processNames() {
+  const ps = spawnSync('ps', ['-Ac', '-o', 'comm='], { encoding: 'utf8' });
+  return new Set((ps.stdout || '').split('\n').map(s => s.trim()));
+}
+
+/** Runs `fn` with a process named `name` on the machine, so bin/launcher.c's "is this
+ * browser running" scan finds one. Killed on the way out however `fn` ends -- a leaked
+ * process named after a browser would poison every later check in this file. */
+async function withProcessNamed(name, fn) {
+  const exe = path.join(fakeAppDir, name);
+  const built = spawnSync(ccCmd, ['-O2', '-o', exe, sleeperSrc], { encoding: 'utf8' });
+  assert.equal(built.status, 0, `setup: the stand-in browser must compile:\n${built.stderr}`);
+  const child = spawn(exe, [], { stdio: 'ignore' });
+  try {
+    // A process carries its own name only once it has actually exec'd.
+    for (let i = 0; i < 100 && !processNames().has(name); i++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(processNames().has(name), `setup: a process named ${name} must be running for this check to mean anything`);
+    await fn();
+  } finally {
+    child.kill('SIGKILL');
+    await new Promise(resolve => child.once('exit', resolve));
+  }
 }
 
 /** A real daemon on a temp home, plus a temp HOME for the probe carrying its secret. Both
@@ -1565,6 +1723,220 @@ async function main() {
         assert.equal(await verdict(bad), 'refused', `must be refused: ${JSON.stringify(bad)}`);
       }
     });
+  });
+
+  // -------------------------------------------------------------------------------------
+  // ADR 93 -- a click surfaces the existing tab. Spec criteria 5 and 6.
+  //
+  // Both surfaces make the same call: bin/notify.m's banner delegate and this file's
+  // -pressRow: each ask cb_surface_tab (bin/launcher.c) whether a scriptable browser is
+  // already showing that board, and open only when none is. So one seam covers both --
+  // `--menubar --probe open <url>` runs that exact function against the real browsers on
+  // this machine, with `osascript` answered by the stub the compiled-in PATH points at.
+  //
+  // Where these stop, stated once: the seam reports the DECISION and does not perform the
+  // fallback open, because that open is +[NSWorkspace openURL:] and would put a browser tab
+  // on the reader's screen on every suite run. "The fallback fires exactly once" is
+  // therefore two assertions in two places -- the decision, behaviourally here, and the one
+  // guarded call site per surface, structurally at the end of this section. That is the
+  // same split criterion 8's "reset is not reachable" already lives with, and for the same
+  // reason: driving AppKit is not available to this file.
+  // -------------------------------------------------------------------------------------
+
+  const CLICK_PORT = 7391;
+  const CLICK_BOARD = 'b_0123456789abcdef0123456789abcdef';
+  const CLICK_URL = `http://localhost:${CLICK_PORT}/b/${CLICK_BOARD}#stranded-round`;
+  /** The `open` decision, with no daemon anywhere: the branch answers from the validator
+   * and the surfacer alone and never reaches a fetch. */
+  const clickVerdict = async (url = CLICK_URL) =>
+    (await probe({ home: makeProbeHome(null), port: CLICK_PORT, args: url === null ? ['open'] : ['open', url] })).open;
+
+  await check('AC 5 and 6: a browser already showing the board raises its tab, and nothing is opened', async () => {
+    // A stand-in named Safari, because Safari is the FIRST row of the table: with the stub
+    // answering `raised`, the search stops at the first running browser, so this is the one
+    // arrangement in which the number of invocations is exactly one however many browsers
+    // the reader happens to have open. That is what makes "and opens no duplicate" provable
+    // here rather than merely likely.
+    await withProcessNamed('Safari', async () => {
+      armOsascript('raised');
+      assert.equal(await clickVerdict(), 'raised', 'a matching tab is raised, so the click opens nothing');
+      const calls = osascriptCalls();
+      assert.equal(calls.length, 1, `exactly one browser is asked once the tab is found:\n${calls.map(c => c.app).join(', ')}`);
+      assert.equal(calls[0].app, 'Safari');
+      assert.equal(calls[0].dialect, 'safari', 'Safari is asked in Safari\'s dialect, not a Chromium\'s');
+      // The fragment is cut off before the script is built, and this is why: the tab is
+      // very likely sitting at `#stranded-round` (where a previous banner's click landed
+      // it) while the URL this click carries need not be. The script matches the base and
+      // then either a `#` or a `?` after it, so `...#stranded-round` matches and
+      // `.../b_abc1` does not match `.../b_abc`.
+      assert.equal(calls[0].base, `http://localhost:${CLICK_PORT}/b/${CLICK_BOARD}`,
+        'the script matches on the board page\'s own URL, fragment and query cut away');
+      assert.match(calls[0].script, /if u is b or u starts with \(b & "#"\) or u starts with \(b & "\?"\) then/,
+        'and matches the whole URL, never a bare board id inside somebody else\'s page');
+      assert.ok(!calls[0].script.includes('#stranded-round'), 'the fragment reaches no script string');
+    });
+  });
+
+  await check('AC 5 and 6: with no tab on this board anywhere, the click falls through to opening it', async () => {
+    armOsascript('none');
+    assert.equal(await clickVerdict(), 'opened', 'nothing was showing it, so the URL is opened as before ADR 93');
+    const calls = osascriptCalls();
+    assert.deepEqual(calls.map(c => c.app).sort(), runningBrowsers(),
+      'and every running browser was asked before giving up -- no early exit on the first "none"');
+  });
+
+  await check('AC 5: a Chromium is asked in the Chromium dialect, never in Safari\'s', async () => {
+    // The two dialects are the whole of ADR 93's "Safari and Chromium": one names the tab
+    // (`set current tab of w to t`), the other names its index (`set active tab index of w
+    // to n`). Handing either script to the other browser raises nothing, silently, forever.
+    await withProcessNamed('Chromium', async () => {
+      armOsascript('none');
+      assert.equal(await clickVerdict(), 'opened');
+      const chromium = osascriptCalls().find(c => c.app === 'Chromium');
+      assert.ok(chromium, 'setup: a running Chromium must have been asked at all');
+      assert.equal(chromium.dialect, 'chromium');
+      assert.match(chromium.script, /^tell application "Chromium"$/m, 'and addressed by its own name');
+    });
+  });
+
+  await check('AC 5 and 6: only browsers already running are asked -- one that is not is never launched', async () => {
+    // The point of the running check, and the reason it happens before anything is spawned:
+    // `tell application "Safari"` LAUNCHES Safari when it is not, and asking a browser
+    // nobody opened is also how a reviewer collects an Automation prompt for an app they
+    // were not using. Asserted as a SET COMPARISON against `ps`, computed here rather than
+    // read back from the binary under test, so the reader's own open browsers move both
+    // sides together and neither this check's power nor its stability depends on them.
+    armOsascript('none');
+    await clickVerdict();
+    const before = osascriptCalls().map(c => c.app).sort();
+    assert.deepEqual(before, runningBrowsers(), 'the browsers asked are exactly the table browsers running');
+
+    // Whichever table browser this machine is NOT running, so the delta below is a delta
+    // rather than a no-op -- chosen at run time because the reader's own open browsers are
+    // none of this check's business.
+    const spare = browserTable().map(b => b.app).find(app => !before.includes(app));
+    assert.ok(spare, 'setup: this machine is running every browser in the table, so nothing can be started');
+
+    await withProcessNamed(spare, async () => {
+      armOsascript('none');
+      await clickVerdict();
+      const during = osascriptCalls().map(c => c.app).sort();
+      assert.deepEqual(during, [...before, spare].sort(), `starting one (${spare}) adds exactly that one`);
+    });
+
+    armOsascript('none');
+    await clickVerdict();
+    assert.deepEqual(osascriptCalls().map(c => c.app).sort(), before, 'and stopping it takes exactly that one away');
+  });
+
+  await check('AC 5 and 6: an osascript that is missing, refuses or answers late still leaves a click that opens', async () => {
+    // Every way this can fail costs a duplicate tab and none of them costs the click --
+    // which is the whole reason the surfacing returns a verdict rather than taking over the
+    // open. A dead click is the one outcome ADR 93 must not be able to produce.
+    armOsascript('fail');
+    assert.equal(await clickVerdict(), 'opened', 'a script that exits nonzero -- a denied Automation grant looks exactly like this');
+
+    armOsascript('slow');
+    const started = Date.now();
+    assert.equal(await clickVerdict(), 'opened', 'a script that answers after a beat is still read to the end');
+    assert.ok(Date.now() - started >= 600, 'setup: the slow answer must actually have been waited for');
+
+    chmodSync(osascriptStub, 0o644); // present, not executable: the same as absent to the resolver
+    try {
+      armOsascript('raised');
+      assert.equal(await clickVerdict(), 'opened', 'no osascript on the compiled-in PATH at all');
+      assert.equal(osascriptCalls().length, 0, 'and nothing ran');
+    } finally {
+      chmodSync(osascriptStub, 0o755);
+    }
+  });
+
+  await check('AC 6: a URL the validator refuses is neither surfaced nor opened, and no script is run for it', async () => {
+    // The order matters and this is what pins it: a URL that may not be opened may not be
+    // ASKED ABOUT either. Otherwise `file:///etc/passwd` would reach an AppleScript string
+    // literal on its way to being refused.
+    for (const bad of [
+      `https://localhost:${CLICK_PORT}/b/${CLICK_BOARD}`,
+      `http://evil.com/b/${CLICK_BOARD}`,
+      `http://localhost:${CLICK_PORT + 1}/b/${CLICK_BOARD}`,
+      'file:///etc/passwd',
+      `http://localhost:${CLICK_PORT}/b/${CLICK_BOARD}" & (do shell script "id") & "`,
+      '',
+    ]) {
+      armOsascript('raised');
+      assert.equal(await clickVerdict(bad), 'refused', `must be refused: ${JSON.stringify(bad)}`);
+      assert.equal(osascriptCalls().length, 0, `and must reach no script at all: ${JSON.stringify(bad)}`);
+    }
+    armOsascript('raised');
+    assert.equal(await clickVerdict(null), 'refused', 'and no URL at all is not a click either');
+  });
+
+  await check('AC 6: the URL GET /api/waiting actually builds is one the surfacing acts on', async () => {
+    // Every URL above is spelled by this check. This one is the route's own, so a row that
+    // opened a URL the surfacer could not parse -- a trailing slash, a host spelling, a
+    // fragment nobody expected -- fails here rather than shipping as "it just never raises".
+    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+      const posted = await (await fetch(`http://127.0.0.1:${port}/api/board`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+        body: JSON.stringify({
+          title: 'SURFACE_FIXTURE',
+          blocks: [{ kind: 'question', prompt: 'Waiting?', widget: 'single', options: [{ label: 'Yes' }] }],
+        }),
+      })).json();
+      const listed = await (await fetch(`http://127.0.0.1:${port}/api/waiting`, {
+        headers: { [SECRET_HEADER]: secret },
+      })).json();
+      const entry = listed.waiting.find(e => e.boardId === posted.boardId);
+      assert.ok(entry, 'setup: the board is waiting');
+
+      await withProcessNamed('Safari', async () => {
+        armOsascript('raised');
+        const state = await probe({ home: probeHome, port, args: ['open', entry.url] });
+        assert.equal(state.open, 'raised', `the route's own URL must be surfaceable: ${entry.url}`);
+        const calls = osascriptCalls();
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].base, entry.url.split('#')[0].split('?')[0],
+          'and the script matches the page that URL names, byte for byte');
+      });
+    });
+  });
+
+  await check('ADR 93, structurally: both board-opening clicks are guarded by the one surfacer, and the index page is not', async () => {
+    // The half the seam above cannot reach. Three things have to be true and none of them
+    // is observable from a probe: bin/notify.m's delegate asks before it opens, -pressRow:
+    // asks before it opens, and -pressIndex:/-pressSettings: do not ask at all (the index
+    // is a page, not a board a reviewer is sitting in front of -- raising some other tab
+    // for it would be a surprise, and ADR 93 is about boards).
+    const notify = readFileSync(path.join(repoRoot, 'bin', 'notify.m'), 'utf8');
+    const menubar = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    const launcher = readFileSync(path.join(repoRoot, 'bin', 'launcher.c'), 'utf8');
+
+    assert.match(launcher, /^int cb_surface_tab\(/m, 'one definition, in C, beside cb_is_board_url');
+    for (const [file, source] of [['bin/notify.m', notify], ['bin/menubar.m', menubar]]) {
+      assert.match(source, /extern int cb_surface_tab\(/, `${file} declares it rather than reimplementing it`);
+      assert.ok(!/^int cb_surface_tab\(/m.test(source), `${file} must not define a second one`);
+    }
+
+    // The banner's click: the surfacing is what decides whether NSWorkspace is reached at
+    // all, and the early return is the "opens no duplicate" half of AC 5.
+    assert.match(notify, /if \(cb_surface_tab\(\[self\.boardURL UTF8String\]\)\) \{\s*\n\s*self\.served = YES;\s*\n\s*return;/,
+      'bin/notify.m returns without opening when a tab was raised');
+    assert.ok(notify.indexOf('cb_surface_tab') < notify.indexOf('[[NSWorkspace sharedWorkspace] openURL:url'),
+      'and asks before it opens, not after');
+
+    // The row's click: the same call, and the open only on the other branch of it.
+    assert.match(menubar, /if \(cb_surface_tab\(\[target UTF8String\]\)\) return;\s*\n\s*dispatch_async\(dispatch_get_main_queue\(\), \^\{\s*\n\s*cb_open_url/,
+      '-pressRow: opens only when nothing was raised');
+
+    // And the two index opens are plain, which is only visible as an absence.
+    for (const method of ['pressIndex', 'pressSettings']) {
+      const start = menubar.indexOf(`- (void)${method}:(id)sender`);
+      assert.ok(start > 0, `setup: -${method}: must still exist`);
+      const body = menubar.slice(start, menubar.indexOf('\n}', start));
+      assert.ok(!body.includes('cb_surface_tab'), `-${method}: opens the index page plainly, without surfacing`);
+      assert.ok(body.includes('cb_open_url'), `-${method}: still opens it`);
+    }
   });
 
   // -------------------------------------------------------------------------------------

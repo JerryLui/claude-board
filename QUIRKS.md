@@ -656,6 +656,7 @@ shadows the stdlib and breaks `python3 -m http.server`.
 - [`writeDoc` defaults to the REAL board home, so a check that calls it without one clobbers the reader's pomodoro state](#writedoc-defaults-to-the-real-board-home-so-a-check-that-calls-it-without-one-clobbers-the-readers-pomodoro-state)
 - [A mutation helper that restores with `git checkout` eats uncommitted work](#a-mutation-helper-that-restores-with-git-checkout-eats-uncommitted-work)
 - [A block's id is kind-locked, permanently](#a-blocks-id-is-kind-locked-permanently)
+- [A check that closes a tab and immediately posts is racing the daemon, and the race only turns over under CPU load](#a-check-that-closes-a-tab-and-immediately-posts-is-racing-the-daemon-and-the-race-only-turns-over-under-cpu-load)
 - [A machine-identity sweep cannot be `includes(os.hostname())`](#a-machine-identity-sweep-cannot-be-includesoshostname)
 - [A comment-only edit to src/ui.mjs can still break check-sample-board.mjs](#a-comment-only-edit-to-srcuimjs-can-still-break-check-sample-boardmjs)
 - [A `new Function` harness inherits the host's globals, so a `typeof` guard can pass for the wrong reason](#a-new-function-harness-inherits-the-hosts-globals-so-a-typeof-guard-can-pass-for-the-wrong-reason)
@@ -913,6 +914,31 @@ Note `wait: true` alone is not enough: `mintAwait` requires `isPageRound`, which
 `html` block and nothing else — a markdown block with `wait: true` is not awaited at all
 and strands nothing.
 
+### A check that closes a tab and immediately posts is racing the daemon, and the race only turns over under CPU load
+
+`tab.req.destroy()` hangs up the *client*. The daemon removes that subscription from
+`createSseHub`'s `subs` in `handleEvents`'s cleanup, which runs from the response's own
+`close` **listener** — so between the two there is a window where the hub still holds an
+entry no browser is on the other end of. Anything the daemon decides from "is anybody
+watching" inside that window decides it wrongly.
+
+Measured while landing ADR 91: `node test/check-stranded.mjs` alone passed 3/3 and a
+40-iteration targeted probe reproduced it 0/40, on an idle machine. Under CPU contention
+(`for i in $(seq $(sysctl -n hw.ncpu)); do node -e 'busy loop' & done`) the same file
+failed on the first run, every time, at `criterion 3: a round landing on a board whose tab
+is open but hidden` — the check whose predecessor closes a stream and which then posts a
+content-only board. So "it passes locally" is worth nothing here; **run the suspect file
+under load before believing a timing fix**, and treat a check that fails only in CI as this
+shape until proved otherwise.
+
+The daemon-side fix is not to sleep: the socket is already observably dead in that window.
+`res.socket.writable` goes false in the same turn the socket is torn down, strictly before
+any close listener runs, so a reader that asks "can I still write an event to this?"
+(`createSseHub`'s `anyWatcher`) sees the truth where `subs.size` does not. Backpressure
+does not confuse it — a full write buffer leaves `writable` true and returns false from
+`write`. What is left is only the genuine window between a tab vanishing and this machine's
+TCP stack hearing about it, which nothing local can close.
+
 ### A machine-identity sweep cannot be `includes(os.hostname())`
 
 The obvious way to check a committed artifact for leaked machine identity is
@@ -1005,6 +1031,7 @@ you did not name, name it.
 - [Where the clone lives silently sets the installer's health budget, and the checks pay it](#where-the-clone-lives-silently-sets-the-installers-health-budget-and-the-checks-pay-it)
 - [`lsregister` records are permanent, share a bundle id, and a dead one is a "damaged app" dialog on repeat](#lsregister-records-are-permanent-share-a-bundle-id-and-a-dead-one-is-a-damaged-app-dialog-on-repeat)
 - [A copied platform binary is SIGKILLed on exec from inside a `.app`, wherever the copy lives](#a-copied-platform-binary-is-sigkilled-on-exec-from-inside-a-app-wherever-the-copy-lives)
+- [An unanswered Automation prompt hangs `osascript` for as long as it is unanswered, and killing it under the prompt records nothing](#an-unanswered-automation-prompt-hangs-osascript-for-as-long-as-it-is-unanswered-and-killing-it-under-the-prompt-records-nothing)
 
 ### macOS TCC gates the daemon by *application*, and launchd's application is not yours
 
@@ -1161,6 +1188,43 @@ When a check needs a throwaway long-lived executable, `symlinkSync` a long path 
 `process.execPath` rather than copying it: `ps` reports the path a process was started from, not
 what the link resolves to, so the link proves what a copy would, and costs no disk where the copy
 costs 115 MB a run.
+
+### An unanswered Automation prompt hangs `osascript` for as long as it is unanswered, and killing it under the prompt records nothing
+
+The first Apple Event an app sends to another app raises the *"X wants to control Y"*
+dialog, and the sending process is **blocked inside that one event until somebody answers
+it**. Measured while building ADR.md entry 93's tab surfacing (macOS 26, Chrome running,
+Automation not yet granted): `osascript -e 'tell application "Google Chrome" to return
+(count of windows)'` produced no output and no error for as long as it was left alone —
+20 seconds, then 6 more on a second attempt. Not slow: stopped.
+
+The half that decides the design is what happens if you give up on it. Killing the
+blocked `osascript` records **nothing** — not an allow, not a denial — so the next attempt
+starts the same dialog from scratch. There is no other way to obtain the grant either:
+System Settings > Privacy & Security > Automation lists only pairs macOS has already
+recorded an answer for, and `tccutil` cannot add one. A timeout shorter than a person
+reaching for the mouse is therefore not the conservative choice, it is the choice where the
+grant can never be obtained at all, every click pays the timeout forever, and the feature
+silently never works. That is the whole reason `SURFACE_BUDGET_MS` in `bin/launcher.c` is
+20 seconds rather than the two or three a script would normally get; trimming it "because
+nothing should take that long" reopens exactly this.
+
+A *recorded* denial behaves completely differently, and it is what the code's fast paths
+are for: "Don't Allow" is remembered, and every later event to that app comes back
+immediately with `Not authorized to send Apple events to <app>. (-1743)` on stderr. So
+"blocked for 20 seconds" means a dialog is on screen, never that permission is missing.
+
+Two consequences for anything else that reaches for `osascript` here:
+
+- **Bound it, and end the errand on a timeout rather than moving to the next target.** A
+  second `tell` to a different app while the first dialog is unanswered stacks a second
+  dialog on it and costs another full budget, which is how one click turns into a minute.
+- **Debugging this from an agent's shell prompts against the wrong app.** The dialog names
+  the *responsible* process, which for a hand-run `osascript` is the terminal or the agent
+  that spawned it, not `claude-board.app` — so probing by hand grants (or denies) a pair
+  that has nothing to do with the product, and leaves a dialog on the reader's screen that
+  they did not ask for. Bound every hand-run probe (`perl -e 'alarm 20; exec @ARGV' …`) and
+  kill the `osascript` afterwards; `ps -Ao pid=,comm= | grep -w osascript` is the sweep.
 
 ### `XPC_SERVICE_NAME` does not tell you a process was started by launchd
 

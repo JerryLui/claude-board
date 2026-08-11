@@ -131,9 +131,12 @@
  */
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <libproc.h>      /* proc_listpids/proc_name: which browsers are already running */
 #include <limits.h>
 #include <mach-o/dyld.h>  /* _NSGetExecutablePath: the --menubar child execs THIS binary */
 #include <signal.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -511,6 +514,334 @@ int cb_is_board_url(const char *s, int expected_port) {
     fragment_len++;
   }
   return fragment_len > 0;
+}
+
+/* --- Surfacing an existing tab --------------------------------------------------
+ *
+ * ADR.md entry 93, which narrows entry 57. Entry 57 left "does a click land on the tab
+ * this board is already open in, or on a second copy of it" to the browser, on the
+ * grounds that forcing a named tab forward needs Apple Events. Every browser answers
+ * "a second copy", so a reviewer clicking a banner for the board already in front of
+ * them collects a duplicate tab. Entry 93 spends the Apple Events: before opening
+ * anything, ask the scriptable browsers whether one of them is already showing this
+ * board, and raise that tab if one is.
+ *
+ * NOT static, and the cb_ prefix says why, exactly as cb_is_board_url's does: BOTH
+ * board-opening clicks call it -- the banner's, in bin/notify.m, and the popover's
+ * waiting row, in bin/menubar.m -- and "is this board already open" must have one
+ * answer in this product rather than one per surface. Each caller declares it `extern`
+ * beside its cb_is_board_url declaration; there is one definition and one build.
+ *
+ * Returns 1 only when a tab was raised and the caller must therefore open NOTHING.
+ * Everything else is 0: no scriptable browser running, no tab on this board, no
+ * osascript on the compiled-in PATH, a script that failed, a script that outran its
+ * budget. 0 is entry 57's behaviour unchanged, which is the point -- every way this can
+ * fail costs a duplicate tab, and none of them costs the click.
+ *
+ * Bounded twice over, because a click that hangs is worse than a duplicate tab: each
+ * browser gets one SURFACE_BUDGET_MS, and the first browser to spend the whole of it ends
+ * the errand rather than passing the wait on to the next one.
+ */
+
+/* The scriptable browsers, one table for both dialects.
+ *
+ * `process` is the name the kernel reports for the browser's own process, and it is
+ * checked BEFORE anything is spawned, for two reasons that are both about not surprising
+ * the reviewer: `tell application "Safari"` LAUNCHES Safari when it is not running, and
+ * the first Apple Event sent to an app is what raises the Automation prompt for it --
+ * entry 93 accepts one prompt per browser the reviewer actually uses, not one per browser
+ * this table has heard of. (The scripts below carry an `is running` guard of their own as
+ * well: this check and the script's are two different processes' views of the same fact,
+ * and the window between them is a browser quitting mid-click.)
+ *
+ * `chromium` picks the dialect. There are two of those in the world and not one per
+ * browser: Safari names the tab itself (`current tab of w`), every Chromium names its
+ * index (`active tab index of w`). Firefox is in neither column because it is not
+ * scriptable at all -- entry 93 accepts entry 57's duplicate there.
+ *
+ * Helper processes do not collide with this: an exact match, so "Google Chrome Helper"
+ * and "Safari Networking" are not Chrome and not Safari. */
+static const struct {
+  const char *process;
+  const char *app;
+  int chromium;
+} BROWSERS[] = {
+  { "Safari",         "Safari",         0 },
+  { "Google Chrome",  "Google Chrome",  1 },
+  { "Microsoft Edge", "Microsoft Edge", 1 },
+  { "Brave Browser",  "Brave Browser",  1 },
+  { "Chromium",       "Chromium",       1 },
+};
+enum { BROWSERS_N = (int)(sizeof(BROWSERS) / sizeof(BROWSERS[0])) };
+
+/* The two dialects, and the whole of what an Apple Event is asked to do here. Three
+ * substitutions each, in this order: the board URL, then the application name twice.
+ *
+ * Matching is on the board page's OWN URL with the fragment and any query cut off (see
+ * board_url_base below), because the tab this is looking for is very likely sitting at
+ * `...#stranded-round` -- the sentinel a previous banner's click landed it on -- while the
+ * URL this click carries may have no fragment at all. Hence the three-way test rather
+ * than a plain prefix match: `starts with` alone would raise board `b_abc1`'s tab for
+ * board `b_abc`, since one id is a prefix of the other. A bare id is never matched
+ * against anything: an id is not a URL, and a tab on somebody else's page that happens to
+ * mention one is not this board.
+ *
+ * `set u to ""` then `try` per tab: a tab that has never loaded answers `missing value`
+ * for its URL, and `starts with` raises on that -- an error there would abandon the
+ * search at the first blank tab rather than skip it.
+ *
+ * Three statements bring the tab forward and they are all three necessary: the tab
+ * becomes its window's selected one, the window becomes the frontmost of that
+ * application's, and the application becomes the frontmost of the machine's. */
+static const char SAFARI_SCRIPT[] =
+    "set b to \"%s\"\n"
+    "if application \"%s\" is not running then return \"none\"\n"
+    "tell application \"%s\"\n"
+    "repeat with w in windows\n"
+    "repeat with t in tabs of w\n"
+    "set u to \"\"\n"
+    "try\n"
+    "set u to (URL of t) as text\n"
+    "end try\n"
+    "if u is b or u starts with (b & \"#\") or u starts with (b & \"?\") then\n"
+    "set current tab of w to t\n"
+    "set index of w to 1\n"
+    "activate\n"
+    "return \"raised\"\n"
+    "end if\n"
+    "end repeat\n"
+    "end repeat\n"
+    "end tell\n"
+    "return \"none\"\n";
+
+static const char CHROMIUM_SCRIPT[] =
+    "set b to \"%s\"\n"
+    "if application \"%s\" is not running then return \"none\"\n"
+    "tell application \"%s\"\n"
+    "repeat with w in windows\n"
+    "set n to 0\n"
+    "repeat with t in tabs of w\n"
+    "set n to n + 1\n"
+    "set u to \"\"\n"
+    "try\n"
+    "set u to (URL of t) as text\n"
+    "end try\n"
+    "if u is b or u starts with (b & \"#\") or u starts with (b & \"?\") then\n"
+    "set active tab index of w to n\n"
+    "set index of w to 1\n"
+    "activate\n"
+    "return \"raised\"\n"
+    "end if\n"
+    "end repeat\n"
+    "end repeat\n"
+    "end tell\n"
+    "return \"none\"\n";
+
+/* Long enough for either script above with a maximum-length board URL spliced into it,
+ * and a stack local rather than a malloc because it is neither large nor variable. */
+#define SURFACE_SCRIPT_LEN 2048
+
+/* How long one browser gets to answer, and the one number here that is a judgement rather
+ * than a bound. Per browser rather than shared across them, because each is an independent
+ * question that may need its own Automation prompt: a browser that answers instantly must
+ * not have had its share of some pooled budget already spent by one that did not.
+ *
+ * Sized for a HUMAN, which is not what a timeout on a script usually is, and QUIRKS.md
+ * ("An unanswered Automation prompt hangs osascript for as long as it is unanswered")
+ * carries the measurement: a script blocked on that dialog is stopped rather than slow, and
+ * killing it under the dialog records nothing, so the next attempt prompts again from the
+ * start and there is no other route to the grant. A budget short enough to expire before a
+ * reviewer can reach the Allow button is therefore not the conservative choice -- it is the
+ * choice where the grant entry 93 spends can never be obtained, every click pays the
+ * timeout forever, and no tab is ever raised. Twenty seconds is a person noticing a dialog
+ * and clicking it. Overrunning it costs a duplicate tab and nothing else, and the script is
+ * killed rather than left to answer later -- so a prompt answered long after the fact can
+ * never raise a tab for a click this process already gave up on and opened for. */
+#define SURFACE_BUDGET_MS 20000
+
+/* The budget is spent as a count of polls rather than against a clock, which is the
+ * smaller of the two shapes and the one that cannot fail open: a clock that refuses to
+ * answer would leave a deadline comparison true forever, and forever is the one thing this
+ * wait may not be. */
+#define SURFACE_POLL_MS 20
+#define SURFACE_POLLS (SURFACE_BUDGET_MS / SURFACE_POLL_MS)
+
+/* The board page's own URL, with the fragment and any query cut away, and the second line
+ * of defense on what may be spliced into an AppleScript string literal. cb_is_board_url
+ * has already refused every byte outside this set -- a quote or a backslash could close
+ * that literal and turn the rest of a URL into script -- but this function takes a
+ * `const char *` from two other files, and a filter that lives one call away in somebody
+ * else's source is one a later edit can lose without noticing. Refusing here costs the
+ * surfacing and leaves the plain open, which is the same degradation every other failure
+ * on this path takes. */
+static int board_url_base(const char *url, char *out, size_t out_len) {
+  size_t len = 0;
+  while (url[len] != '\0' && url[len] != '#' && url[len] != '?') len++;
+  if (len == 0 || len >= out_len) return 0;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)url[i];
+    if (!(isalnum(c) || c == ':' || c == '/' || c == '.' || c == '-' || c == '_')) return 0;
+  }
+  memcpy(out, url, len);
+  out[len] = '\0';
+  return 1;
+}
+
+/* Is a process with exactly this name running for anybody on this machine?
+ *
+ * ponytail: a linear scan of every pid, once per click. The ceiling is one syscall per
+ * process on a machine with a few hundred of them, on a path a human just clicked; the
+ * upgrade path is -[NSRunningApplication runningApplicationsWithBundleIdentifier:], which
+ * asks LaunchServices instead and costs this file AppKit and an Objective-C compile it
+ * does not otherwise need.
+ *
+ * A pid this process may not ask about (another user's) answers 0 and is skipped, which
+ * is correct rather than merely convenient: a browser running as somebody else is not a
+ * browser this reviewer's click can raise a tab in. */
+static int process_is_running(const char *name) {
+  int bytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+  if (bytes <= 0) return 0;
+  pid_t *pids = malloc((size_t)bytes);
+  if (pids == NULL) return 0;
+  bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, bytes);
+  int found = 0;
+  int count = bytes > 0 ? bytes / (int)sizeof(pid_t) : 0;
+  for (int i = 0; i < count && !found; i++) {
+    if (pids[i] <= 0) continue;
+    char comm[64];
+    if (proc_name(pids[i], comm, (uint32_t)sizeof(comm)) <= 0) continue;
+    if (strcmp(comm, name) == 0) found = 1;
+  }
+  free(pids);
+  return found;
+}
+
+/* Where `osascript` is, resolved against the launcher's own compiled-in PATH rather than
+ * against the environment. The same reasoning that put CLAUDE_BOARD_PATH in the header in
+ * the first place (see this file's own header, and install.sh's LAUNCHER_CHILD_PATH): the
+ * plist is user-writable, this binary holds the reader's Documents grant, and an
+ * inherited PATH would let anything that can rewrite the plist choose what runs when a
+ * banner is clicked. Absent means no surfacing, which is a duplicate tab and not a
+ * failure. */
+static int tool_in_path(const char *tool, char *out, size_t out_len) {
+  const char *dir = CLAUDE_BOARD_PATH;
+  while (*dir != '\0') {
+    const char *sep = strchr(dir, ':');
+    size_t dir_len = sep != NULL ? (size_t)(sep - dir) : strlen(dir);
+    if (dir_len > 0 && dir_len + strlen(tool) + 2 <= out_len) {
+      snprintf(out, out_len, "%.*s/%s", (int)dir_len, dir, tool);
+      if (access(out, X_OK) == 0) return 1;
+    }
+    if (sep == NULL) break;
+    dir = sep + 1;
+  }
+  return 0;
+}
+
+/* Run one dialect against one browser, within one SURFACE_BUDGET_MS. Three answers, not
+ * two: 1 raised a tab, 0 answered "no tab here" (or could not be run, or refused, which
+ * are the same thing to a caller that has an open to fall back on), and -1 ran out of
+ * budget. The third is separate from the second because it means something the caller has
+ * to act on -- a script that answered nothing inside twenty seconds is a script waiting on
+ * a human, and asking the next browser would stack a second dialog on the first.
+ *
+ * The verdict is the script's own word on stdout, read through a pipe rather than left on
+ * this process's: the --menubar probe's output IS its report, and a stray line of
+ * osascript chatter in the middle of it would be a parse error in a check. stderr is
+ * deliberately left alone -- "Not authorized to send Apple events" is the one diagnostic
+ * that explains a click that keeps opening duplicates, and it belongs in the daemon's log.
+ *
+ * Nonblocking reads folded into the same poll as waitpid, so neither can wedge the other:
+ * the answer is one short word, so the pipe cannot fill and the child cannot block on a
+ * writer nobody is reading. A child that outruns the budget is SIGKILLed and reaped here
+ * rather than left behind -- this is a process that may live for the length of a round's
+ * wait, and an abandoned osascript per click would accumulate for as long as it does. */
+static int run_surface_script(const char *osascript_path, const char *script) {
+  int fds[2];
+  if (pipe(fds) != 0) return 0;
+  posix_spawn_file_actions_t actions;
+  if (posix_spawn_file_actions_init(&actions) != 0) {
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+  (void)posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+  (void)posix_spawn_file_actions_addclose(&actions, fds[0]);
+  (void)posix_spawn_file_actions_addclose(&actions, fds[1]);
+  char *const argv[] = { (char *)"osascript", (char *)"-e", (char *)script, NULL };
+  /* Built here rather than inherited, for the same reason the daemon's is (OVERRIDE_ENV
+   * above): these two are the only variables this child has any business reading, and
+   * both are compiled in. */
+  char *const envp[] = {
+    (char *)("PATH=" CLAUDE_BOARD_PATH),
+    (char *)("HOME=" CLAUDE_BOARD_HOME_DIR),
+    NULL,
+  };
+  pid_t pid = 0;
+  int spawned = posix_spawn(&pid, osascript_path, &actions, NULL, argv, envp);
+  (void)posix_spawn_file_actions_destroy(&actions);
+  close(fds[1]);
+  if (spawned != 0) {
+    close(fds[0]);
+    return 0;
+  }
+  (void)fcntl(fds[0], F_SETFL, O_NONBLOCK);
+
+  char out[64];
+  size_t len = 0;
+  int status = 0;
+  int reaped = 0;
+  for (int poll = 0; poll < SURFACE_POLLS; poll++) {
+    ssize_t got = read(fds[0], out + len, sizeof(out) - 1 - len);
+    if (got > 0) len += (size_t)got;
+    if (waitpid(pid, &status, WNOHANG) == pid) {
+      reaped = 1;
+      break;
+    }
+    struct timespec nap = { 0, SURFACE_POLL_MS * 1000 * 1000 };
+    (void)nanosleep(&nap, NULL);
+  }
+  if (!reaped) {
+    (void)kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    close(fds[0]);
+    return -1;
+  }
+  for (;;) {
+    ssize_t got = read(fds[0], out + len, sizeof(out) - 1 - len);
+    if (got <= 0) break;
+    len += (size_t)got;
+    if (len + 1 >= sizeof(out)) break;
+  }
+  close(fds[0]);
+  out[len] = '\0';
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0 && strncmp(out, "raised", 6) == 0;
+}
+
+int cb_surface_tab(const char *board_url) {
+  if (board_url == NULL) return 0;
+  char base[MAX_BOARD_URL_LEN];
+  if (!board_url_base(board_url, base, sizeof(base))) return 0;
+  char osascript_path[PATH_MAX];
+  if (!tool_in_path("osascript", osascript_path, sizeof(osascript_path))) return 0;
+
+  for (int i = 0; i < BROWSERS_N; i++) {
+    if (!process_is_running(BROWSERS[i].process)) continue;
+    char script[SURFACE_SCRIPT_LEN];
+    const char *format = BROWSERS[i].chromium ? CHROMIUM_SCRIPT : SAFARI_SCRIPT;
+    int written = snprintf(script, sizeof(script), format, base, BROWSERS[i].app, BROWSERS[i].app);
+    if (written < 0 || (size_t)written >= sizeof(script)) continue;
+    int answer = run_surface_script(osascript_path, script);
+    if (answer > 0) return 1;
+    /* Out of budget, which here means a dialog somebody has not answered yet. Asking the
+     * next browser would put a second dialog on top of the first and make this click cost
+     * another full budget before it opens anything -- so the errand ends, the URL is opened,
+     * and the browsers behind this one in the table are asked on the next click, by which
+     * time the reviewer has probably answered. A refusal is NOT this: "Don't Allow" is
+     * recorded by macOS and answered instantly from then on, which arrives as 0. */
+    if (answer < 0) break;
+  }
+  return 0;
 }
 
 /* How long the click-serving process may live, in seconds, from argv[5].

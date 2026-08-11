@@ -994,8 +994,16 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   session.url = url;
 
   // The daemon announces a stranded round on its own now (ADR 55); this shim only
-  // ever opens a tab for a thread's first board.
-  if (isFirstBoard) await openAuthorizedTab(posted.boardId, url);
+  // ever opens a tab for a thread's first board -- and not even then when the daemon
+  // answered that the open was Suppressed, because some board on that daemon already has
+  // a Watcher and a fresh tab would steal focus from the reviewer sitting on it (ADR 91).
+  // The Banner announces the board instead.
+  //
+  // The daemon's answer and not this side's, for the same reason `awaited` below is: only
+  // the daemon can see every board on this machine, while this process knows one thread in
+  // one project directory. Absent on a daemon from before the field existed, which opens
+  // exactly as it always has.
+  if (isFirstBoard && !posted.suppressed) await openAuthorizedTab(posted.boardId, url);
 
   // A round with nothing awaited on it (see `isAwaited` above) has nothing a human
   // needs to submit, so there is nothing left to wait for — return the instant the

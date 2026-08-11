@@ -89,6 +89,18 @@ static volatile sig_atomic_t stop_requested = 0;
  * src/render.mjs already renders. */
 extern int cb_is_board_url(const char *s, int expected_port);
 
+/* bin/launcher.c's tab surfacer, declared here on the same footing and for the same
+ * reason (ADR 93). A waiting row and a banner open the same board URLs, so "is this board
+ * already open somewhere" gets ONE answer in this product rather than one per surface:
+ * given a URL that has already passed cb_is_board_url, it returns 1 when it raised an
+ * already-open tab and this file must therefore open nothing. Every other outcome -- no
+ * scriptable browser running, no tab on this board, no osascript, a script that failed or
+ * outran its budget -- is 0 and the plain open below, which is entry 57's behaviour
+ * unchanged. Only a BOARD is surfaced this way: the index page and the settings panel are
+ * plain opens (see -pressIndex: and -pressSettings:), a decision entry 93 is deliberately
+ * silent about because the index is not a board a reviewer is sitting on. */
+extern int cb_surface_tab(const char *board_url);
+
 static void cb_stop(int sig) {
   (void)sig;
   stop_requested = 1;
@@ -2103,7 +2115,13 @@ static NSURL *cb_index_url(NSString *fragment) {
 /* The default browser opens it, and the browser's own long-lived session authorizes the
  * page (ADR 57) — no credential travels in the URL, and a browser holding none lands on
  * the refusal page src/render.mjs already renders, naming the recovery command. Exactly
- * bin/notify.m's shape for the same errand. */
+ * bin/notify.m's shape for the same errand.
+ *
+ * A PLAIN open, and after ADR 93 that is what the name means: it opens, every time, and
+ * whether a second tab on the same page now exists is the browser's business. Two of the
+ * three callers want exactly that — the index page and the settings panel are one page
+ * apiece, not a board a reviewer is sitting in front of. The third, -pressRow:, asks
+ * cb_surface_tab first and only lands here when nothing was already showing that board. */
 static void cb_open_url(NSURL *url) {
   if (url == nil) return;
   [[NSWorkspace sharedWorkspace] openURL:url
@@ -2503,7 +2521,34 @@ static void cb_open_url(NSURL *url) {
    * whatever a future edit does to how the row got here. */
   if (!cb_is_board_url([url UTF8String], cb_port())) return;
   [self.popover performClose:nil];
-  cb_open_url([NSURL URLWithString:url]);
+  /* ADR 93: the tab this board is already open in comes forward, and a second one is
+   * opened only when there is none. Identical to what a banner's click does, because it is
+   * the same call into the same function (cb_surface_tab, bin/launcher.c) — a row and a
+   * banner naming the same board must not behave differently.
+   *
+   * Off the main thread, unlike bin/notify.m's call, and that difference is deliberate:
+   * surfacing can wait on a human (an Automation prompt is a dialog somebody has to
+   * answer), and the thing this process would otherwise be blocking is a status item that
+   * is still drawing a clock. bin/notify.m has nothing else to do while it waits and so
+   * makes the same call inline. The open lands back on the main queue, where AppKit wants
+   * it, and exactly one of the two happens per click.
+   *
+   * Its own serial queue, not cb_poll_queue and not a global one: an errand that can wait
+   * twenty seconds on a human must not stall the poll behind it, and serial still means
+   * two rapid clicks surface one board at a time rather than racing. */
+  NSString *target = [url copy];
+  static dispatch_queue_t surface_queue;
+  static dispatch_once_t surface_once;
+  dispatch_once(&surface_once, ^{
+    surface_queue = dispatch_queue_create("io.github.jerrylui.claude-board.menubar.surface",
+                                          DISPATCH_QUEUE_SERIAL);
+  });
+  dispatch_async(surface_queue, ^{
+    if (cb_surface_tab([target UTF8String])) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      cb_open_url([NSURL URLWithString:target]);
+    });
+  });
 }
 
 - (void)pressIndex:(id)sender {
@@ -2796,7 +2841,7 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  * Gated on a second argv word so the supervised path cannot reach it: bin/launcher.c execs
  * this binary with exactly `--menubar` and nothing after it.
  *
- * Seven optional words follow, and they are the seam's seven shapes:
+ * Eight optional words follow, and they are the seam's eight shapes:
  *
  *   <action>            one of CB_PROBE_ACTIONS, POSTed before the report. This is what
  *                       makes "every control takes effect" checkable at all: a check can
@@ -2808,6 +2853,15 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  *   url <candidate>     print whether cb_is_board_url would let a row open that URL, and
  *                       exit. The one way to check the refusal without a daemon that can be
  *                       made to emit a bad URL.
+ *   open <candidate>    ADR 93. Print what a click on a waiting row for that URL would do —
+ *                       `raised` (a browser was already showing that board and its tab was
+ *                       brought forward, so nothing is opened), `opened` (nothing was, so
+ *                       the row opens it), or `refused` (cb_is_board_url said no, so the row
+ *                       does neither). The decision is made by the SAME cb_surface_tab call
+ *                       -pressRow: makes, against the real browsers on this machine; the
+ *                       open itself is the one step this seam stops short of, since it is
+ *                       AppKit and would put a browser tab on the reader's screen on every
+ *                       suite run. See the branch itself for the whole of that reasoning.
  *   icons               print each popover icon's bounding box in the SVG's own 24-unit
  *                       space, and exit. The path-data walker above turns a dozen
  *                       elliptical arcs into a drawing nothing headless can look at, and
@@ -3089,6 +3143,31 @@ int cb_menubar_probe(const char *word, const char *argument) {
       /* The validator, alone, against one candidate — no request, no daemon, no state. */
       int ok = argument != NULL && cb_is_board_url(argument, cb_port());
       printf("url=%s\n", ok ? "ok" : "refused");
+      fflush(stdout);
+      return 0;
+    }
+    if (word != NULL && strcmp(word, "open") == 0) {
+      /* ADR 93's decision, alone: would this click raise a tab, or open one? Same two
+       * steps -pressRow: takes and in the same order — the validator first, because a URL
+       * that may not be opened may not be asked about either, and then cb_surface_tab.
+       *
+       * What this deliberately does NOT do is perform the fallback open. `opened` is the
+       * word for it because it is the branch on which the two real call sites open, and
+       * the seam stops one line short of doing so on purpose: the fallback is
+       * +[NSWorkspace openURL:], which would put a real browser tab on the reader's screen
+       * every time the check suite ran. So the DECISION is behavioural here and the open
+       * that follows from it is pinned structurally in test/check-menubar-client.mjs —
+       * "the AppKit half cannot be checked" applies to this line as much as to a popover.
+       *
+       * `refused` is cb_is_board_url's answer, printed under this word too rather than
+       * only under `url`, so a check can tell "would not be opened at all" apart from
+       * "would be opened fresh" without running two probes. */
+      if (argument == NULL || !cb_is_board_url(argument, cb_port())) {
+        printf("open=refused\n");
+        fflush(stdout);
+        return 0;
+      }
+      printf("open=%s\n", cb_surface_tab(argument) ? "raised" : "opened");
       fflush(stdout);
       return 0;
     }

@@ -878,8 +878,20 @@ HEADER
   # both present is ambiguous and LSBackgroundOnly is documented to win, so
   # test/check-install.mjs asserts LSUIElement is true AND LSBackgroundOnly is absent, not
   # merely present-and-true, or a future edit could add LSBackgroundOnly back next to it
-  # and silently reopen the -600 alert. Neither key stops the bundle posting notifications,
-  # and neither stops macOS showing the one-time "claude-board would like to send you
+  # and silently reopen the -600 alert.
+  #
+  # NSAppleEventsUsageDescription arrived with ADR.md entry 93, which has a board-opening
+  # click ask the scriptable browsers whether one of them is already showing that board
+  # (bin/launcher.c's cb_surface_tab) rather than pile a second tab on the one the reviewer
+  # is looking at. This key is the sentence macOS puts in the "claude-board wants to control
+  # Safari" dialog that asking costs, once per browser the reviewer actually uses. Apple
+  # documents it as required of an app that sends Apple Events at all; what an omitted one
+  # actually does here has NOT been measured, and is not worth measuring when the plist
+  # bytes are this cheap and the dialog is the one place this product gets to say why it is
+  # asking.
+  #
+  # None of the three keys stops the bundle posting notifications,
+  # and none stops macOS showing the one-time "claude-board would like to send you
   # notifications" prompt — measured, not assumed (QUIRKS.md). No CFBundleVersion tied to
   # package.json's version either — a version bump would change these bytes, change the
   # signature, and cost the user their Documents grant for nothing. The bundle's version
@@ -907,6 +919,8 @@ ${ICON_PLIST_ENTRY}	<key>CFBundleIdentifier</key>
 	<string>1.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>claude-board brings the tab a board is already open in to the front, instead of opening a second one.</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 </dict>

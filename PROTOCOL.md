@@ -14,8 +14,8 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `bin/daemon.mjs` | the HTTP server's entry point |
 | `bin/mcp.mjs` | stdio MCP shim, one per Claude session |
 | `bin/authorize.mjs` | the recovery command: mint a handoff and open the browser |
-| `bin/launcher.c` | launchd entry point, compiled by `install.sh` into a signed app bundle that forks the daemon, so macOS TCC has an application of ours to attribute its file reads to |
-| `bin/notify.m` | the bundle's `--notify` mode: one native notification, no `osascript` |
+| `bin/launcher.c` | launchd entry point, compiled by `install.sh` into a signed app bundle that forks the daemon, so macOS TCC has an application of ours to attribute its file reads to. Also the two C functions both native click surfaces share: the board-URL scanner (`cb_is_board_url`) and the tab surfacer (`cb_surface_tab`) |
+| `bin/notify.m` | the bundle's `--notify` mode: one native notification, posted natively rather than through `osascript`. Its click serves the board through `cb_surface_tab` (`bin/launcher.c`), which does spawn `osascript` — to raise the tab the board is already open in rather than open a second one (ADR 93) |
 | `bin/menubar.m` | the bundle's `--menubar` mode: the macOS status item, forked beside the daemon as a second child of the launcher (ADR 72) |
 | `src/store.mjs` | board JSON persistence: read, write, list, search |
 | `src/board.mjs` | the model: id minting, block normalisation, rounds, packet assembly |
@@ -25,7 +25,7 @@ here in the same commit that uses it. Do not repurpose or rename an existing fie
 | `src/render.mjs` | board JSON -> complete HTML page (pure function) |
 | `src/indexpage.mjs` | daemon root: the thread index and its session filter |
 | `src/server.mjs` | the `node:http` daemon: routes, SSE, the four gates below |
-| `src/stranded.mjs` | the stranded rule: a board with an open, awaited round and no Watcher looking at it gets one banner per absence, after a grace. Persistence, grace timers and the click-serving child's lifecycle, all behind `createStrandedWatch` |
+| `src/stranded.mjs` | the stranded rule: a board no Watcher is looking at, carrying an awaited round or a Suppressed board's own first round, gets one banner per absence, after a grace. Persistence, grace timers and the click-serving child's lifecycle, all behind `createStrandedWatch` |
 | `src/secret.mjs` | the two credentials: the local secret and the browser session cookie derived from it, shared by the daemon and the shim |
 | `src/handoff.mjs` | single-use, seconds-lived browser handoffs, and `recoveryCommand()` |
 | `src/ui.mjs` | client-side script for the board page, exported as a string |
@@ -548,7 +548,8 @@ GET  /api/health                    { ok: true, version, daemon, pid }  (open: i
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread
-                                    -> { boardId, thread, round, url, clients, awaited }
+                                    -> { boardId, thread, round, url, clients, suppressed,
+                                    awaited }
 GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet
 GET  /api/board/:id/events          SSE: round pushes, state changes
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
@@ -748,13 +749,32 @@ not lapsed**. Otherwise it mints a new round. A wait-lapsed round stays `status:
 (only a submit or an abandon moves `status`), so `open` alone would send every later question in
 the conversation into a round nothing is listening to.
 
-Either way the response is `{ boardId, thread, round, url, clients, awaited }`, `round`
+Either way the response is `{ boardId, thread, round, url, clients, suppressed, awaited }`, `round`
 naming whichever round was amended or minted and `awaited` carrying that round's own minted
 `awaited` flag. The flag is on the response because the poster cannot always compute it: the shim
 checks the raw blocks it sent and has no way to know that an `html` block's `source` failed to
 resolve, which is exactly the case where the daemon mints the round *not* awaited. A caller
 deciding whether to wait should prefer this field and fall back to its own shape check only when
 it is absent (a daemon older than this field).
+
+**`suppressed`** answers whether this *board's* auto-open was Suppressed (CONTEXT.md "Suppressed";
+ADR.md entry 91), in which case a caller that would otherwise open a tab must not, and the stranded
+banner announces the board instead. Two conditions, both required at the instant the board is
+created: some board on this daemon — any board, any project, focused or not — already has a
+Watcher, **and** round banners are switched on. Suppression trades the tab for a banner, so with
+the banner switched off (`notifyRounds: false`, "Pomodoro settings" above) there is nothing on the
+other side of the trade, and a fresh board opens its tab exactly as it always has. A Watcher whose
+tab has gone does not count: the test is a subscription this daemon can still write an event to,
+not merely one it has not yet reaped.
+
+Decided on the call that mints the board and never re-decided by a later one; a Watcher arriving
+afterwards does not retrospectively suppress an open that already happened. It is recorded on the
+board document as `suppressed` and stripped from everything a client sees, like `strandedBanner`
+beside it, because the stranded rule reads it back long after the response is spent — and that rule
+**spends** it the first time a Watcher reports the board focused, since a board the reviewer has
+reached needs no banner telling them it exists. A push into a board reports the stored value, which
+is therefore false once it has been visited; only a thread's first board consults it at all. A
+daemon older than the field omits it, and a caller then opens exactly as it always has.
 
 A **retry** carrying a `requestId` this board has already applied is answered from what that id
 already did (`deduped: true`) while the round it guarded is still `open`, **its wait has not
@@ -920,8 +940,16 @@ is silent because it reports, not because its socket exists.
 
 ## The stranded banner
 
-The daemon raises one native notification for a board that has an open, awaited round on it and no
-Watcher looking at it (CONTEXT.md "Stranded"; ADR.md entries 55 and 58). It is re-decided after
+The daemon raises one native notification for a board no Watcher is looking at, carrying either an
+open awaited round or — when its own auto-open was Suppressed — its first round, awaited or not
+(CONTEXT.md "Stranded"; ADR.md entries 55, 58 and 92). The second half is what covers a Suppressed
+content-only board, a page board posted without wait: nothing on it is awaited, no tab was opened
+for it, and without the banner it would land in silence. It is spent on round 1 and only round 1,
+so it can never buy a board a second banner; it is spent outright the first time the reviewer
+reaches the board, so a board opened and closed is never announced afterwards; and it covers only a
+round that never carried an `awaitDeadline` at all, so a round whose wait has *lapsed* — which
+keeps `status: 'open'` for good — stays the awaited case and is not announced as a content-only
+one. A first round already abandoned earns none of it either. It is re-decided after
 every event that can change the answer — a round landing, a Watcher arriving or leaving, an
 `attended` report, a submit — never polled, and it fires after a grace of 15000ms
 (`CLAUDE_BOARD_STRANDED_GRACE_MS` overrides, and the launcher passes it through), which is one SSE
@@ -950,7 +978,9 @@ other.
 
 The banner is recorded on the board document as `strandedBanner`,
 `{ at, until, round, returned, pid } | null`: when it went up, when the process serving it will exit
-and withdraw it (the round's deadline or the launcher's hard ceiling, whichever is sooner), the
+and withdraw it (the round's deadline or the launcher's hard ceiling, whichever is sooner — a
+Suppressed board's content-only first round has no deadline at all, and that ceiling alone bounds
+it), the
 highest round announced — the **mark**, permanent for the life of that round — whether the reviewer
 has returned since, and the pid of the process serving the click. It is stripped from everything a
 client sees, so the served page stays byte-identical to `pages/<id>.html`. A daemon restart reads it
@@ -1286,7 +1316,11 @@ The shim tracks one thread per CONVERSATION, not one per process (ADR.md entry 6
 `ask` call starts a new thread and opens its tab; every later `ask` call in the same conversation
 pushes a round into the same live board (`POST /api/board` with `boardId` set) and opens no tab of
 its own. A round landing with nobody watching is the daemon's stranded banner to raise, not the
-shim's tab to force open. `bin/authorize.mjs` still opens a tab, being the standalone recovery
+shim's tab to force open. The first call opens no tab either when the response says `suppressed`
+(ADR.md entry 91): some board somewhere already has a Watcher, and the banner announces this one
+rather than a fresh tab stealing focus from the reviewer sitting on that one. `CLAUDE_BOARD_NO_OPEN`
+and the "nothing here can open a tab" refusal are unchanged and sit outside this: they are about
+what this machine *can* do, and suppression is about what it *should*. `bin/authorize.mjs` still opens a tab, being the standalone recovery
 command a reviewer runs deliberately.
 
 **`fresh`** is what separates one conversation from the next, because nothing else can. Claude Code

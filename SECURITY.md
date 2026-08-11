@@ -25,9 +25,12 @@ the daemon's own session.
   resolved, snapshotted at post time, plus every question, answer and comment. Reading a
   board is reading the code it quotes — including anything an allowlisted root can reach.
 - **The daemon's TCC grants.** The bundle holds access to `~/Documents`, `~/Desktop` and
-  `~/Downloads`. That is a capability the terminal-hosted agent does not itself have, so
-  anything that can make the daemon read a file is spending the daemon's grants, not its
-  own.
+  `~/Downloads`, and — once a reviewer has answered the dialog a board-opening click
+  raises — permission to script each browser it has asked about (ADR 93; "What a
+  board-opening click may do to your browser" below). Both are capabilities the
+  terminal-hosted agent does not itself have, so anything that can make the daemon read a
+  file is spending the daemon's grants rather than its own, and anything that can make it
+  script a browser is spending one that reaches every open tab's URL.
 
 ### Defended
 
@@ -108,10 +111,10 @@ reads the same 0600 secret and sends it in the same `x-claude-board-secret` head
 `127.0.0.1:<port>`. That makes it the second holder of the credential after the MCP shim,
 and worth stating on its own terms.
 
-What it does *not* widen. It is a client and only a client: it binds no port, listens on
+What it does *not* widen, as a client of the daemon: it binds no port, listens on
 nothing, and is unreachable from the network, from a web page and from another local
 process. It resolves no path and creates no board, which is the one route that spends the
-Documents grant, so nothing it can do reaches the grant it inherits. Every route it uses
+Documents grant, so nothing it can do reaches *that* grant. Every route it uses
 is one the browser cookie already reaches (`POMODORO_COOKIE_ACTIONS`, plus the reads),
 which is why the feature added no API for it. And its secret path is derived from `HOME`
 rather than read from `CLAUDE_BOARD_SECRET_FILE` — that variable is kept out of this
@@ -126,6 +129,49 @@ seconds for the length of a login session rather than once per session start. Th
 credential is re-read from disk after any failed request rather than cached for the
 process's life, so rotating the secret file takes effect on the next poll instead of
 requiring a logout.
+
+It does hold one capability the daemon's HTTP surface does not, and it is the next section:
+a click on a waiting row asks the scriptable browsers whether one of them is already
+showing that board. That is the same errand the banner's click child performs, through the
+same function in `bin/launcher.c`, so the two surfaces spend one grant between them.
+
+#### What a board-opening click may do to your browser
+
+ADR 93. Clicking a Banner, or a waiting row in the menu bar popover, no longer piles a
+second tab on a board that is already open: the bundle asks the scriptable browsers whether
+one of them is showing that board's URL, and raises that tab instead of opening one. The
+question is an Apple Event, so it is a TCC grant of its own — **Automation**, held per
+(claude-board, browser) pair and listed in System Settings > Privacy & Security >
+Automation, entirely separate from the folder grants above.
+
+- **What is asked.** Per browser: each window's each tab's URL, compared against the one
+  board URL the click carries. On a match, that tab becomes its window's current one, the
+  window comes forward, and the application activates. Nothing is read out of a page,
+  typed into one, navigated or closed.
+- **What the grant is nevertheless worth.** More than that question. Automation is not
+  per-script: anything running as this bundle, once a browser has been allowed, can send
+  that browser any Apple Event it understands — which includes reading every open tab's
+  URL, and opening pages. So this is a genuine widening beyond the three folders, it sits
+  inside the same trust boundary as the Documents grant (whoever can write the clone owns
+  the next install), and it is worth reading beside that one rather than instead of it.
+- **Which browsers, and only when running.** Safari and the Chromium family — Google
+  Chrome, Microsoft Edge, Brave Browser, Chromium — and only ones already running: the
+  process table is checked before anything is spawned, so a click never launches a browser
+  and never raises a dialog for an application nobody opened. Firefox is not scriptable, is
+  never asked, and keeps the second tab.
+- **When you are asked.** Once per browser, the first time a click reaches one; macOS
+  records the answer and answers from its record afterwards, "Don't Allow" included. The
+  sentence in that dialog is the bundle's `NSAppleEventsUsageDescription`, which reads
+  *"claude-board brings the tab a board is already open in to the front, instead of opening
+  a second one."*
+- **What a refusal costs.** The raise, and nothing else. No grant, no browser running, no
+  matching tab, no `osascript`, a script still waiting on an unanswered dialog: every one
+  of them falls through to opening the URL exactly as it did before ADR 93.
+
+`osascript` is resolved against the launcher's compiled-in `PATH` rather than the
+environment, like everything else this bundle runs, and the only thing spliced into the
+script is a URL that has already passed the board-URL scanner in C — printable ASCII, no
+quote and no backslash, one `/b/<id>` segment on this daemon's own port.
 
 #### The build
 

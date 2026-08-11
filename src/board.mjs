@@ -1275,7 +1275,32 @@ export function buildPacket(board, round, url) {
 // which imports it.
 export const STRANDED_BANNER = 'strandedBanner';
 
-/** A shallow copy of `board` with that record removed, for anything a client sees.
+// The second one, and the same reasoning end to end:
+//
+//   board.suppressed = true | false
+//
+// Whether this board's auto-open was Suppressed when it was created -- some board, any
+// board, any project, already had a Watcher, so no tab was opened and the Banner announces
+// it instead (ADR.md entry 91). Set on the call that mints the board and never re-decided
+// by a later one: a Watcher arriving afterwards does not retrospectively suppress an open
+// that already happened.
+//
+// SPENDABLE, though, and that is the one thing about it worth reading twice. It does not
+// record history ("this board was once Suppressed"); it records a debt ("nothing has told
+// the reviewer this board exists yet"). The stranded rule pays that debt off the moment a
+// Watcher reports the board focused, because a board the reviewer is looking at needs no
+// banner announcing it -- src/stranded.mjs's `spendSuppressed`, which is also the only
+// writer of this field outside board creation.
+//
+// Durable rather than held in the daemon's memory because it is not the shim's answer
+// that needs it -- that is read off the POST response and spent immediately -- but the
+// stranded rule's, which reads it back to decide that a Suppressed board's first round is
+// Stranded with nothing Awaited (ADR.md entry 92). That rule runs from timer callbacks
+// and from SSE close handlers minutes after the post, and it already reads the board
+// document for everything else it knows.
+export const SUPPRESSED = 'suppressed';
+
+/** A shallow copy of `board` with those records removed, for anything a client sees.
  *
  * Not a nicety. The daemon writes the marker with `writeBoard` and does NOT re-render
  * the page (that would mean re-rendering a possibly multi-megabyte page board from a
@@ -1287,6 +1312,6 @@ export const STRANDED_BANNER = 'strandedBanner';
  * these out of the payload keeps the rendered bytes a pure function of the board's
  * REVIEWER-facing state, which is the property that invariant is really about. */
 export function stripDaemonOnly(board) {
-  const { [STRANDED_BANNER]: _banner, ...rest } = board;
+  const { [STRANDED_BANNER]: _banner, [SUPPRESSED]: _suppressed, ...rest } = board;
   return rest;
 }

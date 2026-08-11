@@ -37,7 +37,7 @@ const execFileAsync = promisify(execFile);
 import { SECRET_HEADER } from '../src/secret.mjs';
 import { createBoard, addRound } from '../src/board.mjs';
 import { readBoard, writeBoard } from '../src/store.mjs';
-import { STRANDED_BANNER } from '../src/board.mjs';
+import { STRANDED_BANNER, SUPPRESSED } from '../src/board.mjs';
 import { roundIsAwaitedOpen } from '../src/badge.mjs';
 import { CLICK_LIFETIME_MAX_MS, notifyRound, withdrawClickChild, parseElapsedTime, mayWithdrawPid } from '../src/notify.mjs';
 import { renderBoardPage } from '../src/render.mjs';
@@ -183,14 +183,20 @@ const announcedAt = boardId => (bannerOn(boardId) || {}).at ?? null;
 const AWAIT_MS = 40 * 60 * 1000;
 const QUESTION = prompt => ({ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }] });
 
-/** A real board document on disk: awaited (a question round) unless told otherwise. */
-function seedBoard({ wait = true, cwd = projectDir, awaitTimeoutMs = AWAIT_MS } = {}) {
+/** A real board document on disk: awaited (a question round) unless told otherwise.
+ *
+ * `suppressed` stamps the daemon-only field `handlePostBoard` (src/server.mjs) writes when
+ * some board already had a Watcher at creation and no tab was opened (ADR.md entry 91).
+ * Layer 2 below gets it from the real daemon; here it is set by hand, because this layer's
+ * whole subject is what the rule DOES with it. */
+function seedBoard({ wait = true, cwd = projectDir, awaitTimeoutMs = AWAIT_MS, suppressed = false } = {}) {
   const board = createBoard({
     title: 'Stranded',
     blocks: wait ? [QUESTION('Ship?')] : [{ kind: 'markdown', text: 'an artifact, nothing asked' }],
     cwd,
     awaitTimeoutMs,
   });
+  if (suppressed) board[SUPPRESSED] = true;
   writeBoard(board, home);
   return board;
 }
@@ -776,6 +782,120 @@ async function layerOne() {
 
     await tick();
     assert.equal(banners.length, 0, 'three boards with nothing genuinely awaited on any of them');
+    watch.close();
+  });
+
+  // --- the Suppressed clause (ADR.md entry 92) --------------------------------------
+  //
+  // The check just above is this one's ablation control: the SAME board, content-only and
+  // not Suppressed, raises nothing at all. Everything below turns on one field.
+
+  await check('ADR 92: a Suppressed board whose first round asks nothing is Stranded all the same', async () => {
+    const { banners, watch } = stand();
+    const board = seedBoard({ wait: false, suppressed: true });
+    watch.evaluate(board.id, target(board.id));
+    assert.equal(banners.length, 0, 'the grace is served here exactly as it is for an awaited round');
+    await tick();
+    assert.equal(banners.length, 1, 'no tab was opened for this board, so the Banner is the only thing that can announce it');
+    assert.equal(banners[0].folder, 'my-project');
+    assert.equal(bannerOn(board.id).round, 1, 'the mark goes onto round 1, which is what makes this once and for all');
+    watch.close();
+  });
+
+  await check('ADR 92: and its Banner is clickable, bounded by the launcher\'s ceiling alone', async () => {
+    const { banners, watch } = stand();
+    const board = seedBoard({ wait: false, suppressed: true });
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1);
+    assert.equal(banners[0].url, `${URL_A}/b/${board.id}#stranded-round`,
+      'clicking has to land on the board -- announcing a board nobody can reach announces nothing');
+    assert.equal(banners[0].port, PORT, 'and the bound port beside it, or src/notify.mjs refuses the click outright');
+    // Nothing on this board is Awaited, so no round deadline exists to bound the
+    // click-serving child with -- and an ABSENT bound is not "no bound": src/notify.mjs's
+    // `clickSecondsUntil` answers null for one, which drops the URL, the port and the
+    // lifetime together and leaves a banner that cannot be clicked at all. The launcher's
+    // hard ceiling is what stands in.
+    assert.ok(Number.isFinite(banners[0].deadlineAt),
+      `a finite bound, or there is no click: got ${banners[0].deadlineAt}`);
+    assert.ok(Math.abs(banners[0].deadlineAt - (Date.now() + CLICK_LIFETIME_MAX_MS)) < 5000,
+      `the ceiling alone, since nothing else bounds it: got ${banners[0].deadlineAt - Date.now()}ms`);
+    assert.equal(bannerOn(board.id).until, new Date(banners[0].deadlineAt).toISOString(),
+      'and `until` says the same thing, so the pid this record names is bounded by the life the child was actually given');
+    watch.close();
+  });
+
+  await check('ADR 92: one Banner, once -- a return and a fresh departure buy a Suppressed board no second one', async () => {
+    const { looking, banners, watch } = stand();
+    const board = seedBoard({ wait: false, suppressed: true });
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1);
+    // A genuine return, which is the one thing that opens the gate (ADR.md entry 74) --
+    // and the case that would otherwise loop forever here, since a content-only round
+    // never stops being the first round and never gets answered.
+    looking.set(board.id, true);
+    watch.evaluate(board.id, target(board.id));
+    assert.equal(bannerOn(board.id).returned, true, 'the gate really did open');
+    looking.set(board.id, false);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 1, 'round 1 sits at the mark, so an open gate has nothing left to announce');
+    watch.close();
+  });
+
+  await check('ADR 92: a Suppressed board whose first round is already closed raises nothing', async () => {
+    const { banners, watch } = stand();
+    const board = seedBoard({ suppressed: true });
+    const stored = readBoard(board.id, home);
+    stored.rounds[0].status = 'sent';
+    writeBoard(stored, home);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 0,
+      'an answered first round is a reviewer who got to the board; this clause is for one that landed in silence');
+    watch.close();
+  });
+
+  await check('ADR 92: a Suppressed board the reviewer has READ and closed is never announced afterwards', async () => {
+    const { looking, banners, watch } = stand();
+    const board = seedBoard({ wait: false, suppressed: true });
+    // Reached before any banner was ever raised -- the reviewer followed the index, or a
+    // chat link. There is no banner record here for a return gate to be opened on, so the
+    // visit has to be recorded somewhere of its own or it leaves no trace at all.
+    looking.set(board.id, true);
+    watch.evaluate(board.id, target(board.id));
+    assert.equal(readBoard(board.id, home)[SUPPRESSED], false,
+      'the debt is paid on the board document: this board no longer owes anyone an announcement');
+    // And now they close the tab. Before this was recorded, one grace later a Banner
+    // announced the board they had just finished reading.
+    looking.set(board.id, false);
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 0, 'nothing announces a board the reviewer has already been to');
+    assert.equal(announcedAt(board.id), null);
+    watch.close();
+  });
+
+  await check('ADR 92: a Suppressed board whose first round LAPSED is the awaited case, not the content-only one', async () => {
+    const { banners, watch } = stand();
+    // A wait that ran out. `closeLapsedAwaitedRounds` (src/badge.mjs) clears `awaited` and
+    // leaves `status: 'open'` FOREVER, so "open and not awaited" is not the same shape as
+    // "content-only" -- and this one carries a deadline that has already passed, which
+    // would bound the click-serving child in the past and land the reviewer on a round
+    // nothing can answer.
+    const board = seedBoard({ suppressed: true });
+    const stored = readBoard(board.id, home);
+    stored.rounds[0].awaitDeadline = new Date(Date.now() - 60_000).toISOString();
+    writeBoard(stored, home);
+    const lapsed = readBoard(board.id, home);
+    assert.equal(lapsed.rounds[0].status, 'open', 'the premise: a lapsed round keeps `open` for good');
+    assert.equal(lapsed.rounds[0].awaited, false, 'and stops being awaited, so `waitingRounds` drops it');
+
+    watch.evaluate(board.id, target(board.id));
+    await tick();
+    assert.equal(banners.length, 0, 'a round whose wait has run out is not a round nobody has been told about');
+    assert.equal(announcedAt(board.id), null);
     watch.close();
   });
 
@@ -2088,12 +2208,34 @@ async function layerTwo() {
     assert.equal(served, renderBoardPage(readBoard(boardId, home)),
       're-rendering the stored JSON must reproduce it too -- the record is stripped, not merely absent from one of the three');
     assert.ok(!served.includes(STRANDED_BANNER), 'and the field name appears nowhere in the markup');
+    // The second daemon-only field, stripped by the same `stripDaemonOnly` and for the same
+    // reason. This one IS written inside the request that renders the page, so the
+    // three-way byte identity above would survive it leaking -- which is exactly why it
+    // needs saying here: nothing else in the suite would notice a page carrying the
+    // daemon's own reasoning about whether it opened a tab.
+    assert.ok(readBoard(boardId, home)[SUPPRESSED] === false, 'the field really is on the stored board');
+    assert.ok(!served.includes(SUPPRESSED), 'and it appears nowhere in the markup either');
   });
 
   await check('criterion 1: and it opens no tab', () => {
     const opened = existsSync(process.env.STUB_OPEN_LOG) ? readFileSync(process.env.STUB_OPEN_LOG, 'utf8') : '';
     assert.equal(opened, '',
       'a stub `open` sits ahead of the real one on PATH: the daemon announces, it does not yank a tab in front of anyone');
+  });
+
+  // AHEAD of every check below that opens a stream, and that placement is load-bearing
+  // since ADR.md entry 92: "not awaited" is only silent on a board that was not Suppressed,
+  // and a Watcher standing on ANY board is what suppresses the next board posted. Run after
+  // one of those, this asserts the opposite of what the rule now says and fails honestly --
+  // so it runs while nothing on this daemon has ever been watched, and says so.
+  await check('criterion 8: a round that is not awaited raises no banner', async () => {
+    const posted = await postRound(port, {
+      title: 'An artifact', blocks: [{ kind: 'markdown', text: 'nothing is asked here' }], cwd: projectFor('not-awaited'),
+    });
+    assert.equal(posted.suppressed, false, 'the precondition: no tab anywhere, so this board opened one of its own');
+    await tick(250);
+    assert.equal(spawnsFor('not-awaited').length, 0, 'nothing to answer means nothing to be stranded');
+    assert.equal(announcedAt(posted.boardId), null);
   });
 
   await check('criterion 5: a round landing on a board somebody is looking at raises nothing', async () => {
@@ -2270,15 +2412,6 @@ async function layerTwo() {
       one.req.destroy();
       two.req.destroy();
     }
-  });
-
-  await check('criterion 8: a round that is not awaited raises no banner', async () => {
-    const { boardId } = await postRound(port, {
-      title: 'An artifact', blocks: [{ kind: 'markdown', text: 'nothing is asked here' }], cwd: projectFor('not-awaited'),
-    });
-    await tick(250);
-    assert.equal(spawnsFor('not-awaited').length, 0, 'nothing to answer means nothing to be stranded');
-    assert.equal(announcedAt(boardId), null);
   });
 
   await check('criterion 4: a tab that drops and reconnects inside the grace window raises no banner', async () => {
@@ -2617,6 +2750,91 @@ async function layerTwo() {
   await check('the connected-tab count stays on the round-posting response', async () => {
     const posted = await postRound(port, askBoard('still-reports-clients'));
     assert.equal(posted.clients, 0, '`clients` is published protocol and is not a casualty of this rule');
+  });
+
+  // --- a fresh board defers to an open tab (ADR.md entries 91 and 92) -----------------
+  //
+  // Suppression is the daemon's decision, because "any board, any project" is a fact only
+  // this process can see, and it turns on a real Watcher -- a real event stream, which is
+  // what an open board tab holds. The tab these open is on ANOTHER board every time, which
+  // is the whole claim: it is not this board being watched that suppresses it.
+  //
+  // Last in this layer on purpose. A Watcher standing on some other board changes what
+  // every board posted after it records, so these leave the daemon exactly as they found
+  // it and nothing after them has to know that.
+
+  await check('ADR 91: a board posted while ANOTHER board has a Watcher is Suppressed, and still raises its one banner', async () => {
+    const { boardId: watched } = await postRound(port, askBoard('watched-elsewhere'));
+    const tab = await openStream(port, watched);
+    try {
+      const posted = await postRound(port, askBoard('suppressed-awaited'));
+      assert.equal(posted.suppressed, true,
+        'any board, any project: a tab on some other board is what suppresses this one\'s auto-open');
+      assert.equal(posted.awaited, true, 'and this one really is awaited, so it is the ordinary banner being checked');
+      const rows = await waitForRows('suppressed-awaited', 1);
+      assert.deepEqual(rows, [['spawn', '-e', BANNER('suppressed-awaited')]],
+        'nothing opened a tab for this board, so the Banner is the whole announcement');
+      await tick(200);
+      assert.equal(spawnsFor('suppressed-awaited').length, 1, 'and exactly one, after the grace has come round again');
+    } finally {
+      tab.req.destroy();
+    }
+  });
+
+  await check('ADR 92: a Suppressed page board posted without wait raises one banner too, once, with nothing awaited', async () => {
+    const { boardId: watched } = await postRound(port, askBoard('watched-elsewhere-again'));
+    const tab = await openStream(port, watched);
+    try {
+      // One `html` block and nothing else is a PAGE board (QUIRKS.md), and with no `wait`
+      // nothing on it is Awaited -- the exact shape that used to land in total silence:
+      // no tab, because a Watcher exists elsewhere, and no banner, because the rule only
+      // knew how to announce a round somebody was blocked on.
+      const posted = await postRound(port, {
+        title: 'An artifact, nothing asked',
+        blocks: [{ kind: 'html', html: '<p>an artifact, nothing asked</p>' }],
+        cwd: projectFor('suppressed-page'),
+      });
+      assert.equal(posted.suppressed, true);
+      assert.equal(posted.awaited, false, 'no question block and no wait: there is nothing here for anyone to answer');
+      const rows = await waitForRows('suppressed-page', 1);
+      assert.deepEqual(rows, [['spawn', '-e', BANNER('suppressed-page')]],
+        'the one thing that can tell the reviewer this board exists at all');
+      await tick(250);
+      assert.equal(spawnsFor('suppressed-page').length, 1, 'once, and only once');
+
+      const rec = bannerOn(posted.boardId);
+      assert.equal(rec.round, 1, 'the mark is round 1, which is what makes the second grace above silent');
+      assert.equal(rec.until, new Date(Date.parse(rec.at) + CLICK_LIFETIME_MAX_MS).toISOString(),
+        'no round deadline exists to bound the process serving the click, so the launcher\'s hard ceiling alone does');
+    } finally {
+      tab.req.destroy();
+    }
+  });
+
+  await check('ADR 91: with round banners switched off, a fresh board is not Suppressed -- it opens its tab', async () => {
+    // Suppression TRADES the tab for a Banner. With the Banner switched off there is
+    // nothing on the other side of the trade, and suppressing anyway would be a board that
+    // opened no tab and raised no notification: nothing at all would tell the reviewer it
+    // exists. The tab side of this is test/check-mcp.mjs's (it needs a real shim and a real
+    // opener); this is the daemon's half of the same decision.
+    const settingsPath = path.join(home, 'pomodoro.json');
+    writeFileSync(settingsPath, JSON.stringify({ settings: { notifyRounds: false } }));
+    const { boardId: watched } = await postRound(port, askBoard('watched-but-silent'));
+    const tab = await openStream(port, watched);
+    try {
+      const posted = await postRound(port, {
+        title: 'An artifact, nothing asked',
+        blocks: [{ kind: 'html', html: '<p>an artifact, nothing asked</p>' }],
+        cwd: projectFor('silent-switch'),
+      });
+      assert.equal(posted.suppressed, false,
+        'a Watcher is standing right there, and the board still opens: the switch is the second conjunct');
+      await tick(250);
+      assert.equal(spawnsFor('silent-switch').length, 0, 'and nothing announces it either, which is what the switch asked for');
+    } finally {
+      tab.req.destroy();
+      rmSync(settingsPath, { force: true });
+    }
   });
 }
 
