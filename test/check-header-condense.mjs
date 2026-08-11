@@ -16,11 +16,11 @@
 // cannot reflow anything below it, in any browser, by construction.
 
 import assert from 'node:assert/strict';
-import { createBoard } from '../src/board.mjs';
+import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE } from '../src/badge.mjs';
+import { PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE, pageBoardPillMeta } from '../src/badge.mjs';
 import { parseHTML, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
@@ -158,20 +158,43 @@ check('AC 7: the state label shows on an ordinary board too -- the countdown whi
   const notAwaited = loadBoard(renderBoardPage(ordinaryBoard()));
   const meta2 = notAwaited.querySelector('span#round-meta');
   assert.equal(computed(meta2, 'display'), 'inline');
-  assert.equal(meta2.textContent, 'read-only', 'src/render.mjs\'s own deterministic fallback, unchanged by this ticket -- AC 13 pins this word');
-  // The WORD stays 'read-only' by the PM's own call (AC 13), but the hover
-  // title underneath it must not repeat PILL_READONLY_TITLE's "commenting is
-  // off": ordinaryBoard() is a plain, un-awaited board whose one open round
-  // has an ENABLED send bar the whole time (src/ui.mjs's setSendBarEnabled
-  // reads status/openRoundNumber, never awaited) -- a comment left there is
-  // drained to whichever agent asks next (drainUndeliveredComments,
-  // src/server.mjs), so "commenting is off" is simply false on this surface.
-  // A regression back to PILL_READONLY_TITLE here is exactly what this
-  // assertion exists to catch.
+  // ordinaryBoard()'s round was never Awaited at all -- one of the two closed
+  // shapes ADR 89 keeps collapsed onto 'read-only' (the other being a lapsed
+  // wait); only a Submitted round gets a word of its own, so this one is
+  // unaffected by that split.
+  assert.equal(meta2.textContent, 'read-only', 'src/render.mjs\'s own deterministic fallback for a never-Awaited round');
+  // The hover title underneath it must not repeat PILL_READONLY_TITLE's
+  // "commenting is off": ordinaryBoard() is a plain, un-awaited board whose
+  // one open round has an ENABLED send bar the whole time (src/ui.mjs's
+  // setSendBarEnabled reads status/openRoundNumber, never awaited) -- a
+  // comment left there is drained to whichever agent asks next
+  // (drainUndeliveredComments, src/server.mjs), so "commenting is off" is
+  // simply false on this surface. A regression back to PILL_READONLY_TITLE
+  // here is exactly what this assertion exists to catch.
   assert.equal(meta2.title, ROUND_OPEN_UNAWAITED_TITLE,
     'an ordinary board\'s open, unawaited round must not claim commenting is off directly above a live Send button');
   assert.notEqual(meta2.title, PILL_READONLY_TITLE,
     'the page-board-only title must not leak onto an ordinary board\'s live round');
+});
+
+check('AC 7 / ADR 89: an ordinary board whose round was Submitted shows "submitted" in the state label, not "read-only"', () => {
+  const board = ordinaryBoard();
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, board.rounds[0].n);
+  const document = loadBoard(renderBoardPage(board));
+  const meta = document.querySelector('span#round-meta');
+  assert.equal(computed(meta, 'display'), 'inline');
+  assert.equal(meta.textContent, 'submitted', 'a Submitted round gets its own word (ADR 89), not the never-Awaited/Lapsed "read-only"');
+  assert.equal(meta.title, PILL_SUBMITTED_TITLE, 'and a title true of a round whose answer went out, not either read-only title');
+  assert.notEqual(meta.title, PILL_READONLY_TITLE);
+  assert.notEqual(meta.title, ROUND_OPEN_UNAWAITED_TITLE);
+
+  // Hydrate must not flicker: src/render.mjs's own deterministic fallback and
+  // src/ui.mjs's pageBoardPillMeta (spliced into `ui`, run here for real) must
+  // agree on the identical round.
+  const now = Date.now();
+  const hydrated = pageBoardPillMeta(board.rounds[0], now, false);
+  assert.equal(meta.textContent, hydrated.text, 'server first paint and client hydrate must show the same word');
+  assert.equal(meta.title, hydrated.title, 'server first paint and client hydrate must show the same title');
 });
 
 check('AC 7: the condensed pill reuses the page board\'s own chrome tokens, pinned as a fact about the stylesheet', () => {

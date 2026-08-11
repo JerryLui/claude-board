@@ -45,7 +45,7 @@ import { ASSET_NAME, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
 import {
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
   closeLapsedAwaitedRounds, roundWaitLapsed,
-  PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, ROUND_COUNTDOWN_TITLE,
+  PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, ROUND_COUNTDOWN_TITLE, PILL_SUBMITTED_TITLE,
 } from '../src/badge.mjs';
 // Namespace import, alongside the named one above -- AC 12's own check below
 // needs to assert badgeLabel is ABSENT from this module's exports, which a
@@ -843,13 +843,17 @@ check('roundCountdownText: "Nm left", always rounded UP, never printed once the 
   assert.equal(roundCountdownText(null, now), null);
 });
 
-check('pageBoardPillMeta: the countdown text/title while awaited, "read-only" and its own title the moment it is not', () => {
+check('pageBoardPillMeta: the countdown text/title while awaited, and "read-only" for every closed round on the default (page-board) caller', () => {
   const now = Date.parse('2026-08-07T12:00:00.000Z');
   const awaited = { status: 'open', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
   assert.deepEqual(pageBoardPillMeta(awaited, now), { text: '38m left', title: ROUND_COUNTDOWN_TITLE });
   // Default (no third arg) is 'fullpage', matching every call site before
   // that parameter existed -- PILL_READONLY_TITLE stays what a page board
-  // (and any caller not yet told otherwise) gets.
+  // (and any caller not yet told otherwise) gets, a Submitted round
+  // included: ADR 89 gives 'submitted' to an ORDINARY board only (see
+  // PILL_SUBMITTED_TITLE's own comment on why a page board is held off it at
+  // the pill itself, not only by ADR.md entry 44 keeping Send off its
+  // browser surface).
   for (const closed of [
     { status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' },
     { status: 'open', awaited: false, awaitDeadline: null },
@@ -859,7 +863,7 @@ check('pageBoardPillMeta: the countdown text/title while awaited, "read-only" an
   }
 });
 
-check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-unawaited round\'s title stops claiming commenting is off -- it is false directly above a live Send button', () => {
+check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-unawaited round\'s title stops claiming commenting is off, and a Submitted round reads "submitted"', () => {
   // The exact shape a plain `ask` with no `wait: true` leaves behind
   // (src/board.mjs:526's default): open, not awaited. On a page board this
   // is genuinely dark (PILL_READONLY_TITLE, unchanged above); on an ordinary
@@ -878,11 +882,17 @@ check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-una
   // itself, not `round.status` alone, is what has to make this call.
   assert.deepEqual(pageBoardPillMeta(openUnawaited, now, true), { text: 'read-only', title: PILL_READONLY_TITLE },
     'the identical round object, asked about as a page board, must keep the page-board title');
-  // A round that really is closed (sent) on an ordinary board is genuinely
-  // read-only -- ROUND_OPEN_UNAWAITED_TITLE must not leak there either.
-  const sent = { status: 'sent', awaited: false, awaitDeadline: null };
-  assert.deepEqual(pageBoardPillMeta(sent, now, false), { text: 'read-only', title: PILL_READONLY_TITLE },
-    'a SENT round on an ordinary board is genuinely read-only -- PILL_READONLY_TITLE, not the live one');
+
+  // ADR 89: a Submitted round on an ORDINARY board reads "submitted" -- but
+  // the SAME round object, asked about as a page board, must stay
+  // "read-only": criterion 12 holds a page board off 'submitted' at the pill
+  // itself, not only by ADR.md entry 44 keeping Send off its browser
+  // surface, since `applySubmit` does not itself refuse a page round.
+  const sent = { status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
+  assert.deepEqual(pageBoardPillMeta(sent, now, false), { text: 'submitted', title: PILL_SUBMITTED_TITLE },
+    'fullpage=false, status "sent": the pill must read "submitted"');
+  assert.deepEqual(pageBoardPillMeta(sent, now, true), { text: 'read-only', title: PILL_READONLY_TITLE },
+    'the identical round object, asked about as a page board, must stay "read-only", never "submitted"');
 });
 
 check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) are executable and behave identically to the imported ones', () => {
@@ -896,6 +906,7 @@ check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) a
     var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
     var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
     var ROUND_OPEN_UNAWAITED_TITLE = ${JSON.stringify(ROUND_OPEN_UNAWAITED_TITLE)};
+    var PILL_SUBMITTED_TITLE = ${JSON.stringify(PILL_SUBMITTED_TITLE)};
     var roundIsAwaitedOpen = ${roundIsAwaitedOpen.toString()};
     var roundIsCurrentlyAwaited = ${roundIsCurrentlyAwaited.toString()};
     var roundCountdownText = ${roundCountdownText.toString()};
@@ -913,6 +924,14 @@ check('the exact waiting-signal functions embedded in ui.mjs (via .toString()) a
   // above and still ship a stale title to a live tab.
   const openUnawaited = { status: 'open', awaited: false, awaitDeadline: null };
   assert.deepEqual(rehydrated.pageBoardPillMeta(openUnawaited, now, false), pageBoardPillMeta(openUnawaited, now, false));
+  // And the Submitted branch (ADR 89), on an ORDINARY board -- the only
+  // caller that ever reaches it (a page board's `sent` round stays
+  // "read-only", asserted above). The embedded copy needs its own
+  // PILL_SUBMITTED_TITLE in scope, not just the two read-only titles above,
+  // or a sent round would throw a ReferenceError in a real tab instead of
+  // merely rendering the wrong word.
+  const sent = { status: 'sent', awaited: true, awaitDeadline: '2026-08-07T12:38:00.000Z' };
+  assert.deepEqual(rehydrated.pageBoardPillMeta(sent, now, false), pageBoardPillMeta(sent, now, false));
 });
 
 check('ui.mjs embeds the literal source of every waiting-signal function, not a hand-copied reimplementation', () => {
@@ -8328,14 +8347,15 @@ await checkAsync('pomodoro widget: a running work or short-break interval names 
   status = document.querySelector('span#pomodoro-status');
   assert.match(status.textContent, /^Break 3\/4 · 04:00$/, `expected "Break 3/4 · 04:00"-shaped text, got "${status.textContent}"`);
 
-  // A long break carries no position at all -- the plain pre-position shape.
+  // A long break carries no position, but still gets the dot -- same shape as
+  // the popover's cb_status_label (bin/menubar.m) when it has no position either.
   const longBreakDoc = { settings: POMODORO_SETTINGS, cycle: 3, cycleDate: '2020-01-01', timer: { phase: 'longBreak', deadline: nowMs + 15 * 60_000, paused: false }, now: nowMs };
   await withPomodoroFetch(() => longBreakDoc, async () => {
     ({ document } = loadIndexWithPomodoro());
     await flushPomodoro();
   });
   status = document.querySelector('span#pomodoro-status');
-  assert.match(status.textContent, /^Long break 15:00$/, `a long break must carry no position, got "${status.textContent}"`);
+  assert.match(status.textContent, /^Long break · 15:00$/, `a long break must carry no position, got "${status.textContent}"`);
   assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'a long break must never render a cycle position');
 });
 

@@ -42,7 +42,7 @@ import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
 import {
   roundPageLabel, isPageRound,
-  roundIsAwaitedOpen, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE,
+  roundIsAwaitedOpen, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE,
 } from './badge.mjs';
 
 /** Content-Security-Policy for every board page, both as the HTTP response
@@ -2338,24 +2338,33 @@ export function renderBoardPage(board) {
   // instant it can measure the real rail.
   const pillCount = openRoundQuestionCount(board);
   const pillLabel = `${pillCount} question${pillCount === 1 ? '' : 's'} left`;
-  // The waiting signal (ADR.md entries 46, 47, 40):
+  // The waiting signal (ADR.md entries 46, 47, 40; ADR 89):
   // `#round-meta` (the header's own pill/meta slot, every board since ticket
   // 03) and `#round-countdown` (the ordinary send bar's) are both
-  // first-painted from `roundIsAwaitedOpen` alone -- deterministic, no clock --
-  // and left EMPTY when the round in question is open and awaited, exactly
-  // the split badge.mjs's own header comment lays out (and
-  // src/pomodoro-widget.mjs's precedent for the identical problem): the
-  // actual "38m left" figure is a wall-clock fact only src/ui.mjs may
+  // first-painted from `roundIsAwaitedOpen` and `round.status` alone --
+  // deterministic, no clock -- and left EMPTY when the round in question is
+  // open and awaited, exactly the split badge.mjs's own header comment lays
+  // out (and src/pomodoro-widget.mjs's precedent for the identical problem):
+  // the actual "38m left" figure is a wall-clock fact only src/ui.mjs may
   // compute, filled in at hydrate before the reader can act. The
-  // deterministic (never-awaited/sent/timed-out) case needs no such deferral --
-  // `read-only` is not a function of the clock at all -- so it renders directly
-  // here, the same string ui.mjs's own pageBoardPillMeta falls back to.
+  // deterministic cases -- Submitted, or closed some other way (never-awaited
+  // or its wait lapsed) -- need no such deferral -- neither `submitted` nor
+  // `read-only` is a function of the clock at all -- so each renders directly
+  // here, the same strings ui.mjs's own pageBoardPillMeta falls back to.
   const initialRound = board.rounds.find(r => r.n === initialRoundInView);
   const initialRoundOpenAwaited = roundIsAwaitedOpen(initialRound);
-  const roundMetaText = initialRoundOpenAwaited ? '' : 'read-only';
-  // The title underneath that word is NOT one string for every board: a page
-  // board's own compose/send surface really does go dark the moment it stops
-  // being awaited (PILL_READONLY_TITLE, badge.mjs's own comment on it), but an
+  // `!fullpage` gates this the same way it gates the read-only title just
+  // below -- badge.mjs's own comment on PILL_SUBMITTED_TITLE has the full
+  // reasoning: a page board is held off `submitted` at the pill itself, since
+  // `initialRound.status` alone cannot prove a page round was never handed to
+  // this decision through some path other than the browser's Send control.
+  const initialRoundSubmitted = !fullpage && !!initialRound && initialRound.status === 'sent';
+  const roundMetaText = initialRoundOpenAwaited ? '' : initialRoundSubmitted ? 'submitted' : 'read-only';
+  // The title underneath that word is NOT one string for every board: a
+  // Submitted round on an ORDINARY board gets PILL_SUBMITTED_TITLE (see
+  // `initialRoundSubmitted` just above). Short of that, a page board's
+  // compose/send surface really does go dark the moment it stops being
+  // awaited (PILL_READONLY_TITLE, badge.mjs's own comment on it), but an
   // ordinary round with no `wait: true` stays `open` and its send bar stays
   // enabled the whole time -- "commenting is off" would be false directly
   // above a live Send button. badge.mjs's own comment on
@@ -2363,6 +2372,7 @@ export function renderBoardPage(board) {
   // is what src/ui.mjs's pageBoardPillMeta reads for the identical decision
   // at hydrate, kept in step here by hand the same way roundMetaText already is.
   const roundMetaTitle = initialRoundOpenAwaited ? ''
+    : initialRoundSubmitted ? PILL_SUBMITTED_TITLE
     : (!fullpage && initialRound && initialRound.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   const latestRoundOpenAwaited = roundIsAwaitedOpen(board.rounds[board.rounds.length - 1]);
   // ADR.md entry 46: a page nobody is listening to is uncommentable whatever kind

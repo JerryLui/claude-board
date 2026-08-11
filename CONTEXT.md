@@ -34,6 +34,11 @@ Stranded is the narrower thing a Banner fires on. _Avoid_: unanswered, pending, 
 round being answered. A lapsed round is no longer Awaited and is never resumed by a repeat post.
 _Avoid_: expired, stale, dead.
 
+**Submitted**: of a round, that the reviewer sent their answers, which is the reader-facing
+name for the round state the store calls `sent`. The one closed state a reader is told about
+by name: Lapsed and never-Awaited rounds are both read-only and say only that. _Avoid_: sent
+(internal only), answered, completed, done.
+
 **Watcher**: an open board tab holding a live stream to one board. Counted per board and
 never per machine: a reviewer sitting on another board's tab is not a watcher of this one.
 _Avoid_: client, connection, viewer.

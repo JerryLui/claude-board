@@ -664,10 +664,11 @@ function renderPomodoro() {
     var ms = pomodoroRemainingMs(timer, pomodoroOffset, Date.now());
     var position = pomodoroCyclePosition(timer.phase, pomodoroDoc.cycle, pomodoroDoc.settings.longEvery);
     var text = pomodoroPhaseLabel(timer.phase);
-    // The dot only ever separates a position from the countdown -- a long break,
-    // which carries no position, keeps the plain 'Long break 12:34' shape this
-    // read before positions existed.
-    text += position ? ' ' + position + ' · ' + formatCountdown(ms) : ' ' + formatCountdown(ms);
+    // The dot is the widget's one separator between the phase and its countdown,
+    // position or no position -- a long break reads 'Long break · 12:34' the same
+    // as a work or break interval reads 'Work 1/2 · 25:25'. The popover's
+    // cb_status_label (bin/menubar.m) renders the same shape.
+    text += position ? ' ' + position + ' · ' + formatCountdown(ms) : ' · ' + formatCountdown(ms);
     if (timer.paused) text += ' (paused)';
     if (statusEl) statusEl.textContent = text;
   }

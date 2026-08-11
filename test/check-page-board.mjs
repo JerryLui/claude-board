@@ -37,7 +37,7 @@ import { renderBoardPage, renderRoundSection, groupCommentsByBlock, stageAgentSc
 import { buildRoundPushPayload } from '../src/server.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
-import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE } from '../src/badge.mjs';
+import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, PILL_SUBMITTED_TITLE } from '../src/badge.mjs';
 import { themeBootScript } from '../src/theme.mjs';
 import { parseHTML, StandInEvent, StandInEventSource, resolveComputedProperty } from './dom-stand-in.mjs';
 
@@ -1544,13 +1544,26 @@ check('AC 11: an ordinary board\'s open, awaited round shows the countdown besid
 });
 
 check('AC 11: a page board\'s pill falls back to "read-only" once its round is sent, exactly like AC 8\'s never-awaited case', () => {
+  // ADR.md entry 44 ("a page board is never sent") is a rule the BROWSER
+  // enforces -- no send control ever renders for one (AC 4/AC 8 above) -- not
+  // one `applySubmit` itself refuses: ADR 44's own text is "the gate stays in
+  // the browser... it holds against every path a reviewer has, not against a
+  // caller that can post whatever board it likes anyway". Calling
+  // applySubmit directly, as this check does, is exactly that other path, so
+  // it is the one place this repo can prove the pill itself -- not just the
+  // browser's missing Send control -- keeps a page board off `submitted`
+  // (ADR 89): `pageBoardPillMeta`'s `fullpage` gate on the submitted branch
+  // (src/badge.mjs) is what holds here, the same parameter that already
+  // chose between the two read-only titles.
   const board = pageBoard();
   const document = loadBoard(renderBoardPage(board));
   assert.equal(roundMeta(document).textContent.endsWith('m left'), true, 'setup: open and awaited, so a countdown shows');
 
   applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
   const sentDocument = loadBoard(renderBoardPage(board));
-  assert.equal(roundMeta(sentDocument).textContent, 'read-only', 'a sent round\'s pill falls back exactly like a never-awaited one\'s');
+  const meta = roundMeta(sentDocument);
+  assert.equal(meta.textContent, 'read-only', 'a sent round\'s pill falls back exactly like a never-awaited one\'s, never "submitted", on a page board');
+  assert.notEqual(meta.title, PILL_SUBMITTED_TITLE);
 });
 
 // =================================================================================

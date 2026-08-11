@@ -1,0 +1,5 @@
+# 88. The popover's timer line mirrors the index page
+
+2026-08-11 · narrows 83; relates to 81
+
+**Context:** ADR 83 pulled the countdown out of both native surfaces while paused, but the two surfaces are not read the same way — the menu bar is glanced at in passing, where a frozen number reads as a stopped clock, while the popover is opened deliberately, where the same number is the thing the reader came for; meanwhile a reader with the index page open beside it saw the two surfaces name the same timer differently. **Decision:** the popover's status line is the index page's own string in every state, cycle position and `(paused)` suffix included, so `Work 1/2 · 25:25 (paused)`; the menu bar title stays empty while paused, which is the half of 83 that still stands. **Consequences:** the status item process now reads the cycle and `longEvery` it previously had no use for, and carries a second copy of the position rule that has to be edited in the same commit as the index page's or the two drift — the trap the hand-copied glyph geometry in that file already sets.

@@ -36,6 +36,7 @@ import { createBoard, addRound, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
+import { PILL_SUBMITTED_TITLE } from '../src/badge.mjs';
 import { parseHTML, StandInIntersectionObserver, StandInEventSource, StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
 
 let failures = 0;
@@ -699,8 +700,15 @@ check('an awaited page round that has been sent renders its comment surface exac
   assert.ok(item, 'the sent comment must still be visible in the list');
   assert.match(item.textContent, /looks good/);
 
+  // ADR 89 gives a Submitted round its own pill word, `submitted` -- but only
+  // on an ORDINARY board. A page round genuinely reaching `status: 'sent'`
+  // (ADR.md entry 44 keeps this path out of the browser, but applySubmit
+  // itself does not refuse it, which is exactly what this fixture drives)
+  // must still read `read-only`: `pageBoardPillMeta`'s `fullpage` gate
+  // (src/badge.mjs) holds a page board off `submitted` at the pill itself.
   const meta = document.querySelector('span#round-meta');
-  assert.equal(meta.textContent, 'read-only', 'a sent round\'s pill falls back exactly like a never-awaited one\'s (AC 8, AC 11)');
+  assert.equal(meta.textContent, 'read-only', 'a sent PAGE round\'s pill stays "read-only", never "submitted"');
+  assert.notEqual(meta.title, PILL_SUBMITTED_TITLE);
 });
 
 if (failures) {

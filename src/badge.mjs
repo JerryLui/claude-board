@@ -270,11 +270,27 @@ export const PILL_READONLY_TITLE = 'No agent is listening on this page -- commen
 // (src/ui.mjs's setSendBarEnabled reads `openRoundNumber`/`status`, never
 // `awaited`), and a comment left there is drained to whichever agent asks
 // next exactly like any other undelivered one (`drainUndeliveredComments`,
-// src/server.mjs). The PM's call (not a defect to re-litigate): keep the
-// visible word `read-only` exactly as AC 13 prescribes -- it is pinned there
-// on purpose -- and fix only the claim underneath it that was actually false.
+// src/server.mjs). This title is for a round that is still `open` and simply
+// never got a live listener -- never-Awaited or Lapsed (CONTEXT.md), the two
+// closed states a reader is deliberately told nothing apart. A Submitted
+// round (`status === 'sent'`) never reaches it: ADR 89 gives that state its
+// own word and its own title, PILL_SUBMITTED_TITLE just below, so this one no
+// longer has to cover it too.
 export const ROUND_OPEN_UNAWAITED_TITLE =
   'No agent is waiting live right now -- comments and answers here are saved and reach the next agent that asks.';
+
+// The pill's title once the round in view was actually Submitted (CONTEXT.md
+// "Submitted" -- the store's `status === 'sent'`). ADR 89: a reviewer who just
+// sent their answers is told their answer landed, not only what they can no
+// longer do here, which is what the two titles above both say instead. Only
+// reached on an ordinary board (see `pageBoardPillMeta`'s own `!fullpage`
+// gate below): a page board is held off `submitted` at the pill itself,
+// deliberately, not merely by ADR.md entry 44 keeping Send off its browser
+// surface -- that entry is a guarantee about what the BROWSER offers, not
+// about what `status` a round can be handed to this function carrying, and
+// `applySubmit` does not itself refuse a page round (two checks in this repo
+// drive one to `sent` directly), so the gate has to hold even there.
+export const PILL_SUBMITTED_TITLE = 'This round was submitted -- the answer already went out.';
 
 // What the page board's own Send control says once its round's wait has died
 // under the reviewer (AC 12). The control freezes rather than vanishing, and it
@@ -291,26 +307,34 @@ export const PAGE_SEND_EXPIRED_TITLE =
 
 // The header's own pill/meta slot (ADR.md entry 40, "the pill may hold a
 // label alone", on every board's condensed header, not only a page board's):
-// the countdown while someone is actually waiting, or
-// the bare word `read-only` the moment nobody is -- never awaited at all
-// (AC 8), sent, timed out, or archived (AC 11's fallback). Client-only (see
-// this section's header comment); src/render.mjs's own first-paint fallback
-// is `read-only` only, computed straight from `roundIsAwaitedOpen` with no
-// clock at all -- the live figure is filled in at hydrate, before the reader
-// can act on it.
+// the countdown while someone is actually waiting, the word `submitted` the
+// moment an ORDINARY board's round in view actually was (ADR 89), or the bare
+// word `read-only` for every other closed round -- never awaited at all
+// (AC 8), its wait lapsed, or (on a page board specifically) sent, all three
+// deliberately indistinguishable from each other. Client-only (see this
+// section's header comment); src/render.mjs's own first-paint fallback
+// mirrors this same three-way split by hand, computed straight from
+// `round.status`/`roundIsAwaitedOpen`/`fullpage` with no clock at all -- the
+// live figure is filled in at hydrate, before the reader can act on it.
 //
 // `fullpage` (default `true`, matching every caller before this parameter
 // existed -- src/render.mjs's own page-board-era callers, and this file's own
-// original name) is what tells the `read-only` case which of the two titles
-// above is true for the round it is about (PILL_READONLY_TITLE stays the
-// default rather than requiring every existing call site to opt back into
-// it): a page board's `status` never leaves `open` even once its wait dies
-// (ADR.md entry 44, "a page board is never sent"), so `round.status` alone
-// cannot tell the two surfaces apart -- only the caller, which already knows
-// whether it is rendering a page board or an ordinary one, can.
+// original name) is what tells BOTH closed branches apart, not just the
+// read-only one: a page board's `status` never leaves `open` merely because
+// its wait dies (ADR.md entry 44, "a page board is never sent"), so
+// `round.status` alone cannot tell the two read-only surfaces apart -- only
+// the caller, which already knows whether it is rendering a page board or an
+// ordinary one, can. And criterion 12 holds the same page board off
+// `submitted` too, on purpose: ADR.md entry 44 is a browser-level guarantee
+// (Send never renders there), not a guarantee about what `status` a round can
+// be handed to this function carrying -- `applySubmit` does not itself refuse
+// a page round, so without this gate a caller that reached `sent` some other
+// way would see the pill claim an outcome the page-board surface as a whole
+// says never happens.
 export function pageBoardPillMeta(round, nowMs, fullpage = true) {
   const countdown = roundCountdownText(round, nowMs);
   if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
+  if (!fullpage && round && round.status === 'sent') return { text: 'submitted', title: PILL_SUBMITTED_TITLE };
   const title = (!fullpage && round && round.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   return { text: 'read-only', title };
 }

@@ -324,6 +324,7 @@
   var ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
   var PILL_READONLY_TITLE = "No agent is listening on this page -- commenting is off.";
   var ROUND_OPEN_UNAWAITED_TITLE = "No agent is waiting live right now -- comments and answers here are saved and reach the next agent that asks.";
+  var PILL_SUBMITTED_TITLE = "This round was submitted -- the answer already went out.";
   var PAGE_SEND_EXPIRED_LABEL = "Goes out with the next round";
   var PAGE_SEND_EXPIRED_TITLE = "This round ended. Comments left here are stored and reach the next agent that asks.";
   var roundIsAwaitedOpen = function roundIsAwaitedOpen(round) {
@@ -340,6 +341,7 @@
   var pageBoardPillMeta = function pageBoardPillMeta(round, nowMs, fullpage = true) {
   const countdown = roundCountdownText(round, nowMs);
   if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
+  if (!fullpage && round && round.status === 'sent') return { text: 'submitted', title: PILL_SUBMITTED_TITLE };
   const title = (!fullpage && round && round.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   return { text: 'read-only', title };
 };

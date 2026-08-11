@@ -52,21 +52,41 @@
 //     seam. Driving a UI cannot prove a button is missing.
 //   - 11, "turning the countdown setting off leaves the icon and removes the text".
 //
-// Two later decisions are pinned here as well, and both are about the glyph rather than the
-// HTTP. ADR 83, paused says so with shape and not a number: the menu bar title is empty and
-// the status line names the phase alone. ADR 84, one signal one dimension: the tomato
-// silhouette in every state, a ring for time remaining, one flat bar for a break, two
-// vertical bars for paused, and opacity meaning only that the daemon has gone quiet. Those
-// live on `cb_display` as `ring` and `mark` FOR THIS REASON -- a decision the derivation
-// records is checkable, and a condition rediscovered inside the drawing code is not.
+// Two later decisions are pinned here as well. ADR 88 narrows ADR 83: the menu bar TITLE
+// stays empty while paused and the glyph keeps its paused shape (ADR 83's own point,
+// untouched), but the popover's status LINE no longer drops to the phase name alone --
+// it mirrors the index page's own line (renderPomodoro, src/indexpage.mjs), cycle
+// position and countdown included, with "(paused)" named at the end. ADR 84, one signal
+// one dimension: the tomato silhouette in every state, a ring for time remaining, one
+// flat bar for a break, two vertical bars for paused, and opacity meaning only that the
+// daemon has gone quiet. Those live on `cb_display` as `ring` and `mark` FOR THIS REASON
+// -- a decision the derivation records is checkable, and a condition rediscovered inside
+// the drawing code is not.
 //
 // The popover's own row set is the same story one step further. Its words are all reported
-// (`status`, `stateword`, `caption`, `row`), so "the word paused appears exactly once in
-// the whole popover" is a behavioural assertion rather than a screenshot; and every glyph
-// it draws is a byte copy of src/pomodoro-widget.mjs's, so "no glyph is invented for this
-// surface" is a comparison of two files rather than a promise. What remains uncheckable is
-// everything about the arrangement: which row is above which, that the gear is on the
-// right, that a waiting row has no bezel.
+// (`status`, `stateword`, `caption`, `row`), so "the word paused appears in exactly the two
+// places ADR 88 leaves it" is a behavioural assertion rather than a screenshot; and every
+// glyph it draws is a byte copy of src/pomodoro-widget.mjs's, so "no glyph is invented for
+// this surface" is a comparison of two files rather than a promise.
+//
+// The arrangement used to be entirely uncheckable -- which row is above which, that the
+// gear is on the right, that a waiting row has no bezel -- and criterion 13 closes the
+// first two of those. `--menubar --probe layout` builds -rebuild's OWN row/stack
+// construction (never a second copy that could quietly drift from what ships -- see
+// -buildContentWithDisplay:waiting: in bin/menubar.m), forces Auto Layout to resolve it
+// with no NSApplication anywhere near it, and prints every arranged subview's resolved
+// frame, its class, and which row each named control actually sits in (`rowindex=`). So
+// the checks below assert, from real numbers rather than a screenshot: every row spans
+// the PANEL's own known content width (not merely agrees with its siblings, which a fault
+// that moves every row together would still do); the panel's documented row order and
+// kind (a status row, a control row, a divider, a caption, in that order); that the gear
+// and the switch specifically -- not whichever control happens to be in a well-formed row
+// -- are the ones in the status row, and the forward button in the control row; that the
+// gear's and the forward button's right edges sit at the panel's own right content edge,
+// including under the longest status string cb_status_label ever produces; and that a
+// waiting row (and the overflow row) spans the panel too. What remains uncheckable:
+// whether any of it is legible, keyboard-reachable or correct in dark mode, and whether a
+// waiting row's bezel is really absent on screen.
 //
 // Pattern-matched off test/check-pomodoro.mjs (a live daemon on a temp home via
 // startServer) and test/check-launcher-menubar.mjs (compiles bin/launcher.c from node and
@@ -88,7 +108,9 @@ import { promisify } from 'node:util';
 import http from 'node:http';
 import { defaultDoc, writeDoc, pomodoroDay, formatCountdown } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
-import { SECRET_HEADER } from '../src/secret.mjs';
+import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
+import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
+import { parseHTML } from './dom-stand-in.mjs';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -195,7 +217,7 @@ async function probe({ home, port, args = [] }) {
     signal = err.signal ?? null;
   }
   const lines = stdout.split('\n').map(s => s.trim()).filter(Boolean);
-  const state = { elapsedMs: Date.now() - started, code, signal, stderr, stdout, rows: [], icons: [] };
+  const state = { elapsedMs: Date.now() - started, code, signal, stderr, stdout, rows: [], icons: [], frames: {}, rowIndex: {} };
   // Two line shapes on purpose (bin/menubar.m says why): the first line is bare
   // `key=value` words, and every line after it is one `key=` followed by the rest of the
   // line verbatim, because a row label carries spaces and a middle dot.
@@ -223,6 +245,37 @@ async function probe({ home, port, args = [] }) {
         if (at > 0) icon[pair.slice(0, at)] = pair.slice(at + 1);
       }
       state.icons.push(icon);
+      continue;
+    }
+    // `--menubar --probe layout` (criterion 13): one `frame=<name> x=.. y=.. w=.. h=..
+    // [class=..]` line per view -- `row0`, `row1`, … for the vertical stack's own
+    // arranged subviews in order (each carrying a trailing `class=`, the row's own
+    // Objective-C class name), and named lines (`glyph`, `gear`, `forward`, …) for the
+    // specific controls criteria 2 and 3 are about. Every `.frame` in AppKit is relative
+    // to the view's OWN superview, never to the panel -- bin/menubar.m's own comment on
+    // the seam says so -- so `gear`/`forward`'s x/y are relative to their ROW, not to the
+    // panel, and the checks below read them that way rather than assuming one shared
+    // coordinate space. `class` is kept as a string; every other field is a number.
+    if (line.startsWith('frame=')) {
+      const [nameToken, ...rest] = line.split(' ');
+      const name = nameToken.slice(6);
+      const frame = {};
+      for (const pair of rest) {
+        const at = pair.indexOf('=');
+        if (at <= 0) continue;
+        const key = pair.slice(0, at);
+        const value = pair.slice(at + 1);
+        frame[key] = key === 'class' ? value : Number(value);
+      }
+      state.frames[name] = frame;
+      continue;
+    }
+    // `rowindex=<name> <N>` (criterion 13): which top-level row (an index into `row0`,
+    // `row1`, …) actually holds the named control -- see cb_row_index_of's own comment
+    // for why a frame alone cannot answer "which row", only "flush with A row".
+    if (line.startsWith('rowindex=')) {
+      const [nameToken, indexToken] = line.split(' ');
+      state.rowIndex[nameToken.slice(9)] = Number(indexToken);
       continue;
     }
     if (line.startsWith('row=')) state.rows.push(line.slice(4));
@@ -282,6 +335,101 @@ function runningDoc(timer, settings = {}) {
     settings: { ...base.settings, notify: false, notifyRounds: false, ...settings },
     cycleDate: pomodoroDay(Date.now()),
     timer,
+  };
+}
+
+// -----------------------------------------------------------------------------------------
+// Criterion 13's ground truth: the panel's own numbers, and why they are hardcoded here
+// rather than read back from anything the build under test produces.
+// -----------------------------------------------------------------------------------------
+
+/** bin/menubar.m's own `CB_POPOVER_W` and the 14pt left/right of its `stack.edgeInsets`
+ * literal (`NSEdgeInsetsMake(12.0, 14.0, 12.0, 14.0)`) -- hardcoded independently here,
+ * never read back from the running probe or parsed out of bin/menubar.m's own source.
+ *
+ * That distinction is the whole point of these two constants. A fault that only ever
+ * removes the constraint pinning the vertical stack to its content view
+ * (bin/menubar.m:2311-2312, confirmed by review) leaves every row still perfectly
+ * self-consistent with its SIBLINGS -- x=14 w=151 instead of x=14 w=236, every row
+ * agreeing with every other row -- and invisible to any check that only ever compares
+ * rows against each other. Reading `CB_POPOVER_W` (or the inset) out of bin/menubar.m's
+ * own text at test time would not help either: the same source edit that breaks the
+ * layout could just as easily be the one that changes the number this file would then
+ * read back and trust. The only check that catches "the panel shrank" is one that knows,
+ * independently, what the panel's content width is supposed to be. */
+const PANEL_WIDTH = 264;
+const PANEL_INSET = 14;
+
+/** Every frame in `rows` must span the panel's own content width -- x === PANEL_INSET,
+ * x + w === PANEL_WIDTH - PANEL_INSET -- not merely agree with its siblings (see
+ * PANEL_WIDTH's own comment for why that distinction matters). `tolerance` defaults to a
+ * few points: QUIRKS.md's "Auto Layout resolves off-window, but `.frame` and the
+ * constraint it satisfies can disagree by a few points" entry measured a plain
+ * NSTextField's alignment rect (what a leading/trailing constraint actually pins) sitting
+ * a couple of points OUTSIDE its own paint frame on each side, so the waiting caption
+ * reads a few points WIDER and starting further LEFT than an NSStackView or NSBox row
+ * even once every row is correctly pinned to the panel's own content edges. The fault
+ * this check exists to catch moves rows by TENS of points (measured, before this ticket:
+ * a 264pt panel's own rows landed as far apart as x=14 and x=153), so a few points of
+ * slack loses none of the check's power to catch it. */
+function assertRowsSpanPanel(rows, label, tolerance = 3) {
+  const left = PANEL_INSET;
+  const right = PANEL_WIDTH - PANEL_INSET;
+  rows.forEach((row, i) => {
+    assert.ok(Math.abs(row.x - left) <= tolerance,
+      `${label} ${i}: left edge ${row.x} != the panel's own ${left} -- a row that has drifted off the panel's content edge, however self-consistent with its siblings, is exactly the fault this exists to catch`);
+    assert.ok(Math.abs((row.x + row.w) - right) <= tolerance,
+      `${label} ${i}: right edge ${row.x + row.w} != the panel's own ${right}`);
+  });
+}
+
+// -----------------------------------------------------------------------------------------
+// The two surfaces, compared rather than each pinned to a hand copy.
+// -----------------------------------------------------------------------------------------
+
+/** Loads the REAL `renderIndexPage()` markup and runs the REAL `indexScript` against it,
+ * with `fetch` rewritten to reach the given daemon over real HTTP, authorised the way a
+ * genuine browser tab is -- a session cookie, never the native secret header `probe()`
+ * above uses. Pattern-matched off test/check-pomodoro-page.mjs's own
+ * `loadIndexAgainstDaemon`, narrowed to the one element this file needs
+ * (`#pomodoro-status`); the settings-panel and SSE-stream halves that file already covers
+ * are none of this chunk's business.
+ *
+ * This is what makes criteria 4-6 checkable as a comparison rather than a hand copy. ADR
+ * 88 says the popover's status line is "the index page's own string, in every state" --
+ * and a check that pins BOTH surfaces to a THIRD, hand-typed reproduction of
+ * pomodoroCyclePosition's formula cannot catch the two drifting apart from each other,
+ * which is exactly how a popover that said "Short break" where the index page said
+ * "Break" reached this suite unnoticed (both sides of that check agreed with themselves).
+ * Running the actual client script closes that gap: whatever `renderPomodoro` computes IS
+ * what the reader's index tab shows, not a reconstruction of what it is believed to
+ * compute. */
+const REAL_FETCH = globalThis.fetch;
+function loadIndexAgainstDaemon(port, secret) {
+  const document = parseHTML(renderIndexPage({ threads: [] }));
+  const cookie = `${SESSION_COOKIE}=${sessionToken(secret)}`;
+  globalThis.fetch = (url, opts) =>
+    REAL_FETCH(`http://127.0.0.1:${port}${url}`, { ...opts, headers: { ...(opts && opts.headers), cookie } });
+  // No interval is ever fired: fetchPomodoro().then(renderPomodoro) runs once,
+  // unconditionally, at script init (src/indexpage.mjs:1111) -- before either
+  // setInterval(tickPomodoro, ...) or setInterval(fetchPomodoro, POMODORO_POLL_MS) is
+  // even registered -- so a stub that never calls back is enough to read the first real
+  // render. 'EventSource' is declared and never passed, the same reason
+  // test/check-pomodoro-page.mjs leaves it unbound: this harness has no live stream to
+  // open, and an unflagged Node would otherwise hand initIndexStream a real constructor.
+  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(
+    document, () => 0, document.defaultView, { hash: '' });
+  return {
+    /** Waits out the real network round trip (a stubbed microtask would prove nothing
+     * about the actual fetch/render this check is here to observe) and reads back
+     * #pomodoro-status's own textContent -- 50ms, the same generous, still-fast margin
+     * test/check-pomodoro-page.mjs's own flush() uses. */
+    async statusText() {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const status = document.querySelector('span#pomodoro-status');
+      return status ? status.textContent : null;
+    },
+    restoreFetch() { globalThis.fetch = REAL_FETCH; },
   };
 }
 
@@ -531,18 +679,19 @@ async function main() {
     });
   });
 
-  await check('ADR 83: the word "paused" appears EXACTLY ONCE in the whole popover, beside the switch -- in every phase, and nowhere at all otherwise', async () => {
+  await check('ADR 88 narrows ADR 83: "paused" is named in EXACTLY the two places it leaves it -- the status line\'s own "(paused)" and the word beside the switch -- and nowhere else', async () => {
     // Every word the popover shows is reported by the probe: the status line, the switch's
-    // state word, the waiting caption and each waiting row. So "exactly once" is countable
+    // state word, the waiting caption and each waiting row. So "exactly two" is countable
     // rather than a thing to eyeball, which is the only reason it is a check at all.
     //
-    // It is a real constraint in both directions. Once it is said beside the switch, the
-    // status line must not repeat it (ADR 83's own point: a fact stated twice); and if a
-    // later edit dropped it from the switch to "tidy up", a paused Timer would say so
-    // nowhere in words at all, the countdown having gone with it.
-    // Occurrences of the WORD, not rows containing it: "exactly once" is a claim about how
-    // many times a reader's eye lands on it, and a row that said it twice would be the same
-    // duplication read in one line instead of two.
+    // Two, not the one ADR 83 originally named: the status line used to drop the word
+    // entirely (ADR 83's own point, a fact that must not be stated twice) and now mirrors
+    // the index page's own line instead, which names the state itself. A reader with the
+    // index page open in another window already reads "paused" there beside the same
+    // frozen countdown, so saying it once more here is not the duplication ADR 83 was
+    // refusing -- it is two different controls each naming the state they are next to.
+    // Occurrences of the WORD, not rows containing it: "exactly two" is a claim about how
+    // many times a reader's eye lands on it.
     const wordsOf = state => [state.status, state.stateword, state.caption, ...state.rows];
     const countPaused = state => (wordsOf(state).join(' ').match(/paused/gi) || []).length;
 
@@ -551,8 +700,9 @@ async function main() {
         async ({ probeHome, port }) => {
           const state = await probe({ home: probeHome, port });
           assert.equal(state.stateword, 'Paused', `a paused ${phase} says so beside the switch`);
-          assert.equal(countPaused(state), 1,
-            `and exactly once in the whole popover: ${JSON.stringify(wordsOf(state))}`);
+          assert.match(state.status, /\(paused\)$/, `and again, at the end of its own sentence: ${state.status}`);
+          assert.equal(countPaused(state), 2,
+            `and in exactly those two places, nowhere else: ${JSON.stringify(wordsOf(state))}`);
         });
     }
     // And never at all when nothing is paused -- which is what makes the count above a
@@ -566,54 +716,281 @@ async function main() {
     }
   });
 
-  await check('criterion 4: the popover\'s one line of text names the phase, the pause and the countdown', async () => {
-    // The digits beside the icon say how long; this line says what OF. It is the only text
-    // the popover retitles on the tick, and it is derived by a pure function next to
-    // cb_derive for exactly the reason everything else here is.
-    const now = Date.now();
+  // -------------------------------------------------------------------------------------
+  // ADR 88: the popover's status line is "the index page's own string, in every state" --
+  // checked here by running the REAL index page against the SAME daemon and comparing,
+  // never by pinning both surfaces to a hand-typed reproduction of
+  // pomodoroCyclePosition's formula (loadIndexAgainstDaemon's own comment says why that
+  // third copy is exactly how a real divergence -- 'Short break' vs 'Break' -- once
+  // reached this suite unnoticed).
+  // -------------------------------------------------------------------------------------
+
+  await check('criteria 4 and 6: a running phase\'s popover status line is the SAME string the real index page renders from the same daemon', async () => {
+    // Idle stays out of scope here (per the coordinator): the index page's own idle line
+    // carries a duration ("Idle (25 min)") the popover's deliberately does not, and that
+    // gap is recorded as an open question for the PM, not something this check should
+    // paper over by comparing anyway.
     await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
       assert.equal((await probe({ home: probeHome, port })).status, 'Idle');
     });
+    const now = Date.now();
+    for (const [phase, deadline] of [
+      ['work', now + 7 * 60_000 + 30_000],
+      ['break', now + 3 * 60_000],
+      ['longBreak', now + 9 * 60_000],
+    ]) {
+      await withDaemon(runningDoc({ phase, deadline, paused: false }), async ({ probeHome, port, secret }) => {
+        const popoverState = await probe({ home: probeHome, port });
+        const tab = loadIndexAgainstDaemon(port, secret);
+        try {
+          const indexText = await tab.statusText();
+          assert.ok(indexText, `setup: the index page must render a status text for phase ${phase}`);
+          assert.equal(popoverState.status, indexText,
+            `phase ${phase}: popover said ${JSON.stringify(popoverState.status)}, the index page said ${JSON.stringify(indexText)}`);
+        } finally {
+          tab.restoreFetch();
+        }
+      });
+    }
+    // Criterion 6, asserted directly against the ground truth rather than inferred from
+    // the comparison above: a long break carries no cycle position AT ALL on the real
+    // index page, full stop -- so the popover cannot be agreeing with it by both having
+    // dropped the position the same wrong way.
     await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }),
-      async ({ probeHome, port }) => {
-        // "Long break", not the wire's `longBreak` -- and this line is now the ONLY place
-        // the two breaks are told apart at all, the glyph having stopped trying (ADR 84).
-        assert.match((await probe({ home: probeHome, port })).status, /^Long break · \d{2}:\d{2}$/);
+      async ({ probeHome, port, secret }) => {
+        const tab = loadIndexAgainstDaemon(port, secret);
+        try {
+          const indexText = await tab.statusText();
+          assert.doesNotMatch(indexText, /\d+\/\d+/, `the index page's own long break line must carry no position: ${JSON.stringify(indexText)}`);
+          assert.match(indexText, /^Long break/, `and must still name the phase: ${JSON.stringify(indexText)}`);
+        } finally {
+          tab.restoreFetch();
+        }
       });
   });
 
-  // -------------------------------------------------------------------------------------
-  // Paused says so with SHAPE, not a number (ADR 83).
-  // -------------------------------------------------------------------------------------
-
-  await check('paused: no time in the status line and no title on the menu bar button -- the phase name alone, and not the word "paused" either', async () => {
-    // A frozen countdown reads as a clock that has stopped working rather than one
-    // deliberately stopped, and it states twice what the two bars in the glyph already say.
-    // So the menu bar title goes (`countdown=no`, which is what empties it) and the status
-    // line keeps the phase and drops the clock.
-    //
-    // The word "paused" is NOT here on purpose: the switch beside this line carries it, and
-    // the popover says it exactly once. A status line that said it too would be the second
-    // time, which is the thing ADR 83 is about.
-    for (const [phase, expected] of [['work', 'Work'], ['break', 'Short break'], ['longBreak', 'Long break']]) {
+  await check('criterion 5: a paused interval\'s popover status line is the SAME string the real index page renders, and criterion 7 keeps the menu bar digits empty regardless', async () => {
+    for (const phase of ['work', 'break', 'longBreak']) {
       await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }),
-        async ({ probeHome, port }) => {
-          const state = await probe({ home: probeHome, port });
-          assert.equal(state.status, expected, `a paused ${phase} names its phase and stops there`);
-          assert.ok(!/paused/i.test(state.status), `and never says "paused" itself: ${state.status}`);
-          assert.equal(state.countdown, 'no', 'and no digits reach the menu bar button');
-          // Still DERIVED, though -- the suppression is a display decision, which is what
-          // lets resume put the digits straight back with no refetch.
-          assert.equal(state.text, '01:30');
+        async ({ probeHome, port, secret }) => {
+          const popoverState = await probe({ home: probeHome, port });
+          const tab = loadIndexAgainstDaemon(port, secret);
+          try {
+            const indexText = await tab.statusText();
+            assert.ok(indexText, `setup: the index page must render a status text for a paused ${phase}`);
+            assert.match(indexText, /\(paused\)$/, `setup: the index page's own paused line must name the state too: ${JSON.stringify(indexText)}`);
+            assert.equal(popoverState.status, indexText,
+              `a paused ${phase}: popover said ${JSON.stringify(popoverState.status)}, the index page said ${JSON.stringify(indexText)}`);
+            // Criterion 7, unaffected by any of the above: the menu bar TITLE (the digits
+            // beside the icon) still empties while paused -- a display decision entirely
+            // separate from the popover's own status line, which is why resume can put the
+            // title's digits straight back with no refetch while the popover shows them the
+            // whole time regardless.
+            assert.equal(popoverState.countdown, 'no', 'criterion 7: the menu bar digits still empty while paused');
+          } finally {
+            tab.restoreFetch();
+          }
         });
     }
-    // The countdown comes back the moment it is running again, so the check above is
+    // The countdown comes back the moment it is running again, so the checks above are
     // pinning "paused" rather than a countdown that quietly stopped being computed.
     await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 90_000, paused: false }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         assert.equal(state.countdown, 'yes');
-        assert.match(state.status, /^Work · \d{2}:\d{2}$/, 'a running phase keeps its time');
+        assert.match(state.status, /^Work \d+\/\d+ · \d{2}:\d{2}$/, 'a running phase keeps its time and position');
+      });
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Criterion 13: the popover's arrangement, through `--menubar --probe layout`.
+  //
+  // Every `.frame` AppKit hands back is relative to the view's OWN superview, never to the
+  // panel -- an ordinary NSView fact, not a quirk of this seam -- so a control nested inside
+  // one of the popover's horizontal rows (the gear, the switch, the forward button) reports
+  // ROW-relative coordinates, and a top-level row (`row0`, `row1`, …, the vertical stack's
+  // own arranged subviews) reports PANEL-relative ones. The checks below read each frame in
+  // whichever space it actually came in rather than assuming one shared origin.
+  //
+  // Two things a first pass at this seam got wrong, both found on review and fixed here:
+  //
+  //   - Rows were only ever compared to EACH OTHER, never against the panel's own known
+  //     numbers (PANEL_WIDTH/PANEL_INSET, above). A fault that moves or shrinks every row
+  //     TOGETHER -- measured: dropping the constraint pinning the vertical stack to its
+  //     content view leaves every row at a consistent x=14 w=151 instead of w=236, still
+  //     perfectly agreeing with each other -- was invisible to that comparison. Every row
+  //     check below goes through assertRowsSpanPanel, against the panel's own numbers.
+  //   - A control's ROW-relative frame proves it is flush with the trailing edge of
+  //     WHATEVER row holds it, not that it is in the RIGHT row -- every row is the same
+  //     width, so a fault that swaps the status and control rows, or puts the gear in the
+  //     control row and the forward button in the status row, produces identical-looking
+  //     "flush with my row" frames. `state.rowIndex` (from the probe's own `rowindex=`
+  //     lines) is the fact that is not relative to anything else that could have moved,
+  //     and the checks below pin controls to a SPECIFIC row index, not merely a
+  //     well-formed one.
+  //
+  // The tolerance QUIRKS.md's "Auto Layout resolves off-window..." entry explains: a plain
+  // NSTextField's alignment rect (what a leading/trailing constraint actually pins) sits a
+  // couple of points OUTSIDE its own paint frame on each side, so the waiting caption reads
+  // a few points WIDER and starting further LEFT than an NSStackView or NSBox row even once
+  // every row is correctly pinned to the panel's own content edges. The fault this seam
+  // exists to catch moves rows by TENS of points (measured, before this ticket: a 264pt
+  // panel's own rows landed as far apart as x=14 and x=153), so a few points of slack loses
+  // none of the check's power to catch it.
+  // -------------------------------------------------------------------------------------
+
+  await check('criterion 1 and 13: every popover row -- the status row, the control row, the divider, the waiting caption -- spans the PANEL\'s own content width', async () => {
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+      async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port, args: ['layout'] });
+        const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
+          .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+        assert.ok(rowNames.length >= 4, `expected at least 4 top-level rows, got ${rowNames.length}: ${rowNames.join(', ')}`);
+        assertRowsSpanPanel(rowNames.map(name => state.frames[name]), 'row');
+      });
+  });
+
+  await check('criterion 13: the panel\'s documented row order -- a status row, a control row, a divider, a caption, each a known kind, each in its own place', async () => {
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+      async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port, args: ['layout'] });
+        const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
+          .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+        const rows = rowNames.map(name => state.frames[name]);
+
+        // The DOCUMENTED sequence of row KINDS (bin/menubar.m's own section comment, "The
+        // layout, top to bottom"): a horizontal stack for the status row, a horizontal
+        // stack for the control row, a box for the divider, a text field for the caption.
+        // Two consecutive NSStackViews cannot be told apart by class alone -- a swap
+        // between them reads identically here -- which is exactly why the rowIndex
+        // assertions below exist too.
+        assert.deepEqual(rows.slice(0, 4).map(row => row.class),
+          ['NSStackView', 'NSStackView', 'NSBox', 'NSTextField'],
+          `the first four rows must be, in order, the status row, the control row, the divider and the waiting caption; got ${JSON.stringify(rows.slice(0, 4).map(row => row.class))}`);
+
+        // Row order is vertical order too -- AppKit's y grows upward, so each row must
+        // sit below (a strictly smaller y than) the one before it in the array. On its
+        // own this only proves the rows are stacked top-to-bottom in WHATEVER order the
+        // array holds them (true of any vertical NSStackView, reordered or not); it is
+        // the class sequence and the rowIndex checks either side of it that prove the
+        // array itself holds the DOCUMENTED order.
+        for (let i = 1; i < rows.length; i++) {
+          assert.ok(rows[i].y < rows[i - 1].y,
+            `row ${i} (y=${rows[i].y}) must sit below row ${i - 1} (y=${rows[i - 1].y})`);
+        }
+
+        // Row IDENTITY for the two controls criteria 2 and 3 are about: not merely "some
+        // row, and that row is well-formed" (every row is the same width, so a control in
+        // the WRONG row still reads as "flush with my row's own trailing edge"), but the
+        // SPECIFIC row the panel is documented to hold it in.
+        assert.equal(state.rowIndex.glyph, 0, 'the phase glyph must be in the FIRST row (the status row)');
+        assert.equal(state.rowIndex.statusline, 0, 'the status line must be in the FIRST row (the status row)');
+        assert.equal(state.rowIndex.gear, 0, 'the gear must be in the status row, not the control row');
+        assert.equal(state.rowIndex.toggle, 1, 'the switch must be in the SECOND row (the control row)');
+        assert.equal(state.rowIndex.stateword, 1, 'the state word must be in the SECOND row (the control row)');
+        assert.equal(state.rowIndex.forward, 1, 'the forward button must be in the control row, not the status row');
+      });
+  });
+
+  await check('criterion 1: the phase glyph and the switch both begin at their own row\'s left edge', async () => {
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+      async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port, args: ['layout'] });
+        // Row-relative: the glyph is the FIRST view in the status row and the switch is the
+        // FIRST view in the control row, so "begins at the left edge" is "x == 0" in each
+        // one's own row, not a shared panel-relative number.
+        assert.ok(Math.abs(state.frames.glyph.x) <= 0.5, `the phase glyph must begin at its row's own left edge, got x=${state.frames.glyph.x}`);
+        assert.ok(Math.abs(state.frames.toggle.x) <= 0.5, `the switch must begin at its row's own left edge, got x=${state.frames.toggle.x}`);
+      });
+  });
+
+  await check('criterion 2 and 13: the gear\'s right edge and the forward button\'s right edge hold the PANEL\'s own right content edge -- and the two rows share a right column', async () => {
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+      async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port, args: ['layout'] });
+        const statusRow = state.frames.row0;
+        const controlRow = state.frames.row1;
+        const panelRight = PANEL_WIDTH - PANEL_INSET;
+        // Row-relative (gear.x/w) converted to panel-relative by adding its own row's
+        // panel-relative origin, then compared against the panel's own known right edge
+        // directly -- criterion 2's literal claim, not merely "flush with A row" (see the
+        // section comment above for why that used to be all this proved).
+        const gearRight = statusRow.x + state.frames.gear.x + state.frames.gear.w;
+        const forwardRight = controlRow.x + state.frames.forward.x + state.frames.forward.w;
+        assert.ok(Math.abs(gearRight - panelRight) <= 3,
+          `the gear's right edge (${gearRight}) must sit at the panel's own content edge (${panelRight})`);
+        assert.ok(Math.abs(forwardRight - panelRight) <= 3,
+          `the forward button's right edge (${forwardRight}) must sit at the panel's own content edge (${panelRight})`);
+      });
+  });
+
+  await check('criterion 1, waiting rows: each waiting row -- and the overflow row -- spans the panel\'s content width too', async () => {
+    // Criterion 1 names "each waiting row" explicitly, and they are the only rows built
+    // from cb_row_button rather than cb_row/cb_caption -- a fixture with nothing waiting
+    // (every check above) never builds one at all, so the layout probe had never actually
+    // seen one until this check. Seven boards, the same fixture criterion 6's own
+    // row-count check builds: five capped rows plus the overflow row.
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+      async ({ probeHome, port, secret }) => {
+        for (let i = 1; i <= 7; i++) {
+          await fetch(`http://127.0.0.1:${port}/api/board`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+            body: JSON.stringify({
+              title: `WAITING_${i}`,
+              blocks: [{ kind: 'question', prompt: 'Waiting?', widget: 'single', options: [{ label: 'Yes' }] }],
+            }),
+          });
+        }
+        const state = await probe({ home: probeHome, port, args: ['layout'] });
+        const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
+          .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+        // 4 fixed rows (status, control, divider, caption) + 5 capped waiting rows + 1
+        // overflow row.
+        assert.equal(rowNames.length, 10,
+          `expected 4 fixed rows, 5 waiting rows and 1 overflow row, got ${rowNames.length}: ${rowNames.join(', ')}`);
+        const rows = rowNames.map(name => state.frames[name]);
+        assertRowsSpanPanel(rows, 'row');
+        // Every waiting row and the overflow row is a real NSButton (cb_row_button), not
+        // some other control repurposed for the section.
+        for (let i = 4; i < 10; i++) {
+          assert.equal(rows[i].class, 'NSButton', `row ${i} (a waiting or overflow row) must be an NSButton`);
+        }
+      });
+  });
+
+  await check('criterion 3: the phase glyph keeps its own size, and the gear never moves, even when the status line is the longest string it ever shows', async () => {
+    // The true worst case cb_status_label ever produces: a paused work interval at the
+    // maximum reachable cycle position -- settings.longEvery's own validated ceiling
+    // (MAX_LONG_EVERY=100, src/pomodoro.mjs, not exported; writeDoc bypasses validation
+    // the same way every other fixture in this file does) -- gives 'Work 100/100 · 25:00
+    // (paused)', 29 characters: longer than 'No answer from the daemon' (25, this check's
+    // comparator until review) and longer than any other reachable phase/position/
+    // countdown/paused combination cb_status_label can produce. A check titled "the
+    // longest string it ever shows" has to actually reach for it.
+    const longDoc = { ...runningDoc({ phase: 'work', paused: true, remainingMs: 25 * 60_000 }, { longEvery: 100 }), cycle: 99 };
+    let long;
+    await withDaemon(longDoc, async ({ probeHome, port }) => {
+      long = await probe({ home: probeHome, port, args: ['layout'] });
+    });
+    assert.equal(long.status, 'Work 100/100 · 25:00 (paused)',
+      'setup: this must be the longest status string, or the comparison below proves nothing');
+
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+      async ({ probeHome, port }) => {
+        const short = await probe({ home: probeHome, port, args: ['layout'] });
+        // Same glyph size regardless of which status string is on screen beside it -- the
+        // slack a long string needs is absorbed by the label compressing (cb_fill_with's
+        // own low compression resistance), never by the glyph growing or shrinking.
+        assert.equal(short.frames.glyph.w, long.frames.glyph.w,
+          `the phase glyph's width must not depend on the status text's length: ${short.frames.glyph.w} (short text) vs ${long.frames.glyph.w} (the longest text)`);
+        // And the gear stays flush with the PANEL's own right content edge either way --
+        // a long status string truncates (cb_fill_with's NSLineBreakByTruncatingTail)
+        // rather than pushing the gear off the panel, which is criterion 3's literal
+        // claim.
+        const gearRight = long.frames.row0.x + long.frames.gear.x + long.frames.gear.w;
+        assert.ok(Math.abs(gearRight - (PANEL_WIDTH - PANEL_INSET)) <= 3,
+          `the gear must still hold the panel's own right content edge under the longest status string, got ${gearRight}`);
       });
   });
 

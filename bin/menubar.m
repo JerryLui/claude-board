@@ -212,13 +212,16 @@ typedef struct {
 
 /* The `settings` fields this file reads, and only those. The four durations are what turn
  * a remaining time into the ring's fraction; the two booleans are the item's own
- * preferences, edited on the index page and read here. */
+ * preferences, edited on the index page and read here. `long_every` is ADR 88's own
+ * addition — settings.longEvery, the divisor pomodoroCyclePosition (src/indexpage.mjs)
+ * clamps the popover's cycle position against, mirrored rather than invented. */
 typedef struct {
   double work_ms;
   double break_ms;
   double long_break_ms;
-  int countdown;  /* settings.menubarCountdown */
-  int hidden;     /* settings.menubarHidden */
+  int countdown;    /* settings.menubarCountdown */
+  int hidden;       /* settings.menubarHidden */
+  int long_every;   /* settings.longEvery */
 } cb_settings;
 
 /* What sits in the middle of the silhouette, and only one thing ever can. The rest bar and
@@ -249,6 +252,15 @@ typedef struct {
   long remaining_s;   /* rounded the way formatCountdown rounds */
   int countdown;      /* would the digits be on screen */
   char text[16];      /* "MM:SS", or "" when there is no interval to count */
+  /* ADR 88: the popover's own line mirrors pomodoroCyclePosition (src/indexpage.mjs),
+   * which is null for anything but a running work-or-break interval — a long break
+   * carries no position, having just reset the count the position is measured against.
+   * `has_position` is that null check made a field, for the same reason `ring`/`mark`
+   * above are fields and not a condition cb_status_label would otherwise rediscover. */
+  int has_position;
+  int position_num;    /* cycle + 1, clamped at long_every */
+  int position_denom;  /* settings.longEvery, floored at 1 against a non-positive value --
+                         * never clamped against position_num the way the numerator is */
 } cb_display;
 
 static double cb_phase_length_ms(cb_phase phase, const cb_settings *settings) {
@@ -288,7 +300,7 @@ static double cb_phase_length_ms(cb_phase phase, const cb_settings *settings) {
  * silhouette and the two bars with no ring at all. A paused Timer therefore no longer says
  * which phase it is paused in, which is accepted: it has nothing to be late for. */
 static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settings *settings,
-                            double now_ms) {
+                            double now_ms, int cycle) {
   cb_display d;
   memset(&d, 0, sizeof(d));
   d.answered = answered ? 1 : 0;
@@ -315,6 +327,20 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
   if (d.paused) d.mark = CB_MARK_PAUSED;
   else if (timer->phase == CB_BREAK || timer->phase == CB_LONG_BREAK) d.mark = CB_MARK_REST;
   else d.mark = CB_MARK_NONE;
+
+  /* pomodoroCyclePosition (src/indexpage.mjs), rewritten in C rather than a second
+   * opinion: null (here, `has_position = 0`) for anything but work or break, and
+   * `cycle + 1` clamped at `long_every` otherwise — the ordinal of whichever interval is
+   * currently running, out of the configured cycle length. See that function's own
+   * comment for why the clamp is not a guess. */
+  if (timer->phase == CB_WORK || timer->phase == CB_BREAK) {
+    int every = settings->long_every > 0 ? settings->long_every : 1;
+    int position = cycle + 1;
+    if (position > every) position = every;
+    d.has_position = 1;
+    d.position_num = position;
+    d.position_denom = every;
+  }
 
   double remaining = timer->paused ? timer->remaining_ms : timer->deadline_ms - now_ms;
   if (remaining < 0.0) remaining = 0.0;
@@ -455,12 +481,29 @@ static void cb_waiting_caption(int total, char *out, size_t out_len) {
   else snprintf(out, out_len, "%d waiting for an answer", total);
 }
 
-/* The popover's one line of text about the Timer. The item's own icon and digits are
- * beside it on the menu bar, so this says the thing the icon cannot: the phase in words.
+/* The popover's one line of text about the Timer — ADR 88, narrowing ADR 83. This is now
+ * renderPomodoro's own line (src/indexpage.mjs), rewritten in C rather than a second
+ * opinion: the phase, the cycle position where one applies, the countdown, and
+ * "(paused)" while paused. Idle is the one shape kept apart, exactly as the index page
+ * keeps a bare "Idle" line apart from a running one: there is no interval to count and no
+ * position to state.
  *
- * "Short break" and "Long break" rather than the wire's `break`/`longBreak`, and never a
- * fourth phase name for paused, because paused is a state of a phase and not a phase — the
- * same distinction cb_derive keeps. */
+ * The phase word itself is not this file's to choose (ADR 88: the popover's line is "the
+ * index page's own string in every state", and the spec that ADR answers is explicit that
+ * the popover moves toward the widget, never the reverse) — it is
+ * pomodoroPhaseLabel's own three-way split (src/indexpage.mjs), mirrored rather than
+ * invented: "Break" and "Long break" for the two break phases, never the wire's
+ * `break`/`longBreak`, and never a fourth phase name for paused, because paused is a state
+ * of a phase and not a phase — the same distinction cb_derive keeps.
+ *
+ * What ADR 83 said and no longer says: that a paused Timer drops to the phase name alone,
+ * with no time and no "paused" word, because a frozen countdown reads as a broken clock.
+ * ADR 88 disagrees for THIS line only — a reader with the index page open in another
+ * window already sees that same frozen countdown and the word "paused" beside it, so a
+ * popover that said less was a second, poorer answer about the same timer, not a kinder
+ * one. What ADR 83 still owns: the menu bar TITLE (the digits beside the icon, suppressed
+ * by cb_derive's own `countdown` field) stays empty while paused, and the glyph keeps its
+ * paused shape — both untouched here, and both criteria 7 and 8's "do not break". */
 static void cb_status_label(cb_display d, char *out, size_t out_len) {
   if (!d.answered) {
     /* Criterion 9 in words. The buttons below stay live: a daemon that has stopped
@@ -474,16 +517,14 @@ static void cb_status_label(cb_display d, char *out, size_t out_len) {
     snprintf(out, out_len, "Idle");
     return;
   }
-  const char *phase = d.phase == CB_WORK ? "Work" : (d.phase == CB_BREAK ? "Short break" : "Long break");
-  /* Paused is the PHASE NAME ALONE, and both halves of that are deliberate (ADR 83).
-   *
-   * No time, because a frozen countdown reads as a broken clock rather than a stopped one,
-   * and the menu bar title is empty for the same reason. No "paused" word either: the
-   * switch beside this line already carries it, and the popover says it exactly once. This
-   * line is the one place that still names the phase a paused Timer is in, the glyph having
-   * given that up when paused took the centre. */
-  if (d.paused) snprintf(out, out_len, "%s", phase);
-  else snprintf(out, out_len, "%s · %s", phase, d.text);
+  const char *phase = d.phase == CB_WORK ? "Work" : (d.phase == CB_BREAK ? "Break" : "Long break");
+  const char *paused_suffix = d.paused ? " (paused)" : "";
+  if (d.has_position) {
+    snprintf(out, out_len, "%s %d/%d · %s%s", phase, d.position_num, d.position_denom, d.text,
+             paused_suffix);
+  } else {
+    snprintf(out, out_len, "%s · %s%s", phase, d.text, paused_suffix);
+  }
 }
 
 /* --- What the buttons do --------------------------------------------------------------
@@ -630,6 +671,7 @@ static void cb_defaults(cb_timer *timer, cb_settings *settings) {
   settings->long_break_ms = 15.0 * 60000.0;
   settings->countdown = 1;
   settings->hidden = 0;
+  settings->long_every = 4;
 }
 
 /* The protocol's three phase spellings and nothing else. An unrecognised one — a future
@@ -878,10 +920,13 @@ static void cb_stream_probe(double timeoutSeconds) {
 
 /* `GET /api/pomodoro`. Fills the outputs with defaults first and returns whether the
  * daemon actually answered, so a caller never has to decide what an unanswered call left
- * behind. */
-static BOOL cb_fetch(cb_timer *timer_out, cb_settings *settings_out, double *now_out) {
+ * behind. `cycle_out` is the document's own top-level `cycle` — a sibling of `timer` and
+ * `settings`, never part of either, which is why it is its own out-param rather than a
+ * field folded into `cb_settings` or `cb_timer`. */
+static BOOL cb_fetch(cb_timer *timer_out, cb_settings *settings_out, double *now_out, int *cycle_out) {
   cb_defaults(timer_out, settings_out);
   *now_out = cb_now_ms();
+  *cycle_out = 0;
 
   NSData *body = cb_request(@"GET", "/api/pomodoro", nil);
   if (body == nil) return NO;
@@ -896,10 +941,12 @@ static BOOL cb_fetch(cb_timer *timer_out, cb_settings *settings_out, double *now
     settings_out->long_break_ms = cb_number(settings, @"longBreakMin", 15.0) * 60000.0;
     settings_out->countdown = cb_bool(settings, @"menubarCountdown", 1);
     settings_out->hidden = cb_bool(settings, @"menubarHidden", 0);
+    settings_out->long_every = (int)cb_number(settings, @"longEvery", 4.0);
   }
 
   /* `now` is the daemon's own clock and the only one this file trusts for a deadline. */
   *now_out = cb_number(doc, @"now", *now_out);
+  *cycle_out = (int)cb_number(doc, @"cycle", 0.0);
 
   NSDictionary *timer = doc[@"timer"];
   if ([timer isKindOfClass:[NSDictionary class]]) {
@@ -1001,6 +1048,7 @@ static BOOL cb_perform(cb_action action) {
 static NSLock *cb_state_lock = nil;
 static cb_timer cb_state_timer;
 static cb_settings cb_state_settings;
+static int cb_state_cycle = 0;             /* the document's own top-level `cycle` field */
 static cb_waiting cb_state_waiting;        /* criterion 6's rows, as of the last poll */
 static double cb_state_daemon_now = 0.0;   /* the daemon's clock at the last answer */
 static double cb_state_offset = 0.0;       /* daemonNow - localNow, at the last answer */
@@ -1033,8 +1081,9 @@ static void cb_poll_once(void) {
   cb_timer timer;
   cb_settings settings;
   double daemon_now = 0.0;
+  int cycle = 0;
   double before = cb_now_ms();
-  BOOL answered = cb_fetch(&timer, &settings, &daemon_now);
+  BOOL answered = cb_fetch(&timer, &settings, &daemon_now, &cycle);
   if (!answered) return;
 
   /* Second, and only once the pomodoro half has answered: two GETs against a daemon that
@@ -1049,6 +1098,7 @@ static void cb_poll_once(void) {
   if (have_waiting) cb_state_waiting = waiting;
   cb_state_timer = timer;
   cb_state_settings = settings;
+  cb_state_cycle = cycle;
   cb_state_daemon_now = daemon_now;
   /* Recomputed on every successful read rather than once at startup, exactly as
    * fetchPomodoro does: this is what makes the item's countdown agree with every open tab
@@ -1077,6 +1127,7 @@ static int cb_current_display(cb_display *out, int *zero_fetched_out) {
   [cb_state_lock lock];
   cb_timer timer = cb_state_timer;
   cb_settings settings = cb_state_settings;
+  int cycle = cb_state_cycle;
   double daemon_now = cb_state_daemon_now;
   double offset = cb_state_offset;
   double answered_at = cb_state_answered_at;
@@ -1092,7 +1143,7 @@ static int cb_current_display(cb_display *out, int *zero_fetched_out) {
    * quiet leaves the ring frozen at the last answer rather than draining against a document
    * nothing is refreshing. */
   double now_ms = answered ? local_now + offset : daemon_now;
-  *out = cb_derive(answered, &timer, &settings, now_ms);
+  *out = cb_derive(answered, &timer, &settings, now_ms, cycle);
   return 1;
 }
 
@@ -1885,6 +1936,12 @@ static const double CB_ACTIVATION_FLOOR_S = 0.3;
 @property(nonatomic, strong) NSTextField *statusLine;
 @property(nonatomic, strong) NSSwitch *toggle;
 @property(nonatomic, strong) NSTextField *stateWord;
+/* NOT refreshed by the tick — the row set is a snapshot, same as everything else below
+ * this comment's own boundary. Held only so `--menubar --probe layout` (criterion 13) can
+ * read their resolved frames back after -buildContentWithDisplay:waiting: without a second
+ * copy of -rebuild's own view construction to find them in. */
+@property(nonatomic, strong) NSButton *gearButton;
+@property(nonatomic, strong) NSButton *forwardButton;
 /* Parallel to the row buttons' `tag`s. An NSString rather than an NSURL because the
  * validator that decides whether it may be opened is a C function taking a C string. */
 @property(nonatomic, strong) NSArray<NSString *> *rowURLs;
@@ -1935,13 +1992,23 @@ static NSTextField *cb_caption(NSString *text, BOOL secondary) {
   return label;
 }
 
+/* One priority point below NSButton/NSSwitch/NSImageView's own default horizontal
+ * hugging (NSLayoutPriorityDefaultLow, 250 — every one of this row's OTHER arranged
+ * subviews is left at it). Measured (see the diagnosis this ticket inherited): setting
+ * the label to that SAME value does not make it "loose" relative to its neighbours, it
+ * ties with them, and Auto Layout is then free to stretch ANY view in the tie to absorb
+ * a row's slack — it chose the phase glyph, an NSImageView, stretching it to 107.5pt in a
+ * 264pt panel. One point of separation is enough to make the label the only view that
+ * ever loses a hugging tie in this row. */
+static const NSLayoutPriority CB_TEXT_HUGGING = NSLayoutPriorityDefaultLow - 1;
+
 /* A row that has to hold a control at each end and text in the middle: the text takes the
  * slack and truncates, so nothing on the right is ever pushed off the popover by a long
  * phase name or a wide state word. Layout, not styling. */
 static void cb_fill_with(NSTextField *label) {
   label.lineBreakMode = NSLineBreakByTruncatingTail;
   label.maximumNumberOfLines = 1;
-  [label setContentHuggingPriority:NSLayoutPriorityDefaultLow
+  [label setContentHuggingPriority:CB_TEXT_HUGGING
                     forOrientation:NSLayoutConstraintOrientationHorizontal];
   [label setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -2129,28 +2196,18 @@ static void cb_open_url(NSURL *url) {
   [self.popover.contentViewController.view.window makeKeyWindow];
 }
 
-/* Rebuilt from scratch on every open rather than mutated in place: the row set changes
- * between opens and nothing about a popover that is not on screen is worth keeping.
+/* The row/stack construction -rebuild presents on every open, factored out so
+ * `--menubar --probe layout` (criterion 13) can force Auto Layout to resolve the SAME
+ * views and read real frames back off them — a probe pinning a second copy of this
+ * construction would be vacuous the moment the two drifted apart, so there is exactly
+ * one place this popover's rows are built, and both callers run it.
  *
- * ponytail: the rows are a snapshot taken when the popover opened, and they do NOT
- * re-lay-out while it is open — only the phase line and the primary button retitle on the
- * tick. The ceiling is a round answered in another window while the popover is open,
- * which leaves a row that opens an already-answered board (a page, not an error) until
- * the popover is reopened. The upgrade path is to rebuild from the tick when the list's
- * contents change, and the reason not to is that rows moving under a moving cursor is a
- * misclick that opens the wrong board — NSMenu does not do it either. */
-- (void)rebuild {
-  /* An unanswered daemon derives to the same zeroes cb_derive would produce for one, so
-   * the popover opens saying so rather than not opening. It cannot happen today —
-   * cb_ensure_item runs only after the first answer — and costs one line to not depend on
-   * that staying true. */
-  cb_display display;
-  if (!cb_current_display(&display, NULL)) memset(&display, 0, sizeof(display));
-
-  [cb_state_lock lock];
-  cb_waiting waiting = cb_state_waiting;
-  [cb_state_lock unlock];
-
+ * Sets self.glyphView/statusLine/toggle/stateWord/gearButton/forwardButton/rowURLs
+ * exactly as -rebuild always has — a throwaway probe instance sets them on itself and
+ * is discarded, never touching the real popover's own. Returns the fixed-width content
+ * view; -rebuild wraps it in a view controller and hands it to the popover, and the
+ * probe forces layout on it directly. */
+- (NSView *)buildContentWithDisplay:(cb_display)display waiting:(cb_waiting)waiting {
   NSMutableArray<NSView *> *rows = [NSMutableArray array];
   NSMutableArray<NSString *> *urls = [NSMutableArray array];
 
@@ -2169,9 +2226,9 @@ static void cb_open_url(NSURL *url) {
   self.statusLine = cb_caption([NSString stringWithUTF8String:status], NO);
   cb_fill_with(self.statusLine);
 
-  NSButton *gear = cb_icon_button(cb_icon_image(cb_gear_path()), @"Settings", self,
-                                  @selector(pressSettings:));
-  [rows addObject:cb_row(@[ self.glyphView, self.statusLine, gear ])];
+  self.gearButton = cb_icon_button(cb_icon_image(cb_gear_path()), @"Settings", self,
+                                   @selector(pressSettings:));
+  [rows addObject:cb_row(@[ self.glyphView, self.statusLine, self.gearButton ])];
 
   /* The control row. The switch's POSITION and the word beside it both report the STATE;
    * its accessibility label is the ACTION a press performs, in the widget's own spelling
@@ -2189,9 +2246,9 @@ static void cb_open_url(NSURL *url) {
 
   NSButton *restart = cb_icon_button(cb_icon_image(cb_restart_path()), @"Restart interval",
                                      self, @selector(pressRestart:));
-  NSButton *forward = cb_icon_button(cb_icon_image(cb_forward_path()), @"Forward to next interval",
-                                     self, @selector(pressForward:));
-  [rows addObject:cb_row(@[ self.toggle, self.stateWord, restart, forward ])];
+  self.forwardButton = cb_icon_button(cb_icon_image(cb_forward_path()), @"Forward to next interval",
+                                      self, @selector(pressForward:));
+  [rows addObject:cb_row(@[ self.toggle, self.stateWord, restart, self.forwardButton ])];
 
   [rows addObject:[self separator]];
 
@@ -2217,12 +2274,34 @@ static void cb_open_url(NSURL *url) {
 
   NSStackView *stack = [NSStackView stackViewWithViews:rows];
   stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-  /* Every row the same width as the stack, which is what makes the list read as a list
-   * rather than as a column of differently-sized buttons. */
-  stack.alignment = NSLayoutAttributeWidth;
   stack.spacing = 6.0;
   stack.edgeInsets = NSEdgeInsetsMake(12.0, 14.0, 12.0, 14.0);
   stack.translatesAutoresizingMaskIntoConstraints = NO;
+
+  /* Criteria 1-2: every row spans the panel's own content width, sharing one left edge
+   * and one right edge. NOT what `stack.alignment` buys — its values (leading, trailing,
+   * centerX, width) either align arranged subviews against EACH OTHER or, per
+   * NSLayoutAttributeWidth specifically, make them equal-width to one another; none of
+   * them pins a row's own edges to the STACK's. `alignment` used to be set to
+   * NSLayoutAttributeWidth here on a comment claiming it made "every row the stack's
+   * width" — measured, it did not: the rows kept their intrinsic width and floated at the
+   * trailing edge, which is why the divider (an NSBox, the one arranged subview with no
+   * intrinsic width of its own to keep) was the only row that looked right.
+   *
+   * Pinning each row's leading/trailing to the STACK's own anchors, offset by the exact
+   * insets above, is what makes a row exactly as wide as the panel's content area
+   * regardless of what its own arranged subviews would otherwise have hugged to — and
+   * combined with cb_fill_with's hugging fix, the row's one loosely-hugging label is what
+   * absorbs the difference between that fixed width and everything else in the row's own
+   * intrinsic size. */
+  CGFloat insetLeft = stack.edgeInsets.left;
+  CGFloat insetRight = stack.edgeInsets.right;
+  for (NSView *row in rows) {
+    [NSLayoutConstraint activateConstraints:@[
+      [row.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor constant:insetLeft],
+      [row.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor constant:-insetRight],
+    ]];
+  }
 
   NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0.0, 0.0, CB_POPOVER_W, 10.0)];
   [content addSubview:stack];
@@ -2236,6 +2315,32 @@ static void cb_open_url(NSURL *url) {
     [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
     [content.widthAnchor constraintEqualToConstant:CB_POPOVER_W],
   ]];
+  return content;
+}
+
+/* Rebuilt from scratch on every open rather than mutated in place: the row set changes
+ * between opens and nothing about a popover that is not on screen is worth keeping.
+ *
+ * ponytail: the rows are a snapshot taken when the popover opened, and they do NOT
+ * re-lay-out while it is open — only the phase line and the primary button retitle on the
+ * tick. The ceiling is a round answered in another window while the popover is open,
+ * which leaves a row that opens an already-answered board (a page, not an error) until
+ * the popover is reopened. The upgrade path is to rebuild from the tick when the list's
+ * contents change, and the reason not to is that rows moving under a moving cursor is a
+ * misclick that opens the wrong board — NSMenu does not do it either. */
+- (void)rebuild {
+  /* An unanswered daemon derives to the same zeroes cb_derive would produce for one, so
+   * the popover opens saying so rather than not opening. It cannot happen today —
+   * cb_ensure_item runs only after the first answer — and costs one line to not depend on
+   * that staying true. */
+  cb_display display;
+  if (!cb_current_display(&display, NULL)) memset(&display, 0, sizeof(display));
+
+  [cb_state_lock lock];
+  cb_waiting waiting = cb_state_waiting;
+  [cb_state_lock unlock];
+
+  NSView *content = [self buildContentWithDisplay:display waiting:waiting];
 
   NSViewController *controller = [[NSViewController alloc] init];
   controller.view = content;
@@ -2611,7 +2716,7 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  * Gated on a second argv word so the supervised path cannot reach it: bin/launcher.c execs
  * this binary with exactly `--menubar` and nothing after it.
  *
- * Six optional words follow, and they are the seam's six shapes:
+ * Seven optional words follow, and they are the seam's seven shapes:
  *
  *   <action>            one of CB_PROBE_ACTIONS, POSTed before the report. This is what
  *                       makes "every control takes effect" checkable at all: a check can
@@ -2655,6 +2760,13 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  *                       about the code is to point this at something that answers
  *                       `/api/pomodoro` but refuses or never opens `/api/events`, and watch
  *                       the item update anyway. See cb_menubar_probe_run below.
+ *   layout               criterion 13. Builds -rebuild's OWN row/stack construction (via
+ *                       -buildContentWithDisplay:waiting:, so this is never a second copy
+ *                       that could drift from what ships), asks it to size itself, forces
+ *                       Auto Layout to resolve it, and prints every arranged subview's
+ *                       resolved frame — no NSApplication, no window, nothing shown
+ *                       anywhere; building views and forcing layout needs neither. See
+ *                       cb_menubar_probe_layout below for the exact frames it prints.
  *
  * Output. The first line is space-separated `key=value` with every value a bare word, so a
  * check can split it without a parser; `text` is the countdown the derivation produced
@@ -2777,6 +2889,120 @@ static void cb_menubar_probe_run(double timeoutSeconds) {
   fflush(stdout);
 }
 
+/* Which top-level row (an index into `stack.arrangedSubviews`) holds `target` — itself, if
+ * `target` IS a top-level row, or whichever row's OWN arranged subviews contain it
+ * otherwise. -1 if `target` is nil or genuinely not anywhere in `stack`.
+ *
+ * What this buys a check that `frame=` alone cannot: a control's frame is relative to its
+ * OWN superview (an ordinary NSView fact), so two controls sitting in different rows can
+ * report identical-looking coordinates by coincidence — every row is the same width, so
+ * "flush with my row's own trailing edge" is true of the gear whichever row it is
+ * mistakenly IN. A row INDEX is the one fact that is not relative to anything else that
+ * could have moved, which is what makes it possible to assert "the gear is in the STATUS
+ * row, specifically" rather than "the gear is in A row, and that row is well-formed". */
+static NSInteger cb_row_index_of(NSStackView *stack, NSView *target) {
+  if (target == nil) return -1;
+  for (NSUInteger i = 0; i < stack.arrangedSubviews.count; i++) {
+    NSView *row = stack.arrangedSubviews[i];
+    if (row == target) return (NSInteger)i;
+    if ([row isKindOfClass:[NSStackView class]] &&
+        [((NSStackView *)row).arrangedSubviews indexOfObjectIdenticalTo:target] != NSNotFound) {
+      return (NSInteger)i;
+    }
+  }
+  return -1;
+}
+
+/* `--menubar --probe layout`, criterion 13's own seam. One fetch (the plain probe's own
+ * shape, not cb_state_* — there is no poll loop here and none is wanted), one throwaway
+ * CBPopover instance whose ONLY job is to hold the outputs of
+ * -buildContentWithDisplay:waiting: — the exact method -rebuild calls — and one forced
+ * layout pass with no window, no application and nothing on screen.
+ *
+ * `-fittingSize` is what stands in for "the popover is about to show": NSPopover would
+ * ordinarily size its content view from Auto Layout the moment it appears, and a detached
+ * `content` left at its constructor's placeholder frame (CB_POPOVER_W x 10, -rebuild's own
+ * literal — tall enough for nothing) never receives that sizing pass on its own. Asking
+ * for `fittingSize` and writing it back is the same "measure without a window" idiom
+ * QUIRKS.md's own diagnosis of this fault already used to produce the very numbers this
+ * ticket was handed.
+ *
+ * One `frame=` line per top-level row (`row0`, `row1`, … in stack order — the status row,
+ * the control row, the separator, the waiting caption, then each waiting row and the
+ * overflow row if either is present), which is what lets a check assert "every row shares
+ * one left edge and one right edge" — criterion 1's "spans the panel" and criterion 13's
+ * "a row stops spanning the panel" — generically, over however many rows this daemon's
+ * waiting list produced, with no row's identity hardcoded. Each carries a trailing
+ * `class=` naming the row's own Objective-C class (`NSStackView` for the status/control
+ * rows, `NSBox` for the divider, `NSTextField` for the waiting caption, `NSButton` for a
+ * waiting row or the overflow row) — the one fact a resolved frame alone cannot carry —
+ * which is what lets a check pin the DOCUMENTED sequence of row KINDS, not merely that
+ * whatever sequence exists agrees with itself.
+ *
+ * Named `frame=` lines for the specific controls criteria 2 and 3 are about — the phase
+ * glyph, the gear, the switch, the state word and the forward button — follow, read off
+ * the same instance's own properties rather than re-found by walking the tree a second
+ * time. A `rowindex=` line for each of those same controls names which top-level row
+ * (cb_row_index_of, above) actually holds it — the fact that tells "the gear is flush
+ * with the STATUS row's own trailing edge" apart from "the gear is flush with SOME row's
+ * trailing edge, whichever row that happens to be".
+ *
+ * A trailing `status=` line is the same string cb_status_label produced for THIS build's
+ * row set, so a check proving criterion 3 against the longest string that line ever shows
+ * can confirm it actually got that string from this SAME call, rather than trusting a
+ * second, separate probe to have hit the same daemon state. */
+static void cb_menubar_probe_layout(void) {
+  cb_timer timer;
+  cb_settings settings;
+  double daemon_now = 0.0;
+  int cycle = 0;
+  int answered = cb_fetch(&timer, &settings, &daemon_now, &cycle) ? 1 : 0;
+  cb_display display = cb_derive(answered, &timer, &settings, daemon_now, cycle);
+
+  cb_waiting waiting;
+  memset(&waiting, 0, sizeof(waiting));
+  (void)cb_fetch_waiting(&waiting);
+
+  CBPopover *popover = [[CBPopover alloc] init];
+  NSView *content = [popover buildContentWithDisplay:display waiting:waiting];
+  NSSize fit = content.fittingSize;
+  content.frame = NSMakeRect(0.0, 0.0, fit.width, fit.height);
+  [content layoutSubtreeIfNeeded];
+
+  NSStackView *stack = (NSStackView *)content.subviews.firstObject;
+  for (NSUInteger i = 0; i < stack.arrangedSubviews.count; i++) {
+    NSView *row = stack.arrangedSubviews[i];
+    NSRect frame = row.frame;
+    printf("frame=row%lu x=%.2f y=%.2f w=%.2f h=%.2f class=%s\n", (unsigned long)i,
+           frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
+           NSStringFromClass([row class]).UTF8String);
+  }
+  const struct { const char *name; NSView *view; } named[] = {
+    { "glyph", popover.glyphView },
+    { "statusline", popover.statusLine },
+    { "gear", popover.gearButton },
+    { "toggle", popover.toggle },
+    { "stateword", popover.stateWord },
+    { "forward", popover.forwardButton },
+  };
+  for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
+    NSRect frame = named[i].view.frame;
+    printf("frame=%s x=%.2f y=%.2f w=%.2f h=%.2f\n", named[i].name,
+           frame.origin.x, frame.origin.y, frame.size.width, frame.size.height);
+  }
+  for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
+    printf("rowindex=%s %ld\n", named[i].name, (long)cb_row_index_of(stack, named[i].view));
+  }
+  /* The status line's own text alongside its frames — so a check proving criterion 3
+   * against the longest string this line ever shows can confirm it actually got that
+   * string from this SAME probe call, rather than trusting a second, separate invocation
+   * to have hit the same daemon state. */
+  char status[64];
+  cb_status_label(display, status, sizeof(status));
+  printf("status=%s\n", status);
+  fflush(stdout);
+}
+
 int cb_menubar_probe(const char *word, const char *argument) {
   @autoreleasepool {
     if (word != NULL && strcmp(word, "url") == 0) {
@@ -2803,6 +3029,10 @@ int cb_menubar_probe(const char *word, const char *argument) {
                box.size.width, box.size.height);
       }
       fflush(stdout);
+      return 0;
+    }
+    if (word != NULL && strcmp(word, "layout") == 0) {
+      cb_menubar_probe_layout();
       return 0;
     }
     if (word != NULL && strcmp(word, "stream") == 0) {
@@ -2854,8 +3084,9 @@ int cb_menubar_probe(const char *word, const char *argument) {
     cb_timer timer;
     cb_settings settings;
     double daemon_now = 0.0;
-    int answered = cb_fetch(&timer, &settings, &daemon_now) ? 1 : 0;
-    cb_display d = cb_derive(answered, &timer, &settings, daemon_now);
+    int cycle = 0;
+    int answered = cb_fetch(&timer, &settings, &daemon_now, &cycle) ? 1 : 0;
+    cb_display d = cb_derive(answered, &timer, &settings, daemon_now, cycle);
 
     static const char *const PHASES[] = { "idle", "work", "break", "longBreak" };
     /* `ring` and `mark` are the GLYPH, reported rather than drawn. The paint cannot be

@@ -1391,6 +1391,36 @@ Two things keep it closed, and they cover different cases:
 skips REGISTERING one there") is now only half the story: it is true of the installer and
 not of macOS. It is still correct in practice only because of the first bullet.
 
+### Auto Layout resolves off-window, but `.frame` and the constraint it satisfies can disagree by a few points
+
+Confirmed while landing the popover's `--menubar --probe layout` seam (criterion 13):
+a detached view never added to any window still resolves a full constraint graph. The
+idiom is `NSSize fit = view.fittingSize; view.frame = (NSRect){.size = fit};
+[view layoutSubtreeIfNeeded];` — ask for the fitting size first (a plain `NSView`
+left at its constructor's placeholder frame never receives a sizing pass on its own,
+since nothing without a superview writes one back for it), write it back, then force
+layout. No `NSApplication`, no window, nothing on screen; QUIRKS.md's own entry above
+("Becoming an `NSApplication`…") already says forcing layout is fine, this is the exact
+shape that does it.
+
+The trap: a leading/trailing constraint pins a view's ALIGNMENT RECT, not its `.frame` —
+identical for an `NSStackView` or an `NSBox`, but measured a consistent ~2pt OUTWARD
+offset on each side for a plain borderless `NSTextField` (`+[NSTextField
+labelWithString:]`): its alignment rect sits INSIDE its `.frame` by that much, so the
+`.frame` itself is the wider, outer rectangle. A label pinned to the exact same anchors
+as its sibling rows therefore reads a few points WIDER, and starting further LEFT, than
+`.frame` alone would suggest for a matching `NSStackView`/`NSBox` row — measured exactly:
+`x=12 w=240` for the label against `x=14 w=236` for its siblings, in a panel where both
+are correctly pinned to the same content edges. It is not a bug in the pinning — the
+constraint is satisfied exactly — only in reading `.frame` as if it were the alignment
+rect. A check built on resolved frames should either read `-alignmentRectForFrame:` for
+anything built from `NSTextField`/`NSButton`-family controls, or — simpler, and what
+`test/check-menubar-client.mjs` does — tolerate a few points of slack in any
+cross-control-type "these two edges must match" assertion. Keep the tolerance well
+under whatever the fault under test actually moves things by (measured here: the real
+layout fault this seam exists to catch moved rows by TENS of points, so a 3pt tolerance
+loses none of the check's power).
+
 ### A main-queue `dispatch_after` never fires while a status item menu is tracking
 
 Menu tracking runs the loop in `NSEventTrackingRunLoopMode`, which a plain main-queue block

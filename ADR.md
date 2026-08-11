@@ -37,7 +37,7 @@ link where it is worth reading.
 | 35 | [An undelivered comment rides the thread's next packet](.agents/adr/0035-undelivered-comment-rides-the-thread-s-next-packet.md) | 2026-08-07 | narrowed by 45 and 46 |
 | 36 | [An upgrade widens a carried-forward root record back to the current defaults](.agents/adr/0036-upgrade-widens-a-carried-forward-root-record-back.md) | 2026-08-07 | accepted |
 | 38 | [`/file/` is deleted; the board is the only way to see a rendered page](.agents/adr/0038-file-is-deleted-the-board-is-the-only.md) | 2026-08-07 | accepted |
-| 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59 |
+| 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59, 89 |
 | 42 | [Rounds are the board's pages, flipped left and right](.agents/adr/0042-rounds-are-the-board-s-pages-flipped-left.md) | 2026-08-07 | accepted |
 | 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
 | 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
@@ -69,8 +69,10 @@ link where it is worth reading.
 | 80 | [The status item carries no colour](.agents/adr/0080-the-status-item-carries-no-colour.md) | 2026-08-10 | relates to 72; narrowed by 83, 84 |
 | 81 | [The popover takes focus](.agents/adr/0081-the-popover-takes-focus.md) | 2026-08-10 | relates to 72; relates to 75 |
 | 82 | [Forward and Restart preserve paused](.agents/adr/0082-forward-and-restart-preserve-paused.md) | 2026-08-10 | relates to 81 |
-| 83 | [Paused says so with shape, not a number](.agents/adr/0083-paused-says-so-with-shape-not-a-number.md) | 2026-08-10 | narrows 80 |
+| 83 | [Paused says so with shape, not a number](.agents/adr/0083-paused-says-so-with-shape-not-a-number.md) | 2026-08-10 | narrows 80; narrowed by 88 |
 | 84 | [One signal, one dimension, in the status glyph](.agents/adr/0084-one-signal-one-dimension-in-the-status-glyph.md) | 2026-08-10 | narrows 80; relates to 83 |
 | 85 | [The tab carries one mark](.agents/adr/0085-the-tab-carries-one-mark.md) | 2026-08-10 | relates to 84 |
 | 86 | [The status item learns by push and survives by poll](.agents/adr/0086-the-status-item-learns-by-push-and-survives-by-poll.md) | 2026-08-10 | replaces 79; relates to 77; relates to 72 |
 | 87 | [The index page holds the stream, not only the poll](.agents/adr/0087-the-index-page-holds-the-stream-not-only-the-poll.md) | 2026-08-10 | amends 77; relates to 86 |
+| 88 | [The popover's timer line mirrors the index page](.agents/adr/0088-the-popover-timer-line-mirrors-the-index-page.md) | 2026-08-11 | narrows 83; relates to 81 |
+| 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50 |

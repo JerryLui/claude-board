@@ -48,7 +48,7 @@ import {
   roundPageLabel, roundNumberLabel, isPageRound,
   questionBlocks, roundIsAwaited,
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
-  ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE,
+  ROUND_COUNTDOWN_TITLE, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE,
   PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE,
 } from './badge.mjs';
 import { lensZoomAt, lensFit, lensOneToOne } from './lens.mjs';
@@ -250,6 +250,7 @@ export const ui = `
   var ROUND_COUNTDOWN_TITLE = ${JSON.stringify(ROUND_COUNTDOWN_TITLE)};
   var PILL_READONLY_TITLE = ${JSON.stringify(PILL_READONLY_TITLE)};
   var ROUND_OPEN_UNAWAITED_TITLE = ${JSON.stringify(ROUND_OPEN_UNAWAITED_TITLE)};
+  var PILL_SUBMITTED_TITLE = ${JSON.stringify(PILL_SUBMITTED_TITLE)};
   var PAGE_SEND_EXPIRED_LABEL = ${JSON.stringify(PAGE_SEND_EXPIRED_LABEL)};
   var PAGE_SEND_EXPIRED_TITLE = ${JSON.stringify(PAGE_SEND_EXPIRED_TITLE)};
   var roundIsAwaitedOpen = ${roundIsAwaitedOpen.toString()};
