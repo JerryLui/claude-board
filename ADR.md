@@ -86,3 +86,4 @@ link where it is worth reading.
 | 97 | [An amend to the marked round moves it back one, unless the reviewer is Attended](.agents/adr/0097-an-amend-to-the-marked-round-moves-it-back-one.md) | 2026-08-11 | narrows 74 |
 | 98 | [The comment toggle follows commentability](.agents/adr/0098-comment-toggle-follows-commentability.md) | 2026-08-11 | widens 46 |
 | 99 | [The packet says `lost`, not `resolved`](.agents/adr/0099-packet-says-lost-not-resolved.md) | 2026-08-11 | relates to 28 |
+| 100 | [A re-install prints twelve lines, and the standing prose is first-run-only](.agents/adr/0100-a-re-install-prints-twelve-lines.md) | 2026-08-11 | relates to 36 |
