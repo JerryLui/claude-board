@@ -235,6 +235,7 @@ one case that matters is also the one no automated check here can produce.
 - [The `claude-in-chrome` extension's own coordinate system, and its window resize](#the-claude-in-chrome-extensions-own-coordinate-system-and-its-window-resize)
 - [A harness that imports `src/` serves the code as it was at startup](#a-harness-that-imports-src-serves-the-code-as-it-was-at-startup)
 - [Growing the viewport after load mis-positions anchor pins](#growing-the-viewport-after-load-mis-positions-anchor-pins)
+- [A pin over an html stage arrives after the round flip, not with it](#a-pin-over-an-html-stage-arrives-after-the-round-flip-not-with-it)
 - [Preview harness](#preview-harness)
 
 ### `ResizeObserver` does not necessarily deliver an initial observation
@@ -648,6 +649,18 @@ gives the gallery round 20000, well past what that round needs, and the artifact
 page its own 1000, the height a reviewer actually sees a full-frame page at.
 Two heights means two full navigations, not one navigation plus a metrics change
 partway through; the script reloads for the second shot for exactly that reason.
+
+### A pin over an html stage arrives after the round flip, not with it
+
+`goToRound` (src/ui.mjs) calls `refreshPins` synchronously off the class toggle, so a
+pin on ordinary markup is on screen before the click handler returns. A pin anchored
+inside an `html` stage is not: the stage is a sandboxed iframe, so the position comes
+back from the stage agent script over `postMessage`, and the pin is built when that
+answer lands. `examples/screenshot.mjs`'s round-1 shot used a fixed 1s settle sleep for
+both, which held on an idle machine and lost on a busy one -- the same bytes gave
+`selector matched nothing: .pin-layer[data-block-id="h1"] .anchor-pin` on one run and a
+correct image on the next. Any driver that flips a round and then measures a stage pin
+has to wait on the pin (`waitFor` there), never on a duration.
 
 ### Preview harness
 

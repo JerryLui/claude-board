@@ -28,8 +28,9 @@
 //     logic mishandles -- every pin snaps to a (10, 10) fallback corner instead of
 //     staying on the element it is pinned to. Doing it once, before the first layout,
 //     avoids both. A round flip doesn't touch this at all: goToRound (src/ui.mjs)
-//     recomputes pins itself, synchronously, off a plain class toggle -- the settle
-//     wait after the click is only for the 160ms CSS transitions, not for that.
+//     recomputes pins itself off a plain class toggle -- though a pin over an html
+//     stage lands one iframe round-trip later, which is why the flipped shot waits
+//     on the pin (waitFor) instead of on the settle sleep alone.
 //
 // Deliberately NOT committed as a byte-identity check (unlike sample-board.html,
 // which is a pure function of JSON): a screenshot is a function of the installed
@@ -185,6 +186,29 @@ async function assertMermaidRendered(s) {
   await rectOf(s, 'pre.mermaid svg');
 }
 
+/** Polls until `selector` matches something with a non-zero box, or gives up.
+ *
+ * An anchor pin over an html stage is not painted by the flip that reveals it:
+ * refreshPins (src/ui.mjs) asks the sandboxed iframe where the element is and
+ * builds the pin when the stage's agent script answers, so the pin arrives one
+ * postMessage round-trip after goToRound returns. A fixed settle sleep covers
+ * that on an idle machine and loses the race on a busy one -- observed as
+ * `selector matched nothing: .pin-layer[data-block-id="h1"] .anchor-pin` on one
+ * run and a clean pin on the next, same bytes. Waiting on the post-condition
+ * instead of on a duration is the whole fix; the throw at the end keeps the
+ * fail-loud stance for a pin that genuinely never comes. */
+async function waitFor(s, selector, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await rectOf(s, selector);
+    } catch (err) {
+      if (Date.now() >= deadline) throw err;
+      await new Promise(r => setTimeout(r, 250));
+    }
+  }
+}
+
 /** Click `selector` in the page, throwing loudly if nothing matches -- same
  * fail-loud stance as rectOf, for the same reason: a selector that silently
  * clicks nothing leaves the page on whatever round it was already showing, and
@@ -249,9 +273,10 @@ async function main() {
   await loadFresh(s, 1, PAGE_VIEWPORT_HEIGHT);
   await click(s, 'nav#round-pager .round-page[data-round="1"]');
   // Settles the round's 160ms CSS transitions (the header's fixed/pill states, the
-  // pager's current-entry state). The pin position itself needs no wait -- goToRound
-  // (src/ui.mjs) recomputes it synchronously off the class toggle, before this click
-  // handler even returns.
+  // pager's current-entry state). The pin over this round's html stage is NOT covered
+  // by this sleep -- goToRound (src/ui.mjs) re-asks the sandboxed iframe for the
+  // anchor's box and builds the pin when the answer comes back -- so waitFor below
+  // waits on the pin itself rather than trusting a duration.
   await new Promise(r => setTimeout(r, 1000));
   // The flip is asserted, not assumed. `click()` proves only that the selector
   // matched -- a disabled button or an unwired nav swallows the click and returns
@@ -264,9 +289,10 @@ async function main() {
   if (!onPageBoard.result.value) {
     throw new Error('flip to round 1 did not take: <body> is not .page-board, so this would have shot the wrong round');
   }
-  // rectOf throws if the pin is missing OR zero-area; asserting its bottom edge
-  // separately below catches the shot cropping a real pin out of frame instead.
-  const pin = await rectOf(s, '.pin-layer[data-block-id="h1"] .anchor-pin');
+  // waitFor throws if the pin is missing OR zero-area once its deadline is up;
+  // asserting its bottom edge separately below catches the shot cropping a real
+  // pin out of frame instead.
+  const pin = await waitFor(s, '.pin-layer[data-block-id="h1"] .anchor-pin');
   const commentPanel = await rectOf(s, '.page-comments');
   const pager = await rectOf(s, 'nav#round-pager');
   const pageBottom = Math.max(
