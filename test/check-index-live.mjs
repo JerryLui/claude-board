@@ -1,6 +1,11 @@
 // The index stops lying (ADR 77): the daemon owes a
 // rows endpoint, and the index's own fifteen-second tick fetches it and patches the list
-// in place rather than reloading.
+// in place rather than reloading. And it stops WAITING: the page holds the daemon-wide
+// stream open (`GET /api/events`) and every push on it wakes one of those same fetches,
+// so a change the daemon already knows about lands in a round trip instead of up to
+// fifteen seconds later. The tick is untouched and still checked here -- it is the
+// fallback when the stream is down, and the only thing that re-labels a relative time on
+// a row nothing has changed.
 //
 // One layer, deliberately: a real daemon on an ephemeral port, with the REAL
 // renderIndexPage output parsed by test/dom-stand-in.mjs and the REAL indexScript run
@@ -12,7 +17,13 @@
 //
 // The tick is FIRED BY HAND rather than waited for -- indexScript takes `setInterval` as
 // an injected parameter for exactly this, so "within one poll interval" is checked in
-// milliseconds instead of fifteen real seconds.
+// milliseconds instead of fifteen real seconds. The stream is driven the same way, and
+// for the same reason: `EventSource` is injected too, so a push is delivered by hand
+// rather than raced for. The events driven in are the REAL ones -- the push checks below
+// hold a second, raw `GET /api/events` connection open beside the page (the shape
+// test/check-menubar-client.mjs's stream probe already proves) and feed the page exactly
+// what the daemon sent it, so a page listening for an event name the daemon never
+// broadcasts cannot pass.
 //
 // NO REAL NOTIFICATION MAY EVER FIRE FROM THIS FILE. It posts awaited rounds into a real
 // daemon and never opens a board, which is precisely the shape the stranded rule
@@ -28,7 +39,7 @@ import http from 'node:http';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
 import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
-import { parseHTML } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -106,10 +117,25 @@ function projectFor(name) {
  * test/check-pomodoro-page.mjs does -- see that file's comment on why the cookie is
  * attached by hand (node's fetch has no jar, and `credentials: 'same-origin'` does
  * nothing outside a browser). `intervals` captures every registration so the
- * fifteen-second tick can be fired by hand. */
-function openIndexTab(port, { threads = [], query = '' } = {}) {
+ * fifteen-second tick can be fired by hand.
+ *
+ * `eventSource: false` loads the page in a scope with no EventSource in it at all --
+ * an older browser, and the same shape test/check-pure.mjs's narrow function-extraction
+ * stand-ins run this script under. The page must still work; that is criterion 5. */
+function openIndexTab(port, { threads = [], query = '', eventSource = true } = {}) {
   const document = parseHTML(renderIndexPage({ threads, query }));
   const intervals = [];
+  // Captured the way test/check-anchor-push.mjs captures the board page's own
+  // EventSource: a subclass whose constructor keeps the instance, so a check can
+  // dispatch into the very listeners the real script registered rather than calling
+  // patchRows/fetchPomodoro directly -- which would prove nothing about whether the
+  // subscription is wired at all. StandInEventSource (test/dom-stand-in.mjs) already
+  // models exactly as much of one as this needs: a url, addEventListener, and a
+  // dispatch that hands the listener a real string `ev.data`.
+  let stream = null;
+  class CapturingEventSource extends StandInEventSource {
+    constructor(url) { super(url); stream = this; }
+  }
   globalThis.fetch = (url, opts) => {
     const target = `http://127.0.0.1:${port}${url}`;
     const headers = { ...(opts && opts.headers), cookie: sessionCookieHeader() };
@@ -120,18 +146,34 @@ function openIndexTab(port, { threads = [], query = '' } = {}) {
   // panel the menu bar item opens, and a stand-in one parameter short of the real
   // page throws on load rather than failing the thing under test. The window is the
   // parsed document's own defaultView; location is a plain { hash }, empty because
-  // no check here is about the fragment.
-  new Function('document', 'setInterval', 'window', 'location', indexScript)(document, (fn, ms) => {
+  // no check here is about the fragment. 'EventSource' is the fifth and newest: the
+  // page reads it through `typeof`, so passing nothing is a faithful browser without
+  // one rather than a broken harness.
+  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(document, (fn, ms) => {
     intervals.push({ fn, ms });
     return intervals.length;
-  }, document.defaultView, { hash: '' });
+  }, document.defaultView, { hash: '' }, eventSource ? CapturingEventSource : undefined);
   const poll = intervals.find(i => i.ms === 15000);
   assert.ok(poll, 'setup failure: the index must register a fifteen-second tick');
   return {
     document,
+    /** The subscription the page opened, or null if it opened none. */
+    stream,
     /** One poll interval, as the page really runs it. */
     async tick() {
       poll.fn();
+      await flush();
+    },
+    /** One push, delivered into the page's own listener exactly as the daemon wrote
+     * it on the wire -- `data` is JSON.stringify'd here because a real EventSource
+     * hands a listener the raw text of the `data:` line, never a parsed object.
+     * Asserts the subscription exists first: with the push path gone there is no
+     * stream and no listener, and this says so instead of silently doing nothing. */
+    async push(name, data) {
+      assert.ok(stream, `the index page must hold the daemon-wide stream open to hear '${name}': nothing constructed an EventSource`);
+      const listeners = stream.listeners.get(name) || [];
+      assert.ok(listeners.length, `the index page must listen for '${name}' on the daemon-wide stream`);
+      stream.dispatch(name, JSON.stringify(data));
       await flush();
     },
     restoreFetch() { globalThis.fetch = REAL_FETCH; },
@@ -140,11 +182,79 @@ function openIndexTab(port, { threads = [], query = '' } = {}) {
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 60));
 
+/** A second subscriber on `GET /api/events`, held open beside the page the way
+ * bin/menubar.m holds it -- raw HTTP, no page, no client script (the shape
+ * test/check-menubar-client.mjs's stream probe already proves out). Two jobs here:
+ * it is what proves the daemon really broadcasts the event the page is listening
+ * for (its payload is fed straight into the page, never hand-written), and it is
+ * the menu bar's stand-in for the other direction of criterion 3 -- an action taken
+ * on the index page has to reach it.
+ *
+ * Frames are split on the blank line SSE separates them with, so the `: connected`
+ * and `: heartbeat` comment frames the daemon also writes are simply not events. */
+function openWireStream(port) {
+  const events = [];
+  let raw = '';
+  let pending = '';
+  const req = http.request({
+    host: '127.0.0.1',
+    port,
+    method: 'GET',
+    path: '/api/events',
+    headers: { host: `127.0.0.1:${port}`, [SECRET_HEADER]: SECRET },
+  }, res => {
+    res.setEncoding('utf8');
+    res.on('data', chunk => {
+      raw += chunk;
+      pending += chunk;
+      const frames = pending.split('\n\n');
+      pending = frames.pop();
+      for (const frame of frames) {
+        const name = /^event: (.+)$/m.exec(frame);
+        const data = /^data: (.*)$/m.exec(frame);
+        if (name && data) events.push({ name: name[1], data: JSON.parse(data[1]) });
+      }
+    });
+  });
+  // A stream this check destroys on its way out reports the destruction as an error;
+  // there is nothing to do about it and nothing to say.
+  req.on('error', () => {});
+  req.end();
+
+  const until = async (what, ready, ms = 3000) => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const hit = ready();
+      if (hit) return hit;
+      if (Date.now() >= deadline) throw new Error(`${what} never arrived within ${ms}ms -- the stream carried: ${JSON.stringify(raw)}`);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
+
+  return {
+    /** Resolve once the daemon has actually accepted the subscription. Anything
+     * triggered before this could be broadcast to nobody and lost -- the stream
+     * holds no history, which is the whole reason the page re-fetches on connect. */
+    connected: () => until("the stream's own ': connected' line", () => raw.includes(': connected') || null),
+    /** The next event of that name, removed from the queue so a second call waits
+     * for a genuinely new one rather than re-reading the last. */
+    next: name => until(`a '${name}' event`, () => {
+      const i = events.findIndex(e => e.name === name);
+      return i === -1 ? null : events.splice(i, 1)[0];
+    }),
+    close() { req.destroy(); },
+  };
+}
+
 const rows = doc => doc.querySelectorAll('a.thread-item');
 const rowFor = (doc, threadId) => rows(doc).find(r => r.getAttribute('data-thread-id') === threadId) || null;
 
 async function main() {
-  const { server, port } = await startServer({ home, port: 0 });
+  // `let`, not `const`: one check below genuinely restarts this daemon -- same home,
+  // same port, and a brand-new stream hub that has never heard of the page still
+  // sitting open against it -- and rebinds `server` to the replacement so the finally
+  // at the foot of this function closes the daemon that is actually running.
+  let { server, port } = await startServer({ home, port: 0 });
 
   try {
     // ---------------------------------------------------------------------------------
@@ -487,6 +597,271 @@ async function main() {
         tab.restoreFetch();
       }
     });
+
+    // ---------------------------------------------------------------------------------
+    // The push path: the page hears about a change instead of waiting for one.
+    //
+    // No tick is ever what DELIVERS the change under test below. That is the whole
+    // point -- a tick fired after the change would make every one of these pass against
+    // the poll-only page this replaced, and prove nothing. Where a tick does appear it
+    // is arranging the baseline, before the change happens, or (criterion 5) it is the
+    // thing under test.
+    //
+    // Falsification, reproduced: reverting src/indexpage.mjs alone turns six checks in
+    // this file red -- the first on the subscription itself ("the page must open a live
+    // connection at all"), the rest on `tab.push`'s own missing-listener assertion.
+    // ---------------------------------------------------------------------------------
+
+    await check('the index holds the daemon-wide stream open, and listens for exactly the events the daemon broadcasts', async () => {
+      const tab = openIndexTab(port, { threads: [] });
+      try {
+        assert.ok(tab.stream, 'the page must open a live connection at all -- without one it is fifteen seconds behind the menu bar');
+        assert.equal(tab.stream.url, '/api/events',
+          'the DAEMON-WIDE stream (src/server.mjs handleStream), not a per-board one: the index has no board id to subscribe under');
+        assert.deepEqual([...tab.stream.listeners.keys()].sort(), ['open', 'pomodoro', 'waiting'],
+          'open (first connect and every reconnect), plus the two events the daemon already broadcasts -- a listener for anything else would be waiting on a push nobody sends');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('criterion 1: a board posted, and then answered, reaches the list on the daemon\'s own push -- no tick', async () => {
+      const wire = openWireStream(port);
+      const tab = openIndexTab(port, { threads: [] });
+      try {
+        await wire.connected();
+        await tab.tick(); // the list starts current, so what follows can only be the push
+        const posted = await postBoard(port, { title: 'Pushed in', blocks: [QUESTION('Heard?')], cwd: projectFor('iota'), wait: true });
+        assert.equal(rowFor(tab.document, posted.thread), null, 'setup: the page cannot already know about it');
+
+        // The daemon's own event, fed to the page verbatim. A page listening for a name
+        // the daemon never sends fails here rather than in a hand-written payload.
+        const first = await wire.next('waiting');
+        assert.equal(typeof first.data.total, 'number', 'the waiting event is a COUNT, not rows -- which is why the page re-fetches instead of applying it');
+        await tab.push('waiting', first.data);
+        const row = rowFor(tab.document, posted.thread);
+        assert.ok(row, 'the row arrives on the push alone');
+        assert.equal(row.getAttribute('data-live'), 'true', 'and arrives live, exactly as a tick would have rendered it');
+
+        // The other half of the same criterion: a round answered settles the row, again
+        // with nothing but the push the daemon sends for it.
+        const submitted = await rawRequest(port, 'POST', `/api/board/${posted.boardId}/submit`, {
+          headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+          body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+        });
+        assert.equal(submitted.status, 200, `submit failed: ${submitted.body}`);
+        await tab.push('waiting', (await wire.next('waiting')).data);
+        assert.equal(rowFor(tab.document, posted.thread).getAttribute('data-live'), 'false',
+          'the answered row settles on the push too');
+      } finally {
+        tab.restoreFetch();
+        wire.close();
+      }
+    });
+
+    await check('criterion 1: a change landing while a fetch is outstanding is remembered, not dropped -- one more fetch, without waiting for a tick', async () => {
+      // Two boards land two milliseconds apart. The first push sends a fetch, and the
+      // answer to it is rendered by the daemon BEFORE the second board exists; the
+      // second push arrives while that answer is still on the wire. The in-flight guard
+      // (one fetch at a time, so responses cannot cross) is what makes the second push
+      // meet a busy page -- and dropping it there means the list carries the first board
+      // and not the second until the fifteen-second tick, which is not "within a second".
+      //
+      // The round trip is loopback and takes single-digit milliseconds, so the window is
+      // held open by hand rather than raced for: the harness's own fetch is wrapped to
+      // make the REAL request (real rows, rendered at the real instant) and then park
+      // the response until this check releases it. Same discipline as firing the tick by
+      // hand -- the timing under test is pinned, not hoped for.
+      const tab = openIndexTab(port, { threads: [] });
+      try {
+        await tab.tick(); // baseline: the list is current before either board exists
+        const inflight = globalThis.fetch;
+        let release;
+        const held = new Promise(resolve => { release = resolve; });
+        globalThis.fetch = (url, opts) => inflight(url, opts).then(async r => { await held; return r; });
+
+        const first = await postBoard(port, { title: 'First of two', blocks: [QUESTION('One?')], cwd: projectFor('xi') });
+        await tab.push('waiting', { total: 1, now: Date.now() }); // the fetch goes out, and parks
+
+        const second = await postBoard(port, { title: 'Second of two', blocks: [QUESTION('Two?')], cwd: projectFor('omicron') });
+        await tab.push('waiting', { total: 2, now: Date.now() }); // ... and this one meets a busy page
+
+        release();
+        await flush(); // the parked answer lands: the first board, and only the first
+        await flush(); // and whatever the page owes itself for the push it could not serve
+
+        globalThis.fetch = inflight;
+        assert.ok(rowFor(tab.document, first.thread), 'the board the outstanding fetch already knew about');
+        assert.ok(rowFor(tab.document, second.thread),
+          'the board that landed mid-fetch must arrive on its own push too -- a dropped push leaves it invisible until the fifteen-second tick, and nothing was going to ask again');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('criterion 2: a timer change reaches the widget on the daemon\'s own push -- no tick', async () => {
+      // Reset first so this reads the same however the checks around it left the daemon.
+      await rawRequest(port, 'POST', '/api/pomodoro/reset', { headers: { [SECRET_HEADER]: SECRET } });
+      const wire = openWireStream(port);
+      const tab = openIndexTab(port, { threads: [] });
+      try {
+        await wire.connected();
+        await flush(); // the widget's own load-time fetch settles: an idle daemon
+        const status = tab.document.querySelector('span#pomodoro-status');
+        assert.match(status.textContent, /^Idle/, 'setup failure: the widget must start from an idle daemon');
+
+        await rawRequest(port, 'POST', '/api/pomodoro/ensure', { headers: { [SECRET_HEADER]: SECRET } });
+        await tab.push('pomodoro', (await wire.next('pomodoro')).data);
+        assert.match(status.textContent, /^Work \d+\/\d+ · \d\d:\d\d$/,
+          `a timer started elsewhere must show here within a push, got: "${status.textContent}"`);
+
+        await rawRequest(port, 'POST', '/api/pomodoro/pause', { headers: { [SECRET_HEADER]: SECRET } });
+        await tab.push('pomodoro', (await wire.next('pomodoro')).data);
+        assert.match(status.textContent, /\(paused\)$/, `and so must pausing it, got: "${status.textContent}"`);
+
+        // Start, pause, skip, restart, and a work interval ending with nobody at the
+        // machine are five daemon-side triggers for ONE event the page cannot tell
+        // apart -- every one of them is a `pomodoro` broadcast carrying the document
+        // (src/server.mjs's respond, and its onBoundary hook for the unattended one).
+        // Two of them here is what proves the page's single handler; that each trigger
+        // broadcasts at all is the daemon's own, covered by test/check-boundary.mjs and
+        // test/check-menubar-client.mjs.
+      } finally {
+        tab.restoreFetch();
+        wire.close();
+      }
+    });
+
+    await check('criterion 3, the other direction: an action taken on the index page reaches a menu-bar-shaped subscriber within a second', async () => {
+      // CONFIRMED, NOT BUILT. Nothing in indexScript pushes anything: the widget's
+      // buttons POST the same pomodoro routes they always did, and those routes already
+      // broadcast the document they answer with (src/server.mjs's `respond`). This check
+      // exists to prove that end of criterion 3 still holds now that the page is also a
+      // subscriber -- not because anything was added for it.
+      await rawRequest(port, 'POST', '/api/pomodoro/reset', { headers: { [SECRET_HEADER]: SECRET } });
+      const wire = openWireStream(port);
+      const tab = openIndexTab(port, { threads: [] });
+      try {
+        await wire.connected();
+        await flush();
+        const toggle = tab.document.querySelector('button#pomodoro-toggle');
+        assert.equal(toggle.getAttribute('aria-checked'), 'false', 'setup failure: expected an idle daemon, so the press starts a timer');
+
+        const pressedAt = Date.now();
+        toggle.dispatchEvent(new StandInEvent('click'));
+        const heard = await wire.next('pomodoro');
+        assert.ok(Date.now() - pressedAt < 1000, `the press must reach the other surface within a second, took ${Date.now() - pressedAt}ms`);
+        assert.ok(heard.data.timer && heard.data.timer.phase === 'work' && !heard.data.timer.paused,
+          `the subscriber must be told what the press actually did, got: ${JSON.stringify(heard.data.timer)}`);
+      } finally {
+        tab.restoreFetch();
+        wire.close();
+      }
+    });
+
+    await check('criterion 6: a push-driven update leaves scroll position and the search box exactly as they were', async () => {
+      // The tick-driven twin of this is 'criterion 10' above. Both matter, and they are
+      // the same code: a push calls the same patchRows, which replaces the contents of
+      // the list and nothing else. A push that reloaded, or re-rendered the shell, would
+      // throw away a half-typed filter -- and it would do it while the reader was typing,
+      // which is worse than a tick doing it fifteen seconds after they stopped.
+      //
+      // A hand-shaped event is enough here: the payload is deliberately not read (the
+      // check above is what proves the daemon really sends this name).
+      const tab = openIndexTab(port, { threads: [] });
+      try {
+        await tab.tick();
+        const input = tab.document.querySelector('input.search-input');
+        const list = tab.document.querySelector('div.thread-list');
+        const body = tab.document.querySelector('body');
+        tab.document.documentElement.scrollTop = 420;
+        input.value = 'half-typed filt';
+
+        await postBoard(port, { title: 'Pushed mid-type', blocks: [QUESTION('Rudely?')], cwd: projectFor('kappa') });
+        await tab.push('waiting', { total: 1, now: Date.now() });
+        assert.ok(rows(tab.document).some(r => r.textContent.includes('Pushed mid-type')),
+          'setup failure: this only proves anything if the push really updated the list');
+
+        assert.equal(tab.document.documentElement.scrollTop, 420, 'the scroll position survives a push');
+        assert.equal(tab.document.querySelector('input.search-input'), input, 'the search box is the same element');
+        assert.equal(input.value, 'half-typed filt', 'and what was typed into it is still there');
+        assert.equal(tab.document.querySelector('div.thread-list'), list, 'the list itself is patched, not replaced');
+        assert.equal(tab.document.querySelector('body'), body, 'and nothing above it is rebuilt');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('criterion 5: with no stream at all, and with one that never says anything, the fifteen-second tick still does the whole job', async () => {
+      // Nothing that works today gets slower. Two ways the stream can be unavailable: a
+      // browser with no EventSource in it at all, and a connection that is made and then
+      // never carries a thing (a daemon that went away, a proxy that swallows the
+      // stream). Neither may cost the page anything it had before.
+      const blind = openIndexTab(port, { threads: [], eventSource: false });
+      try {
+        assert.equal(blind.stream, null, 'setup failure: nothing may have subscribed here');
+        const posted = await postBoard(port, { title: 'No stream here', blocks: [QUESTION('Still?')], cwd: projectFor('lambda') });
+        await blind.tick();
+        assert.ok(rowFor(blind.document, posted.thread), 'the tick alone still brings the row in, exactly as it always did');
+      } finally {
+        blind.restoreFetch();
+      }
+
+      const silent = openIndexTab(port, { threads: [] });
+      try {
+        assert.ok(silent.stream, 'setup failure: this half is about a stream that connects and then says nothing');
+        const posted = await postBoard(port, { title: 'Silent stream', blocks: [QUESTION('Anyone?')], cwd: projectFor('mu') });
+        await silent.tick(); // no push is ever delivered into this tab
+        assert.ok(rowFor(silent.document, posted.thread), 'a silent stream must not cost the page its own tick');
+      } finally {
+        silent.restoreFetch();
+      }
+    });
+
+    await check('criterion 4: an index left open through a real daemon restart goes live again on the reconnect alone', async () => {
+      // The daemon really stops and really comes back on the same port, so the
+      // replacement's stream hub has never heard of this page and holds no history for
+      // it -- nothing backfills what was missed. Coming back live therefore has to mean
+      // asking what the state is NOW, which is why the page re-fetches on 'open' rather
+      // than waiting for the next event.
+      //
+      // The reconnect itself is fired by hand here for the same reason every tick in
+      // this file is: EventSource reconnecting on its own is the BROWSER's behaviour,
+      // deliberately not reimplemented (and so not this suite's to prove) -- what is
+      // ours is what the page does when it comes back, and that is what this drives.
+      await rawRequest(port, 'POST', '/api/pomodoro/reset', { headers: { [SECRET_HEADER]: SECRET } });
+      const tab = openIndexTab(port, { threads: [] });
+      try {
+        await tab.tick();
+        await flush();
+        assert.match(tab.document.querySelector('span#pomodoro-status').textContent, /^Idle/, 'setup failure: expected an idle daemon before the restart');
+
+        await new Promise(resolve => {
+          server.close(resolve);
+          server.closeIdleConnections?.();
+          server.closeAllConnections?.();
+        });
+        await tab.tick(); // the daemon is gone: a failed fetch must leave the page alone
+        const strandedRows = rows(tab.document).length;
+
+        server = (await startServer({ home, port })).server;
+
+        // Both changes happen while this page is disconnected, so neither can arrive as
+        // an event -- they can only be found by asking.
+        const posted = await postBoard(port, { title: 'Landed while down', blocks: [QUESTION('Back?')], cwd: projectFor('nu') });
+        await rawRequest(port, 'POST', '/api/pomodoro/ensure', { headers: { [SECRET_HEADER]: SECRET } });
+        assert.equal(rowFor(tab.document, posted.thread), null, 'setup: the page cannot know about it yet');
+
+        await tab.push('open');
+        assert.ok(rowFor(tab.document, posted.thread), 'the reconnect alone brings the list up to date -- no reload, no tick');
+        assert.ok(rows(tab.document).length > strandedRows, 'setup sanity: the list really did move');
+        assert.match(tab.document.querySelector('span#pomodoro-status').textContent, /^Work \d+\/\d+ · \d\d:\d\d$/,
+          'and the widget with it: a reconnect re-fetches both, since neither can be replayed');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
   } finally {
     server.close();
     server.closeIdleConnections?.();

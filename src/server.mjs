@@ -1556,8 +1556,9 @@ function handleEvents(req, res, id, home, sse, stranded) {
   res.on('error', cleanup);
 }
 
-/** `GET /api/events`: the daemon-wide stream (`createStreamHub` above), for a process with
- * no board to subscribe on -- bin/menubar.m today, and the reason this ticket exists.
+/** `GET /api/events`: the daemon-wide stream (`createStreamHub` above), for a subscriber
+ * with no single board to open one under: bin/menubar.m, which has no board id at all, and
+ * the index page (ADR.md entry 87), which lists every board rather than holding one.
  * Shaped exactly like `handleEvents` above (the same `: connected` line, the same
  * heartbeat, the same close/error cleanup) because a caller that already knows how to hold
  * a `text/event-stream` connection open needs no second set of rules to learn. No
@@ -2010,7 +2011,7 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
       }
 
       // The rows feed the open index pages poll on their own fifteen-second tick (ADR.md
-      // entry 77). Deliberately NOT a stream: an index is a page nobody stares at, and a
+      // entry 77, amended by 87): the index already holds `GET /api/events`; giving these rows their own
       // live connection per open tab costs more than being at most one tick behind.
       //
       // The same renderer `GET /` uses, so what a poll patches in can never disagree with

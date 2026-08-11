@@ -7456,7 +7456,18 @@ check('indexScript (the relative-time client script) parses and runs against a m
   const fakeSetInterval = (fn, ms) => { intervalFn = fn; intervalMs = ms; return 1; };
   // Throws (a real syntax error, or a thrown reference to something undefined in
   // this stand-in) if indexScript does not actually parse and run end to end.
-  new Function('document', 'setInterval', indexScript)(fakeDocument, fakeSetInterval);
+  //
+  // 'EventSource' is DECLARED and never passed, which is the whole point: it binds
+  // the name to undefined inside this scope, so initIndexStream's own
+  // `typeof EventSource === 'undefined'` guard takes its early return for a reason
+  // this file controls. Left off the list, the name would resolve to whatever the
+  // HOST happens to expose -- and node has had a global EventSource behind a flag
+  // since 22.x -- at which point this stand-in would construct a real one against
+  // the relative URL '/api/events' and throw, from a check that is about relTime.
+  // A test that passes because of the interpreter's build options is not passing.
+  // The three sibling sites below declare it for the same reason;
+  // test/check-index-live.mjs is the one place that really supplies one.
+  new Function('document', 'setInterval', 'EventSource', indexScript)(fakeDocument, fakeSetInterval);
   assert.equal(typeof intervalFn, 'function', 'refresh must be wired through setInterval so an open tab keeps relative times fresh');
   assert.notEqual(els[0].textContent, '2020-01-01 00:00:00Z', 'refresh() must actually run once up front and overwrite the placeholder text, not wait for the first interval tick');
   // The narrowest bucket relTime has ("a minute ago", 45s-90s) is 45 seconds
@@ -7478,7 +7489,7 @@ check('indexScript (the relative-time client script) parses and runs against a m
 function extractRelTime() {
   const noopDocument = { querySelectorAll: () => [], querySelector: () => null }; // see the check above: initPomodoroWidget's own bail-out
   const noopSetInterval = () => {};
-  const fn = new Function('document', 'setInterval', indexScript + '; return relTime;')(noopDocument, noopSetInterval);
+  const fn = new Function('document', 'setInterval', 'EventSource', indexScript + '; return relTime;')(noopDocument, noopSetInterval);
   if (typeof fn !== 'function') throw new Error('indexScript extraction did not yield relTime as a function');
   return fn;
 }
@@ -8015,7 +8026,7 @@ function loadIndexWithPomodoro({ hash = '' } = {}) {
   // fragment being spent after it has been acted on is a behaviour with a consequence
   // (a second press of the popover's gear works), so a check has to be able to see it.
   const history = { calls: [], replaceState(state, title, url) { this.calls.push(url); location.hash = ''; } };
-  new Function('document', 'setInterval', 'window', 'location', 'history', indexScript)(document, fakeSetInterval, document.defaultView, location, history);
+  new Function('document', 'setInterval', 'window', 'location', 'history', 'EventSource', indexScript)(document, fakeSetInterval, document.defaultView, location, history);
   return { document, intervals, window: document.defaultView, location, history };
 }
 
@@ -8242,7 +8253,7 @@ check('pomodoroRemainingMs: no timer at all is 0, never a thrown error', () => {
 function extractIndexScriptFn(name) {
   const noopDocument = { querySelectorAll: () => [], querySelector: () => null };
   const noopSetInterval = () => {};
-  const fn = new Function('document', 'setInterval', `${indexScript}\n; return ${name};`)(noopDocument, noopSetInterval);
+  const fn = new Function('document', 'setInterval', 'EventSource', `${indexScript}\n; return ${name};`)(noopDocument, noopSetInterval);
   if (typeof fn !== 'function') throw new Error(`indexScript extraction did not yield ${name} as a function`);
   return fn;
 }

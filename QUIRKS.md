@@ -647,6 +647,7 @@ shadows the stdlib and breaks `python3 -m http.server`.
 - [A block's id is kind-locked, permanently](#a-blocks-id-is-kind-locked-permanently)
 - [A machine-identity sweep cannot be `includes(os.hostname())`](#a-machine-identity-sweep-cannot-be-includesoshostname)
 - [A comment-only edit to src/ui.mjs can still break check-sample-board.mjs](#a-comment-only-edit-to-srcuimjs-can-still-break-check-sample-boardmjs)
+- [A `new Function` harness inherits the host's globals, so a `typeof` guard can pass for the wrong reason](#a-new-function-harness-inherits-the-hosts-globals-so-a-typeof-guard-can-pass-for-the-wrong-reason)
 
 ### A client script that parses is not a client script that is on the page
 
@@ -925,6 +926,38 @@ lives under) is NOT embedded the same way — only the returned template literal
 is — so a comment edit there is inert for this purpose. The fix, same as any
 other genuine drift: `node examples/sample-board.mjs`, then diff the result to
 confirm the only change is the one you made.
+
+### A `new Function` harness inherits the host's globals, so a `typeof` guard can pass for the wrong reason
+
+`new Function('document', 'setInterval', src)` gives the script exactly the names you
+listed — and then, for every name you did NOT list, the global scope of the node process
+running the check. Both client scripts guard their SSE subscription with
+`typeof EventSource === 'undefined'` (`initIndexStream` in `src/indexpage.mjs`,
+`src/ui.mjs`'s board stream), which is correct in a browser and silently load-bearing
+here: the narrow harnesses take the early return only because the node build in use has
+no global `EventSource`. Node has shipped one behind a flag since 22.x. Unflag it and
+those harnesses stop skipping — they construct a real `EventSource` against the RELATIVE
+url `/api/events`, which throws, and the check dies for a reason that has nothing to do
+with what it was testing.
+
+Reproduce it in one line, without waiting for a future node:
+
+```
+node --import /tmp/es-preload.mjs test/check-pure.mjs
+# where the preload does: globalThis.EventSource = class { constructor(u) { throw new Error(u); } };
+```
+
+The fix is to DECLARE the name and never pass it — `new Function('document', 'setInterval',
+'EventSource', src)(doc, fakeSetInterval)` binds it to `undefined` inside the scope, so the
+guard fires by the check's choice rather than by the interpreter's build options. Done for
+every site that runs `indexScript`. **Still open for `src/ui.mjs`**: the
+`new Function('document', 'window', 'location', ui)` pattern appears across roughly ten
+check files and eight checks in `test/check-pure.mjs` fail under the preload above — that
+predates the index page's stream and is its own job.
+
+The general shape, worth suspecting anywhere: a check that passes because of what the
+interpreter does or does not expose is not passing. If a script under test reads a global
+you did not name, name it.
 
 ---
 

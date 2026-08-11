@@ -64,7 +64,7 @@ link where it is worth reading.
 | 74 | [A round is announced once, and the mark outlives the absence](.agents/adr/0074-round-is-announced-once-and-the-mark.md) | 2026-08-10 | narrows 55 |
 | 75 | [The bundle is an agent app, not a background-only one](.agents/adr/0075-bundle-is-an-agent-app-not-background.md) | 2026-08-10 | narrows 57; relates to 72 |
 | 76 | [A launch that did not come from launchd refuses to supervise](.agents/adr/0076-no-argument-launch-refuses-to-supervise.md) | 2026-08-10 | relates to 75 |
-| 77 | [The index polls for its rows](.agents/adr/0077-index-polls-for-its-rows.md) | 2026-08-10 | accepted |
+| 77 | [The index polls for its rows](.agents/adr/0077-index-polls-for-its-rows.md) | 2026-08-10 | SSE half amended by 87 |
 | 78 | [The `select` message is deleted; a stage may propose, never decide](.agents/adr/0078-select-message-is-deleted-a-stage-may-propose.md) | 2026-08-01 | accepted |
 | 80 | [The status item carries no colour](.agents/adr/0080-the-status-item-carries-no-colour.md) | 2026-08-10 | relates to 72; narrowed by 83, 84 |
 | 81 | [The popover takes focus](.agents/adr/0081-the-popover-takes-focus.md) | 2026-08-10 | relates to 72; relates to 75 |
@@ -73,3 +73,4 @@ link where it is worth reading.
 | 84 | [One signal, one dimension, in the status glyph](.agents/adr/0084-one-signal-one-dimension-in-the-status-glyph.md) | 2026-08-10 | narrows 80; relates to 83 |
 | 85 | [The tab carries one mark](.agents/adr/0085-the-tab-carries-one-mark.md) | 2026-08-10 | relates to 84 |
 | 86 | [The status item learns by push and survives by poll](.agents/adr/0086-the-status-item-learns-by-push-and-survives-by-poll.md) | 2026-08-10 | replaces 79; relates to 77; relates to 72 |
+| 87 | [The index page holds the stream, not only the poll](.agents/adr/0087-the-index-page-holds-the-stream-not-only-the-poll.md) | 2026-08-10 | amends 77; relates to 86 |

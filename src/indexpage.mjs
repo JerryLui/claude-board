@@ -247,7 +247,18 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
  * — the exact ISO value stays on the element's `title` attribute (set server-side
  * above) for when it is genuinely needed — and it fetches the rows themselves from
  * `GET /api/index/rows` and patches the list in place, so a board posted after the
- * page loaded appears without anyone reloading (ADR 77). Small, dependency-free,
+ * page loaded appears without anyone reloading (ADR 77).
+ *
+ * Both of those fetches are also WOKEN by a push: the page subscribes to the
+ * daemon-wide stream (`GET /api/events`, src/server.mjs's `handleStream` — the same
+ * one the menu bar item holds) and every event on it runs the fetch that already
+ * owns the state, so a change the daemon already knows about reaches the list and
+ * the widget in a round trip instead of up to fifteen seconds later. See
+ * `initIndexStream` at the foot of this script for what a push does and does not
+ * carry. The tick is untouched by that and stays exactly as it was: it is the
+ * fallback whenever the stream is down, and it is the only thing that ever re-labels
+ * "a minute ago" on a row nothing has changed, which no push could do — nothing
+ * happened, and that is precisely when the label moves. Small, dependency-free,
  * inline (QUIRKS.md "No external assets — except two bare sibling filenames"; an
  * icon is not one of them),
  * and wired entirely from this script rather than from `onclick` attributes: the
@@ -278,6 +289,14 @@ export function renderThreadRows({ threads = [], query = '' } = {}) {
  * function-extraction stand-ins above never reach the two new ones, because
  * `initPomodoroWidget` bails on a document with no `div#pomodoro-widget` in it
  * long before either is read.
+ *
+ * `EventSource` is the fifth, and the one this script REQUIRES nothing of: it is
+ * read through `typeof` (`initIndexStream` below), so a scope without one runs the
+ * whole script and simply never subscribes — which is exactly what the narrow
+ * function-extraction stand-ins above do, and what a browser too old to have one
+ * would do. test/check-index-live.mjs supplies it, as a driveable
+ * `StandInEventSource` (test/dom-stand-in.mjs), because a stream a check can push
+ * into by hand is the only way to prove "within a second" in milliseconds.
  *
  * This is its own top-level template literal, not inlined into renderIndexPage's
  * returned markup, for the same reason src/ui.mjs is its own export: a stray
@@ -338,24 +357,51 @@ function refresh() {
 // served with it, and reading innerHTML back to fingerprint it would be a parse
 // per tick for one saved write on one tick).
 var lastRowsHtml = null;
-// One poll at a time. A daemon answering slower than the tick would otherwise
-// accumulate an outstanding request per tick, and responses can land out of
-// order -- a slow tick-1 answer arriving after a fast tick-2 answer differs from
-// lastRowsHtml and patches the OLDER rows in over the newer ones. It self-corrects
-// on the next tick, so the cost is one interval of a stale list, but it is a
-// stale list shown for no reason. Skipping is right rather than queueing: the
-// next tick is fifteen seconds away and asks the same question.
-var rowsInFlight = false;
-
-// The index polls for its rows and patches the LIST, never the page (ADR 77).
-// Not SSE: this is a page nobody stares at, and a live connection per open tab
-// costs the daemon more than being at most one tick behind costs the reader. Not
-// a reload either, and that is the load-bearing half -- replacing only the list's
-// contents is what leaves the scroll position and whatever is typed in the search
-// box exactly as they were, which a reload would throw away.
+// One fetch at a time, and exactly one more owed if anything asked while that one
+// was out. A daemon answering slower than its callers would otherwise accumulate an
+// outstanding request per call, and responses can land out of order -- a slow first
+// answer arriving after a fast second one differs from lastRowsHtml and patches the
+// OLDER rows in over the newer ones.
 //
-// The query comes off the list element rather than the URL: this script's only
-// injected globals are 'document' and 'setInterval'.
+// Dropping the overlapping call outright was right while the tick was the only
+// caller: the next tick was fifteen seconds away and asked the same question, so the
+// cost was one interval of a list that was at most one interval stale anyway. A push
+// is a different caller making a different promise -- within a second -- and a store
+// change landing during the round trip of the one before it is precisely what a drop
+// loses: the answer already on the wire was rendered before that change existed, and
+// nothing else was going to ask. Two boards posted two milliseconds apart is the
+// whole window, and it is enough. So an overlapping call is REMEMBERED here and
+// re-run once the outstanding fetch settles.
+//
+// Coalesced, not queued: however many calls arrive during one round trip, they owe
+// exactly one more fetch between them, which keeps both properties this guard exists
+// for -- never more than one request outstanding, and never two answers in flight
+// that could cross, since the re-run only starts after the previous one has landed.
+// Re-run on BOTH settle paths, for the same reason rowsInFlight is cleared after the
+// catch rather than beside it: a failed fetch that swallowed the push it was hiding
+// would strand the list for the life of the tab.
+var rowsInFlight = false;
+var rowsPending = false;
+
+// The index fetches its rows and patches the LIST, never the page (ADR 77). Not a
+// reload, and that is the load-bearing half -- replacing only the list's contents
+// is what leaves the scroll position and whatever is typed in the search box
+// exactly as they were, which a reload would throw away. That holds however this
+// was called: it is the ONE way the list is ever updated, so a push (initIndexStream
+// below) preserves the page exactly as the fifteen-second tick already does,
+// because it is the same code doing it.
+//
+// This used to argue the page should not have a live connection at all -- "a page
+// nobody stares at". The popover retired that argument: the reviewer now acts in the
+// menu bar with this page on screen, so the two surfaces disagreeing for a tick is
+// visible. What survives from it is everything below: one fetch at a time, the
+// unchanged-html short circuit, and the swallowed failure.
+//
+// The query comes off the list element rather than the URL. 'location' is injected
+// these days (see this export's header), so this is no longer "there is nothing else
+// to read": data-query is the filter the list on screen was ACTUALLY rendered under,
+// where location.search is a second copy of the same fact -- and the stand-ins that
+// run this script do not all carry a 'search' at all.
 //
 // credentials: 'same-origin', like fetchPomodoro below -- the session cookie a
 // browser holds after /auth/:token is what authorises this read; the page carries
@@ -369,7 +415,8 @@ var rowsInFlight = false;
 // per row.
 function patchRows() {
   var list = document.querySelector('div.thread-list');
-  if (!list || rowsInFlight) return;
+  if (!list) return;
+  if (rowsInFlight) { rowsPending = true; return; }
   var q = list.getAttribute('data-query') || '';
   rowsInFlight = true;
   return fetch('/api/index/rows?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
@@ -389,8 +436,17 @@ function patchRows() {
     .catch(function () { /* leave the list as it is: see this function's comment */ })
     // Cleared on BOTH paths, and after the catch rather than beside it: a failed
     // poll that left this set would stop the list updating for the life of the
-    // tab, which is a worse outcome than the pile-up it guards against.
-    .then(function () { rowsInFlight = false; });
+    // tab, which is a worse outcome than the pile-up it guards against. The
+    // remembered call is paid off here, in the same place and for the same reason
+    // -- and the flag is cleared BEFORE the re-run, so a push arriving during THAT
+    // fetch is remembered again rather than lost to the one already being served.
+    .then(function () {
+      rowsInFlight = false;
+      if (rowsPending) {
+        rowsPending = false;
+        patchRows();
+      }
+    });
 }
 
 function tick() {
@@ -1064,6 +1120,66 @@ function initPomodoroWidget() {
   setInterval(fetchPomodoro, POMODORO_POLL_MS);
 }
 initPomodoroWidget();
+
+// fetchPomodoro with its rejection swallowed, for the stream's callers only. A push
+// that arrives just as the daemon goes down, or a reconnect racing a restart, must
+// leave the widget showing the last thing it knew -- exactly as a failed patchRows
+// leaves the list alone -- and a rejected promise returned into an event listener is
+// nobody's to catch. The POMODORO_POLL_MS interval keeps calling fetchPomodoro bare,
+// unchanged: that path is the backstop, and it gets another go in fifteen seconds.
+function wakePomodoro() {
+  fetchPomodoro().catch(function () { /* see this function's own comment */ });
+}
+
+// The daemon-wide stream (GET /api/events, src/server.mjs's handleStream): the same
+// connection the menu bar item holds, opened once more per open index tab. Without
+// it this page waits up to fifteen seconds for news the daemon already has, which is
+// visible the moment the reviewer presses something in the menu bar popover with
+// this page on screen.
+//
+// A push WAKES A FETCH, and nothing here reads what it carried. The 'waiting' event
+// is a count, not rows, and 'pomodoro' is a document that was current at the instant
+// it was sent -- while patchRows above is the one place that knows how to patch the
+// list without disturbing the page, and fetchPomodoro is the one place that
+// recomputes the clock offset the countdown is rendered from. So neither listener
+// below takes an argument at all: what a push says is only 'ask again now'.
+//
+// 'open' fires on the first connection AND on every automatic reconnect, which is
+// exactly the set of moments this tab may have missed something: nothing backfills
+// events sent while it was disconnected, so coming back live means asking what the
+// state is NOW. That is what makes an index left open through a daemon restart go
+// live again on its own. The first 'open' costs one extra pair of fetches at load,
+// which is the price of not keeping a 'have I connected before' flag to tell a
+// connect from a reconnect -- and the rows fetch would have happened on the first
+// tick anyway. src/ui.mjs's board stream resyncs on 'open' for the same reason.
+//
+// No reconnect and no backoff written here: EventSource does it natively, which is
+// the whole reason this page subscribes with one. Guarded on typeof exactly as
+// src/ui.mjs guards its own: this script also runs under stand-ins with no
+// EventSource in scope at all, and a page that cannot subscribe still has its tick.
+// The session cookie the tab already holds is what authorises the stream -- an
+// EventSource sends it same-origin, like the board page's per-board one, so nothing
+// here needs a secret of its own.
+//
+// Only the two events the daemon already broadcasts (broadcastWaiting and
+// broadcastPomodoro, src/server.mjs) are listened for. A row change with no
+// broadcast behind it -- a prune, a last-activity stamp drifting -- keeps arriving on
+// the tick; teaching the daemon a new event is a decision of its own, not a line
+// added here.
+//
+// ponytail: one held connection per open index tab, the shape a board tab already
+// has. Ceiling: a reviewer who leaves a dozen index tabs open for days costs the
+// daemon a dozen idle subscribers. Upgrade path if that ever bites: drop the
+// subscription while the tab is hidden and re-open it on visibilitychange, which is
+// exactly what the 'open' -> re-fetch path above already covers.
+function initIndexStream() {
+  if (typeof EventSource === 'undefined') return;
+  var es = new EventSource('/api/events');
+  es.addEventListener('open', function () { patchRows(); wakePomodoro(); });
+  es.addEventListener('waiting', function () { patchRows(); });
+  es.addEventListener('pomodoro', function () { wakePomodoro(); });
+}
+initIndexStream();
 `;
 
 /** Filter the thread index down to the sessions a query names. Matches on what
@@ -1126,9 +1242,10 @@ ${faviconLink}
   </form>
 
   <!-- data-query carries the filter this list was rendered under, so patchRows can ask
-       for the SAME rows without reading location: indexScript is executed with document
-       and setInterval as its only injected globals (test/check-pomodoro-page.mjs's
-       harness), and a reference to location there is a ReferenceError. -->
+       for the SAME rows without reading location: this is the filter the rows on screen
+       were actually rendered under, and the check harnesses that run indexScript against
+       this markup (test/check-pomodoro-page.mjs, test/check-index-live.mjs) inject a
+       location carrying a hash and nothing else. -->
   <div class="thread-list" data-query="${escAttr(query)}">
     ${threadsHtml}
   </div>

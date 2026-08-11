@@ -555,10 +555,11 @@ POST /api/board/:id/attended        { watcher, attended, seq?, sinceFocusMs? } -
                                     board and opens its return gate
 GET  /api/index/rows?q=             -> { html }: the index's thread rows, filtered by the
                                     same q, and nothing else -- no page, no styles, no
-                                    board content. What an open index polls on its own
-                                    fifteen-second tick to patch the list in place
-                                    (ADR 77); the rows are rendered by the same function
-                                    `GET /` uses, so the two cannot drift
+                                    board content. What an open index fetches on its own
+                                    fifteen-second tick, and again on a `waiting` push over
+                                    the daemon-wide stream (ADR 77, amended by 87), to
+                                    patch the list in place; the rows are rendered by the
+                                    same function `GET /` uses, so the two cannot drift
 GET  /api/search?q=                 archive search
 GET  /api/waiting                   every round in the store with an OPEN WAIT (not merely
                                     unanswered, and not "stranded") ->
@@ -566,9 +567,10 @@ GET  /api/waiting                   every round in the store with an OPEN WAIT (
                                       total, now }; newest board first, uncapped -- a client
                                     showing only its first few owns that cap
 GET  /api/events                    SSE: the daemon-wide stream -- timer, settings and
-                                    waiting-count changes, for a process with no board id
-                                    to subscribe under `/api/board/:id/events` with
-                                    (bin/menubar.m). See "SSE events" below
+                                    waiting-count changes, for a process or page with no
+                                    single board id to subscribe under
+                                    `/api/board/:id/events` with (bin/menubar.m; the index
+                                    page, src/indexpage.mjs, ADR 87). See "SSE events" below
 GET  /api/pomodoro                  the whole document -> { settings, cycle, cycleDate, timer, now };
                                     rolled to the current pomodoro day first, so a read
                                     never shows an interval from a day that has ended
@@ -1086,8 +1088,9 @@ round; a dedicated JSON route would be leaner and can be added later without cha
 
 `GET /api/events`: the same `text/event-stream` shape as `/api/board/:id/events` above — the
 `: connected` comment, the heartbeat cadence, the close/error cleanup — but not scoped to a board
-and never 404s, because there is no id to fail to find. It exists for a process with no board to
-open one under: `bin/menubar.m`, which has no `:id` at all. Every subscriber gets every event —
+and never 404s, because there is no id to fail to find. It exists for a subscriber with no single
+board to open one under: `bin/menubar.m`, which has no `:id` at all, and the index page
+(ADR 87), which lists every board rather than holding one. Every subscriber gets every event —
 there is nothing to key subscribers by, unlike the per-board stream. No `watcher` event either:
 nothing published here is per-connection.
 

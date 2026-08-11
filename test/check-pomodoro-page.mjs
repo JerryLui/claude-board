@@ -88,7 +88,14 @@ function loadIndexAgainstDaemon(port) {
   // defaultView, so a listener the script registers is reachable from a check;
   // location is a plain { hash }, empty here because nothing in this file is
   // about the fragment -- test/check-pure.mjs owns that half.
-  new Function('document', 'setInterval', 'window', 'location', indexScript)(document, fakeSetInterval, document.defaultView, { hash: '' });
+  // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
+  // this scope so initIndexStream takes its own `typeof` early return by this file's
+  // choice rather than by whether the host node build exposes a global EventSource
+  // (node has had one behind a flag since 22.x). Unflagged, the name would otherwise
+  // resolve to the real constructor and this harness would open a live connection to
+  // the relative URL '/api/events' -- from a check that is about the pomodoro widget.
+  // test/check-index-live.mjs is the one harness that really supplies one.
+  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(document, fakeSetInterval, document.defaultView, { hash: '' });
   return {
     document,
     intervals,
