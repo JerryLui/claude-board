@@ -44,9 +44,9 @@ link where it is worth reading.
 | 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35 |
 | 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | accepted |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
-| 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74 |
+| 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74; narrowed by 91; widened by 92 |
 | 56 | [The launcher may compose a notification body, behind a filter](.agents/adr/0056-launcher-may-compose-a-notification-body-behind-a.md) | 2026-08-09 | narrows 19 |
-| 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 72; narrowed by 75 |
+| 57 | [The banner opens the board it names](.agents/adr/0057-banner-opens-the-board-it-names.md) | 2026-08-09 | narrows 72; narrowed by 75; narrowed by 93 |
 | 58 | [One notifier for a round, and it is the daemon's](.agents/adr/0058-one-notifier-for-a-round-and-it-is.md) | 2026-08-09 | widens 55; narrowed by 73 |
 | 59 | [The board clears its own chrome band, the artifact does not](.agents/adr/0059-board-clears-its-own-chrome-band-the-artifact.md) | 2026-08-09 | narrows 40 |
 | 62 | [Third-party rendering code is vendored, not depended on](.agents/adr/0062-third-party-rendering-code-is-vendored-not-depended.md) | 2026-08-09 | accepted |
@@ -77,3 +77,6 @@ link where it is worth reading.
 | 88 | [The popover's timer line mirrors the index page](.agents/adr/0088-the-popover-timer-line-mirrors-the-index-page.md) | 2026-08-11 | narrows 83; relates to 81; completed by 90 |
 | 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50 |
 | 90 | [An absent Timer names the state and nothing else](.agents/adr/0090-an-absent-timer-names-the-state-and-nothing-else.md) | 2026-08-11 | completes 88; relates to 83 |
+| 91 | [A fresh board defers to an open tab](.agents/adr/0091-a-fresh-board-defers-to-an-open-tab.md) | 2026-08-11 | narrows 55; widened by 92 |
+| 92 | [The Banner covers a Suppressed content-only board](.agents/adr/0092-the-banner-covers-a-suppressed-content-only-board.md) | 2026-08-11 | widens 55; widens 91 |
+| 93 | [A click surfaces the existing tab](.agents/adr/0093-a-click-surfaces-the-existing-tab.md) | 2026-08-11 | narrows 57; relates to 72 |

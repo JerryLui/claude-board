@@ -1,0 +1,5 @@
+# 91. A fresh board defers to an open tab
+
+2026-08-11 · narrows 55; widened by 92
+
+**Context:** the shim opens a tab for every thread's first board, which steals focus from a reviewer already sitting on another board; entry 55 already chose announce-over-open for every later round, leaving the first board the one remaining forced tab. **Decision:** the auto-open is Suppressed whenever any board on the daemon has a Watcher — any board, any project, focused or not — and the stranded Banner, unchanged down to its grace, carries the announcement; with no Watcher anywhere the first board opens as it always has. **Consequences:** a forgotten background tab suppresses every auto-open, so the Banner becomes the only way a new board surfaces until that tab closes.

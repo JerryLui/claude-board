@@ -48,10 +48,15 @@ the last two minutes, so a tab left open behind the terminal still counts as wat
 short while. Reported by the tab, since a live stream proves only that a tab exists.
 _Avoid_: active, foreground, in view.
 
-**Stranded**: of a round, that it is Awaited and not yet Announced while its board is not
-Attended, so nothing on screen is telling the reviewer it is there. Covers the board with no
-tab and the board buried behind three windows alike, and it is what a Banner fires on.
-_Avoid_: orphaned, unattended, unseen.
+**Suppressed**: of a fresh board's auto-open, skipped because some board — any board, any
+project — already has a Watcher, so a new tab would steal focus from a reviewer already on
+one. The Banner announces the board instead. _Avoid_: deferred (collides with deferred
+answers), skipped, blocked.
+
+**Stranded**: of a round, that it is not yet Announced while its board is not Attended, and
+it is either Awaited or the first round of a Suppressed board, so nothing on screen is
+telling the reviewer it is there. Covers the board with no tab and the board buried behind
+three windows alike, and it is what a Banner fires on. _Avoid_: orphaned, unattended, unseen.
 
 **Announced**: of a round, that a Banner has been raised for it. Permanent for the life of the
 round: returning to the board takes the Banner off the screen without un-announcing the round,
