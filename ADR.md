@@ -41,7 +41,7 @@ link where it is worth reading.
 | 42 | [Rounds are the board's pages, flipped left and right](.agents/adr/0042-rounds-are-the-board-s-pages-flipped-left.md) | 2026-08-07 | accepted |
 | 44 | ["A page board is never sent" is a browser rule, not a daemon rule](.agents/adr/0044-page-board-is-never-sent-is-a-browser.md) | 2026-08-07 | narrowed by 45 |
 | 45 | [A page board may be awaited, and the caller declares it](.agents/adr/0045-page-board-may-be-awaited-and-the-caller.md) | 2026-08-07 | narrows 35 and 44; completed by 50 |
-| 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35 |
+| 46 | [Commenting exists only where someone is waiting](.agents/adr/0046-commenting-exists-only-where-someone-is-waiting.md) | 2026-08-07 | narrows 35; widened by 98, 101 |
 | 47 | [The wait is 40 minutes, for every round, and the page shows what is left](.agents/adr/0047-wait-is-40-minutes-for-every-round-and.md) | 2026-08-07 | accepted |
 | 50 | [A wait that dies is recorded on the round](.agents/adr/0050-wait-that-dies-is-recorded-on-the-round.md) | 2026-08-08 | completes 45 |
 | 55 | [A stranded round is announced, not opened onto](.agents/adr/0055-stranded-round-is-announced-not-opened-onto.md) | 2026-08-09 | narrows 4; widened by 58; narrowed by 74; narrowed by 91; widened by 92 |
@@ -84,6 +84,7 @@ link where it is worth reading.
 | 95 | [Mermaid is vendored, closing the CSP's last external-host allowance](.agents/adr/0095-mermaid-is-vendored-closing-the-csp-s-last.md) | 2026-08-11 | widens 62; relates to 70 |
 | 96 | [The Notice is transient, never standing](.agents/adr/0096-the-notice-is-transient-never-standing.md) | 2026-08-11 | relates to 28 |
 | 97 | [An amend to the marked round moves it back one, unless the reviewer is Attended](.agents/adr/0097-an-amend-to-the-marked-round-moves-it-back-one.md) | 2026-08-11 | narrows 74 |
-| 98 | [The comment toggle follows commentability](.agents/adr/0098-comment-toggle-follows-commentability.md) | 2026-08-11 | widens 46 |
+| 98 | [The comment toggle follows commentability](.agents/adr/0098-comment-toggle-follows-commentability.md) | 2026-08-11 | widens 46; widened by 101 |
 | 99 | [The packet says `lost`, not `resolved`](.agents/adr/0099-packet-says-lost-not-resolved.md) | 2026-08-11 | relates to 28 |
 | 100 | [A re-install prints twelve lines, and the standing prose is first-run-only](.agents/adr/0100-a-re-install-prints-twelve-lines.md) | 2026-08-11 | relates to 36 |
+| 101 | [A sent round is uncommentable](.agents/adr/0101-a-sent-round-is-uncommentable.md) | 2026-08-11 | widens 46, 98 |

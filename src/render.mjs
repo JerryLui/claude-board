@@ -2454,7 +2454,15 @@ export function renderBoardPage(board) {
   // reasoning: a page board is held off `submitted` at the pill itself, since
   // `initialRound.status` alone cannot prove a page round was never handed to
   // this decision through some path other than the browser's Send control.
-  const initialRoundSubmitted = !fullpage && !!initialRound && initialRound.status === 'sent';
+  // Status alone, no `fullpage` and no clock -- the identical question
+  // src/ui.mjs's refreshPager asks of `roundEntry(currentRound)` to toggle
+  // `sent-page`, asked here so the class is on <body> in the served bytes
+  // rather than only from hydrate onwards (ADR 101). The two must agree
+  // exactly: a first paint that disagreed with the first refreshPager would
+  // show the send bar and the comment control for one frame and then take
+  // them away.
+  const initialRoundSent = !!initialRound && initialRound.status === 'sent';
+  const initialRoundSubmitted = !fullpage && initialRoundSent;
   const roundMetaText = initialRoundOpenAwaited ? '' : initialRoundSubmitted ? 'submitted' : 'read-only';
   // The title underneath that word is NOT one string for every board: a
   // Submitted round on an ORDINARY board gets PILL_SUBMITTED_TITLE (see
@@ -2491,15 +2499,17 @@ export function renderBoardPage(board) {
   // on every flip, the same split `pageUncommentable`/refreshAwaitDisplay
   // already uses for the awaited-ness half.
   const roundUncommentable = !roundHasCommentable(board.blocks.filter(b => b.round === initialRoundInView));
-  // Both toggle-hiding facts ride the same body-class mechanism as `readonly`
-  // (QUIRKS.md "Readonly is locked twice"): kept in the markup, hidden
-  // structurally by src/styles.mjs rather than omitted, so a page that becomes
-  // commentable again (a later round pushed, a flip to a different round) never
-  // needs a second element minted for it. Built as a list rather than the old
-  // fullpage-only ternary, since `roundUncommentable` -- unlike
-  // `pageUncommentable` -- applies to an ordinary board too.
+  // All three commenting-hiding facts ride the same body-class mechanism as
+  // `readonly` (QUIRKS.md "Readonly is locked twice"): kept in the markup,
+  // hidden structurally by src/styles.mjs rather than omitted, so a page that
+  // becomes commentable again (a later round pushed, a flip to a different
+  // round) never needs a second element minted for it. Built as a list rather
+  // than the old fullpage-only ternary, since `roundUncommentable` and
+  // `initialRoundSent` -- unlike `pageUncommentable` -- apply to an ordinary
+  // board too.
   const bodyClasses = [
     ...(fullpage ? ['page-board'] : []),
+    ...(initialRoundSent ? ['sent-page'] : []),
     ...(pageUncommentable ? ['page-uncommentable'] : []),
     ...(roundUncommentable ? ['round-uncommentable'] : []),
   ];

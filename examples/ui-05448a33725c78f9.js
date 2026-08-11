@@ -4178,7 +4178,16 @@
     // buttons live outside every round section (the same gap that once let a
     // double click submit an already-sent round twice -- see setSendBarEnabled).
     var entry = roundEntry(currentRound);
-    document.body.classList.toggle('sent-page', !!entry && entry.status === 'sent');
+    var sentPage = !!entry && entry.status === 'sent';
+    document.body.classList.toggle('sent-page', sentPage);
+    // ADR 101, and the same second half roundUncommentable takes just above:
+    // the stylesheet hides the toggle on a sent round, and hiding the CONTROL
+    // is only ever half the lock. A reviewer who had comment mode on when the
+    // round went out -- their own Send, or another tab's, both of which land
+    // here via goToRound -- would otherwise be left with the mode still true,
+    // a crosshair over an exchange that has already gone, and no visible
+    // toggle to turn it back off. Turning the STATE off is the JS half.
+    if (sentPage && commentMode) setCommentMode(false);
     var open = openRoundNumber();
     if (!submitInFlight) setSendBarEnabled(open !== null && currentRound === open);
 

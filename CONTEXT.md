@@ -100,7 +100,9 @@ though a rendered block nested inside it still is. _Avoid_: container, layout bl
 
 **Commentable**: carrying the comment control and the click-to-anchor gesture — only the
 rendered content kinds, `mermaid` and `html`, wherever they appear; `markdown` and `code` never
-are. _Avoid_: annotatable, pinnable, anchorable.
+are. Kind is necessary, not sufficient: the round it sits on has to still be listening, so a page
+board nobody is waiting on (ADR.md entry 46) and any round already sent (entry 101) carry none of
+it either. _Avoid_: annotatable, pinnable, anchorable.
 
 **Stage**: an `html` block rendered in a sandboxed iframe, carrying its markup either by value
 (a hand-mocked UI preview) or by a path-only reference to a rendered file on disk. _Avoid_:

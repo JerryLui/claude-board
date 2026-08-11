@@ -312,14 +312,22 @@ body:not(.page-board) .round-meta { display: inline; }
    control that turns commenting on is not on offer there either. ADR 98 widens
    this with a third, independent fact: a round with nothing Commentable on it
    ('html'/'mermaid', wherever it appears) is uncommentable regardless of who's
-   listening, on ANY board, not only a page one. Three classes rather than one
-   because they are three different facts -- an archive is read-only whatever it
-   holds; 'page-uncommentable' is about a page board's round being unawaited in
-   particular; 'round-uncommentable' is about the round's own CONTENT, awaited or
-   not (src/render.mjs sets both at first paint, src/ui.mjs's
-   refreshAwaitDisplay/refreshPager keep them true afterwards -- against the
-   clock for the first, against every round flip for the second). */
-body.readonly .mode-toggle, body.page-uncommentable .mode-toggle, body.round-uncommentable .mode-toggle { display: none; }
+   listening, on ANY board, not only a page one. ADR 101 widens it once more with
+   a fourth: a round that has been SENT is uncommentable too, which is what
+   closed entry 46's own "an ordinary content round is untouched" carve-out --
+   the page board already lost its compose surface the moment it went out
+   (renderPageCommentPanel, src/render.mjs), and an ordinary one went on
+   offering the mode over an exchange that had already left.
+   Four classes rather than one because they are four different facts -- an
+   archive is read-only whatever it holds; 'page-uncommentable' is about a page
+   board's round being unawaited in particular; 'round-uncommentable' is about
+   the round's own CONTENT, awaited or not; 'sent-page' is about its STATUS,
+   whatever it holds and whoever is listening (src/render.mjs sets all three at
+   first paint, src/ui.mjs's refreshAwaitDisplay/refreshPager keep them true
+   afterwards -- against the clock for the first, against every round flip for
+   the other two). */
+body.readonly .mode-toggle, body.page-uncommentable .mode-toggle, body.round-uncommentable .mode-toggle,
+body.sent-page .mode-toggle { display: none; }
 
 /* the theme control (src/theme.mjs): reuses .mode-toggle's chrome above rather
    than duplicating it, plus this icon-only modifier -- no visible label, so
@@ -327,10 +335,12 @@ body.readonly .mode-toggle, body.page-uncommentable .mode-toggle, body.round-unc
 .mode-toggle-icon { padding: 7px; }
 /* Unlike .mode-toggle, this control stays live in a read-only archive -- an
    archive reader is exactly who needs to switch theme. Same for an
-   uncommentable page board, and same again for a round with nothing
-   Commentable on it: nothing there is answerable or anchorable, but the theme
-   of whatever IS on screen is exactly what a reader still wants to change, so
-   all three of .mode-toggle's hiding gates above are carved out here. An id
+   uncommentable page board, same again for a round with nothing Commentable on
+   it, and same once more for a round that has been sent (ADR 101): nothing
+   there is answerable or anchorable, but the theme of whatever IS on screen is
+   exactly what a reader still wants to change -- a settled round is precisely
+   what gets re-read -- so all four of .mode-toggle's hiding gates above are
+   carved out here. An id
    selector outranks body.readonly .mode-toggle's class selector regardless of
    source order, so that rule's own wording (asserted verbatim by
    test/check-archive.mjs) never has to change to carve this control out of it.
@@ -341,7 +351,8 @@ body.readonly .mode-toggle, body.page-uncommentable .mode-toggle, body.round-unc
    qualifier is what the real button has and
    a markdown-minted heading never can -- see src/ui.mjs's matching
    'button#theme-toggle' lookup and its own comment on the same collision. */
-body.readonly button#theme-toggle, body.page-uncommentable button#theme-toggle, body.round-uncommentable button#theme-toggle { display: inline-flex; }
+body.readonly button#theme-toggle, body.page-uncommentable button#theme-toggle, body.round-uncommentable button#theme-toggle,
+body.sent-page button#theme-toggle { display: inline-flex; }
 
 .readonly-banner { display: none; background: var(--warning-soft); border: 1px solid var(--warning-border);
   color: var(--warning-ink); font-size: 12.5px; padding: 10px 14px; border-radius: var(--r-md); margin-bottom: var(--space-4); }
@@ -365,6 +376,18 @@ body.readonly input, body.readonly textarea, body.readonly button.card-choice { 
    the same reason (QUIRKS.md "Readonly is locked twice"). */
 body.sent-page .send-bar { display: none; }
 body.sent-page input, body.sent-page textarea, body.sent-page button.card-choice { pointer-events: none; opacity: 0.7; }
+/* ADR 101: and the whole-block comment control goes with them. commentArea
+   (src/render.mjs) has always rendered a sent block's compose form disabled --
+   'historical' -- so the button was already opening a form nothing could be
+   typed into; this takes away the affordance rather than leaving one that lies.
+   Hidden, not disabled, matching what the page board's own sent surface does
+   (renderPageCommentPanel emits no compose form at all once the round is out)
+   and matching the toggle above, which is display:none under this same class.
+   The comment LIST is untouched, here as everywhere: what was already said
+   stays readable on a settled round -- that is most of why anyone flips back to
+   one. The rule keys on the block button alone, never '.comment-form', which
+   the lens still hosts a copy of (.lens-form-host) for a round that is open. */
+body.sent-page .comment-btn { display: none; }
 
 .blocks { display: flex; flex-direction: column; gap: var(--space-6); }
 

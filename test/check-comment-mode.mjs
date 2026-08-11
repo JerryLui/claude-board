@@ -1560,6 +1560,116 @@ check('ADR 98\'s own scenario: comment mode turns off, not merely invisible, whe
     'and it must raise no Notice at all -- comment mode being genuinely off, not merely uncontrollable, is what this whole check is about');
 });
 
+// --- sent gating (ADR 101): a round that has GONE OUT offers no comment ------
+// surface either, on an ordinary board as much as on a page one. Entry 46 drew
+// this rule for the page board alone ("an ordinary content round is
+// untouched"), so an ordinary board went on showing the toggle and every
+// stage's own comment button over an exchange already submitted. Both halves
+// are driven here: the first paint (src/render.mjs puts `sent-page` on <body>
+// in the served bytes) and the flip (src/ui.mjs's refreshPager, which is also
+// the path a reviewer's own Send arrives back through -- applySubmittedPush
+// calls goToRound). ------------------------------------------------------------
+
+check('ADR 101: a sent ordinary round offers no comment surface at first paint -- no toggle, no block comment button -- while the comments already on it stay readable', () => {
+  const sentBoard = createBoard({
+    title: 'ADR 101 -- a sent ordinary round',
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Ship</button></div>' },
+      { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+    ],
+  });
+  const stageId = sentBoard.blocks[0].id;
+  applySubmit(sentBoard, {
+    action: 'send',
+    answers: [],
+    comments: [{ blockId: stageId, anchor: { kind: 'block' }, text: 'said before it went out' }],
+  }, 1);
+  assert.equal(sentBoard.rounds[0].status, 'sent', 'setup failure: the round did not go sent');
+
+  const document = parseHTML(renderBoardPage(sentBoard));
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+
+  // First paint, not merely from hydrate onwards: the class is in the served
+  // bytes, so the control is never visible for a frame and then taken away.
+  assert.equal(document.body.classList.contains('sent-page'), true,
+    'a board opening on a sent round must carry sent-page at first paint, the same answer src/ui.mjs\'s refreshPager gives at hydrate');
+
+  const toggle = document.getElementById('comment-mode-toggle');
+  assert.ok(toggle, 'the toggle stays IN the markup, hidden structurally -- a later round arriving open must not need a second element minted for it');
+  assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'none',
+    'the comment-mode toggle must render with no visible affordance on a sent round (ADR 101)');
+
+  const btn = document.querySelector('.comment-btn[data-block-id="' + stageId + '"]');
+  assert.ok(btn, 'setup failure: the html stage rendered no comment button at all');
+  assert.equal(resolveComputedProperty(styles, btn, false, 'display'), 'none',
+    'the block\'s own comment button must go with the toggle -- its form was already disabled, so leaving the button was an affordance that lied');
+
+  // The negative that keeps this honest: what the round already carries is
+  // still readable, and the theme control is still reachable -- a settled round
+  // is precisely what gets re-read.
+  const item = document.querySelector('.comment-item');
+  assert.ok(item, 'setup failure: the sent comment did not render');
+  assert.match(item.textContent, /said before it went out/,
+    'a sent round\'s existing comments must stay on screen -- only the surface for adding MORE goes away');
+  assert.equal(resolveComputedProperty(styles, document.querySelector('button#theme-toggle'), false, 'display'), 'inline-flex',
+    'the theme control wears .mode-toggle\'s chrome and must survive the sent gate, exactly as it survives the other three');
+});
+
+check('ADR 101: flipping onto a sent round turns comment mode off, and flipping back off it restores the whole surface', () => {
+  // A trailing markdown block on each round is what keeps them ORDINARY:
+  // isPageRound (src/board.mjs) calls a round of one rendered artifact and
+  // nothing else a page board, and a page board has no .comment-btn to gate --
+  // it renders .page-comments instead, which entry 46 already covers.
+  const flipBoard = createBoard({
+    title: 'ADR 101 -- sent round one, open round two',
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Ship</button></div>' },
+      { kind: 'markdown', text: 'round one prose' },
+    ],
+  });
+  applySubmit(flipBoard, { action: 'send', answers: [], comments: [] }, 1);
+  addRound(flipBoard, {
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Ship again</button></div>' },
+      { kind: 'markdown', text: 'round two prose' },
+    ],
+  });
+  const sentStageId = flipBoard.blocks[0].id;
+  const openStageId = flipBoard.blocks[2].id;
+
+  const document = parseHTML(renderBoardPage(flipBoard));
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, document.defaultView, { protocol: 'http:' });
+
+  // The board opens on round 2, which is open and Commentable -- so the whole
+  // surface is live here, and every assertion below is a real change.
+  assert.equal(document.body.classList.contains('sent-page'), false, 'setup: round 2 is open');
+  const toggle = enableCommentMode(document);
+  assert.equal(resolveComputedProperty(styles, document.querySelector('.comment-btn[data-block-id="' + openStageId + '"]'), false, 'display'),
+    'inline-flex', 'setup: the open round\'s stage shows its comment button');
+
+  document.querySelector('button#round-prev').dispatchEvent(new StandInEvent('click'));
+
+  assert.equal(document.body.classList.contains('sent-page'), true, 'flipping back to round 1 must mark it sent');
+  assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'none',
+    'the toggle must be gone on arrival -- no visible control left to turn comment mode back off');
+  assert.equal(resolveComputedProperty(styles, document.querySelector('.comment-btn[data-block-id="' + sentStageId + '"]'), false, 'display'),
+    'none', 'and the sent stage\'s own comment button with it');
+  assert.equal(document.body.classList.contains('comment-mode'), false,
+    'commentMode itself must turn off on the flip (QUIRKS.md "locked twice") -- otherwise the mode survives with a crosshair over an exchange that has already gone and nothing on screen able to undo it');
+  assert.equal(toggle.classList.contains('active'), false,
+    'and the toggle\'s .active must follow the state actually turning off, not merely the control disappearing while the state persists underneath');
+
+  // Flipping forward restores everything, so none of the above can pass
+  // against a surface that is simply dead from here on.
+  document.querySelector('button#round-next').dispatchEvent(new StandInEvent('click'));
+  assert.equal(document.body.classList.contains('sent-page'), false, 'flipping back onto the open round must lift the gate');
+  assert.equal(resolveComputedProperty(styles, toggle, false, 'display'), 'inline-flex',
+    'the toggle must come back on the open round -- structurally hidden, never omitted');
+  assert.equal(resolveComputedProperty(styles, document.querySelector('.comment-btn[data-block-id="' + openStageId + '"]'), false, 'display'),
+    'inline-flex', 'and so must the open round\'s comment button');
+  enableCommentMode(document); // and the control genuinely works again, from off
+});
+
 // =================================================================================
 // The Notice (ADR.md entry 96): with comment mode on, clicking a question
 // option is a blocked click, not a dead one -- one row per acceptance
