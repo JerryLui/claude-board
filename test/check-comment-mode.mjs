@@ -1346,7 +1346,7 @@ check("a mermaid diagram nested inside a compare side is commentable exactly as 
     "the only open form afterward must still be the compare side's own nested block -- the grid minted nothing");
 });
 
-// --- the Tray's markup order (variant A, chat dock): list, composer, send bar -
+// --- the Tray's markup order (variant A, chat-style): list, composer, send bar -
 
 check('AC 1: an awaited page board\'s Tray orders its list before its composer before its send bar', () => {
   const trayBoard = createBoard({
@@ -1399,7 +1399,7 @@ check('AC 2 corollary: queueing a comment scrolls the Tray\'s list to the newest
   form.dispatchEvent(new StandInEvent('submit'));
 
   assert.equal(wrap.scrollTop, wrap.scrollHeight,
-    'queueing a comment must scroll the Tray\'s list to the bottom -- with the panel capped at ~40vh, the 4th queued comment already overflows, and with no scroll a reviewer who just typed one sees the input clear with nothing to show it landed');
+    'queueing a comment must scroll the Tray\'s list to the bottom -- with the Tray capped, the 4th queued comment already overflows, and with no scroll a reviewer who just typed one sees the input clear with nothing to show it landed');
 });
 
 // --- toggle gating (ADR 98): a round with no Commentable block anywhere on it -

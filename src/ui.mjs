@@ -2760,7 +2760,7 @@ export const ui = `
   // exist -- so the reviewer was told they had commented on something that was
   // gone the moment they commented on it. And its Send/Discuss controls have
   // their own delegated listener below, which carries no comment-mode guard: with
-  // the panel unlisted, one press in comment mode both submitted the round AND
+  // the Tray unlisted, one press in comment mode both submitted the round AND
   // opened a compose form over the artifact.
   var ANCHOR_CHROME_SELECTOR = '.block-kicker, .comment-btn, .comment-form, .comment-target, '
     + '.comment-list, .page-comments, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
@@ -3231,7 +3231,7 @@ export const ui = `
       // one; refreshPins rebuilds the list entries the same way, so editing in
       // place cannot also leave a stray second entry for the same queue item.
       refreshPins(document);
-      // Chat-dock order (the Tray, CONTEXT.md): the list is meant to follow the
+      // Chat-style order (the Tray, CONTEXT.md): the list is meant to follow the
       // newest entry, same as an ordinary chat input -- with the 40vh cap
       // (src/styles.mjs), the 4th queued comment already overflows, and with no
       // scroll the reviewer types, the input clears, and the new entry lands
@@ -4164,7 +4164,7 @@ export const ui = `
     sendBarDockObserver.observe(rail);
   }
 
-  /** '.page-comments' (a page board's floating comment panel) has to clear
+  /** '.page-comments' (a page board's Tray) has to clear
    * '.round-pager-dock', the round pager's fixed bottom-centre box. A
    * ResizeObserver on the dock is the mechanism that survives: it measures the
    * dock's REAL box, independent of where either element sits in the tree, and
@@ -4240,7 +4240,7 @@ export const ui = `
   refreshPager();
   // AC 5: an awaited page round opens with comment mode ON, so the reviewer
   // never has to find the toggle first -- the hint inside the empty
-  // panel (renderPageCommentPanel, src/render.mjs) is what teaches the
+  // Tray (renderPageCommentPanel, src/render.mjs) is what teaches the
   // click-to-comment gesture instead, since the toggle itself is no longer
   // what reveals it here. 'roundIsCurrentlyAwaited', not merely
   // 'roundIsAwaitedOpen': an already-expired round has nothing to teach the

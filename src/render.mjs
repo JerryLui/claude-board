@@ -226,7 +226,7 @@ function anchorTag(c, lost) {
 }
 
 /** The `<div class="comment-item">` list, shared by `commentArea` below and the
- * page board's own panel (`renderPageCommentPanel`): one rendering of a block's
+ * page board's own Tray (`renderPageCommentPanel`): one rendering of a block's
  * stored comments, so the two surfaces can never disagree about how a comment's
  * anchor tag or lost/resolved styling is drawn. */
 function commentItemsHtml(blockId, commentsByBlock) {
@@ -1855,8 +1855,8 @@ function buildStageSrcdoc(block) {
  *     before a wait died has nowhere else to keep rendering ("comments already
  *     left stay on screen", AC 12), and src/ui.mjs's refreshPins looks this id
  *     up by the same convention every block's list uses.
- *   - open and awaited, short of its deadline: the live surface -- chat-dock
- *     order (the Tray, CONTEXT.md): the list first, then the compose form
+ *   - open and awaited, short of its deadline: the live surface -- the Tray's
+ *     chat-style order (CONTEXT.md): the list first, then the compose form
  *     (with the hint line while the list is empty, teaching the
  *     click-to-comment gesture, since comment mode already starts ON here and
  *     the toggle itself is no longer what reveals the gesture), then the send
@@ -1906,8 +1906,8 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
   const hint = showHint
     ? `<p class="page-comment-hint" id="${hintId}">Click anywhere on the page to leave a comment.</p>`
     : '';
-  // Chat-dock order (the Tray, CONTEXT.md): the queued list first, the
-  // composer next, the send bar last -- a reviewer scanning the panel meets
+  // Chat-style order (the Tray, CONTEXT.md): the queued list first, the
+  // composer next, the send bar last -- a reviewer scanning the Tray meets
   // what is already said before the box for saying more, and the send
   // control settles at the reviewer's hand instead of above an
   // arbitrarily long list. What keeps the composer and send bar out of the

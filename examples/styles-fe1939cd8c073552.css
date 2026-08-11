@@ -236,7 +236,7 @@ svg { flex: none; }
    runs under, and the reservation near '.round-pager-dock' below carves that
    room back out. Pinned by test/check-round-end.mjs, which fails if this
    padding grows a bottom value here and if the reservation there ever stops
-   matching the expression the comment panel clears the dock with. */
+   matching the expression the Tray clears the dock with. */
 .board-shell { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 0 var(--space-5); }
 
 /* the board's identity stays on screen: a long board scrolls for a while, and
@@ -1208,7 +1208,7 @@ body.comment-mode .blocks { cursor: crosshair; }
    and in test/check-round-end.mjs together.
    One board stays carved out, and the carve-out is load-bearing:
    'body.page-board' has a fixed 100vh frame that must not grow, and its
-   floating comment panel already clears the dock by this exact formula. */
+   Tray already clears the dock by this exact formula. */
 body.sent-page:not(.page-board) .board-shell,
 body.readonly:not(.page-board) .board-shell {
   padding-bottom: calc(var(--space-4) + var(--round-pager-dock-h, 84px) + var(--space-3)); }
@@ -1560,7 +1560,7 @@ body.page-board .html-stage { height: 100vh; min-height: 0; border: none; border
 body.page-board .send-bar { display: none; }
 /* the archive's banner is in flow above the header, which would push the frame
    off the bottom of a viewport that cannot scroll -- floated into the corner the
-   comment panel and the header both leave free. */
+   Tray and the header both leave free. */
 body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom: var(--space-5);
   z-index: 30; margin-bottom: 0; max-width: 320px; }
 /* Raised clear of the round pager, which owns the bottom-centre strip on every
@@ -1587,27 +1587,27 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    Verified against a real Chrome, which this repo's own DOM stand-in cannot
    substitute for (QUIRKS.md, "The stand-in has no layout"): 'bottom' resolves
    to exactly var(--space-4) + the dock's measured height + var(--space-3),
-   not the fallback, and with the panel given real content (growing content,
+   not the fallback, and with the Tray given real content (growing content,
    overflowing off the TOP of the viewport) its measured rect bottom stayed
    exactly var(--space-3) above the dock's measured rect top in every case,
-   because the panel grows upward, away from the dock -- the clearance is a
-   property of the DOCK's height alone, not the panel's. */
-/* The panel used to grow upward with NO ceiling --
+   because the Tray grows upward, away from the dock -- the clearance is a
+   property of the DOCK's height alone, not the Tray's. */
+/* The Tray (variant A, CONTEXT.md) used to grow upward with NO ceiling --
    fine while it only ever held the compose form and a short list, wrong the
    moment a send control landed inside it (ADR.md entry 45, AC 4) that has to
-   stay reachable at every comment count: unbounded growth pushed the panel's own
+   stay reachable at every comment count: unbounded growth pushed the Tray's own
    top edge off the top of a short viewport well before the list got long,
    taking the send control with it. 'max-height' below puts a ceiling on
-   the panel itself: the Tray (variant A, CONTEXT.md) stops growing at roughly
+   the Tray itself: it stops growing at roughly
    40% of the viewport height, so the artifact's upper half stays visible under
    it no matter how many comments are queued. 'min()' keeps the older,
    dock-relative ceiling alongside the flat one rather than replacing it --
    tied to the SAME '--round-pager-dock-h' the 'bottom' value already reads (no
    second number to keep in sync) -- as the floor for a viewport short enough
-   that 40vh alone would still let the panel's top edge climb into the
+   that 40vh alone would still let the Tray's top edge climb into the
    condensed header pill's own headroom (ADR.md entry 40): "the rest of the
-   viewport, minus this panel's own bottom offset, minus 72px of headroom for
-   the pill plus its own gap". Whichever number is smaller wins, so the panel's
+   viewport, minus the Tray's own bottom offset, minus 72px of headroom for
+   the pill plus its own gap". Whichever number is smaller wins, so the Tray's
    top edge can never rise above either limit, at ANY comment count.
    '.comment-list-wrap' is what actually absorbs the
    overflow: 'flex: 1 1 auto; min-height: 0' lets it shrink below its content's
@@ -1621,7 +1621,7 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    comment on renderPageCommentPanel has the fuller version of this). The hint
    rides inside '.page-send-bar' now rather than sitting beside it (see its
    own rule below), so it is carried by the bar's 'flex: none' rather than
-   carrying one of its own. 'overflow: hidden' on the panel itself is a
+   carrying one of its own. 'overflow: hidden' on the Tray itself is a
    backstop, not the mechanism: the inner scroll is what is meant to absorb
    every case, this
    only guards against a measurement this comment did not anticipate. */
@@ -1640,22 +1640,22 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
      8px/16px/16px asymmetry read as a different object at the other end of the
      screen. The pill's own vertical inset is 6px rather than 12px, and that is
      not a mismatch to fix: the pill holds one row of controls and is sized by
-     them (see its padding-block), while this panel stacks a list, a form and a
+     them (see its padding-block), while the Tray stacks a list, a form and a
      bar, which need the room. */
   padding: var(--space-3); }
 /* The scrollable half: only the LIST of already-left comments grows without
-   bound and scrolls internally once it outgrows the panel's own max-height
+   bound and scrolls internally once it outgrows the Tray's own max-height
    above -- the hint, the compose form and the send control are none of them
    inside this box, so they never scroll out of reach regardless of how many
    comments are queued. */
 .comment-list-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* The click-to-comment gesture's own hint, back in exactly
-   one place -- the awaited page board's empty comment panel, because comment
+   one place -- the awaited page board's empty Tray, because comment
    mode already starts ON there (src/ui.mjs), so the mode toggle itself is no
    longer what reveals the gesture the way it is everywhere else.
 
    It rides the send bar's own row, at its left end: one short line does not
-   need a row to itself, and the panel floats over somebody's artifact, so every
+   need a row to itself, and the Tray floats over somebody's artifact, so every
    row it does not spend is artifact the reader can still see. 'margin-right:
    auto' is what keeps the two buttons at the right end of that row without the
    bar having to change its own 'justify-content' -- and when the hint goes at
@@ -1665,11 +1665,11 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
   color: var(--muted); margin: 0 auto 0 0; }
 /* AC 4: one send control at every comment count, Discuss beside it -- the same
    '.btn-send'/'.btn-discuss' chrome the ordinary send bar uses, just inside
-   this panel instead. 'flex: none' keeps it out of '.comment-list-wrap''s own
+   the Tray instead. 'flex: none' keeps it out of '.comment-list-wrap''s own
    scroll region (see this file's own comment on '.page-comments' above).
 
    'flex-wrap' is the narrow-window floor: the hint plus both buttons fit the
-   640px panel comfortably, but on a phone-width board there is no row wide
+   640px Tray comfortably, but on a phone-width board there is no row wide
    enough for all three, and wrapping puts the hint back on a line of its own
    rather than squeezing the controls. */
 .page-send-bar { flex: none; display: flex; align-items: center; justify-content: flex-end;
@@ -1678,7 +1678,7 @@ body.page-board .readonly-banner { position: fixed; left: var(--space-5); bottom
    throwing away anything already on screen -- src/ui.mjs adds this class the
    moment it learns the round's deadline has passed (a periodic client-side
    check, and an immediate nudge over the 'awaitExpired' SSE event) and removes
-   none of the panel's existing '.comment-item' entries when it does. Locked
+   none of the Tray's existing '.comment-item' entries when it does. Locked
    twice, same discipline QUIRKS.md's "Readonly is locked twice" already
    documents for body.readonly: this hides the compose surface, and src/ui.mjs
    additionally disables the same elements' 'disabled' attribute, since a CSS
