@@ -74,5 +74,6 @@ link where it is worth reading.
 | 85 | [The tab carries one mark](.agents/adr/0085-the-tab-carries-one-mark.md) | 2026-08-10 | relates to 84 |
 | 86 | [The status item learns by push and survives by poll](.agents/adr/0086-the-status-item-learns-by-push-and-survives-by-poll.md) | 2026-08-10 | replaces 79; relates to 77; relates to 72 |
 | 87 | [The index page holds the stream, not only the poll](.agents/adr/0087-the-index-page-holds-the-stream-not-only-the-poll.md) | 2026-08-10 | amends 77; relates to 86 |
-| 88 | [The popover's timer line mirrors the index page](.agents/adr/0088-the-popover-timer-line-mirrors-the-index-page.md) | 2026-08-11 | narrows 83; relates to 81 |
+| 88 | [The popover's timer line mirrors the index page](.agents/adr/0088-the-popover-timer-line-mirrors-the-index-page.md) | 2026-08-11 | narrows 83; relates to 81; completed by 90 |
 | 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50 |
+| 90 | [An absent Timer names the state and nothing else](.agents/adr/0090-an-absent-timer-names-the-state-and-nothing-else.md) | 2026-08-11 | completes 88; relates to 83 |

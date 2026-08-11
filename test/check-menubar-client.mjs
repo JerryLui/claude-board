@@ -726,20 +726,21 @@ async function main() {
   // -------------------------------------------------------------------------------------
 
   await check('criteria 4 and 6: a running phase\'s popover status line is the SAME string the real index page renders from the same daemon', async () => {
-    // Idle stays out of scope here (per the coordinator): the index page's own idle line
-    // carries a duration ("Idle (25 min)") the popover's deliberately does not, and that
-    // gap is recorded as an open question for the PM, not something this check should
-    // paper over by comparing anyway.
-    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
-      assert.equal((await probe({ home: probeHome, port })).status, 'Idle');
-    });
+    // Idle is compared like any other state. It used to be carved out: the index page
+    // said "Idle (25 min)" where the popover said "Idle", and the gap was an open
+    // question. The PM closed it toward the popover -- a duration that is not counting
+    // down reads as a countdown that has stopped -- so there is nothing left to exempt.
+    // The literal 'Idle' is pinned as well as compared, so the two surfaces cannot drift
+    // together into some third string and still agree with each other.
     const now = Date.now();
     for (const [phase, deadline] of [
+      [null, null],
       ['work', now + 7 * 60_000 + 30_000],
       ['break', now + 3 * 60_000],
       ['longBreak', now + 9 * 60_000],
     ]) {
-      await withDaemon(runningDoc({ phase, deadline, paused: false }), async ({ probeHome, port, secret }) => {
+      const doc = phase === null ? runningDoc(null) : runningDoc({ phase, deadline, paused: false });
+      await withDaemon(doc, async ({ probeHome, port, secret }) => {
         const popoverState = await probe({ home: probeHome, port });
         const tab = loadIndexAgainstDaemon(port, secret);
         try {
@@ -747,6 +748,10 @@ async function main() {
           assert.ok(indexText, `setup: the index page must render a status text for phase ${phase}`);
           assert.equal(popoverState.status, indexText,
             `phase ${phase}: popover said ${JSON.stringify(popoverState.status)}, the index page said ${JSON.stringify(indexText)}`);
+          if (phase === null) {
+            assert.equal(indexText, 'Idle',
+              'an absent timer is the bare word on both surfaces -- no duration, since nothing is counting down');
+          }
         } finally {
           tab.restoreFetch();
         }

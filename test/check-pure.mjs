@@ -8284,7 +8284,7 @@ function extractIndexScriptFn(name) {
   return fn;
 }
 
-await checkAsync('pomodoro widget: no timer running renders a calm idle state (the configured work length, no countdown) and leaves the switch off but live', async () => {
+await checkAsync('pomodoro widget: no timer running renders a calm idle state (the state named, no duration and no countdown) and leaves the switch off but live', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   let document;
@@ -8296,7 +8296,12 @@ await checkAsync('pomodoro widget: no timer running renders a calm idle state (t
   const toggle = document.querySelector('button#pomodoro-toggle');
   assert.ok(status, 'setup failure: no #pomodoro-status rendered');
   assert.match(status.textContent, /idle/i, 'no timer must read as a calm idle state, not an error (spec: "a real state, not an error")');
-  assert.match(status.textContent, /25/, 'idle state must show the configured work length -- spec: "the durations, or a dash"');
+  // ADR 90 retired the bracketed work length this used to require ("Idle (25 min)",
+  // from a spec asking for "the durations, or a dash"): a duration that is not counting
+  // down, in the place a countdown sits, reads as a countdown that has stopped. The
+  // state is the whole of the line now, and it is the same word the Popover has always
+  // used -- so this asserts NO number rather than a particular one.
+  assert.doesNotMatch(status.textContent, /\d/, 'an absent timer names the state and nothing else -- no duration, since nothing is counting down');
   assert.doesNotMatch(status.textContent, /\d\d:\d\d/, 'no timer must never render a countdown');
   assert.doesNotMatch(status.textContent, /\d+\/\d+/, 'no timer must never render a cycle position either');
   assert.equal(toggle.getAttribute('aria-checked'), 'false', 'idle is the switch\'s off state');

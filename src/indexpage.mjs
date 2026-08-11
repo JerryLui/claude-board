@@ -657,9 +657,15 @@ function renderPomodoro() {
   if (!pomodoroDoc) return;
   var timer = pomodoroDoc.timer;
   if (!timer) {
-    // No timer running is a real state, not an error: show the configured
-    // work length as a calm, honest default, never a countdown.
-    if (statusEl) statusEl.textContent = 'Idle (' + pomodoroDoc.settings.workMin + ' min)';
+    // No timer running is a real state, not an error -- and the state is the whole of
+    // what this line says. The configured work length used to sit here in brackets
+    // ("Idle (25 min)") as a calm default naming what a start would give you. It is gone
+    // for the reason bin/menubar.m's cb_derive already refused it: a duration that is not
+    // counting down, in the place a countdown normally sits, reads as a countdown that
+    // has stopped. The number is still one field away in the settings panel below, which
+    // is where a number that can be EDITED belongs. The Popover says 'Idle' too, and the
+    // two surfaces now agree in this state as in every other.
+    if (statusEl) statusEl.textContent = 'Idle';
   } else {
     var ms = pomodoroRemainingMs(timer, pomodoroOffset, Date.now());
     var position = pomodoroCyclePosition(timer.phase, pomodoroDoc.cycle, pomodoroDoc.settings.longEvery);

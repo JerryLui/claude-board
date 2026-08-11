@@ -312,9 +312,10 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
   if (!timer->running) {
     /* Idle: the silhouette alone, no ring and no centre mark, and no countdown at all —
      * countdown text appears only while a timer exists, so an idle item is the icon alone
-     * whatever menubarCountdown says. The widget's own idle row says the same thing
-     * differently ("Idle (25 min)"); there is no room for that in a menu bar, and a
-     * duration that is not counting down would read as one that is. */
+     * whatever menubarCountdown says: a duration that is not counting down would read as
+     * one that is. The index page's widget used to say "Idle (25 min)" and now says the
+     * bare "Idle" this line has always said, on the same reasoning — so the popover and
+     * the widget agree here as they do in every running state. */
     d.phase = CB_IDLE;
     return d;
   }
