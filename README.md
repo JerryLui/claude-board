@@ -64,14 +64,15 @@ cd ~/src/claude-board
 bash install.sh
 ```
 
-Both run the same `install.sh`: one idempotent command, and one click. Verify, revive,
-authorize:
+Both run the same `install.sh`: one idempotent command, and one click. Verify and
+revive:
 
 ```sh
 curl -s http://127.0.0.1:7391/api/health          # expect {"ok":true,...}
 launchctl kickstart -k gui/$(id -u)/claude-board  # daemon stopped answering
-node ~/src/claude-board/bin/authorize.mjs         # authorize another browser
 ```
+
+Authorizing a second browser is below, under "this browser is not authorized."
 
 A session that was already running when you installed does not have the `ask` tool;
 start a new one.
@@ -79,8 +80,9 @@ start a new one.
 ### Requirements
 
 - macOS. `install.sh` refuses anything else, before it writes a thing.
-- Node 22 or newer, at a stable path (`/opt/homebrew/bin/node`). Checked up front. A
-  node managed by `mise`, `nodenv`, `fnm` or similar gets a warning: launchd would keep
+- Node 22 or newer, at a stable path (Homebrew's `/opt/homebrew/bin/node` or
+  `/usr/local/bin/node`, or the system `/usr/bin/node`). Checked up front. A node
+  managed by `mise`, `nodenv`, `fnm` or similar gets a warning: launchd would keep
   pointing at wherever that path was on install day.
 - Claude Code, with `claude` on your `PATH`. Also checked up front.
 - Xcode Command Line Tools (`xcode-select --install`), for the one `cc` call that
@@ -187,6 +189,26 @@ title, project folder or thread id. Searching *inside* archived boards is
 
 Content blocks reference a file rather than quoting it, and the daemon snapshots the
 file at post time.
+
+### An example skill
+
+[`skills/grill-example/SKILL.md`](skills/grill-example/SKILL.md) is a design-interview
+skill that posts each round of open questions as a board, adapted from
+[Matt Pocock's `grill-me`](https://github.com/mattpocock/skills/tree/main/skills/productivity).
+It is not installed. `install.sh` copies the manual and nothing else, and the plugin's
+`skills` override hides this directory from plugin discovery the same way it hides the
+manual — so nothing here registers a `/grill-example` until you copy it yourself:
+
+```sh
+cp -r skills/grill-example ~/.claude/skills/                                  # from a clone
+cp -r ~/Library/Application\ Support/claude-board-checkout/skills/grill-example \
+      ~/.claude/skills/                                                       # from a plugin install
+```
+
+Worth reading before writing your own: it shows what a skill built on the board owns
+(when a round goes up, what context rides with each question) and what it defers to the
+manual (the call, the block kinds, the widgets), which is the split that keeps a caller
+from drifting.
 
 ### If a page says "this browser is not authorized"
 
