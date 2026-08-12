@@ -239,6 +239,16 @@ one, so pulling and reinstalling a security fix is the reader's job, not the dae
   poisoned bundle carries a different cdhash than the one already granted, so the
   reinstall re-prompts, and an attacker who cannot click through that prompt gets nothing.
   Treat the clone directory and the LaunchAgents plist as inside the trust boundary.
+- **A plugin install has a checkout where the clone would be, same boundary.** Installing
+  through the Claude Code plugin route (README, "Installing as a Claude Code plugin")
+  copies `bin/`, `src/`, `skills/` and the two scripts out of the plugin cache into
+  `~/Library/Application Support/claude-board-checkout` and installs from there — the
+  cache itself is versioned and swept on update, so nothing durable points into it. The
+  checkout is the clone's stand-in everywhere the two paragraphs above say "clone":
+  whoever can write it owns the next install, under the same re-prompt. It is refreshed
+  by `/claude-board:install`, never by the daemon; plugin updates change nothing until
+  that runs. Everything the plugin itself registers is inert delivery — no MCP server,
+  no hooks, one user-invoked install skill.
 
 #### Where a reference can reach
 

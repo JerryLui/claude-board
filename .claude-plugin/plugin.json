@@ -1,0 +1,13 @@
+{
+  "name": "claude-board",
+  "description": "A local review surface for Claude Code: the agent posts a board of questions and rendered context, you answer them all in a browser and submit once. This plugin delivers the source and /claude-board:install; the installer registers everything durable.",
+  "author": {
+    "name": "Jerry Liu"
+  },
+  "homepage": "https://github.com/JerryLui/claude-board",
+  "repository": "https://github.com/JerryLui/claude-board",
+  "license": "MIT",
+  "skills": [
+    "./plugin-skills"
+  ]
+}

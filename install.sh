@@ -16,6 +16,10 @@
 #   5.  MCP registration: `claude mcp add --scope user`, absolute path into THIS clone.
 #   6.  skills/claude-board/SKILL.md -> ~/.claude/skills/claude-board/.
 #
+# A run that starts under the Claude Code plugin cache installs a fifth thing first:
+# a checkout of itself (default ~/Library/Application Support/claude-board-checkout),
+# which then plays the clone's part everywhere above -- see "plugin origin" below.
+#
 # Four invariants an edit here has to preserve:
 #
 #   IDEMPOTENT. A second run changes nothing and exits 0: no duplicate registration
@@ -291,9 +295,14 @@ cbs_print_captured() {
 # output cbs_run_captured otherwise swallows, the full config header, and the standing
 # macOS prose in full, and (as a side effect of the fence's own check) suppresses the
 # spinner. Parsed once, here, before anything below reads CLAUDE_BOARD_VERBOSE.
+# Set only by the exec at the end of the plugin-origin relocation below -- argv rather
+# than an env var, and assigned unconditionally here first, so nothing an environment
+# exports can pre-arm it (a `:-` default would inherit an exported value).
+INSTALL_RELOCATED=0
 for _cbs_install_arg in "$@"; do
   case "$_cbs_install_arg" in
     --verbose) CLAUDE_BOARD_VERBOSE=1 ;;
+    --relocated) INSTALL_RELOCATED=1 ;;
   esac
 done
 
@@ -447,6 +456,100 @@ fi
 if [ -z "${HOME:-}" ]; then
   echo "error: HOME is empty — every path this script writes is derived from it." >&2
   exit 1
+fi
+
+# --- plugin origin: relocate to a checkout that outlives the cache -------------
+# Claude Code delivers a plugin as a versioned cache directory and sweeps the old
+# version ~14 days after an update, so nothing durable may point into it -- and this
+# script bakes REPO_DIR into durable things: the MCP registration, a degraded plist's
+# daemon path, the launcher header's CLAUDE_BOARD_REPO_ROOT (what recoveryCommand
+# prints as the path to bin/authorize.mjs). A run that finds itself inside the cache
+# therefore copies what the install needs to a stable checkout and re-execs from
+# there, and the rest of this script never learns the cache existed. A clone is the
+# user's and is never relocated; the checkout is this script's own, which the marker
+# file below proves -- every rm -rf against the checkout, here and in uninstall.sh,
+# requires the marker, so a real clone parked at this path can never be deleted as
+# if it were ours.
+#
+# Placed after the three machine refusals above so nothing destructive runs on a
+# tree, or a machine, the install would refuse anyway. The trailing-slash trims are
+# load-bearing: with a slash, the tmp path lands INSIDE the old checkout (deleted
+# with it), and the cache-root pattern never matches (relocation silently skipped).
+CHECKOUT_MARKER=".claude-board-checkout"
+PLUGIN_CACHE_ROOT="${CLAUDE_BOARD_PLUGIN_CACHE_ROOT:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins}"
+PLUGIN_CACHE_ROOT="${PLUGIN_CACHE_ROOT%/}"
+CHECKOUT_DIR="${CLAUDE_BOARD_CHECKOUT_DIR:-$HOME/Library/Application Support/claude-board-checkout}"
+CHECKOUT_DIR="${CHECKOUT_DIR%/}"
+# Both sides compared in logical AND physical form: REPO_DIR is bash's logical pwd,
+# ~/.claude is routinely a symlink into a dotfiles repo, and CLAUDE_CONFIG_DIR
+# relocates it outright. A missed match fails OPEN -- no relocation, and the cache
+# path is baked into everything -- so the match is deliberately generous.
+REPO_DIR_PHYS="$(cd "$REPO_DIR" && pwd -P)"
+PLUGIN_CACHE_ROOT_PHYS="$(cd "$PLUGIN_CACHE_ROOT" 2>/dev/null && pwd -P || printf '%s' "$PLUGIN_CACHE_ROOT")"
+PLUGIN_ORIGIN=0
+case "$REPO_DIR/" in
+  "$PLUGIN_CACHE_ROOT/"*|"$PLUGIN_CACHE_ROOT_PHYS/"*) PLUGIN_ORIGIN=1 ;;
+esac
+case "$REPO_DIR_PHYS/" in
+  "$PLUGIN_CACHE_ROOT/"*|"$PLUGIN_CACHE_ROOT_PHYS/"*) PLUGIN_ORIGIN=1 ;;
+esac
+if [ "$PLUGIN_ORIGIN" -eq 1 ]; then
+  # Refused BEFORE anything is copied or deleted, not discovered on the second pass:
+  # a checkout under the cache root would re-exec forever. --relocated backstops the
+  # same loop if a future edit breaks this check.
+  case "$CHECKOUT_DIR/" in
+    "$PLUGIN_CACHE_ROOT/"*|"$PLUGIN_CACHE_ROOT_PHYS/"*)
+      echo "error: CLAUDE_BOARD_CHECKOUT_DIR ($CHECKOUT_DIR) resolves under the plugin cache ($PLUGIN_CACHE_ROOT)" >&2
+      echo "       set CLAUDE_BOARD_CHECKOUT_DIR to a directory outside the cache" >&2
+      exit 1 ;;
+  esac
+  if [ "$INSTALL_RELOCATED" = "1" ]; then
+    echo "error: the relocated install ($REPO_DIR) still resolves under the plugin cache ($PLUGIN_CACHE_ROOT)" >&2
+    echo "       set CLAUDE_BOARD_CHECKOUT_DIR to a directory outside the cache" >&2
+    exit 1
+  fi
+  if [ -d "$CHECKOUT_DIR" ] && [ ! -f "$CHECKOUT_DIR/$CHECKOUT_MARKER" ]; then
+    echo "error: $CHECKOUT_DIR exists and is not a claude-board checkout (no $CHECKOUT_MARKER file)" >&2
+    echo "       move it aside, or set CLAUDE_BOARD_CHECKOUT_DIR elsewhere" >&2
+    exit 1
+  fi
+  cbs_step_ok "plugin" "relocating" "$(display_path "$CHECKOUT_DIR")"
+  CHECKOUT_TMP="$CHECKOUT_DIR.tmp.$$"
+  rm -rf "$CHECKOUT_TMP"
+  # Tmp litter from a crashed earlier run, swept only when it carries the marker --
+  # the same proof-of-ownership every other deletion here demands.
+  for _stale_tmp in "$CHECKOUT_DIR".tmp.*; do
+    if [ -f "$_stale_tmp/$CHECKOUT_MARKER" ]; then rm -rf "$_stale_tmp"; fi
+  done
+  mkdir -p "$(dirname "$CHECKOUT_DIR")"
+  mkdir -p "$CHECKOUT_TMP"
+  trap 'rm -rf "$CHECKOUT_TMP"' EXIT
+  # The set the install actually needs, entry by entry, never the whole cache: for a
+  # local-path marketplace source the cache is a working-directory copy, gitignored
+  # files included, and none of that belongs in a durable second copy. Per-entry cp
+  # into a directory we made also keeps a symlinked cache dir from turning the
+  # checkout itself into a symlink back into the cache.
+  for _entry in install.sh uninstall.sh package.json LICENSE bin src skills; do
+    cp -R "$REPO_DIR/$_entry" "$CHECKOUT_TMP/$_entry"
+  done
+  # Marker before the chmod, so it gets the same owner-only mode as everything else.
+  : > "$CHECKOUT_TMP/$CHECKOUT_MARKER"
+  chmod -R u+w,go-rwx "$CHECKOUT_TMP"
+  # Swap by rename, old tree aside first: the failure between the two renames costs a
+  # moment of no checkout, never a good checkout replaced by nothing.
+  CHECKOUT_OLD=""
+  if [ -d "$CHECKOUT_DIR" ]; then
+    CHECKOUT_OLD="$CHECKOUT_DIR.old.$$"
+    mv "$CHECKOUT_DIR" "$CHECKOUT_OLD"
+  fi
+  if ! mv "$CHECKOUT_TMP" "$CHECKOUT_DIR"; then
+    if [ -n "$CHECKOUT_OLD" ]; then mv "$CHECKOUT_OLD" "$CHECKOUT_DIR"; fi
+    echo "error: could not move the staged checkout into place at $CHECKOUT_DIR" >&2
+    exit 1
+  fi
+  if [ -n "$CHECKOUT_OLD" ]; then rm -rf "$CHECKOUT_OLD"; fi
+  trap - EXIT
+  exec bash "$CHECKOUT_DIR/install.sh" --relocated "$@"
 fi
 
 # This path is baked into the signed launcher and into the MCP registration, so it has to
@@ -746,6 +849,28 @@ fi
 printf '%s' "$PORT" > "$PORT_RECORD_FILE"
 # `/file/` and its allowlist are gone (ADR.md entry 38); clear what an older install left.
 rm -f "$SERVE_ROOTS_RECORD_FILE"
+
+# The checkout record: where the plugin-origin relocation actually put the tree, so
+# uninstall.sh removes what was installed rather than whatever sits at the default
+# path. A checkout-origin run (the marker is the proof) records itself; a clone-origin
+# run is a takeover -- every registration this run writes points at the clone, so a
+# marker-bearing checkout is stale the moment this run succeeds, and is taken back
+# here the way uninstall.sh would take it back. Marker-gated like every checkout
+# deletion; a directory without the marker is not ours and is left alone, silently
+# (the plugin-origin path already refused to relocate onto it, so reaching one here
+# means the user built it by hand).
+CHECKOUT_RECORD_FILE="$SECRET_DIR/checkout"
+if [ -f "$REPO_DIR/$CHECKOUT_MARKER" ]; then
+  printf '%s' "$REPO_DIR" > "$CHECKOUT_RECORD_FILE"
+else
+  STALE_CHECKOUT="$(cat "$CHECKOUT_RECORD_FILE" 2>/dev/null || true)"
+  if [ -z "$STALE_CHECKOUT" ]; then STALE_CHECKOUT="$CHECKOUT_DIR"; fi
+  if [ "$STALE_CHECKOUT" != "$REPO_DIR" ] && [ -d "$STALE_CHECKOUT" ] && [ -f "$STALE_CHECKOUT/$CHECKOUT_MARKER" ]; then
+    rm -rf "$STALE_CHECKOUT"
+    cbs_step_ok "checkout" "removed, superseded" "$(display_path "$STALE_CHECKOUT")"
+  fi
+  rm -f "$CHECKOUT_RECORD_FILE"
+fi
 
 # --- content hashing helpers -------------------------------------------------
 # Used below by the launcher bundle step to decide whether it needs rebuilding.

@@ -1,0 +1,11 @@
+{
+  "name": "claude-board",
+  "owner": { "name": "Jerry Liu", "url": "https://github.com/JerryLui" },
+  "plugins": [
+    {
+      "name": "claude-board",
+      "source": "./",
+      "description": "A local review surface for Claude Code: boards of questions and rendered context, answered in a browser, submitted once."
+    }
+  ]
+}

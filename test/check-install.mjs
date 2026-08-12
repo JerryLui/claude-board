@@ -251,6 +251,9 @@ const installedSkill = path.join(skillsDir, 'claude-board', 'SKILL.md');
 const env = {
   ...process.env,
   CLAUDE_BOARD_SKILLS_DIR: skillsDir,
+  // Both scripts default this to a real path under ~/Library and delete what they
+  // find there (marker-gated); the suite's runs stay inside workDir.
+  CLAUDE_BOARD_CHECKOUT_DIR: path.join(workDir, 'checkout'),
   CLAUDE_BOARD_SECRET_FILE: secretFile,
   CLAUDE_BOARD_LAUNCH_AGENTS_DIR: launchAgentsDir,
   CLAUDE_BOARD_LOG_DIR: logDir,
@@ -2763,6 +2766,10 @@ http.createServer((req, res) => {
         // $HOME/.claude/skills and removes the manual it finds there, so omitting this
         // deletes the real one. It did, on the first suite run after step 6 shipped.
         CLAUDE_BOARD_SKILLS_DIR: path.join(freshWorkDir, 'skills'),
+        // The third: step 2e's default is the real plugin checkout under
+        // ~/Library/Application Support, marker-gated but still not this suite's to
+        // touch (audit 2026-08-12, the same seam class as the two above).
+        CLAUDE_BOARD_CHECKOUT_DIR: path.join(freshWorkDir, 'checkout'),
         CLAUDE_BOARD_HOME: path.join(freshWorkDir, 'Store'),
         CLAUDE_BOARD_MCP_CMD: claudeStub, // still stubbed -- never touches the real `claude`
         CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,
@@ -2880,6 +2887,195 @@ http.createServer((req, res) => {
     assert.match(r.stderr, /CAPTURE-MARKER-STDOUT-LINE/, "the failed command's own stdout must be captured and shown");
     assert.match(r.stderr, /CAPTURE-MARKER-STDERR-LINE/, 'and its stderr too -- cbs_run_captured merges both');
     assert.doesNotMatch(r.stdout, /CAPTURE-MARKER/, 'captured output must never reach stdout');
+  });
+
+  // --- plugin origin -------------------------------------------------------------
+  // install.sh relocates a run that starts under the plugin cache root to a stable
+  // checkout and re-execs from it (its "plugin origin" block says why: the cache is
+  // versioned and swept on update, so nothing durable may name it). Staged under a fake
+  // cache root via the CLAUDE_BOARD_PLUGIN_CACHE_ROOT seam -- the real root is under
+  // $HOME/.claude, which this suite never touches.
+
+  /** The exact entry set the relocation copies, staged at `dest`. One staged file is
+   * made read-only on purpose: the relocation's `chmod -R u+w` exists for a hostile
+   * source tree, and a stage with no read-only file would never exercise it. */
+  function stagePluginTree(dest) {
+    mkdirSync(dest, { recursive: true });
+    for (const entry of ['install.sh', 'uninstall.sh', 'package.json', 'LICENSE', 'bin', 'src', 'skills']) {
+      cpSync(path.join(repoRoot, entry), path.join(dest, entry), { recursive: true });
+    }
+    chmodSync(path.join(dest, 'skills', 'claude-board', 'SKILL.md'), 0o444);
+  }
+
+  /** Per-check roots for a run that must not share the suite-wide dirs. */
+  function pluginEnv(root, tag, extra) {
+    return {
+      ...env,
+      ...quietStubs(tag),
+      CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
+      CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
+      CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
+      CLAUDE_BOARD_SKILLS_DIR: path.join(root, 'skills-dest'),
+      CLAUDE_BOARD_SECRET_FILE: path.join(root, 'config', 'claude-board', 'secret'),
+      ...extra,
+    };
+  }
+  // Every spawn below gets a timeout: two of these checks exist to prove "refuses
+  // instead of looping", and without a timeout a regression there hangs the suite
+  // forever instead of failing it.
+  const PLUGIN_SPAWN_OPTS = { encoding: 'utf8', timeout: 120_000 };
+
+  await check('a plugin-origin run relocates to the checkout, twice, and nothing durable names the cache', async () => {
+    const root = path.join(workDir, 'plugin-origin');
+    const cacheRoot = path.join(root, 'plugins');
+    const cacheCopy = path.join(cacheRoot, 'cache', 'claude-board', 'claude-board', 'deadbeef1234');
+    const checkout = path.join(root, 'checkout');
+    stagePluginTree(cacheCopy);
+    const stubs = quietStubs('plugin-origin');
+    // Trailing slash on the seam on purpose: the block normalises it, and without the
+    // trim the tmp dir lands inside the old checkout and both are deleted (audit
+    // 2026-08-12, reproduced).
+    const runEnv = pluginEnv(root, 'plugin-origin', {
+      ...stubs,
+      CLAUDE_BOARD_PLUGIN_CACHE_ROOT: cacheRoot,
+      CLAUDE_BOARD_CHECKOUT_DIR: `${checkout}/`,
+      // The loop guard is argv-only: an exported variable must not pre-arm it and
+      // refuse this perfectly legitimate first relocation (a `:-` default would).
+      INSTALL_RELOCATED: '1',
+    });
+    const r = spawnSync('bash', [path.join(cacheCopy, 'install.sh')], { env: runEnv, ...PLUGIN_SPAWN_OPTS });
+    assert.equal(r.signal, null, 'the run must finish on its own, not on the timeout');
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(r.stdout, /relocating/, 'the relocation must be announced, not silent');
+    // The checkout is complete, marked, and owner-only -- not merely present.
+    for (const f of ['install.sh', 'uninstall.sh', 'bin/daemon.mjs', 'bin/mcp.mjs', 'src/server.mjs', '.claude-board-checkout']) {
+      assert.ok(existsSync(path.join(checkout, f)), `the checkout must carry ${f}`);
+    }
+    assert.equal(statSync(checkout).mode & 0o077, 0, 'the checkout must be owner-only');
+    assert.ok(statSync(path.join(checkout, 'skills', 'claude-board', 'SKILL.md')).mode & 0o200,
+      'the read-only staged file must have been made writable (chmod -R u+w)');
+    assert.equal(readFileSync(path.join(root, 'config', 'claude-board', 'checkout'), 'utf8'), checkout,
+      'the record beside the secret must name the real checkout');
+    // Nothing durable names the cache: not the plist, not the MCP registration.
+    const plistDir = path.join(root, 'LaunchAgents');
+    const plists = readdirSync(plistDir).map(f => readFileSync(path.join(plistDir, f), 'utf8')).join('\n');
+    assert.ok(!plists.includes(cacheCopy), 'the plist must not point into the plugin cache');
+    const claudeLog = readFileSync(stubs.STUB_CLAUDE_LOG, 'utf8');
+    assert.ok(!claudeLog.includes(cacheCopy), 'the MCP registration must not point into the plugin cache');
+    assert.ok(claudeLog.includes(path.join(checkout, 'bin', 'mcp.mjs')),
+      'the MCP registration must name the checkout shim');
+    assert.ok(existsSync(path.join(root, 'skills-dest', 'claude-board', 'SKILL.md')),
+      'the manual must land at its personal-skill home, plugin origin or not');
+    // Second run: the headline idempotency claim holds on this path too, the swap
+    // replaces the marked checkout it made, and the staging leaves no litter behind.
+    const second = spawnSync('bash', [path.join(cacheCopy, 'install.sh')], { env: runEnv, ...PLUGIN_SPAWN_OPTS });
+    assert.equal(second.status, 0, `second run:\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    assert.ok(existsSync(path.join(checkout, 'bin', 'daemon.mjs')), 'the checkout must survive a repeat install');
+    const litter = readdirSync(root).filter(n => n.startsWith('checkout.tmp.') || n.startsWith('checkout.old.'));
+    assert.deepEqual(litter, [], 'a completed swap must leave no tmp or old dirs beside the checkout');
+  });
+
+  await check('the relocation refuses rather than deletes: a looping checkout, and a dir that is not ours', async () => {
+    const root = path.join(workDir, 'plugin-loop');
+    const cacheRoot = path.join(root, 'plugins');
+    const cacheCopy = path.join(cacheRoot, 'cache', 'claude-board', 'claude-board', 'deadbeef5678');
+    stagePluginTree(cacheCopy);
+    // A checkout under the cache root: refused BEFORE anything is copied or deleted --
+    // the reactive form of this guard cost a full destructive relocation first (audit
+    // 2026-08-12, reproduced).
+    const nested = path.join(cacheRoot, 'cache', 'nested-checkout');
+    const r = spawnSync('bash', [path.join(cacheCopy, 'install.sh')], {
+      env: pluginEnv(root, 'plugin-loop', {
+        CLAUDE_BOARD_PLUGIN_CACHE_ROOT: cacheRoot,
+        CLAUDE_BOARD_CHECKOUT_DIR: nested,
+      }),
+      ...PLUGIN_SPAWN_OPTS,
+    });
+    assert.equal(r.signal, null, 'the refusal must not be the timeout');
+    assert.notEqual(r.status, 0, 'a checkout inside the cache root must fail the install, not loop');
+    assert.match(r.stderr, /CLAUDE_BOARD_CHECKOUT_DIR/, 'and the refusal must name the override that fixes it');
+    assert.ok(!existsSync(nested), 'and must refuse before staging anything at the looping path');
+    // A directory at the checkout path with no marker file is not ours: refused, kept.
+    const foreign = path.join(root, 'foreign-checkout');
+    mkdirSync(foreign, { recursive: true });
+    writeFileSync(path.join(foreign, 'precious.txt'), 'not a checkout');
+    const r2 = spawnSync('bash', [path.join(cacheCopy, 'install.sh')], {
+      env: pluginEnv(root, 'plugin-foreign', {
+        CLAUDE_BOARD_PLUGIN_CACHE_ROOT: cacheRoot,
+        CLAUDE_BOARD_CHECKOUT_DIR: foreign,
+      }),
+      ...PLUGIN_SPAWN_OPTS,
+    });
+    assert.notEqual(r2.status, 0, 'a marker-less directory at the checkout path must refuse the install');
+    assert.ok(existsSync(path.join(foreign, 'precious.txt')), 'and must leave the directory exactly as it was');
+  });
+
+  await check('a clone install takes back a marked checkout, and only a marked one', async () => {
+    const root = path.join(workDir, 'plugin-takeover');
+    const checkout = path.join(root, 'stale-checkout');
+    mkdirSync(checkout, { recursive: true });
+    writeFileSync(path.join(checkout, '.claude-board-checkout'), '');
+    writeFileSync(path.join(checkout, 'leftover.mjs'), '// stale plugin code');
+    const runEnv = pluginEnv(root, 'plugin-takeover', { CLAUDE_BOARD_CHECKOUT_DIR: checkout });
+    // Clone origin: run from the repo itself, cache-root seam untouched.
+    const r = spawnSync('bash', [installScript], { env: runEnv, ...PLUGIN_SPAWN_OPTS });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(r.stdout, /superseded/, 'the takeover must be announced');
+    assert.ok(!existsSync(checkout), 'a clone install must take the stale checkout back');
+    // The same path without the marker survives the same run untouched, silently.
+    mkdirSync(checkout, { recursive: true });
+    writeFileSync(path.join(checkout, 'precious.txt'), 'a real clone parked here');
+    const r2 = spawnSync('bash', [installScript], { env: runEnv, ...PLUGIN_SPAWN_OPTS });
+    assert.equal(r2.status, 0);
+    assert.ok(existsSync(path.join(checkout, 'precious.txt')), 'a marker-less directory is never ours to delete');
+  });
+
+  await check('uninstall removes a marked checkout via its record, and refuses a marker-less one', async () => {
+    const root = path.join(workDir, 'plugin-uninstall');
+    const cacheRoot = path.join(root, 'plugins');
+    const cacheCopy = path.join(cacheRoot, 'cache', 'claude-board', 'claude-board', 'deadbeefabcd');
+    const checkout = path.join(root, 'checkout');
+    stagePluginTree(cacheCopy);
+    const runEnv = pluginEnv(root, 'plugin-uninstall', {
+      CLAUDE_BOARD_PLUGIN_CACHE_ROOT: cacheRoot,
+      CLAUDE_BOARD_CHECKOUT_DIR: checkout,
+    });
+    const installed = spawnSync('bash', [path.join(cacheCopy, 'install.sh')], { env: runEnv, ...PLUGIN_SPAWN_OPTS });
+    assert.equal(installed.status, 0, `setup sanity:\n${installed.stdout}\n${installed.stderr}`);
+    // The record, not the seam, is what a real uninstall has: drop the seam here.
+    const { CLAUDE_BOARD_CHECKOUT_DIR: _dropped, ...uninstallEnv } = runEnv;
+    const r = spawnSync('bash', [path.join(checkout, 'uninstall.sh')], { env: uninstallEnv, ...PLUGIN_SPAWN_OPTS });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.ok(!existsSync(checkout), 'uninstall must remove the checkout the record names');
+    assert.ok(!existsSync(path.join(root, 'config', 'claude-board', 'checkout')), 'and the record with it');
+    // A marker-less dir at the checkout path is warned about and kept.
+    mkdirSync(checkout, { recursive: true });
+    writeFileSync(path.join(checkout, 'precious.txt'), 'not ours');
+    const r2 = spawnSync('bash', [uninstallScript], {
+      env: { ...uninstallEnv, CLAUDE_BOARD_CHECKOUT_DIR: checkout }, ...PLUGIN_SPAWN_OPTS,
+    });
+    assert.equal(r2.status, 0);
+    assert.ok(existsSync(path.join(checkout, 'precious.txt')), 'a marker-less directory survives uninstall');
+    assert.match(r2.stderr, /not removed/, 'and the refusal is said out loud, not silent');
+  });
+
+  await check('the plugin manifests name what exists, and bundle no MCP server and no second manual', async () => {
+    // install.sh is the single registrar: the plugin delivers the tree and
+    // /claude-board:install, nothing else. A plugin MCP server would rename the ask
+    // tool (mcp__plugin_* prefix); a plugin copy of the manual would double-register it.
+    const plugin = JSON.parse(readFileSync(path.join(repoRoot, '.claude-plugin', 'plugin.json'), 'utf8'));
+    assert.equal(plugin.name, 'claude-board');
+    assert.deepEqual(plugin.skills, ['./plugin-skills'], 'skills override must hide skills/ (the manual) from plugin discovery');
+    assert.ok(!('mcpServers' in plugin), 'no inline plugin MCP server');
+    assert.ok(!existsSync(path.join(repoRoot, '.mcp.json')), 'no .mcp.json at the plugin root');
+    const skill = readFileSync(path.join(repoRoot, 'plugin-skills', 'install', 'SKILL.md'), 'utf8');
+    assert.match(skill, /^name: install$/m, 'frontmatter name pins the invocation (cache dir names are version strings)');
+    assert.match(skill, /^disable-model-invocation: true$/m);
+    const marketplace = JSON.parse(readFileSync(path.join(repoRoot, '.claude-plugin', 'marketplace.json'), 'utf8'));
+    assert.equal(marketplace.name, 'claude-board');
+    assert.equal(marketplace.plugins.length, 1);
+    assert.equal(marketplace.plugins[0].name, 'claude-board');
+    assert.equal(marketplace.plugins[0].source, './');
   });
 
   await check('--verbose restores the full config header and the standing prose in full, even on a repeat run', async () => {

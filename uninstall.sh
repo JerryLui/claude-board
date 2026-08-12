@@ -1,13 +1,16 @@
 #!/bin/bash
-# uninstall.sh — the reverse of install.sh. Removes the two things install.sh puts
-# outside this repository:
+# uninstall.sh — the reverse of install.sh. Removes what install.sh puts outside
+# this repository:
 #
 #   1. the launchd job (bootout) and its plist in ~/Library/LaunchAgents,
 #   2. the MCP registration (`claude mcp remove --scope user`),
 #   3. ~/Applications/claude-board.app, the launcher bundle, the stamp that records
 #      what it was built from, and the bundle's LaunchServices record,
 #   4. ~/.claude/skills/claude-board/SKILL.md, the manual install.sh step 6 copied
-#      there out of this clone.
+#      there out of this clone,
+#   5. the plugin checkout (default ~/Library/Application Support/claude-board-checkout)
+#      and its record beside the secret — only when it carries the marker file the
+#      plugin-origin relocation plants, see step 2e.
 #
 # Order, and why: launchd first (bootout, then delete its plist) so nothing is
 # actively supervised while the rest of the teardown runs. The MCP registration is
@@ -538,6 +541,41 @@ fi
 # teardown -- it only ever fires for a machine an old, pre-ADR-38 install left residue
 # on. The ordinary case is that this file has never existed, and a tick line that has to
 # name it just to say so would be exactly the noise this whole rework exists to cut.
+
+# --- 2e. the plugin checkout ----------------------------------------------------
+# A plugin-origin install.sh relocates itself to this checkout before installing (see
+# its own header comment), so the checkout is this repo's code, never user data, and
+# what the install wrote the uninstall takes back. Which directory that actually is
+# comes from the record install.sh keeps beside the secret, the same carry-forward
+# every other install-time choice gets; the seam and the default only stand in when
+# no record exists. The rm -rf is gated on the marker file the relocation plants --
+# without it the directory is not ours (a clone parked at this path, a hand-made
+# dir), and it is left in place with a warning instead of deleted. Silent when
+# absent, same reasoning as 2d: on a clone-install machine it has never existed.
+#
+# On a plugin machine this script IS $CHECKOUT_DIR/uninstall.sh and deletes the
+# directory it runs from. bash holds the script's fd, so the run completes; the
+# caller's shell is merely left in a deleted cwd.
+CHECKOUT_MARKER=".claude-board-checkout"
+CHECKOUT_RECORD_FILE="$SECRET_DIR/checkout"
+CHECKOUT_DIR="${CLAUDE_BOARD_CHECKOUT_DIR:-}"
+if [ -z "$CHECKOUT_DIR" ]; then
+  CHECKOUT_DIR="$(cat "$CHECKOUT_RECORD_FILE" 2>/dev/null || true)"
+fi
+if [ -z "$CHECKOUT_DIR" ]; then
+  CHECKOUT_DIR="$HOME/Library/Application Support/claude-board-checkout"
+fi
+CHECKOUT_DIR="${CHECKOUT_DIR%/}"
+if [ -d "$CHECKOUT_DIR" ]; then
+  if [ -f "$CHECKOUT_DIR/$CHECKOUT_MARKER" ]; then
+    rm -rf "$CHECKOUT_DIR"
+    cbs_step_ok "checkout" "removed" "$CHECKOUT_DIR"
+  else
+    cbs_step_warn "checkout" "not removed" "$CHECKOUT_DIR"
+    cbs_detail "no $CHECKOUT_MARKER file, so this directory is not a claude-board checkout"
+  fi
+fi
+rm -f "$CHECKOUT_RECORD_FILE"
 
 # --- 3. report what is deliberately left behind --------------------------------
 # The whole point of this section: an uninstall that silently destroyed a review

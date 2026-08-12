@@ -103,8 +103,10 @@ second run, which is what keeps the grant below from being asked for again.
 (the launchd job), `~/Library/Application Support/claude-board/` (the board store — your
 review history), `~/.config/claude-board/secret` (the local auth secret), `~/.claude/skills/claude-board/`
 (the manual Claude Code reads), `~/Library/Logs/claude-board/` (logs), and Claude Code's
-own MCP registration (`claude mcp add`). No sudo, no network beyond a loopback health
-check, nothing downloaded.
+own MCP registration (`claude mcp add`). A plugin install (below) adds an eighth:
+`~/Library/Application Support/claude-board-checkout`, the code copy the daemon paths
+point at instead of a clone. No sudo, no network beyond a loopback health check,
+nothing downloaded.
 
 Stop it without uninstalling anything: `launchctl bootout gui/$(id -u)/claude-board`
 unloads the launchd job. It comes back on next login, or on `bash install.sh` again —
@@ -112,6 +114,34 @@ unloads the launchd job. It comes back on next login, or on `bash install.sh` ag
 
 **The clone is a build input, not what the daemon runs.** A `git pull` alone changes
 nothing about what is running; re-run `bash install.sh` to take it.
+
+### Installing as a Claude Code plugin
+
+The same install, without leaving Claude Code — the repo is its own plugin marketplace:
+
+```
+/plugin marketplace add JerryLui/claude-board
+/plugin install claude-board@claude-board
+/claude-board:install
+```
+
+(A local clone works as the marketplace too: `/plugin marketplace add ~/src/claude-board`.)
+
+`/claude-board:install` runs the same `install.sh`, from the plugin's cache directory.
+Its first move there is to copy what it needs to
+`~/Library/Application Support/claude-board-checkout` and re-run from that checkout:
+Claude Code keeps plugins in a versioned cache and sweeps old versions after an update,
+so nothing durable — the MCP registration, the launchd job, the recovery command — may
+point into it. Everything after that is the clone install, identically: same registrar,
+same one click, same idempotence. After a plugin update, run `/claude-board:install`
+again — the `git pull` rule above, wearing plugin clothes.
+
+The plugin deliberately registers no MCP server and no manual of its own. Plugin-registered
+servers get a namespaced tool prefix, which would rename the `ask` tool depending on how
+you installed; `install.sh` stays the single registrar either way. Removing it all with no
+clone around: `bash ~/Library/Application\ Support/claude-board-checkout/uninstall.sh`
+(it removes the checkout too, itself included), then `/plugin uninstall` and
+`/plugin marketplace remove` take back what Claude Code holds.
 
 `install.sh` never touches `~/.claude/settings.json`, so the optional `SessionStart` hook
 that starts a pomodoro work interval with your session is applied by hand:
