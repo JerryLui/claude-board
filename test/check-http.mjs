@@ -4700,6 +4700,9 @@ async function main() {
       [{ longEvery: 0 }, /longEvery/, 'zero would divide by zero in settleBoundary'],
       [{ longEvery: -1 }, /longEvery/, 'a negative longEvery is meaningless'],
       [{ notify: 'yes' }, /notify/, 'a truthy non-boolean is still rejected'],
+      // The Master switch is validated exactly the same way, and must name ITS OWN
+      // field too -- same reasoning as notifyRounds just below.
+      [{ enabled: 'yes' }, /enabled/, 'a truthy non-boolean is rejected on the Master switch too'],
       // The round-banner tick (ticket 03, ADR.md entry 58) is validated the same way,
       // and must name ITS OWN field, not "notify" -- a shared regex here would pass
       // even if the two toggles were validated by the same code path with the wrong
@@ -4782,6 +4785,78 @@ async function main() {
     assert.equal(reread.settings.cueBreak, soundB, 'cueBreak must survive a daemon restart');
     assert.equal(reread.settings.cueLongBreak, NO_CUE, 'cueLongBreak must survive a daemon restart');
     assert.equal('sound' in reread.settings, false, 'the retired sound key must never reappear');
+  });
+
+  // --- the Master switch (`enabled`) ------------------------------------
+  //
+  // Route-level coverage for "Pomodoro made optional": the wire shape GET reports once
+  // off, the settings write actually flipping it (clearing a running Timer Rollover-
+  // style and refusing a subsequent ensure), and persistence across a restart -- the
+  // pure semantics (mergeSettings, normalizeDoc, startWork, the armed setTimeout
+  // actually being cancelled) are already covered in test/check-pomodoro.mjs; this is
+  // specifically about the HTTP surface those pure functions sit behind.
+
+  await check('POMODORO: GET keeps answering once the Master switch is off, and reports the disabled state -- no timer rides the wire', async () => {
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.ok(started.timer, 'sanity: a real interval is running before the switch flips');
+
+    const off = await (await fetch(`${base}/api/pomodoro/settings`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: false }),
+    })).json();
+    assert.equal(off.settings.enabled, false, 'the write itself reports the flipped switch');
+    assert.equal(off.timer, null, 'and the cleared Timer, in the same response');
+
+    const doc = await (await fetch(`${base}/api/pomodoro`)).json();
+    assert.equal(doc.settings.enabled, false, 'GET keeps answering, and reports the disabled state');
+    assert.equal(doc.timer, null, 'no timer is present on the wire while off');
+    assert.ok('settings' in doc && 'cycle' in doc && 'cycleDate' in doc, 'the rest of the document rides the wire exactly as it does while on');
+
+    // Restore for the checks that follow.
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
+  });
+
+  await check('POMODORO: the settings write flips the Master switch, clears a running Timer Rollover-style, and refuses ensure while off', async () => {
+    await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
+    const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(started.timer.phase, 'work', 'sanity: a real interval is running before the switch flips');
+
+    const off = await (await fetch(`${base}/api/pomodoro/settings`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: false }),
+    })).json();
+    assert.equal(off.settings.enabled, false);
+    assert.equal(off.timer, null, 'flipping off clears the running Timer');
+    assert.equal(off.cycle, 0, 'and resets the Cycle, same as a Rollover');
+
+    const ensureWhileOff = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(ensureWhileOff.timer, null, 'ensure is refused while off -- the exact seam the session-start hook\'s curl reaches, safe without the hook changing');
+
+    const on = await (await fetch(`${base}/api/pomodoro/settings`, {
+      method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }),
+    })).json();
+    assert.equal(on.settings.enabled, true);
+    assert.equal(on.timer, null, 'flipping back on starts idle -- nothing is restored (ADR 90)');
+
+    // And idle-while-on can start a real interval again, proving the disable/re-enable
+    // round trip left no residue behind.
+    const restarted = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
+    assert.equal(restarted.timer.phase, 'work');
+  });
+
+  await check('POMODORO: the Master switch survives a daemon restart, same as every other toggle', async () => {
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: false }) });
+
+    await new Promise(resolve => server.close(resolve));
+    ({ server, port } = await startServer({ home, port: 0 }));
+    base = `http://127.0.0.1:${port}`;
+
+    const reread = await (await fetch(`${base}/api/pomodoro`)).json();
+    assert.equal(reread.settings.enabled, false, 'the Master switch must survive a daemon restart');
+    assert.equal(reread.timer, null, 'and the off state must still carry no timer after the restart');
+
+    // Restore for the checks that follow -- nothing past this point is about pomodoro.
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
   });
 
   await check('GET /file no longer exists: the daemon serves boards and nothing else', () => {

@@ -71,8 +71,15 @@ function sessionCookieHeader() {
 // 'http://127.0.0.1:PORThttp://127.0.0.1:PORT/api/pomodoro').
 const REAL_FETCH = globalThis.fetch;
 
-function loadIndexAgainstDaemon(port) {
-  const document = parseHTML(renderIndexPage({ threads: [] }));
+// `pomodoroEnabled`/`hash` default to the values every pre-ADR-103 call site here
+// already relied on (the full widget, no fragment) -- an existing call passing
+// neither argument is unaffected by either one's addition. `pomodoroEnabled` feeds
+// renderIndexPage directly (this helper calls it in-process, the same way every
+// check here always has, never through a real GET / -- proving the SERVER's own
+// gate, src/server.mjs's readPomodoroDoc call, is a different check below that
+// goes through the real route instead of this helper).
+function loadIndexAgainstDaemon(port, { pomodoroEnabled = true, hash = '' } = {}) {
+  const document = parseHTML(renderIndexPage({ threads: [], pomodoroEnabled }));
   const intervals = [];
   const fakeSetInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
   globalThis.fetch = (url, opts) => {
@@ -86,8 +93,8 @@ function loadIndexAgainstDaemon(port) {
   // new Function('document', 'window', 'location', ui) contract every check that
   // drives src/ui.mjs already uses. The window is the parsed document's OWN
   // defaultView, so a listener the script registers is reachable from a check;
-  // location is a plain { hash }, empty here because nothing in this file is
-  // about the fragment -- test/check-pure.mjs owns that half.
+  // location is a plain { hash }, empty unless a check below asks for the
+  // fragment explicitly (ADR 103's own reachability criterion, off included).
   // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
   // this scope so initIndexStream takes its own `typeof` early return by this file's
   // choice rather than by whether the host node build exposes a global EventSource
@@ -95,12 +102,34 @@ function loadIndexAgainstDaemon(port) {
   // resolve to the real constructor and this harness would open a live connection to
   // the relative URL '/api/events' -- from a check that is about the pomodoro widget.
   // test/check-index-live.mjs is the one harness that really supplies one.
-  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(document, fakeSetInterval, document.defaultView, { hash: '' });
+  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(document, fakeSetInterval, document.defaultView, { hash });
   return {
     document,
     intervals,
     restoreFetch() { globalThis.fetch = REAL_FETCH; },
   };
+}
+
+/** The pomodoro widget's own real markup, isolated out of a full renderIndexPage()
+ * (or a real GET / body) -- never a bare `html.includes('name="workMin"')` against
+ * the WHOLE page, which is the exact trap test/check-pure.mjs's own comment names
+ * ("'pomodoro-widget'/'theme-toggle' both also appear in this file's own CSS
+ * comments"): indexScript is the SAME unconditional string regardless of which
+ * shape rendered, and it carries the literal text of every selector this widget's
+ * own client code ever looks up (`form.querySelector('input[name="workMin"]')`,
+ * `document.querySelector('span#pomodoro-status')`, ...) -- so a plain substring
+ * search against the full page finds those every time, on or off, and an
+ * assertion built on it either always fails (checking absence) or always passes
+ * vacuously (checking presence), never actually reading which shape rendered.
+ * Slicing out just the widget's own markup, between its wrapper's opening tag and
+ * themeToggle()'s button (the two real elements test/check-pure.mjs's own ordering
+ * check already anchors on), is what makes a plain substring search meaningful
+ * again. */
+function pomodoroWidgetMarkup(html) {
+  const start = html.indexOf('<div class="pomodoro-widget" id="pomodoro-widget">');
+  const end = html.indexOf('<button type="button" id="theme-toggle"');
+  assert.ok(start >= 0 && end > start, 'setup failure: could not isolate the pomodoro widget\'s own markup from the rest of the page');
+  return html.slice(start, end);
 }
 
 /** A real network round trip against 127.0.0.1 settles in low single-digit ms,
@@ -260,7 +289,11 @@ async function main() {
         const onDisk = readPomodoroDoc(home);
         // Still a WHOLE-object comparison, deliberately: it is what catches a form that
         // drops a stored setting it never displayed.
-        assert.deepEqual(onDisk.settings, { workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, notifyRounds: true, cueWork, cueBreak, cueLongBreak, menubarCountdown: false, menubarHidden: true }, 'all eleven fields must actually persist on disk, exactly as entered');
+        // `enabled` rides along at its default (`true`): this form has no Master switch
+        // input yet, so the settings patch it posts never mentions the key, and the
+        // whole-object comparison below has to name it anyway or it is not really
+        // whole-object -- see src/pomodoro.mjs's DEFAULT_SETTINGS/TOGGLE_KEYS.
+        assert.deepEqual(onDisk.settings, { enabled: true, workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, notifyRounds: true, cueWork, cueBreak, cueLongBreak, menubarCountdown: false, menubarHidden: true }, 'all eleven fields must actually persist on disk, exactly as entered');
         // Restated as its own assertion rather than left implicit in the deepEqual
         // above: the deepEqual would still pass if the three cues happened to be equal
         // AND the arrangement above had picked three equal names, so this pins the
@@ -329,6 +362,112 @@ async function main() {
       afterTab.restoreFetch();
 
       assert.equal(before, after, 'the same absolute deadline and the same cycle must render the identical text across a daemon restart -- the countdown and the position must not reset, jump, or go blank');
+    });
+
+    // ---------------------------------------------------------------------------
+    // ADR 103, "off is absence". The daemon-side half of the new `enabled` key
+    // (validating it through POST /api/pomodoro/settings) is another chunk's work
+    // and is not in this worktree -- src/pomodoro.mjs's TOGGLE_KEYS does not know
+    // the name yet, so these checks never round-trip it through the HTTP write
+    // path. They seed an off DOCUMENT straight to disk instead, exactly the way
+    // every other fixture in this file already does (writePomodoroDoc, ARRANGE
+    // only) -- normalizeDoc's own unknown-key passthrough (src/pomodoro.mjs) is
+    // what makes a hand-written `enabled: false` survive the read back intact
+    // even before the other chunk teaches TOGGLE_KEYS the name. What these checks
+    // are actually proving is entirely this chunk's own code: src/server.mjs's
+    // GET / gate (`settings.enabled !== false`) and src/pomodoro-widget.mjs's two
+    // shapes -- not the daemon's validation of a write, which is out of scope
+    // here by the brief's own instruction.
+    // ---------------------------------------------------------------------------
+
+    await check('index page, pomodoro off: GET / server-renders no timer widget -- only a bare, reachable gear -- and the settings panel omits every pomodoro-only section while keeping the four survivors', async () => {
+      const off = { ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: false } };
+      writePomodoroDoc(off, home);
+
+      const res = await REAL_FETCH(`http://127.0.0.1:${server.port}/`, { headers: { cookie: sessionCookieHeader() } });
+      assert.equal(res.status, 200, 'setup failure: GET / must still answer with the switch off');
+      const widget = pomodoroWidgetMarkup(await res.text());
+
+      // The timer itself: gone, not merely unpopulated -- every id that names a
+      // piece of it absent from the widget's own markup entirely.
+      for (const needle of ['id="pomodoro-status"', 'id="pomodoro-toggle"', 'id="pomodoro-restart"', 'id="pomodoro-forward"', 'id="pomodoro-icon-slot"', 'id="pomodoro-reset"']) {
+        assert.ok(!widget.includes(needle), `${needle} must not render at all with the switch off -- Reset acts on a loop that does not exist while off`);
+      }
+      // The gated settings sections: gone, duration fields, Cues, and the two rows
+      // the spec names by field (interval-banner/notify, menu-bar-Countdown).
+      for (const needle of ['name="workMin"', 'name="breakMin"', 'name="longBreakMin"', 'name="longEvery"', 'name="notify"', 'name="cueWork"', 'name="cueBreak"', 'name="cueLongBreak"', 'name="menubarCountdown"', 'pomodoro-settings-caption">Cues']) {
+        assert.ok(!widget.includes(needle), `${needle} must not render with the switch off`);
+      }
+
+      // Still reachable: the wrapper initPomodoroWidget's own bail check looks
+      // for, and #pomodoro-settings itself -- baked into the compiled menu-bar
+      // binary's gear URL, so it must survive under this exact id regardless of
+      // which shape rendered.
+      assert.ok(widget.startsWith('<div class="pomodoro-widget" id="pomodoro-widget">'), 'the wrapper must still exist -- it is what wires the survivors below to indexScript');
+      assert.ok(widget.includes('<details class="pomodoro-settings" id="pomodoro-settings">'), '#pomodoro-settings must keep existing -- the compiled menu-bar binary\'s gear URL is baked against it');
+      assert.ok(widget.includes('class="pomodoro-settings-summary"'), 'the bare gear itself must render');
+
+      // The four survivors: the Master switch (server-rendered honestly unchecked,
+      // since this document really does have settings.enabled === false), round
+      // banners (the safety net SECURITY.md documents), Hide menu bar icon
+      // (rendered as its positive, "Show in menu bar", same as always), and the
+      // whole Store section.
+      assert.ok(widget.includes('<label class="pomodoro-field pomodoro-field-check">Pomodoro timer<input type="checkbox" name="enabled"></label>'), 'the Master switch row must survive, unchecked -- it is the only way back on');
+      assert.ok(widget.includes('<label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>'), 'round banners are not the pomodoro\'s and must survive off untouched');
+      assert.ok(widget.includes('<label class="pomodoro-field pomodoro-field-check">Show in menu bar<input type="checkbox" name="menubarHidden"></label>'), 'Hide menu bar icon must survive -- it hides/unhides the whole status item regardless of the switch');
+      assert.ok(widget.includes('pomodoro-settings-caption">Store<'), 'the Store section must survive off untouched');
+      assert.ok(widget.includes('id="store-prune-days"') && widget.includes('id="store-prune"'), 'the Store control itself must still be reachable');
+    });
+
+    await check('index page, pomodoro off: the bare gear stays reachable -- the fragment the menu bar popover\'s own gear navigates to still opens the settings panel', async () => {
+      const off = { ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: false } };
+      writePomodoroDoc(off, home);
+
+      // pomodoroEnabled: false renders the SAME off shape the check above proved
+      // GET / serves -- this one drives the real indexScript against it, with the
+      // fragment already set the way a fresh tab opened from the menu bar's own
+      // URL (bin/menubar.m: cb_open_url(cb_index_url(@"#pomodoro-settings"))) would
+      // arrive with, proving criterion 3's other half: the popover gear still
+      // lands on the settings panel, off included.
+      const tab = loadIndexAgainstDaemon(server.port, { pomodoroEnabled: false, hash: '#pomodoro-settings' });
+      try {
+        await flush();
+        const panel = tab.document.querySelector('details#pomodoro-settings');
+        assert.ok(panel, 'setup failure: #pomodoro-settings did not render');
+        assert.equal(panel.open, true, 'the fragment must open the panel even with the switch off -- settings must stay reachable');
+        // And the survivors inside it are the real, live daemon's own values --
+        // proving initPomodoroWidget actually ran (not just that the markup
+        // happened to render), the same "settled, not merely rendered" bar every
+        // other check in this file holds itself to.
+        const notifyRounds = tab.document.querySelector('input[name="notifyRounds"]');
+        assert.ok(notifyRounds, 'the round-banner row must be wired up, not just present in the markup');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('index page: a settings document with no `enabled` key at all -- the upgrade path -- still server-renders the full timer widget', async () => {
+      // A legacy on-disk document, the same shape a settings file written before
+      // ADR 103 existed would have: no `enabled` key anywhere in its settings
+      // object. defaultDoc() no longer proves that on its own now that the
+      // daemon chunk's DEFAULT_SETTINGS/normalizeDoc (src/pomodoro.mjs) fill the
+      // key in on every read -- in memory, before this fixture is even written --
+      // so asserting against an in-memory object here would pass regardless of
+      // what actually lands on disk. Strip the key back out of defaultDoc()'s own
+      // settings (future-proof against DEFAULT_SETTINGS changing shape again)
+      // before writing, then read the RAW bytes back with fs, never readDoc,
+      // which is the one guard that actually proves this fixture is what it
+      // claims to be.
+      const { enabled: _enabled, ...legacySettings } = defaultDoc().settings;
+      const upgraded = { ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: legacySettings };
+      writePomodoroDoc(upgraded, home);
+      const onDisk = JSON.parse(readFileSync(path.join(home, 'pomodoro.json'), 'utf8'));
+      assert.ok(!('enabled' in onDisk.settings), 'setup failure: the raw on-disk JSON must not carry an enabled key -- readDoc\'s own normalized view of it would carry one regardless, which is exactly why this reads the file instead');
+
+      const res = await REAL_FETCH(`http://127.0.0.1:${server.port}/`, { headers: { cookie: sessionCookieHeader() } });
+      const widget = pomodoroWidgetMarkup(await res.text());
+      assert.ok(widget.includes('id="pomodoro-status"'), 'a missing key must read as on, identical to today -- the full timer widget must still render');
+      assert.ok(widget.includes('name="workMin"'), 'and the full settings panel with it, duration fields included');
     });
   } finally {
     await new Promise(resolve => server.server.close(resolve));

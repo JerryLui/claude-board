@@ -103,7 +103,9 @@ copy. `uninstall.sh` leaves these callers alone; it did not write them.
 
 A `SessionStart` hook that starts a pomodoro work interval when a Claude Code session
 starts. The board works without it; it only decides whether the timer starts itself or
-waits for the index page's switch.
+waits for the index page's switch. Both defer to the board's own **Pomodoro timer**
+switch in its settings panel: with that off, `ensure` is refused by the daemon and this
+hook starts nothing, hook installed or not.
 
 **Ask before applying it.** Put a yes/no question to the reader with `AskUserQuestion` —
 "Install the SessionStart hook that starts a pomodoro when a Claude Code session starts?"
@@ -117,7 +119,8 @@ reader's own settings are the one file an agent touches here.
 Safe to run on every session: `POST /api/pomodoro/ensure` starts a work interval only
 when no timer exists at all. A running, paused, or mid-break timer is left exactly as
 it was, so a second session, a `/clear`, or a resume is a no-op (proved in
-`test/check-http.mjs` and `test/check-install-doc.mjs`).
+`test/check-http.mjs` and `test/check-install-doc.mjs`) — and so is every call while
+the board's Pomodoro timer switch is off.
 
 ## The entry
 
@@ -202,7 +205,8 @@ curl -s http://127.0.0.1:7391/api/pomodoro | node -e 'process.stdin.once("data",
 (add the secret header when calling from outside a session — PROTOCOL.md "The local
 secret"). Expect a `work` phase timer with a future `deadline`. A second session or a
 `/clear` must not move that deadline; if it does, something is calling a route other
-than `ensure`.
+than `ensure`. With the board's Pomodoro timer switch off, expect `timer: null`
+instead — `ensure` refuses while it is off.
 
 For the guard, run the command itself rather than starting a session:
 `CLAUDE_BOARD_NO_POMODORO=1 bash -c '<the command above>'` must leave `timer` exactly as

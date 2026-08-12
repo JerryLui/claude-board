@@ -141,11 +141,14 @@ banners by default, gone in seconds; set claude-board to **Alerts** under
 ### The menu bar item and the timer
 
 Installing also adds a menu-bar status item and a pomodoro-style work timer that the
-item and the index page's clock both read. Neither does anything on its own: the timer
-starts only from the index page, or from the optional session-start hook in
-[INSTALL.md](INSTALL.md), which is applied by hand because `install.sh` never touches
-`~/.claude/settings.json`. Hide the icon with **Show in menu bar** in the board's
-pomodoro settings; the choice survives logout and reinstall.
+item and the index page's clock both read. On by default, behind a **Pomodoro timer**
+switch that leads the board's settings panel — off removes the timer from both
+surfaces and the menu-bar item falls back to showing only the waiting-boards list.
+Left on, neither does anything on its own: the timer starts only from the index page,
+or from the optional session-start hook in [INSTALL.md](INSTALL.md), which is applied
+by hand because `install.sh` never touches `~/.claude/settings.json`. Hide the icon
+with **Show in menu bar** in the board's pomodoro settings, independent of the timer
+switch; the choice survives logout and reinstall.
 
 ### Stopping without uninstalling
 

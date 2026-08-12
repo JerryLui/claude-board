@@ -762,6 +762,91 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
+  // enabled -- the Master switch. Pure semantics only: the default, the upgrade path
+  // (a document with no key at all), the boundary guard against a hand-edited file
+  // pairing `enabled: false` with a still-live timer, and the Rollover-style clearing
+  // mergeSettings performs on the true -> false transition (and its absence in
+  // reverse). The impure half -- ensureTimer refused while off, and the armed
+  // setTimeout actually cancelled -- is a few sections further down, and the HTTP
+  // surface is in test/check-http.mjs.
+  // -------------------------------------------------------------------------------
+
+  await check('DEFAULT_SETTINGS: the Master switch is on by default', () => {
+    assert.equal(DEFAULT_SETTINGS.enabled, true);
+  });
+
+  await check('normalizeDoc: a document with no enabled key at all (written before this field existed) reads as on -- the upgrade path', () => {
+    const settings = normalizeDoc({ settings: { workMin: 40 } }).settings;
+    assert.equal(settings.enabled, true);
+  });
+
+  await check('normalizeDoc: an explicit enabled: false survives normalization untouched', () => {
+    const settings = normalizeDoc({ settings: { enabled: false } }).settings;
+    assert.equal(settings.enabled, false);
+  });
+
+  await check('normalizeDoc: a non-boolean enabled (hand-edited garbage) falls back to on, same coercion every other toggle gets', () => {
+    const settings = normalizeDoc({ settings: { enabled: 'nope' } }).settings;
+    assert.equal(settings.enabled, true);
+  });
+
+  await check('normalizeDoc: enabled: false forces the timer to null even when the document on disk still names a live one -- the boundary guard against a hand-edited file', () => {
+    const now = Date.now();
+    const parsed = {
+      settings: { enabled: false },
+      cycle: 2,
+      cycleDate: pomodoroDay(now),
+      timer: { phase: 'work', deadline: now + 60_000, paused: false },
+    };
+    const doc = normalizeDoc(parsed);
+    assert.equal(doc.timer, null, 'no timer may exist while the document reads as off, however it got that way');
+    assert.equal(doc.cycle, 2, 'the guard only clears the timer -- cycle bookkeeping is untouched by a read');
+  });
+
+  await check('mergeSettings: flipping enabled true -> false clears the Timer and resets the Cycle to zero, Rollover-style (ADR 67)', () => {
+    const now = Date.now();
+    const doc = { ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
+    const next = mergeSettings(doc, { enabled: false });
+    assert.equal(next.timer, null);
+    assert.equal(next.cycle, 0);
+    assert.equal(next.settings.enabled, false);
+    assert.equal(next.cycleDate, doc.cycleDate, 'the pomodoro day itself is untouched -- only rollDay changes that');
+  });
+
+  await check('mergeSettings: flipping enabled false -> true starts idle -- nothing is restored (ADR 90)', () => {
+    const now = Date.now();
+    const off = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, enabled: false }, cycle: 0, cycleDate: pomodoroDay(now), timer: null };
+    const next = mergeSettings(off, { enabled: true });
+    assert.equal(next.timer, null, 'no frozen timer is restored on re-enable');
+    assert.equal(next.settings.enabled, true);
+  });
+
+  await check('mergeSettings: a patch that leaves enabled untouched never looks at the Timer -- the clearing is specific to the true -> false transition, not to every write', () => {
+    const now = Date.now();
+    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
+    const next = mergeSettings(doc, { workMin: 33 });
+    assert.equal(next.timer, doc.timer, 'a patch that never mentions enabled must not touch the running Timer, by reference');
+  });
+
+  await check('mergeSettings: a non-boolean enabled is rejected, naming the field, same validation every other toggle gets', () => {
+    assert.throws(() => mergeSettings(defaultDoc(), { enabled: 'off' }), /enabled/);
+  });
+
+  await check('mergeSettings: patching enabled alone leaves every other toggle untouched', () => {
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false, notifyRounds: false, menubarHidden: true } };
+    const next = mergeSettings(doc, { enabled: false });
+    assert.equal(next.settings.notify, false);
+    assert.equal(next.settings.notifyRounds, false, 'the round-banner safety net is a different key -- flipping enabled must not silently touch it');
+    assert.equal(next.settings.menubarHidden, true);
+  });
+
+  await check('startWork: refuses to mint a timer when settings.enabled is false, by reference -- the daemon-side refusal a timer start is held to', () => {
+    const now = Date.now();
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, enabled: false }, cycleDate: pomodoroDay(now) };
+    assert.equal(startWork(doc, now), doc, 'idle stays idle -- no needless write, and nothing minted');
+  });
+
+  // -------------------------------------------------------------------------------
   // readDoc / writeDoc -- persistence, defaults, and the impure ensureTimer wrapper.
   // -------------------------------------------------------------------------------
 
@@ -969,6 +1054,74 @@ async function main() {
       const doc = readDoc(h, now);
       assert.equal(doc.timer.phase, 'work');
       assert.equal(doc.timer.deadline, now + DEFAULT_SETTINGS.workMin * 60_000);
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------------
+  // enabled -- the impure half. ensureTimer refused while off (the exact seam the
+  // session-start hook's POST /api/pomodoro/ensure reaches, safe without the hook
+  // changing), and the engine.settings write actually cancelling the live setTimeout
+  // on the true -> false transition, not merely writing a doc that looks cleared.
+  // -------------------------------------------------------------------------------
+
+  await check('ensureTimer: refused while enabled is false -- the session-start hook\'s ensure is a no-op without the hook changing', () => {
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-off-'));
+    const now = Date.now();
+    writeDoc({ ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, enabled: false }, cycleDate: pomodoroDay(now) }, h);
+    const engine = createPomodoro({ home: h });
+    try {
+      const next = engine.ensureTimer(now);
+      assert.equal(next.timer, null, 'no timer is minted while off');
+      assert.equal(readDoc(h, now).timer, null, 'and nothing was written that would say otherwise');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('engine.settings: flipping enabled off while a Timer is running clears it, resets the Cycle, and cancels the armed boundary -- no notification fires for the interval that was cut off', async () => {
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-disable-'));
+    const boundaries = [];
+    const engine = createPomodoro({ home: h, onBoundary: b => boundaries.push(b) });
+    try {
+      const now = Date.now();
+      // A deadline moments away: if the armed setTimeout survives the disable, it
+      // fires well within this check's own wait below.
+      writeDoc({ ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 150, paused: false } }, h);
+      engine.boot(now);
+
+      const next = engine.settings({ enabled: false }, now);
+      assert.equal(next.timer, null, 'the Timer is cleared, Rollover-style');
+      assert.equal(next.cycle, 0, 'the Cycle resets to zero, Rollover-style');
+      assert.equal(next.settings.enabled, false);
+
+      await new Promise(resolve => setTimeout(resolve, 400));
+      assert.deepEqual(boundaries, [], `no boundary may fire for an interval the Master switch just cut off: ${JSON.stringify(boundaries)}`);
+      assert.equal(readDoc(h, Date.now()).timer, null, 'and the cleared state is what is actually on disk, not just what this call returned');
+    } finally {
+      engine.close();
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  await check('engine.settings: flipping enabled back on starts idle -- nothing is restored (ADR 90)', () => {
+    const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-reenable-'));
+    const engine = createPomodoro({ home: h });
+    try {
+      const now = Date.now();
+      writeDoc({ ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
+      engine.settings({ enabled: false }, now);
+      const backOn = engine.settings({ enabled: true }, now);
+      assert.equal(backOn.timer, null, 'nothing is restored -- ADR 90: an absent timer names the state and nothing else');
+      assert.equal(backOn.cycle, 0);
+      assert.equal(backOn.settings.enabled, true);
+      // And starting fresh from idle works normally again -- being off left no residue
+      // that would stop a later ensure from minting a real interval.
+      const started = engine.ensureTimer(now);
+      assert.equal(started.timer.phase, 'work');
     } finally {
       engine.close();
       rmSync(h, { recursive: true, force: true });

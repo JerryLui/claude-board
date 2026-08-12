@@ -2287,10 +2287,21 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         // extracted from this same walk. `GET /api/search` is unchanged and remains
         // the full-text route over board bodies.
         const threads = buildThreadIndex(listBoards(home));
+        // ADR 103's server-side gate -- the one pomodoro.json read this route ever
+        // does, and only for this one boolean: `readPomodoroDoc` never throws (see
+        // its own comment) and `settings.enabled !== false` is the documented
+        // derivation ("missing, or anything but literally false, reads as on"), so a
+        // settings document from before this key existed renders exactly like it
+        // does today. Everything else pomodoro-shaped about this page -- the
+        // countdown text, every other settings field -- still reaches the reader the
+        // one round trip later that src/pomodoro-widget.mjs's own header comment
+        // describes; this is not GET / growing a second source of truth for the
+        // Timer, only for which of pomodoroWidget()'s two shapes to render.
+        const pomodoroEnabled = readPomodoroDoc(home).settings.enabled !== false;
         // INDEX_CSP, not the board CSP: the search box is a plain GET form back to
         // this same route, and `form-action 'none'` makes the browser refuse to
         // submit it. See render.mjs's comment on INDEX_CSP.
-        return sendHtml(res, 200, renderIndexPage({ threads, query }), {
+        return sendHtml(res, 200, renderIndexPage({ threads, query, pomodoroEnabled }), {
           'content-security-policy': INDEX_CSP,
         });
       }

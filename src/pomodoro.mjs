@@ -49,6 +49,18 @@ import { isCue, pickCue, NO_CUE, SOUNDS_DIRS } from './cues.mjs';
 // startup leaves the default naming it, which mergeSettings below then refuses on the
 // next save, the same way it refuses any other name that is no longer a cue.
 export const DEFAULT_SETTINGS = Object.freeze({
+  // The Master switch ("Pomodoro made optional behind one Master switch"): on by
+  // default, so a settings document written before this key existed reads as on --
+  // behavior identical to today's, no migration (TOGGLE_KEYS' own coercion below is
+  // what turns a missing or hand-mangled value into `true` rather than `undefined`).
+  // Off is the daemon's own durable state, not a substitute for
+  // `CLAUDE_BOARD_NO_POMODORO` (ADR 68), which stays the per-SESSION suppressor a hook
+  // checks before it ever asks -- this key is what the session-start hook's `ensure` is
+  // safe against without the hook itself changing (see startWork's own guard below).
+  // Flipping it off clears whatever Timer and Cycle were live, Rollover-style (ADR 67
+  // semantics, mergeSettings below); flipping it back on starts idle and restores
+  // nothing (ADR 90: an absent timer names the state and nothing else).
+  enabled: true,
   workMin: 25,
   breakMin: 5,
   longBreakMin: 15,
@@ -234,10 +246,19 @@ export function rollDay(doc, now) {
  * current pomodoro day, so a session start against a document left over from yesterday
  * ends yesterday's loop and starts today's work interval together. Reversing the two
  * lines is the old defect exactly — a timer paused last night that every session start
- * politely declines to disturb. */
+ * politely declines to disturb.
+ *
+ * A no-op, same shape, when `settings.enabled` is `false`: the Master switch's whole
+ * point is that a timer start is REFUSED while off, and this is the one place a fresh
+ * work interval is ever minted, so this is the one guard that has to exist for that to
+ * be true daemon-wide -- the session-start hook's `ensure` (createPomodoro.ensureTimer
+ * below) reaches no further than this function, and every other control
+ * (pause/resume/reset/forward/restart) only ever transforms a timer that already
+ * exists, never mints one, so none of them need their own copy of this check. */
 export function startWork(doc, now) {
   const base = rollDay(doc, now);
   if (base.timer) return base;
+  if (base.settings.enabled === false) return base;
   return { ...base, timer: { phase: 'work', deadline: now + base.settings.workMin * 60_000, paused: false } };
 }
 
@@ -505,17 +526,20 @@ export function applyClockStep(doc, stepMs) {
 // ---------------------------------------------------------------------------------
 
 const DURATION_KEYS = ['workMin', 'breakMin', 'longBreakMin'];
-// Every boolean setting, validated identically and independently: `notify` gates a
-// pomodoro boundary's banner, `notifyRounds` gates a Stranded round's
-// (roundBannersEnabled above), and the two `menubar*` keys are the status item's own
-// pair. Independence is the property that matters and it is structural here, not
-// argued -- neither key's presence or absence in a patch ever touches another's stored
-// value, the same as any two unrelated keys in this loop, which is what "silencing one
-// leaves the other alone" (criterion 17) comes down to at this layer. Adding a key to
+// Every boolean setting, validated identically and independently: `enabled` is the
+// Master switch that gates the whole daemon-side loop, `notify` gates a pomodoro
+// boundary's banner, `notifyRounds` gates a Stranded round's (roundBannersEnabled
+// above), and the two `menubar*` keys are the status item's own pair. Independence is
+// the property that matters and it is structural here, not argued -- neither key's
+// presence or absence in a patch ever touches another's stored value, the same as any
+// two unrelated keys in this loop, which is what "silencing one leaves the other
+// alone" (criterion 17) comes down to at this layer -- `enabled` included: turning
+// pomodoro off must not (and, being just another key in this same loop, structurally
+// cannot) touch `notifyRounds`, the safety net SECURITY.md documents. Adding a key to
 // this list is the whole of teaching both boundaries about it: mergeSettings refuses a
 // non-boolean by name below, and normalizeDoc fills a missing or hand-mangled one in
 // from DEFAULT_SETTINGS.
-const TOGGLE_KEYS = ['notify', 'notifyRounds', 'menubarCountdown', 'menubarHidden'];
+const TOGGLE_KEYS = ['enabled', 'notify', 'notifyRounds', 'menubarCountdown', 'menubarHidden'];
 // The three per-phase cue settings -- validated against
 // src/cues.mjs's isCue, the one place the closed set of legal values (the 14 sounds
 // macOS ships, plus `None`) is enumerated. Not re-enumerated here on purpose (this
@@ -567,13 +591,23 @@ function isBoundedInt(v, min, max) {
  * divides by zero three lines into the next boundary crossing; a bad key it has never
  * heard of touches nothing).
  *
- * Deliberately does not look at `doc.timer` at all: changing a duration does NOT
- * retarget whatever interval is already running — the running deadline was computed
- * from the OLD value the moment the interval started, and a duration change here only
- * changes what the NEXT `startWork`/`settleBoundary` boundary computes. Retargeting a
- * live countdown out from under a reviewer mid-interval (the deadline visibly jumping
- * while they watch it) was rejected in favor of "the interval you started is the
- * interval you get; the new setting takes effect from the next one". */
+ * Deliberately does not look at `doc.timer` at all for any other key: changing a
+ * duration does NOT retarget whatever interval is already running — the running
+ * deadline was computed from the OLD value the moment the interval started, and a
+ * duration change here only changes what the NEXT `startWork`/`settleBoundary` boundary
+ * computes. Retargeting a live countdown out from under a reviewer mid-interval (the
+ * deadline visibly jumping while they watch it) was rejected in favor of "the interval
+ * you started is the interval you get; the new setting takes effect from the next one".
+ *
+ * The ONE exception is `enabled` flipping true → false ("Pomodoro made optional"): that
+ * transition ends the loop the way a Rollover does (ADR 67 semantics) rather than
+ * merely changing what the next boundary computes, because there IS no next boundary to
+ * hand it to — the Timer is cleared and the Cycle reset to zero in the same settings
+ * write, not left for some later control to notice the switch is off. The reverse
+ * direction (false → true) restores nothing (ADR 90): the doc's timer is already null
+ * by the time anything reads it (normalizeDoc's own boundary guard below enforces that
+ * even against a hand-edited file), so there is nothing for this function to leave
+ * alone either way. */
 export function mergeSettings(doc, patch) {
   if (!isPlainObject(patch)) throw new Error('settings patch must be a JSON object');
   const settings = { ...doc.settings };
@@ -605,6 +639,16 @@ export function mergeSettings(doc, patch) {
       );
     }
     settings[key] = patch[key];
+  }
+  // The one exception to "never looks at doc.timer" — see this function's own comment.
+  // `!== false` / `=== false` rather than truthy/falsy: both sides have already been
+  // through TOGGLE_KEYS' strict-boolean validation above (or were never touched by the
+  // patch at all, in which case they still carry whatever normalizeDoc/DEFAULT_SETTINGS
+  // already coerced them to), so this is a plain boolean comparison, not a coercion.
+  const wasEnabled = doc.settings.enabled !== false;
+  const isEnabled = settings.enabled !== false;
+  if (wasEnabled && !isEnabled) {
+    return { ...doc, settings, timer: null, cycle: 0 };
   }
   return { ...doc, settings };
 }
@@ -724,6 +768,17 @@ export function normalizeDoc(parsed) {
     const anchor = paused ? raw.remainingMs : raw.deadline;
     if (typeof anchor === 'number' && Number.isFinite(anchor)) timer = { ...raw, paused };
   }
+  // The Master switch's structural guarantee: a document that reads as OFF never
+  // carries a timer past this point, however it got that way. Every path that flips
+  // `enabled` true -> false already clears the timer itself (mergeSettings above), so
+  // in the ordinary run of the daemon this is a no-op; the one shape it actually
+  // guards against is a hand-edited `pomodoro.json` pairing `enabled: false` with a
+  // still-running or still-due timer, which — left alone — is the one way
+  // `settleBoundary` could still fire a real boundary (a notification, a cue) for a
+  // feature the reader turned off. Runs on every read (readDoc below), same as the
+  // rest of this function's defensive coercions, so nothing downstream of readDoc ever
+  // has to re-check `settings.enabled` before trusting `timer`.
+  if (settings.enabled === false) timer = null;
   return { settings, cycle, cycleDate, timer };
 }
 
@@ -1028,15 +1083,23 @@ export function createPomodoro({
     /** Settings (src/server.mjs POST /api/pomodoro/settings). mergeSettings throws on
      * a bad patch — this method does not catch it, so the thrown Error propagates to
      * the HTTP route, which is what turns it into a 400 naming the field. Deliberately
-     * calls neither `arm` nor touches `doc.timer`: mergeSettings' own comment is the
-     * fuller version of why a settings write must not retarget whatever interval is
-     * already running, and re-arming against an UNCHANGED deadline here would be a
-     * no-op clearTimeout+setTimeout pair that only invites a future reader to wonder
-     * why writing settings touches the live clock at all. */
+     * calls `arm` only when `mergeSettings` actually touched `doc.timer` — which today
+     * means exactly one thing, the Master switch flipping true → false: mergeSettings'
+     * own comment is the fuller version of why an ORDINARY settings write (a duration, a
+     * cue) must not retarget whatever interval is already running, and re-arming
+     * against an unchanged deadline would be a no-op clearTimeout+setTimeout pair that
+     * only invites a future reader to wonder why writing settings touches the live
+     * clock at all. The Master switch is different: mergeSettings already cleared
+     * `timer` to null on that transition (Rollover semantics), and `arm` is what turns
+     * that into the live setTimeout actually going away too — without it, a Timer that
+     * was due to fire in the next few seconds (see MAX_ARM_MS) would still fire through
+     * the setTimeout this method never cancelled, on a document it no longer belongs
+     * to. */
     settings(patch, now = nowFn()) {
       const doc = readDoc(home, now);
       const next = mergeSettings(doc, patch);
       writeDoc(next, home);
+      if (next.timer !== doc.timer) arm(next, now);
       return next;
     },
     /** Stops the live setTimeout. Called from src/server.mjs on server close so an

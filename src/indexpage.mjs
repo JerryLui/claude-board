@@ -883,27 +883,61 @@ function closePomodoroSettings() {
   pomodoroSyncForm();
 }
 
+// Each field is looked up and added to the patch independently, rather than one
+// object literal read straight off the form the way this used to be written --
+// ADR 103's off shape (pomodoroSettingsGear, src/pomodoro-widget.mjs) strips this
+// same form down to three fields (notifyRounds, menubarHidden, and the Master
+// switch, which posts through its own onPomodoroEnabledChange below and is never
+// collected here), so a form that no longer HAS a workMin input must not be asked
+// for its '.value'. mergeSettings (src/pomodoro.mjs) already merges a partial
+// patch field by field and drops keys it does not recognize, which is what makes
+// sending only what is actually on screen both safe and sufficient -- nothing
+// here has to know which shape it is running against.
 function onPomodoroSettingsSubmit(ev) {
   ev.preventDefault();
   var form = ev.target;
-  postPomodoro('settings', {
-    workMin: parseInt(form.querySelector('input[name="workMin"]').value, 10),
-    breakMin: parseInt(form.querySelector('input[name="breakMin"]').value, 10),
-    longBreakMin: parseInt(form.querySelector('input[name="longBreakMin"]').value, 10),
-    longEvery: parseInt(form.querySelector('input[name="longEvery"]').value, 10),
-    notify: !!form.querySelector('input[name="notify"]').checked,
-    notifyRounds: !!form.querySelector('input[name="notifyRounds"]').checked,
-    cueWork: form.querySelector('select[name="cueWork"]').value,
-    cueBreak: form.querySelector('select[name="cueBreak"]').value,
-    cueLongBreak: form.querySelector('select[name="cueLongBreak"]').value,
-    menubarCountdown: !!form.querySelector('input[name="menubarCountdown"]').checked,
-    // Negated, the second and last place this form inverts anything: the row
-    // reads 'Show in menu bar', the key it writes is 'menubarHidden'. Ticked ->
-    // hidden false -> the item comes back. Posted through the same
-    // /api/pomodoro/settings patch as every other field here, never a second
-    // save path of its own.
-    menubarHidden: !form.querySelector('input[name="menubarHidden"]').checked,
-  }).then(closePomodoroSettings);
+  var patch = {};
+  var workMin = form.querySelector('input[name="workMin"]');
+  if (workMin) patch.workMin = parseInt(workMin.value, 10);
+  var breakMin = form.querySelector('input[name="breakMin"]');
+  if (breakMin) patch.breakMin = parseInt(breakMin.value, 10);
+  var longBreakMin = form.querySelector('input[name="longBreakMin"]');
+  if (longBreakMin) patch.longBreakMin = parseInt(longBreakMin.value, 10);
+  var longEvery = form.querySelector('input[name="longEvery"]');
+  if (longEvery) patch.longEvery = parseInt(longEvery.value, 10);
+  var notify = form.querySelector('input[name="notify"]');
+  if (notify) patch.notify = !!notify.checked;
+  var notifyRounds = form.querySelector('input[name="notifyRounds"]');
+  if (notifyRounds) patch.notifyRounds = !!notifyRounds.checked;
+  var cueWork = form.querySelector('select[name="cueWork"]');
+  if (cueWork) patch.cueWork = cueWork.value;
+  var cueBreak = form.querySelector('select[name="cueBreak"]');
+  if (cueBreak) patch.cueBreak = cueBreak.value;
+  var cueLongBreak = form.querySelector('select[name="cueLongBreak"]');
+  if (cueLongBreak) patch.cueLongBreak = cueLongBreak.value;
+  var menubarCountdown = form.querySelector('input[name="menubarCountdown"]');
+  if (menubarCountdown) patch.menubarCountdown = !!menubarCountdown.checked;
+  // Negated, the one place left this form inverts anything: the row reads 'Show
+  // in menu bar', the key it writes is 'menubarHidden'. Ticked -> hidden false ->
+  // the item comes back.
+  var menubarHidden = form.querySelector('input[name="menubarHidden"]');
+  if (menubarHidden) patch.menubarHidden = !menubarHidden.checked;
+  postPomodoro('settings', patch).then(closePomodoroSettings);
+}
+
+// The Master switch (ADR 103): unlike every field collected above, this one
+// persists on its own 'change', immediately, rather than waiting for Save --
+// see the row's own comment in src/pomodoro-widget.mjs for why bundling it into
+// onPomodoroSettingsSubmit's patch was rejected. Real postPomodoro, not the
+// fire-and-forget fetch onPomodoroNotifyChange/onPomodoroCueChange below use for
+// an audition: flipping this decides which of the two page shapes the NEXT load
+// renders (deliverable 2), so a write that failed must be seen to fail rather
+// than look like it landed. No debounce -- a checkbox has one value per click,
+// the same reasoning onPomodoroNotifyChange's own comment gives for skipping one.
+function onPomodoroEnabledChange(ev) {
+  var el = ev.target;
+  if (!el || el.getAttribute('name') !== 'enabled') return;
+  postPomodoro('settings', { enabled: !!el.checked });
 }
 
 // Picking a cue plays it immediately, before Save, even with the
@@ -1105,6 +1139,12 @@ function initPomodoroWidget() {
   // above: each handler scopes itself to its own control (SELECT there, the
   // notify checkbox here) and they share nothing but the event.
   if (form) form.addEventListener('change', onPomodoroNotifyChange);
+  // A third delegated 'change', same reasoning -- the Master switch scopes
+  // itself to name="enabled" and shares nothing with the two above but the form
+  // and the event. Present on both shapes pomodoroWidget() can render (this
+  // form always has the row -- see the row's own comment in
+  // src/pomodoro-widget.mjs), so this listener is never a no-op registration.
+  if (form) form.addEventListener('change', onPomodoroEnabledChange);
   document.addEventListener('click', onDocumentClickClosePomodoroSettings);
   // The other half of the fragment: a tab already sitting on this page when the
   // menu bar item asks for the panel only ever sees the hash change, never a
@@ -1219,8 +1259,18 @@ export function filterThreads(threads, query) {
  * page's one script (`indexScript` above) only ever touches `.rel-time` text
  * content, the contents of `.thread-list`, and the pomodoro widget; nothing here
  * depends on it running, and the served list is correct as of the moment it was
- * served whether or not it ever does. */
-export function renderIndexPage({ threads = [], query = '' } = {}) {
+ * served whether or not it ever does.
+ *
+ * `pomodoroEnabled` (ADR 103, default true — "a settings document without the new
+ * key reads as on") is the one piece of pomodoro state this function ever takes: a
+ * plain boolean, decided by the CALLER (src/server.mjs's own `GET /` route reads
+ * `settings.enabled` off pomodoro.json for it) rather than read here, so this
+ * function stays what it always was — a pure render over its arguments, no fs
+ * access of its own. It does nothing but pick which of pomodoroWidget()'s two
+ * shapes renders into the header below; every other pomodoro field still reaches
+ * the page the way src/pomodoro-widget.mjs's own header comment describes, one
+ * fetch after load. */
+export function renderIndexPage({ threads = [], query = '', pomodoroEnabled = true } = {}) {
   const threadsHtml = renderThreadRows({ threads, query });
 
   return `<!doctype html>
@@ -1241,7 +1291,7 @@ ${faviconLink}
       <h1>claude-board</h1>
     </div>
     <div class="index-head-actions">
-      ${pomodoroWidget()}
+      ${pomodoroWidget({ enabled: pomodoroEnabled })}
       ${themeToggle()}
     </div>
   </header>

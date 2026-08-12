@@ -17,14 +17,19 @@
 // field below. indexpage.mjs's pomodoroSyncForm fills it in on first fetch.
 //
 // No countdown text is ever rendered server-side: `GET /` (src/server.mjs)
-// never reads pomodoro.json -- ADR.md entry 8 ("the daemon owns the pomodoro
-// clock") says who owns the clock, not that every route has to consult it --
-// so every reader's first paint shows this calm, static placeholder and
-// indexScript's own first fetch (run synchronously as the script loads, before
-// its poll/tick timers) fills in the real state within one round trip. A
-// timer-shaped flash-of-wrong-content is not a concern here the way
-// dark-then-light is for theme (QUIRKS.md): unlike colour, a blank countdown
-// is not wrong, just not yet known.
+// never reads pomodoro.json for the TIMER -- ADR.md entry 8 ("the daemon owns
+// the pomodoro clock") says who owns the clock, not that every route has to
+// consult it -- so every reader's first paint shows this calm, static
+// placeholder and indexScript's own first fetch (run synchronously as the
+// script loads, before its poll/tick timers) fills in the real state within
+// one round trip. A timer-shaped flash-of-wrong-content is not a concern here
+// the way dark-then-light is for theme (QUIRKS.md): unlike colour, a blank
+// countdown is not wrong, just not yet known. ADR 103 narrows the claim to
+// "for the timer": the call site now reads `settings.enabled` once, before
+// this function runs at all, to decide which of the two shapes below to hand
+// back -- that is a shape decision, not a Timer reading, and it is the one
+// piece of pomodoro.json state this page was ever going to need synchronously
+// (see this function's own doc comment).
 //
 // The settings panel behind the cogwheel is no longer the pomodoro's (ADR 71):
 // it is the index's GENERAL settings panel, sectioned with the hairline +
@@ -37,6 +42,26 @@
 // the stylesheet rules on is a class something actually emits") includes this
 // file alongside src/render.mjs/ui.mjs/indexpage.mjs/markdown.mjs/theme.mjs --
 // every class name below has to stay on that list or the check goes red.
+//
+// ADR 103, "off is absence": `pomodoroWidget({ enabled })` now renders one of
+// two shapes, gated on the caller's own read of `settings.enabled` (this file
+// never reads pomodoro.json itself, matching every other piece of state
+// above). Off renders `pomodoroSettingsGear()` below -- the bare cogwheel and
+// nothing else, no tomato, no status text, no switch, no restart/forward pair
+// -- rather than this function growing a maze of per-field `enabled ?  :`
+// ternaries; a reader diffing "what does off actually show" against the mock
+// wants a second small function, not this one with every line conditional.
+// Both shapes keep the SAME `id="pomodoro-widget"` wrapper and the SAME
+// `id="pomodoro-settings"` details -- neither is legacy naming that stayed
+// out of inertia, both are load-bearing regardless of which shape rendered:
+// `initPomodoroWidget` (src/indexpage.mjs) bails on a document with no
+// `div#pomodoro-widget`, and it is that same bail that would otherwise leave
+// the survivors below (Save, the round-banner tick, Hide menu bar icon, the
+// Store section) wired to nothing. The fields `initPomodoroWidget` wires that
+// this shape simply does not render (the switch, Restart/Forward, the cue
+// selects, ...) are already looked up with `document.querySelector` and
+// null-guarded one line later -- the off shape asks nothing new of that file,
+// it only means more of those guards find nothing.
 
 import { cueNames } from './cues.mjs';
 
@@ -135,7 +160,8 @@ function cueOptionsHtml() {
  * present", and an idle click is already a server-side no-op
  * (forwardTimer/restartTimer in src/pomodoro.mjs both return `doc` unchanged
  * against `!doc.timer`), so there is no idle-disabled state to render either. */
-export function pomodoroWidget() {
+export function pomodoroWidget({ enabled = true } = {}) {
+  if (!enabled) return pomodoroSettingsGear();
   const cueOptions = cueOptionsHtml();
   // The icon sits in its own slot, not bare, so indexScript's renderPomodoro can
   // swap the whole glyph (TOMATO_ICON <-> REST_ICON) by replacing this ONE
@@ -156,6 +182,25 @@ export function pomodoroWidget() {
     <summary class="pomodoro-settings-summary" role="button" aria-label="Settings" title="Settings">${GEAR_ICON}</summary>
     <form class="pomodoro-settings-form" id="pomodoro-settings-form">
       <div class="pomodoro-settings-caption">Pomodoro</div>
+      <!-- The Master switch (ADR 103), leading the panel per the reviewed mock --
+           the one field in this whole form whose server-rendered 'checked' state IS
+           hardcoded rather than left for indexScript's first fetch to fill in, unlike
+           every other field's own comment on this file. That is not a departure from
+           the rule, it is what the rule already implies here: the branch above
+           ('if (!enabled) return pomodoroSettingsGear()') already read this exact value
+           to decide which of the two shapes to hand back, so by the time this line
+           renders "checked" is not a guess, it is restating a fact this function
+           already knows. pomodoroSettingsGear() below renders the same row unchecked,
+           for the same reason.
+           Posts on its OWN 'change', immediately, through
+           POST /api/pomodoro/settings with a single-key '{ enabled }' body
+           (onPomodoroEnabledChange, src/indexpage.mjs) -- never bundled into the
+           eleven-field patch onPomodoroSettingsSubmit collects on Save. Two reasons:
+           this row can render inside a form Save has stripped down to three fields
+           (this shape's own reduced form below), and flipping it decides the page's
+           whole SHAPE (deliverable 2's sections), which must not wait on whatever
+           unrelated edit happens to be sitting unsaved in the same panel. -->
+      <label class="pomodoro-field pomodoro-field-check">Pomodoro timer<input type="checkbox" name="enabled" checked></label>
       <label class="pomodoro-field">Work (min)<input type="number" name="workMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Short break (min)<input type="number" name="breakMin" min="1" max="1440" step="1"></label>
       <label class="pomodoro-field">Long break (min)<input type="number" name="longBreakMin" min="1" max="1440" step="1"></label>
@@ -273,6 +318,53 @@ export function pomodoroWidget() {
              the call, so the click is not the deliberate part. The critical colour is
              worn permanently rather than on an armed state, since there is no armed
              state to show. -->
+        <button type="button" class="pomodoro-btn pomodoro-btn-danger" id="store-prune" aria-label="Store: delete boards">Delete boards</button>
+        <span class="pomodoro-settings-status" id="store-prune-status" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </details>
+</div>`;
+}
+
+/** ADR 103's off shape -- "off is absence" (variant A of the reviewed mocks). Called
+ * only from pomodoroWidget() above, never exported or reached any other way, so this
+ * file still has exactly one public shape for a caller to reason about.
+ *
+ * Everything pomodoroWidget() renders that IS the timer -- the icon slot, the status
+ * text, the Restart/Forward pair, the start/pause/resume switch -- is simply absent, not
+ * present-and-hidden: the header comment above already names why (`hidden` losing to an
+ * author `display` rule is the exact bug this widget's own switch used to have). What
+ * survives is the bare cogwheel plus the four sections the spec names as not the
+ * pomodoro's to lose: the Master switch itself (so the reader has a way back on),
+ * round banners, Hide menu bar icon, and the Store control. Cues, the three duration
+ * fields and the interval-banner (Notify) row are gone with the timer they belong to;
+ * Reset goes with them too -- it ends a pomodoro loop that, off, does not exist -- which
+ * is why the actions row below carries only Save, matching the mock exactly.
+ *
+ * Same `id="pomodoro-widget"` / `id="pomodoro-settings"` / `id="pomodoro-settings-form"`
+ * as the enabled shape, and deliberately so -- see this file's header comment on why
+ * that is load-bearing for indexScript's own wiring, and CONTEXT.md/the compiled
+ * menu-bar binary on why `#pomodoro-settings` specifically can never move. */
+function pomodoroSettingsGear() {
+  return `<div class="pomodoro-widget" id="pomodoro-widget">
+  <details class="pomodoro-settings" id="pomodoro-settings">
+    <summary class="pomodoro-settings-summary" role="button" aria-label="Settings" title="Settings">${GEAR_ICON}</summary>
+    <form class="pomodoro-settings-form" id="pomodoro-settings-form">
+      <div class="pomodoro-settings-caption">Pomodoro</div>
+      <label class="pomodoro-field pomodoro-field-check">Pomodoro timer<input type="checkbox" name="enabled"></label>
+      <hr class="pomodoro-settings-divider">
+      <div class="pomodoro-settings-caption">Banners</div>
+      <label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>
+      <hr class="pomodoro-settings-divider">
+      <div class="pomodoro-settings-caption">Menu bar</div>
+      <label class="pomodoro-field pomodoro-field-check">Show in menu bar<input type="checkbox" name="menubarHidden"></label>
+      <div class="pomodoro-settings-actions">
+        <button type="submit" class="pomodoro-btn pomodoro-btn-primary">Save</button>
+      </div>
+      <hr class="pomodoro-settings-divider">
+      <div class="pomodoro-settings-caption">Store</div>
+      <label class="pomodoro-field">Older than (days)<input type="number" name="pruneDays" id="store-prune-days" min="1" max="3650" step="1" aria-label="Store: older than (days)"></label>
+      <div class="pomodoro-settings-actions">
         <button type="button" class="pomodoro-btn pomodoro-btn-danger" id="store-prune" aria-label="Store: delete boards">Delete boards</button>
         <span class="pomodoro-settings-status" id="store-prune-status" role="status" aria-live="polite"></span>
       </div>

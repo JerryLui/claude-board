@@ -339,8 +339,8 @@ enumerated in `PROTOCOL.md` "The browser session cookie". Three named lists carr
 `src/server.mjs` — and that they are named lists rather than an `/api/<thing>/*` prefix match is
 what keeps a route added later secret-only until someone widens it deliberately. The set reaches
 further than the name suggests: a browser holding only the cookie drives the whole pomodoro clock
-— every duration along with both the notify and the round-banner toggles — reports a board
-Attended or not, and prunes the store.
+— every duration along with the notify and round-banner toggles and the Master switch (`enabled`) — reports a
+board Attended or not, and prunes the store.
 
 The `attended` report and the round-banner toggle are why each of them has to be authenticated at
 all, and they are not the same
@@ -349,7 +349,14 @@ daemon restarts. The round-banner toggle is the larger one: `notifyRounds: false
 `settings` is merged into the stored settings and persisted, and the daemon reads it back on every
 announcement, so one write durably silences **every** Stranded banner for **every** board on the
 machine, across restarts, without touching a board or the secret file (ADR.md entry 58). The
-same-origin write check stands in front of all of it.
+Master switch carries the same weight, aimed the other way: `enabled: false` through `settings`
+is merged and persisted exactly like `notifyRounds: false` is, and it durably stops the whole
+pomodoro loop — the current interval is cleared Rollover-style and nothing new can start —
+until someone flips it back, again without touching a board or the secret file. It does not
+reach the round-banner toggle: `notifyRounds` and `enabled` are independent keys in the same
+settings document, so a write that silences one leaves the other exactly where it was, and
+Stranded's safety net keeps ringing whether or not pomodoro itself is on. The same-origin write
+check stands in front of all of it.
 
 #### `prune` is the one cookie-reachable write that destroys something
 
@@ -506,9 +513,13 @@ visit `http://127.0.0.1:3000` in the same browser — your own dev server, a not
 a container you published on loopback — that server receives the `cb_session` cookie on a
 plain navigation, and can replay it here to read every board, answer any open round, and — via
 `POST /api/pomodoro/settings` with `notifyRounds: false` — durably switch off every Stranded
-banner on the machine, which is the whole notification safety net that feature exists to be. It
-never touches the secret file, so this sits *outside* the "any process running as you"
-boundary further down: a container that cannot read your home directory can still do it.
+banner on the machine, which is the whole notification safety net that feature exists to be. The
+same replay can just as durably switch pomodoro itself off — `enabled: false` on the same route —
+clearing whatever interval is running and refusing every one after it until a human flips the
+Master switch back; it cannot silence `notifyRounds` in the same stroke, since that is a
+different key the write never touches. Neither ever touches the secret file, so this sits
+*outside* the "any process running as you" boundary further down: a container that cannot read
+your home directory can still do it.
 
 Nothing here closes it. The daemon cannot tell a replay from the browser it minted the
 cookie for, and while the index lives at `/` on `127.0.0.1` the cookie is scoped to every

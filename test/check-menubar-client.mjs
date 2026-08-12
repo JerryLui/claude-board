@@ -2036,6 +2036,160 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------------
+  // The Master switch (settings.enabled) -- criteria 6 and 8. The daemon-side gating (a
+  // timer start refused, the switch clearing a running Timer on flip-off) is a different
+  // chunk's own file (src/pomodoro.mjs) and a different chunk's own tests; what belongs
+  // here is the same split every other toggle in this suite already gets: this file only
+  // ever READS settings.enabled off `GET /api/pomodoro`, so what is checkable from this
+  // end is that the read derives the right display and that the existence gate and
+  // menubarHidden -- both already this file's own business -- stay exactly what they were.
+  //
+  // `runningDoc`'s `settings` here is written straight to `pomodoro.json` via `writeDoc`,
+  // never through the validated HTTP settings route (mergeSettings, src/pomodoro.mjs,
+  // does not know the key yet in this worktree) -- the same shortcut every other settings
+  // fixture in this suite already takes (menubarCountdown/menubarHidden above), and it is
+  // enough here: this end of the feature only cares what `GET /api/pomodoro` answers with,
+  // not how the daemon came to write it.
+  // -------------------------------------------------------------------------------------
+
+  await check('criterion 6: the switch off derives no ring, no centre mark and no countdown text, whatever the timer document still says', async () => {
+    const now = Date.now();
+    // Every timer shape the daemon could still be holding the instant the switch flips off
+    // -- idle, running, paused, on a break -- because AC6 is "the switch off outranks the
+    // Timer", not "the switch off happens to line up with idle".
+    const cases = [
+      { name: 'idle', timer: null },
+      { name: 'running work', timer: { phase: 'work', deadline: now + 5 * 60_000, paused: false } },
+      { name: 'paused work', timer: { phase: 'work', paused: true, remainingMs: 90_000 } },
+      { name: 'running break', timer: { phase: 'break', deadline: now + 3 * 60_000, paused: false } },
+    ];
+    for (const c of cases) {
+      await withDaemon(runningDoc(c.timer, { enabled: false }), async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port });
+        assert.equal(state.enabled, 'no', `${c.name}: the switch itself must read as off`);
+        assert.equal(state.ring, 'no', `${c.name}: no ring while the switch is off`);
+        assert.equal(state.mark, 'none', `${c.name}: no centre mark while the switch is off`);
+        assert.equal(state.countdown, 'no', `${c.name}: no countdown text while the switch is off`);
+        assert.equal(state.text, 'none', `${c.name}: nothing for the countdown to say`);
+      });
+    }
+  });
+
+  await check('criterion 6: the item\'s existence gate is untouched by the switch -- GET /api/pomodoro keeps answering with pomodoro off, so the item still appears', async () => {
+    // The paint itself is not checkable (this file's own opening comment says so, and it
+    // is as true of the board glyph as of the tomato) -- what IS checkable, and what AC6's
+    // "the menu-bar item still appears" comes down to on this end, is that
+    // cb_current_display's own gate (`answered_once`) still opens: a daemon that keeps
+    // answering with `enabled: false` is not a daemon that has "stopped answering", so
+    // criterion 9's dimming/hiding never enters into it either.
+    await withDaemon(runningDoc(null, { enabled: false }), async ({ probeHome, port }) => {
+      const state = await probe({ home: probeHome, port });
+      assert.equal(state.answered, 'yes', 'the daemon must still answer with the switch off');
+      assert.equal(state.enabled, 'no');
+    });
+  });
+
+  await check('missing settings.enabled reads as on -- the client\'s own fallback, matching every other toggle cb_fetch reads (the upgrade path)', async () => {
+    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
+      // No `enabled` key at all in this fixture (defaultDoc's own shape) -- the closest
+      // thing to "a settings document written before this key existed" this suite can
+      // produce without src/pomodoro.mjs itself knowing the key yet.
+      const state = await probe({ home: probeHome, port });
+      assert.equal(state.enabled, 'yes', 'a missing key must read as on, like every other toggle cb_bool reads here');
+    });
+  });
+
+  await check('AC4: with the switch off there is no countdown text regardless of menubarCountdown, and the stored preference is untouched for re-enable', async () => {
+    const now = Date.now();
+    const timer = { phase: 'work', deadline: now + 20 * 60_000, paused: false };
+    await withDaemon(runningDoc(timer, { enabled: false, menubarCountdown: true }), async ({ probeHome, port, secret }) => {
+      const off = await probe({ home: probeHome, port });
+      assert.equal(off.countdown, 'no', 'no countdown text while the switch is off, whatever menubarCountdown says');
+      // This file never writes a setting at all (the closed route set a few checks above
+      // has no settings route) -- so the value GET /api/pomodoro answers with is exactly
+      // what the fixture wrote, never something this derivation reset on the way through.
+      const doc = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
+        headers: { [SECRET_HEADER]: secret },
+      })).json();
+      assert.equal(doc.settings.menubarCountdown, true, 'the stored preference survives the switch being off, unwritten');
+    });
+    // Re-enabling (a fresh document is the daemon chunk's own job; this simulates the far
+    // side of it) shows the countdown again from the very same stored `true` -- never a
+    // fresh default, because nothing here ever touched it.
+    await withDaemon(runningDoc(timer, { enabled: true, menubarCountdown: true }), async ({ probeHome, port }) => {
+      assert.equal((await probe({ home: probeHome, port })).countdown, 'yes',
+        're-enabling must restore the countdown from the untouched stored value');
+    });
+  });
+
+  await check('criterion 8: Hide menu bar icon hides/unhides the whole item regardless of the switch, on or off', async () => {
+    for (const enabled of [true, false]) {
+      await withDaemon(runningDoc(null, { enabled, menubarHidden: true }), async ({ probeHome, port }) => {
+        const state = await probe({ home: probeHome, port });
+        assert.equal(state.hidden, 'yes', `enabled=${enabled}: menubarHidden must still hide the item`);
+        assert.equal(state.enabled, enabled ? 'yes' : 'no', 'setup: the switch itself reads as expected');
+      });
+      await withDaemon(runningDoc(null, { enabled, menubarHidden: false }), async ({ probeHome, port }) => {
+        assert.equal((await probe({ home: probeHome, port })).hidden, 'no',
+          `enabled=${enabled}: menubarHidden must still unhide the item`);
+      });
+    }
+  });
+
+  await check('criterion 6: with the switch off, the popover is the waiting list and the gear alone -- no status row, no control row, no divider', async () => {
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000, paused: false }, { enabled: false }),
+      async ({ probeHome, port, secret }) => {
+        // Two boards waiting, so what is asserted below is genuinely "the waiting list",
+        // not an empty caption that would pass the row-count check by accident.
+        for (let i = 1; i <= 2; i++) {
+          await fetch(`http://127.0.0.1:${port}/api/board`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', [SECRET_HEADER]: secret },
+            body: JSON.stringify({
+              title: `OFF_WAITING_${i}`,
+              blocks: [{ kind: 'question', prompt: 'Waiting?', widget: 'single', options: [{ label: 'Yes' }] }],
+            }),
+          });
+        }
+        const state = await probe({ home: probeHome, port, args: ['layout'] });
+        const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
+          .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+        // The on-state's four fixed rows (status, control, divider, caption) collapse to
+        // ONE (caption + gear) when the switch is off, so a daemon holding two waiting
+        // boards draws exactly three rows total, none of them the divider.
+        assert.equal(rowNames.length, 3,
+          `expected 1 fixed row + 2 waiting rows, got ${rowNames.length}: ${rowNames.join(', ')}`);
+        const rows = rowNames.map(name => state.frames[name]);
+        assert.deepEqual(rows.map(row => row.class), ['NSStackView', 'NSButton', 'NSButton'],
+          `row 0 must be the caption+gear row and the rest plain waiting rows, got ${JSON.stringify(rows.map(r => r.class))}`);
+        assertRowsSpanPanel(rows, 'row (switch off)');
+
+        // None of the Timer-only controls exist at all: cb_row_index_of's own -1 for a nil
+        // view is what "no control" means when there was never a view to find one on.
+        for (const name of ['glyph', 'statusline', 'toggle', 'stateword', 'forward']) {
+          assert.equal(state.rowIndex[name], -1, `${name} must not exist in the off popover`);
+        }
+        // Criterion 3: settings stay reachable -- the gear survives, in the popover's one
+        // remaining row.
+        assert.equal(state.rowIndex.gear, 0, 'the gear is still in the (only) row');
+      });
+  });
+
+  await check('criterion 3, structurally: the gear\'s URL is the same #pomodoro-settings anchor whether the switch is on or off -- one gear, one wire, never rebuilt per state', async () => {
+    // The gear button itself is constructed ONCE in -buildContentWithDisplay:waiting:,
+    // before the on/off branch, and -pressSettings: (its one action) is untouched by this
+    // spec -- so this is a regression net on "the popover gear still lands on the settings
+    // panel" (criterion 3) rather than a claim this chunk had to newly satisfy.
+    const source = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    assert.match(source, /cb_open_url\(cb_index_url\(@"#pomodoro-settings"\)\)/,
+      'the gear must still open the baked #pomodoro-settings anchor');
+    // One gear built, once, ahead of the on/off branch -- never a second construction (and
+    // so never a second place this URL could drift from) for the off state.
+    assert.equal([...source.matchAll(/cb_icon_button\(cb_icon_image\(cb_gear_path\(\)\)/g)].length, 1,
+      'the gear button must be built exactly once, shared by both states');
+  });
+
+  // -------------------------------------------------------------------------------------
   // Criterion 9 -- everything that is not an answer.
   // -------------------------------------------------------------------------------------
 

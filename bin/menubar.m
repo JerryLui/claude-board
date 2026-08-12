@@ -234,6 +234,13 @@ typedef struct {
   int countdown;    /* settings.menubarCountdown */
   int hidden;       /* settings.menubarHidden */
   int long_every;   /* settings.longEvery */
+  /* settings.enabled — the Master switch (spec: "Pomodoro made optional behind one Master
+   * switch"). Missing key reads as on, matching every other toggle here and the spec's own
+   * upgrade path: a settings document written before this key existed must behave exactly
+   * as it does today. This file only ever reads it — the switch is edited on the index
+   * page's settings panel, never from the menu bar (CB_ACTION_PATHS's own comment already
+   * says this process posts no setting at all). */
+  int enabled;
 } cb_settings;
 
 /* What sits in the middle of the silhouette, and only one thing ever can. The rest bar and
@@ -256,6 +263,13 @@ typedef enum {
 typedef struct {
   int answered;       /* has the daemon answered inside CB_STALE_AFTER_MS */
   int hidden;         /* settings.menubarHidden — the item exists but is not visible */
+  /* settings.enabled, copied straight through — ADR 103, "off is absence". A field rather
+   * than a condition cb_draw rediscovers from `phase`, for the same reason `ring`/`mark`
+   * are fields: it is what test/check-menubar-client.mjs pins through `--menubar --probe`
+   * without a window server. Off forces phase back to CB_IDLE below (there being no timer
+   * left to describe), so `enabled` is the one field that tells a genuinely idle Timer
+   * apart from the switch itself being off — both draw `phase=idle`, only one is `enabled=no`. */
+  int enabled;
   cb_phase phase;
   int paused;
   int ring;           /* draw the progress ring inside the outline */
@@ -354,9 +368,22 @@ static cb_display cb_derive(int answered, const cb_timer *timer, const cb_settin
   memset(&d, 0, sizeof(d));
   d.answered = answered ? 1 : 0;
   d.hidden = settings->hidden ? 1 : 0;
+  d.enabled = settings->enabled ? 1 : 0;
   /* A full sweep, so a state that draws no ring never leaves a stale fraction behind for
    * one that does. */
   d.fraction = 1.0;
+
+  /* AC6: the switch off outranks everything below it — ring, centre mark and countdown
+   * text every one of them gone, whatever `timer` itself still says. `hidden` above is
+   * read first and survives this branch untouched (AC8: Hide menu bar icon is not the
+   * switch's business either way), and `phase` lands on CB_IDLE for the same reason idle
+   * itself does — there is no interval left to describe — with `enabled` (not `phase`) the
+   * field that tells the two apart, and cb_draw the thing that reads it to draw the board
+   * glyph instead of the tomato. */
+  if (!d.enabled) {
+    d.phase = CB_IDLE;
+    return d;
+  }
 
   if (!timer->running) {
     /* Idle: the silhouette alone, no ring and no centre mark, and no countdown at all —
@@ -778,6 +805,7 @@ static void cb_defaults(cb_timer *timer, cb_settings *settings) {
   settings->countdown = 1;
   settings->hidden = 0;
   settings->long_every = 4;
+  settings->enabled = 1;
 }
 
 /* The protocol's three phase spellings and nothing else. An unrecognised one — a future
@@ -1121,6 +1149,9 @@ static BOOL cb_fetch(cb_timer *timer_out, cb_settings *settings_out, double *now
     settings_out->long_break_ms = cb_number(settings, @"longBreakMin", 15.0) * 60000.0;
     settings_out->countdown = cb_bool(settings, @"menubarCountdown", 1);
     settings_out->hidden = cb_bool(settings, @"menubarHidden", 0);
+    /* Missing key means on (spec criterion 9's upgrade path) — cb_bool's own fallback,
+     * matching every other toggle read here. */
+    settings_out->enabled = cb_bool(settings, @"enabled", 1);
     /* Floored at 1, not at 0: it is a divisor on both sides of the wire (settleBoundary's
      * `breakNumber % longEvery`, and the popover's own position denominator). */
     settings_out->long_every = cb_number_int(settings, @"longEvery", 4.0, 1, CB_COUNT_MAX);
@@ -1616,6 +1647,24 @@ static const double CB_RING_STROKE = 1.5;
  * alone in the middle of a lot of white; at the outline's own weight it read as a scratch. */
 static const double CB_REST_STROKE = 2.2;
 
+/* AC6 / ADR 103: with the switch off there is nothing left to draw a Timer's glyph for, so
+ * the item draws this project's own board mark instead of the tomato — the same rounded
+ * square and quiet/bold rows src/styles.mjs's MARK_SHAPES is (the favicon, and the mark in
+ * both the index and board page headers), redrawn as the tomato's own kind of line art
+ * (ADR 84: shape and weight, never hue, never a fill) rather than copied as MARK_SHAPES'
+ * filled tile. The reviewed mock (variant A, `/tmp/example-pomodoro-optional.html`) drew it
+ * this same way: one rounded outline, two interior bars, one stroke weight throughout.
+ *
+ * The outline's own bounds are the tomato's (CB_CIRCLE_X ± CB_CIRCLE_R horizontally, SVG y
+ * 4.6..21.4 vertically — TOMATO_ICON's own stem-to-hem span) rather than a fresh box, so
+ * flipping the switch never changes how much ink the item is showing or how wide the item
+ * is: the two glyphs trade places inside the exact same frame. */
+static const double CB_BOARD_X = CB_CIRCLE_X - CB_CIRCLE_R;   /* 5.2 */
+static const double CB_BOARD_Y = 4.6;                          /* SVG y, top edge */
+static const double CB_BOARD_W = CB_CIRCLE_R * 2.0;             /* 13.6 */
+static const double CB_BOARD_H = 21.4 - 4.6;                    /* 16.8 */
+static const double CB_BOARD_RADIUS = 3.0;
+
 /* The item's image, in points. 18 tall is the most a 22pt menu bar takes without crowding
  * it. CB_SCALE maps the 24-unit box into that height: the ink spans y 4.6..21.4 in SVG
  * units plus half a stroke either side, i.e. 18.8 units, and 0.82 leaves a hair of margin
@@ -1688,6 +1737,24 @@ static void cb_line(NSBezierPath *path, double x1, double y1, double x2, double 
  * Every `set` here is a mask value, never a colour — see cb_mask above. */
 static void cb_draw(cb_display d) {
   [cb_mask(cb_ink_alpha(d)) setStroke];
+
+  if (!d.enabled) {
+    /* AC6: no ring, no centre mark, no countdown text — cb_derive already forced all
+     * three off, and this is the shape half of that: an entirely different silhouette,
+     * not the idle tomato with parts missing. CB_BOARD_* above says why these particular
+     * bounds. Two bars, echoing MARK_SHAPES' own quiet/bold pair, at the outline's own
+     * stroke weight rather than a second one — the mock this was reviewed against drew
+     * the whole glyph at one weight, and ADR 84 spends weight sparingly enough already. */
+    NSBezierPath *board = cb_path();
+    [board appendBezierPathWithRoundedRect:NSMakeRect(CB_BOARD_X, CB_SVG_Y(CB_BOARD_Y + CB_BOARD_H),
+                                                       CB_BOARD_W, CB_BOARD_H)
+                                    xRadius:CB_BOARD_RADIUS
+                                    yRadius:CB_BOARD_RADIUS];
+    cb_line(board, CB_BOARD_X + 3.0, 11.0, CB_BOARD_X + 11.0, 11.0);
+    cb_line(board, CB_BOARD_X + 3.0, 16.0, CB_BOARD_X + 8.0, 16.0);
+    [board stroke];
+    return;
+  }
 
   /* The silhouette, and it is drawn in EVERY state including the breaks (ADR 84) — the
    * break glyph's old stemlessness is gone, and with it the moment where the menu bar
@@ -2419,50 +2486,71 @@ static void cb_open_url(NSURL *url) {
   NSMutableArray<NSView *> *rows = [NSMutableArray array];
   NSMutableArray<NSString *> *urls = [NSMutableArray array];
 
-  /* The status line: the phase glyph the menu bar is drawing at this same instant, the
-   * phase in words, and the gear pinned right. The glyph is an NSImageView rather than a
-   * button because it is not a control — and it is the one place a colour is named beyond
-   * the captions: an image view has no text colour of its own for a template image to
-   * inherit, so `labelColor` says out loud that this glyph belongs to the line beside it.
-   * A semantic name, resolved by the system per appearance, never a value. */
-  self.glyphView = [NSImageView imageViewWithImage:cb_glyph_image(display)];
-  self.glyphView.contentTintColor = [NSColor labelColor];
-  [self.glyphView setAccessibilityElement:NO];
-
-  char status[64];
-  cb_status_label(display, status, sizeof(status));
-  self.statusLine = cb_caption([NSString stringWithUTF8String:status], NO);
-  cb_fill_with(self.statusLine);
+  char waiting_caption[48];
+  cb_waiting_caption(waiting.count + waiting.more, waiting_caption, sizeof(waiting_caption));
 
   self.gearButton = cb_icon_button(cb_icon_image(cb_gear_path()), @"Settings", self,
                                    @selector(pressSettings:));
-  [rows addObject:cb_row(@[ self.glyphView, self.statusLine, self.gearButton ])];
 
-  /* The control row. The switch's POSITION and the word beside it both report the STATE;
-   * its accessibility label is the ACTION a press performs, in the widget's own spelling
-   * ("Start pomodoro" / "Pause pomodoro" / "Resume pomodoro"), so the two surfaces say the
-   * same sentence to a screen reader. */
-  self.toggle = [[NSSwitch alloc] init];
-  self.toggle.target = self;
-  self.toggle.action = @selector(pressPrimary:);
-  self.toggle.state = cb_switch_on(display) ? NSControlStateValueOn : NSControlStateValueOff;
-  NSString *switch_word = [NSString stringWithUTF8String:cb_switch_label(cb_switch_action(display))];
-  [self.toggle setAccessibilityLabel:[switch_word stringByAppendingString:@" pomodoro"]];
+  if (!display.enabled) {
+    /* AC2/AC6 (ADR 103, "off is absence"): no glyph, no status line, no switch, no
+     * restart/forward — every one of those properties left nil, exactly as if -rebuild
+     * had never run for a Timer at all, which is honest: there is no Timer. The waiting
+     * caption carries the gear where the status row otherwise would (criterion 3: settings
+     * stay reachable from a bare gear even here), and no separator, there being no timer
+     * section above it to divide from. */
+    self.glyphView = nil;
+    self.statusLine = nil;
+    self.toggle = nil;
+    self.stateWord = nil;
+    self.forwardButton = nil;
 
-  self.stateWord = cb_caption([NSString stringWithUTF8String:cb_switch_state_word(display)], YES);
-  cb_fill_with(self.stateWord);
+    NSTextField *caption = cb_caption(@(waiting_caption), YES);
+    cb_fill_with(caption);
+    [rows addObject:cb_row(@[ caption, self.gearButton ])];
+  } else {
+    /* The status line: the phase glyph the menu bar is drawing at this same instant, the
+     * phase in words, and the gear pinned right. The glyph is an NSImageView rather than a
+     * button because it is not a control — and it is the one place a colour is named beyond
+     * the captions: an image view has no text colour of its own for a template image to
+     * inherit, so `labelColor` says out loud that this glyph belongs to the line beside it.
+     * A semantic name, resolved by the system per appearance, never a value. */
+    self.glyphView = [NSImageView imageViewWithImage:cb_glyph_image(display)];
+    self.glyphView.contentTintColor = [NSColor labelColor];
+    [self.glyphView setAccessibilityElement:NO];
 
-  NSButton *restart = cb_icon_button(cb_icon_image(cb_restart_path()), @"Restart interval",
-                                     self, @selector(pressRestart:));
-  self.forwardButton = cb_icon_button(cb_icon_image(cb_forward_path()), @"Forward to next interval",
-                                      self, @selector(pressForward:));
-  [rows addObject:cb_row(@[ self.toggle, self.stateWord, restart, self.forwardButton ])];
+    char status[64];
+    cb_status_label(display, status, sizeof(status));
+    self.statusLine = cb_caption([NSString stringWithUTF8String:status], NO);
+    cb_fill_with(self.statusLine);
 
-  [rows addObject:[self separator]];
+    [rows addObject:cb_row(@[ self.glyphView, self.statusLine, self.gearButton ])];
 
-  char waiting_caption[48];
-  cb_waiting_caption(waiting.count + waiting.more, waiting_caption, sizeof(waiting_caption));
-  [rows addObject:cb_caption(@(waiting_caption), YES)];
+    /* The control row. The switch's POSITION and the word beside it both report the STATE;
+     * its accessibility label is the ACTION a press performs, in the widget's own spelling
+     * ("Start pomodoro" / "Pause pomodoro" / "Resume pomodoro"), so the two surfaces say the
+     * same sentence to a screen reader. */
+    self.toggle = [[NSSwitch alloc] init];
+    self.toggle.target = self;
+    self.toggle.action = @selector(pressPrimary:);
+    self.toggle.state = cb_switch_on(display) ? NSControlStateValueOn : NSControlStateValueOff;
+    NSString *switch_word = [NSString stringWithUTF8String:cb_switch_label(cb_switch_action(display))];
+    [self.toggle setAccessibilityLabel:[switch_word stringByAppendingString:@" pomodoro"]];
+
+    self.stateWord = cb_caption([NSString stringWithUTF8String:cb_switch_state_word(display)], YES);
+    cb_fill_with(self.stateWord);
+
+    NSButton *restart = cb_icon_button(cb_icon_image(cb_restart_path()), @"Restart interval",
+                                       self, @selector(pressRestart:));
+    self.forwardButton = cb_icon_button(cb_icon_image(cb_forward_path()), @"Forward to next interval",
+                                        self, @selector(pressForward:));
+    [rows addObject:cb_row(@[ self.toggle, self.stateWord, restart, self.forwardButton ])];
+
+    [rows addObject:[self separator]];
+
+    [rows addObject:cb_caption(@(waiting_caption), YES)];
+  }
+
   for (int i = 0; i < waiting.count; i++) {
     NSString *label = [NSString stringWithUTF8String:waiting.rows[i].label];
     if (label == nil) continue;
@@ -3078,10 +3166,11 @@ static void cb_menubar_probe_live(double timeoutSeconds) {
   cb_display d;
   if (!cb_current_display(&d, NULL)) memset(&d, 0, sizeof(d));
   static const char *const PHASES[] = { "idle", "work", "break", "longBreak" };
-  printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s answered=%s\n",
+  printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s answered=%s "
+         "enabled=%s\n",
          PHASES[d.phase], d.paused ? "yes" : "no", d.remaining_s, d.fraction,
          d.countdown ? "yes" : "no", d.text[0] ? d.text : "none", d.hidden ? "yes" : "no",
-         d.answered ? "yes" : "no");
+         d.answered ? "yes" : "no", d.enabled ? "yes" : "no");
 
   [cb_state_lock lock];
   cb_waiting waiting = cb_state_waiting;
@@ -3131,10 +3220,11 @@ static void cb_menubar_probe_run(double timeoutSeconds) {
   cb_display d;
   if (!cb_current_display(&d, NULL)) memset(&d, 0, sizeof(d));
   static const char *const PHASES[] = { "idle", "work", "break", "longBreak" };
-  printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s answered=%s\n",
+  printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s answered=%s "
+         "enabled=%s\n",
          PHASES[d.phase], d.paused ? "yes" : "no", d.remaining_s, d.fraction,
          d.countdown ? "yes" : "no", d.text[0] ? d.text : "none", d.hidden ? "yes" : "no",
-         d.answered ? "yes" : "no");
+         d.answered ? "yes" : "no", d.enabled ? "yes" : "no");
 
   [cb_state_lock lock];
   cb_waiting waiting = cb_state_waiting;
@@ -3379,11 +3469,11 @@ int cb_menubar_probe(const char *word, const char *argument) {
      * they are different words on purpose, and because "the popover says paused exactly
      * once" is only checkable if every word the popover shows is reported somewhere. */
     printf("phase=%s paused=%s remaining=%ld fraction=%.3f countdown=%s text=%s hidden=%s "
-           "answered=%s primary=%s stateword=%s ring=%s mark=%s\n",
+           "answered=%s primary=%s stateword=%s ring=%s mark=%s enabled=%s\n",
            PHASES[d.phase], d.paused ? "yes" : "no", d.remaining_s, d.fraction,
            d.countdown ? "yes" : "no", d.text[0] ? d.text : "none", d.hidden ? "yes" : "no",
            d.answered ? "yes" : "no", cb_switch_label(cb_switch_action(d)),
-           cb_switch_state_word(d), d.ring ? "yes" : "no", MARKS[d.mark]);
+           cb_switch_state_word(d), d.ring ? "yes" : "no", MARKS[d.mark], d.enabled ? "yes" : "no");
 
     char status[64];
     cb_status_label(d, status, sizeof(status));
