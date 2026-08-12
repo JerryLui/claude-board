@@ -937,7 +937,43 @@ function onPomodoroSettingsSubmit(ev) {
 function onPomodoroEnabledChange(ev) {
   var el = ev.target;
   if (!el || el.getAttribute('name') !== 'enabled') return;
-  postPomodoro('settings', { enabled: !!el.checked });
+  postPomodoro('settings', { enabled: !!el.checked }).then(function () {
+    // ADR 104: flipping the Master switch changes the page's SHAPE -- full
+    // widget vs reduced panel, header countdown, the Timer surfaces, all of
+    // it -- so a successful write repairs by reloading, the same honest fix
+    // onStorePruneClick already uses above, never a second client-side
+    // rendering path. The one-shot reopen this toggle alone gets (no general
+    // panel-open memory) rides the URL itself rather than any separate flag
+    // storage: parking POMODORO_SETTINGS_FRAGMENT on the URL before reloading
+    // means the freshly loaded page's own openPomodoroSettingsFromFragment --
+    // already wired at startup below, and already the thing that opens AND
+    // SPENDS this exact fragment for the menu bar's own gear -- opens the
+    // settings panel once and clears the fragment straight back out, so an
+    // ordinary later reload finds nothing parked and stays closed, same as
+    // today.
+    //
+    // history.replaceState, never assigning location.hash -- the same form
+    // (and the same reason) openPomodoroSettingsFromFragment's own consume
+    // step below already uses: assigning location.hash queues an async
+    // 'hashchange' AND pushes a history entry. A reload started right after
+    // happens to outrun that queued event in every browser this was tried on,
+    // but nothing guarantees the ordering, and the pushed entry would make
+    // the reviewer's first Back press after the flip a no-op (back to the
+    // same URL, fragment and all). replaceState rewrites the URL the reload
+    // rereads with no queued event and no new entry. Guarded the same
+    // defensive way as every other history/location access in this file:
+    // this script also runs against stand-ins that supply neither.
+    if (typeof history !== 'undefined' && history && history.replaceState &&
+        typeof location !== 'undefined' && location && typeof location.reload === 'function') {
+      history.replaceState(null, '', location.pathname + location.search + POMODORO_SETTINGS_FRAGMENT);
+      location.reload();
+    }
+    // A failed write (the .catch this deliberately has none of) reloads
+    // nothing and leaves the checkbox showing whatever the reader just set --
+    // visibly out of step with what actually persisted, which is the failure
+    // staying visible that AC 3 asks for, unchanged from before this handler
+    // ever reloaded anything.
+  });
 }
 
 // Picking a cue plays it immediately, before Save, even with the

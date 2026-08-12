@@ -78,23 +78,46 @@ const REAL_FETCH = globalThis.fetch;
 // check here always has, never through a real GET / -- proving the SERVER's own
 // gate, src/server.mjs's readPomodoroDoc call, is a different check below that
 // goes through the real route instead of this helper).
-function loadIndexAgainstDaemon(port, { pomodoroEnabled = true, hash = '' } = {}) {
+// `failSettingsWrite` drops the session cookie on exactly one route --
+// POST /api/pomodoro/settings -- so that one write gets a REAL 401 back from
+// the real daemon (src/server.mjs's own no-credential refusal) rather than a
+// stubbed rejection: this file's whole discipline is a real round trip, and a
+// bad cookie is a legitimate way to make one actually fail. Every other
+// request (the widget's own initial GET, any other action) keeps the normal
+// cookie, so a check using this can still tell "the settings write itself
+// failed" apart from "the tab was never authorised at all".
+function loadIndexAgainstDaemon(port, { pomodoroEnabled = true, hash = '', failSettingsWrite = false } = {}) {
   const document = parseHTML(renderIndexPage({ threads: [], pomodoroEnabled }));
   const intervals = [];
   const fakeSetInterval = (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; };
   globalThis.fetch = (url, opts) => {
     const target = `http://127.0.0.1:${port}${url}`;
-    const headers = { ...(opts && opts.headers), cookie: sessionCookieHeader() };
+    const dropCookie = failSettingsWrite && url === '/api/pomodoro/settings';
+    const headers = { ...(opts && opts.headers), ...(dropCookie ? {} : { cookie: sessionCookieHeader() }) };
     return REAL_FETCH(target, { ...opts, headers });
   };
-  // 'window'/'location' join the two parameters this already passed: indexScript
-  // reads both for the settings panel's '#pomodoro-settings' fragment (the one
-  // the menu bar item's Settings row opens), the same
-  // new Function('document', 'window', 'location', ui) contract every check that
-  // drives src/ui.mjs already uses. The window is the parsed document's OWN
-  // defaultView, so a listener the script registers is reachable from a check;
-  // location is a plain { hash }, empty unless a check below asks for the
-  // fragment explicitly (ADR 103's own reachability criterion, off included).
+  // 'window'/'location'/'history' join the parameters this already passed:
+  // indexScript reads all three for the settings panel's '#pomodoro-settings'
+  // fragment (the one the menu bar item's Settings row opens, and ADR 104's
+  // reopen-after-reload rides), the same
+  // new Function('document', 'window', 'location', 'history', ui) contract
+  // test/check-pure.mjs's own loadIndexWithPomodoro already uses. The window is
+  // the parsed document's OWN defaultView, so a listener the script registers is
+  // reachable from a check; location's `pathname`/`search` default to the plain
+  // index route, `hash` empty unless a check below asks for the fragment
+  // explicitly (ADR 103's own reachability criterion, off included).
+  // `reload` is this file's own minimal seam for ADR 104's repair
+  // (onPomodoroEnabledChange and onStorePruneClick's shared reload idiom,
+  // src/indexpage.mjs): a spy, not a real navigation -- this stand-in has no
+  // document teardown to model, so counting calls is the whole of what a check
+  // needs to prove the repair fired, once. `history` RECORDS every
+  // replaceState call verbatim (same shape as test/check-pure.mjs's own
+  // `history.calls`), and applies the one real side effect
+  // src/indexpage.mjs's own callers depend on -- test/dom-stand-in.mjs's
+  // StandInHistory doc comment gives the same reasoning -- updating `location`'s
+  // bound `hash` to match the replaced URL, so a check can tell "the fragment
+  // landed via a real replaceState" apart from a bare `location.hash =`
+  // assignment, which would never touch `history.calls` at all.
   // 'EventSource' is DECLARED and never passed, binding the name to undefined inside
   // this scope so initIndexStream takes its own `typeof` early return by this file's
   // choice rather than by whether the host node build exposes a global EventSource
@@ -102,10 +125,21 @@ function loadIndexAgainstDaemon(port, { pomodoroEnabled = true, hash = '' } = {}
   // resolve to the real constructor and this harness would open a live connection to
   // the relative URL '/api/events' -- from a check that is about the pomodoro widget.
   // test/check-index-live.mjs is the one harness that really supplies one.
-  new Function('document', 'setInterval', 'window', 'location', 'EventSource', indexScript)(document, fakeSetInterval, document.defaultView, { hash });
+  const location = { hash, pathname: '/', search: '', reloadCount: 0, reload() { this.reloadCount++; } };
+  const history = {
+    calls: [],
+    replaceState(state, title, url) {
+      this.calls.push(url);
+      const hashIdx = url.indexOf('#');
+      location.hash = hashIdx === -1 ? '' : url.slice(hashIdx);
+    },
+  };
+  new Function('document', 'setInterval', 'window', 'location', 'history', 'EventSource', indexScript)(document, fakeSetInterval, document.defaultView, location, history);
   return {
     document,
     intervals,
+    location,
+    history,
     restoreFetch() { globalThis.fetch = REAL_FETCH; },
   };
 }
@@ -365,19 +399,15 @@ async function main() {
     });
 
     // ---------------------------------------------------------------------------
-    // ADR 103, "off is absence". The daemon-side half of the new `enabled` key
-    // (validating it through POST /api/pomodoro/settings) is another chunk's work
-    // and is not in this worktree -- src/pomodoro.mjs's TOGGLE_KEYS does not know
-    // the name yet, so these checks never round-trip it through the HTTP write
-    // path. They seed an off DOCUMENT straight to disk instead, exactly the way
-    // every other fixture in this file already does (writePomodoroDoc, ARRANGE
-    // only) -- normalizeDoc's own unknown-key passthrough (src/pomodoro.mjs) is
-    // what makes a hand-written `enabled: false` survive the read back intact
-    // even before the other chunk teaches TOGGLE_KEYS the name. What these checks
-    // are actually proving is entirely this chunk's own code: src/server.mjs's
-    // GET / gate (`settings.enabled !== false`) and src/pomodoro-widget.mjs's two
-    // shapes -- not the daemon's validation of a write, which is out of scope
-    // here by the brief's own instruction.
+    // ADR 103, "off is absence". The four checks immediately below seed an off
+    // DOCUMENT straight to disk (writePomodoroDoc, ARRANGE only, same as every
+    // other fixture in this file) rather than posting it through HTTP -- what
+    // they prove is src/server.mjs's GET / gate (`settings.enabled !== false`)
+    // and src/pomodoro-widget.mjs's two shapes, not a write. The write path --
+    // POST /api/pomodoro/settings actually flipping `enabled` and the client
+    // repairing afterward -- is proven by the ADR 104 group further below,
+    // which rounds-trip it through the real daemon like every write check in
+    // this file does.
     // ---------------------------------------------------------------------------
 
     await check('index page, pomodoro off: GET / server-renders no timer widget -- only a bare, reachable gear -- and the settings panel omits every pomodoro-only section while keeping the four survivors', async () => {
@@ -442,6 +472,98 @@ async function main() {
         const notifyRounds = tab.document.querySelector('input[name="notifyRounds"]');
         assert.ok(notifyRounds, 'the round-banner row must be wired up, not just present in the markup');
       } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    // ---------------------------------------------------------------------------
+    // ADR 104: a successful Master-switch write repairs the page by reloading it,
+    // with a one-shot flag that reopens the settings panel after that reload.
+    // Unlike the GET-only group above, these round-trip the real POST
+    // /api/pomodoro/settings write (TOGGLE_KEYS already knows 'enabled') and
+    // inspect this file's own location seam (loadIndexAgainstDaemon's reload
+    // spy, above) for the repair. The failure check forces a REAL 401 (a
+    // dropped session cookie on that one route, failSettingsWrite) rather than
+    // stubbing the daemon, matching this file's own real-HTTP discipline.
+    // ---------------------------------------------------------------------------
+
+    await check('pomodoro widget: switching the Master switch off, a successful write, repairs with exactly one reload and parks the settings-panel fragment for it to reopen (ADR 104, AC 1 & 2)', async () => {
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()) }, home);
+      const tab = loadIndexAgainstDaemon(server.port);
+      try {
+        await flush();
+        const checkbox = tab.document.querySelector('input[name="enabled"]');
+        assert.ok(checkbox, 'setup failure: no Master switch rendered');
+        // hasAttribute, not `.checked` -- test/dom-stand-in.mjs deliberately does not
+        // reflect the parsed `checked` CONTENT attribute onto the `.checked` PROPERTY
+        // (Element's own comment: only `disabled` earns that), so a checkbox fresh out
+        // of parseHTML reads `.checked === undefined` regardless of the markup.
+        assert.equal(checkbox.hasAttribute('checked'), true, 'setup failure: expected the switch to render on');
+        checkbox.checked = false; // the native toggle a real browser already applies before 'change' fires
+        checkbox.dispatchEvent(new StandInEvent('change'));
+        await flush();
+        assert.equal(readPomodoroDoc(home).settings.enabled, false, 'setup failure: the write must actually have reached the daemon');
+        // history.replaceState, not a bare `location.hash =` assignment: the
+        // latter would never touch history.calls at all, so this pins the
+        // actual mechanism (no hashchange race, no pushed history entry),
+        // not merely its eventual side effect on location.hash below.
+        assert.deepEqual(tab.history.calls, ['/#pomodoro-settings'], 'the fragment must land via history.replaceState against the reload\'s own URL, exactly once');
+        assert.equal(tab.location.reloadCount, 1, 'a successful write must repair with exactly one reload -- no further reviewer action');
+        assert.equal(tab.location.hash, '#pomodoro-settings', 'the reload must carry the one-shot reopen flag so the reader lands back on the settings panel');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('pomodoro widget: switching the Master switch back on, a successful write, repairs the same way -- both directions change the page\'s shape (AC 1)', async () => {
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: false } }, home);
+      const tab = loadIndexAgainstDaemon(server.port, { pomodoroEnabled: false });
+      try {
+        await flush();
+        const checkbox = tab.document.querySelector('input[name="enabled"]');
+        assert.ok(checkbox, 'setup failure: no Master switch rendered in the reduced panel');
+        assert.equal(checkbox.hasAttribute('checked'), false, 'setup failure: expected the switch to render off');
+        checkbox.checked = true;
+        checkbox.dispatchEvent(new StandInEvent('change'));
+        await flush();
+        assert.equal(readPomodoroDoc(home).settings.enabled, true, 'setup failure: the write must actually have reached the daemon');
+        assert.deepEqual(tab.history.calls, ['/#pomodoro-settings'], 'the fragment must land via history.replaceState here too, exactly once');
+        assert.equal(tab.location.reloadCount, 1, 'turning the switch back on must repair with exactly one reload too');
+        assert.equal(tab.location.hash, '#pomodoro-settings', 'and carry the same one-shot reopen flag');
+      } finally {
+        tab.restoreFetch();
+      }
+    });
+
+    await check('pomodoro widget: a Master-switch write that fails (a real 401, no session cookie on that one route) reloads nothing and stays visibly failed (AC 3)', async () => {
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()) }, home);
+      const tab = loadIndexAgainstDaemon(server.port, { failSettingsWrite: true });
+      // onPomodoroEnabledChange carries no .catch on this write -- deliberately,
+      // the same fire-and-forget shape onPomodoroToggleClick/onPomodoroForwardClick/
+      // onPomodoroRestartClick already use elsewhere in this file: a real browser
+      // tab merely logs an unhandled rejection to the console on a failed write, it
+      // does not crash the page. Node's own default IS to crash the process on one
+      // though, so this stands in for "the browser doesn't care", the same role
+      // test/check-notify.mjs's own uncaughtException listeners play for "a failed
+      // osascript call must not crash the caller".
+      let rejection = null;
+      const onRejection = err => { rejection = err; };
+      process.on('unhandledRejection', onRejection);
+      try {
+        await flush();
+        const checkbox = tab.document.querySelector('input[name="enabled"]');
+        assert.equal(checkbox.hasAttribute('checked'), true, 'setup failure: expected the switch to render on');
+        checkbox.checked = false;
+        checkbox.dispatchEvent(new StandInEvent('change'));
+        await flush();
+        assert.ok(rejection, 'setup failure: the forced 401 must actually reject the write');
+        assert.equal(readPomodoroDoc(home).settings.enabled, true, 'a failed write must not actually land on disk');
+        assert.equal(tab.location.reloadCount, 0, 'a failed write must reload nothing');
+        assert.deepEqual(tab.history.calls, [], 'and must not park the reopen flag via replaceState either -- there is no reload for it to ride');
+        assert.equal(tab.location.hash, '', 'and must not park the reopen flag either -- there is no reload for it to ride');
+        assert.equal(checkbox.checked, false, 'the box stays showing the reader\'s own click, out of step with the untouched disk value -- the visible failure the handler already guaranteed');
+      } finally {
+        process.off('unhandledRejection', onRejection);
         tab.restoreFetch();
       }
     });

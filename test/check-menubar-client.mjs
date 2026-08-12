@@ -21,9 +21,11 @@
 // at all; `--menubar --probe url <candidate>` runs the board-URL validator alone;
 // `--menubar --probe open <candidate>` runs ADR 93's decision -- raise the tab a board is
 // already open in, or open one -- against the real browsers on this machine with a stubbed
-// osascript; and `--menubar --probe icons` reports the bounding box of each icon the
-// popover draws, which is the one observable the SVG path-data walker has. The popover's
-// rows are printed by the
+// osascript; `--menubar --probe icons` reports the bounding box of each icon the popover
+// draws, which is the one observable the SVG path-data walker has; and `--menubar --probe
+// board` reports the off-state Board glyph's own SVG-space bounds and rows, plus that same
+// ink run through the button image's own fit transform, so a clipped edge is two numbers
+// disagreeing rather than a screenshot. The popover's rows are printed by the
 // plain probe, because the rules that decide them — five at most, the overflow's
 // arithmetic, the row's wording, which action the switch performs and which word sits
 // beside it — are pure C functions sitting next to cb_derive for exactly this reason. What
@@ -308,7 +310,7 @@ async function probe({ home, port, args = [] }) {
     signal = err.signal ?? null;
   }
   const lines = stdout.split('\n').map(s => s.trim()).filter(Boolean);
-  const state = { elapsedMs: Date.now() - started, code, signal, stderr, stdout, rows: [], icons: [], frames: {}, rowIndex: {} };
+  const state = { elapsedMs: Date.now() - started, code, signal, stderr, stdout, rows: [], icons: [], frames: {}, rowIndex: {}, boardRows: [] };
   // Two line shapes on purpose (bin/menubar.m says why): the first line is bare
   // `key=value` words, and every line after it is one `key=` followed by the rest of the
   // line verbatim, because a row label carries spaces and a middle dot.
@@ -367,6 +369,43 @@ async function probe({ home, port, args = [] }) {
     if (line.startsWith('rowindex=')) {
       const [nameToken, indexToken] = line.split(' ');
       state.rowIndex[nameToken.slice(9)] = Number(indexToken);
+      continue;
+    }
+    // `--menubar --probe board` (AC 4/5): one `board x=.. y=.. w=.. h=.. radius=..` line --
+    // the off-state glyph's real bounds, read off the same NSBezierPath cb_draw strokes
+    // (bin/menubar.m's cb_board_outline_path) and converted back into the SVG-space
+    // top-left the spec itself quotes -- then one `boardrow=<i> y=.. x1=.. x2=..` line per
+    // row, in draw order, straight out of CB_BOARD_ROWS.
+    if (line.startsWith('board ')) {
+      const board = {};
+      for (const pair of line.split(' ').slice(1)) {
+        const at = pair.indexOf('=');
+        if (at > 0) board[pair.slice(0, at)] = Number(pair.slice(at + 1));
+      }
+      state.board = board;
+      continue;
+    }
+    if (line.startsWith('boardrow=')) {
+      const [nameToken, ...rest] = line.split(' ');
+      const row = { index: Number(nameToken.slice(9)) };
+      for (const pair of rest) {
+        const at = pair.indexOf('=');
+        if (at > 0) row[pair.slice(0, at)] = Number(pair.slice(at + 1));
+      }
+      state.boardRows.push(row);
+      continue;
+    }
+    // `boardink x0=.. x1=.. y0=.. y1=.. glyphw=.. iconw=.. iconh=..` -- the same ink,
+    // stroke included, run through cb_glyph_fit_transform (the SAME transform cb_image
+    // concats) into POINT space, plus the frame it has to fit inside. This is the seam
+    // that catches a clip: `board`/`boardrow` above are SVG-space and cannot see one.
+    if (line.startsWith('boardink ')) {
+      const ink = {};
+      for (const pair of line.split(' ').slice(1)) {
+        const at = pair.indexOf('=');
+        if (at > 0) ink[pair.slice(0, at)] = Number(pair.slice(at + 1));
+      }
+      state.boardInk = ink;
       continue;
     }
     if (line.startsWith('row=')) state.rows.push(line.slice(4));
@@ -1413,6 +1452,131 @@ async function main() {
     // Forward: the polygon's 5..15 plus the bar at 19, and the polygon's own 4..20.
     near(boxes.forward.x, 5, 'forward x'); near(boxes.forward.w, 14, 'forward width');
     near(boxes.forward.h, 16, 'forward height');
+  });
+
+  // -------------------------------------------------------------------------------------
+  // AC 4-6 (spec: "square Board glyph") -- the off-state glyph is a square at the
+  // favicon's own corner ratio, MARK_SHAPES' three rows as line art, sized and centred on
+  // the tomato's own ink so the toggle swaps glyphs at the same optical size and item
+  // width, and painted with no clip. `--menubar --probe board` reports the SAME
+  // NSBezierPath cb_draw strokes (cb_board_outline_path, bin/menubar.m) in SVG space, plus
+  // that same ink run through cb_image's own fit transform into POINT space -- neither a
+  // hand copy of its constants -- the no-pixel rule the rest of this file already follows
+  // for the popover's icons above. AC6 (the comment and the constants must agree) has no
+  // check of its own; see the note above the last check in this section for why.
+  // -------------------------------------------------------------------------------------
+
+  /** AC 4/5's ground truth, hardcoded independently for the same reason PANEL_WIDTH above
+   * is: the favicon's own 9/32 corner ratio (MARK_SHAPES' `rx="9"` on its own 32-unit
+   * square, src/styles.mjs) and the tomato's own centre-x and stem-to-hem span
+   * (TOMATO_ICON's `cx=12` and SVG y 4.6..21.4, src/pomodoro-widget.mjs), never read back
+   * from bin/menubar.m's own CB_BOARD_* constants -- a fault that changes those constants
+   * must not also be able to rewrite the number this file checks them against. */
+  const FAVICON_CORNER_RATIO = 9 / 32;
+  const TOMATO_CENTER_X = 12;
+  const TOMATO_INK_TOP = 4.6;
+  const TOMATO_INK_BOTTOM = 21.4;
+
+  await check('AC 4/5: the off-state glyph is a square, at the favicon\'s own corner ratio, sized and centred on the tomato\'s own ink', async () => {
+    const state = await probe({ home: makeProbeHome(null), port: 1, args: ['board'] });
+    assert.equal(state.code, 0, `the board report must exit 0: ${state.stderr}`);
+    const board = state.board;
+    assert.ok(board, 'a `board x=.. y=.. w=.. h=.. radius=..` line must be reported');
+
+    // Square: width and height read off the real NSBezierPath's own bounds, not two
+    // separately-typed constants that could quietly diverge from each other.
+    assert.ok(Math.abs(board.w - board.h) < 0.05,
+      `the board must be square: w=${board.w} h=${board.h}`);
+
+    // The favicon's own corner ratio, applied to this glyph's own width.
+    assert.ok(Math.abs(board.radius / board.w - FAVICON_CORNER_RATIO) < 0.01,
+      `radius/width must be the favicon's 9/32, got ${board.radius}/${board.w} = ${(board.radius / board.w).toFixed(4)}`);
+
+    // AC5: the tomato's own stem-to-hem span, both edges -- the glyph's own vertical
+    // bounds must equal TOMATO_ICON's numbers, not a fresh box.
+    assert.ok(Math.abs(board.y - TOMATO_INK_TOP) < 0.05,
+      `top edge must be the tomato's own ${TOMATO_INK_TOP}, got ${board.y}`);
+    assert.ok(Math.abs((board.y + board.h) - TOMATO_INK_BOTTOM) < 0.05,
+      `bottom edge must be the tomato's own ${TOMATO_INK_BOTTOM}, got ${board.y + board.h}`);
+
+    // AC5's centring: the square shares the tomato's own centre-x, so the toggle swaps
+    // glyphs without the item's own width changing.
+    assert.ok(Math.abs((board.x + board.w / 2) - TOMATO_CENTER_X) < 0.05,
+      `the square must be centred on the tomato's own x=${TOMATO_CENTER_X}, got centre ${board.x + board.w / 2}`);
+  });
+
+  await check('AC4: the three rows are MARK_SHAPES\' own long/short/long, told apart by LENGTH -- never by a per-row opacity (ADR 84)', async () => {
+    const state = await probe({ home: makeProbeHome(null), port: 1, args: ['board'] });
+    assert.equal(state.code, 0, `the board report must exit 0: ${state.stderr}`);
+    assert.equal(state.boardRows.length, 3, 'three rows, MARK_SHAPES\' own long/short/long');
+
+    const expected = [
+      { y: 9.3, x1: 7.3, x2: 16.7 },
+      { y: 12.8, x1: 7.3, x2: 13.1 },
+      { y: 16.5, x1: 7.3, x2: 16.7 },
+    ];
+    const rows = state.boardRows.slice().sort((a, b) => a.index - b.index);
+    rows.forEach((row, i) => {
+      assert.ok(Math.abs(row.y - expected[i].y) < 0.05, `row ${i} y: expected ~${expected[i].y}, got ${row.y}`);
+      assert.ok(Math.abs(row.x1 - expected[i].x1) < 0.05, `row ${i} x1: expected ~${expected[i].x1}, got ${row.x1}`);
+      assert.ok(Math.abs(row.x2 - expected[i].x2) < 0.05, `row ${i} x2: expected ~${expected[i].x2}, got ${row.x2}`);
+    });
+
+    // Long, short, long -- rows 0 and 2 the same length, row 1 shorter -- which is the
+    // whole of what tells them apart (never opacity: bin/menubar.m sets the glyph's mask
+    // exactly once, asserted structurally below, so no row can carry its own weight).
+    const width = row => row.x2 - row.x1;
+    assert.ok(Math.abs(width(rows[0]) - width(rows[2])) < 0.05, 'the first and third rows must be the same length');
+    assert.ok(width(rows[1]) < width(rows[0]) - 1, 'the middle row must be shorter than the outer two');
+
+    // ADR 84, structurally: cb_draw sets the glyph's mask exactly once, before branching
+    // on d.enabled, so the off-state branch below it has no second alpha or WEIGHT to
+    // give any one row something its siblings do not share. `lineWidth` alongside
+    // setStroke/cb_mask: a per-row `board.lineWidth = ...` (the idiom this file's own
+    // popover-icon helpers use elsewhere) would be a second stroke weight in exactly the
+    // shape AC4 forbids, and would slip past a check that only watched for a second colour.
+    const menubar = readFileSync(path.join(repoRoot, 'bin', 'menubar.m'), 'utf8');
+    const offState = menubar.match(/if \(!d\.enabled\) \{([\s\S]*?)\n {4}return;\n {2}\}/);
+    assert.ok(offState, 'bin/menubar.m\'s cb_draw must still have an off-state branch');
+    assert.doesNotMatch(offState[1], /setStroke|cb_mask|lineWidth/,
+      'the off-state branch must not set its own stroke/mask/weight -- alpha and weight are cb_draw\'s single, shared calls, above the branch');
+  });
+
+  // AC6 ("the drawing code's comment and its constants agree") has no dedicated check of
+  // its own: the numeric proof that the constants actually come out square is the check
+  // above (board.w === board.h, read off the real NSBezierPath rather than the constants'
+  // own text), and that same equality is what the prose above CB_BOARD_W now describes.
+  // A check that greps bin/menubar.m for particular WORDS would police prose rather than
+  // fact (this file's own rule, see criterion 8's "quoted string literals, not the raw
+  // text" below) and would fail the moment an accurate comment used one of the banned
+  // words to explain what the code no longer does.
+
+  await check('the fix for the horizontal clip (AC 4/5 stay exact): the off-state ink -- stroke included, run through the SAME fit transform cb_image concats -- lands inside the image, and inside its own reserved share of it', async () => {
+    // bin/menubar.m's cb_glyph_fit_transform is the ONE transform cb_image concats before
+    // painting the item's real icon; `--menubar --probe board` now runs the glyph's own
+    // painted bounds (geometry plus half its stroke, exactly what reaches the screen)
+    // through that same transform and reports where the four corners land in POINT space
+    // -- the one space a clip like this actually happens in, and the one no SVG-space
+    // check (the one above) can ever see.
+    const state = await probe({ home: makeProbeHome(null), port: 1, args: ['board'] });
+    assert.equal(state.code, 0, `the board report must exit 0: ${state.stderr}`);
+    const ink = state.boardInk;
+    assert.ok(ink, 'a `boardink x0=.. x1=.. y0=.. y1=.. glyphw=.. iconw=.. iconh=..` line must be reported');
+
+    // No clipping: the ink's own painted bounds must not fall outside the image AppKit
+    // actually allocates for the item's icon (CB_ICON_W x CB_ICON_H).
+    assert.ok(ink.x0 > -0.01, `left edge clips past the image: x0=${ink.x0}`);
+    assert.ok(ink.x1 < ink.iconw + 0.01, `right edge clips past the image: x1=${ink.x1}, iconw=${ink.iconw}`);
+    assert.ok(ink.y0 > -0.01, `bottom edge clips past the image: y0=${ink.y0}`);
+    assert.ok(ink.y1 < ink.iconh + 0.01, `top edge clips past the image: y1=${ink.y1}, iconh=${ink.iconh}`);
+
+    // Criterion 10 / ADR 83: the ink must also stay inside its OWN reserved share of the
+    // image, `glyphw` -- not merely somewhere inside the whole image -- or it eats into
+    // the 3pt gap the countdown digits are drawn into (the actual shape of the bug this
+    // check exists to catch: the old frame did not clip past the image on the right, it
+    // only ate 0.21pt of the gap).
+    assert.ok(ink.x0 > -0.01 && ink.x1 <= ink.glyphw + 0.01,
+      `ink spans x${ink.x0}..${ink.x1}, past its own glyphw=${ink.glyphw} -- eating into the countdown's 3pt gap`);
   });
 
   // -------------------------------------------------------------------------------------

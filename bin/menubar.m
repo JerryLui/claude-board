@@ -1648,28 +1648,60 @@ static const double CB_RING_STROKE = 1.5;
 static const double CB_REST_STROKE = 2.2;
 
 /* AC6 / ADR 103: with the switch off there is nothing left to draw a Timer's glyph for, so
- * the item draws this project's own board mark instead of the tomato — the same rounded
- * square and quiet/bold rows src/styles.mjs's MARK_SHAPES is (the favicon, and the mark in
- * both the index and board page headers), redrawn as the tomato's own kind of line art
- * (ADR 84: shape and weight, never hue, never a fill) rather than copied as MARK_SHAPES'
- * filled tile. The reviewed mock (variant A, `/tmp/example-pomodoro-optional.html`) drew it
- * this same way: one rounded outline, two interior bars, one stroke weight throughout.
+ * the item draws this project's own board mark instead of the tomato — a SQUARE, true to
+ * src/styles.mjs's MARK_SHAPES (the favicon, and the mark in both the index and board page
+ * headers), redrawn as the tomato's own kind of line art (ADR 84: shape and weight, never
+ * hue, never a fill) rather than copied as MARK_SHAPES' filled tile. Board pick variant B,
+ * "favicon rows": MARK_SHAPES' own three rows — long, short, long — as three stroked lines
+ * at the outline's own single weight, rather than variant A's two filled bars (the earlier
+ * mock this used to match, before the square rewrite below). Rows differ from each other by
+ * LENGTH, the same axis MARK_SHAPES itself uses — never by opacity: ADR 84's alpha carries
+ * exactly one fact (staleness) and cb_draw sets it once, above, for the whole glyph.
  *
- * The outline's own bounds are the tomato's (CB_CIRCLE_X ± CB_CIRCLE_R horizontally, SVG y
- * 4.6..21.4 vertically — TOMATO_ICON's own stem-to-hem span) rather than a fresh box, so
- * flipping the switch never changes how much ink the item is showing or how wide the item
- * is: the two glyphs trade places inside the exact same frame. */
-static const double CB_BOARD_X = CB_CIRCLE_X - CB_CIRCLE_R;   /* 5.2 */
-static const double CB_BOARD_Y = 4.6;                          /* SVG y, top edge */
-static const double CB_BOARD_W = CB_CIRCLE_R * 2.0;             /* 13.6 */
-static const double CB_BOARD_H = 21.4 - 4.6;                    /* 16.8 */
-static const double CB_BOARD_RADIUS = 3.0;
+ * The square's own bounds are the tomato's stem-to-hem span (SVG y 4.6..21.4, TOMATO_ICON's
+ * own vertical ink) used for BOTH edges, not a fresh box, and its horizontal centre is the
+ * tomato's own CB_CIRCLE_X too — so flipping the switch never moves where the ink is
+ * centred, and never changes the ITEM's own width (CB_GLYPH_W/CB_ICON_W below are one
+ * frame shared by every state, unaffected by which one is actually drawn into it). What
+ * this does NOT hold any more: the two glyphs are not the same WIDTH of ink — the square's
+ * own 16.8 is wider than the tomato's 13.6, which is exactly why CB_GLYPH_W had to widen to
+ * fit it (see its own comment, below). CB_BOARD_RADIUS is the favicon's own 9/32 corner
+ * ratio (MARK_SHAPES' `rx="9"` on its 32-unit square) applied to this glyph's 16.8:
+ * 16.8 * 9/32 = 4.725, rounded to this file's own one-decimal convention. */
+static const double CB_BOARD_H = 21.4 - 4.6;                     /* 16.8, the tomato's own stem-to-hem span */
+static const double CB_BOARD_W = CB_BOARD_H;                     /* square: the same 16.8 */
+static const double CB_BOARD_X = CB_CIRCLE_X - CB_BOARD_W / 2.0; /* 3.6, centred like the tomato */
+static const double CB_BOARD_Y = 4.6;                             /* SVG y, top edge */
+static const double CB_BOARD_RADIUS = 4.7;                        /* CB_BOARD_W * 9/32 (favicon ratio), rounded */
+
+/* MARK_SHAPES' own three rows — long, short, long — as this glyph's line art: each row's
+ * own centre y and x-span, scaled by 16.8/32 (CB_BOARD_H over MARK_SHAPES' 32-unit box) and
+ * offset into this glyph's own origin, so these are the same numbers a reader could work out
+ * from src/styles.mjs's MARK_SHAPES by hand, not a fresh guess at three bars. cb_draw and
+ * `--menubar --probe board` both read this one array below, so the glyph actually painted
+ * and the glyph the probe reports can never drift apart from each other. */
+typedef struct { double y, x1, x2; } cb_board_row;
+static const cb_board_row CB_BOARD_ROWS[] = {
+  { 9.3, 7.3, 16.7 },    /* MARK_SHAPES row 1 (quiet, long) */
+  { 12.8, 7.3, 13.1 },   /* MARK_SHAPES row 2 (quiet, short) */
+  { 16.5, 7.3, 16.7 },   /* MARK_SHAPES row 3 (bold, long) */
+};
 
 /* The item's image, in points. 18 tall is the most a 22pt menu bar takes without crowding
  * it. CB_SCALE maps the 24-unit box into that height: the ink spans y 4.6..21.4 in SVG
  * units plus half a stroke either side, i.e. 18.8 units, and 0.82 leaves a hair of margin
  * inside 18pt. CB_INK_CENTER_Y is where that ink is centred (y-up), and every state draws
  * the same silhouette now, so it is the one centre for all of them.
+ *
+ * The Board glyph's own square makes that SAME 18.8 units the ink's horizontal span too —
+ * its own width is CB_BOARD_H (the tomato's own stem-to-hem height) plus the same stroke
+ * either side, because it is a square. CB_GLYPH_W therefore has to hold exactly what
+ * CB_ICON_H already holds, and is defined as that height rather than a second,
+ * independently-chosen width: one fit, proven correct once above, reused for both axes
+ * instead of risking the two drifting apart. (Measured before this: CB_GLYPH_W was a plain
+ * 15, fitted only to the tomato's own narrower 13.6 + stroke = 15.6 units; the square's
+ * 18.8 needs 18.8 * 0.82 = 15.416pt, and the old 15pt frame clipped its left stroke edge
+ * past the image's own left edge and ate into the countdown's 3pt gap on the right.)
  *
  * The width is the glyph's own CB_GLYPH_W plus 3pt of EMPTY IMAGE to the right of it, and
  * that 3pt is the space between the icon and the countdown (criterion 10, ADR 83). Buying
@@ -1679,9 +1711,9 @@ static const double CB_BOARD_RADIUS = 3.0;
  * attributed title would be reaching back for the styling this file spends its whole
  * appearance story avoiding. The ink is centred in CB_GLYPH_W rather than in CB_ICON_W, so
  * the extra width lands entirely on the countdown's side. */
-static const double CB_GLYPH_W = 15.0;
-static const double CB_ICON_W = 18.0;    /* CB_GLYPH_W + 3pt of space before the digits */
 static const double CB_ICON_H = 18.0;
+static const double CB_GLYPH_W = CB_ICON_H;   /* 18: the ink needs the same room both axes now */
+static const double CB_ICON_W = CB_GLYPH_W + 3.0;   /* 21: CB_GLYPH_W + 3pt before the digits */
 static const double CB_SCALE = 0.82;
 static const double CB_INK_CENTER_Y = 11.0;
 
@@ -1732,6 +1764,42 @@ static void cb_line(NSBezierPath *path, double x1, double y1, double x2, double 
   [path lineToPoint:NSMakePoint(x2, CB_SVG_Y(y2))];
 }
 
+/* The Board glyph's own square outline, built from CB_BOARD_X/Y/W/H/RADIUS alone — factored
+ * out of cb_draw so `--menubar --probe board` (bottom of this file) reports the bounds of
+ * the SAME NSBezierPath the item paints, not a hand copy of its geometry. */
+static NSBezierPath *cb_board_outline_path(void) {
+  NSBezierPath *board = cb_path();
+  [board appendBezierPathWithRoundedRect:NSMakeRect(CB_BOARD_X, CB_SVG_Y(CB_BOARD_Y + CB_BOARD_H),
+                                                     CB_BOARD_W, CB_BOARD_H)
+                                  xRadius:CB_BOARD_RADIUS
+                                  yRadius:CB_BOARD_RADIUS];
+  return board;
+}
+
+/* The Board glyph's own PAINTED bounds, stroke included. appendBezierPathWithRoundedRect:
+ * only ever hands back the geometric bounds of the rect it was given — a stroke centred on
+ * a closed path adds half its own width outward on every side, and NSBezierPath's `bounds`
+ * does not include that — so this insets the geometric box outward by CB_STROKE / 2 to get
+ * what actually reaches the screen, the same half-stroke cb_image's own CB_SCALE comment
+ * already accounts for on the vertical axis. */
+static NSRect cb_board_ink_rect(void) {
+  return NSInsetRect([cb_board_outline_path() bounds], -CB_STROKE / 2.0, -CB_STROKE / 2.0);
+}
+
+/* The status item's own image fit — the SAME NSAffineTransform cb_image (below) concats
+ * before calling cb_draw, factored out so `--menubar --probe board` (bottom of this file)
+ * can run the glyph's own ink through it too. A clip like the one this fixed (CB_GLYPH_W
+ * once too narrow for the squared glyph's ink) only exists in POINT space, after this
+ * transform — invisible to any check that reads SVG-space numbers alone — so catching it
+ * again means sharing the transform itself, not re-deriving its arithmetic a second time. */
+static NSAffineTransform *cb_glyph_fit_transform(void) {
+  NSAffineTransform *fit = [NSAffineTransform transform];
+  [fit translateXBy:CB_GLYPH_W / 2.0 yBy:CB_ICON_H / 2.0];
+  [fit scaleBy:CB_SCALE];
+  [fit translateXBy:-CB_CIRCLE_X yBy:-CB_INK_CENTER_Y];
+  return fit;
+}
+
 /* Draws into whatever context is current, in the 24-unit space the widget's SVG uses.
  * Called only from the drawing handler below, which has already established the transform.
  * Every `set` here is a mask value, never a colour — see cb_mask above. */
@@ -1742,16 +1810,13 @@ static void cb_draw(cb_display d) {
     /* AC6: no ring, no centre mark, no countdown text — cb_derive already forced all
      * three off, and this is the shape half of that: an entirely different silhouette,
      * not the idle tomato with parts missing. CB_BOARD_* above says why these particular
-     * bounds. Two bars, echoing MARK_SHAPES' own quiet/bold pair, at the outline's own
-     * stroke weight rather than a second one — the mock this was reviewed against drew
-     * the whole glyph at one weight, and ADR 84 spends weight sparingly enough already. */
-    NSBezierPath *board = cb_path();
-    [board appendBezierPathWithRoundedRect:NSMakeRect(CB_BOARD_X, CB_SVG_Y(CB_BOARD_Y + CB_BOARD_H),
-                                                       CB_BOARD_W, CB_BOARD_H)
-                                    xRadius:CB_BOARD_RADIUS
-                                    yRadius:CB_BOARD_RADIUS];
-    cb_line(board, CB_BOARD_X + 3.0, 11.0, CB_BOARD_X + 11.0, 11.0);
-    cb_line(board, CB_BOARD_X + 3.0, 16.0, CB_BOARD_X + 8.0, 16.0);
+     * bounds. Three rows, echoing MARK_SHAPES' own long/short/long, at the outline's own
+     * stroke weight rather than a second one — ADR 84 spends weight sparingly enough
+     * already, and CB_BOARD_ROWS is the one array both this and the probe below read. */
+    NSBezierPath *board = cb_board_outline_path();
+    for (size_t i = 0; i < sizeof(CB_BOARD_ROWS) / sizeof(CB_BOARD_ROWS[0]); i++) {
+      cb_line(board, CB_BOARD_ROWS[i].x1, CB_BOARD_ROWS[i].y, CB_BOARD_ROWS[i].x2, CB_BOARD_ROWS[i].y);
+    }
     [board stroke];
     return;
   }
@@ -1828,14 +1893,13 @@ static NSImage *cb_image(cb_display d) {
                                   flipped:NO
                            drawingHandler:^BOOL(NSRect rect) {
                              (void)rect;
-                             NSAffineTransform *fit = [NSAffineTransform transform];
                              /* CB_GLYPH_W, not CB_ICON_W: the ink is centred in the
                               * glyph's own share of the box and the remainder is left
-                              * empty on the right, which is criterion 10's gap. */
-                             [fit translateXBy:CB_GLYPH_W / 2.0 yBy:CB_ICON_H / 2.0];
-                             [fit scaleBy:CB_SCALE];
-                             [fit translateXBy:-CB_CIRCLE_X yBy:-CB_INK_CENTER_Y];
-                             [fit concat];
+                              * empty on the right, which is criterion 10's gap.
+                              * cb_glyph_fit_transform is the SAME transform
+                              * `--menubar --probe board` runs the glyph's own ink
+                              * through, above — one fit, never two. */
+                             [cb_glyph_fit_transform() concat];
                              cb_draw(d);
                              return YES;
                            }];
@@ -3050,7 +3114,7 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  * Gated on a second argv word so the supervised path cannot reach it: bin/launcher.c execs
  * this binary with exactly `--menubar` and nothing after it.
  *
- * Eight optional words follow, and they are the seam's eight shapes:
+ * Nine optional words follow, and they are the seam's nine shapes:
  *
  *   <action>            one of CB_PROBE_ACTIONS, POSTed before the report. This is what
  *                       makes "every control takes effect" checkable at all: a check can
@@ -3080,6 +3144,17 @@ static const struct { const char *word; cb_action action; } CB_PROBE_ACTIONS[] =
  *                       ink somewhere it does not belong (measured: either one takes the
  *                       restart icon's width from 20 units to 6). Paths only: no image, no
  *                       view, no application.
+ *   board               print the off-state Board glyph's own bounds and rows: one
+ *                       `board x=.. y=.. w=.. h=.. radius=..` line, SVG-space, read back
+ *                       off the real NSBezierPath cb_draw strokes (cb_board_outline_path)
+ *                       rather than a copy of CB_BOARD_X/Y/W/H; one `boardrow=<i> y=..
+ *                       x1=.. x2=..` line per MARK_SHAPES row, straight out of
+ *                       CB_BOARD_ROWS; and one `boardink x0=.. x1=.. y0=.. y1=.. glyphw=..
+ *                       iconw=.. iconh=..` line — the SAME ink, stroke included, run
+ *                       through the SAME NSAffineTransform cb_image concats
+ *                       (cb_glyph_fit_transform), so a horizontal clip (a glyph frame too
+ *                       narrow for its own ink — measured once, fixed alongside this seam)
+ *                       shows up as two numbers disagreeing, not as a screenshot.
  *   stream <seconds>    hold the daemon-wide `GET /api/events` stream open (`cb_stream_probe`
  *                       above) and report the first pushed event, or a timeout after
  *                       `seconds` (default CB_STREAM_DEFAULT_TIMEOUT_S). The one shape here
@@ -3398,6 +3473,54 @@ int cb_menubar_probe(const char *word, const char *argument) {
                (long)[icons[i].path elementCount], box.origin.x, box.origin.y,
                box.size.width, box.size.height);
       }
+      fflush(stdout);
+      return 0;
+    }
+    if (word != NULL && strcmp(word, "board") == 0) {
+      /* AC4/5: the off-state glyph's real bounds, read off the SAME NSBezierPath cb_draw
+       * strokes (cb_board_outline_path) rather than a copy of CB_BOARD_X/Y/W/H -- so a bug
+       * that only shows up once CB_SVG_Y or appendBezierPathWithRoundedRect: is actually
+       * called (a wrong sign, a transposed argument) still shows up here. `x`/`y` are
+       * converted back out of AppKit's y-up bounds into the SVG-space top-left this file's
+       * comments and the spec both quote -- CB_SVG_Y is its own inverse, so one call undoes
+       * the one cb_board_outline_path applied. `w`/`h` need no such conversion: a flip
+       * changes where a box sits, never its size, so reading both off one `bounds` call is
+       * what proves the glyph is square rather than assuming it from two separately-read
+       * constants. Rows are reported from CB_BOARD_ROWS directly -- the same array cb_draw
+       * loops over above -- one line each, in draw order. */
+      NSRect box = [cb_board_outline_path() bounds];
+      double svgY = CB_SVG_Y(box.origin.y + box.size.height);
+      printf("board x=%.2f y=%.2f w=%.2f h=%.2f radius=%.2f\n",
+             box.origin.x, svgY, box.size.width, box.size.height, CB_BOARD_RADIUS);
+      for (size_t i = 0; i < sizeof(CB_BOARD_ROWS) / sizeof(CB_BOARD_ROWS[0]); i++) {
+        printf("boardrow=%zu y=%.2f x1=%.2f x2=%.2f\n", i,
+               CB_BOARD_ROWS[i].y, CB_BOARD_ROWS[i].x1, CB_BOARD_ROWS[i].x2);
+      }
+      /* The same ink, run through the SAME NSAffineTransform cb_image concats before
+       * calling cb_draw (cb_glyph_fit_transform) -- point space, stroke included, so a
+       * horizontal clip (a glyph frame too narrow for its own ink) shows up here exactly
+       * as it would on screen, with no pixel ever read. All four corners, not just two:
+       * the fit is scale-and-translate only today, but reading all four costs nothing and
+       * does not silently stop working if a future fit ever adds a rotation. `glyphw`,
+       * `iconw` and `iconh` are the frame this ink has to fit inside, printed alongside it
+       * so a check can compare the two without hardcoding either one. */
+      NSRect ink = cb_board_ink_rect();
+      NSAffineTransform *fit = cb_glyph_fit_transform();
+      NSPoint corners[4] = {
+        [fit transformPoint:NSMakePoint(NSMinX(ink), NSMinY(ink))],
+        [fit transformPoint:NSMakePoint(NSMinX(ink), NSMaxY(ink))],
+        [fit transformPoint:NSMakePoint(NSMaxX(ink), NSMinY(ink))],
+        [fit transformPoint:NSMakePoint(NSMaxX(ink), NSMaxY(ink))],
+      };
+      double minX = corners[0].x, maxX = corners[0].x, minY = corners[0].y, maxY = corners[0].y;
+      for (size_t i = 1; i < 4; i++) {
+        if (corners[i].x < minX) minX = corners[i].x;
+        if (corners[i].x > maxX) maxX = corners[i].x;
+        if (corners[i].y < minY) minY = corners[i].y;
+        if (corners[i].y > maxY) maxY = corners[i].y;
+      }
+      printf("boardink x0=%.3f x1=%.3f y0=%.3f y1=%.3f glyphw=%.2f iconw=%.2f iconh=%.2f\n",
+             minX, maxX, minY, maxY, CB_GLYPH_W, CB_ICON_W, CB_ICON_H);
       fflush(stdout);
       return 0;
     }
