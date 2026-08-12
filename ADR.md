@@ -90,3 +90,4 @@ link where it is worth reading.
 | 101 | [A sent round is uncommentable](.agents/adr/0101-a-sent-round-is-uncommentable.md) | 2026-08-11 | widens 46, 98 |
 | 102 | [One copy of the mechanism, not one caller-facing file](.agents/adr/0102-one-copy-of-the-mechanism-not-one-caller-facing-file.md) | 2026-08-12 | narrows 5, 11 |
 | 103 | [The pomodoro is optional, and off is absence](.agents/adr/0103-the-pomodoro-is-optional-and-off-is-absence.md) | 2026-08-12 | narrows 84; relates to 8, 67, 68, 72, 90 |
+| 104 | [A shape change reloads the page; values patch in place](.agents/adr/0104-a-shape-change-reloads-values-patch-in-place.md) | 2026-08-12 | relates to 103 |
