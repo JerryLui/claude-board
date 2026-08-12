@@ -47,7 +47,7 @@ Two modes, one primitive. A **question board**'s blocks are questions, replacing
 blocks are a rendered artifact, with question blocks interleaved where it has open decisions. A
 board is a running thread, not a page: successive rounds land in the same open tab. The board was
 also intended as the one rendering surface for every command, the other skills dropping their
-private design systems for a block list; `ADR.md` entries 5 and 11 record where that landed.
+private design systems for a block list; `ADR.md` entries 5, 11 and 102 record where that landed.
 
 **Anchoring's solution.** Any element the reviewer can see can take a comment, through one model
 over the board's own rendered DOM. Diagrams and mocks become two cases of that model rather than
@@ -642,6 +642,37 @@ anyone listening" a question five pieces of code answer independently — exactl
 "one property behind three surfaces" exists to prevent, and the same three symptoms above would
 return the moment one of the five drifted. Clearing the flag at `readBoard`, the one choke point
 every reader already passes through, makes all five correct without any of them knowing.
+
+### Entry 102 — one copy of the mechanism
+
+**Why the description was fixed before anything else.** The manual already carried the routing rule
+— a lone follow-up and a yes/no stay in the terminal, everything wider goes to the board — and it
+was never reached, because the description that gates it triggered on *intent*: "when posting
+questions to the board", "when a skill names the board". Both are downstream of a decision already
+taken. Nothing fired on the situation that matters, an agent about to fan four questions into a
+terminal having never thought about the board, so the rule that would have redirected it sat inside
+a file only opened after the redirect. Rewriting the description to trigger on the situation costs
+one line in a file this repo owns, and reaches callers written later, callers installed from
+someone else's marketplace, and plain chat with no caller at all — none of which any migration
+reaches.
+
+**Why the migration is offered rather than run.** Rejected: sweeping the reader's `~/.claude` at
+install time. It edits files this project does not own, on a machine where `~/.claude` is often not
+version-controlled, and it re-manufactures entry 11's failure at N files the moment one sweep
+writes mechanism instead of a pointer. The `INSTALL.md` procedure keeps the capability and moves
+every irreversible part behind the reader: read-only inventory, a round of questions with
+recommended answers, batched edits with the diffs shown. Four exclusions carry the cost that makes
+this fragile rather than merely tedious — the installed manual and anything under
+`~/.claude/plugins/` are both overwritten without a word by the next update, and an unattended
+caller routed to a board that refuses headless sessions trades a working run for a fallback path.
+
+**Why the example caller is not installed.** Rejected: shipping `grill-example` from
+`plugin-skills/`, where the plugin already delivers `/claude-board:install`. A model-invoked skill
+there loads its description into every plugin user's context whether or not they want an interview
+skill, and it turns the plugin from delivery-plus-install into an opinion about how to run a design
+review. Copied by hand, it costs nothing until someone wants it. Also rejected: no example at all,
+leaving the description to carry the whole load — the description says *that* a caller should reach
+the board, and nothing shows what a caller that defers its mechanism actually looks like.
 
 ## Out of Scope
 

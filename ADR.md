@@ -19,10 +19,10 @@ link where it is worth reading.
 | 1 | [Theme selection is client-side only](.agents/adr/0001-theme-selection-is-client-side-only.md) | 2026-07-30 | accepted |
 | 3 | [References resolve inside a configured allowlist, not only `cwd`](.agents/adr/0003-references-resolve-inside-a-configured-allowlist-not-only.md) | 2026-07-30 | accepted |
 | 4 | [Every command falls back off the board, `/grill` included](.agents/adr/0004-every-command-falls-back-off-the-board-grill.md) | 2026-07-31 | narrowed by 55 |
-| 5 | [This repo ships the protocol, not its callers](.agents/adr/0005-this-repo-ships-the-protocol-not-its-callers.md) | 2026-07-31 | accepted |
+| 5 | [This repo ships the protocol, not its callers](.agents/adr/0005-this-repo-ships-the-protocol-not-its-callers.md) | 2026-07-31 | narrowed by 102 |
 | 7 | [An `html` block may name a file, but only a whole one](.agents/adr/0007-html-block-may-name-a-file-but-only.md) | 2026-08-04 | accepted |
 | 8 | [The daemon owns the pomodoro clock](.agents/adr/0008-daemon-owns-the-pomodoro-clock.md) | 2026-08-04 | narrowed by 67 |
-| 11 | [The repo ships one caller-facing file: the manual](.agents/adr/0011-repo-ships-one-caller-facing-file-the-manual.md) | 2026-08-04 | accepted |
+| 11 | [The repo ships one caller-facing file: the manual](.agents/adr/0011-repo-ships-one-caller-facing-file-the-manual.md) | 2026-08-04 | narrowed by 102 |
 | 13 | [The daemon's environment is baked into the launcher, not the plist](.agents/adr/0013-daemon-s-environment-is-baked-into-the-launcher.md) | 2026-08-04 | accepted |
 | 14 | [The launcher is compiled from a staged copy; the stamp covers the binary](.agents/adr/0014-launcher-is-compiled-from-a-staged-copy-the.md) | 2026-08-04 | accepted |
 | 15 | [The daemon's own code is staged into the signed bundle](.agents/adr/0015-daemon-s-own-code-is-staged-into-the.md) | 2026-08-04 | accepted |
@@ -88,3 +88,4 @@ link where it is worth reading.
 | 99 | [The packet says `lost`, not `resolved`](.agents/adr/0099-packet-says-lost-not-resolved.md) | 2026-08-11 | relates to 28 |
 | 100 | [A re-install prints twelve lines, and the standing prose is first-run-only](.agents/adr/0100-a-re-install-prints-twelve-lines.md) | 2026-08-11 | relates to 36 |
 | 101 | [A sent round is uncommentable](.agents/adr/0101-a-sent-round-is-uncommentable.md) | 2026-08-11 | widens 46, 98 |
+| 102 | [One copy of the mechanism, not one caller-facing file](.agents/adr/0102-one-copy-of-the-mechanism-not-one-caller-facing-file.md) | 2026-08-12 | narrows 5, 11 |

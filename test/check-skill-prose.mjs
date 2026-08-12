@@ -1,6 +1,11 @@
-// skills/claude-board/SKILL.md check: this repo now ships one caller-facing prose file —
-// the manual for the `ask` tool (ADR.md entry 11) — so for the first time since entry 5 the
-// suite has a real subject for src/prose-check.mjs rather than only a fixture.
+// skills/claude-board/SKILL.md check: this repo ships the one copy of the mechanism —
+// the manual for the `ask` tool (ADR.md entries 11 and 102) — so for the first time since
+// entry 5 the suite has a real subject for src/prose-check.mjs rather than only a fixture.
+//
+// Entry 102 is why this file is not the only caller-facing prose here and is still the only
+// subject: a caller shipped from this repo (skills/grill-example/SKILL.md, the INSTALL.md
+// migration) names the board and defers every argument, block kind and widget to the manual,
+// so it has no mechanism to bind. Nothing checks that it stays that way.
 //
 // That is the whole point of shipping the manual here instead of leaving a copy in
 // ~/.claude: prose that claims an argument, block kind or widget the shim does not have

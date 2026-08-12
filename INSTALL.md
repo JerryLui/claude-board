@@ -1,7 +1,8 @@
 # Installing by hand
 
-Two pieces `install.sh` cannot keep current on its own: the board manual it writes only when
-it runs, and the optional session-start hook it never writes.
+Three pieces `install.sh` cannot do on its own: the board manual it writes only when it
+runs, the skills already on this machine that could route their questions to the board, and
+the optional session-start hook it never writes.
 
 ## Refreshing the board manual
 
@@ -16,6 +17,87 @@ cp skills/claude-board/SKILL.md ~/.claude/skills/claude-board/SKILL.md
 
 Make the edit in the clone: a reinstall overwrites the installed copy rather than
 preserving it, and `test/check-install.mjs` asserts the two are byte-identical.
+
+## Routing existing skills to the board — optional, ask first
+
+The manual's description fires on the situation now — more than one question to put, a mock
+to hand over for a reaction — so a skill that says nothing about the board still reaches it.
+This section is for the stronger claim: a skill that should *always* ask on the board, and
+whose own prose still routes it to the terminal.
+
+**Everything below is read by an agent, and the first write happens after step 2's answers
+come back.**
+
+### Step 1 — inventory, read only
+
+Find the callers under `~/.claude` that put more than one question to the user in a run:
+`skills/*/SKILL.md`, `commands/*.md`, `agents/*.md`, matching on `AskUserQuestion` or on
+prose describing an interview, a review round, or a set of options.
+
+Four exclusions, each of which makes an edit worse than no edit:
+
+- `~/.claude/skills/claude-board/` — `install.sh` overwrites it on every run. Edits there
+  are lost without a word. The clone is where that file changes.
+- Anything under `~/.claude/plugins/` — a plugin update overwrites the edit the same way,
+  and the reader did not author the file.
+- A caller that runs unattended (a cron line, `claude -p`, CI). The board refuses a headless
+  session by design, so routing one there converts a working run into a fallback path.
+- A caller whose whole interview is a lone follow-up or a yes/no. The manual's "When not to
+  use the board" section keeps those in the terminal; opening a tab for one question is
+  worse than answering it inline.
+
+Report the survivors as a list — path, what each asks, how many questions in a run — and
+stop.
+
+### Step 2 — the round
+
+Put the decision on a board, the same shape the callers are being migrated to. Four
+questions, each carrying a recommended answer and the reason for it, with the candidate
+files themselves as the context beside them:
+
+1. **Which callers route to the board?** Multi-select, one option per survivor. Recommend
+   the ones that fan out three or more questions in a single interview; a two-question
+   caller is a judgement call, not a default.
+2. **How deep does the edit go?** Single choice. Recommended: a pointer line and nothing
+   else — the caller names the board, the manual keeps the mechanism. The alternatives are
+   rewriting the interview into rounds (more work, more drift surface) and adding an
+   explicit off-board sentence per caller (the manual already covers the fallback).
+3. **Which of these ever run with nobody watching?** Multi-select over the same list, so a
+   caller the inventory could not classify is confirmed by the person who wrote it rather
+   than guessed at. Anything selected here drops out.
+4. **What is the undo?** Single choice. Recommended: `git init` in `~/.claude` and one
+   commit before the first edit. Alternatives: a timestamped copy of the directory, or
+   already version-controlled. There is no answer that means "no undo" — the edits change
+   the reader's own files, outside any repo this project owns.
+
+### Step 3 — the edit
+
+**The edit is a pointer, never a copy.** Name the board, hand the mechanism to the manual:
+
+> Questions go on the board. **Read the `claude-board` skill for the call, the block kinds,
+> the widgets, the packet and the fallback** — that skill is the protocol.
+
+A widget list, an argument name, a block kind or a packet field written into a caller is a
+second copy of the manual, and it drifts the first time the protocol moves.
+`skills/grill-example/SKILL.md` in the clone is a caller written to this rule; copy its
+shape rather than inventing one.
+
+Three files, then show the diffs and wait for a yes before the next three. A caller that
+turns out mid-edit to be a yes/no in disguise goes back on the excluded list instead of
+through.
+
+### Verifying
+
+Skill descriptions load when a session starts, so an edited caller is not live in the
+session that edited it. Start a fresh one, run one edited caller, and confirm the round
+lands on the board and the packet comes back. Then revisit the excluded list once: an
+exclusion that was wrong is cheaper to fix now than after the reader has forgotten the
+inventory.
+
+### Undoing
+
+Whatever step 2's question 4 answered — `git checkout` in `~/.claude`, or restoring the
+copy. `uninstall.sh` leaves these callers alone; it did not write them.
 
 ## The session-start hook — optional, ask first
 
