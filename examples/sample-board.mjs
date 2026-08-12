@@ -94,10 +94,15 @@ import path from 'node:path';
 // of any artifact is painted over -- and the header only condenses once the
 // stage has scrolled past 24px, which an artifact shorter than the viewport
 // never does. An artifact that starts its own content at the top loses it.
+// The mock's surface is LIGHT on purpose: a page-board artifact fills the whole
+// viewport, and the committed screenshots are shot in forced light theme
+// (examples/screenshot.mjs), so a dark body here would paint the entire README
+// image dark under light board chrome. The dark accents stay on the ticket
+// headers, where they read as card styling rather than page theme.
 const KITCHEN_BOARD_HTML = `<style>
-  body { margin: 0; padding: 104px 24px 32px; font-family: system-ui, sans-serif; background: #111827; }
+  body { margin: 0; padding: 104px 24px 32px; font-family: system-ui, sans-serif; background: #f3f4f6; }
   .kd-board { max-width: 900px; margin: 0 auto; }
-  .kd-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; color: #f9fafb; }
+  .kd-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; color: #111827; }
   .kd-head h1 { font-size: 20px; margin: 0; font-weight: 700; }
   .kd-head .clock { font-size: 13px; opacity: .75; font-variant-numeric: tabular-nums; }
   .kd-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }

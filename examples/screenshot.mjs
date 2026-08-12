@@ -12,12 +12,23 @@
 // in between -- see the viewport point below for why a live resize is the trap, and a
 // live click is not: it never touches Emulation.setDeviceMetricsOverride.
 //
+// The page is served over LOCAL HTTP, not opened as file:// -- and that choice is
+// what the images are FOR. body.readonly keys on `location.protocol === 'file:'`
+// (src/ui.mjs), and readonly is a whole different skin: an amber banner, a
+// "read-only" pill, the brand mark hidden (src/styles.mjs `body.readonly
+// .back-to-index`). A file:// shot faithfully depicts the opened-from-disk
+// fallback, which is precisely not the product the README is showing. Over http
+// the page looks exactly as the daemon serves it; its EventSource/resync calls
+// against the static server fail silently by design (src/ui.mjs swallows both),
+// so no daemon is needed and no error chrome appears.
+//
 // The recipe (each point fixes a trap that silently produces a wrong image, not an
 // error -- see QUIRKS.md "Growing the viewport after load mis-positions anchor pins"):
-//   - Force light theme with Emulation.setEmulatedMedia BEFORE navigating. The page
-//     renders dark otherwise, and seeding localStorage doesn't work on file://.
-//   - Wait after Page.navigate for mermaid's CDN-loaded renderer to arrive; the
-//     diagram is absent from anything captured immediately.
+//   - Force light theme with Emulation.setEmulatedMedia BEFORE navigating -- the
+//     shot must not depend on the OS appearance of whichever machine regenerates it.
+//   - Wait after Page.navigate for mermaid's renderer (a separate vendored asset,
+//     imported async) to arrive; the diagram is absent from anything captured
+//     immediately.
 //   - Set the viewport to a generous fixed height BEFORE Page.navigate, and never
 //     touch Emulation.setDeviceMetricsOverride again after that. Two different bugs
 //     share this one fix: captureBeyondViewport never paints an off-screen iframe (so
@@ -34,20 +45,40 @@
 //
 // Deliberately NOT committed as a byte-identity check (unlike sample-board.html,
 // which is a pure function of JSON): a screenshot is a function of the installed
-// Chrome build, its fonts and a CDN-loaded diagram renderer, so it will never be
-// byte-stable across machines. This script is the regeneration guarantee instead.
+// Chrome build and its fonts, so it will never be byte-stable across machines. This script is the regeneration guarantee instead.
 
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const examplesDir = path.dirname(fileURLToPath(import.meta.url));
-const fileUrl = pathToFileURL(path.join(examplesDir, 'sample-board.html')).href;
 const heroOut = path.join(examplesDir, 'sample-board.png');
 const pageOut = path.join(examplesDir, 'sample-board-comments.png');
+
+// Serves sample-board.html and the shared assets beside it -- see the header
+// comment for why the shots must come over http. Loopback only, port 0, and only
+// the three extensions the page actually names: this is a screenshot fixture,
+// not a file server. Correct JS/CSS types are load-bearing (module scripts are
+// MIME-checked); everything else, including the page's own /api and /b probes,
+// gets a silent 404.
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
+const server = createServer((req, res) => {
+  const name = path.basename(new URL(req.url, 'http://x').pathname);
+  const type = MIME[path.extname(name)];
+  if (!type) { res.writeHead(404).end(); return; }
+  try {
+    const body = readFileSync(path.join(examplesDir, name));
+    res.writeHead(200, { 'content-type': type }).end(body);
+  } catch {
+    res.writeHead(404).end();
+  }
+});
+await new Promise(res => server.listen(0, '127.0.0.1', res));
+const pageUrl = `http://127.0.0.1:${server.address().port}/sample-board.html`;
 
 // Comfortably taller than round 2, the block gallery (~4,600 CSS px), so no mermaid
 // diagram is ever off-screen at first paint, however the page's content settles.
@@ -70,7 +101,7 @@ const chrome = spawn(CHROME, [
   // whatever answers to be the Chrome we just spawned, and Chrome does NOT exit
   // when its debugging port is already taken -- it just runs without a debug
   // listener, so the probe succeeds against the squatter, and every reply after
-  // that (screenshot bytes we commit, the file:// path we send) crosses to a
+  // that (screenshot bytes we commit, the page URL we send) crosses to a
   // browser we do not own. Reading the port back out of our OWN profile
   // directory binds the channel to the process we actually started.
   '--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-color-profile=srgb',
@@ -160,21 +191,21 @@ async function rectOf(s, selector) {
 }
 
 /** Set the emulated viewport, THEN navigate -- see this file's header comment for
- * why the order matters. Waits for mermaid's CDN-loaded renderer and one settle
+ * why the order matters. Waits for mermaid's async-imported renderer and one settle
  * pass after that before returning. */
 async function loadFresh(s, deviceScaleFactor, height) {
   await s('Emulation.setDeviceMetricsOverride', {
     width: 1440, height, deviceScaleFactor, mobile: false,
   });
-  await s('Page.navigate', { url: fileUrl });
-  await new Promise(r => setTimeout(r, 4000)); // mermaid fetches its renderer from a CDN
+  await s('Page.navigate', { url: pageUrl });
+  await new Promise(r => setTimeout(r, 4000)); // mermaid imports and runs its renderer async
   await new Promise(r => setTimeout(r, 1500)); // settle pass
 }
 
 /** Throws unless the mermaid diagram actually rendered.
  *
- * The wait above is a sleep, and a sleep has no post-condition. When the CDN
- * import fails or is still in flight, src/ui.mjs swallows it and either replaces
+ * The wait above is a sleep, and a sleep has no post-condition. When the
+ * renderer import fails or is still in flight, src/ui.mjs swallows it and either replaces
  * the diagram with a raw-source fallback or leaves the bare source standing --
  * both of which still satisfy every other selector this script measures, so the
  * hero is written showing a code listing where the README promises a flowchart,
@@ -333,5 +364,6 @@ main()
       : new Promise(res => chrome.once('exit', res));
     chrome.kill();
     await exited;
+    server.close();
     rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
