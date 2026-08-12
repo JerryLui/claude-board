@@ -469,7 +469,8 @@ if [ -z "$NODE_BIN" ]; then
     */.nodenv/*|*/nodenv/versions/*|*/nodenv/shims/*)
       for stable in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
         if [ -x "$stable" ]; then
-          cbs_step_warn "node" "version-managed node found ($NODE_BIN); baking $stable instead"
+          cbs_step_warn "node" "node on PATH is version-managed; using $stable"
+          cbs_detail "found $NODE_BIN"
           cbs_detail "set CLAUDE_BOARD_NODE to override"
           NODE_BIN="$stable"
           break
@@ -1296,11 +1297,8 @@ HEALTH_TRIES=20
 if [ "$LAUNCHER_IS_NEW" -eq 1 ] && [ "$REPO_IN_PROTECTED_DIR" -eq 1 ]; then
   HEALTH_TRIES=480   # 0.25s apart, i.e. two minutes to notice a dialog and click it
   echo
-  echo "==> macOS will now ask whether \"$LABEL\" may access files in your"
-  echo "    $(dirname "$REPO_DIR") folder. Click Allow — this clone lives there, so the"
-  echo "    daemon cannot read its own code until you do."
-  echo "    If no dialog appears: System Settings -> Privacy & Security -> Files and Folders,"
-  echo "    find $LABEL, and turn the folder on there."
+  echo "==> asking for access to $(display_path "$(dirname "$REPO_DIR")")"
+  echo "    click Allow, no dialog: System Settings -> Privacy & Security -> Files and Folders -> $LABEL"
   echo
 fi
 # Test seam: the budget above is a person's, and the checks that prove a dead port fails
@@ -1513,8 +1511,8 @@ if [ "$USE_LAUNCHER" -eq 1 ] && [ -x "$APP_EXEC" ]; then
   if [ "$LAUNCHER_IS_NEW" -eq 1 ] || [ "$CLAUDE_BOARD_VERBOSE" = "1" ]; then
     # Printed BEFORE the call, which blocks until the dialog is answered -- an unexplained
     # pause with a dialog behind the terminal is the shape of a hung installer.
-    echo "==> if macOS asks whether \"$LABEL\" may send notifications, say Allow"
-    echo "    (pomodoro boundaries, and a round waiting on a board nobody is looking at)"
+    echo "==> asking to send notifications"
+    echo "    click Allow (interval boundaries, boards left waiting)"
   fi
   "$APP_EXEC" --notify-authorize >/dev/null 2>&1 || true
 fi
@@ -1525,15 +1523,12 @@ if [ "$USE_LAUNCHER" -eq 1 ] && ( [ "$LAUNCHER_IS_NEW" -eq 1 ] || [ "$CLAUDE_BOA
   echo "launcher: $APP_PATH ($BUNDLE_ID)"
   # Every successful run, not just the one that built it: this is the answer to "why can't
   # the board read that file", and whoever hits that rarely watched the install scroll past.
-  echo "          macOS attributes the daemon's file reads to this bundle. A reference into"
-  echo "          ~/Documents, ~/Desktop or ~/Downloads needs it ticked in System Settings ->"
-  echo "          Privacy & Security -> Files and Folders."
+  echo "          to macOS, the daemon's file reads and its notifications both come from this app"
+  echo "          file access: System Settings -> Privacy & Security -> Files and Folders -> $LABEL"
   # Printed rather than set: Banner vs Alert is per-app and macOS exposes no API for it.
   # Worth printing because owning the bundle is what makes the row say claude-board at all
   # -- posting through osascript put the setting under "Script Editor".
-  echo "          Both kinds of notification come from it -- pomodoro boundaries and a round"
-  echo "          left waiting. To make them stay on screen until dismissed:"
-  echo "          System Settings -> Notifications -> $LABEL -> Alerts."
+  echo "          keep notifications on screen: System Settings -> Notifications -> $LABEL -> Alerts"
 fi
 
 # --- 7. the banner and its footer -------------------------------------------
