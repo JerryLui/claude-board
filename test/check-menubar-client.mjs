@@ -710,7 +710,7 @@ async function main() {
 
   await check('criterion 2, work: a running work interval is full-weight work with a live countdown', async () => {
     const now = Date.now();
-    await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false }, { workMin: 30 }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false }, { workMin: 30, enabled: true }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         assert.equal(state.phase, 'work');
@@ -726,11 +726,11 @@ async function main() {
     // words. A derivation that collapsed them here would take that away too, and the
     // boundary logic would have nothing to say which break just ended.
     const now = Date.now();
-    await withDaemon(runningDoc({ phase: 'break', deadline: now + 3 * 60_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'break', deadline: now + 3 * 60_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         assert.equal((await probe({ home: probeHome, port })).phase, 'break');
       });
-    await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 10 * 60_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 10 * 60_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         assert.equal((await probe({ home: probeHome, port })).phase, 'longBreak');
       });
@@ -740,7 +740,7 @@ async function main() {
     // A paused timer carries `remainingMs` and no `deadline` at all -- pauseTimer froze it
     // server-side. A client that subtracted a clock from a missing deadline would show a
     // countdown racing backwards from the epoch.
-    await withDaemon(runningDoc({ phase: 'work', paused: true, remainingMs: 90_000 }, { workMin: 25 }),
+    await withDaemon(runningDoc({ phase: 'work', paused: true, remainingMs: 90_000 }, { workMin: 25, enabled: true }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         assert.equal(state.phase, 'work', 'paused draws the glyph its phase would draw');
@@ -763,7 +763,7 @@ async function main() {
     // as the arithmetic.
     const now = Date.now();
     await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false },
-      { workMin: 30, breakMin: 5, longBreakMin: 15 }), async ({ probeHome, port }) => {
+      { workMin: 30, breakMin: 5, longBreakMin: 15, enabled: true }), async ({ probeHome, port }) => {
       const state = await probe({ home: probeHome, port });
       const fraction = Number(state.fraction);
       // A round trip and a process spawn of slack, which at half an hour is far under a
@@ -780,7 +780,7 @@ async function main() {
     // and it is the check that would notice cb_phase_length_ms losing the break case.
     const now = Date.now();
     await withDaemon(runningDoc({ phase: 'break', deadline: now + 2 * 60_000, paused: false },
-      { workMin: 25, breakMin: 8 }), async ({ probeHome, port }) => {
+      { workMin: 25, breakMin: 8, enabled: true }), async ({ probeHome, port }) => {
       const fraction = Number((await probe({ home: probeHome, port })).fraction);
       assert.ok(Math.abs(fraction - 0.25) < 0.01, `expected an arc near 0.25 (2 of 8 min), got ${fraction}`);
     });
@@ -797,7 +797,7 @@ async function main() {
     // the item derived. Two implementations of the same arithmetic, one in C and one in JS,
     // pinned to each other rather than each to a constant.
     const now = Date.now();
-    await withDaemon(runningDoc({ phase: 'work', deadline: now + 7 * 60_000 + 30_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: now + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
       async ({ probeHome, port, secret }) => {
         const state = await probe({ home: probeHome, port });
         const doc = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
@@ -827,7 +827,7 @@ async function main() {
   // -------------------------------------------------------------------------------------
 
   await check('criterion 4: start, pause, resume, forward and restart each reach the daemon and change its state', async () => {
-    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+    await withDaemon(runningDoc(null, { enabled: true }), async ({ probeHome, port, secret }) => {
       const doc = async () => (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
         headers: { [SECRET_HEADER]: secret },
       })).json();
@@ -887,7 +887,7 @@ async function main() {
     // opinion about what "the button" does, and `primary=` is that mirror's report. A
     // popover that offered Start beside Pause, or that posted `ensure` at a paused timer
     // (which is a no-op -- ensureTimer keeps the timer it finds), would fail here.
-    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
+    await withDaemon(runningDoc(null, { enabled: true }), async ({ probeHome, port }) => {
       assert.equal((await probe({ home: probeHome, port })).primary, 'Start', 'idle');
       await probe({ home: probeHome, port, args: ['start'] });
       assert.equal((await probe({ home: probeHome, port })).primary, 'Pause', 'running');
@@ -907,7 +907,7 @@ async function main() {
     //
     // "Off" and not "Idle" while there is no timer: the status line beside it already says
     // Idle, and a row that says the same word twice is a row that has said nothing twice.
-    await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
+    await withDaemon(runningDoc(null, { enabled: true }), async ({ probeHome, port }) => {
       const idle = await probe({ home: probeHome, port });
       assert.equal(idle.stateword, 'Off', 'idle');
       assert.equal(idle.status, 'Idle', 'and the line above it is the one that says Idle');
@@ -942,7 +942,7 @@ async function main() {
     const countPaused = state => (wordsOf(state).join(' ').match(/paused/gi) || []).length;
 
     for (const phase of ['work', 'break', 'longBreak']) {
-      await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }),
+      await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }, { enabled: true }),
         async ({ probeHome, port }) => {
           const state = await probe({ home: probeHome, port });
           assert.equal(state.stateword, 'Paused', `a paused ${phase} says so beside the switch`);
@@ -1005,7 +1005,7 @@ async function main() {
       ['break', now + 3 * 60_000],
       ['longBreak', now + 9 * 60_000],
     ]) {
-      const doc = phase === null ? runningDoc(null) : runningDoc({ phase, deadline, paused: false });
+      const doc = phase === null ? runningDoc(null, { enabled: true }) : runningDoc({ phase, deadline, paused: false }, { enabled: true });
       await withDaemon(doc, async ({ probeHome, port, secret }) => {
         // Both readings are timed, because the running countdown inside these two strings
         // is read at two different instants and the tolerance is that gap -- see
@@ -1032,7 +1032,7 @@ async function main() {
     // the comparison above: a long break carries no cycle position AT ALL on the real
     // index page, full stop -- so the popover cannot be agreeing with it by both having
     // dropped the position the same wrong way.
-    await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'longBreak', deadline: now + 9 * 60_000, paused: false }, { enabled: true }),
       async ({ probeHome, port, secret }) => {
         const tab = loadIndexAgainstDaemon(port, secret);
         try {
@@ -1047,7 +1047,7 @@ async function main() {
 
   await check('criterion 5: a paused interval\'s popover status line is the SAME string the real index page renders, and criterion 7 keeps the menu bar digits empty regardless', async () => {
     for (const phase of ['work', 'break', 'longBreak']) {
-      await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }),
+      await withDaemon(runningDoc({ phase, paused: true, remainingMs: 90_000 }, { enabled: true }),
         async ({ probeHome, port, secret }) => {
           const popoverState = await probe({ home: probeHome, port });
           const tab = loadIndexAgainstDaemon(port, secret);
@@ -1075,7 +1075,7 @@ async function main() {
     }
     // The countdown comes back the moment it is running again, so the checks above are
     // pinning "paused" rather than a countdown that quietly stopped being computed.
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 90_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 90_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         assert.equal(state.countdown, 'yes');
@@ -1121,7 +1121,7 @@ async function main() {
   // -------------------------------------------------------------------------------------
 
   await check('criterion 1 and 13: every popover row -- the status row, the control row, the divider, the waiting caption -- spans the PANEL\'s own content width', async () => {
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port, args: ['layout'] });
         const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
@@ -1132,7 +1132,7 @@ async function main() {
   });
 
   await check('criterion 13: the panel\'s documented row order -- a status row, a control row, a divider, a caption, each a known kind, each in its own place', async () => {
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port, args: ['layout'] });
         const rowNames = Object.keys(state.frames).filter(name => /^row\d+$/.test(name))
@@ -1186,7 +1186,7 @@ async function main() {
   });
 
   await check('criterion 2 and 13: the gear\'s right edge and the forward button\'s right edge hold the PANEL\'s own right content edge -- and the two rows share a right column', async () => {
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port, args: ['layout'] });
         const statusRow = state.frames.row0;
@@ -1211,7 +1211,7 @@ async function main() {
     // (every check above) never builds one at all, so the layout probe had never actually
     // seen one until this check. Seven boards, the same fixture criterion 6's own
     // row-count check builds: five capped rows plus the overflow row.
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
       async ({ probeHome, port, secret }) => {
         for (let i = 1; i <= 7; i++) {
           await fetch(`http://127.0.0.1:${port}/api/board`, {
@@ -1249,7 +1249,7 @@ async function main() {
     // comparator until review) and longer than any other reachable phase/position/
     // countdown/paused combination cb_status_label can produce. A check titled "the
     // longest string it ever shows" has to actually reach for it.
-    const longDoc = { ...runningDoc({ phase: 'work', paused: true, remainingMs: 25 * 60_000 }, { longEvery: 100 }), cycle: 99 };
+    const longDoc = { ...runningDoc({ phase: 'work', paused: true, remainingMs: 25 * 60_000 }, { longEvery: 100, enabled: true }), cycle: 99 };
     let long;
     await withDaemon(longDoc, async ({ probeHome, port }) => {
       long = await probe({ home: probeHome, port, args: ['layout'] });
@@ -1257,7 +1257,7 @@ async function main() {
     assert.equal(long.status, 'Work 100/100 · 25:00 (paused)',
       'setup: this must be the longest status string, or the comparison below proves nothing');
 
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 7 * 60_000 + 30_000, paused: false }, { enabled: true }),
       async ({ probeHome, port }) => {
         const short = await probe({ home: probeHome, port, args: ['layout'] });
         // Same glyph size regardless of which status string is on screen beside it -- the
@@ -1302,7 +1302,7 @@ async function main() {
       { name: 'paused long break', timer: { phase: 'longBreak', paused: true, remainingMs: 60_000 }, ring: 'no', mark: 'paused' },
     ];
     for (const c of cases) {
-      await withDaemon(runningDoc(c.timer), async ({ probeHome, port }) => {
+      await withDaemon(runningDoc(c.timer, { enabled: true }), async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         assert.equal(state.ring, c.ring, `${c.name}: ring`);
         assert.equal(state.mark, c.mark, `${c.name}: centre mark`);
@@ -1342,7 +1342,7 @@ async function main() {
       longBreak: { phase: 'longBreak', deadline: now + 9 * 60_000, paused: false },
     };
     for (const [name, timer] of Object.entries(runningTimers)) {
-      await withDaemon(runningDoc(timer), async ({ probeHome, port }) => {
+      await withDaemon(runningDoc(timer, { enabled: true }), async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         marks[name] = `${state.ring}/${state.mark}`;
         assert.notEqual(state.mark, 'paused', `nothing that is not paused may draw the paused bars: ${name} did`);
@@ -1589,7 +1589,7 @@ async function main() {
   // -------------------------------------------------------------------------------------
 
   await check('criterion 8: `reset` is refused by the one seam that can act, and the daemon\'s timer survives asking', async () => {
-    await withDaemon(runningDoc(null), async ({ probeHome, port, secret }) => {
+    await withDaemon(runningDoc(null, { enabled: true }), async ({ probeHome, port, secret }) => {
       await probe({ home: probeHome, port, args: ['start'] });
       const before = await (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
         headers: { [SECRET_HEADER]: secret },
@@ -1664,7 +1664,7 @@ async function main() {
     //     the same document independently (`Math.min(cycle + 1, longEvery)`) and arrives at
     //     its own sane answer with no help from this client at all.
     const now = Date.now();
-    const running = runningDoc({ phase: 'work', deadline: now + 5 * 60_000, paused: false });
+    const running = runningDoc({ phase: 'work', deadline: now + 5 * 60_000, paused: false }, { enabled: true });
     for (const [label, cycle] of [
       ['far past what an int can hold, upwards', 1e300],
       ['far past what an int can hold, downwards', -1e300],
@@ -1713,7 +1713,7 @@ async function main() {
       ['a frozen remainder past the end of time', { phase: 'work', paused: true, remainingMs: 1e300 }, {}],
       ['a longEvery past the end of time', { phase: 'work', deadline: Date.now() + 60_000, paused: false }, { longEvery: 1e300 }],
     ]) {
-      await withDaemon(runningDoc(timer, settings), async ({ probeHome, port }) => {
+      await withDaemon(runningDoc(timer, { ...settings, enabled: true }), async ({ probeHome, port }) => {
         const state = await probe({ home: probeHome, port });
         assert.equal(state.answered, 'yes', `${label}: the client must still answer`);
         assert.match(state.text, /^\d+:\d{2}$/, `${label}: the countdown must still be digits: ${state.text}`);
@@ -2131,7 +2131,7 @@ async function main() {
     // have disturbed -- 1.000 would pass this assertion by accident on a derivation that
     // reset the fraction along with the text.
     const timer = { phase: 'work', deadline: now + 20 * 60_000, paused: false };
-    await withDaemon(runningDoc(timer, { menubarCountdown: false }), async ({ probeHome, port }) => {
+    await withDaemon(runningDoc(timer, { menubarCountdown: false, enabled: true }), async ({ probeHome, port }) => {
       const off = await probe({ home: probeHome, port });
       assert.equal(off.countdown, 'no', 'the digits must not reach the button');
       assert.equal(off.phase, 'work', 'and the icon is untouched by the switch');
@@ -2141,7 +2141,7 @@ async function main() {
       // computed. That is what lets the switch take effect on a redraw with no restart.
       assert.match(off.text, /^\d{2}:\d{2}$/);
     });
-    await withDaemon(runningDoc(timer, { menubarCountdown: true }), async ({ probeHome, port }) => {
+    await withDaemon(runningDoc(timer, { menubarCountdown: true, enabled: true }), async ({ probeHome, port }) => {
       assert.equal((await probe({ home: probeHome, port })).countdown, 'yes');
     });
   });
@@ -2170,7 +2170,7 @@ async function main() {
     //
     // Same shape as the reset refusal above, and for the same reason: an absence cannot be
     // checked by driving a UI.
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 10 * 60_000, paused: false }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 10 * 60_000, paused: false }, { enabled: true }),
       async ({ probeHome, port, secret }) => {
         const doc = async () => (await fetch(`http://127.0.0.1:${port}/api/pomodoro`, {
           headers: { [SECRET_HEADER]: secret },
@@ -2253,13 +2253,12 @@ async function main() {
     });
   });
 
-  await check('missing settings.enabled reads as on -- the client\'s own fallback, matching every other toggle cb_fetch reads (the upgrade path)', async () => {
+  await check('missing settings.enabled reads as off -- the client\'s own fallback, matching the daemon\'s ships-off default (ADR 105)', async () => {
     await withDaemon(runningDoc(null), async ({ probeHome, port }) => {
-      // No `enabled` key at all in this fixture (defaultDoc's own shape) -- the closest
-      // thing to "a settings document written before this key existed" this suite can
-      // produce without src/pomodoro.mjs itself knowing the key yet.
+      // No `enabled` key at all in this fixture (defaultDoc's own shape) -- a response
+      // without the key reads as a fresh document, and fresh means off.
       const state = await probe({ home: probeHome, port });
-      assert.equal(state.enabled, 'yes', 'a missing key must read as on, like every other toggle cb_bool reads here');
+      assert.equal(state.enabled, 'no', 'a missing key must read as off, the same default src/pomodoro.mjs fills in');
     });
   });
 
@@ -2574,7 +2573,7 @@ async function main() {
     const now = Date.now();
     // A running work interval under the OLD 25-minute default, so the arc has a value the
     // push could plausibly disturb: 15 of 25 minutes left is a 0.6 fraction.
-    await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false }, { workMin: 25 }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: now + 15 * 60_000, paused: false }, { workMin: 25, enabled: true }),
       async ({ probeHome, port, secret }) => {
         const opened = await openLiveProbe({ home: probeHome, port, seconds: 5 });
         assert.equal(opened.stdout.trim(), 'stream=connected', `setup: the probe must connect before this check can mean anything:\n${opened.stdout}\n${opened.stderr}`);
@@ -2784,7 +2783,7 @@ async function main() {
 
   await check('ticket 03, criteria 4 and 5: the daemon is killed and restarted on the same port -- the stream reconnects on its own, and the item\'s next report is a REAL fetch of the new daemon rather than the old one replayed', async () => {
     const now = Date.now();
-    await withDaemon(runningDoc({ phase: 'work', deadline: now + 20 * 60_000, paused: false }, { workMin: 25 }),
+    await withDaemon(runningDoc({ phase: 'work', deadline: now + 20 * 60_000, paused: false }, { workMin: 25, enabled: true }),
       async ({ daemonHome, probeHome, port, secret, server }) => {
         const opened = await openLiveProbe({ home: probeHome, port, seconds: 10 });
         assert.equal(opened.stdout.trim(), 'stream=connected', `setup: the probe must connect before this check can mean anything:\n${opened.stdout}\n${opened.stderr}`);
@@ -2805,7 +2804,7 @@ async function main() {
         // Back on the SAME port, with a DIFFERENT document: a report matching THIS one and
         // not the pre-kill one is what proves the reconnect fetched fresh data rather than
         // replaying what the item already had.
-        writeDoc(runningDoc({ phase: 'break', deadline: Date.now() + 3 * 60_000, paused: false }, { breakMin: 5 }), daemonHome);
+        writeDoc(runningDoc({ phase: 'break', deadline: Date.now() + 3 * 60_000, paused: false }, { breakMin: 5, enabled: true }), daemonHome);
         const restarted = await startServer({ home: daemonHome, port, secret });
         try {
           const { code, signal, stdout, stderr } = await opened.waitForExit();
@@ -2821,7 +2820,7 @@ async function main() {
   });
 
   await check('ticket 03, criterion 6: with GET /api/events refused outright, the item still updates on the ordinary poll -- proven by actually breaking the route, not by reading the code', async () => {
-    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 10 * 60_000, paused: false }), async ({ probeHome, port }) => {
+    await withDaemon(runningDoc({ phase: 'work', deadline: Date.now() + 10 * 60_000, paused: false }, { enabled: true }), async ({ probeHome, port }) => {
       const proxy = await startBlockingProxy(port);
       try {
         const state = await probe({ home: probeHome, port: proxy.port, args: ['run', '5'] });

@@ -235,11 +235,10 @@ typedef struct {
   int hidden;       /* settings.menubarHidden */
   int long_every;   /* settings.longEvery */
   /* settings.enabled — the Master switch (spec: "Pomodoro made optional behind one Master
-   * switch"). Missing key reads as on, matching every other toggle here and the spec's own
-   * upgrade path: a settings document written before this key existed must behave exactly
-   * as it does today. This file only ever reads it — the switch is edited on the index
-   * page's settings panel, never from the menu bar (CB_ACTION_PATHS's own comment already
-   * says this process posts no setting at all). */
+   * switch"). Missing key reads as off, matching the daemon's own default (ADR 105: the
+   * pomodoro ships off, opt-in from the settings panel). This file only ever reads it —
+   * the switch is edited on the index page's settings panel, never from the menu bar
+   * (CB_ACTION_PATHS's own comment already says this process posts no setting at all). */
   int enabled;
 } cb_settings;
 
@@ -805,7 +804,7 @@ static void cb_defaults(cb_timer *timer, cb_settings *settings) {
   settings->countdown = 1;
   settings->hidden = 0;
   settings->long_every = 4;
-  settings->enabled = 1;
+  settings->enabled = 0;
 }
 
 /* The protocol's three phase spellings and nothing else. An unrecognised one — a future
@@ -1149,9 +1148,9 @@ static BOOL cb_fetch(cb_timer *timer_out, cb_settings *settings_out, double *now
     settings_out->long_break_ms = cb_number(settings, @"longBreakMin", 15.0) * 60000.0;
     settings_out->countdown = cb_bool(settings, @"menubarCountdown", 1);
     settings_out->hidden = cb_bool(settings, @"menubarHidden", 0);
-    /* Missing key means on (spec criterion 9's upgrade path) — cb_bool's own fallback,
-     * matching every other toggle read here. */
-    settings_out->enabled = cb_bool(settings, @"enabled", 1);
+    /* Missing key means off, matching the daemon's own default (ADR 105: the pomodoro
+     * ships off) — a response without the key is a fresh document, not an old one. */
+    settings_out->enabled = cb_bool(settings, @"enabled", 0);
     /* Floored at 1, not at 0: it is a divisor on both sides of the wire (settleBoundary's
      * `breakNumber % longEvery`, and the popover's own position denominator). */
     settings_out->long_every = cb_number_int(settings, @"longEvery", 4.0, 1, CB_COUNT_MAX);

@@ -21,9 +21,11 @@ sending one packet back.
 - **The index page**: lists every thread with its rounds-left count, filters by
   title, project or thread id, and searches inside archived boards; a board
   double-clicked from Finder still renders read-only with no daemon running.
-- **The pomodoro timer and menu bar item**: a work timer the index page and a new
-  status item both read, with its own boundary notification, cues chosen by ear,
-  and a show/hide toggle that survives reinstall.
+- **The menu bar item, and an optional pomodoro timer**: a status item giving quick
+  access to the boards still waiting on an answer, plus a work timer it and the
+  index page both read — off by default, opt-in from the settings panel — with its
+  own boundary notification, cues chosen by ear, and a show/hide toggle that
+  survives reinstall.
 - **Tests and docs**: 56 checks (`npm run check`) covering the daemon, rendering
   and the install path, node only, no browser and no network; ADR, DESIGN,
   SECURITY, PROTOCOL and QUIRKS docs kept current alongside the code, plus an

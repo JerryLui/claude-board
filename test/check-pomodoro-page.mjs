@@ -188,7 +188,9 @@ async function main() {
     // of the status text is actually exercised end to end, not just the countdown --
     // the "Work 3/4 · 12:34" shape rides on these two checks rather than
     // earning new ones.
-    const running = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false } };
+    // ADR 105 flipped the fresh-doc default to off; force enabled: true here since
+    // this file's checks below are about the ENABLED widget.
+    const running = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 12 * 60_000, paused: false }, settings: { ...defaultDoc().settings, enabled: true } };
     writePomodoroDoc(running, home);
 
     await check('pomodoro widget: GET /api/pomodoro over real HTTP, authorised by the session cookie alone (no secret header) -- exactly what a browser tab holds, position and all', async () => {
@@ -260,7 +262,7 @@ async function main() {
     // timer it starts has to actually land on disk. test/check-pure.mjs proves the
     // switch posts the right URL; only this proves the daemon accepts it.
     await check('pomodoro widget: flipping the switch on while idle starts a real timer on the daemon, authorised by the session cookie alone', async () => {
-      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()) }, home);
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: true } }, home);
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
@@ -377,7 +379,7 @@ async function main() {
       const now2 = Date.now();
       // cycle: 1 -> position 2/4, so the restart proves the POSITION survives
       // reading `doc.cycle` back off disk, not only the countdown.
-      const stable = { ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(now2), timer: { phase: 'break', deadline: now2 + 8 * 60_000, paused: false } };
+      const stable = { ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(now2), timer: { phase: 'break', deadline: now2 + 8 * 60_000, paused: false }, settings: { ...defaultDoc().settings, enabled: true } };
       writePomodoroDoc(stable, home);
 
       const beforeTab = loadIndexAgainstDaemon(server.port);
@@ -536,7 +538,7 @@ async function main() {
     });
 
     await check('pomodoro widget: a Master-switch write that fails (a real 401, no session cookie on that one route) reloads nothing and stays visibly failed (AC 3)', async () => {
-      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()) }, home);
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: true } }, home);
       const tab = loadIndexAgainstDaemon(server.port, { failSettingsWrite: true });
       // onPomodoroEnabledChange carries no .catch on this write -- deliberately,
       // the same fire-and-forget shape onPomodoroToggleClick/onPomodoroForwardClick/
@@ -568,7 +570,7 @@ async function main() {
       }
     });
 
-    await check('index page: a settings document with no `enabled` key at all -- the upgrade path -- still server-renders the full timer widget', async () => {
+    await check('index page: a settings document with no `enabled` key at all now server-renders the disabled gear, not the timer -- ADR 105 dropped 103\'s upgrade path', async () => {
       // A legacy on-disk document, the same shape a settings file written before
       // ADR 103 existed would have: no `enabled` key anywhere in its settings
       // object. defaultDoc() no longer proves that on its own now that the
@@ -588,8 +590,12 @@ async function main() {
 
       const res = await REAL_FETCH(`http://127.0.0.1:${server.port}/`, { headers: { cookie: sessionCookieHeader() } });
       const widget = pomodoroWidgetMarkup(await res.text());
-      assert.ok(widget.includes('id="pomodoro-status"'), 'a missing key must read as on, identical to today -- the full timer widget must still render');
-      assert.ok(widget.includes('name="workMin"'), 'and the full settings panel with it, duration fields included');
+      // ADR 105: a missing key now reads as a FRESH document, and a fresh document
+      // ships off -- 103's "missing key reads as on" upgrade path had no users and
+      // is gone, so this now proves the opposite of what it used to.
+      assert.ok(!widget.includes('id="pomodoro-status"'), 'a missing key must read as off -- no timer must render');
+      assert.ok(!widget.includes('name="workMin"'), 'and no settings panel duration fields either -- the bare gear shape only');
+      assert.ok(widget.includes('class="pomodoro-settings-summary"'), 'the bare gear itself must still render, reachable to turn it on');
     });
   } finally {
     await new Promise(resolve => server.server.close(resolve));

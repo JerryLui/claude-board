@@ -4525,6 +4525,8 @@ async function main() {
     // No content-type, no body: readJsonBody is never called on the ensure branch of
     // handlePomodoro (src/server.mjs), which is what lets this succeed instead of the
     // 415 a real bodyless curl would get from any route that DOES read a JSON body.
+    // Master switch defaults off (ADR 105); ensure needs it on to actually start anything.
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
     await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
     const r = await rawRequest(port, 'POST', '/api/pomodoro/ensure', `127.0.0.1:${port}`, { headers: { [SECRET_HEADER]: SECRET } });
     assert.equal(r.status, 200, 'ensure must not require a content-type or a body');
@@ -4539,7 +4541,7 @@ async function main() {
     // wrongly minted a FRESH deadline (`now + workMin*60_000`) instead of continuing from
     // the frozen remainder, the resulting deadline would land ~700ms later than expected
     // -- comfortably outside the assertion's tolerance below.
-    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ workMin: 1 }) });
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ workMin: 1, enabled: true }) });
     await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
     const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
     assert.equal(started.timer.phase, 'work');
@@ -4606,8 +4608,10 @@ async function main() {
     // is explicit: "No notification ever actually fires during the suite." check-http.mjs
     // stubs no PATH (it has no other reason to), so the toggle is what keeps that true here;
     // test/check-notify.mjs owns notification coverage and stubs osascript properly.
+    // Master switch defaults off (ADR 105); resume is a no-op while off, so the seeded
+    // settings need enabled: true too.
     const doc = readPomodoroDoc(home);
-    writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, longEvery: 4, notify: false }, timer: { phase: 'work', paused: true, remainingMs: 150 } }, home);
+    writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, longEvery: 4, notify: false, enabled: true }, timer: { phase: 'work', paused: true, remainingMs: 150 } }, home);
 
     const resumed = await (await fetch(`${base}/api/pomodoro/resume`, { method: 'POST', headers: writeHeaders() })).json();
     assert.equal(resumed.timer.paused, false);
@@ -4628,8 +4632,10 @@ async function main() {
     // test time rather than a real 60+ seconds.
     // `notify: false` for the same reason as the resume check above -- this crosses a real
     // boundary on a real daemon, and no notification may fire during the suite.
+    // Master switch defaults off (ADR 105); startWork (behind ensure) is a no-op while
+    // off, so the seeded settings need enabled: true too.
     const doc = readPomodoroDoc(home);
-    writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, workMin: 150 / 60_000, longEvery: 4, notify: false }, timer: null }, home);
+    writePomodoroDoc({ ...doc, cycle: 0, settings: { ...doc.settings, workMin: 150 / 60_000, longEvery: 4, notify: false, enabled: true }, timer: null }, home);
 
     const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
     assert.equal(started.timer.phase, 'work');
@@ -4660,6 +4666,8 @@ async function main() {
 
   await check('POMODORO: ensure starts a work interval when none exists, and is a no-op against a running, paused, or mid-break timer -- a mid-break ensure leaves the break deadline untouched', async () => {
     await fetch(`${base}/api/pomodoro/reset`, { method: 'POST', headers: writeHeaders() });
+    // Master switch defaults off (ADR 105); ensure needs it on to actually start anything.
+    await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify({ enabled: true }) });
 
     const started = await (await fetch(`${base}/api/pomodoro/ensure`, { method: 'POST', headers: writeHeaders() })).json();
     assert.ok(started.timer, 'ensure must start a timer where there was none');

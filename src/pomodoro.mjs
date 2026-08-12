@@ -49,18 +49,20 @@ import { isCue, pickCue, NO_CUE, SOUNDS_DIRS } from './cues.mjs';
 // startup leaves the default naming it, which mergeSettings below then refuses on the
 // next save, the same way it refuses any other name that is no longer a cue.
 export const DEFAULT_SETTINGS = Object.freeze({
-  // The Master switch ("Pomodoro made optional behind one Master switch"): on by
-  // default, so a settings document written before this key existed reads as on --
-  // behavior identical to today's, no migration (TOGGLE_KEYS' own coercion below is
-  // what turns a missing or hand-mangled value into `true` rather than `undefined`).
-  // Off is the daemon's own durable state, not a substitute for
-  // `CLAUDE_BOARD_NO_POMODORO` (ADR 68), which stays the per-SESSION suppressor a hook
-  // checks before it ever asks -- this key is what the session-start hook's `ensure` is
-  // safe against without the hook itself changing (see startWork's own guard below).
-  // Flipping it off clears whatever Timer and Cycle were live, Rollover-style (ADR 67
-  // semantics, mergeSettings below); flipping it back on starts idle and restores
-  // nothing (ADR 90: an absent timer names the state and nothing else).
-  enabled: true,
+  // The Master switch ("Pomodoro made optional behind one Master switch"): off by
+  // default (ADR 105) -- the timer is an opt-in extra, and a fresh install renders
+  // no pomodoro anywhere until the settings panel switches it on. A settings document
+  // missing the key reads as off too, same as a fresh install (TOGGLE_KEYS' own
+  // coercion below is what turns a missing or hand-mangled value into this default
+  // rather than `undefined`). Off is the daemon's own durable state, not a substitute
+  // for `CLAUDE_BOARD_NO_POMODORO` (ADR 68), which stays the per-SESSION suppressor a
+  // hook checks before it ever asks -- this key is what the session-start hook's
+  // `ensure` is safe against without the hook itself changing (see startWork's own
+  // guard below). Flipping it off clears whatever Timer and Cycle were live,
+  // Rollover-style (ADR 67 semantics, mergeSettings below); flipping it back on
+  // starts idle and restores nothing (ADR 90: an absent timer names the state and
+  // nothing else).
+  enabled: false,
   workMin: 25,
   breakMin: 5,
   longBreakMin: 15,

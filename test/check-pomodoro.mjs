@@ -35,6 +35,9 @@ import { startServer } from '../src/server.mjs';
 import { NO_CUE } from '../src/cues.mjs';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 
+// ADR 105: the pomodoro ships off, so a fixture whose subject is a live timer opts in explicitly.
+const onDoc = () => { const d = defaultDoc(); return { ...d, settings: { ...d.settings, enabled: true } }; };
+
 let failures = 0;
 async function check(name, fn) {
   try {
@@ -511,26 +514,26 @@ async function main() {
 
   await check('startWork: begins a fresh work interval when there is no timer at all', () => {
     const now = Date.now();
-    const next = startWork(defaultDoc(), now);
+    const next = startWork(onDoc(), now);
     assert.equal(next.timer.phase, 'work');
     assert.equal(next.timer.deadline, now + DEFAULT_SETTINGS.workMin * 60_000);
   });
 
   await check('startWork: a running timer is untouched, by reference', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 60_000, paused: false } };
+    const doc = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 60_000, paused: false } };
     assert.equal(startWork(doc, now), doc);
   });
 
   await check('startWork: a paused timer from the CURRENT pomodoro day is untouched -- starting during a pause does not resume or restart it', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 12_000 } };
+    const doc = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 12_000 } };
     assert.equal(startWork(doc, now), doc);
   });
 
   await check('startWork: a timer mid-break is untouched -- starting during a break does not cut it short', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 120_000, paused: false } };
+    const doc = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 120_000, paused: false } };
     assert.equal(startWork(doc, now), doc);
   });
 
@@ -539,7 +542,7 @@ async function main() {
     // already there alone" only ever meant a timer from the day being worked. The
     // morning's first session must not need a second call (nor a click) to get a timer.
     const morning = new Date(2026, 7, 5, 9, 0, 0).getTime();
-    const lastNight = { ...defaultDoc(), cycle: 3, cycleDate: '2026-08-04', timer: { phase: 'work', paused: true, remainingMs: 12_000 } };
+    const lastNight = { ...onDoc(), cycle: 3, cycleDate: '2026-08-04', timer: { phase: 'work', paused: true, remainingMs: 12_000 } };
     const next = startWork(lastNight, morning);
     assert.equal(next.timer.phase, 'work');
     assert.equal(next.timer.paused, false, 'the morning\'s first session leaves a timer RUNNING, not a resumed pause');
@@ -771,23 +774,23 @@ async function main() {
   // surface is in test/check-http.mjs.
   // -------------------------------------------------------------------------------
 
-  await check('DEFAULT_SETTINGS: the Master switch is on by default', () => {
-    assert.equal(DEFAULT_SETTINGS.enabled, true);
+  await check('DEFAULT_SETTINGS: the Master switch is off by default (ADR 105: the pomodoro ships off)', () => {
+    assert.equal(DEFAULT_SETTINGS.enabled, false);
   });
 
-  await check('normalizeDoc: a document with no enabled key at all (written before this field existed) reads as on -- the upgrade path', () => {
+  await check('normalizeDoc: a document with no enabled key at all reads as off -- same as a fresh install', () => {
     const settings = normalizeDoc({ settings: { workMin: 40 } }).settings;
-    assert.equal(settings.enabled, true);
-  });
-
-  await check('normalizeDoc: an explicit enabled: false survives normalization untouched', () => {
-    const settings = normalizeDoc({ settings: { enabled: false } }).settings;
     assert.equal(settings.enabled, false);
   });
 
-  await check('normalizeDoc: a non-boolean enabled (hand-edited garbage) falls back to on, same coercion every other toggle gets', () => {
-    const settings = normalizeDoc({ settings: { enabled: 'nope' } }).settings;
+  await check('normalizeDoc: an explicit enabled: true survives normalization untouched', () => {
+    const settings = normalizeDoc({ settings: { enabled: true } }).settings;
     assert.equal(settings.enabled, true);
+  });
+
+  await check('normalizeDoc: a non-boolean enabled (hand-edited garbage) falls back to off, same coercion every other toggle gets', () => {
+    const settings = normalizeDoc({ settings: { enabled: 'nope' } }).settings;
+    assert.equal(settings.enabled, false);
   });
 
   await check('normalizeDoc: enabled: false forces the timer to null even when the document on disk still names a live one -- the boundary guard against a hand-edited file', () => {
@@ -805,7 +808,7 @@ async function main() {
 
   await check('mergeSettings: flipping enabled true -> false clears the Timer and resets the Cycle to zero, Rollover-style (ADR 67)', () => {
     const now = Date.now();
-    const doc = { ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
+    const doc = { ...onDoc(), cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
     const next = mergeSettings(doc, { enabled: false });
     assert.equal(next.timer, null);
     assert.equal(next.cycle, 0);
@@ -872,7 +875,7 @@ async function main() {
     // Stamped with the CURRENT pomodoro day: readDoc rolls what it reads (below), so a
     // document dated any other day round-trips as an empty one, correctly.
     const now = Date.now();
-    const doc = { ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: 12345, paused: false } };
+    const doc = { ...onDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: 12345, paused: false } };
     writeDoc(doc, home);
     assert.deepEqual(readDoc(home, now), doc);
     const modeOf = p => statSync(p).mode & 0o777;
@@ -886,7 +889,7 @@ async function main() {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-roll-'));
     try {
       const evening = new Date(2026, 7, 4, 23, 0, 0).getTime();
-      writeDoc({ ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(evening), timer: { phase: 'work', paused: true, remainingMs: 9 * 60_000 } }, h);
+      writeDoc({ ...onDoc(), cycle: 3, cycleDate: pomodoroDay(evening), timer: { phase: 'work', paused: true, remainingMs: 9 * 60_000 } }, h);
       const file = path.join(h, 'pomodoro.json');
       const before = readFileSync(file, 'utf8');
 
@@ -913,7 +916,7 @@ async function main() {
   await check('ensureTimer: no-op against a RUNNING timer', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
-    const running = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
+    const running = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } };
     writeDoc(running, h);
     const engine = createPomodoro({ home: h });
     try {
@@ -928,7 +931,7 @@ async function main() {
   await check('ensureTimer: no-op against a PAUSED timer from the CURRENT pomodoro day', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
-    const paused = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 42_000 } };
+    const paused = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now - 1_000, paused: true, remainingMs: 42_000 } };
     writeDoc(paused, h);
     const engine = createPomodoro({ home: h });
     try {
@@ -948,7 +951,7 @@ async function main() {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const lastNight = new Date(2026, 7, 4, 23, 0, 0).getTime();
     const morning = new Date(2026, 7, 5, 9, 12, 0).getTime();
-    writeDoc({ ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(lastNight), timer: { phase: 'work', paused: true, remainingMs: 42_000 } }, h);
+    writeDoc({ ...onDoc(), cycle: 3, cycleDate: pomodoroDay(lastNight), timer: { phase: 'work', paused: true, remainingMs: 42_000 } }, h);
     const engine = createPomodoro({ home: h });
     try {
       engine.ensureTimer(morning);
@@ -973,7 +976,7 @@ async function main() {
     const fourPm = new Date(2026, 7, 5, 16, 0, 0).getTime();
     const engine = createPomodoro({ home: h });
     try {
-      writeDoc({ ...defaultDoc(), cycle: 1, cycleDate: pomodoroDay(nineAm), timer: { phase: 'work', deadline: nineAm + 17 * 60_000, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycle: 1, cycleDate: pomodoroDay(nineAm), timer: { phase: 'work', deadline: nineAm + 17 * 60_000, paused: false } }, h);
       engine.pause(nineAm);
       assert.equal(readDoc(h, nineAm).timer.remainingMs, 17 * 60_000);
 
@@ -999,7 +1002,7 @@ async function main() {
     const now = Date.now();
     const engine = createPomodoro({ home: h });
     try {
-      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 300_000, paused: false } }, h);
       engine.pause(now);
       const forwarded = engine.forward(now + 1_000);
       assert.equal(forwarded.timer.phase, 'break');
@@ -1017,7 +1020,7 @@ async function main() {
     const now = Date.now();
     const engine = createPomodoro({ home: h });
     try {
-      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
       engine.pause(now);
       const restarted = engine.restart(now + 1_000);
       assert.equal(restarted.timer.phase, 'break');
@@ -1033,7 +1036,7 @@ async function main() {
   await check('ensureTimer: no-op against a timer MID-BREAK -- a start during a break does not cut it short', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
-    const midBreak = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 90_000, paused: false } };
+    const midBreak = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 90_000, paused: false } };
     writeDoc(midBreak, h);
     const engine = createPomodoro({ home: h });
     try {
@@ -1048,6 +1051,7 @@ async function main() {
   await check('ensureTimer: starts a fresh work interval when there is truly no timer', () => {
     const h = mkdtempSync(path.join(tmpdir(), 'claude-board-pomodoro-ensure-'));
     const now = Date.now();
+    writeDoc(onDoc(), h);
     const engine = createPomodoro({ home: h });
     try {
       engine.ensureTimer(now);
@@ -1090,7 +1094,7 @@ async function main() {
       const now = Date.now();
       // A deadline moments away: if the armed setTimeout survives the disable, it
       // fires well within this check's own wait below.
-      writeDoc({ ...defaultDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 150, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycle: 2, cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 150, paused: false } }, h);
       engine.boot(now);
 
       const next = engine.settings({ enabled: false }, now);
@@ -1112,7 +1116,7 @@ async function main() {
     const engine = createPomodoro({ home: h });
     try {
       const now = Date.now();
-      writeDoc({ ...defaultDoc(), cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now + 60_000, paused: false } }, h);
       engine.settings({ enabled: false }, now);
       const backOn = engine.settings({ enabled: true }, now);
       assert.equal(backOn.timer, null, 'nothing is restored -- ADR 90: an absent timer names the state and nothing else');
@@ -1231,7 +1235,7 @@ async function main() {
     const boundaries = [];
     const engine = createPomodoro({ home: h, now: clock.now, onBoundary: b => boundaries.push(b) });
     try {
-      writeDoc({ ...defaultDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
       engine.boot();
       clock.step(2 * 60_000); // NTP, mid-wait: the wall clock moves, the monotonic one does not
       await new Promise(resolve => setTimeout(resolve, 400));
@@ -1255,7 +1259,7 @@ async function main() {
     const boundaries = [];
     const engine = createPomodoro({ home: h, now: clock.now, onBoundary: b => boundaries.push(b) });
     try {
-      writeDoc({ ...defaultDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycle: 0, cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline: clock.base + 150, paused: false } }, h);
       engine.boot();
       clock.step(-30 * 60_000);
       await new Promise(resolve => setTimeout(resolve, 400));
@@ -1305,7 +1309,7 @@ async function main() {
     const deadline = clock.base + 60_000;
     const engine = createPomodoro({ home: h, now: clock.now });
     try {
-      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycleDate: pomodoroDay(clock.base), timer: { phase: 'work', deadline, paused: false } }, h);
       engine.boot();
       clock.step(59_000);
       // Polled rather than slept out: the slice is a few seconds, and a fixed sleep sized
@@ -1339,7 +1343,7 @@ async function main() {
     const engine = createPomodoro({ home: h });
     try {
       const now = Date.now();
-      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 120, paused: false } }, h);
+      writeDoc({ ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 120, paused: false } }, h);
       engine.boot(now);
 
       // ENOSPC, a revoked Documents grant and a read-only volume all reach atomicWrite the
@@ -1403,7 +1407,7 @@ async function main() {
     try {
       const now = Date.now();
       const running = {
-        ...defaultDoc(),
+        ...onDoc(),
         cycleDate: pomodoroDay(now),
         cycle: 2,
         timer: { phase: 'work', deadline: now + 10 * 60_000, paused: false }, // 10 min out: not due during this check
@@ -1481,7 +1485,7 @@ async function main() {
   await check('POST /api/pomodoro/forward: advances the running timer on disk, same cycle bookkeeping a natural boundary performs', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
-      const running = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
+      const running = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } };
       writeDoc(running, home);
 
       const res = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } });
@@ -1499,7 +1503,7 @@ async function main() {
   await check('POST /api/pomodoro/forward: forwarding a PAUSED timer through the route lands PAUSED at the next phase, full duration remaining (ADR 82)', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
-      const paused = { ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
+      const paused = { ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', paused: true, remainingMs: 30_000 } };
       writeDoc(paused, home);
 
       const body = await (await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
@@ -1533,7 +1537,7 @@ async function main() {
       await fetch(pomodoroUrl(port, 'settings'), {
         method: 'POST',
         headers: { [SECRET_HEADER]: secret, 'content-type': 'application/json' },
-        body: JSON.stringify({ breakMin: 9 }),
+        body: JSON.stringify({ breakMin: 9, enabled: true }),
       });
       const settings = readDoc(home).settings;
       const midBreak = { ...defaultDoc(), settings, cycle: 3, cycleDate: pomodoroDay(now), timer: { phase: 'break', deadline: now - 1_000, paused: false } };
@@ -1553,7 +1557,7 @@ async function main() {
 
   await check('POST /api/pomodoro/restart: a paused timer through the route stays PAUSED, re-minted to a full interval of the same phase (ADR 82)', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
-      const paused = { ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), timer: { phase: 'work', paused: true, remainingMs: 5_000 } };
+      const paused = { ...onDoc(), cycleDate: pomodoroDay(Date.now()), timer: { phase: 'work', paused: true, remainingMs: 5_000 } };
       writeDoc(paused, home);
 
       const body = await (await fetch(pomodoroUrl(port, 'restart'), { method: 'POST', headers: { [SECRET_HEADER]: secret } })).json();
@@ -1604,7 +1608,7 @@ async function main() {
   await check('POMODORO: the session cookie alone (no secret) can call both forward and restart', async () => {
     await withPomodoroServer(async ({ home, port, secret }) => {
       const now = Date.now();
-      writeDoc({ ...defaultDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } }, home);
+      writeDoc({ ...onDoc(), cycleDate: pomodoroDay(now), timer: { phase: 'work', deadline: now + 20 * 60_000, paused: false } }, home);
       const cookieHeaders = { cookie: `${SESSION_COOKIE}=${sessionToken(secret)}` };
 
       const forwardC = await fetch(pomodoroUrl(port, 'forward'), { method: 'POST', headers: cookieHeaders });

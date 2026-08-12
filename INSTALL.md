@@ -104,8 +104,8 @@ copy. `uninstall.sh` leaves these callers alone; it did not write them.
 A `SessionStart` hook that starts a pomodoro work interval when a Claude Code session
 starts. The board works without it; it only decides whether the timer starts itself or
 waits for the index page's switch. Both defer to the board's own **Pomodoro timer**
-switch in its settings panel: with that off, `ensure` is refused by the daemon and this
-hook starts nothing, hook installed or not.
+switch in its settings panel: with that off — and off is the default (ADR 105) —
+`ensure` is refused by the daemon and this hook starts nothing, hook installed or not.
 
 **Ask before applying it.** Put a yes/no question to the reader with `AskUserQuestion` —
 "Install the SessionStart hook that starts a pomodoro when a Claude Code session starts?"

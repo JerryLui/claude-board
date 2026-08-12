@@ -160,7 +160,7 @@ function cueOptionsHtml() {
  * present", and an idle click is already a server-side no-op
  * (forwardTimer/restartTimer in src/pomodoro.mjs both return `doc` unchanged
  * against `!doc.timer`), so there is no idle-disabled state to render either. */
-export function pomodoroWidget({ enabled = true } = {}) {
+export function pomodoroWidget({ enabled = false } = {}) {
   if (!enabled) return pomodoroSettingsGear();
   const cueOptions = cueOptionsHtml();
   // The icon sits in its own slot, not bare, so indexScript's renderPomodoro can

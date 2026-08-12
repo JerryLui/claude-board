@@ -286,7 +286,9 @@ async function main() {
     // startServer's own pomodoro.boot() call, short enough that waitForLines's 5s
     // budget below has no reason to be patient about it.
     writeDoc({
-      settings: { ...DEFAULT_SETTINGS, notify: true, cueWork: CUE_WORK, cueBreak: CUE_BREAK, cueLongBreak: CUE_LONG_BREAK },
+      // enabled: true (ADR 105 shipped the Master switch off by default) -- without it
+      // readDoc nulls the timer before the boundary ever gets a chance to fire.
+      settings: { ...DEFAULT_SETTINGS, enabled: true, notify: true, cueWork: CUE_WORK, cueBreak: CUE_BREAK, cueLongBreak: CUE_LONG_BREAK },
       cycle: 0,
       cycleDate: pomodoroDay(now),
       timer: { phase: 'work', deadline: now + 150, paused: false },

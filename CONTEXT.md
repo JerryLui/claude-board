@@ -188,10 +188,10 @@ still to run (ADR 82); against no timer it is a no-op. _Avoid_: skip, next, adva
 from the current settings, phase and cycle untouched. Same edge rules as Forward: silent, preserves
 paused, no-op when idle. _Avoid_: reset (that ends the whole loop), redo, replay.
 
-**Master switch**: the one setting that makes the whole pomodoro feature optional. On, the loop and
-its surfaces exist; off, none of them render and the Timer is gone — off is absence, never a dimmed
-surface, and flipping it off ends the loop the way a Rollover does. _Avoid_: enable flag, feature
-flag, kill switch, toggle (every checkbox is one).
+**Master switch**: the one setting that makes the whole pomodoro feature optional, off by default
+(ADR 105). On, the loop and its surfaces exist; off, none of them render and the Timer is gone —
+off is absence, never a dimmed surface, and flipping it off ends the loop the way a Rollover does.
+_Avoid_: enable flag, feature flag, kill switch, toggle (every checkbox is one).
 
 **Board glyph**: the Status item's off-state mark, holding the item's place while the Master switch
 is off (ADR 103) — the brand mark's square and rows redrawn as line art, square like the 32 × 32

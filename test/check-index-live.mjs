@@ -107,6 +107,16 @@ async function postBoard(port, body) {
   return JSON.parse(r.body);
 }
 
+/** ADR 105: the Master switch ships off, so `ensure` (and the widget's own toggle,
+ * which posts the same route) would no-op on a fresh document without this. */
+async function enablePomodoro(port) {
+  const r = await rawRequest(port, 'POST', '/api/pomodoro/settings', {
+    headers: { 'content-type': 'application/json', [SECRET_HEADER]: SECRET },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(r.status, 200, `enabling the pomodoro switch failed: ${r.body}`);
+}
+
 function projectFor(name) {
   const dir = path.join(workDir, name);
   mkdirSync(dir, { recursive: true });
@@ -702,6 +712,7 @@ async function main() {
     await check('criterion 2: a timer change reaches the widget on the daemon\'s own push -- no tick', async () => {
       // Reset first so this reads the same however the checks around it left the daemon.
       await rawRequest(port, 'POST', '/api/pomodoro/reset', { headers: { [SECRET_HEADER]: SECRET } });
+      await enablePomodoro(port);
       const wire = openWireStream(port);
       const tab = openIndexTab(port, { threads: [] });
       try {
@@ -739,6 +750,7 @@ async function main() {
       // exists to prove that end of criterion 3 still holds now that the page is also a
       // subscriber -- not because anything was added for it.
       await rawRequest(port, 'POST', '/api/pomodoro/reset', { headers: { [SECRET_HEADER]: SECRET } });
+      await enablePomodoro(port);
       const wire = openWireStream(port);
       const tab = openIndexTab(port, { threads: [] });
       try {
@@ -830,6 +842,7 @@ async function main() {
       // deliberately not reimplemented (and so not this suite's to prove) -- what is
       // ours is what the page does when it comes back, and that is what this drives.
       await rawRequest(port, 'POST', '/api/pomodoro/reset', { headers: { [SECRET_HEADER]: SECRET } });
+      await enablePomodoro(port);
       const tab = openIndexTab(port, { threads: [] });
       try {
         await tab.tick();

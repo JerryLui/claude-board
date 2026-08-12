@@ -162,6 +162,13 @@ async function main() {
 
   ({ server, port } = await startServer({ home: daemonHome, port: 0 }));
 
+  // ADR 105: the pomodoro ships off, and `ensure` is refused while the Master switch is
+  // off -- every check below proves the HOOK's mechanics, so the fixture opts in first,
+  // the same durable write the settings panel's switch performs. The refusal itself is
+  // proved in test/check-http.mjs, not here.
+  const fresh = readPomodoroDoc(daemonHome);
+  writePomodoroDoc({ ...fresh, settings: { ...fresh.settings, enabled: true } }, daemonHome);
+
   await check('the extracted hook, run against a live daemon with no timer, starts a work interval', async () => {
     const before = await pomodoroDoc();
     assert.equal(before.timer, null, 'fixture daemon must start with no timer at all');
