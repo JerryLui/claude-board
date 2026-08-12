@@ -294,7 +294,7 @@ check('README names the menu-bar opt-out and that it survives reinstall', () => 
   assert.match(readme, /survives? logout and reinstall/i, 'README must state the hide choice survives logout and reinstall');
 });
 check('the disclosure checks fail on a README that lost the menu-bar paragraph', () => {
-  const stripped = readme.replace(/Installing also gives you two things[\s\S]*?survives logout and reinstall\.\n/, '');
+  const stripped = readme.replace(/### The menu bar item and the timer[\s\S]*?survives logout and reinstall\.\n/, '');
   assert.doesNotMatch(stripped, /menu[- ]bar/i, 'stripping the disclosure paragraph did not remove every menu-bar mention -- the absence check would not have caught its loss');
   assert.doesNotMatch(stripped, /pomodoro settings/i);
 });
