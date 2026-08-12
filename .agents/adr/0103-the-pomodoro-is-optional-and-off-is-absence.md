@@ -1,0 +1,5 @@
+# 103. The pomodoro is optional, and off is absence
+
+2026-08-12 · narrows 84; relates to 8, 67, 68, 72, 90
+
+**Context:** the pomodoro is an add-on woven through the daemon, the index page and the menu bar, with no way to decline it short of hiding the whole status item — which also kills the waiting-boards list. **Decision:** one Master switch in the settings panel, on by default; off renders nothing pomodoro anywhere — widget, duration and cue sections, popover timer rows, interval banners, countdown — while the waiting list, round banners, Hide-menu-bar-icon and Store survive untouched, and flipping it off ends the loop exactly as a Rollover does. Dimming or disabling in place was rejected, as was restoring a frozen timer on re-enable. **Consequences:** the tomato leaves the menu bar when off and a board glyph keeps the item's place, so 84's "drawn in every state" holds only while the feature is on; `/api/pomodoro` keeps answering when off, since the item's very existence is gated on it answering; re-enabling starts idle and restores nothing.

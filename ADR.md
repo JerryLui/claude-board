@@ -70,7 +70,7 @@ link where it is worth reading.
 | 81 | [The popover takes focus](.agents/adr/0081-the-popover-takes-focus.md) | 2026-08-10 | relates to 72; relates to 75 |
 | 82 | [Forward and Restart preserve paused](.agents/adr/0082-forward-and-restart-preserve-paused.md) | 2026-08-10 | relates to 81 |
 | 83 | [Paused says so with shape, not a number](.agents/adr/0083-paused-says-so-with-shape-not-a-number.md) | 2026-08-10 | narrows 80; narrowed by 88 |
-| 84 | [One signal, one dimension, in the status glyph](.agents/adr/0084-one-signal-one-dimension-in-the-status-glyph.md) | 2026-08-10 | narrows 80; relates to 83; narrowed by 94 |
+| 84 | [One signal, one dimension, in the status glyph](.agents/adr/0084-one-signal-one-dimension-in-the-status-glyph.md) | 2026-08-10 | narrows 80; relates to 83; narrowed by 94; narrowed by 103 |
 | 85 | [The tab carries one mark](.agents/adr/0085-the-tab-carries-one-mark.md) | 2026-08-10 | relates to 84 |
 | 86 | [The status item learns by push and survives by poll](.agents/adr/0086-the-status-item-learns-by-push-and-survives-by-poll.md) | 2026-08-10 | replaces 79; relates to 77; relates to 72 |
 | 87 | [The index page holds the stream, not only the poll](.agents/adr/0087-the-index-page-holds-the-stream-not-only-the-poll.md) | 2026-08-10 | amends 77; relates to 86 |
@@ -89,3 +89,4 @@ link where it is worth reading.
 | 100 | [A re-install prints twelve lines, and the standing prose is first-run-only](.agents/adr/0100-a-re-install-prints-twelve-lines.md) | 2026-08-11 | relates to 36 |
 | 101 | [A sent round is uncommentable](.agents/adr/0101-a-sent-round-is-uncommentable.md) | 2026-08-11 | widens 46, 98 |
 | 102 | [One copy of the mechanism, not one caller-facing file](.agents/adr/0102-one-copy-of-the-mechanism-not-one-caller-facing-file.md) | 2026-08-12 | narrows 5, 11 |
+| 103 | [The pomodoro is optional, and off is absence](.agents/adr/0103-the-pomodoro-is-optional-and-off-is-absence.md) | 2026-08-12 | narrows 84; relates to 8, 67, 68, 72, 90 |

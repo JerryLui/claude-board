@@ -187,3 +187,8 @@ still to run (ADR 82); against no timer it is a no-op. _Avoid_: skip, next, adva
 **Restart**: the control that starts the current interval over — a fresh full-length interval read
 from the current settings, phase and cycle untouched. Same edge rules as Forward: silent, preserves
 paused, no-op when idle. _Avoid_: reset (that ends the whole loop), redo, replay.
+
+**Master switch**: the one setting that makes the whole pomodoro feature optional. On, the loop and
+its surfaces exist; off, none of them render and the Timer is gone — off is absence, never a dimmed
+surface, and flipping it off ends the loop the way a Rollover does. _Avoid_: enable flag, feature
+flag, kill switch, toggle (every checkbox is one).
