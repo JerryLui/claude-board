@@ -14,7 +14,7 @@
 // scripts accept (see their header comments). No browser, no network.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync, chmodSync, statSync, cpSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, mkdirSync, chmodSync, statSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -3114,9 +3114,28 @@ http.createServer((req, res) => {
     // mechanism, but "the same install" is the actual claim, and this is the one check
     // that runs bash install.sh itself, twice, against the same throwaway root.
     const root = path.join(workDir, 'colour-equivalence-run');
+    // The "and on stderr too" setup sanity below needs the reinstall to write SOMETHING
+    // to stderr, and the only thing a healthy reinstall writes there is install.sh's
+    // version-managed-node warn (:568-588, fires whenever `command -v node` matches a
+    // pattern like */.nvm/*). That is true on a machine whose own node happens to be
+    // nvm-managed, and false on CI's hosted toolcache node -- so make it true on every
+    // machine instead of relying on the one running this check: put a node under a fake
+    // .nvm path first on PATH. Either warn branch (a stable node substituted, or the
+    // version-managed one kept) writes to stderr, so this doesn't need to control which
+    // one fires, only that `command -v node` resolves under the fake path.
+    const fakeNvmDir = path.join(workDir, 'fake-nvm', '.nvm', 'versions', 'node', 'v1', 'bin');
+    mkdirSync(fakeNvmDir, { recursive: true });
+    symlinkSync(process.execPath, path.join(fakeNvmDir, 'node'));
     const colourEnv = {
       ...env,
       ...quietStubs('colour-equivalence'),
+      PATH: `${fakeNvmDir}:${env.PATH}`,
+      // Never inherit a developer's own CLAUDE_BOARD_NODE (nvm users are told to export
+      // it, install.sh:578/SECURITY.md): set, it skips version-managed detection
+      // entirely (install.sh:565's NODE_BIN starts non-empty), so no warn fires and the
+      // stderr setup-sanity assertion below fails for a reason unrelated to the check.
+      // Same guard as the sibling node-detection checks above.
+      CLAUDE_BOARD_NODE: '',
       CLAUDE_BOARD_LAUNCH_AGENTS_DIR: path.join(root, 'LaunchAgents'),
       CLAUDE_BOARD_LOG_DIR: path.join(root, 'Logs'),
       CLAUDE_BOARD_APP_DIR: path.join(root, 'Applications'),
@@ -3138,12 +3157,23 @@ http.createServer((req, res) => {
 
     const ansi = /\x1b\[[0-9;]*m/g;
     const strip = s => s.replace(ansi, '');
+    // install.sh's one genuinely time-dependent transcript token: the health step's
+    // measured wait (install.sh:1528-1529, "${HEALTH_ELAPSED_SECONDS}s"). This check
+    // runs three SEPARATE real installs, each polling /api/health afresh, so a run
+    // whose wait straddles a second boundary prints a different digit than one that
+    // doesn't -- a flake unrelated to anything a line-for-line comparison exists to
+    // catch. Scoped to right after "responding" so nothing else on the transcript is
+    // ever touched, and the match stops short of the trailing ANSI reset, so the
+    // colour wrapped around the token survives normalization intact -- load-bearing
+    // for the setup-sanity assertions just below, which still need a real difference
+    // to prove colour was carried.
+    const normalizeTiming = s => s.replace(/(responding\s+(?:\x1b\[\d+m)?)\d+s/g, '$1Ns');
     // Setup sanity first: if the coloured run carried no escapes at all, the equality
     // checks below would be proving nothing.
-    assert.notEqual(coloured.stdout, plain.stdout, 'setup sanity: the coloured run must actually carry colour on stdout');
-    assert.notEqual(coloured.stderr, plain.stderr, 'setup sanity: and on stderr too');
-    assert.equal(strip(coloured.stdout), plain.stdout, 'stripping ANSI from the coloured run\'s stdout must reproduce the plain run\'s, line for line');
-    assert.equal(strip(coloured.stderr), plain.stderr, 'and the same for stderr');
+    assert.notEqual(normalizeTiming(coloured.stdout), normalizeTiming(plain.stdout), 'setup sanity: the coloured run must actually carry colour on stdout');
+    assert.notEqual(normalizeTiming(coloured.stderr), normalizeTiming(plain.stderr), 'setup sanity: and on stderr too');
+    assert.equal(normalizeTiming(strip(coloured.stdout)), normalizeTiming(plain.stdout), 'stripping ANSI from the coloured run\'s stdout must reproduce the plain run\'s, line for line');
+    assert.equal(normalizeTiming(strip(coloured.stderr)), normalizeTiming(plain.stderr), 'and the same for stderr');
   });
 
   // --- the shared transcript-styling block (colour, step lines, header/banner/footer) ---

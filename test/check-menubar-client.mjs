@@ -451,7 +451,12 @@ async function withProcessNamed(name, fn) {
     await fn();
   } finally {
     child.kill('SIGKILL');
-    await new Promise(resolve => child.once('exit', resolve));
+    // 'exit' may already have fired: a stand-in that died at exec is reaped
+    // before the setup assertion above throws, and awaiting a spent emitter
+    // would hang that loud failure into run.mjs's group-kill timeout instead.
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise(resolve => child.once('exit', resolve));
+    }
   }
 }
 
@@ -1833,22 +1838,35 @@ async function main() {
     // Every way this can fail costs a duplicate tab and none of them costs the click --
     // which is the whole reason the surfacing returns a verdict rather than taking over the
     // open. A dead click is the one outcome ADR 93 must not be able to produce.
-    armOsascript('fail');
-    assert.equal(await clickVerdict(), 'opened', 'a script that exits nonzero -- a denied Automation grant looks exactly like this');
+    //
+    // Under a stand-in browser because every case below is about a script that IS reached,
+    // and the check above proves only running browsers are asked: on a machine running none
+    // of the table -- a headless runner, or anyone who simply has no browser open -- no
+    // script would run and all three cases would pass by never having asked anything, the
+    // late answer loudest of all, since a click that asks nobody returns instantly. So the
+    // check brings the running browser it assumes rather than borrowing the reader's. Which
+    // row it is does not matter: neither `fail` nor `slow` raises, so nothing stops the scan
+    // early and the stand-in is asked whatever else is open. The last case is the one this
+    // cannot weaken -- an osascript that will not execute logs nothing however many browsers
+    // wanted to be asked, and now at least one did.
+    await withProcessNamed('Safari', async () => {
+      armOsascript('fail');
+      assert.equal(await clickVerdict(), 'opened', 'a script that exits nonzero -- a denied Automation grant looks exactly like this');
+      assert.ok(osascriptCalls().some(c => c.app === 'Safari'), 'setup: the refusal must be one a script actually returned');
 
-    armOsascript('slow');
-    const started = Date.now();
-    assert.equal(await clickVerdict(), 'opened', 'a script that answers after a beat is still read to the end');
-    assert.ok(Date.now() - started >= 600, 'setup: the slow answer must actually have been waited for');
-
-    chmodSync(osascriptStub, 0o644); // present, not executable: the same as absent to the resolver
-    try {
-      armOsascript('raised');
-      assert.equal(await clickVerdict(), 'opened', 'no osascript on the compiled-in PATH at all');
-      assert.equal(osascriptCalls().length, 0, 'and nothing ran');
-    } finally {
-      chmodSync(osascriptStub, 0o755);
-    }
+      armOsascript('slow');
+      const started = Date.now();
+      assert.equal(await clickVerdict(), 'opened', 'a script that answers after a beat is still read to the end');
+      assert.ok(Date.now() - started >= 600, 'setup: the slow answer must actually have been waited for');
+      chmodSync(osascriptStub, 0o644); // present, not executable: the same as absent to the resolver
+      try {
+        armOsascript('raised');
+        assert.equal(await clickVerdict(), 'opened', 'no osascript on the compiled-in PATH at all');
+        assert.equal(osascriptCalls().length, 0, 'and nothing ran');
+      } finally {
+        chmodSync(osascriptStub, 0o755);
+      }
+    });
   });
 
   await check('AC 6: a URL the validator refuses is neither surfaced nor opened, and no script is run for it', async () => {

@@ -46,6 +46,14 @@ async function check(name, fn) {
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'claude-board-notify-check-'));
 
+// The local secret, in this check's own temp dir -- never ~/.config/claude-board. Set
+// before any check below boots a real daemon (startServer/readSecret both resolve
+// CLAUDE_BOARD_SECRET_FILE via src/secret.mjs's secretPath() seam, so this must land in
+// process.env before either one is called). Same shape as test/check-http.mjs:124-127.
+const SECRET_FILE = path.join(workDir, 'secret');
+writeFileSync(SECRET_FILE, `${'a'.repeat(64)}\n`, { mode: 0o600 });
+process.env.CLAUDE_BOARD_SECRET_FILE = SECRET_FILE;
+
 // Same pattern as test/check-install.mjs's STUB_CLAUDE/STUB_LAUNCHCTL: a tiny node
 // script standing in for the real binary, recording every invocation's argv as one
 // JSON line, exit code controllable via env so the non-zero-exit path is exercisable.

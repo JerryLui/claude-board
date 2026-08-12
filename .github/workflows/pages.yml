@@ -1,5 +1,16 @@
 name: pages
 
+# DISABLED in the repo's Actions settings (gh workflow disable pages,
+# 2026-08-12): GitHub Pages cannot be enabled while this repo is private on
+# the current plan -- the enable API answers 422 "your current plan does not
+# support GitHub Pages for this repository", so every run of this workflow
+# failed at configure-pages with "Not Found". Nothing here is broken; the
+# repo setting is the blocker. To bring the site up: make the repo public
+# (or move to a plan with private-repo Pages), enable Pages with build type
+# "GitHub Actions" (Settings -> Pages, or
+# gh api repos/{owner}/{repo}/pages -X POST -f build_type=workflow),
+# then gh workflow enable pages.
+#
 # Publishes examples/ as the Pages site root, removing the "clone to see it"
 # barrier: a newcomer reads the rendered sample board at
 # https://jerrylui.github.io/claude-board/sample-board.html with no clone, no

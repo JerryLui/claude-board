@@ -26,3 +26,9 @@ jobs:
       - name: npm run check
         # No install step: zero dependencies, node built-ins only.
         run: npm run check
+        env:
+          # Headroom for slower CI runners: check-install.mjs spawns several full
+          # install.sh runs and hit the 180s local default on the Node 22 job. The
+          # cap only bites when something hangs, so raising it here costs nothing
+          # when healthy. Local runs keep the 180s default (test/run.mjs).
+          CLAUDE_BOARD_CHECK_TIMEOUT_MS: '300000'
