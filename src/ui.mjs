@@ -804,6 +804,20 @@ export const ui = `
   // max-height is a backstop only: THIS clamp is what actually stops a hostile
   // report, since it runs before the value ever touches the frame's inline style.
   var STAGE_HEIGHT_CAP = 600;
+  // The two numbers that stop a stage holding the wheel hostage
+  // (forwardStageWheel). TRAVEL_CAP bounds how much hidden content the page
+  // will ever believe in: reported height feeds scroll travel through this
+  // clamp, so even a stage that honors every forwarded notch in its reports
+  // runs out of believed travel -- fifty capped frames of mock is past any
+  // legitimate variant. WHEEL_SLACK is how far the stage's reported position
+  // may lag the pixels the page has actually forwarded before the page takes
+  // the wheel back: wide enough for the one-message report lag (and a
+  // two-notch lag in PAGES mode, one notch = the cap), narrow enough that a
+  // frozen or under-honoring report releases within a dozen ordinary notches.
+  // Together they bound total capture at TRAVEL_CAP + WHEEL_SLACK pixels no
+  // matter what the stage reports.
+  var STAGE_TRAVEL_CAP = 30000;
+  var STAGE_WHEEL_SLACK = 2 * STAGE_HEIGHT_CAP;
   // The floor beside that cap: a stage that sizes itself from the
   // viewport rather than from its own content can report a height that
   // measures whatever sliver of chrome happened to be visible -- a few
@@ -1153,11 +1167,17 @@ export const ui = `
   function forwardStageWheel(card, ev) {
     var frame = card.querySelector('.html-stage');
     if (!frame || !isWiredStage(frame)) return;
+    // A trackpad pinch arrives as a wheel event with ctrlKey set (the lens
+    // handler documents the same fact). It is a zoom gesture, not a scroll,
+    // and it is never the stage's -- same rule in both wheel handlers.
+    if (ev.ctrlKey) return;
     // How far this mock can still travel: what it reported as its own content
     // height, less the frame the cap clipped it to. Zero or less means nothing
     // is hidden -- the ordinary case, and it must stay the cheap one: the page
-    // keeps the gesture untouched.
-    var travel = (frame.__cbStageContentH || 0) - STAGE_HEIGHT_CAP;
+    // keeps the gesture untouched. The report passes through STAGE_TRAVEL_CAP
+    // because it is the stage's own claim: uncapped, an absurd height is an
+    // unbounded license to consume notches.
+    var travel = Math.min(frame.__cbStageContentH || 0, STAGE_TRAVEL_CAP) - STAGE_HEIGHT_CAP;
     if (travel <= 0) return;
     var delta = wheelPixels(ev);
     if (typeof delta !== 'number' || !isFinite(delta) || delta === 0) return;
@@ -1170,7 +1190,25 @@ export const ui = `
     var top = typeof frame.__cbStageTop === 'number' ? frame.__cbStageTop : 0;
     if (delta < 0 && top <= 0) return;
     if (delta > 0 && top >= travel) return;
+    // The end checks above trust the stage's report; this one does not. 'fwd'
+    // is the page's own ledger of net pixels already forwarded, and a notch is
+    // consumed only while the reported position tracks it within
+    // STAGE_WHEEL_SLACK. A stage whose report freezes (or advances less than
+    // the pixels it was given) drifts past the slack and the wheel is the
+    // page's again, in whichever direction the report stopped honoring; an
+    // honest stage never drifts, because its browser scrolls by exactly what
+    // was forwarded and reports where it landed.
+    // ponytail: a stage that scrolls ITSELF far from the ledger (script-driven
+    // autoscroll, no notches forwarded) forfeits the in-place wheel for the
+    // return direction -- the ledger only moves on forwarded notches, so the
+    // gap never closes. The upgrade path is wall-clock-rate-limited ledger
+    // convergence toward reports; message-rate-limited would just hand the
+    // stage the pen back.
+    var fwd = frame.__cbStageFwd || 0;
+    if (delta > 0 && fwd - top > STAGE_WHEEL_SLACK) return;
+    if (delta < 0 && top - fwd > STAGE_WHEEL_SLACK) return;
     ev.preventDefault();
+    frame.__cbStageFwd = Math.max(0, Math.min(travel, fwd + delta));
     postToStage(frame, { type: 'scrollBy', delta: delta });
   }
 

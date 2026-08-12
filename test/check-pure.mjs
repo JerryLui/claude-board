@@ -5775,6 +5775,74 @@ check('choose-between-rendered-variants: a mock the cap CLIPS scrolls under the 
     'and the well-formed one still moves the mock, so the check above rejects the messages rather than the mechanism being dead');
 });
 
+check('choose-between-rendered-variants: a stage cannot hold the wheel hostage -- a frozen report releases the notch within bounded slack, a fake mid-range report cannot trap the upward direction, a pinch (ctrl+wheel) is never consumed, and believed travel is capped (ablation 1: drop the ledger checks and a frozen report consumes downward notches forever; ablation 2: drop the ctrlKey gate and a pinch over a clipped mock is swallowed; ablation 3: drop STAGE_TRAVEL_CAP and a stage honoring its reports holds the wheel for a billion fake pixels)', () => {
+  // The gap this closes (found by audit, 2026-08-12): the check above proves
+  // the chaining a COOPERATING stage gets, but ownership of the notch was
+  // decided entirely from two numbers the stage itself reports.
+  // A stage lying about either -- an absurd height, a position that never
+  // moves -- captured every downward notch over the card forever, and one
+  // faked mid-range report closed the upward escape too. The stand-in half
+  // here reaches the whole decision path; that the release is visible on
+  // screen is the demo board's half (QUIRKS.md "The DOM stand-in's ceilings").
+  const board = createBoard({
+    title: 'hostile',
+    blocks: [{
+      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'Hostile', block: { kind: 'html', html: '<body data-standin-scroll-height="900"><p>liar</p></body>' } },
+        { label: 'Short', block: { kind: 'html', html: '<body data-standin-scroll-height="400"><p>short mock</p></body>' } },
+      ],
+    }],
+  });
+  const document = loadVariantBoard(board);
+  const card = document.querySelector('.choice-variant');
+  const frames = document.querySelectorAll('.html-stage');
+  withCapturedRAF((drain) => { frames.forEach(f => f.loadSrcdoc()); drain(); });
+
+  const moved = [];
+  frames[0].contentWindow.scrollBy = (opts) => { moved.push(opts); };
+
+  // The stage now lies: an enormous height, and it will never report movement.
+  frames[0].contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'height', height: 1e9 }, '*');
+  assert.equal(frames[0].style.height, '600px', 'the style clamp must hold against the same report regardless');
+
+  const notch = (props) => {
+    const ev = new StandInEvent('wheel', { deltaY: 120, deltaMode: 0, ...props });
+    card.dispatchEvent(ev);
+    return ev;
+  };
+
+  // Pinch: a zoom gesture, never the stage's, clipped or not.
+  const pinch = notch({ ctrlKey: true });
+  assert.equal(pinch.defaultPrevented, false, 'a ctrl+wheel (trackpad pinch) over a clipped mock must stay the page\'s');
+  assert.deepEqual(moved, [], 'and must not be forwarded to the stage either');
+
+  // Frozen position: notches are consumed only until the page's ledger of
+  // forwarded pixels outruns the report by the slack, then the page scrolls
+  // again with the pointer still over the card.
+  let released = -1;
+  for (let i = 0; i < 30; i++) {
+    if (!notch({}).defaultPrevented) { released = i; break; }
+  }
+  assert.ok(released > 0, 'the first notches ARE consumed -- release is a drift judgment, not a blanket refusal to scroll clipped mocks');
+  assert.ok(released <= 15, `a frozen report must release the wheel within a bounded number of notches, got ${released < 0 ? 'never' : released}`);
+  assert.equal(notch({}).defaultPrevented, false, 'and it stays released while the report stays frozen');
+
+  // One faked mid-range report must not close the upward escape: the ledger
+  // never forwarded anything like 5000 pixels, so the claim is not honored.
+  frames[0].contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'scroll', top: 5000 }, '*');
+  const up = notch({ deltaY: -120 });
+  assert.equal(up.defaultPrevented, false, 'an upward notch against a position the page never forwarded goes back to the page');
+
+  // Active liar: a stage that honors every forwarded pixel in its reports is
+  // indistinguishable from a real scroll -- so the height it claimed is only
+  // believed up to STAGE_TRAVEL_CAP, and at that boundary the notch is the
+  // page's despite a claimed billion pixels still "hidden".
+  frames[0].contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'scroll', top: 30000 - 600 }, '*');
+  const past = notch({});
+  assert.equal(past.defaultPrevented, false, 'at the travel cap a downward notch chains back to the page, whatever height the stage claimed');
+});
+
 check('choose-between-rendered-variants: an html option\'s iframe is rendered pointer-events: none -- a real click can never reach it, only the card around it can ever record a pick', () => {
   // SECURITY, not polish: without this, a real, trusted
   // click over the visible mock content of an html-kind option would land

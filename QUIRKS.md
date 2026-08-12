@@ -685,6 +685,26 @@ Take a screenshot to force the frame, then measure. Interleave one per step when
 sequence depends on reports landing between steps; a `setTimeout` of any length does
 not substitute, because the wait itself is not a paint.
 
+That workaround has since narrowed (measured 2026-08-12): the extension now parks its
+MCP tab group in a zero-size hidden window (`outerWidth` 0, `visibilityState`
+'hidden' permanently — AppleScript cannot even enumerate it, so no amount of
+`activate` surfaces it). There, a forced screenshot still delivers a stage's FIRST
+rAF-driven `height` report, but does NOT flush the `scroll` events a
+programmatically-scrolled stage document has pending — every `scroll` report simply
+never arrives, however many screenshots are interleaved, and `gif_creator` recording
+forces nothing between actions either. Anything that needs the stage report LOOP
+(scroll chaining, the wheel-release ledger) has to be watched in a genuinely visible
+tab: `open` the board URL in the reader's own window and use human eyes, or assert
+the loop in the stand-in and verify only the one-shot reports over automation.
+
+Two more traps on the way into that hidden window: the extension's `navigate` tool
+performs top-level navigations that do not attach cookies (the same URL fetched from
+page context sends them fine), so a cookie-gated page 401s under `navigate` — set
+`document.cookie` from page JS on the origin, then navigate with `location.href` from
+inside the page. And Chrome refused both handoff and `document.cookie` writes for
+`http://127.0.0.1` while accepting them for `http://localhost` — same daemon, same
+jar; use `localhost` URLs for driven-tab work.
+
 Separately: the extension's `computer` scroll action dispatches **no** `wheel` event —
 it moves the scroll position programmatically. A capture-phase `wheel` listener on
 `window` sees nothing while the page visibly scrolls. Wheel handling has to be driven
