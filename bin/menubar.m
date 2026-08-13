@@ -2194,9 +2194,12 @@ static NSImage *cb_glyph_image(cb_display d) {
  *
  * The whole strategy against that bill is: DO NOT STYLE ANYTHING. Every control here is a
  * stock AppKit one at its default appearance, the popover keeps its own material and
- * background, and the only two colours named in the whole section are `secondaryLabelColor`
- * on the captions and `labelColor` on the phase glyph — SEMANTIC names the system resolves
- * per appearance, never values. An NSButton or an NSSwitch nobody touched is already right
+ * background, and the only three colours named in the whole section are `secondaryLabelColor`
+ * on the captions, `labelColor` on the phase glyph, and `labelColor` again on the waiting
+ * rows' own titles (cb_row_button, below — AppKit dims a borderless button's title by
+ * default, and the row is the popover's content rather than its chrome) — SEMANTIC names
+ * the system resolves per appearance, never values. An NSButton or an NSSwitch nobody touched
+ * is already right
  * in every appearance and every accessibility setting, has a focus ring, is reachable
  * under Full Keyboard Access and reports itself to VoiceOver; a hand-drawn row is none of
  * those, for each of which this file would then own a bug. It is the same call the
@@ -2238,8 +2241,10 @@ static NSImage *cb_glyph_image(cb_display d) {
  * setting at all (see CB_ACTION_PATHS).
  *
  * A WAITING BOARD is a dot and its label, not a bordered button — but still a real
- * NSButton, with `bordered` off and nothing else touched, because the bezel is the only
- * part the layout drops. A hand-drawn row would lose the focus ring, the keyboard reach and
+ * NSButton, with `bordered` off and the bezel the only part the layout drops on its own; the
+ * title's colour is the one thing this file does set explicitly (cb_row_button), because
+ * left alone it is AppKit's default DIMMED reading for a borderless button, not a value this
+ * file invented. A hand-drawn row would lose the focus ring, the keyboard reach and
  * the VoiceOver report along with it. The dot is a typographic bullet in the title rather
  * than a drawn circle, which is what keeps the popover's glyph set exactly equal to the
  * widget's: nothing here is invented for this surface.
@@ -2296,11 +2301,34 @@ static NSButton *cb_icon_button(NSImage *image, NSString *accessibility, id targ
   return button;
 }
 
-/* A waiting row: a dot, then the label, left-aligned, and no bezel. All three are the
- * layout the popover was redrawn to (see the section comment) rather than styling — the
- * ink, the focus ring, the highlight and the VoiceOver report are still the system's, and
- * `accessibility` replaces the title outright for a screen reader, so the bullet is never
- * spoken.
+/* Reported by `--menubar --probe` (bottom of this file) beside every `waiting=` line, so a
+ * headless check can assert the token without a window server. CB_ROW_TITLE_COLOR_TOKEN is
+ * the ONE naming: cb_row_button below pastes it into its [NSColor …] call and the probe
+ * string is its stringification, so the report cannot say something the paint does not do —
+ * by construction, not by two literals happening to agree. */
+#define CB_ROW_TITLE_COLOR_TOKEN labelColor
+#define CB_STR_(x) #x
+#define CB_STR(x) CB_STR_(x)
+static const char *const CB_ROW_TITLE_COLOR = CB_STR(CB_ROW_TITLE_COLOR_TOKEN);
+
+/* A waiting row: a dot, then the label, left-aligned, no bezel, and the title set explicitly
+ * to `labelColor` — the third of the section comment's three named colours. Everything but
+ * the colour is the layout the popover was redrawn to (see the section comment) rather than
+ * styling — the ink, the focus ring, the highlight and the VoiceOver report are still the
+ * system's, and `accessibility` replaces the title outright for a screen reader, so the
+ * bullet is never spoken.
+ *
+ * The colour needs its own lever because NSButton, unlike NSTextField, has no `textColor`
+ * property — `attributedTitle` is the only door AppKit gives it. Copying the attributed
+ * title `buttonWithTitle:` already built and adding ONE attribute over its full range (rather
+ * than replacing it outright) keeps whatever font and paragraph style AppKit chose by
+ * default; only the colour is this file's own decision. Left unset, a borderless button's
+ * title draws dimmed — that dimming is what the Problem this shape fixes is about, and no
+ * code anywhere named a colour for it before now.
+ *
+ * Both the board rows and the "N more waiting" overflow row call this one helper (see below)
+ * rather than two that happen to agree, so the two can never drift apart on colour, bezel or
+ * alignment.
  *
  * Left-aligned because a centred board title reads as a label and truncates from the
  * middle; the labels themselves are already elided to CB_TITLE_MAX above. */
@@ -2312,14 +2340,20 @@ static NSButton *cb_row_button(NSString *title, NSString *accessibility, id targ
   [button setAccessibilityLabel:accessibility];
   button.alignment = NSTextAlignmentLeft;
   button.bordered = NO;
+  NSMutableAttributedString *primary = [button.attributedTitle mutableCopy];
+  [primary addAttribute:NSForegroundColorAttributeName
+                   value:[NSColor CB_ROW_TITLE_COLOR_TOKEN]
+                   range:NSMakeRange(0, primary.length)];
+  button.attributedTitle = primary;
   return button;
 }
 
 static NSTextField *cb_caption(NSString *text, BOOL secondary) {
   NSTextField *label = [NSTextField labelWithString:text];
-  /* One of the two appearance decisions in the whole popover, and it is a SEMANTIC colour
-   * rather than a value: `secondaryLabelColor` is what the system means by "this is a
-   * caption", and it resolves itself in light, in dark and under Increase Contrast. */
+  /* One of the section's three named colours (see the section comment), and it is a
+   * SEMANTIC colour rather than a value: `secondaryLabelColor` is what the system means by
+   * "this is a caption", and it resolves itself in light, in dark and under Increase
+   * Contrast. */
   if (secondary) label.textColor = [NSColor secondaryLabelColor];
   return label;
 }
@@ -3249,7 +3283,8 @@ static void cb_menubar_probe_live(double timeoutSeconds) {
   [cb_state_lock lock];
   cb_waiting waiting = cb_state_waiting;
   [cb_state_lock unlock];
-  printf("waiting=%d total=%d more=%d\n", waiting.count, waiting.total, waiting.more);
+  printf("waiting=%d total=%d more=%d rowcolor=%s\n", waiting.count, waiting.total, waiting.more,
+         CB_ROW_TITLE_COLOR);
   for (int i = 0; i < waiting.count; i++) printf("row=%s\n", waiting.rows[i].label);
   fflush(stdout);
 }
@@ -3303,7 +3338,8 @@ static void cb_menubar_probe_run(double timeoutSeconds) {
   [cb_state_lock lock];
   cb_waiting waiting = cb_state_waiting;
   [cb_state_lock unlock];
-  printf("waiting=%d total=%d more=%d\n", waiting.count, waiting.total, waiting.more);
+  printf("waiting=%d total=%d more=%d rowcolor=%s\n", waiting.count, waiting.total, waiting.more,
+         CB_ROW_TITLE_COLOR);
   for (int i = 0; i < waiting.count; i++) printf("row=%s\n", waiting.rows[i].label);
   fflush(stdout);
 }
@@ -3604,7 +3640,8 @@ int cb_menubar_probe(const char *word, const char *argument) {
     cb_waiting waiting;
     memset(&waiting, 0, sizeof(waiting));
     (void)cb_fetch_waiting(&waiting);
-    printf("waiting=%d total=%d more=%d\n", waiting.count, waiting.total, waiting.more);
+    printf("waiting=%d total=%d more=%d rowcolor=%s\n", waiting.count, waiting.total, waiting.more,
+           CB_ROW_TITLE_COLOR);
     for (int i = 0; i < waiting.count; i++) printf("row=%s\n", waiting.rows[i].label);
     if (waiting.more > 0) printf("morerow=%s\n", waiting.more_label);
     /* The caption carries the count (see cb_waiting_caption), so it is a thing a check

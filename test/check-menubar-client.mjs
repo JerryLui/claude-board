@@ -1800,6 +1800,12 @@ async function main() {
       assert.equal(five.more, '0', 'and at exactly the cap there is nothing left over');
       assert.equal(five.morerow, undefined);
       assert.equal(five.caption, '5 waiting for an answer', 'the caption carries the count even when nothing overflows -- the Solution asks the dropdown for "a count of boards waiting", and below the cap the overflow row is not there to supply one');
+      // A borderless NSButton's title dims by default, and a waiting row is the popover's
+      // content rather than its chrome, so cb_row_button sets the title colour explicitly
+      // to the semantic `labelColor` (primary) rather than leaving it dimmed. Reported as a
+      // token alongside `waiting=`/`total=`/`more=` because a resolved colour value cannot
+      // be asserted headless.
+      assert.equal(five.rowcolor, 'labelColor', 'waiting-board rows render their title in labelColor, not AppKit\'s default dimmed reading');
       for (const row of five.rows) {
         assert.match(row, /^BOARD_\d · round 1$/, `a row is "<thread title> · round <n>", got ${JSON.stringify(row)}`);
       }
@@ -1812,6 +1818,9 @@ async function main() {
       assert.equal(six.total, '6', 'and `total` is the route\'s uncapped count, which is what the overflow row counts from');
       assert.equal(six.morerow, '1 more waiting');
       assert.equal(six.caption, '6 waiting for an answer', 'the caption counts what is WAITING, not what is drawn -- six waiting, five rows, one over');
+      // The overflow row shares cb_row_button with the board rows above rather than a second
+      // helper that happens to agree, so the same colour token applies with it on screen too.
+      assert.equal(six.rowcolor, 'labelColor', 'the "N more waiting" overflow row shares the board rows\' helper, so it renders primary too');
 
       await ask('BOARD_7');
       const seven = await probe({ home: probeHome, port });
@@ -2620,7 +2629,7 @@ async function main() {
       // The `waiting` event carries no rows of its own (just a count) -- this is what
       // proves the push triggered a real re-check of GET /api/waiting rather than merely
       // being noticed and dropped.
-      assert.match(stdout, /^waiting=1 total=1 more=0$/m, `the fresh row must be in the item's cache by the time the probe exits, not merely available for a poll to find later:\n${stdout}`);
+      assert.match(stdout, /^waiting=1 total=1 more=0 rowcolor=labelColor$/m, `the fresh row must be in the item's cache by the time the probe exits, not merely available for a poll to find later:\n${stdout}`);
       assert.match(stdout, /^row=ticket 02 waiting push · round 1$/m);
     });
   });
@@ -2666,7 +2675,7 @@ async function main() {
       // broadcastWaiting), so this is the SAME code path the check above already proved
       // reaches cb_state_waiting -- what's new here is the daemon-reported total actually
       // going back to zero once the round this probe's one push was about is answered.
-      assert.match(stdout, /^waiting=0 total=0 more=0$/m, `the row must be gone from the item's cache once the answer's push lands:\n${stdout}`);
+      assert.match(stdout, /^waiting=0 total=0 more=0 rowcolor=labelColor$/m, `the row must be gone from the item's cache once the answer's push lands:\n${stdout}`);
       assert.ok(!/^row=/m.test(stdout), `no row may survive the answer:\n${stdout}`);
     });
   });
