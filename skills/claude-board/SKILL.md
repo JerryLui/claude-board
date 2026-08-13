@@ -78,6 +78,12 @@ exception: a page board (the single-stage shape described below) is commentable 
 posted with `wait: true`. Without it, the page is read-only — no comment control, no
 click-to-anchor gesture, whatever kind its one block is.
 
+**Pick the kind by how the reviewer takes the block in: anything judged by looking — a
+mock, a layout, a chart, a diagram, competing designs — goes up rendered, as `html` or
+`mermaid`; `markdown` and `code` carry what is read as text.** A mock sketched in markdown
+or ASCII lands as prose — no comment control, nothing to click — and the reaction the
+round exists for has nowhere to anchor.
+
 **`section` is the heading's slug, not its text**: lowercase, spaces to hyphens, so
 `## Open questions` is `section: 'open-questions'`. Get it wrong and the block resolves to
 nothing.
