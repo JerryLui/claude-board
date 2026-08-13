@@ -649,7 +649,14 @@ function renderContextItem(block, board, commentsByBlock, historical) {
  * (renderContextItem) stacked inside `.question-main`, between the prompt and
  * the widget, and never emits a `.question-context` card at all -- which is
  * what lets the SAME pre-existing `:not(:has(.question-context))` rule carry
- * the full-width layout too, with no new grid CSS of its own. */
+ * the full-width layout too, with no new grid CSS of its own.
+ *
+ * The note field and the footer are children of the `section`, not of
+ * `.question-main`: both are about the question as a whole rather than about
+ * either column, so they sit on their own grid rows below both (the stylesheet
+ * spans them `1 / -1`). Keeping the note inside `.question-main` cost it half
+ * the card's width for no reason -- a two-column question got a note box as
+ * narrow as its options while the context card sat beside empty space. */
 function renderQuestionBlock(block, board, commentsByBlock, historical) {
   const answer = board.answers[block.id];
   const statusText = `status: ${answer ? answer.status : 'unanswered'}`;
@@ -670,16 +677,16 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
     <p class="question-prompt">${escHtml(block.prompt)}</p>
     ${proseContextHtml}
     ${widgetHtml}
-    <div class="note-field">
-      <label for="note-${escAttr(block.id)}">Note</label>
-      <textarea id="note-${escAttr(block.id)}" data-note-for="${escAttr(block.id)}" placeholder="Optional note"${historical ? ' disabled' : ''}>${escHtml(answer ? answer.note : '')}</textarea>
-    </div>
-    <div class="question-footer">
-      <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
-      <span class="answer-status" data-status="${escAttr(answer ? answer.status : 'unanswered')}">${escHtml(statusText)}</span>
-    </div>
   </div>
   ${cardContextHtml ? `<div class="question-context">${cardContextHtml}</div>` : ''}
+  <div class="note-field">
+    <label for="note-${escAttr(block.id)}">Note</label>
+    <textarea id="note-${escAttr(block.id)}" data-note-for="${escAttr(block.id)}" placeholder="Optional note"${historical ? ' disabled' : ''}>${escHtml(answer ? answer.note : '')}</textarea>
+  </div>
+  <div class="question-footer">
+    <button type="button" class="btn-defer${isDeferred ? ' active' : ''}" data-defer-for="${escAttr(block.id)}"${historical ? ' disabled' : ''}>Defer</button>
+    <span class="answer-status" data-status="${escAttr(answer ? answer.status : 'unanswered')}">${escHtml(statusText)}</span>
+  </div>
 </section>`;
 }
 

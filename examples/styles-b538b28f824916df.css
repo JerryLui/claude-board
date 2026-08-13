@@ -501,8 +501,17 @@ body.sent-page .comment-btn { display: none; }
 /* scroll-margin-top clears the sticky .board-head when the questions-left pill
    scrolls a block's own top on screen (src/ui.mjs's goToQuestion), the same
    reason .round carries it for a page flip -- see --head-clear in :root. */
-.question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: var(--space-5); align-items: start;
+.question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  column-gap: var(--space-5); row-gap: var(--space-3); align-items: start;
   scroll-margin-top: var(--head-clear); }
+/* The note and the footer answer FOR the question, not for either column, so
+   they take their own full-width rows under both -- a two-column question used
+   to get a note box only as wide as its options while the context card beside
+   it ended halfway up the card. Row spacing is the grid's own row-gap, so the
+   widget's trailing margin (.options and friends carry one) is zeroed where it
+   would double up against it. */
+.question-block > .note-field, .question-block > .question-footer { grid-column: 1 / -1; }
+.question-main > :last-child { margin-bottom: 0; }
 /* ADR.md entry 26: a question carrying a rendered stage (anywhere in its
    options or its context, src/render.mjs's questionCarriesStage) never emits
    a '.question-context' card at all -- its context renders as prose inside
@@ -688,7 +697,7 @@ body.sent-page .comment-btn { display: none; }
   border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--r-md); padding: 9px 12px; font: inherit;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
 
-.question-footer { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-3); }
+.question-footer { display: flex; align-items: center; gap: var(--space-3); }
 .btn-defer { background: var(--panel-2); border: 1px solid var(--hairline); color: var(--ink-2);
   font-size: 11.5px; font-weight: 550; border-radius: var(--r-pill); padding: 6px 14px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }

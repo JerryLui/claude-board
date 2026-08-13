@@ -1861,14 +1861,15 @@ check('U1, re-verified (previously not reproduced; confirmed here with the real 
   const qid = board.blocks[0].id;
   const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
   const sectionRoot = parseHtmlTree(sectionHtml).children[0];
-  // question-main(1) > question-footer(5) > answer-status span(2) -- fixed
-  // sibling positions regardless of widget contents (block-kicker, prompt,
-  // widget, note-field, footer are always exactly one element each).
-  const statusNode = resolveSteps(sectionRoot, pathToSteps('1.5.2'));
-  assert.ok(statusNode && (statusNode.cls || []).includes('answer-status'), 'setup failure: "1.5.2" must address the status span');
+  // question-footer(3) > answer-status span(2) -- fixed sibling positions for a
+  // question with no context card: question-main, note-field and footer are the
+  // section's three children, and the note and the footer are the section's own
+  // (full-width rows under both columns), not question-main's.
+  const statusNode = resolveSteps(sectionRoot, pathToSteps('3.2'));
+  assert.ok(statusNode && (statusNode.cls || []).includes('answer-status'), 'setup failure: "3.2" must address the status span');
   const hint = extractHint(elementText(statusNode));
   assert.equal(hint, 'status: unanswered');
-  assert.equal(resolveDomAnchorInSection(sectionHtml, '1.5.2', hint), true, 'setup failure: must resolve while genuinely unanswered');
+  assert.equal(resolveDomAnchorInSection(sectionHtml, '3.2', hint), true, 'setup failure: must resolve while genuinely unanswered');
 
   // The reviewer's ONE Send carries both the comment minted against the
   // still-unanswered status line AND the answer itself -- an answer can only
@@ -1878,7 +1879,7 @@ check('U1, re-verified (previously not reproduced; confirmed here with the real 
   applySubmit(board, {
     action: 'send',
     answers: [{ id: qid, choice: 'Yes' }],
-    comments: [{ blockId: qid, anchor: { kind: 'dom', ref: '1.5.2', hint }, text: 'still says unanswered?' }],
+    comments: [{ blockId: qid, anchor: { kind: 'dom', ref: '3.2', hint }, text: 'still says unanswered?' }],
   }, 1);
 
   const resolved = resolveComment(board, board.comments[0]);
