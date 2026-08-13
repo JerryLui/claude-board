@@ -92,10 +92,10 @@ start a new one.
   builds the launcher. Optional: without them the install still works, but cannot read
   references out of `~/Documents`, `~/Desktop` or `~/Downloads`.
 
-Nothing is downloaded: no `npm install`, no `node_modules`. Two rendering engines
-(`marked`, `prismjs`) are vendored as readable source under `src/vendor/`, pinned by
-sha256, and run server-side at post time. Mermaid is the one view-time load, from
-jsdelivr, when a diagram renders.
+Nothing is downloaded: no `npm install`, no `node_modules`. Three rendering engines
+are vendored under `src/vendor/` and digest-checked: `marked` and `prismjs` as
+readable source, run server-side at post time; `mermaid` minified, served at view
+time from the board's own assets, never a CDN.
 
 ### What it touches
 
