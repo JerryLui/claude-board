@@ -78,7 +78,7 @@ link where it is worth reading.
 | 89 | [The pill names a Submitted round](.agents/adr/0089-the-pill-names-a-submitted-round.md) | 2026-08-11 | narrows 40; relates to 50 |
 | 90 | [An absent Timer names the state and nothing else](.agents/adr/0090-an-absent-timer-names-the-state-and-nothing-else.md) | 2026-08-11 | completes 88; relates to 83 |
 | 91 | [A fresh board defers to an open tab](.agents/adr/0091-a-fresh-board-defers-to-an-open-tab.md) | 2026-08-11 | narrows 55; widened by 92 |
-| 92 | [The Banner covers a Suppressed content-only board](.agents/adr/0092-the-banner-covers-a-suppressed-content-only-board.md) | 2026-08-11 | widens 55; widens 91 |
+| 92 | [The Banner covers a Suppressed content-only board](.agents/adr/0092-the-banner-covers-a-suppressed-content-only-board.md) | 2026-08-11 | widens 55; widens 91; narrowed by 106 |
 | 93 | [A click surfaces the existing tab](.agents/adr/0093-a-click-surfaces-the-existing-tab.md) | 2026-08-11 | narrows 57; relates to 72 |
 | 94 | [The ring is work's alone](.agents/adr/0094-the-ring-is-works-alone.md) | 2026-08-11 | narrows 84; relates to 83 |
 | 95 | [Mermaid is vendored, closing the CSP's last external-host allowance](.agents/adr/0095-mermaid-is-vendored-closing-the-csp-s-last.md) | 2026-08-11 | widens 62; relates to 70 |
@@ -92,3 +92,4 @@ link where it is worth reading.
 | 103 | [The pomodoro is optional, and off is absence](.agents/adr/0103-the-pomodoro-is-optional-and-off-is-absence.md) | 2026-08-12 | narrows 84; narrowed by 105; relates to 8, 67, 68, 72, 90 |
 | 104 | [A shape change reloads the page; values patch in place](.agents/adr/0104-a-shape-change-reloads-values-patch-in-place.md) | 2026-08-12 | relates to 103 |
 | 105 | [The pomodoro ships off](.agents/adr/0105-the-pomodoro-ships-off.md) | 2026-08-12 | narrows 103; relates to 68, 84, 90 |
+| 106 | [Off silences even a Suppressed board's Banner](.agents/adr/0106-off-silences-even-a-suppressed-boards-banner.md) | 2026-08-14 | narrows 92 |

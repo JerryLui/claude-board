@@ -81,6 +81,12 @@ product raises *about a round*; the Notice below is in-page and is about an inte
 a round. _Avoid_: alert, toast, notification (unqualified) — also collides with macOS's own
 banner/alert distinction.
 
+**Banner level**: the four-step setting saying when a Stranded round earns its Banner — Off,
+on when no board is Attended, on when this board is not Attended (the default, and today's
+rule), always on. Strictly monotone, each step bannering in more cases than the last, and it
+replaces the binary notifyRounds toggle; Off alone is absolute (ADR 106). _Avoid_:
+notification level, alert mode, notifyRounds (the superseded key).
+
 **Notice**: the in-page message the board raises when a gesture cannot land, saying why —
 today, that Comment mode is on and so answers are locked. Transient and self-dismissing,
 never standing, and never more than one at a time. _Avoid_: toast, banner (the macOS one),
