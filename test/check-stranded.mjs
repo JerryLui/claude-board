@@ -155,6 +155,23 @@ async function withGrace(ms, fn) {
   }
 }
 
+/** The daemon's settings document, and the one place any check writes it.
+ *
+ * QUIRKS.md: an explicit temporary home, never `writeDoc`'s default -- a check that lets
+ * that default stand writes into the reader's own pomodoro state. `home` has been a
+ * mkdtemp directory since the top of this file, and the file is REMOVED afterwards even
+ * when the body throws, so the next scenario runs at the shipped default level rather
+ * than at whichever one a failing assertion left behind. */
+const SETTINGS_PATH = path.join(home, 'pomodoro.json');
+async function withSettings(settings, fn) {
+  writeFileSync(SETTINGS_PATH, JSON.stringify({ settings }));
+  try {
+    await fn();
+  } finally {
+    rmSync(SETTINGS_PATH, { force: true });
+  }
+}
+
 /** Wait until `folder` has `count` rows recorded against it, or give up. */
 async function waitForRows(folder, count, timeoutMs = 2000) {
   const start = Date.now();
@@ -235,6 +252,20 @@ function stand({ notify, sse } = {}) {
     const until = windowUntil.get(id);
     return until ? Math.max(0, until - Date.now()) : 0;
   };
+  // The machine-wide twin, derived from the per-board answer exactly as the real hub
+  // derives it (src/server.mjs's `attendedAnywhereRemainingMs`: the maximum over every
+  // board it holds). Spelling it any other way here is the drift that hides a defect --
+  // "no board is Attended" has to mean the same thing on both sides of the seam, or the
+  // middle Banner level could be quiet in this file and loud in the daemon.
+  const remainingAnywhere = () => {
+    let best = 0;
+    for (const id of new Set([...looking.keys(), ...windowUntil.keys()])) {
+      const left = remaining(id);
+      if (left === Infinity) return Infinity;
+      best = Math.max(best, left);
+    }
+    return best;
+  };
   const banners = [];
   const watch = createStrandedWatch({
     home,
@@ -252,6 +283,9 @@ function stand({ notify, sse } = {}) {
       // finite number is a tab that has lost focus and is still inside its look-away
       // window; 0 is nobody watching.
       attendedRemainingMs: remaining,
+      // The same three answers asked of every board at once, which is what the Banner
+      // level "On when no board is open" reads (ADR.md entry 58).
+      attendedAnywhereRemainingMs: remainingAnywhere,
     },
     notify: notify || ((folder, opts) => {
       // A stand-in ChildProcess, down to the one event the rule subscribes to: `exit`,
@@ -1086,30 +1120,240 @@ async function layerOne() {
     watch.close();
   });
 
-  await check('the round-banner switch silences it, and the pomodoro switch does not', async () => {
-    const settingsPath = path.join(home, 'pomodoro.json');
-    // QUIRKS.md: an explicit temporary home, so this never lands on the reader's real
-    // pomodoro state. CLAUDE_BOARD_HOME has pointed at `home` since the top of the file.
-    writeFileSync(settingsPath, JSON.stringify({ settings: { notifyRounds: false } }));
-    const off = stand();
-    const silenced = seedBoard();
-    off.watch.evaluate(silenced.id, target(silenced.id));
-    await tick();
-    assert.equal(off.banners.length, 0, 'criterion 17: round banners have their own control');
-    assert.equal(announcedAt(silenced.id), null,
-      'a banner that was never raised must not leave a marker suppressing the next one');
-    off.watch.close();
+  // --- the Banner level (ADR.md entry 58, ADR 106) ----------------------------------
+  //
+  // Four steps over this one rule, and each asks a different attendance question of it:
+  // Off asks none and answers no; "On when no board is open" asks the whole machine;
+  // "On when this board is not open" -- the default -- asks the round's own board, which
+  // is byte-for-byte what the retired notifyRounds checkbox did; Always on asks nothing
+  // and answers yes. The level is read FRESH at fire time, never captured, and it gates
+  // the Banner and nothing else.
 
-    // Pomodoro banners off, round banners left alone: this rule still fires.
-    writeFileSync(settingsPath, JSON.stringify({ settings: { notify: false } }));
-    const on = stand();
-    const loud = seedBoard();
-    on.watch.evaluate(loud.id, target(loud.id));
-    await tick();
-    assert.equal(on.banners.length, 1, 'silencing the pomodoro must not silence these');
-    on.watch.close();
+  await check('Banner level off: no round banner at all, and the pomodoro switch is still a different control', async () => {
+    await withSettings({ bannerLevel: 'off' }, async () => {
+      const off = stand();
+      const silenced = seedBoard();
+      off.watch.evaluate(silenced.id, target(silenced.id));
+      await tick();
+      assert.equal(off.banners.length, 0, 'criterion 17: round banners have their own control');
+      assert.equal(announcedAt(silenced.id), null,
+        'a banner that was never raised must not leave a marker suppressing the next one');
+      off.watch.close();
+    });
 
-    rmSync(settingsPath, { force: true });
+    // The retired checkbox's own off, on a document written before the level existed. The
+    // gate reads the migration and not the raw key, so a machine upgraded from
+    // `notifyRounds: false` stays exactly as silent as it was.
+    await withSettings({ notifyRounds: false }, async () => {
+      const legacy = stand();
+      const silenced = seedBoard();
+      legacy.watch.evaluate(silenced.id, target(silenced.id));
+      await tick();
+      assert.equal(legacy.banners.length, 0, 'the legacy off has to reach this gate through the migration');
+      legacy.watch.close();
+    });
+
+    // Pomodoro banners off, the Banner level left alone: this rule still fires.
+    await withSettings({ notify: false }, async () => {
+      const on = stand();
+      const loud = seedBoard();
+      on.watch.evaluate(loud.id, target(loud.id));
+      await tick();
+      assert.equal(on.banners.length, 1, 'silencing the pomodoro must not silence these');
+      on.watch.close();
+    });
+  });
+
+  await check('the ladder is monotone: with another board Attended only the two loudest levels banner, with nobody attending anything every level but Off does', async () => {
+    // One shape, four levels, twice -- which is what "strictly monotone" comes down to:
+    // whatever banners at one level banners at every louder one. The Attended board is a
+    // DIFFERENT board, which is the only thing that tells "no board is open" apart from
+    // "this board is not open".
+    await withGrace(25, async () => {
+      for (const [level, expected] of [['off', 0], ['no-board', 0], ['this-board', 1], ['always', 1]]) {
+        await withSettings({ bannerLevel: level }, async () => {
+          const { looking, banners, watch } = stand();
+          const elsewhere = seedBoard();
+          const mine = seedBoard();
+          looking.set(elsewhere.id, true); // the reviewer is sitting on some other board
+          watch.evaluate(mine.id, target(mine.id));
+          await tick(120);
+          assert.equal(banners.length, expected, `level ${level}, with another board Attended`);
+          watch.close();
+        });
+      }
+      for (const [level, expected] of [['off', 0], ['no-board', 1], ['this-board', 1], ['always', 1]]) {
+        await withSettings({ bannerLevel: level }, async () => {
+          const { banners, watch } = stand();
+          const mine = seedBoard();
+          watch.evaluate(mine.id, target(mine.id));
+          await tick(120);
+          assert.equal(banners.length, expected, `level ${level}, with nobody attending anything`);
+          watch.close();
+        });
+      }
+    });
+  });
+
+  await check('Banner level always: attendance regardless -- a buried tab does not hold the Banner past the grace', async () => {
+    // The level with no attendance question at all. A tab buried a moment ago keeps its
+    // board Attended for the whole look-away window (ADR.md entry 73), which is exactly
+    // what the default level waits out; here it must not delay the Banner past the grace,
+    // or the loudest level would also be the slowest one.
+    await withGrace(25, async () => {
+      await withSettings({ bannerLevel: 'always' }, async () => {
+        const { lookAway, banners, watch } = stand();
+        const board = seedBoard();
+        lookAway(board.id, 5_000); // five seconds of look-away window left on it
+        watch.evaluate(board.id, target(board.id));
+        await tick(120);
+        assert.equal(banners.length, 1, 'the grace alone is the whole delay at this level');
+        await tick(80);
+        assert.equal(banners.length, 1, 'and still exactly one: the per-round mark is untouched by the level (ADR.md entry 74)');
+        watch.close();
+      });
+
+      // The ablation, and the whole difference between the two loudest levels: the same
+      // board, the same window, one step down -- quiet, because the window is precisely
+      // what "this board is not open" waits out.
+      await withSettings({ bannerLevel: 'this-board' }, async () => {
+        const { lookAway, banners, watch } = stand();
+        const board = seedBoard();
+        lookAway(board.id, 5_000);
+        watch.evaluate(board.id, target(board.id));
+        await tick(120);
+        assert.equal(banners.length, 0, "today's rule waits the look-away window out");
+        watch.close();
+      });
+    });
+  });
+
+  await check('Banner level no-board: a look-away window on ANOTHER board delays the Banner rather than muting it, with no further event', async () => {
+    // The re-arm this level needs for the same reason the per-board one does: no event
+    // fires when a look-away window expires, and here the window belongs to a board this
+    // one will never hear about. Dropping the countdown would not delay the round, it
+    // would lose it.
+    await withGrace(25, async () => {
+      await withSettings({ bannerLevel: 'no-board' }, async () => {
+        const { lookAway, banners, watch } = stand();
+        const elsewhere = seedBoard();
+        const mine = seedBoard();
+        lookAway(elsewhere.id, 200); // the reviewer buried a DIFFERENT board's tab
+        watch.evaluate(mine.id, target(mine.id));
+        await tick(120); // past the grace, still inside the other board's window
+        assert.equal(banners.length, 0, 'any board Attended anywhere keeps this level quiet');
+        // NOTHING is called from here on: that window expires on its own, on the real
+        // clock, and no event fires when one does.
+        await tick(200);
+        assert.equal(banners.length, 1, 'the Banner arrives when the last board stops being Attended, with no event to bring it');
+        watch.close();
+      });
+    });
+  });
+
+  await check('Banner level no-board: a tab focused RIGHT NOW elsewhere holds the Banner, and letting go releases it with no event on this board', async () => {
+    // The `Infinity` answer. On this board's own tab it may return with nothing armed --
+    // a focused tab must produce a blur, a close or an answer, and each is an event for
+    // THIS board. A focused tab on ANOTHER board produces no event for this one at all,
+    // so this level has to keep a countdown alive to come back on.
+    await withGrace(25, async () => {
+      await withSettings({ bannerLevel: 'no-board' }, async () => {
+        const { looking, banners, watch } = stand();
+        const elsewhere = seedBoard();
+        const mine = seedBoard();
+        looking.set(elsewhere.id, true);
+        watch.evaluate(mine.id, target(mine.id));
+        await tick(120);
+        assert.equal(banners.length, 0, 'somebody is looking at a board, which is the whole of what this level asks');
+        looking.delete(elsewhere.id); // that tab goes -- and nothing here calls evaluate
+        await tick(120);
+        assert.equal(banners.length, 1, 'the countdown has to come back on its own, or this level is silent for the rest of the round');
+        watch.close();
+      });
+    });
+  });
+
+  await check('ADR 92 at every On level: the Banner a Suppressed board is owed outranks the level\'s attendance condition', async () => {
+    // Suppression traded this board's tab for exactly this Banner, so it fires even where
+    // the level says quiet -- the carve-out, at all three On levels. Each half carries its
+    // ablation control beside it: the SAME shape on a board that was never Suppressed
+    // stays quiet, which is what says the bypass and not the timing is doing the work.
+    await withGrace(25, async () => {
+      // "On when no board is open", with the reviewer sitting on another board.
+      await withSettings({ bannerLevel: 'no-board' }, async () => {
+        const { looking, banners, watch } = stand();
+        const elsewhere = seedBoard();
+        looking.set(elsewhere.id, true);
+        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-no-board') });
+        const ordinary = seedBoard({ cwd: projectFor('ordinary-no-board') });
+        watch.evaluate(owed.id, target(owed.id));
+        watch.evaluate(ordinary.id, target(ordinary.id));
+        await tick(120);
+        assert.deepEqual(banners.map(b => b.folder), ['owed-no-board'],
+          'a board nobody was ever shown is announced while the reviewer sits on another one; an ordinary awaited round is not');
+        watch.close();
+      });
+
+      // "On when this board is not open", with a look-away window opening on the board
+      // itself between the countdown being armed and the timer firing -- the one shape
+      // that makes this level's own attendance condition true for a Suppressed board.
+      // This is the ordering the level ladder had to move: the bypass used to be decided
+      // AFTER the attendance gate, so it could only ever outrank the switch.
+      await withSettings({ bannerLevel: 'this-board' }, async () => {
+        const { lookAway, banners, watch } = stand();
+        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-this-board') });
+        const ordinary = seedBoard({ cwd: projectFor('ordinary-this-board') });
+        watch.evaluate(owed.id, target(owed.id));
+        watch.evaluate(ordinary.id, target(ordinary.id));
+        lookAway(owed.id, 300);      // both boards are Attended at fire time...
+        lookAway(ordinary.id, 300);
+        await tick(120);
+        assert.deepEqual(banners.map(b => b.folder), ['owed-this-board'],
+          'the bypass is decided in front of the level\'s attendance condition, not behind it');
+        watch.close();
+      });
+
+      // Always on: nothing mutes anything here, so this is the cheap end of the carve-out.
+      await withSettings({ bannerLevel: 'always' }, async () => {
+        const { looking, banners, watch } = stand();
+        const elsewhere = seedBoard();
+        looking.set(elsewhere.id, true);
+        const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-always') });
+        watch.evaluate(owed.id, target(owed.id));
+        await tick(120);
+        assert.equal(banners.length, 1, 'the loudest level owes this board its Banner too');
+        watch.close();
+      });
+    });
+  });
+
+  await check('ADR 106: Off silences even the Banner a Suppressed board is owed, and raising the level later still announces it', async () => {
+    // ADR 106 narrows 92: the bypass survives every On level and Off alone is absolute --
+    // a machine migrated from `notifyRounds: false` loses the one Banner it still got, and
+    // the Popover's Waiting list is what remains. Nothing is MARKED on the way through,
+    // which is what the second half proves: the same board, the same watch, one level up,
+    // still gets the Banner it was owed. That is also the fresh-read property -- the level
+    // is read at fire time, so a change mid-wait lands on the next evaluation rather than
+    // on the next daemon restart.
+    const { banners, watch } = stand();
+    const owed = seedBoard({ wait: false, suppressed: true, cwd: projectFor('owed-at-off') });
+    try {
+      await withSettings({ bannerLevel: 'off' }, async () => {
+        watch.evaluate(owed.id, target(owed.id));
+        await tick();
+        assert.equal(banners.length, 0, 'Off is absolute: it silences the one Banner suppression traded a tab for');
+        assert.equal(announcedAt(owed.id), null, 'and marks nothing, so the debt is still owed');
+        assert.equal(readBoard(owed.id, home)[SUPPRESSED], true,
+          'the suppression decision itself is no business of the Banner level');
+      });
+      await withSettings({ bannerLevel: 'no-board' }, async () => {
+        watch.evaluate(owed.id, target(owed.id));
+        await tick();
+        assert.equal(banners.length, 1, 'the very next evaluation reads the new level: silence at Off was the level, not this board');
+      });
+    } finally {
+      watch.close();
+    }
   });
 
   await check('criterion 15: a round being answered terminates the process serving the click', async () => {
@@ -3095,16 +3339,19 @@ async function layerTwo() {
     }
   });
 
-  await check('ADR 91: the Banner a Suppressed board is owed fires despite the round-banner switch', async () => {
-    // Suppression TRADES the tab for a Banner, so the switch that silences ordinary
-    // stranded rounds does not silence this one: honouring it here too would mean a board
-    // that opened no tab AND raised no notification, which nothing at all tells the
-    // reviewer about. The tab side of this is test/check-mcp.mjs's (it needs a real shim
-    // and a real opener); this is the daemon's half of the same decision.
-    const settingsPath = path.join(home, 'pomodoro.json');
-    writeFileSync(settingsPath, JSON.stringify({ settings: { notifyRounds: false } }));
+  await check('ADR 106: at Off the Banner a Suppressed board is owed is silenced too, and the quietest On level still raises it while another board is Attended', async () => {
+    // Suppression TRADES the tab for a Banner (ADR 92), so every On level raises that one
+    // even where its own attendance condition says quiet: a board that opened no tab AND
+    // raised no notification is a board nothing tells the reviewer about. ADR 106 narrows
+    // that to the three On levels -- Off is the reviewer asking for silence in as many
+    // words, and the Popover's Waiting list is what remains. The tab side of this is
+    // test/check-mcp.mjs's (it needs a real shim and a real opener); this is the daemon's
+    // half of the same decision, through the real hub and the real settings document.
+    writeFileSync(SETTINGS_PATH, JSON.stringify({ settings: { bannerLevel: 'off' } }));
     const { boardId: watched } = await postRound(port, askBoard('watched-still-banners'));
-    const tab = await openStream(port, watched);
+    // Genuinely Attended, not merely subscribed: the reviewer is ON another board, which
+    // is what the level below has to stay quiet about for anything but this bypass.
+    const tab = await arriveAt(port, watched);
     try {
       const posted = await postRound(port, {
         title: 'An artifact, nothing asked',
@@ -3112,16 +3359,83 @@ async function layerTwo() {
         cwd: projectFor('banner-outranks-switch'),
       });
       assert.equal(posted.suppressed, true,
-        'a Watcher is standing right there, and the switch does not enter into the decision');
-      let spawns = [];
-      for (let i = 0; i < 40 && spawns.length === 0; i++) { await tick(100); spawns = spawnsFor('banner-outranks-switch'); }
-      assert.equal(spawns.length, 1, 'the one Banner suppression owes fires despite the switch');
-      await tick(300);
-      assert.equal(spawnsFor('banner-outranks-switch').length, 1, 'and only once');
+        'a Watcher is standing right there, and the Banner level does not enter into that decision');
+      await tick(400); // several graces: the grace is 60ms for the whole of this layer
+      assert.equal(spawnsFor('banner-outranks-switch').length, 0,
+        'Off silences even this one (ADR 106)');
+      assert.equal(bannerOn(posted.boardId), null,
+        'and marks nothing, so the debt survives the level being raised');
+
+      // Raised to the QUIETEST On level, with the other board still Attended: the bypass
+      // outranks that level's attendance condition, and the level is read fresh at fire
+      // time so the next event on this board is all it takes.
+      writeFileSync(SETTINGS_PATH, JSON.stringify({ settings: { bannerLevel: 'no-board' } }));
+      // A Watcher that has said nothing is not Attended (it is what a reconnect looks
+      // like), so this opens a stream purely for the `evaluate` that subscribing does.
+      const owedTab = await openStream(port, posted.boardId);
+      try {
+        const rows = await waitForRows('banner-outranks-switch', 1);
+        assert.deepEqual(rows, [['spawn', '-e', BANNER('banner-outranks-switch')]],
+          'the one Banner suppression owes fires at the level whose attendance condition is loudest against it');
+        await tick(300);
+        assert.equal(spawnsFor('banner-outranks-switch').length, 1, 'and only once');
+      } finally {
+        owedTab.req.destroy();
+      }
     } finally {
       tab.req.destroy();
-      rmSync(settingsPath, { force: true });
+      rmSync(SETTINGS_PATH, { force: true });
     }
+  });
+
+  await check('the Banner level gates the real daemon: an ordinary awaited round is quiet at "no board is open" and loud at "this board is not open"', async () => {
+    // The two middle levels, told apart by the one fact only the daemon can see: a board
+    // Attended in ANOTHER project. BOTH boards are posted with nobody watching anything,
+    // so neither is Suppressed and neither is owed a Banner outright (ADR 92) -- a board
+    // minted while a tab was open would banner through that bypass at every On level and
+    // would prove nothing at all about the level.
+    //
+    // A much longer grace for this one check, because the sequence needs the reviewer to
+    // reach the first board before the second board's countdown fires. 60ms is not a
+    // window two real round trips fit in reliably, and QUIRKS.md's own warning about this
+    // file applies: a timing margin that holds on an idle machine is worth nothing, so
+    // this one is wide enough to survive the contention that turns those races over.
+    await withGrace(1_200, async () => {
+      writeFileSync(SETTINGS_PATH, JSON.stringify({ settings: { bannerLevel: 'no-board' } }));
+      const { boardId: watched, suppressed: watchedSuppressed } = await postRound(port, askBoard('level-elsewhere-watched'));
+      const quiet = await postRound(port, askBoard('level-no-board-quiet'));
+      assert.equal(watchedSuppressed, false, 'the premise: nobody had a tab open, so neither board is owed anything by ADR 92');
+      assert.equal(quiet.suppressed, false, 'the board under test in particular: nothing owes it a Banner but the level');
+      assert.equal(quiet.awaited, true, 'and its round is genuinely awaited, so only the level stands between it and a Banner');
+      // The reviewer arrives at the OTHER board, well inside both graces.
+      const tab = await arriveAt(port, watched);
+      try {
+        await tick(1_800); // both countdowns have fired and been re-decided at least once
+        assert.equal(spawnsFor('level-no-board-quiet').length, 0,
+          'a reviewer Attending any board on this machine keeps this level quiet');
+        assert.equal(bannerOn(quiet.boardId), null, 'and nothing is marked while it is quiet');
+        assert.equal(spawnsFor('level-elsewhere-watched').length, 0, 'nor does the board they are actually on ring');
+
+        // One step louder, with the reviewer still exactly where they were: this level
+        // asks only about the round's OWN board, which nobody has ever opened.
+        writeFileSync(SETTINGS_PATH, JSON.stringify({ settings: { bannerLevel: 'this-board' } }));
+        // A stream and no report -- a Watcher that has said nothing is not Attended (it is
+        // what a reconnect looks like), so this is an EVENT for that board and not a
+        // reviewer arriving. The level is read fresh when the countdown fires, so this is
+        // all it takes for the change to land on a round already waiting.
+        const silent = await openStream(port, quiet.boardId);
+        try {
+          const rows = await waitForRows('level-no-board-quiet', 1, 3000);
+          assert.deepEqual(rows, [['spawn', '-e', BANNER('level-no-board-quiet')]],
+            'the same round, the same reviewer, one level louder: it rings');
+        } finally {
+          silent.req.destroy();
+        }
+      } finally {
+        tab.req.destroy();
+        rmSync(SETTINGS_PATH, { force: true });
+      }
+    });
   });
 }
 

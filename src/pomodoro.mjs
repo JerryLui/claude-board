@@ -68,14 +68,18 @@ export const DEFAULT_SETTINGS = Object.freeze({
   longBreakMin: 15,
   longEvery: 4,
   notify: true,
-  // Round banners' own on/off tick (ADR.md entry 58; CONTEXT.md's Banner), independent
-  // of `notify` above -- that one gates pomodoro boundary banners alone, this one gates
-  // a Stranded round's banner alone, and each can be silenced without touching the
-  // other. On by default, INCLUDING for a settings document written before this field
-  // existed: normalizeDoc below fills a missing/non-boolean value in from this same
-  // default, so a reader who has never opened settings still gets round banners. See
-  // roundBannersEnabled below for the read side a later chunk consults.
-  notifyRounds: true,
+  // Banner level -- the four-step gate on a Stranded round's own banner (ADR.md entry
+  // 58; CONTEXT.md's Banner; ADR 106), independent of `notify` above -- that one gates
+  // pomodoro boundary banners alone, this one gates a Stranded round's banner alone,
+  // and each can be silenced without touching the other. `'this-board'` is the default
+  // -- byte-for-byte the retired `notifyRounds: true` checkbox's own behavior -- so a
+  // fresh install and a machine that never opens settings both land here. Replaces the
+  // binary `notifyRounds` checkbox: normalizeDoc below migrates an existing document's
+  // `notifyRounds` (true/absent -> this default, false -> `'off'`) the first time it is
+  // read, and `notifyRounds` itself never survives into the settings this function's
+  // caller sees. See BANNER_LEVELS/bannerLevel below for the closed set and the read
+  // side src/stranded.mjs consults.
+  bannerLevel: 'this-board',
   // The macOS status item's two preferences (the item is a second process of the same
   // bundle, ADR 72). They live in the DAEMON's document rather than
   // in the item's own defaults for the same reason every other preference here does: the
@@ -110,18 +114,30 @@ export const DEFAULT_SETTINGS = Object.freeze({
   cueLongBreak: pickCue('Submarine'),
 });
 
-/** The plain, obvious predicate a round's Stranded path (a later chunk, wired into the
- * daemon around sse.clientCount in src/server.mjs) consults before raising a Banner for
- * a round -- as opposed to `settings.notify`, which gates a pomodoro boundary's banner
- * and nothing else (ADR.md entry 58; criterion 17: independent of the pomodoro control
- * in both directions). Takes a settings object (typically `readDoc(home).settings`)
- * rather than a whole doc, matching how notify.mjs's own notifyBoundary is called.
- * Defaults ON for anything that is not exactly `false` -- absent, missing, or a stale
- * document with no `notifyRounds` key at all -- the same "on unless explicitly turned
- * off" reading normalizeDoc's coercion gives every other toggle here, so a settings file
- * from before this field existed still returns true. */
-export function roundBannersEnabled(settings) {
-  return !settings || settings.notifyRounds !== false;
+/** The closed set of Banner levels, in strictly monotone order (Off, quietest On,
+ * today's-default On, loudest On) -- a settings key `bannerLevel` may take on, both on
+ * disk and in a settings patch. src/stranded.mjs's `announce` switches on these exact
+ * four strings; do not rename or reorder them without checking who reads them. */
+export const BANNER_LEVELS = ['off', 'no-board', 'this-board', 'always'];
+
+/** The level a round's Stranded path (src/stranded.mjs's `announce`) reads before
+ * raising a Banner for a round -- as opposed to `settings.notify`, which gates a
+ * pomodoro boundary's banner and nothing else (ADR.md entry 58; criterion 17:
+ * independent of the pomodoro control in both directions). Takes a settings object
+ * (typically `readDoc(home).settings`) rather than a whole doc, matching how
+ * notify.mjs's own notifyBoundary is called.
+ *
+ * Handles every shape a caller might hand it: no settings object at all, an already-
+ * normalized document's valid `bannerLevel`, a hand-mangled or unrecognized value (falls
+ * back to the default, same "invalid reads as default" coercion every other setting in
+ * this file gets), and -- the migration seam -- a document that predates `bannerLevel`
+ * entirely and carries only the retired `notifyRounds` boolean: `true`/absent maps to
+ * the same default `bannerLevel` would have, `false` maps to `'off'`, so a machine
+ * upgraded from the checkbox changes no behavior the instant this ships. */
+export function bannerLevel(settings) {
+  if (!settings) return DEFAULT_SETTINGS.bannerLevel;
+  if (BANNER_LEVELS.includes(settings.bannerLevel)) return settings.bannerLevel;
+  return settings.notifyRounds === false ? 'off' : DEFAULT_SETTINGS.bannerLevel;
 }
 
 /** How late a deadline is allowed to run before the interval counts as EXPIRED rather
@@ -530,18 +546,22 @@ export function applyClockStep(doc, stepMs) {
 const DURATION_KEYS = ['workMin', 'breakMin', 'longBreakMin'];
 // Every boolean setting, validated identically and independently: `enabled` is the
 // Master switch that gates the whole daemon-side loop, `notify` gates a pomodoro
-// boundary's banner, `notifyRounds` gates a Stranded round's (roundBannersEnabled
-// above), and the two `menubar*` keys are the status item's own pair. Independence is
-// the property that matters and it is structural here, not argued -- neither key's
-// presence or absence in a patch ever touches another's stored value, the same as any
-// two unrelated keys in this loop, which is what "silencing one leaves the other
-// alone" (criterion 17) comes down to at this layer -- `enabled` included: turning
-// pomodoro off must not (and, being just another key in this same loop, structurally
-// cannot) touch `notifyRounds`, the safety net SECURITY.md documents. Adding a key to
-// this list is the whole of teaching both boundaries about it: mergeSettings refuses a
-// non-boolean by name below, and normalizeDoc fills a missing or hand-mangled one in
-// from DEFAULT_SETTINGS.
-const TOGGLE_KEYS = ['enabled', 'notify', 'notifyRounds', 'menubarCountdown', 'menubarHidden'];
+// boundary's banner, and the two `menubar*` keys are the status item's own pair.
+// `bannerLevel` -- the Stranded round's own gate (`bannerLevel` above), the retired
+// `notifyRounds` checkbox's replacement -- is NOT on this list: it
+// is a closed set of four strings, not a boolean, and is validated in its own block
+// below the same way CUE_KEYS is. Independence is the property that matters and it is
+// structural here, not argued -- neither key's presence or absence in a patch ever
+// touches another's stored value, the same as any two unrelated keys in this loop,
+// which is what "silencing one leaves the other alone" (criterion 17) comes down to at
+// this layer -- `enabled` included: turning pomodoro off must not (and, being just
+// another key in this same loop, structurally cannot) touch `bannerLevel`, the safety
+// net SECURITY.md documents. A patch carrying the retired `notifyRounds` key hits none
+// of the blocks below and is silently dropped, the same as any other key this module no
+// longer recognizes. Adding a key to this list is the whole of teaching both boundaries
+// about it: mergeSettings refuses a non-boolean by name below, and normalizeDoc fills a
+// missing or hand-mangled one in from DEFAULT_SETTINGS.
+const TOGGLE_KEYS = ['enabled', 'notify', 'menubarCountdown', 'menubarHidden'];
 // The three per-phase cue settings -- validated against
 // src/cues.mjs's isCue, the one place the closed set of legal values (the 14 sounds
 // macOS ships, plus `None`) is enumerated. Not re-enumerated here on purpose (this
@@ -641,6 +661,18 @@ export function mergeSettings(doc, patch) {
       );
     }
     settings[key] = patch[key];
+  }
+  // `bannerLevel` -- a closed set of four strings, not a boolean, so it gets its own
+  // block rather than joining TOGGLE_KEYS, the same reason CUE_KEYS above is not folded
+  // into that loop either. Named-400 by construction: the message states the field
+  // (`settings.bannerLevel`) and the whole legal set, so a rejected save tells the
+  // caller exactly what it could have sent instead, the same shape isCue's own message
+  // above gives a bad cue.
+  if ('bannerLevel' in patch) {
+    if (!BANNER_LEVELS.includes(patch.bannerLevel)) {
+      throw new Error(`settings.bannerLevel must be one of ${BANNER_LEVELS.join(', ')}`);
+    }
+    settings.bannerLevel = patch.bannerLevel;
   }
   // The one exception to "never looks at doc.timer" — see this function's own comment.
   // `!== false` / `=== false` rather than truthy/falsy: both sides have already been
@@ -743,16 +775,32 @@ export function normalizeDoc(parsed) {
     if (!isPositiveFinite(settings[key])) settings[key] = DEFAULT_SETTINGS[key];
   }
   // Every toggle (TOGGLE_KEYS above), not just `notify` -- an older document with no
-  // `notifyRounds` and no `menubar*` keys at all is exactly the "settings file written
-  // before this work existed" case the constraint names, and this loop is what makes each
-  // of them read as its own default rather than as a validation failure that would
-  // otherwise fall through to `undefined`. `undefined` is not a harmless spelling of
-  // "off" here either: it is what a client's `if (settings.menubarHidden)` reads the same
-  // as `false` and what `JSON.stringify` drops from the response entirely, so a native
+  // `menubar*` keys at all is exactly the "settings file written before this work
+  // existed" case the constraint names, and this loop is what makes each of them read
+  // as its own default rather than as a validation failure that would otherwise fall
+  // through to `undefined`. `undefined` is not a harmless spelling of "off" here
+  // either: it is what a client's `if (settings.menubarHidden)` reads the same as
+  // `false` and what `JSON.stringify` drops from the response entirely, so a native
   // client asking for a key it can see in the defaults would get nothing back.
   for (const key of TOGGLE_KEYS) {
     if (typeof settings[key] !== 'boolean') settings[key] = DEFAULT_SETTINGS[key];
   }
+  // Banner level -- an explicit, valid `bannerLevel` in the RAW parsed document (`rest`,
+  // not `settings`: the latter already carries DEFAULT_SETTINGS' own valid bannerLevel
+  // spread in above, which would make every document look "explicit") wins outright;
+  // anything else (missing, hand-mangled, or a document old enough to predate the key
+  // and carry only the retired `notifyRounds` boolean) is decided by the one rule
+  // `bannerLevel()` above already states: `notifyRounds` true/absent migrates to the
+  // same default a fresh install gets, false migrates to `'off'`. Delegating to that
+  // function rather than re-deriving the mapping here is what keeps a hand-called
+  // `bannerLevel(settings)` (the Stranded path's own read, elsewhere) and what a
+  // document actually normalizes to on disk from ever being able to drift apart.
+  // `notifyRounds` itself never survives past this line -- consumed here the same way
+  // `sound` above is consumed by the cue migration and then dropped -- so nothing
+  // downstream, including the next write of this same document, carries the retired key
+  // forward.
+  settings.bannerLevel = bannerLevel(rest);
+  delete settings.notifyRounds;
   for (const key of ['cueWork', 'cueBreak', 'cueLongBreak']) {
     if (!isCue(settings[key])) settings[key] = DEFAULT_SETTINGS[key];
   }

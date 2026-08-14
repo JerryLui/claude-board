@@ -12,7 +12,7 @@ import { readBoard, writeBoard, boardHome } from './store.mjs';
 import { STRANDED_BANNER, SUPPRESSED } from './board.mjs';
 import { roundIsAwaitedOpen, waitingRounds } from './badge.mjs';
 import { notifyRound, withdrawClickChild, CLICK_LIFETIME_MAX_MS } from './notify.mjs';
-import { readDoc as readPomodoroDoc, roundBannersEnabled } from './pomodoro.mjs';
+import { readDoc as readPomodoroDoc, bannerLevel } from './pomodoro.mjs';
 import { folderName } from './indexpage.mjs';
 
 /** How long a board has to go without being Attended before the daemon announces that a
@@ -70,10 +70,11 @@ function registerStrandedWatch(watch) {
   });
 }
 
-/** The stranded rule (ADR.md entries 55 and 58). Reads
- * `sse.attendedRemainingMs` and nothing else the daemon does not already know. It asked
- * `sse.isConfirmedAttended` until ADR.md entry 73 gave the hub a clock: a boolean cannot
- * say WHEN a board stops being attended, and this rule has to arm a timer for that
+/** The stranded rule (ADR.md entries 55 and 58). Reads `sse.attendedRemainingMs`, its
+ * machine-wide twin `sse.attendedAnywhereRemainingMs` (which of the two the Banner level
+ * asks for is `mutedForMs` below), and nothing else the daemon does not already know. It
+ * asked `sse.isConfirmedAttended` until ADR.md entry 73 gave the hub a clock: a boolean
+ * cannot say WHEN a board stops being attended, and this rule has to arm a timer for that
  * moment because nothing fires when a look-away window expires.
  *
  * The rule in one sentence: a board no Watcher is looking at, carrying either an open
@@ -436,6 +437,32 @@ export function createStrandedWatch({
     terminate(boardId, withdrawable);
   }
 
+  /** How long the reviewer's chosen Banner level says this board is still muted, in
+   * `sse.attendedRemainingMs`'s own three-answer shape (`Infinity` = muted with no clock
+   * running on it, a finite number = muted until then, `0` = nothing muting it). ONE
+   * function, so the four levels are one closed switch rather than a condition spread
+   * across the rule (ADR.md entry 58):
+   *
+   *  - `'this-board'`, the default, asks the question this rule has always asked: is the
+   *    round's OWN board Attended (ADR.md entry 73's window included).
+   *  - `'no-board'` asks it of the whole machine, which is why the hub grew
+   *    `attendedAnywhereRemainingMs` (src/server.mjs). Strictly quieter than
+   *    `'this-board'` by construction: the machine-wide answer is the maximum of the
+   *    per-board ones, so it can never be 0 where this board's own answer is not.
+   *  - `'always'` asks nothing at all -- attendance regardless, which is the level's
+   *    whole meaning.
+   *  - `'off'` never reaches here: `announce` returns before asking (ADR 106).
+   *
+   * Not consulted for the RETURN gate, which is a different question with a different
+   * answer and stays per-board at every level: `evaluate` reading `attendedRemainingMs`
+   * for this board is "the reviewer is looking AT THIS BOARD", which withdraws the banner
+   * and spends a Suppressed board's debt. Somebody attending a different board is not
+   * that, at any level. */
+  function mutedForMs(level, boardId) {
+    if (level === 'always') return 0;
+    return level === 'no-board' ? sse.attendedAnywhereRemainingMs() : sse.attendedRemainingMs(boardId);
+  }
+
   /** The grace has elapsed. Everything is re-decided here rather than trusted from when
    * the timer was armed: a reconnecting tab, an answer, or a lapsed wait can all land in
    * the few seconds the grace buys.
@@ -446,36 +473,17 @@ export function createStrandedWatch({
   function announce(boardId, target) {
     pending.delete(boardId);
     try {
-      // Only a Watcher that has SAID it is looking holds the banner back, and the
-      // arming rule above is what makes that safe for criterion 4: a countdown is only
-      // ever started at a moment when nobody was confirmed, so by the time it fires the
-      // board has gone a full grace with nobody saying they are there. A tab that drops
-      // and reconnects inside that window reports from its `watcher` handler one round
-      // trip later, and THAT is what cancels this -- not the bare fact of a socket.
+      // THE REVIEWER'S BANNER LEVEL, first of everything, because `'off'` is absolute:
+      // there is nothing for this rule to decide at that level, not even for the board a
+      // Suppressed auto-open traded its tab away for (ADR 106, narrowing 92 -- what
+      // remains for that board is the Popover's Waiting list). Every other level goes on
+      // to ask the questions below.
       //
-      // Counting an unreported Watcher here instead was a mute button obtainable with a
-      // read credential: `/events` needs no write, and a subscriber that reconnects
-      // shortly before each grace expires is never old enough to age out, so no
-      // per-Watcher bound could close it. There is nothing to bound now.
-      //
-      // WHY THIS ASKS FOR MILLISECONDS AND NOT A BOOLEAN. Returning here without re-arming
-      // was safe while "attended" meant "a tab said it is looking": a later blur was a DOM
-      // edge, and the edge was guaranteed to bring an event that armed a fresh countdown.
-      // It is not safe now that the same answer can be true purely because a look-away
-      // window is still running, because NO EVENT FIRES WHEN A WINDOW EXPIRES. Dropping
-      // the countdown there loses the round for good -- reachable on the ordinary
-      // `install.sh` update, where `handleEvents` arms the bare grace at subscribe and the
-      // page's `sinceFocusMs` seeds a longer window one round trip later: the grace fires
-      // first, finds the window, and the window then expires against nothing at all. That
-      // is a permanent false negative, and ADR.md entry 74 accepts a missed banner never
-      // being repeated, not a round that is never announced.
-      //
-      // `Infinity` is the one case that may still return with nothing armed: a tab that is
-      // focused RIGHT NOW must produce a blur, a close or an answer eventually, and each of
-      // those is an event.
-      const attendedFor = sse.attendedRemainingMs(boardId);
-      if (attendedFor === Infinity) return;
-      if (attendedFor > 0) return arm(boardId, target, attendedFor, true);
+      // Read FRESH on every evaluation and never captured at boot, the same reason
+      // notifyBoundary re-reads on every interval: a level changed mid-day takes effect on
+      // the next banner, not on the next restart.
+      const level = bannerLevel(readPomodoroDoc(home).settings);
+      if (level === 'off') return;
       const board = boardOf(boardId);
       if (!board || !mayAnnounce(board)) return;
       // The oldest round still waiting that has never been announced (ADR.md entry 74):
@@ -495,16 +503,61 @@ export function createStrandedWatch({
       // resolves it, on load and on hashchange/focus/visibilitychange so a tab that was
       // already open moves too).
       const oldest = nextToAnnounce(board);
-      // The reviewer's own switch (ticket 03): off silences this rule for ordinary
-      // stranded rounds, while the pomodoro clock's own banners carry on. It does not
-      // silence the one Banner a Suppressed board's first round is owed: suppression
-      // traded that board's tab for exactly this announcement, so honouring the switch
-      // here too would leave a board nothing at all tells the reviewer about (ADR.md
-      // entry 91). Read fresh, not captured at boot, for the same reason notifyBoundary
-      // re-reads on every interval -- a toggle flipped mid-day takes effect on the next
-      // banner, not the next restart.
+      // THE SUPPRESSED BOARD'S BYPASS, and the reason the attendance gate now sits BEHIND
+      // it rather than in front of it, where it stood while there was a single binary
+      // switch for it to outrank. Suppression traded this board's tab for exactly this
+      // announcement (ADR.md entries 91 and 92), so at every On level it outranks that
+      // level's attendance condition: a board nobody was ever shown, kept quiet because
+      // the reviewer happens to be looking at some OTHER board, is a board nothing tells
+      // them about at all. `'off'` is the one level that does silence it, and that
+      // decision is above (ADR 106).
       const owedToSuppression = Boolean(board[SUPPRESSED] && oldest && oldest.n === 1);
-      if (!owedToSuppression && !roundBannersEnabled(readPomodoroDoc(home).settings)) return;
+      if (!owedToSuppression) {
+        // Only a Watcher that has SAID it is looking holds the banner back, and the
+        // arming rule above is what makes that safe for criterion 4: a countdown is only
+        // ever started at a moment when nobody was confirmed, so by the time it fires the
+        // board has gone a full grace with nobody saying they are there. A tab that drops
+        // and reconnects inside that window reports from its `watcher` handler one round
+        // trip later, and THAT is what cancels this -- not the bare fact of a socket.
+        //
+        // Counting an unreported Watcher here instead was a mute button obtainable with a
+        // read credential: `/events` needs no write, and a subscriber that reconnects
+        // shortly before each grace expires is never old enough to age out, so no
+        // per-Watcher bound could close it. There is nothing to bound now.
+        //
+        // WHY THIS ASKS FOR MILLISECONDS AND NOT A BOOLEAN. Returning here without re-arming
+        // was safe while "attended" meant "a tab said it is looking": a later blur was a DOM
+        // edge, and the edge was guaranteed to bring an event that armed a fresh countdown.
+        // It is not safe now that the same answer can be true purely because a look-away
+        // window is still running, because NO EVENT FIRES WHEN A WINDOW EXPIRES. Dropping
+        // the countdown there loses the round for good -- reachable on the ordinary
+        // `install.sh` update, where `handleEvents` arms the bare grace at subscribe and the
+        // page's `sinceFocusMs` seeds a longer window one round trip later: the grace fires
+        // first, finds the window, and the window then expires against nothing at all. That
+        // is a permanent false negative, and ADR.md entry 74 accepts a missed banner never
+        // being repeated, not a round that is never announced.
+        const mutedFor = mutedForMs(level, boardId);
+        if (mutedFor === Infinity) {
+          // A tab focused RIGHT NOW, with no clock running on it. On THIS board that may
+          // return with nothing armed, because that tab must produce a blur, a close or an
+          // answer eventually and every one of those is an event that calls `evaluate` for
+          // this board.
+          //
+          // At `'no-board'` it may not: the tab holding this board quiet belongs to a
+          // DIFFERENT board, and nothing on this daemon evaluates board A when board B's
+          // tab blurs -- so returning bare here would be the same permanent false negative
+          // as dropping a window, and this level would go silent for the rest of the round
+          // the first time the reviewer opened anything.
+          // ponytail: a bare grace's poll rather than a hub event, ceiling: one wake-up
+          // per grace per stranded board for as long as some board stays focused (unref'd,
+          // and only while this board really has something unannounced to say). The
+          // upgrade path is the hub telling this rule when its LAST focused tab lets go,
+          // which is a cross-board event `createSseHub` does not raise today.
+          if (level !== 'no-board') return;
+          return arm(boardId, target, strandedGraceMs(), true);
+        }
+        if (mutedFor > 0) return arm(boardId, target, mutedFor, true);
+      }
       const at = Date.now();
       // What bounds the process serving this banner's click. Normally the round's own
       // deadline; on a Suppressed board's content-only first round there is no deadline to
@@ -628,7 +681,16 @@ export function createStrandedWatch({
         // had focus (ADR.md entry 73), so the countdown cannot finish while the board is
         // still Attended. `announce` re-decides on arrival and re-arms on whatever window
         // is left, so overshooting costs nothing; undershooting costs a wasted wake-up.
-        arm(boardId, target, strandedGraceMs() + attendedFor, attendedFor > 0);
+        //
+        // A window is a DELAY only at a level whose gate that window can hold back. At
+        // `'always'` nothing does (`mutedForMs`), so waiting one out here would quietly
+        // make the loudest level slower than the grace it promises -- a buried tab would
+        // hold the Banner for the whole two-minute window, which is exactly the muting
+        // that level exists to refuse. Asked only when there IS a window to wait out, so
+        // the ordinary event still carries no settings read at all, and `readDoc` never
+        // throws (it degrades to defaults) so this cannot cost the countdown itself.
+        const muting = attendedFor > 0 && bannerLevel(readPomodoroDoc(home).settings) === 'always' ? 0 : attendedFor;
+        arm(boardId, target, strandedGraceMs() + muting, muting > 0);
       } catch (err) {
         console.error(`claude-board: stranded rule for board ${boardId} failed: ${(err && err.message) || err}`);
       }

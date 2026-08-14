@@ -189,6 +189,43 @@ await check('a sinceFocusMs older than the window lands as an expired window, no
   });
 });
 
+await check('attendedAnywhereRemainingMs: the whole machine\'s answer, in the per-board reader\'s own three shapes', async () => {
+  // What the Banner level "On when no board is open" reads (ADR.md entry 58), and the one
+  // question no per-board accessor can answer. The MAXIMUM across boards, not the first
+  // board that answers: a reading that went quiet as soon as one board answered 0 would
+  // banner in cases the level below it stays quiet in, and the ladder would stop being
+  // monotone.
+  await withWindow(4000, async () => {
+    const hub = createSseHub();
+    assert.equal(hub.attendedAnywhereRemainingMs(), 0, 'a daemon nobody has connected to is not Attended anywhere');
+    const a = hub.subscribe('b_a', fakeRes());
+    const b = hub.subscribe('b_b', fakeRes());
+    assert.equal(hub.attendedAnywhereRemainingMs(), 0, 'and neither is one whose Watchers have said nothing yet');
+
+    hub.setAttended('b_b', b, false, 1, 40); // one buried tab, on ONE of the two boards
+    assert.ok(hub.attendedAnywhereRemainingMs() > 3000,
+      `a window running on any board at all is the machine's answer, got ${hub.attendedAnywhereRemainingMs()}`);
+    assert.equal(hub.attendedRemainingMs('b_a'), 0,
+      'while the OTHER board still answers 0 for itself -- which is exactly the gap between the two middle Banner levels');
+
+    hub.setAttended('b_a', a, true, 1);
+    assert.equal(hub.attendedAnywhereRemainingMs(), Infinity, 'a tab focused right now, anywhere, has no clock running on it');
+  });
+
+  // And it ages out on the same clock the per-board answer does, or the middle level would
+  // be a mute button rather than a delay.
+  await withWindow(60, async () => {
+    const hub = createSseHub();
+    const w = hub.subscribe('b_x', fakeRes());
+    hub.setAttended('b_x', w, true, 1);
+    hub.setAttended('b_x', w, false, 2); // the blur that starts the window
+    const left = hub.attendedAnywhereRemainingMs();
+    assert.ok(left > 0 && left <= 60, `the window is running machine-wide too, got ${left}`);
+    await tick(140);
+    assert.equal(hub.attendedAnywhereRemainingMs(), 0, 'and once every window anywhere is spent, nobody is Attended');
+  });
+});
+
 await check('criterion 7: a tab that has never had focus gets no window of its own', async () => {
   // A tab opened in the background and never looked at. It has nothing to count two
   // minutes from, and treating "connected" as "recently focused" would hand any

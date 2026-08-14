@@ -4709,13 +4709,14 @@ async function main() {
       [{ longEvery: -1 }, /longEvery/, 'a negative longEvery is meaningless'],
       [{ notify: 'yes' }, /notify/, 'a truthy non-boolean is still rejected'],
       // The Master switch is validated exactly the same way, and must name ITS OWN
-      // field too -- same reasoning as notifyRounds just below.
+      // field too -- same reasoning as bannerLevel just below.
       [{ enabled: 'yes' }, /enabled/, 'a truthy non-boolean is rejected on the Master switch too'],
-      // The round-banner tick (ticket 03, ADR.md entry 58) is validated the same way,
+      // The round-banner level (ADR.md entry 58, ADR 106) is validated the same way,
       // and must name ITS OWN field, not "notify" -- a shared regex here would pass
-      // even if the two toggles were validated by the same code path with the wrong
-      // key baked into the message.
-      [{ notifyRounds: 'yes' }, /notifyRounds/, 'a truthy non-boolean is rejected on the round-banner toggle too'],
+      // even if the two settings were validated by the same code path with the wrong
+      // key baked into the message. It is a closed set of four strings, not a boolean,
+      // so the bad value is an unrecognized string rather than a non-boolean.
+      [{ bannerLevel: 'sometimes' }, /bannerLevel/, 'an unknown Banner level is rejected, named in the message (criterion 7)'],
       [{ cueWork: 'Sosumi ' }, /cueWork/, 'a name outside the closed set (trailing space) is rejected'],
       [{ cueBreak: 'NotASound' }, /cueBreak/, 'a name macOS does not ship is rejected'],
       [{ cueLongBreak: 1 }, /cueLongBreak/, 'a non-string cue value is rejected'],
@@ -4768,7 +4769,7 @@ async function main() {
     const sounds = cueNames().filter(n => n !== NO_CUE);
     assert.ok(sounds.length >= 2, 'this machine must ship at least two real sounds for this check to mean anything');
     const [soundA, soundB] = sounds;
-    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, notifyRounds: false, cueWork: soundA, cueBreak: soundB, cueLongBreak: NO_CUE };
+    const patch = { workMin: 33, breakMin: 6, longBreakMin: 21, longEvery: 5, notify: false, bannerLevel: 'off', cueWork: soundA, cueBreak: soundB, cueLongBreak: NO_CUE };
     const written = await (await fetch(`${base}/api/pomodoro/settings`, { method: 'POST', headers: writeHeaders(), body: JSON.stringify(patch) })).json();
     assert.equal(written.settings.workMin, 33, 'the write itself must reflect the patch');
 
@@ -4788,7 +4789,7 @@ async function main() {
     assert.equal(reread.settings.longBreakMin, 21, 'longBreakMin must survive a daemon restart');
     assert.equal(reread.settings.longEvery, 5, 'longEvery must survive a daemon restart');
     assert.equal(reread.settings.notify, false, 'the notify toggle must survive a daemon restart');
-    assert.equal(reread.settings.notifyRounds, false, 'the round-banner toggle must survive a daemon restart, independently of notify');
+    assert.equal(reread.settings.bannerLevel, 'off', 'the round-banner level must survive a daemon restart, independently of notify');
     assert.equal(reread.settings.cueWork, soundA, 'cueWork must survive a daemon restart');
     assert.equal(reread.settings.cueBreak, soundB, 'cueBreak must survive a daemon restart');
     assert.equal(reread.settings.cueLongBreak, NO_CUE, 'cueLongBreak must survive a daemon restart');

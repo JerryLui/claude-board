@@ -29,7 +29,8 @@ import {
   writeDoc,
   createPomodoro,
   mergeSettings,
-  roundBannersEnabled,
+  BANNER_LEVELS,
+  bannerLevel,
 } from '../src/pomodoro.mjs';
 import { startServer } from '../src/server.mjs';
 import { NO_CUE } from '../src/cues.mjs';
@@ -625,58 +626,118 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------------
-  // notifyRounds -- round banners' own on/off tick (ticket 03, ADR.md entry 58),
-  // independent of `notify` in both directions (criterion 17). `notify` itself is
-  // covered against the real daemon in test/check-http.mjs; these are the pure-logic
-  // half: the default, the stale-document read, and the merge boundary.
+  // bannerLevel -- the Stranded round's own four-step gate, replacing the retired
+  // binary notifyRounds checkbox (ADR.md entry 58, ADR 106), independent of `notify` in
+  // both directions (criterion 17). `notify` itself is covered against the real daemon
+  // in test/check-http.mjs; these are the pure-logic half: the closed set, the default,
+  // the predicate, the notifyRounds migration on read, and the merge boundary
+  // (criterion 7: migration and the named-400 refusal).
   // -------------------------------------------------------------------------------
 
-  await check('DEFAULT_SETTINGS: notifyRounds defaults on, same as notify', () => {
-    assert.equal(DEFAULT_SETTINGS.notifyRounds, true);
+  await check('BANNER_LEVELS: the closed set, in strictly monotone order', () => {
+    assert.deepEqual(BANNER_LEVELS, ['off', 'no-board', 'this-board', 'always']);
   });
 
-  await check('roundBannersEnabled: on by default, off only when explicitly false', () => {
-    assert.equal(roundBannersEnabled({ notifyRounds: true }), true);
-    assert.equal(roundBannersEnabled({ notifyRounds: false }), false);
+  await check('DEFAULT_SETTINGS: bannerLevel defaults to this-board -- byte-for-byte the retired notifyRounds: true behavior', () => {
+    assert.equal(DEFAULT_SETTINGS.bannerLevel, 'this-board');
+  });
+
+  await check('bannerLevel: an explicit valid level wins outright, every level round-trips', () => {
+    for (const level of BANNER_LEVELS) assert.equal(bannerLevel({ bannerLevel: level }), level);
+  });
+
+  await check('bannerLevel: no settings object at all reads as the default', () => {
+    assert.equal(bannerLevel(undefined), 'this-board', 'no settings object at all must still read as the default');
+    assert.equal(bannerLevel(null), 'this-board');
+  });
+
+  await check('bannerLevel: an invalid/hand-mangled level falls back to the default, same coercion every other setting gets', () => {
+    assert.equal(bannerLevel({ bannerLevel: 'sometimes' }), 'this-board');
+    assert.equal(bannerLevel({ bannerLevel: 42 }), 'this-board');
+  });
+
+  await check('bannerLevel: legacy notifyRounds migrates -- true/absent to the default level, false to Off (criterion 7)', () => {
+    assert.equal(bannerLevel({ notifyRounds: true }), 'this-board');
+    assert.equal(bannerLevel({ notifyRounds: false }), 'off');
     // A settings file written before this field existed carries no notifyRounds key
     // at all -- the exact "reader who never opens settings" constraint -- and must
-    // still read as on, not off and not undefined.
-    assert.equal(roundBannersEnabled({}), true, 'a missing key must read as on, not off');
-    assert.equal(roundBannersEnabled(undefined), true, 'no settings object at all must still read as on');
-    assert.equal(roundBannersEnabled({ notifyRounds: 'nope' }), true, 'a non-boolean garbage value must not be mistaken for off');
+    // still read as the default, not off and not undefined.
+    assert.equal(bannerLevel({}), 'this-board', 'a missing key must read as the default, not off');
+    assert.equal(bannerLevel({ notifyRounds: 'nope' }), 'this-board', 'a non-boolean garbage value must not be mistaken for off');
   });
 
-  await check('normalizeDoc: a document with no notifyRounds key at all (written before this field existed) reads as on', () => {
+  await check('bannerLevel: an explicit bannerLevel wins over a legacy notifyRounds riding alongside it', () => {
+    assert.equal(bannerLevel({ bannerLevel: 'always', notifyRounds: false }), 'always');
+    assert.equal(bannerLevel({ bannerLevel: 'off', notifyRounds: true }), 'off');
+  });
+
+  await check('normalizeDoc: a document with no bannerLevel or notifyRounds key at all (written before either existed) reads as the default', () => {
     const settings = normalizeDoc({ settings: { workMin: 40 } }).settings;
-    assert.equal(settings.notifyRounds, true);
+    assert.equal(settings.bannerLevel, 'this-board');
+    assert.equal('notifyRounds' in settings, false, 'the retired key must not survive normalization');
   });
 
-  await check('normalizeDoc: an explicit notifyRounds: false survives normalization untouched', () => {
+  await check('normalizeDoc: migration -- an existing settings document with notifyRounds true lands on the default level (criterion 7)', () => {
+    const settings = normalizeDoc({ settings: { notifyRounds: true } }).settings;
+    assert.equal(settings.bannerLevel, 'this-board');
+    assert.equal('notifyRounds' in settings, false);
+  });
+
+  await check('normalizeDoc: migration -- an existing settings document with notifyRounds false lands on Off (criterion 7)', () => {
     const settings = normalizeDoc({ settings: { notifyRounds: false } }).settings;
-    assert.equal(settings.notifyRounds, false);
+    assert.equal(settings.bannerLevel, 'off');
+    assert.equal('notifyRounds' in settings, false);
   });
 
-  await check('normalizeDoc: a non-boolean notifyRounds (hand-edited garbage) falls back to the default, same coercion notify already gets', () => {
-    const settings = normalizeDoc({ settings: { notifyRounds: 'nope' } }).settings;
-    assert.equal(settings.notifyRounds, true);
+  await check('normalizeDoc: an explicit bannerLevel survives normalization untouched, and wins over a legacy notifyRounds riding alongside it', () => {
+    const settings = normalizeDoc({ settings: { bannerLevel: 'always', notifyRounds: false } }).settings;
+    assert.equal(settings.bannerLevel, 'always');
+    assert.equal('notifyRounds' in settings, false);
   });
 
-  await check('mergeSettings: patching notify alone leaves notifyRounds untouched', () => {
-    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notifyRounds: false } };
+  await check('normalizeDoc: a hand-edited bannerLevel outside the closed set falls back to the default, same coercion every other setting gets', () => {
+    const settings = normalizeDoc({ settings: { bannerLevel: 'sometimes' } }).settings;
+    assert.equal(settings.bannerLevel, 'this-board');
+  });
+
+  await check('mergeSettings: patching notify alone leaves bannerLevel untouched', () => {
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, bannerLevel: 'off' } };
     const next = mergeSettings(doc, { notify: false });
     assert.equal(next.settings.notify, false);
-    assert.equal(next.settings.notifyRounds, false, 'must survive a patch that never mentions it');
+    assert.equal(next.settings.bannerLevel, 'off', 'must survive a patch that never mentions it');
   });
 
-  await check('mergeSettings: patching notifyRounds alone leaves notify untouched -- independent in the other direction too', () => {
+  await check('mergeSettings: patching bannerLevel alone leaves notify untouched -- independent in the other direction too', () => {
     const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false } };
-    const next = mergeSettings(doc, { notifyRounds: false });
-    assert.equal(next.settings.notifyRounds, false);
+    const next = mergeSettings(doc, { bannerLevel: 'always' });
+    assert.equal(next.settings.bannerLevel, 'always');
     assert.equal(next.settings.notify, false, 'must survive a patch that never mentions it');
   });
 
-  await check('mergeSettings: a non-boolean notifyRounds is rejected, naming the field, same validation notify already gets', () => {
-    assert.throws(() => mergeSettings(defaultDoc(), { notifyRounds: 'yes' }), /notifyRounds/);
+  await check('mergeSettings: every level in the closed set is accepted', () => {
+    for (const level of BANNER_LEVELS) {
+      assert.equal(mergeSettings(defaultDoc(), { bannerLevel: level }).settings.bannerLevel, level);
+    }
+  });
+
+  await check('mergeSettings: an unknown bannerLevel is refused, named in the message, and changes nothing (criterion 7)', () => {
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, bannerLevel: 'no-board' } };
+    assert.throws(() => mergeSettings(doc, { bannerLevel: 'sometimes' }), /settings\.bannerLevel/);
+    // A refusal is total: nothing from a rejected patch is applied, so a valid key
+    // riding alongside a bad one does not land either -- same contract every other
+    // validated key in this function gets.
+    assert.throws(() => mergeSettings(doc, { notify: false, bannerLevel: 'sometimes' }), /settings\.bannerLevel/);
+    // mergeSettings never mutates its argument, so the document it was handed reads
+    // back exactly as it started -- the HTTP route's own "nothing persists" guarantee
+    // one layer down from here.
+    assert.equal(doc.settings.bannerLevel, 'no-board');
+  });
+
+  await check('mergeSettings: a patch carrying the retired notifyRounds key is silently dropped, the same as any other key this module no longer recognizes', () => {
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, bannerLevel: 'this-board' } };
+    const next = mergeSettings(doc, { notifyRounds: false });
+    assert.equal(next.settings.bannerLevel, 'this-board', 'an unrecognized patch key must not silently change the level');
+    assert.equal('notifyRounds' in next.settings, false);
   });
 
   // -------------------------------------------------------------------------------
@@ -737,6 +798,8 @@ async function main() {
       const doc = readDoc(oldHome, now);
       assert.equal(doc.settings.menubarCountdown, true);
       assert.equal(doc.settings.menubarHidden, false);
+      // Also the notifyRounds migration seam, on the same old-shaped document.
+      assert.equal(doc.settings.bannerLevel, 'this-board');
       assert.equal(doc.cycle, 1, 'and the rest of the document is untouched by the fill-in');
     } finally {
       rmSync(oldHome, { recursive: true, force: true });
@@ -744,12 +807,12 @@ async function main() {
   });
 
   await check('mergeSettings: each menu bar key is patchable alone, leaving the other three toggles exactly as they were', () => {
-    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false, notifyRounds: false } };
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false, bannerLevel: 'off' } };
     const hidden = mergeSettings(doc, { menubarHidden: true });
     assert.equal(hidden.settings.menubarHidden, true);
     assert.equal(hidden.settings.menubarCountdown, true, 'hiding the item must not silently reset the countdown preference');
-    assert.equal(hidden.settings.notify, false, 'and it touches neither banner toggle');
-    assert.equal(hidden.settings.notifyRounds, false);
+    assert.equal(hidden.settings.notify, false, 'and it touches neither banner control');
+    assert.equal(hidden.settings.bannerLevel, 'off');
 
     const quiet = mergeSettings(doc, { menubarCountdown: false });
     assert.equal(quiet.settings.menubarCountdown, false);
@@ -836,10 +899,10 @@ async function main() {
   });
 
   await check('mergeSettings: patching enabled alone leaves every other toggle untouched', () => {
-    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false, notifyRounds: false, menubarHidden: true } };
+    const doc = { ...defaultDoc(), settings: { ...DEFAULT_SETTINGS, notify: false, bannerLevel: 'off', menubarHidden: true } };
     const next = mergeSettings(doc, { enabled: false });
     assert.equal(next.settings.notify, false);
-    assert.equal(next.settings.notifyRounds, false, 'the round-banner safety net is a different key -- flipping enabled must not silently touch it');
+    assert.equal(next.settings.bannerLevel, 'off', 'the round-banner safety net is a different key -- flipping enabled must not silently touch it');
     assert.equal(next.settings.menubarHidden, true);
   });
 

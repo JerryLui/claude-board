@@ -322,6 +322,33 @@ export function createSseHub() {
      * forever". `createStrandedWatch.evaluate` arms its countdown past the remaining
      * window for exactly that reason. */
     attendedRemainingMs: remainingMs,
+    /** The same question asked of the WHOLE machine: how much longer is ANY board on this
+     * daemon Attended -- this project's, another project's, any of them (ADR.md entry 58,
+     * the Banner level's "On when no board is open"). Exactly `attendedRemainingMs`'s
+     * three answers and the same units, because the caller branches on them identically:
+     * `Infinity` is a tab focused right now somewhere, a finite number is the LONGEST
+     * look-away window still running anywhere, `0` is a machine with nobody looking at
+     * anything.
+     *
+     * The maximum of the per-board answer rather than a second walk of the same map, so
+     * the two cannot drift: "no board is Attended" has to mean exactly "every board
+     * answers 0 to the question the per-board reader already asks", or the middle Banner
+     * level would be quiet in cases the level below it is loud in and the ladder would
+     * stop being monotone.
+     *
+     * NOT `anyWatcher` above, which is a different question with a different answer: that
+     * one counts a tab merely being OPEN (what a fresh board's auto-open defers to, ADR
+     * 91), while this one counts a reviewer actually being at one. A board tab left open
+     * behind the terminal for a week is a Watcher and is not Attended. */
+    attendedAnywhereRemainingMs() {
+      let best = 0;
+      for (const boardId of subs.keys()) {
+        const left = remainingMs(boardId);
+        if (left === Infinity) return Infinity;
+        best = Math.max(best, left);
+      }
+      return best;
+    },
   };
 }
 
@@ -594,12 +621,13 @@ function isStoreCookieWrite(parts) {
  *    pausing an advisory clock that never gates an `ask` and never reaches a tool is
  *    strictly less than that — `isSameOriginWrite` still stands in front of it, exactly
  *    as it does for submit. `settings` is the one that reaches furthest and the one to
- *    measure a NEW action against, because it is not board-neutral: `TOGGLE_KEYS`
- *    (src/pomodoro.mjs) persists `notifyRounds` into `pomodoro.json`, and
- *    src/stranded.mjs's `announce` refuses to raise a banner when
- *    `roundBannersEnabled` reads it false — so a cookie-only caller can durably silence
- *    every Stranded banner for every board on this machine. That is the ceiling this
- *    list currently grants; anything reaching past it wants the secret, not the cookie. The board-scoped fallback token that
+ *    measure a NEW action against, because it is not board-neutral: `mergeSettings`
+ *    (src/pomodoro.mjs) persists `bannerLevel` into `pomodoro.json`, and
+ *    src/stranded.mjs's `announce` raises no banner at all when `bannerLevel` reads
+ *    `'off'` (not even the one a Suppressed board is owed, ADR 106), so a cookie-only
+ *    caller can durably silence every Stranded banner for every board on this machine.
+ *    That is the ceiling this list currently grants; anything reaching past it wants the
+ *    secret, not the cookie. The board-scoped fallback token that
  *    used to sit here is deleted rather than kept beside it. `attended` joins the cookie
  *    set on the same footing again, reaching less than either: see
  *    `BOARD_COOKIE_ACTIONS` above.
@@ -1066,9 +1094,11 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
       // The create branch only, so nothing about a later round can revise it, and before
       // the render below so `stripDaemonOnly` is what keeps it off the page rather than
       // the ordering of two writes.
-      // The Watcher alone decides (ADR.md entry 91). The round-banner switch does not
-      // enter into it: src/stranded.mjs exempts the one Banner a Suppressed board is
-      // owed from that switch, so suppressing here can never leave the board unannounced.
+      // The Watcher alone decides (ADR.md entry 91). The reviewer's Banner level does not
+      // enter into it: src/stranded.mjs exempts the one Banner a Suppressed board is owed
+      // from every level's attendance condition, so suppressing here leaves the board
+      // unannounced only at the level whose whole meaning is silence (ADR 106), where the
+      // Popover's Waiting list is what remains.
       board[SUPPRESSED] = sse.anyWatcher();
     }
   } catch (err) {

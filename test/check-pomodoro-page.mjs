@@ -282,18 +282,20 @@ async function main() {
     });
 
     // Ten fields now, not six: the `sound` checkbox retired into three independent
-    // per-phase cue pickers (ADR.md entry 20), and notifyRounds (ticket 03, ADR.md
-    // entry 58) joined notify as the round banner's own tick. Three
-    // DIFFERENT names are chosen deliberately rather than three copies of one -- "each
-    // remembers its own choice independently of the other two" is the criterion, and a
-    // check that set all three alike would pass just as happily against a bug that
-    // collapsed them into a single stored value. The names come off cueNames() rather
-    // than being hardcoded, for the same reason src/pomodoro-widget.mjs builds its
-    // options from it: this suite must not assert a 14-name list that is a property of
-    // the machine it runs on. notify and notifyRounds are set OPPOSITE each other below
-    // for the same reason as check-pure.mjs's own arrangement: a bug that wired the two
-    // checkboxes together would show up as a mismatch, not a coincidental pass.
-    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all eleven fields, the three cues, the two notify toggles and the two menu bar preferences independently', async () => {
+    // per-phase cue pickers (ADR.md entry 20), and bannerLevel (ticket 03, ADR.md
+    // entry 58) joined notify as the round banner's own gate -- a four-option select
+    // now, not the retired notifyRounds checkbox. Three
+    // DIFFERENT cue names are chosen deliberately rather than three copies of one --
+    // "each remembers its own choice independently of the other two" is the criterion,
+    // and a check that set all three alike would pass just as happily against a bug
+    // that collapsed them into a single stored value. The names come off cueNames()
+    // rather than being hardcoded, for the same reason src/pomodoro-widget.mjs builds
+    // its options from it: this suite must not assert a 14-name list that is a
+    // property of the machine it runs on. notify is turned off and bannerLevel is
+    // moved to a non-default level below, for the same reason as check-pure.mjs's own
+    // arrangement: a bug that wired the two controls together would show up as a
+    // mismatch, not a coincidental pass.
+    await check('pomodoro widget: the settings form posts through the cookie-authorised route and the daemon actually persists all eleven fields, the three cues, notify and the Banner level, and the two menu bar preferences independently', async () => {
       const tab = loadIndexAgainstDaemon(server.port);
       try {
         await flush();
@@ -308,16 +310,15 @@ async function main() {
         form.querySelector('input[name="longBreakMin"]').value = '18';
         form.querySelector('input[name="longEvery"]').value = '5';
         form.querySelector('input[name="notify"]').checked = false;
-        form.querySelector('input[name="notifyRounds"]').checked = true;
+        form.querySelector('select[name="bannerLevel"]').value = 'always';
         form.querySelector('select[name="cueWork"]').value = cueWork;
         form.querySelector('select[name="cueBreak"]').value = cueBreak;
         form.querySelector('select[name="cueLongBreak"]').value = cueLongBreak;
         // The two menu bar preferences, both moved OFF their
         // defaults so this proves a real write rather than agreeing with what was
-        // already stored -- and in opposite directions to each other, the same
-        // reason notify and notifyRounds are set opposite above. "Show in menu bar"
-        // is the one control in this form whose ticked state is the negation of the
-        // key behind it: unticked here, so menubarHidden must land TRUE on disk.
+        // already stored -- and in opposite directions to each other. "Show in menu
+        // bar" is the one control in this form whose ticked state is the negation of
+        // the key behind it: unticked here, so menubarHidden must land TRUE on disk.
         form.querySelector('input[name="menubarCountdown"]').checked = false;
         form.querySelector('input[name="menubarHidden"]').checked = false;
         form.dispatchEvent(new StandInEvent('submit'));
@@ -329,7 +330,7 @@ async function main() {
         // input yet, so the settings patch it posts never mentions the key, and the
         // whole-object comparison below has to name it anyway or it is not really
         // whole-object -- see src/pomodoro.mjs's DEFAULT_SETTINGS/TOGGLE_KEYS.
-        assert.deepEqual(onDisk.settings, { enabled: true, workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, notifyRounds: true, cueWork, cueBreak, cueLongBreak, menubarCountdown: false, menubarHidden: true }, 'all eleven fields must actually persist on disk, exactly as entered');
+        assert.deepEqual(onDisk.settings, { enabled: true, workMin: 42, breakMin: 7, longBreakMin: 18, longEvery: 5, notify: false, bannerLevel: 'always', cueWork, cueBreak, cueLongBreak, menubarCountdown: false, menubarHidden: true }, 'all eleven fields must actually persist on disk, exactly as entered');
         // Restated as its own assertion rather than left implicit in the deepEqual
         // above: the deepEqual would still pass if the three cues happened to be equal
         // AND the arrangement above had picked three equal names, so this pins the
@@ -400,6 +401,46 @@ async function main() {
       assert.equal(before, after, 'the same absolute deadline and the same cycle must render the identical text across a daemon restart -- the countdown and the position must not reset, jump, or go blank');
     });
 
+    // A saved Banner level must survive a daemon restart -- not merely
+    // that the DOCUMENT survives one (test/check-http.mjs's own "POMODORO: settings
+    // persist across a daemon restart" already proves that at the HTTP layer), but
+    // that the PANEL shows the restored level back, through a real fetch and a real
+    // pomodoroSyncForm run, the same "settled, not merely rendered" bar every other
+    // check in this file holds itself to. Saves a level other than the default so a
+    // stale first-<option> read (the bug this would actually catch) cannot coincide
+    // with the right answer.
+    await check('pomodoro widget: a Banner level saved through the panel survives a real daemon restart, and the reopened panel shows it back', async () => {
+      writePomodoroDoc({ ...defaultDoc(), cycleDate: pomodoroDay(Date.now()), settings: { ...defaultDoc().settings, enabled: true } }, home);
+
+      const beforeTab = loadIndexAgainstDaemon(server.port);
+      await flush();
+      const form = beforeTab.document.querySelector('form#pomodoro-settings-form');
+      const beforeSelect = form.querySelector('select[name="bannerLevel"]');
+      assert.equal(beforeSelect.value, 'this-board', 'setup failure: expected the fresh document\'s default Banner level');
+      beforeSelect.value = 'off';
+      form.dispatchEvent(new StandInEvent('submit'));
+      await flush();
+      assert.equal(readPomodoroDoc(home).settings.bannerLevel, 'off', 'setup failure: the write must actually have reached the daemon');
+      beforeTab.restoreFetch();
+
+      const port = server.port;
+      await new Promise(resolve => server.server.close(resolve));
+      server = await startServer({ home, port });
+
+      // A brand new tab against the restarted daemon -- no fragment, panel closed by
+      // default, exactly the state pomodoroSyncForm is willing to write into. The
+      // value below is only right if fetchPomodoro really re-read pomodoro.json off
+      // the restarted daemon and pomodoroSyncForm really applied it to this select.
+      const afterTab = loadIndexAgainstDaemon(server.port);
+      try {
+        await flush();
+        const afterSelect = afterTab.document.querySelector('select[name="bannerLevel"]');
+        assert.equal(afterSelect.value, 'off', 'the saved Banner level must survive a real daemon restart and come back in the settings panel, not merely on disk');
+      } finally {
+        afterTab.restoreFetch();
+      }
+    });
+
     // ---------------------------------------------------------------------------
     // ADR 103, "off is absence". The four checks immediately below seed an off
     // DOCUMENT straight to disk (writePomodoroDoc, ARRANGE only, same as every
@@ -440,12 +481,12 @@ async function main() {
       assert.ok(widget.includes('class="pomodoro-settings-summary"'), 'the bare gear itself must render');
 
       // The four survivors: the Master switch (server-rendered honestly unchecked,
-      // since this document really does have settings.enabled === false), round
-      // banners (the safety net SECURITY.md documents), Hide menu bar icon
+      // since this document really does have settings.enabled === false), Banner
+      // level (the safety net SECURITY.md documents), Hide menu bar icon
       // (rendered as its positive, "Show in menu bar", same as always), and the
       // whole Store section.
       assert.ok(widget.includes('<label class="pomodoro-field pomodoro-field-check">Pomodoro timer<input type="checkbox" name="enabled"></label>'), 'the Master switch row must survive, unchecked -- it is the only way back on');
-      assert.ok(widget.includes('<label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>'), 'round banners are not the pomodoro\'s and must survive off untouched');
+      assert.ok(widget.includes('<label class="pomodoro-field">Banner level<select name="bannerLevel"><option value="off">Off</option><option value="no-board">On when no board is open</option><option value="this-board">On when this board is not open</option><option value="always">Always on</option></select></label>'), 'Banner level is not the pomodoro\'s and must survive off untouched, as one four-option select, not the retired notifyRounds checkbox');
       assert.ok(widget.includes('<label class="pomodoro-field pomodoro-field-check">Show in menu bar<input type="checkbox" name="menubarHidden"></label>'), 'Hide menu bar icon must survive -- it hides/unhides the whole status item regardless of the switch');
       assert.ok(widget.includes('pomodoro-settings-caption">Store<'), 'the Store section must survive off untouched');
       assert.ok(widget.includes('id="store-prune-days"') && widget.includes('id="store-prune"'), 'the Store control itself must still be reachable');
@@ -470,9 +511,15 @@ async function main() {
         // And the survivors inside it are the real, live daemon's own values --
         // proving initPomodoroWidget actually ran (not just that the markup
         // happened to render), the same "settled, not merely rendered" bar every
-        // other check in this file holds itself to.
-        const notifyRounds = tab.document.querySelector('input[name="notifyRounds"]');
-        assert.ok(notifyRounds, 'the round-banner row must be wired up, not just present in the markup');
+        // other check in this file holds itself to. initPomodoroWidget only opens the
+        // panel from the fragment AFTER its own fetchPomodoro().then(...) (see that
+        // file's own comment), and pomodoroSyncForm only ever writes into a CLOSED
+        // panel -- so by the time this reads the select, the sync that filled it in
+        // already ran while it was still closed, and the value below is genuinely the
+        // daemon's, not the select's own default first option.
+        const bannerLevel = tab.document.querySelector('select[name="bannerLevel"]');
+        assert.ok(bannerLevel, 'the Banner level row must be wired up, not just present in the markup');
+        assert.equal(bannerLevel.value, 'this-board', 'the select must show the real daemon default, proving it was actually synced and not merely rendered');
       } finally {
         tab.restoreFetch();
       }

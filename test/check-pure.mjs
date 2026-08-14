@@ -8436,7 +8436,7 @@ const CUE_C = ALL_CUES[3] || NO_CUE;
 // every check using this fixture reads a document shaped exactly like the one the
 // daemon actually serves; the checks that are about those two keys set their own
 // values rather than leaning on these.
-const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, notifyRounds: true, cueWork: CUE_A, cueBreak: CUE_B, cueLongBreak: NO_CUE, menubarCountdown: true, menubarHidden: false };
+const POMODORO_SETTINGS = { workMin: 25, breakMin: 5, longBreakMin: 15, longEvery: 4, notify: true, bannerLevel: 'this-board', cueWork: CUE_A, cueBreak: CUE_B, cueLongBreak: NO_CUE, menubarCountdown: true, menubarHidden: false };
 
 /** Parse the real renderIndexPage() output and run the real indexScript against
  * it, capturing every setInterval registration by hand (there are three: refresh's
@@ -8506,7 +8506,7 @@ check('pomodoro widget: the markup is emitted in index-head-actions, beside them
   // are on this list for that reason even though one of them renders as its own
   // negation ("Show in menu bar"): the inversion is in the ticked STATE, never in
   // the name.
-  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'notifyRounds', 'cueWork', 'cueBreak', 'cueLongBreak', 'menubarCountdown', 'menubarHidden']) {
+  for (const field of ['workMin', 'breakMin', 'longBreakMin', 'longEvery', 'notify', 'bannerLevel', 'cueWork', 'cueBreak', 'cueLongBreak', 'menubarCountdown', 'menubarHidden']) {
     assert.match(html, new RegExp(`name="${field}"`), `settings form must carry a ${field} field`);
   }
   // The retired boolean ("not kept as a master mute") must be
@@ -9172,15 +9172,17 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eleven
   const initial = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   // Rotated relative to POMODORO_SETTINGS (CUE_A/CUE_B/None), not just three
   // arbitrary new names -- proves each of the three fields round-trips its
-  // OWN new value rather than the write path silently mixing them up. notifyRounds is
-  // flipped to false OPPOSITE notify (which goes false too here) so a bug that wired
-  // the two checkboxes to the same underlying value, rather than two independent ones,
-  // would still show up as a mismatch against POMODORO_SETTINGS' own notifyRounds: true.
+  // OWN new value rather than the write path silently mixing them up. bannerLevel is
+  // moved to 'off' while notify goes false too, but to a value that is not a mere
+  // negation of notify (bannerLevel is a four-way select, not a checkbox) -- a bug
+  // that wired the two controls to the same underlying value, rather than two
+  // independent ones, would still show up as a mismatch against POMODORO_SETTINGS'
+  // own bannerLevel: 'this-board'.
   // Both menubar keys leave their defaults too, and in OPPOSITE
   // directions: the countdown goes off, the item stays shown. A patch that dropped
   // either -- or that wired the pair to one underlying value -- fails the deepEqual
   // below rather than passing on a coincidence.
-  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, notifyRounds: false, cueWork: CUE_B, cueBreak: NO_CUE, cueLongBreak: CUE_C, menubarCountdown: false, menubarHidden: false };
+  const savedSettings = { workMin: 50, breakMin: 10, longBreakMin: 20, longEvery: 3, notify: false, bannerLevel: 'off', cueWork: CUE_B, cueBreak: NO_CUE, cueLongBreak: CUE_C, menubarCountdown: false, menubarHidden: false };
   const saved = { ...initial, settings: savedSettings };
   let document;
   const calls = await withPomodoroFetch(call => (call.method === 'POST' ? saved : initial), async () => {
@@ -9192,7 +9194,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eleven
     form.querySelector('input[name="longBreakMin"]').value = '20';
     form.querySelector('input[name="longEvery"]').value = '3';
     form.querySelector('input[name="notify"]').checked = false;
-    form.querySelector('input[name="notifyRounds"]').checked = false;
+    form.querySelector('select[name="bannerLevel"]').value = 'off';
     form.querySelector('select[name="cueWork"]').value = CUE_B;
     form.querySelector('select[name="cueBreak"]').value = NO_CUE;
     form.querySelector('select[name="cueLongBreak"]').value = CUE_C;
@@ -9206,7 +9208,7 @@ await checkAsync('pomodoro widget: submitting the settings form posts all eleven
   const post = calls.find(c => c.method === 'POST');
   assert.ok(post, 'submitting must POST');
   assert.equal(post.url, '/api/pomodoro/settings');
-  assert.deepEqual(post.body, savedSettings, 'all eleven settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, notifyRounds, cueWork, cueBreak, cueLongBreak, menubarCountdown, menubarHidden');
+  assert.deepEqual(post.body, savedSettings, 'all eleven settings fields must round-trip in one patch, exactly as entered -- workMin, breakMin, longBreakMin, longEvery, notify, bannerLevel, cueWork, cueBreak, cueLongBreak, menubarCountdown, menubarHidden');
   // Applied back, not merely echoed: re-reading the form after the response
   // shows the daemon's own saved value, proving the round trip is real -- for
   // both a duration field and one cue field (each picker is its
@@ -9232,18 +9234,19 @@ await checkAsync('pomodoro widget: the three cue pickers sync independently from
   });
 });
 
-await checkAsync('pomodoro widget: the round-banner tick syncs from settings.notifyRounds independently of Notify (criterion 17)', async () => {
+await checkAsync('pomodoro widget: the Banner level select syncs from settings.bannerLevel independently of Notify (criterion 17)', async () => {
   const nowMs = Date.now();
-  // notify ON, notifyRounds OFF -- the two disagree, so a sync bug that read one
-  // checkbox off the other's value (or off a single shared field) shows up here as a
-  // mismatch, not a coincidental pass.
-  const doc = { settings: { ...POMODORO_SETTINGS, notify: true, notifyRounds: false }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
+  // notify ON, bannerLevel 'always' -- disagreeing with notify in the direction that
+  // matters (not the default 'this-board' POMODORO_SETTINGS already carries), so a
+  // sync bug that read the select off the notify checkbox's value (or off a single
+  // shared field) shows up here as a mismatch, not a coincidental pass.
+  const doc = { settings: { ...POMODORO_SETTINGS, notify: true, bannerLevel: 'always' }, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
     await flushPomodoro();
     const form = document.querySelector('form#pomodoro-settings-form');
     assert.equal(form.querySelector('input[name="notify"]').checked, true, 'notify must sync to its own saved value');
-    assert.equal(form.querySelector('input[name="notifyRounds"]').checked, false, 'notifyRounds must sync to ITS OWN saved value, not follow notify');
+    assert.equal(form.querySelector('select[name="bannerLevel"]').value, 'always', 'bannerLevel must sync to ITS OWN saved value, not follow notify');
   });
 });
 
@@ -9322,19 +9325,27 @@ await checkAsync('pomodoro widget: unticking Notify fires nothing -- a banner sa
   assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/notifyTest'), []);
 });
 
-await checkAsync('pomodoro widget: ticking Round banners fires no test banner -- that audition stays Notify\'s alone (criterion 18: not one per kind)', async () => {
+await checkAsync('pomodoro widget: picking a Banner level fires no test banner and no cue preview -- that audition stays Notify\'s alone, and the level is not one of the three cue pickers even though it is also a <select> (criterion 18: not one per kind)', async () => {
   const nowMs = Date.now();
   const doc = { settings: POMODORO_SETTINGS, cycle: 0, cycleDate: null, timer: null, now: nowMs };
   const calls = await withPomodoroFetch(() => doc, async () => {
     const { document } = loadIndexWithPomodoro();
     await flushPomodoro();
     document.querySelector('details#pomodoro-settings').open = true;
-    const notifyRounds = document.querySelector('form#pomodoro-settings-form input[name="notifyRounds"]');
-    notifyRounds.checked = true;
-    notifyRounds.dispatchEvent(new StandInEvent('change'));
+    const bannerLevel = document.querySelector('form#pomodoro-settings-form select[name="bannerLevel"]');
+    bannerLevel.value = 'always';
+    bannerLevel.dispatchEvent(new StandInEvent('change'));
+    // A real wait past onPomodoroCueChange's own POMODORO_PREVIEW_DEBOUNCE_MS
+    // (150ms), not just flushPomodoro's microtask drain -- the bug this guards
+    // against (onPomodoroCueChange scoped by bare tagName === 'SELECT', which
+    // Banner level now also is) fires its preview fetch on a debounce timer, so
+    // asserting immediately after dispatch would pass even with the guard
+    // missing, simply because the timer had not fired yet.
+    await new Promise(resolve => setTimeout(resolve, 220));
   });
-  assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/notifyTest'), [], 'a second on/off tick must not gain a second way to fire the one test banner');
-  assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'ticking Round banners must not save anything either -- Save is still the write');
+  assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/notifyTest'), [], 'picking a Banner level must not fire the one test banner -- that stays Notify\'s alone');
+  assert.deepEqual(calls.filter(c => c.url === '/api/pomodoro/preview'), [], 'picking a Banner level must not fire a cue preview -- it is a <select> but not one of the three cue pickers');
+  assert.equal(calls.filter(c => c.url === '/api/pomodoro/settings').length, 0, 'picking a Banner level must not save anything either -- Save is still the write');
 });
 
 await checkAsync('pomodoro widget: selecting None previews it like any other value -- no special-cased silence on the client, the server owns "plays nothing"', async () => {

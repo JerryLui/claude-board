@@ -720,7 +720,7 @@ function pomodoroSyncForm() {
   var longBreakMin = form.querySelector('input[name="longBreakMin"]');
   var longEvery = form.querySelector('input[name="longEvery"]');
   var notify = form.querySelector('input[name="notify"]');
-  var notifyRounds = form.querySelector('input[name="notifyRounds"]');
+  var bannerLevel = form.querySelector('select[name="bannerLevel"]');
   // The three cue pickers, synced the same way and on the same
   // condition as every field above -- each is its own <select>, so this is
   // what makes "reverting a change without saving leaves the stored cue
@@ -742,7 +742,7 @@ function pomodoroSyncForm() {
   if (longBreakMin && active !== longBreakMin) longBreakMin.value = s.longBreakMin;
   if (longEvery && active !== longEvery) longEvery.value = s.longEvery;
   if (notify && active !== notify) notify.checked = !!s.notify;
-  if (notifyRounds && active !== notifyRounds) notifyRounds.checked = !!s.notifyRounds;
+  if (bannerLevel && active !== bannerLevel) bannerLevel.value = s.bannerLevel;
   if (cueWork && active !== cueWork) cueWork.value = s.cueWork;
   if (cueBreak && active !== cueBreak) cueBreak.value = s.cueBreak;
   if (cueLongBreak && active !== cueLongBreak) cueLongBreak.value = s.cueLongBreak;
@@ -886,7 +886,7 @@ function closePomodoroSettings() {
 // Each field is looked up and added to the patch independently, rather than one
 // object literal read straight off the form the way this used to be written --
 // ADR 103's off shape (pomodoroSettingsGear, src/pomodoro-widget.mjs) strips this
-// same form down to three fields (notifyRounds, menubarHidden, and the Master
+// same form down to three fields (bannerLevel, menubarHidden, and the Master
 // switch, which posts through its own onPomodoroEnabledChange below and is never
 // collected here), so a form that no longer HAS a workMin input must not be asked
 // for its '.value'. mergeSettings (src/pomodoro.mjs) already merges a partial
@@ -907,8 +907,8 @@ function onPomodoroSettingsSubmit(ev) {
   if (longEvery) patch.longEvery = parseInt(longEvery.value, 10);
   var notify = form.querySelector('input[name="notify"]');
   if (notify) patch.notify = !!notify.checked;
-  var notifyRounds = form.querySelector('input[name="notifyRounds"]');
-  if (notifyRounds) patch.notifyRounds = !!notifyRounds.checked;
+  var bannerLevel = form.querySelector('select[name="bannerLevel"]');
+  if (bannerLevel) patch.bannerLevel = bannerLevel.value;
   var cueWork = form.querySelector('select[name="cueWork"]');
   if (cueWork) patch.cueWork = cueWork.value;
   var cueBreak = form.querySelector('select[name="cueBreak"]');
@@ -1008,6 +1008,14 @@ function onPomodoroCueChange(ev) {
   // this file already reads every other form field the same explicit way
   // (form.querySelector('input[name="..."]'), never form.workMin).
   var name = el.getAttribute('name');
+  // The tagName check alone used to be the whole of the scoping (the three cue
+  // pickers were the only <select> this form had) -- ticket 03's Banner level
+  // control is a second one, and it is not a cue: a bug here would fire a
+  // '/api/pomodoro/preview' request carrying a Banner-level STRING as the cue
+  // every time the reader picked a level. Named exactly, the same discipline
+  // TOGGLE_KEYS/CUE_KEYS (src/pomodoro.mjs) already use for their own closed
+  // sets, rather than an ever-growing exclusion list.
+  if (name !== 'cueWork' && name !== 'cueBreak' && name !== 'cueLongBreak') return;
   var value = el.value;
   if (pomodoroPreviewTimers[name]) clearTimeout(pomodoroPreviewTimers[name]);
   var timer = setTimeout(function () {

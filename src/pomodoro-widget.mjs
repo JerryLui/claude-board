@@ -64,6 +64,7 @@
 // it only means more of those guards find nothing.
 
 import { cueNames } from './cues.mjs';
+import { BANNER_LEVELS } from './pomodoro.mjs';
 
 // Stroke-based inline glyph, same family as src/theme.mjs's three theme icons
 // and src/render.mjs's COMMENT_ICON. No external assets beyond the three bare
@@ -132,6 +133,27 @@ function cueOptionsHtml() {
   return cueNames().map(name => `<option value="${name}">${name}</option>`).join('');
 }
 
+/** The ladder's own labels, one per `BANNER_LEVELS` value (src/pomodoro.mjs) -- reads
+ * that export rather than hand-listing the four strings a second time, so the option
+ * list can never drift from the closed set mergeSettings validates against. Wording
+ * matches the spec's own ladder (Off / on when no board is open / on when this board is
+ * not open / always on) and stays clear of CONTEXT.md's Banner-level glossary _Avoid_
+ * list (no "notification level", no "alert mode", no bare "notifyRounds"). Static --
+ * unlike cueOptionsHtml above, nothing here is machine state -- but built the same
+ * shape (a function returning the joined `<option>` markup, no `selected` attribute:
+ * the selected value is daemon state, filled in client-side by pomodoroSyncForm) so the
+ * two option lists read as one idiom. */
+const BANNER_LEVEL_LABELS = {
+  off: 'Off',
+  'no-board': 'On when no board is open',
+  'this-board': 'On when this board is not open',
+  always: 'Always on',
+};
+
+function bannerLevelOptionsHtml() {
+  return BANNER_LEVELS.map(level => `<option value="${level}">${BANNER_LEVEL_LABELS[level]}</option>`).join('');
+}
+
 /** IDs, not classes, are what indexScript's client code looks elements up by
  * (`document.getElementById`) -- exactly like `#theme-toggle` in
  * src/theme.mjs. Classes below exist only for styling.
@@ -163,6 +185,7 @@ function cueOptionsHtml() {
 export function pomodoroWidget({ enabled = false } = {}) {
   if (!enabled) return pomodoroSettingsGear();
   const cueOptions = cueOptionsHtml();
+  const bannerLevelOptions = bannerLevelOptionsHtml();
   // The icon sits in its own slot, not bare, so indexScript's renderPomodoro can
   // swap the whole glyph (TOMATO_ICON <-> REST_ICON) by replacing this ONE
   // stable element's innerHTML -- a real markup swap, never the `hidden`
@@ -228,16 +251,21 @@ export function pomodoroWidget({ enabled = false } = {}) {
       <hr class="pomodoro-settings-divider">
       <div class="pomodoro-settings-caption">Banners</div>
       <label class="pomodoro-field pomodoro-field-check">Notify<input type="checkbox" name="notify"></label>
-      <!-- Round banners' own tick, independent of Notify above (ADR.md entry 58;
-           CONTEXT.md's Banner) -- Notify gates a pomodoro boundary's banner, this one
-           gates a Stranded round's, and unlike the pickers above it fires no test
-           banner of its own on the way on: that audition stays Notify's alone
-           (src/indexpage.mjs's onPomodoroNotifyChange), so this checkbox's 'change'
+      <!-- Banner level, independent of Notify above (ADR.md entry 58; CONTEXT.md's
+           Banner-level glossary entry; ADR 106) -- Notify gates a pomodoro boundary's
+           banner, this one gates a Stranded round's, and unlike the pickers above it
+           fires no test banner of its own on the way on: that audition stays Notify's
+           alone (src/indexpage.mjs's onPomodoroNotifyChange), so this select's 'change'
            reaches no handler beyond the ordinary sync/submit every other field here
            already gets. It is what earns this section its own caption rather than
            sitting under Pomodoro: it gates a Stranded ROUND's banner, which has nothing
-           to do with the clock. -->
-      <label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>
+           to do with the clock. One four-option select, not the retired notifyRounds
+           checkbox plus a refinement (spec Decisions) -- see bannerLevelOptionsHtml
+           above for the option list and CONTEXT.md's Banner-level entry for the
+           wording. No selected attribute here, same reasoning as the cue pickers: the
+           selected value is daemon state, filled in by indexpage.mjs's
+           pomodoroSyncForm. -->
+      <label class="pomodoro-field">Banner level<select name="bannerLevel">${bannerLevelOptions}</select></label>
       <!-- The macOS status item's two preferences (the item is a second process
            of the same bundle, ADR 72). They are edited HERE and
            nowhere else -- the item owns no state of its own, it only READS the
@@ -336,7 +364,7 @@ export function pomodoroWidget({ enabled = false } = {}) {
  * author `display` rule is the exact bug this widget's own switch used to have). What
  * survives is the bare cogwheel plus the four sections the spec names as not the
  * pomodoro's to lose: the Master switch itself (so the reader has a way back on),
- * round banners, Hide menu bar icon, and the Store control. Cues, the three duration
+ * Banner level, Hide menu bar icon, and the Store control. Cues, the three duration
  * fields and the interval-banner (Notify) row are gone with the timer they belong to;
  * Reset goes with them too -- it ends a pomodoro loop that, off, does not exist -- which
  * is why the actions row below carries only Save, matching the mock exactly.
@@ -346,6 +374,7 @@ export function pomodoroWidget({ enabled = false } = {}) {
  * that is load-bearing for indexScript's own wiring, and CONTEXT.md/the compiled
  * menu-bar binary on why `#pomodoro-settings` specifically can never move. */
 function pomodoroSettingsGear() {
+  const bannerLevelOptions = bannerLevelOptionsHtml();
   return `<div class="pomodoro-widget" id="pomodoro-widget">
   <details class="pomodoro-settings" id="pomodoro-settings">
     <summary class="pomodoro-settings-summary" role="button" aria-label="Settings" title="Settings">${GEAR_ICON}</summary>
@@ -354,7 +383,7 @@ function pomodoroSettingsGear() {
       <label class="pomodoro-field pomodoro-field-check">Pomodoro timer<input type="checkbox" name="enabled"></label>
       <hr class="pomodoro-settings-divider">
       <div class="pomodoro-settings-caption">Banners</div>
-      <label class="pomodoro-field pomodoro-field-check">Round banners<input type="checkbox" name="notifyRounds"></label>
+      <label class="pomodoro-field">Banner level<select name="bannerLevel">${bannerLevelOptions}</select></label>
       <hr class="pomodoro-settings-divider">
       <div class="pomodoro-settings-caption">Menu bar</div>
       <label class="pomodoro-field pomodoro-field-check">Show in menu bar<input type="checkbox" name="menubarHidden"></label>

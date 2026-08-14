@@ -612,9 +612,10 @@ POST /api/pomodoro/restart          re-mint the current interval's deadline to a
                                     duration (current settings); phase/cycle untouched;
                                     no-op while idle; fires no notification and no cue
 POST /api/pomodoro/settings         { workMin?, breakMin?, longBreakMin?, longEvery?, notify?,
-                                    notifyRounds?, menubarCountdown?, menubarHidden?,
+                                    bannerLevel?, menubarCountdown?, menubarHidden?,
                                     cueWork?, cueBreak?, cueLongBreak? }
-                                    merged into the stored settings, not replaced
+                                    merged into the stored settings, not replaced;
+                                    bannerLevel is one of off|no-board|this-board|always
 POST /api/pomodoro/preview          { cue } -> { ok: true }; plays a cue immediately, reads
                                     and writes nothing
 POST /api/pomodoro/notifyTest       no body -> { ok: true }; raises one test banner
@@ -704,9 +705,9 @@ route's own section, below).
 It is additionally accepted on nine pomodoro writes — `ensure`, `pause`, `resume`, `reset`,
 `settings`, `preview`, `notifyTest`, `forward`, `restart` — so the index page's switch and its
 settings popover can drive the clock. The clock itself never gates an `ask` and never reaches a
-tool. **`settings` is the one that reaches past the clock**: `notifyRounds` lives in the same
+tool. **`settings` is the one that reaches past the clock**: `bannerLevel` lives in the same
 document, it is merged in and persisted like any duration, and the Stranded rule reads it back
-before every announcement, so `notifyRounds: false` from a cookie durably suppresses the Stranded
+before every announcement, so `bannerLevel: 'off'` from a cookie durably suppresses the Stranded
 banner for every board on the machine, across restarts. `SECURITY.md` "What the cookie may write"
 prices that. The list stays a closed, named set: a pomodoro write added later is secret-only until
 someone deliberately names it — and one that reaches a board the way `settings` does needs that
@@ -778,9 +779,11 @@ it is absent (a daemon older than this field).
 ADR.md entry 91), in which case a caller that would otherwise open a tab must not, and the stranded
 banner announces the board instead. One condition, taken at the instant the board is created:
 some board on this daemon — any board, any project, focused or not — already has a Watcher. The
-round-banner switch (`notifyRounds: false`, "Pomodoro settings" above) does not enter into it:
+round-banner level (`bannerLevel`, "Pomodoro settings" above) does not enter into it:
 suppression trades the tab for a banner, so the one banner a Suppressed board's first round is
-owed fires despite the switch, which keeps silencing ordinary stranded rounds. A Watcher whose
+owed fires at every On level, whatever that level's own attendance condition says about ordinary
+stranded rounds. `bannerLevel: 'off'` is the one level that silences it too (ADR 106): the
+reviewer asked for silence in as many words, and the Popover's Waiting list is what remains. A Watcher whose
 tab has gone does not count: the test is a subscription this daemon can still write an event to,
 not merely one it has not yet reaped.
 
