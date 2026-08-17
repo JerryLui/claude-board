@@ -135,7 +135,7 @@ check('mdToHtml carries the visualize renderer\'s pinned behaviour', () => {
     'plain ssn_country stay literal',
     '<strong>double</strong>',
     '<ul><li id="title-li1">one<ul><li>nested</li></ul></li><li id="title-li2">two</li></ul>',
-    '<table><tr><th>H1</th><th>H2</th></tr><tr><td>a</td><td>b</td></tr></table>',
+    '<div class="table-scroll"><table><tr><th>H1</th><th>H2</th></tr><tr><td>a</td><td>b</td></tr></table></div>',
     '<blockquote><p>quoted</p></blockquote>',
     '<pre><code>if (a &lt; b) {}</code></pre>',
     '<pre class="mermaid">flowchart LR\n  A --&gt; B</pre>',
@@ -396,7 +396,7 @@ check('AC 11: a loose list (blank line between items) wraps each item in its own
 
 check('AC 11: a pipe inside a table cell\'s code span no longer splits the cell in two', () => {
   const out = mdToHtml('| a | b |\n|---|---|\n| `x|y` | z |\n');
-  assert.equal(out, '<table><tr><th>a</th><th>b</th></tr><tr><td><code>x|y</code></td><td>z</td></tr></table>');
+  assert.equal(out, '<div class="table-scroll"><table><tr><th>a</th><th>b</th></tr><tr><td><code>x|y</code></td><td>z</td></tr></table></div>');
 });
 
 check('an INDENTED table renders every column -- GFM allows up to three spaces in front of the leading pipe, and the last column used to fall off the end', () => {
@@ -464,8 +464,8 @@ check('AC 12: GFM is on -- task lists, strikethrough, autolinks and tables all r
   assert.ok(autolinks.includes('<a href="http://www.foo.com" target="_blank" rel="noopener noreferrer">www.foo.com</a>'));
 
   const table = mdToHtml('| L | C | R |\n|:--|:-:|--:|\n| a | b | c |\n');
-  assert.equal(table, '<table><tr><th align="left">L</th><th align="center">C</th><th align="right">R</th></tr>' +
-    '<tr><td align="left">a</td><td align="center">b</td><td align="right">c</td></tr></table>');
+  assert.equal(table, '<div class="table-scroll"><table><tr><th align="left">L</th><th align="center">C</th><th align="right">R</th></tr>' +
+    '<tr><td align="left">a</td><td align="center">b</td><td align="right">c</td></tr></table></div>');
 });
 
 check('AC 13: a ```mermaid fence still becomes <pre class="mermaid"> even alongside the new GFM/reference-link machinery', () => {

@@ -672,7 +672,11 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
   function renderTable(t) {
     const lines = t.raw.replace(/\n+$/, '').split('\n');
     const headerCells = splitTableRowCells(lines[0] ?? '');
-    let out = '<table><tr>';
+    // The scroller div, not the table, is what keeps a wide table on the page: a
+    // table's min-content width beats `width: 100%`, so without a scrolling parent
+    // it paints past its card and drags the whole page wide. `.table-scroll` is
+    // `overflow-x: auto` in src/styles.mjs.
+    let out = '<div class="table-scroll"><table><tr>';
     for (let i = 0; i < t.header.length; i++) {
       out += '<th' + alignAttr(t.align[i]) + '>' + renderCellText(headerCells, i) + '</th>';
     }
@@ -685,7 +689,7 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
       }
       out += '</tr>';
     }
-    return out + '</table>';
+    return out + '</table></div>';
 
     function renderCellText(cells, col) {
       return renderInline(Lexer.lexInline(cells[col] ?? ''));

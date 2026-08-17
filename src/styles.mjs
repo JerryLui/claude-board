@@ -651,6 +651,12 @@ body.sent-page .comment-btn { display: none; }
 .md-content blockquote { margin: 0.8em 0; padding: 2px 14px; border-left: 2px solid var(--accent);
   color: var(--ink-2); background: var(--accent-soft); border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .md-content blockquote p { color: inherit; }
+/* The scroller emitted around every markdown table (src/markdown.mjs renderTable):
+   a table's min-content width wins over 'width: 100%', so only a scrolling parent
+   can keep a wide one from painting past its card and dragging the page wide.
+   The table keeps its own margin; an overflow box does not collapse margins, so
+   the wrapper's height carries them and the rhythm is unchanged. */
+.table-scroll { overflow-x: auto; }
 .md-content table { border-collapse: separate; border-spacing: 0; margin: 0.8em 0; width: 100%;
   border: 1px solid var(--hairline); border-radius: var(--r-md); overflow: hidden; }
 .md-content th, .md-content td { border-bottom: 1px solid var(--hairline); padding: 7px 12px; font-size: 13px; text-align: left; }
