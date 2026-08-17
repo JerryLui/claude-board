@@ -1217,6 +1217,26 @@ export function dropResolved(comments) {
   return comments.map(({ resolved, ...rest }) => rest);
 }
 
+/** `roundAnswers` is one round's answer entries in the exact shape a packet carries
+ * them: every question block whose `round` is this one -- nested in another question's
+ * `context` or in a compare side included -- paired with what the reviewer did with it,
+ * falling back to an explicit `unanswered` for a round nobody has submitted yet.
+ *
+ * Extracted from the assembly below rather than inlined there because it now has a
+ * SECOND caller: `drainUndeliveredAnswers` (src/server.mjs, ADR.md entry 107) resolves
+ * an owed round's answers against that round's own board, and a hand-copied second
+ * version of this mapping is exactly the drift ADR 35's own history warns about -- two
+ * definitions of "what an answer entry looks like" would diverge at the first field
+ * either one gains. One definition, two call sites. */
+export function roundAnswers(board, round) {
+  return questionBlocks(board)
+    .filter(b => b.round === round)
+    .map(b => {
+      const a = board.answers[b.id] || { status: 'unanswered', choice: null, note: '' };
+      return { id: b.id, round: b.round, prompt: b.prompt, widget: b.widget, status: a.status, choice: a.choice, note: a.note };
+    });
+}
+
 /** Assemble the packet the `ask` tool (eventually) returns, and what /wait resolves
  * with: names the board, the round, each question's status/choice/note, and every
  * comment with the anchor it attached to. See PROTOCOL.md "Packet".
@@ -1227,14 +1247,15 @@ export function dropResolved(comments) {
  * settled feedback and re-reported old `unanswered`/`deferred` entries as fresh
  * signal, each round louder than the last. Every entry additionally carries its own
  * `round` (PROTOCOL.md "Packet"), so a caller that genuinely wants the history can
- * read `board.answers`/`board.comments` and still tell the rounds apart. */
+ * read `board.answers`/`board.comments` and still tell the rounds apart.
+ *
+ * Two exceptions ride ON TOP of this, both assembled by `buildPacketWithUndelivered`
+ * (src/server.mjs) after this function has run and neither visible here: an undelivered
+ * comment (ADR.md entry 35) and, since ADR.md entry 107, the answers of a submitted
+ * round no packet ever carried. Both append to the arrays this builds and both are told
+ * apart by the `round` every entry already has. */
 export function buildPacket(board, round, url) {
-  const answers = questionBlocks(board)
-    .filter(b => b.round === round)
-    .map(b => {
-      const a = board.answers[b.id] || { status: 'unanswered', choice: null, note: '' };
-      return { id: b.id, round: b.round, prompt: b.prompt, widget: b.widget, status: a.status, choice: a.choice, note: a.note };
-    });
+  const answers = roundAnswers(board, round);
   const comments = dropResolved(resolveComments(board, board.comments.filter(c => (c.round ?? round) === round)));
   // The round's own recorded outcome wins over the board-wide state, which a later
   // round resets to 'open'. Falls back to board.state for rounds sent before
@@ -1313,6 +1334,47 @@ export const STRANDED_BANNER = 'strandedBanner';
 // document for everything else it knows.
 export const SUPPRESSED = 'suppressed';
 
+// The third one, ADR.md entry 107's delivery ledger:
+//
+//   board.answersDelivered = [n…]        // round numbers, ascending
+//
+// Which of THIS board's rounds have had their answers carried out by a packet. A round
+// is added the moment a packet naming it actually leaves (`drainUndeliveredAnswers`,
+// src/server.mjs), never when it is submitted and never when it is minted, because the
+// fact worth recording is delivery and nothing else -- ADR 35's own history is the
+// argument: keying its comments on `awaited`, a mint-time flag standing in for "a packet
+// carried these", lost a reviewer's comment permanently.
+//
+// A round that times out is NOT recorded by the timeout packet, and that is the whole
+// point rather than an oversight: at that instant the round is still `open` and has no
+// submitted answers for a packet to carry, so nothing was delivered. When the reviewer
+// submits it late (ADR.md entry 50 leaves a lapsed round open, so a late submit lands),
+// the answers exist, no packet has carried them, and the next packet on the thread takes
+// them.
+//
+// Board-level rather than a field on each round, unlike everything else about a round's
+// lifecycle, for one concrete reason: `renderBoardPage` (src/render.mjs) spreads
+// `board.rounds` into the page verbatim, while this ledger is written by `commit` on a
+// response's `finish` with no re-render beside it. A per-round flag would therefore make
+// the served page disagree with `pages/<id>.html` on disk on every wait that resolves.
+// (A comment's own `delivered` mark escapes that only because `resolveComment` above
+// rebuilds each comment from a fixed field list, dropping it before it can reach the
+// page.) So it goes here, beside the other two, and `stripDaemonOnly` below is what keeps
+// it off every client payload.
+//
+// ABSENT is not the same as EMPTY, and the difference is the whole migration story. A
+// board written before this rule shipped carries no key at all, and reading that as
+// "nothing has been delivered yet" would hand the thread's entire answered history to its
+// next packet on the first wait after an upgrade -- precisely the "round 6 redelivers
+// rounds 1-5" damage the packet is round-scoped to prevent. So the first commit that
+// touches a board with no ledger ADOPTS whatever it has already sent as delivered and
+// writes the key, and only what happens after that is ever owed. The board is minted
+// without the field rather than with an empty one deliberately: `createBoard` above is
+// what `examples/sample-board.mjs` builds its committed fixture through, and a field
+// seeded there would be a stored-shape change for a fact only the daemon has an opinion
+// about.
+export const ANSWERS_DELIVERED = 'answersDelivered';
+
 /** A shallow copy of `board` with those records removed, for anything a client sees.
  *
  * Not a nicety. The daemon writes the marker with `writeBoard` and does NOT re-render
@@ -1325,6 +1387,6 @@ export const SUPPRESSED = 'suppressed';
  * these out of the payload keeps the rendered bytes a pure function of the board's
  * REVIEWER-facing state, which is the property that invariant is really about. */
 export function stripDaemonOnly(board) {
-  const { [STRANDED_BANNER]: _banner, [SUPPRESSED]: _suppressed, ...rest } = board;
+  const { [STRANDED_BANNER]: _banner, [SUPPRESSED]: _suppressed, [ANSWERS_DELIVERED]: _delivered, ...rest } = board;
   return rest;
 }

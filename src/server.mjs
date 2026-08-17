@@ -52,7 +52,7 @@ import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, sto
 import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
-import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, dropResolved, resolveComments, questionBlocks, stripDaemonOnly, SUPPRESSED, roundContentDrifted } from './board.mjs';
+import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, stripDaemonOnly, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, renderRefusalPage, CSP, INDEX_CSP } from './render.mjs';
 import { buildThreadIndex, renderIndexPage, renderThreadRows, folderName } from './indexpage.mjs';
 // The one shape rule for "is this round a full-viewport page" (ADR.md entry 33),
@@ -1284,6 +1284,30 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
   res.end();
 }
 
+/** `threadBoards` is every board of `thread` in the store, oldest first, with `board`'s
+ * own entry substituted for the copy `listBoards` just re-read off disk -- same file, but
+ * it keeps the caller's `pending` entries pointing at the very objects the packet was
+ * built from.
+ *
+ * A thread's rounds can span more than one board (`boundCwdForThread` above does the same
+ * walk for the same reason), so both drains below are thread-wide and neither can be
+ * written against `board` alone. Shared rather than done twice: the two rules are
+ * independent in every other respect, but this walk is the expensive part and there is no
+ * sense paying for it twice per wait.
+ *
+ * ponytail: this reads and parses every board in the store on every `/wait` that
+ * resolves, to find the few in this thread. The ceiling is the store's total size, not the
+ * thread's -- `boundCwdForThread` above pays the same cost and its own comment justifies
+ * keeping it off the hot path, which this is closer to. It is fine while a store holds
+ * hundreds of boards and a wait is once per round; the upgrade path, when it stops being
+ * fine, is a thread -> board-id index beside the boards rather than a smarter walk. */
+function threadBoards(thread, board, home) {
+  return listBoards(home)
+    .filter(b => b && b.thread === thread)
+    .map(b => (b.id === board.id ? board : b))
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+}
+
 /** ADR 35: a comment left on a round that returned no packet is held as undelivered
  * and rides the next packet the same thread returns, once.
  *
@@ -1307,10 +1331,9 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
  * meet: a comment whose packet left is never drained again, and a comment whose packet
  * never left is always drained next.
  *
- * Walks every board of `thread`, not just `board`: a thread's rounds can span more
- * than one board (`boundCwdForThread` above does the same walk for the same reason),
- * and a carried-forward comment can live on any of them. Each pending comment is
- * resolved against its OWN board -- `blockId` and `n` numbering are per-board
+ * Takes `boards` -- the whole thread, from `threadBoards` above -- rather than just
+ * `board`, because a carried-forward comment can live on any of them. Each pending
+ * comment is resolved against its OWN board -- `blockId` and `n` numbering are per-board
  * (PROTOCOL.md "Identifiers") -- never smuggled into `board`'s. `round`'s own comments
  * are excluded here regardless (even on the rare shape where the round being waited on
  * is itself not awaited): `buildPacket`'s normal round-scoped filter already hands
@@ -1325,23 +1348,7 @@ function handleAuthHandoff(req, res, token, handoffs, secret, pathname) {
  * is known to have left the daemon, loses the comment outright to a request that aborts
  * or a daemon that restarts in that window -- and noise beats data loss, since ADR 35
  * exists precisely so a comment produces something somebody reads. */
-function drainUndeliveredComments(thread, board, round, home) {
-  // ponytail: this reads and parses every board in the store on every `/wait` that
-  // resolves, to find the few in this thread. The ceiling is the store's total size,
-  // not the thread's -- `boundCwdForThread` above pays the same cost and its own
-  // comment justifies keeping it off the hot path, which this is closer to. It is
-  // fine while a store holds hundreds of boards and a wait is once per round; the
-  // upgrade path, when it stops being fine, is a thread -> board-id index beside the
-  // boards rather than a smarter walk.
-  const boards = listBoards(home)
-    .filter(b => b && b.thread === thread)
-    // Reuse the already-loaded board for its own entry rather than the copy
-    // listBoards just re-read from disk -- same file, but it keeps the `pending`
-    // entries below pointing at the very objects the packet was built from. `commit`
-    // no longer writes this object back (it re-reads), so this is about which comments
-    // get drained, not about which document gets saved.
-    .map(b => (b.id === board.id ? board : b))
-    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+function drainUndeliveredComments(boards, board, round, home) {
   const comments = [];
   const pendingByBoard = [];
   for (const b of boards) {
@@ -1407,10 +1414,108 @@ function drainUndeliveredComments(thread, board, round, home) {
   return { comments, commit };
 }
 
-/** `buildPacket` plus whatever undelivered comments the thread is owed (ADR 35) --
- * every place a packet leaves the server through `/wait` goes through this instead of
- * `buildPacket` directly, timeout included: a timed-out round still returns a packet,
- * and a comment held from an earlier round is just as owed to it as to a normal one.
+/** ADR 107, the same rule generalised to answers: a SUBMITTED round whose answers no
+ * packet ever carried has them owed to the next packet the same thread returns, once.
+ *
+ * Two shapes lose an answer set without this, and one mechanism covers both because the
+ * fact it keys on is the same in each. A round whose wait died and which the reviewer
+ * then submitted anyway (ADR 50 leaves a lapsed round `open`, so the submit lands and is
+ * persisted) can never hand a caller a packet again -- the wait it belonged to is gone,
+ * and "one packet is one round" stops any later one carrying it. And a round whose own
+ * response died on the wire loses its answers identically, since a retry cannot get a
+ * packet for that round either. In the observed case (2026-08-17) the agent was left
+ * holding a `timeout` packet claiming an explicit no-response the store had already
+ * falsified, re-asked all six questions two rounds later, and the two records disagreed
+ * on two of the six.
+ *
+ * The mark is `ANSWERS_DELIVERED` (src/board.mjs) -- see that constant for why the
+ * ledger sits on the board rather than on each round, and why an ABSENT ledger means "a
+ * board from before this rule" rather than "nothing delivered yet". A board with no
+ * ledger has its already-sent rounds ADOPTED here rather than drained: they are recorded
+ * as delivered and the ledger is written even when there is nothing else to write, so the
+ * board joins the rule from that moment on instead of paying out its whole history once.
+ *
+ * A round is owed exactly when it is `sent` and unmarked. `sent` is what makes the
+ * question interesting at all: an `open` round has no submitted answers for any packet to
+ * have carried, and an `abandoned` one never will have (`handleSubmit` below refuses a
+ * round that is not open), so neither is ever a candidate. That is also precisely why a
+ * timeout packet does not spend the mark on its own round -- at the instant it leaves,
+ * that round is still `open`.
+ *
+ * A round with no question blocks at all is skipped outright rather than marked: an
+ * artifact round owes nothing and never will, and recording a delivery for it would put
+ * a write on the wire for every page board a thread ever posted.
+ *
+ * The waited round itself is MARKED but not drained, exactly as its comments are:
+ * `buildPacket` (src/board.mjs) already put its answers in this very packet through its
+ * ordinary round-scoped filter, and adding them here as well would hand one response the
+ * same answer entry twice.
+ *
+ * Split into read-and-resolve plus a `commit` closure for the same reason
+ * `drainUndeliveredComments` above is, and with the same failure mode in mind: marking
+ * eagerly loses the answers to a request that aborts in the window before the response
+ * leaves, and a redelivery is noise where a loss is the thing this exists to prevent. */
+function drainUndeliveredAnswers(boards, board, round, home) {
+  const answers = [];
+  const pendingByBoard = [];
+  for (const b of boards) {
+    // No ledger at all: a board written before this rule shipped. Everything already sent
+    // on it is adopted below rather than paid out -- see ANSWERS_DELIVERED (src/board.mjs).
+    const adopting = !Array.isArray(b[ANSWERS_DELIVERED]);
+    const delivered = new Set(adopting ? [] : b[ANSWERS_DELIVERED]);
+    const mark = [];
+    for (const r of b.rounds || []) {
+      if (r.status !== 'sent' || delivered.has(r.n)) continue;
+      const entries = roundAnswers(b, r.n);
+      if (!entries.length) continue; // asked nothing, so there is nothing to owe
+      mark.push(r.n);
+      if (adopting) continue;
+      // Its own round is the one exception, and it is the packet's own: buildPacket
+      // already carried it.
+      if (b.id !== board.id || r.n !== round) answers.push(...entries);
+    }
+    // `adopting` on its own is enough to write: a legacy board with nothing sent yet has
+    // an empty adoption, and skipping it would leave it legacy until the round it is
+    // about to owe has already been swallowed by the NEXT commit's adoption.
+    if (adopting || mark.length) pendingByBoard.push({ board: b, rounds: mark });
+  }
+  const commit = () => {
+    for (const { board: b, rounds } of pendingByBoard) {
+      // Kept in step with what is about to be written for the same reason the comment
+      // commit does it: it costs nothing, and it keeps this in-memory board honest rather
+      // than depending on an argument about who else is holding `b`.
+      b[ANSWERS_DELIVERED] = [...new Set([...(b[ANSWERS_DELIVERED] || []), ...rounds])].sort((x, y) => x - y);
+      // Re-read and MERGE, never write the captured board back: `commit` runs on the
+      // response's own `finish` event, a later macrotask than the capture above, and in
+      // that window another writer (the stranded rule's timer callback, src/stranded.mjs)
+      // can have landed a record on this same document. Same reasoning, same swallow, and
+      // the same consequence for a failure -- the rounds stay unmarked and ride the next
+      // `/wait` on the thread, which is a redelivery rather than a loss.
+      try {
+        const fresh = readBoard(b.id, home);
+        if (!fresh) continue; // the board is gone; nothing to mark
+        fresh[ANSWERS_DELIVERED] = [...new Set([...(fresh[ANSWERS_DELIVERED] || []), ...rounds])].sort((x, y) => x - y);
+        writeBoard(fresh, home);
+      } catch (err) {
+        console.error(`claude-board: could not mark answers delivered for board ${b && b.id}: ${(err && err.message) || err}`);
+      }
+    }
+  };
+  return { answers, commit };
+}
+
+/** `buildPacket` plus whatever the thread is owed and no packet has carried -- comments
+ * (ADR 35) and, since ADR 107, a submitted round's answers. Every place a packet leaves
+ * the server through `/wait` goes through this instead of `buildPacket` directly, timeout
+ * included: a timed-out round still returns a packet, and what an earlier round is owed is
+ * just as owed to that one as to a normal one.
+ *
+ * Both exceptions APPEND to the arrays `buildPacket` already built rather than changing
+ * the packet's shape, and each entry is told apart by the `round` it already carries. A
+ * consumer that never heard of either rule keeps working unread.
+ *
+ * One thread walk (`threadBoards` above), two independent rules: each owns one field and
+ * commits it separately, so a failure to persist one cannot silently spend the other.
  *
  * Returns `{ packet, commit }`, not a bare packet: see `drainUndeliveredComments` for
  * why persisting the delivered marks is deliberately not this function's job. Exported
@@ -1418,9 +1523,15 @@ function drainUndeliveredComments(thread, board, round, home) {
  * to win a real socket-abort race. */
 export function buildPacketWithUndelivered(board, round, url, home) {
   const packet = buildPacket(board, round, url);
-  const { comments: drained, commit } = drainUndeliveredComments(board.thread, board, round, home);
+  const boards = threadBoards(board.thread, board, home);
+  const { comments: drained, commit: commitComments } = drainUndeliveredComments(boards, board, round, home);
+  const { answers: owed, commit: commitAnswers } = drainUndeliveredAnswers(boards, board, round, home);
   if (drained.length) packet.comments = packet.comments.concat(drained);
-  return { packet, commit };
+  if (owed.length) packet.answers = packet.answers.concat(owed);
+  return {
+    packet,
+    commit: () => { commitComments(); commitAnswers(); },
+  };
 }
 
 async function handleWait(req, res, id, url, home, sse, stream, waiting) {
@@ -2416,10 +2527,12 @@ export function createRequestHandler({ home = boardHome(), secret: pinnedSecret,
         const action = parts[3];
         if (req.method === 'GET' && action === 'wait') {
           // S1: this GET is not a read. `handleWait` writes the board on its timeout
-          // branch and, on every branch, spends undelivered comments (marks them
-          // `delivered: true`) once the response lands -- see the comments on
-          // `handleWait` and `drainUndeliveredComments` above for why both of those are
-          // deliberate and must stay exactly as they are. Gate 4 above already let this
+          // branch and, on every branch, spends what the thread is owed once the response
+          // lands -- undelivered comments (marks them `delivered: true`) and, since ADR
+          // 107, a submitted round's undelivered answers -- see the comments on
+          // `handleWait`, `drainUndeliveredComments` and `drainUndeliveredAnswers` above
+          // for why all of those are deliberate and must stay exactly as they are.
+          // Gate 4 above already let this
           // request through on the weaker READ credential (secret, or a same-origin
           // cookie), which is the gap: a cookie is precisely what a CSRF-shaped
           // cross-origin GET can ride in on, and no browser page ever legitimately

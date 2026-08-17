@@ -192,8 +192,11 @@ round of content only returns the instant it lands.
   reviewer to reopen `url` or move on in chat. **Never silently retry the round.** A round
   that timed out is not closed — it stays open, so a re-post amends that same dead round in
   place rather than opening a fresh one: the blocks land on a round with no live deadline and
-  nothing waiting on it, and you get `posted` straight back instead of an answer. Anything the
-  reviewer had typed on it arrives as an ordinary comment on your next packet.
+  nothing waiting on it, and you get `posted` straight back instead of an answer. A reviewer
+  who answers it late still reaches you: those answers arrive on your next packet the same way
+  comments already do, appended to `answers` and each naming the round it belongs to — so read
+  every entry's own `round`, and treat a late answer as settling that question rather than
+  re-asking it.
 - **`abandoned`**: the round was closed while you were still waiting on it, because the
   conversation that owned the board declared itself over — a later `ask` with `fresh: true`
   started a new board, or the board was abandoned directly. Nobody answered and nobody will:
@@ -216,12 +219,17 @@ A comment anchored to a block (`blockId` / `anchor`) is feedback on that block, 
 answer; address it as its own input. One packet is one round: round 6 does not redeliver
 rounds 1 through 5. A page board posted with `wait: true` gets its own comments back the
 normal way, in its own packet, `status: 'submitted'` — an empty `comments` array there is
-a real outcome, not an error. A page board posted *without* `wait` is the one exception to
-"one packet is one round": nothing ever waits on it, so a comment left there rides the
-next packet the same thread returns, once. Collecting comments from a page board therefore
-costs either `wait: true` on it, or a later round that asks something. A `wait: true` page
-board whose wait times out falls back to exactly that behaviour: its comments were not
-delivered in its own packet, so they ride the next one.
+a real outcome, not an error.
+
+There are exactly two exceptions, and they are the same rule: **what no packet has carried
+is owed to the next packet the same thread returns, once**, appended to that packet's own
+array and told apart by the `round` each entry carries. A page board posted *without*
+`wait` is the first — nothing ever waits on it, so a comment left there rides the next
+packet; collecting comments from one therefore costs either `wait: true` on it or a later
+round that asks something, and a `wait: true` page board whose wait times out falls back to
+exactly this. The second is a round answered after its wait died, above. Both ride whatever
+packet comes next, `timeout` and `abandoned` included, so check the `round` on every answer
+and every comment before assuming it belongs to the round you just posted.
 
 ## When the board is unavailable
 

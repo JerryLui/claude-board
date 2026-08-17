@@ -178,6 +178,18 @@ round is awaited by its question either way and the deadline is identical either
 the flag asks for the state the round is already in. It stays the two routes above; `wait`
 never becomes a third.
 
+**`answersDelivered`** (ADR 107) is a daemon-only ledger beside the rounds: the round numbers of
+this board whose answers a packet has actually carried out, ascending. It is what makes the
+packet's second exception decidable — a `sent` round missing from it is owed to the next packet
+the thread returns — and it is written only when a packet naming that round has genuinely left,
+never at submit time and never at mint time. Like `strandedBanner` and `suppressed` it is stripped
+from everything a client sees, and for a sharper reason than either: it is written on a wait's own
+`finish` with no re-render beside it, so a per-round flag would make the served page disagree with
+`pages/<id>.html` on every wait that resolves. **A board written before this field existed carries
+no key at all**, which is not the same as an empty one: the first packet that touches such a board
+adopts whatever it has already sent as delivered and writes the key, so a thread in flight across
+an upgrade is not handed its whole answered history at once.
+
 **`awaited` comes back off when the deadline passes** (ADR 50). `closeLapsedAwaitedRounds`
 (`src/badge.mjs`) is the only writer that clears it, and `readBoard` (`src/store.mjs`) — the
 choke point every reader of a stored board goes through — applies it on every read, so a round
@@ -506,32 +518,51 @@ side — and it was not a page board (one `html` block, nothing else) posted wit
 succeeded rather than waiting at all. `answers` and `comments` are always empty on a `posted`
 packet. `discuss` means the reviewer chose Discuss in chat: partial answers
 are included and the agent must stop posting boards for the rest of the session. `timeout` is the
-wall-clock cap (default 40m, ADR.md entry 47) and carries an explicit no-response — an empty `answers`, and no
-comments beyond the undelivered ones described next, which are owed to a timed-out round exactly
-as they are to any other. `abandoned` is the round being closed under a blocked call — the
+wall-clock cap (default 40m, ADR.md entry 47) and carries an explicit no-response about ITS OWN
+round — an empty `answers` and no comments of its own — plus whatever the two exceptions below
+owe the thread, which are owed to a timed-out round exactly as they are to any other. `abandoned`
+is the round being closed under a blocked call — the
 conversation that owned the board declared itself over (`fresh`, ADR.md entry 69) or the board was
 abandoned directly — and it is terminal in a way `timeout` is not: the round will never reopen, so
 the caller posts to the current board rather than to this one. It carries whatever the store held
-plus the same owed comments, and the shim names it as its own outcome, never as a submit.
+plus the same owed comments and answers, and the shim names it as its own outcome, never as a
+submit.
 
-**Scope: one packet is one round, with one exception.** `answers` holds exactly the question
+**Scope: one packet is one round, with two exceptions.** `answers` holds exactly the question
 blocks whose `round` is the packet's `round`, and `comments` exactly the comments left in it.
 Round 6 does not redeliver rounds 1-5: the agent would re-address settled feedback and re-report
 an old `unanswered`/`deferred` as a fresh signal, louder each round. Every entry carries its own
 `round` (and each comment its `createdAt`), so a caller that wants the thread's history reads
 `board.answers` / `board.comments`. The stored board keeps everything; the packet is the round.
 
-**The exception: a comment left on a round that is not *awaited*** (ADR.md entry 35, narrowed by
+Both exceptions are the same rule — **what no packet has carried is owed to the next packet the
+same thread returns, once** — and both are additive: they append to the array the packet already
+built, are told apart by the `round` every entry carries, and change nothing about the packet's
+shape, so a consumer that has never heard of either keeps working unread. "Once" means committed
+as delivered only after the response has actually left the daemon, so a dropped connection
+re-delivers rather than loses, and what has been delivered is never sent again. They ride whatever
+packet comes next, `timeout` and `abandoned` included.
+
+**The first exception: a comment left on a round that is not *awaited*** (ADR.md entry 35, narrowed by
 entry 45). A page board posted without `wait: true` is a round nothing ever waits on, so nothing
 would otherwise carry its comments back — the reviewer's feedback on the artifact would sit in the
 store unread. Such a comment rides the next packet the same thread returns, once, appended to that
 packet's own `comments`; it carries its own `round`, which is how a caller tells it from the round
-in hand. Once, not once per round: the packet is committed as delivered only after the response
-has actually left, so a dropped connection re-delivers rather than loses, and a delivered comment
-is never sent again. Collecting comments from a page board therefore costs either `wait: true` on
+in hand. Collecting comments from a page board therefore costs either `wait: true` on
 it, so it gets its own `/wait` call and its own `submitted` packet with `comments` populated
 directly (an empty array there is a normal outcome, not this exception), or a later round that
 asks something — an agent that wants them one way or the other rather than polling for it.
+
+**The second exception: the answers of a submitted round no packet ever carried** (ADR.md entry
+107). A round whose wait died and which the reviewer then submitted anyway is the shape this
+exists for: a lapsed round stays `open` (ADR.md entry 50), so the submit lands and is persisted,
+but that round can never hand a caller a packet again and the rule above stops any later one
+carrying it. The agent is left holding a `timeout` packet claiming an explicit no-response the
+store has since falsified. A round whose own response died on the wire loses its answers the same
+way. So a `sent` round whose answers no packet has carried has them appended to the next packet
+the same thread returns, each entry naming its own `round` exactly as it always did. A round
+answered through its own `/wait` is never redelivered this way — that packet leaving is precisely
+what marks it — and no packet ever carries the same answer entry twice.
 
 **`status` is the only thing that says whether a question was decided; `choice` is not.** A caller
 must branch on `status` and never on `choice` being non-null, because the three statuses do not
@@ -1057,10 +1088,11 @@ the store holds. A client that disconnects ends the wait outright — nothing is
 poll stops.
 
 **Secret-only, unlike every other GET.** `handleWait` writes -- it persists the board on the
-timeout branch above and, on every branch, marks every undelivered comment `delivered: true`
-once the response has actually left -- so this is gated exactly like a write: the secret
-header, never the session cookie alone. The only caller is `bin/mcp.mjs`, which already sends
-the secret on every request, reads included.
+timeout branch above and, on every branch, spends what the thread is owed once the response has
+actually left: every undelivered comment is marked `delivered: true`, and every submitted round
+whose answers this packet carried is recorded in `answersDelivered` -- so this is gated exactly
+like a write: the secret header, never the session cookie alone. The only caller is `bin/mcp.mjs`,
+which already sends the secret on every request, reads included.
 
 ## The pomodoro routes (ADR 8, 20, 67)
 

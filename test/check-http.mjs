@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { HANDOFF_TOKEN_RE, recoveryCommand, repoRoot } from '../src/handoff.mjs';
 import { startServer, activeWaitCount, buildPacketWithUndelivered, DEFAULT_WAIT_TIMEOUT_MS } from '../src/server.mjs';
-import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
+import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
 // The one cap every by-value string on a board shares (src/resolve.mjs), read rather
 // than restated so a check cannot pass against a number the product no longer uses.
 import { MAX_REF_BYTES } from '../src/resolve.mjs';
@@ -4090,6 +4090,274 @@ async function main() {
       readBoard(board1, home).comments[0].delivered, true,
       'commit must still do its own job: the comment it drained is marked delivered',
     );
+  });
+
+  // --- ADR 107: a submitted round's answers ride the next packet, once -------------
+  //
+  // The same rule as ADR 35 above, generalised from comments to answers, so these
+  // checks are deliberately shaped like the ones they sit under: the same two-board
+  // thread for the cross-board case, and the same exported `buildPacketWithUndelivered`
+  // seam for the deferred-commit half, which no loopback request flushes slowly enough
+  // to race honestly.
+  //
+  // What is NOT shared is the trigger. A comment goes undelivered when its round returned
+  // no packet at all; a round's ANSWERS go undelivered when the packet that did leave
+  // could not have carried them, because at the moment it left the round had not been
+  // submitted. That is the timeout shape, and it is the one every fixture below builds:
+  // let round 1's wall clock fire, then submit it anyway (ADR 50 leaves a lapsed round
+  // `open`, so the submit lands and is persisted where nothing can ever hand it back).
+
+  /** `lapse` lets one round's wait die on the wall clock and hands back its packet.
+   * `CLAUDE_BOARD_TIMEOUT_MS` is read per call (`waitTimeoutMs`, src/server.mjs), so the
+   * override applies to this one wait and is restored either way -- a leaked 250ms cap
+   * would silently turn every later blocking check in this file into a timeout. */
+  async function lapse(boardId, round = 1) {
+    const previous = process.env.CLAUDE_BOARD_TIMEOUT_MS;
+    process.env.CLAUDE_BOARD_TIMEOUT_MS = '250';
+    try {
+      return await (await fetch(`${base}/api/board/${boardId}/wait?round=${round}`)).json();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_BOARD_TIMEOUT_MS;
+      else process.env.CLAUDE_BOARD_TIMEOUT_MS = previous;
+    }
+  }
+
+  /** `askRound` posts a round carrying exactly one question and hands back the board id,
+   * the thread and the question block's own id -- which is only knowable by reading the
+   * board back, since the daemon mints it. `into` names an existing board (a further
+   * round on it) or a thread (a second board in it); omitted, it opens a fresh thread. */
+  async function askRound(prompt, into = {}) {
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: prompt,
+        ...into,
+        blocks: [{ kind: 'question', prompt, widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+      }),
+    })).json();
+    const stored = readBoard(posted.boardId, home);
+    const qid = stored.blocks.filter(b => b.kind === 'question' && b.round === posted.round).map(b => b.id)[0];
+    return { ...posted, qid };
+  }
+
+  /** `answer` submits one round, as the page's Send button does. */
+  function answer(boardId, round, qid, choice, note = '') {
+    return fetch(`${base}/api/board/${boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round, action: 'send', answers: [{ id: qid, status: 'answered', choice, note }], comments: [] }),
+    });
+  }
+
+  /** `askAndAnswer` waits on a round and answers it -- the ordinary shape every packet
+   * below arrives through. The wait has to be in flight before the submit lands, or
+   * `waitForRound` returns on its first poll and proves nothing about a blocked call. */
+  async function askAndAnswer(boardId, round, qid, choice, note = '') {
+    const waiting = fetch(`${base}/api/board/${boardId}/wait?round=${round}`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const submitted = await answer(boardId, round, qid, choice, note);
+    assert.equal(submitted.status, 200, `setup: round ${round} must be submittable`);
+    return waiting;
+  }
+
+  await check('ADR 107 AC 1/2: a round whose wait died and which was then submitted late rides the next packet the thread returns, naming its own round -- and rides it exactly once', async () => {
+    const r1 = await askRound('LATE_SUBMIT_Q1');
+    const timedOut = await lapse(r1.boardId);
+    assert.equal(timedOut.status, 'timeout', 'setup: round 1 must actually lapse');
+    assert.equal(timedOut.answers[0].status, 'unanswered',
+      'and its packet claims an explicit no-response -- the claim the late submit is about to falsify');
+    assert.ok(!(readBoard(r1.boardId, home)[ANSWERS_DELIVERED] || []).includes(1),
+      'nothing is marked delivered by that packet: at the instant it left, the round was still open and had no answers to carry');
+
+    // ADR 50 leaves a lapsed round `open`, so this lands -- and lands nowhere any packet
+    // could ever reach it from, which is the whole defect.
+    assert.equal((await answer(r1.boardId, 1, r1.qid, 'No', 'answered 39 minutes late')).status, 200);
+    assert.equal(readBoard(r1.boardId, home).answers[r1.qid].choice, 'No', 'setup: the late answer really is on the board');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'and still nothing has carried it');
+
+    const r2 = await askRound('SECOND_ROUND_Q', { boardId: r1.boardId });
+    assert.equal(r2.round, 2);
+    const packet2 = await askAndAnswer(r1.boardId, 2, r2.qid, 'Yes');
+
+    assert.equal(packet2.answers.length, 2, 'round 2\'s packet carries its own answer plus the one round 1 was owed');
+    assert.equal(packet2.answers[0].round, 2, 'the packet\'s own round comes first -- owed entries are appended, never spliced in');
+    const owed = packet2.answers[1];
+    assert.equal(owed.round, 1, 'the owed entry names the round that owes it, not the round in hand');
+    assert.equal(owed.id, r1.qid);
+    assert.equal(owed.prompt, 'LATE_SUBMIT_Q1');
+    assert.equal(owed.status, 'answered');
+    assert.equal(owed.choice, 'No');
+    assert.equal(owed.note, 'answered 39 minutes late');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1, 2], 'both rounds are marked once that packet has left');
+
+    // Once, ever. A third round on the same thread must carry its own answer and nothing
+    // else -- the ablation is `delivered.has(r.n)` removed from the drain, which turns
+    // every later packet into a growing replay of the whole thread.
+    const r3 = await askRound('THIRD_ROUND_Q', { boardId: r1.boardId });
+    const packet3 = await askAndAnswer(r1.boardId, 3, r3.qid, 'Yes');
+    assert.deepEqual(packet3.answers.map(a => a.round), [3], 'an already-delivered round must not come back a second time');
+  });
+
+  await check('ADR 107 AC 5: a round whose own packet left normally is never redelivered, and no packet carries the same answer entry twice', async () => {
+    // The other direction of the same mark, and the one that keeps "one packet is one
+    // round" true everywhere but the two documented exceptions: round 1 here is answered
+    // through its own blocked `/wait`, so its answers left in its own packet.
+    const r1 = await askRound('NORMAL_ROUND_Q');
+    const packet1 = await askAndAnswer(r1.boardId, 1, r1.qid, 'Yes');
+    assert.deepEqual(packet1.answers.map(a => a.round), [1], 'setup: round 1 gets its own answer in its own packet, once');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1], 'and that packet leaving is what marks it');
+
+    const r2 = await askRound('NORMAL_ROUND_Q2', { boardId: r1.boardId });
+    const packet2 = await askAndAnswer(r1.boardId, 2, r2.qid, 'No');
+    assert.deepEqual(packet2.answers.map(a => a.round), [2], 'round 2 does not redeliver round 1');
+    assert.equal(new Set(packet2.answers.map(a => a.id)).size, packet2.answers.length,
+      'and no packet ever carries the same answer entry twice -- the waited round is marked by this drain but never drained by it');
+  });
+
+  await check('ADR 107 AC 3: the delivered mark stays unpersisted until commit -- deferred, not eager, provable without winning a socket race', async () => {
+    // Byte-for-byte the argument the ADR 35 deferred-commit check above makes, and driven
+    // at the same exported seam for the same reason: a loopback response flushes far too
+    // fast to land an assertion inside the window where the packet is computed and the
+    // response has not gone anywhere. Marking eagerly here does not merely re-deliver, it
+    // LOSES the answers -- the round can never hand out a packet again.
+    const r1 = await askRound('DEFERRED_ANSWER_Q');
+    assert.equal((await lapse(r1.boardId)).status, 'timeout');
+    assert.equal((await answer(r1.boardId, 1, r1.qid, 'Yes', 'DEFERRED_ANSWER_NOTE')).status, 200);
+
+    const r2 = await askRound('DEFERRED_COLLECTOR_Q', { thread: r1.thread });
+    assert.notEqual(r2.boardId, r1.boardId, 'this check is only proving something if the collecting round is its own board');
+    const collector = readBoard(r2.boardId, home);
+
+    const first = buildPacketWithUndelivered(collector, 1, 'http://test.invalid/', home);
+    assert.equal(first.packet.answers.filter(a => a.note === 'DEFERRED_ANSWER_NOTE').length, 1, 'the packet must carry the owed answer');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [],
+      'building the packet must not itself persist the mark -- the response has not gone anywhere yet');
+
+    // The response never reaches the client: this build's `commit` is simply never called,
+    // exactly as `res.once('finish', commit)` never fires for a socket that died. A second,
+    // independent build -- a later wait -- must still find the answers.
+    const second = buildPacketWithUndelivered(collector, 1, 'http://test.invalid/', home);
+    assert.equal(second.packet.answers.filter(a => a.note === 'DEFERRED_ANSWER_NOTE').length, 1,
+      'an uncommitted drain must not have consumed the answers -- they are still there for the next attempt');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'still nothing on disk -- two computed packets, zero commits');
+
+    second.commit();
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1], 'commit is what persists the mark, and only commit');
+
+    const third = buildPacketWithUndelivered(collector, 1, 'http://test.invalid/', home);
+    assert.equal(third.packet.answers.filter(a => a.note === 'DEFERRED_ANSWER_NOTE').length, 0, 'once committed, the answers are gone from future packets');
+  });
+
+  await check('ADR 107 AC 6: owed answers ride across boards of the same thread, resolved against their own board', async () => {
+    // A thread's rounds span boards (`ask` opens a new one whenever the reviewer has
+    // closed the last), so the owing round and the collecting round routinely live on
+    // different documents -- and a question id is per-BOARD, so `q1` on one is a
+    // different question from `q1` on the other. Resolving against the wrong board would
+    // hand the agent the collecting board's own prompt with the other board's answer
+    // attached, which reads as a plausible answer to a question nobody asked.
+    const owing = await askRound('CROSS_BOARD_OWING_Q');
+    assert.equal((await lapse(owing.boardId)).status, 'timeout');
+    assert.equal((await answer(owing.boardId, 1, owing.qid, 'No', 'left on the first board')).status, 200);
+
+    const collecting = await askRound('CROSS_BOARD_COLLECTING_Q', { thread: owing.thread });
+    assert.notEqual(collecting.boardId, owing.boardId, 'setup: the two rounds must be on different boards');
+    assert.equal(collecting.qid, owing.qid, 'setup: and their question ids must COLLIDE, or own-board resolution is not being tested');
+
+    const packet = await askAndAnswer(collecting.boardId, 1, collecting.qid, 'Yes');
+    assert.equal(packet.answers.length, 2);
+    assert.equal(packet.answers[0].prompt, 'CROSS_BOARD_COLLECTING_Q', 'the packet\'s own round is this board\'s question');
+    assert.equal(packet.answers[1].prompt, 'CROSS_BOARD_OWING_Q', 'and the owed entry is the OTHER board\'s question, resolved there');
+    assert.equal(packet.answers[1].note, 'left on the first board');
+    assert.deepEqual(readBoard(owing.boardId, home)[ANSWERS_DELIVERED], [1], 'the mark persists on the board the round actually lives on');
+
+    // And it never crosses into a thread it does not belong to: a board in a DIFFERENT
+    // thread must not see it, which is the same containment the undelivered-comment
+    // checks below assert for comments.
+    const stranger = await askRound('DIFFERENT_THREAD_Q');
+    const strangerPacket = await askAndAnswer(stranger.boardId, 1, stranger.qid, 'Yes');
+    assert.deepEqual(strangerPacket.answers.map(a => a.prompt), ['DIFFERENT_THREAD_Q'], 'another thread\'s packet must carry nothing of this one');
+  });
+
+  await check('ADR 107 AC 4: owed answers ride whatever packet comes next -- a timeout packet and an abandoned one included', async () => {
+    // `buildPacketWithUndelivered` is the single seam every `/wait` leaves through, so
+    // this is really a check that no branch of `handleWait` grew its own packet builder.
+    // It matters most on exactly these two: a `timeout` packet is documented as carrying
+    // "an explicit no-response", and an `abandoned` round never reopens -- so a packet
+    // that dropped what it was owed on either branch would drop it permanently.
+    const owing = await askRound('RIDES_A_TIMEOUT_Q');
+    assert.equal((await lapse(owing.boardId)).status, 'timeout');
+    assert.equal((await answer(owing.boardId, 1, owing.qid, 'Yes', 'owed to whatever comes next')).status, 200);
+
+    const nextRound = await askRound('TIMEOUT_CARRIER_Q', { boardId: owing.boardId });
+    const timeoutPacket = await lapse(owing.boardId, nextRound.round);
+    assert.equal(timeoutPacket.status, 'timeout');
+    assert.equal(timeoutPacket.answers.filter(a => a.round === 1).length, 1, 'a timeout packet carries what the thread is owed as readily as any other');
+    assert.equal(timeoutPacket.answers.find(a => a.round === 1).note, 'owed to whatever comes next');
+
+    // Now the abandoned branch, with a second owing round: the one above has been
+    // delivered, so it is no longer a candidate for anything.
+    assert.equal((await answer(owing.boardId, nextRound.round, nextRound.qid, 'No', 'owed on the abandon path')).status, 200);
+    assert.ok(!(readBoard(owing.boardId, home)[ANSWERS_DELIVERED] || []).includes(nextRound.round),
+      'setup: the second round lapsed and was submitted late too, so nothing has carried it');
+
+    const carrier = await askRound('ABANDON_CARRIER_Q', { thread: owing.thread });
+    const abandonedPacket = fetch(`${base}/api/board/${carrier.boardId}/wait?round=1`).then(r => r.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${carrier.boardId}/abandon`, { method: 'POST', headers: writeHeaders() });
+    const packet = await abandonedPacket;
+    assert.equal(packet.status, 'abandoned');
+    assert.equal(packet.answers.filter(a => a.note === 'owed on the abandon path').length, 1,
+      'an abandoned round is the last packet this caller will ever get, so it carries what it is owed too');
+  });
+
+  await check('ADR 107: the delivery ledger is daemon-only -- it never reaches a client, and the served page stays byte-identical to the archive on disk', async () => {
+    // The reason the mark is a board-level ledger rather than a flag on each round.
+    // `renderBoardPage` spreads `board.rounds` into `<script id="board-data">` verbatim,
+    // and `commit` runs on a response's `finish` with no re-render beside it -- so a
+    // per-round flag would make `GET /b/:id` serve markup `pages/<id>.html` does not
+    // have, breaking the invariant that makes an archived board open from Finder with no
+    // daemon. Same argument and same treatment as the check `STRANDED_BANNER` gets in
+    // test/check-stranded.mjs, made here because this field is spent on every wait.
+    const r1 = await askRound('LEDGER_IS_DAEMON_ONLY_Q');
+    await askAndAnswer(r1.boardId, 1, r1.qid, 'Yes');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1], 'the ledger really is on the stored board');
+
+    const served = await (await fetch(`${base}/b/${r1.boardId}`)).text();
+    const onDisk = readFileSync(path.join(home, 'pages', `${r1.boardId}.html`), 'utf8');
+    assert.equal(served, onDisk, 'served page must match the pages/ file exactly, after a wait has spent its marks');
+    assert.equal(served, renderBoardPage(readBoard(r1.boardId, home)),
+      're-rendering the stored JSON must reproduce it too -- the ledger is stripped, not merely absent from one of the three');
+    assert.ok(!served.includes(ANSWERS_DELIVERED), 'and the field name appears nowhere in the markup');
+  });
+
+  await check('ADR 107: a board written before the ledger existed adopts its already-sent rounds rather than paying its whole history out at once', async () => {
+    // The migration, and the only reason "no ledger" and "an empty ledger" are different
+    // facts. Stand in for a board archived by an earlier daemon by deleting the field
+    // from one this daemon has already finished with -- which is exactly what such a
+    // board looks like on disk, since nothing else writes it.
+    const legacy = await askRound('LEGACY_ROUND_1_Q');
+    await askAndAnswer(legacy.boardId, 1, legacy.qid, 'Yes', 'answered before the rule existed');
+    const stripped = readBoard(legacy.boardId, home);
+    delete stripped[ANSWERS_DELIVERED];
+    writeBoard(stripped, home);
+    assert.equal(readBoard(legacy.boardId, home)[ANSWERS_DELIVERED], undefined, 'setup: the board carries no ledger at all');
+
+    const r2 = await askRound('LEGACY_ROUND_2_Q', { boardId: legacy.boardId });
+    const packet = await askAndAnswer(legacy.boardId, 2, r2.qid, 'No');
+    assert.deepEqual(packet.answers.map(a => a.round), [2],
+      'a legacy board\'s settled history must not be handed back on the first wait after an upgrade -- that is the "round 6 redelivers rounds 1-5" damage this rule exists beside, not a case of it');
+    assert.deepEqual(readBoard(legacy.boardId, home)[ANSWERS_DELIVERED], [1, 2],
+      'it is adopted instead, and the ledger is written, so the board joins the rule from here on');
+
+    // And the adoption is a one-time amnesty, not a permanent exemption: a round that
+    // lapses and is submitted late AFTER the ledger exists rides normally.
+    const r3 = await askRound('LEGACY_ROUND_3_Q', { boardId: legacy.boardId });
+    assert.equal((await lapse(legacy.boardId, 3)).status, 'timeout');
+    assert.equal((await answer(legacy.boardId, 3, r3.qid, 'Yes', 'late, after adoption')).status, 200);
+    const r4 = await askRound('LEGACY_ROUND_4_Q', { boardId: legacy.boardId });
+    const packet4 = await askAndAnswer(legacy.boardId, 4, r4.qid, 'Yes');
+    assert.deepEqual(packet4.answers.map(a => a.round), [4, 3], 'the round that lapsed after adoption is owed exactly as any other is');
   });
 
   await check('map-context question round trip (/wayfind\'s shape): post one question whose context references a map section by its heading SLUG, render it, answer it, and prove the referenced content actually resolved -- not merely that the post returned 200', async () => {

@@ -34,7 +34,7 @@ link where it is worth reading.
 | 30 | [The tab mark stays amber; a numeral replaces the inverted tile](.agents/adr/0030-tab-mark-stays-amber-a-numeral-replaces-the.md) | 2026-08-06 | narrowed by 66 |
 | 32 | [A rendered page reaches the board as a snapshotted stage, not a framed served file](.agents/adr/0032-rendered-page-reaches-the-board-as-a-snapshotted.md) | 2026-08-07 | accepted |
 | 33 | [Fullpage is inferred from the board's shape, not declared by the caller](.agents/adr/0033-fullpage-is-inferred-from-the-board-s-shape.md) | 2026-08-07 | accepted |
-| 35 | [An undelivered comment rides the thread's next packet](.agents/adr/0035-undelivered-comment-rides-the-thread-s-next-packet.md) | 2026-08-07 | narrowed by 45 and 46 |
+| 35 | [An undelivered comment rides the thread's next packet](.agents/adr/0035-undelivered-comment-rides-the-thread-s-next-packet.md) | 2026-08-07 | narrowed by 45 and 46; widened by 107 |
 | 36 | [An upgrade widens a carried-forward root record back to the current defaults](.agents/adr/0036-upgrade-widens-a-carried-forward-root-record-back.md) | 2026-08-07 | accepted |
 | 38 | [`/file/` is deleted; the board is the only way to see a rendered page](.agents/adr/0038-file-is-deleted-the-board-is-the-only.md) | 2026-08-07 | accepted |
 | 40 | [A board header condenses into a centred pill on reading](.agents/adr/0040-board-header-condenses-into-a-centred-pill.md) | 2026-08-07 | narrowed by 59, 89 |
@@ -93,3 +93,4 @@ link where it is worth reading.
 | 104 | [A shape change reloads the page; values patch in place](.agents/adr/0104-a-shape-change-reloads-values-patch-in-place.md) | 2026-08-12 | relates to 103 |
 | 105 | [The pomodoro ships off](.agents/adr/0105-the-pomodoro-ships-off.md) | 2026-08-12 | narrows 103; relates to 68, 84, 90 |
 | 106 | [Off silences even a Suppressed board's Banner](.agents/adr/0106-off-silences-even-a-suppressed-boards-banner.md) | 2026-08-14 | narrows 92 |
+| 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50 |
