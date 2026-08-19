@@ -49,7 +49,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { readBoard, writeBoard, writePage, readAsset, boardHome, listBoards, storeFingerprint, searchBoards, pruneStore } from './store.mjs';
-import { ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
+import { ASSET_NAME, MERMAID_ASSET_NAME, SHARED_ASSETS, assetContentType } from './assets.mjs';
 import { readSecret, secretPath, secretMatches, sessionToken, sessionCookieMatches, SECRET_HEADER, SESSION_COOKIE, SESSION_MAX_AGE_S } from './secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, HANDOFF_TOKEN_RE, DEFAULT_PORT } from './handoff.mjs';
 import { createBoard, addRound, amendRound, abandonOpenRounds, applySubmit, buildPacket, roundAnswers, dropResolved, resolveComments, questionBlocks, stripDaemonOnly, SUPPRESSED, ANSWERS_DELIVERED, roundContentDrifted } from './board.mjs';
@@ -643,7 +643,7 @@ function isAuthorizedWrite(req, parts, secret) {
   return sessionCookieMatches(req.headers.cookie, secret);
 }
 
-/** The two GET routes that are reachable with no credential, and the reason each is.
+/** The three GET routes that are reachable with no credential, and the reason each is.
  *
  *  - `/api/health`: install.sh polls it with plain `curl` to decide whether the service
  *    actually came up, and gating it would make a fresh install report failure on a
@@ -658,11 +658,25 @@ function isAuthorizedWrite(req, parts, secret) {
  *  - `/auth/<token>`: the route that hands a browser its credential. Requiring one here
  *    would be a bootstrap loop. It is protected by the token being single-use, unguessable
  *    and seconds-lived instead (src/handoff.mjs).
+ *  - `GET /b/mermaid-<hash>.js`, and NOTHING else under `/b/`: the vendored mermaid
+ *    engine, for the one caller that structurally cannot hold the credential. A board
+ *    page's html stage is sandboxed with no `allow-same-origin`, so it runs at an opaque
+ *    origin and its subresource fetch arrives with no cookie at all (the session cookie is
+ *    `SameSite=Strict` besides) — gated, the engine 401s and every diagram inside every
+ *    posted artifact stays raw source. What the exception discloses is weaker than what
+ *    `/api/health` already does: the bytes are a third-party library published under its
+ *    own licence, byte-identical for every install of this version, and the name is a
+ *    digest OF those public bytes, so a caller who can ask for it by name already had it.
+ *    No board, no path, no store contents, and no user data is reachable through it. The
+ *    pattern is `MERMAID_ASSET_NAME` (src/assets.mjs) and not `ASSET_NAME`, deliberately:
+ *    `ui-<hash>.js` and `styles-<hash>.css` are this board's OWN client behaviour and
+ *    stay gated with everything else.
  *
  * Deliberately a closed list, not a prefix or a pattern: a route added later is gated
  * unless someone comes here and argues for it. */
 function isOpenRoute(pathname, parts) {
   if (pathname === '/api/health') return true;
+  if (parts[0] === 'b' && parts.length === 2 && MERMAID_ASSET_NAME.test(parts[1])) return true;
   return parts[0] === 'auth' && parts.length === 2;
 }
 
@@ -1197,9 +1211,11 @@ function handleGetPage(req, res, id, home) {
  * `pages/<name>` is what makes the served surface and the Finder surface literally the same
  * bytes, which is the promise the hash in the name makes.
  *
- * Behind the read gate like every other route: the caller is a page this daemon just served,
- * so it is already holding the session cookie. `immutable` caching is safe for exactly the
- * same reason the name is a hash — the bytes under a given name never change. */
+ * Behind the read gate like every other route, with ONE name-shaped exception: the caller is
+ * a page this daemon just served, so it is already holding the session cookie — except for
+ * `mermaid-<hash>.js`, whose caller is that page's sandboxed html stage and structurally
+ * holds nothing (see `isOpenRoute` for the argument). `immutable` caching is safe for
+ * exactly the same reason the name is a hash — the bytes under a given name never change. */
 function handleGetAsset(res, name, home) {
   // The fallback covers the one case where a live page names an asset the store has never
   // written: a board whose JSON exists but whose page file does not (readable through

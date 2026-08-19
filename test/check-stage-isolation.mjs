@@ -1125,10 +1125,20 @@ const uiSrcText = readFileSync(UI_SRC_PATH, 'utf8');
 const protocolText = readFileSync(PROTOCOL_PATH, 'utf8');
 
 /** Every `type:` string either half of the channel actually sends, read off the
- * real call shapes rather than off any hand-kept list -- `post({ type: 'x', ... })`
- * (src/render.mjs, the stage) and `postToStage(frame, { type: 'x', ... })`
- * (src/ui.mjs, the parent), across both files' raw source text so a type
- * introduced on either side is caught the same way. Deliberately does NOT match
+ * real message literals rather than off any hand-kept list -- an object literal
+ * whose first key is `type`, in either file's raw source text, so a type
+ * introduced on either side is caught the same way.
+ *
+ * This used to match the CALL shapes instead (`post({ type: 'x', ... })`,
+ * `postToStage(frame, { type: 'x', ... })`), and that was too narrow the moment a
+ * message had to be built before it was sent: the stage's mermaid facade keeps
+ * its request object so it can RESEND it until the parent answers
+ * (src/render.mjs's stageMermaidPrelude), so its literal no longer sits inside
+ * the parenthesis and the extractor stopped seeing a type that is very much
+ * live. Matching the literal is not looser in practice -- checked against both
+ * files, every `{ type: '...' }` in either of them exists to be posted -- and it
+ * survives the next message that needs to be held before it is sent. It still
+ * deliberately does NOT match
  * on `data.type === 'x'` (a receive branch): the design comment's own contract is
  * "every message this channel SENDS", and 'select' is discussed at length in
  * prose (src/render.mjs's no-'select' passage, ADR.md entry 78) without ever being sent
@@ -1141,8 +1151,9 @@ const protocolText = readFileSync(PROTOCOL_PATH, 'utf8');
  * without first being posted. */
 function liveMessageTypes(renderSrc, uiSrc) {
   const types = new Set();
-  for (const m of renderSrc.matchAll(/\bpost\(\s*\{\s*type:\s*'(\w+)'/g)) types.add(m[1]);
-  for (const m of uiSrc.matchAll(/\bpostToStage\([^,]+,\s*\{\s*type:\s*'(\w+)'/g)) types.add(m[1]);
+  for (const src of [renderSrc, uiSrc]) {
+    for (const m of src.matchAll(/\{\s*type:\s*'(\w+)'/g)) types.add(m[1]);
+  }
   return types;
 }
 
@@ -1186,13 +1197,21 @@ check('every live message type (a real post()/postToStage() call site) has an en
   assert.deepEqual(missing, [], `undocumented live message type(s): ${missing.join(', ')}`);
 });
 
-check('the ten live types are exactly ready/hover/click/positions/height/scroll/scrollBy/mode/locate/band', () => {
+check('the twelve live types are exactly ready/hover/click/positions/height/scroll/mermaid/scrollBy/mode/locate/band/diagrams', () => {
   // Pinned by hand once, so a type silently renamed (not just added) is also
   // caught: the check above only ever notices ADDITIONS relative to the
   // comment, never a live type and its comment entry drifting to two
   // different names in lockstep.
+  //
+  // 'mermaid'/'diagrams' are the newest pair: a diagram-bearing stage asking
+  // this page to draw its figures, and the page answering with the SVGs. The
+  // stage half is sent from the engine facade src/render.mjs prepends to such a
+  // stage's srcdoc, through the same `post({ type: ... })` shape the agent
+  // script uses -- which is exactly what keeps it visible to the extractor
+  // above rather than being a send this drift check cannot see.
   const live = liveMessageTypes(renderSrcText, uiSrcText);
-  assert.deepEqual([...live].sort(), ['band', 'click', 'height', 'hover', 'locate', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
+  assert.deepEqual([...live].sort(),
+    ['band', 'click', 'diagrams', 'height', 'hover', 'locate', 'mermaid', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
 });
 
 check('the deleted \'select\' type is not live, and is not required to be documented', () => {

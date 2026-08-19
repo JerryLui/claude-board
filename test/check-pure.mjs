@@ -41,7 +41,7 @@ import { formatCountdown, DEFAULT_SETTINGS } from '../src/pomodoro.mjs';
 import { TOMATO_ICON, REST_ICON } from '../src/pomodoro-widget.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { computeBoardPatch } from '../src/patch.mjs';
-import { ASSET_NAME, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
+import { ASSET_NAME, SCRIPT_ASSET, STYLE_ASSET, MERMAID_ASSET } from '../src/assets.mjs';
 import {
   roundIsAwaitedOpen, roundIsCurrentlyAwaited, roundCountdownText, pageBoardPillMeta,
   closeLapsedAwaitedRounds, roundWaitLapsed,
@@ -3973,6 +3973,33 @@ check('an amend that replaces a block clears the reviewer\'s local field state f
 // Finder. An absolute path, a URL, a protocol-relative
 // `//host/x` or a subdirectory would each break the Finder surface (AC 9), so each is
 // still a failure here; that is what this check now defends.
+/** Every subresource a document's markup pulls, by the attribute the browser would
+ * fetch. Navigation hrefs (the back-to-index `<a href="/">`) are deliberately not in
+ * this set: they are not loads, and they are allowed to be absolute. */
+function subresourceRefs(html) {
+  const refs = [];
+  for (const [, tag, attrs] of html.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
+    const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
+    if (m) refs.push({ tag, ref: m[1] });
+  }
+  return refs;
+}
+
+/** ADR 70's rule itself, in ONE place: the emitted page and an html stage's `srcdoc`
+ * are held to the identical standard, since both resolve against the same base URL and
+ * both have to work from Finder. */
+function assertBareSiblingRef(tag, ref, where) {
+  // A `data:` URL carries its own bytes, so it is self-contained by definition -- that is
+  // the favicon (src/styles.mjs's faviconLink), and it stays allowed.
+  if (ref.startsWith('data:')) return;
+  assert.ok(ASSET_NAME.test(ref),
+    `${where}: <${tag}> loads "${ref}", which is not a bare content-addressed sibling filename -- ` +
+    'an absolute path, a URL, a protocol-relative reference or a subdirectory all fail to ' +
+    'resolve when the page is opened from Finder (ADR 70)');
+  assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
+    `${where}: <${tag}> loads "${ref}", which is not bare: no separator, no scheme, no dot segment`);
+}
+
 check('the emitted page references the shared script and stylesheet as BARE SIBLING FILENAMES, and nothing else external', () => {
   const board = createBoard({
     title: 'Standalone',
@@ -3980,27 +4007,10 @@ check('the emitted page references the shared script and stylesheet as BARE SIBL
   });
   const html = renderBoardPage(board);
 
-  // Every subresource the page pulls, by the attribute the browser would fetch. Navigation
-  // hrefs (the back-to-index `<a href="/">`) are deliberately not in this set: they are not
-  // loads, and they are allowed to be absolute.
-  const refs = [];
-  for (const [, tag, attrs] of html.matchAll(/<(link|script|img|iframe)\b([^>]*)>/g)) {
-    const m = attrs.match(/\s(?:src|href)="([^"]*)"/);
-    if (m) refs.push({ tag, ref: m[1] });
-  }
+  const refs = subresourceRefs(html);
   assert.ok(refs.length >= 3, `setup failure: expected at least the favicon, the stylesheet and the script, found ${refs.length}`);
 
-  for (const { tag, ref } of refs) {
-    // A `data:` URL carries its own bytes, so it is self-contained by definition -- that is
-    // the favicon (src/styles.mjs's faviconLink), and it stays allowed.
-    if (ref.startsWith('data:')) continue;
-    assert.ok(ASSET_NAME.test(ref),
-      `<${tag}> loads "${ref}", which is not a bare content-addressed sibling filename -- ` +
-      'an absolute path, a URL, a protocol-relative reference or a subdirectory all fail to ' +
-      'resolve when the page is opened from Finder (ADR 70)');
-    assert.ok(!ref.includes('/') && !ref.includes(':') && !ref.startsWith('.'),
-      `<${tag}> loads "${ref}", which is not bare: no separator, no scheme, no dot segment`);
-  }
+  for (const { tag, ref } of refs) assertBareSiblingRef(tag, ref, 'the page');
 
   // And the two it must name are the real content-addressed ones, not some spelling that
   // merely looks like one. (Ablation: hardcode a name in render.mjs and this fails the
@@ -4022,6 +4032,58 @@ check('the emitted page references the shared script and stylesheet as BARE SIBL
   // half of AC 8: naming the file while still carrying it would pass every assertion above.
   assert.ok(!html.includes(ui), 'the page must not still carry the client script');
   assert.ok(!html.includes(styles), 'the page must not still carry the stylesheet');
+});
+
+// An html stage's `srcdoc` is a second document inside the first, and since the board
+// began providing its vendored mermaid engine to diagram-bearing stages, it is a
+// document that names a subresource of its own. The rule above applies to it unchanged
+// and for the same two reasons: a `srcdoc` frame inherits its parent's base URL, so a
+// bare filename resolves to `/b/<name>` served and to the file beside the archive from
+// Finder, and nothing else resolves on both. This is the check that blesses that one
+// form -- and refuses every other spelling of it.
+check('an html stage\'s srcdoc names subresources by the SAME bare-sibling rule the page does', () => {
+  const board = createBoard({
+    title: 'Stage with a diagram',
+    blocks: [
+      { kind: 'html', html: '<div class="doc"><pre class="mermaid">flowchart LR\n  A --> B</pre></div>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
+  });
+  const html = renderBoardPage(board);
+  const srcdocs = [...html.matchAll(/srcdoc="([^"]*)"/g)].map(m => m[1]);
+  assert.equal(srcdocs.length, 1, `setup failure: expected exactly one stage, found ${srcdocs.length}`);
+
+  // What the browser hands the srcdoc parser: the attribute value, entity-decoded.
+  // `&amp;` last, mirroring the order src/render.mjs's own escaper applies.
+  const stageDoc = srcdocs[0]
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
+  const refs = subresourceRefs(stageDoc);
+  assert.equal(refs.length, 1, `a diagram-bearing stage pulls exactly the engine, found ${JSON.stringify(refs)}`);
+  for (const { tag, ref } of refs) assertBareSiblingRef(tag, ref, 'a stage srcdoc');
+  assert.equal(refs[0].ref, MERMAID_ASSET, 'and it is the real content-addressed engine, not a spelling that resembles one');
+
+  // The rule is only worth having if the shapes it forbids actually fail it. Each of
+  // these resolves fine served and to nothing at all from Finder, which is exactly the
+  // asymmetry that makes an archive look like it works until the network is off.
+  for (const bad of ['/b/mermaid-0123456789abcdef.js', 'assets/mermaid-0123456789abcdef.js',
+    '//cdn.example/mermaid-0123456789abcdef.js', 'https://cdn.example/mermaid.min.js',
+    './mermaid-0123456789abcdef.js', '../mermaid-0123456789abcdef.js']) {
+    assert.throws(() => assertBareSiblingRef('script', bad, 'ablation'),
+      `"${bad}" must fail the bare-sibling rule, and does not`);
+  }
+
+  // And a stage with no diagram in it names nothing at all -- the marker is what
+  // decides, so a diagram-free board's bytes are exactly what they were.
+  const plain = renderBoardPage(createBoard({
+    title: 'Stage with no diagram',
+    blocks: [{ kind: 'html', html: '<div class="doc"><button>Send</button></div>' }, { kind: 'markdown', text: 'x' }],
+  }));
+  const plainSrcdoc = [...plain.matchAll(/srcdoc="([^"]*)"/g)].map(m => m[1])[0];
+  assert.ok(plainSrcdoc, 'setup failure: no stage rendered');
+  assert.equal(subresourceRefs(plainSrcdoc.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')).length, 0,
+    'a diagram-free stage must pull nothing');
+  assert.doesNotMatch(plain, /mermaid-[0-9a-f]{16}\.js/, 'and the page must not name the engine anywhere');
 });
 
 // =================================================================================

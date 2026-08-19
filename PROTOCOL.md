@@ -588,7 +588,9 @@ GET  /b/<asset>                     the shared script or stylesheet a page names
                                     content-addressed filename (ADR.md entry 70); the
                                     daemon's only static route. Disjoint from the line
                                     above: an asset name contains a dot, which a board id
-                                    cannot
+                                    cannot. `mermaid-<hash>.js` alone is open (the caller
+                                    is a sandboxed stage, which holds no credential);
+                                    `ui-`/`styles-` are gated like every other read
 GET  /api/health                    { ok: true, version, daemon, pid }  (open: install.sh polls it)
 GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open by necessity)
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
@@ -703,7 +705,8 @@ why a local secret exists at all.
 
 ## The browser session cookie
 
-**Every route but `GET /api/health` and `GET /auth/:token` requires a credential**, reads
+**Every route but `GET /api/health`, `GET /auth/:token` and `GET /b/mermaid-<hash>.js` requires a
+credential**, reads
 included -- except `GET /api/board/:id/wait`, which this cookie alone never satisfies (secret
 only, above). The browser cannot read a 0600 file, so it holds this instead:
 
@@ -1238,7 +1241,9 @@ only the count, not the rows — a client that wants the rows still asks `GET /a
 ## Stage postMessage channel
 
 The page's second wire contract, between the board page and an `html` block's sandboxed stage.
-`src/render.mjs`'s `stageAgentScript` is the stage half; `src/ui.mjs`'s message listener is the
+`src/render.mjs`'s `stageAgentScript` is the stage half -- joined, on a stage that carries a
+diagram, by `stageMermaidPrelude`'s engine facade, which speaks the same channel for the
+`mermaid` type alone; `src/ui.mjs`'s message listener is the
 parent half. Rationale for the isolation model lives in `SECURITY.md`; this section owns the
 message tables and the two validation rules.
 
@@ -1262,6 +1267,7 @@ from anything else that might postMessage this window (an extension, devtools, a
 | `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` relative to this document's `<body>`, or `null` if the ref no longer resolves. Numbers and null only |
 | `height` | `{ height }` | `document.body.scrollHeight` |
 | `scroll` | `{ top }` | "I am at this offset". Deduplicated on the last reported value |
+| `mermaid` | `{ requestId, sources, config }` | "draw these diagrams for me". Sent only by the engine facade a diagram-bearing stage is given, and **repeated under the same `requestId` until answered** (see below) |
 
 `ref` is a `buildSteps`/`stepsToPath` index chain from `document.body`.
 
@@ -1299,6 +1305,7 @@ the parent cannot observe it short of being told.
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
 | `scrollBy` | `{ delta }` | "move yourself this many pixels" — one forwarded wheel notch |
+| `diagrams` | `{ requestId, svgs }` | response to `mermaid`: one entry per requested source, in the same order — the rendered SVG as a string, or `null` for one the board could not draw |
 
 `scroll` is the one bidirectional type on this channel. Inbound it is sent only as a reset,
 `top: 0`, by the board's back-to-top control, since the parent cannot scroll a cross-origin
@@ -1334,6 +1341,61 @@ negotiation.
 
 `locate` and `band` are both sent once a stage announces `ready`, and again whenever the parent's
 own refresh runs (resize, a comment queued, a submit landing, a round flip).
+
+### `mermaid`/`diagrams`: the board draws a stage's diagrams
+
+A stage runs at an opaque origin, and Chrome refuses a `file:` subresource to such a
+context at the local-resource level, whatever the CSP says. So a diagram-bearing stage
+gets two things prepended to its `srcdoc` (`src/render.mjs`): the engine's bare sibling
+filename, which loads for real on the SERVED surface before any of the stage's own
+scripts run, and an inline prelude that shape-checks `window.mermaid` and — when the tag
+did not deliver, i.e. every `file://` archive — installs a facade with the same API
+surface (`initialize`, `run`, `init`, `render`, `startOnLoad`/`contentLoaded`). The facade
+renders by sending `mermaid` here and swapping the returned SVG in **only on success**: a
+figure whose render failed keeps its own raw source, never a blank box, and releases its
+`data-processed` claim so a later pass may try again. An artifact's own loader
+(`if (!window.mermaid) …`) therefore short-circuits on either surface and its CDN
+fallback never starts.
+
+`mermaid` is the one type on this channel that is **retried rather than fired once**, and it
+has to be. The parent's listener belongs to its deferred `ui-<hash>.js`, which cannot run
+until the whole board page has parsed; a stage's own scripts run as soon as its frame exists.
+Nothing orders those two, so a single send is lost outright whenever the stage wins, and the
+figure stays on raw source for the rest of the page's life — measured as an intermittent
+archive failure in real Chrome, and reproducible on demand by removing the resend
+(`test/browser-check-mermaid-stage.mjs`). The facade repeats every request on a 150ms interval
+for at most twelve seconds; giving up releases each figure's `data-processed` claim so it
+reads as its own raw source. A resend carries the **same `requestId`**, and the parent **drops
+a `requestId` already in flight for that frame** — never queueing it twice (which would draw
+the same figure twice) and never answering it twice (a refusal racing the real reply would
+latch failure onto a figure about to be drawn). The id is released once its answer is posted.
+
+The same race exists for `ready` above, unfixed: a stage that announces itself before the
+parent listens is never wired for comment mode, pins or the chrome band. It predates stage
+mermaid and is not closed here.
+
+The parent side is a trust boundary, and every rule below is load-bearing:
+
+- `requestId` is a non-empty string of at most 64 characters; `sources` is an array of 1
+  to 32 strings of at most 50000 characters each. A batch outside those bounds is
+  ignored in silence; a single source outside them is answered `null` in place, so the
+  reply's indices always line up with the request's.
+- `config` is forwarded through an **allowlist** (`theme` from mermaid's own theme names,
+  `themeVariables` as short scalars under plain identifiers — `MERMAID_STAGE_CONFIG_KEYS`,
+  exactly those two) and nothing else. A top-level `fontFamily`/`fontSize` is dropped; a
+  template that wants them sets them inside `themeVariables`, where mermaid reads them
+  anyway. `securityLevel` is not on the list and must never be: it is what keeps
+  mermaid's own sanitizer on. `startOnLoad` is fixed by the parent.
+- The engine is re-initialized for every batch, and `initialize()` resets mermaid's site
+  config from its own defaults, so a stage's palette cannot bleed into the next
+  board-level render.
+- The reply goes to the frame re-derived from `event.source`, never to anything the
+  message claims about itself, and it always goes: an unanswered stage would leave its
+  figures claimed and waiting forever.
+
+`GET /b/mermaid-<hash>.js` is the one credential-less read the daemon allows, because the
+stage that fetches it structurally holds no credential; see `src/server.mjs`'s
+`isOpenRoute` for the argument and `SECURITY.md` for the isolation model it sits inside.
 
 ### There is no `select` message, deliberately
 

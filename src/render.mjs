@@ -40,6 +40,7 @@ import { themeBootScript, themeToggle } from './theme.mjs';
 import { resolveComments, stripDaemonOnly } from './board.mjs';
 import { buildSteps, stepsToPath, pathToSteps, resolveSteps } from './anchor.mjs';
 import { grammarFor, Prism } from './vendor/prism/index.mjs';
+import { MERMAID_ASSET } from './vendor/mermaid/index.mjs';
 import {
   roundPageLabel, isPageRound, roundHasCommentable,
   roundIsAwaitedOpen, PILL_READONLY_TITLE, ROUND_OPEN_UNAWAITED_TITLE, PILL_SUBMITTED_TITLE,
@@ -1880,12 +1881,209 @@ export function stageAgentScript() {
  * assert against this exact string rather than a hand-copied guess at it. */
 export const STAGE_MARGIN_RESET = '<style>html,body{margin:0;padding:0}</style>';
 
+/** Does this stage's own markup carry a mermaid diagram? A TEXTUAL test on the
+ * class marker, deliberately -- the stage's bytes are all this renderer has, and
+ * parsing them to ask the same question would answer no better. A diagram whose
+ * node is BUILT at runtime (an artifact that mints `<pre class="mermaid">` from
+ * data after load) is a known false negative and an accepted one: it gets what it
+ * gets today, raw source, and the cost of catching it is providing the engine to
+ * every stage on the board.
+ *
+ * Matches the marker as a whole word inside a `class` attribute, quoted or bare,
+ * so `class="mermaid"` and `class="figure mermaid"` both count while
+ * `data-x="mermaid"` and `class="notmermaid"` do not. */
+const STAGE_MERMAID_MARKER = /\bclass\s*=\s*(?:["'][^"']*)?\bmermaid\b/;
+
+export function stageCarriesMermaid(html) {
+  return STAGE_MERMAID_MARKER.test(String(html ?? ''));
+}
+
+/** What a diagram-bearing stage gets prepended, and the reason it is TWO tags.
+ *
+ * A stage is `sandbox="allow-scripts"` with no `allow-same-origin`, so it runs at
+ * an opaque origin, and the two surfaces a board has to work on answer a
+ * subresource request there differently. Measured in Chrome against this exact
+ * shape (the page's own CSP, inherited through `srcdoc`):
+ *
+ *  - SERVED: the bare sibling filename resolves against the parent's base URL
+ *    (`/b/<name>`, the daemon's one static route) and the inherited
+ *    `script-src 'self'` admits it from the opaque origin. The engine is a
+ *    classic, non-deferred script, so it is fully live before any of the stage's
+ *    own scripts run -- which is the whole point: an artifact's own loader
+ *    (`if (!window.mermaid) ...`) short-circuits unmodified, and its CDN fallback
+ *    never starts.
+ *  - `file://`: the same tag ALWAYS errors, whatever the CSP says. Only a
+ *    file:-origin context may load a `file:` subresource, and an opaque origin is
+ *    not one; verified with no CSP at all and with an explicit `script-src file:`.
+ *    Nothing this renderer can emit opens that, so the second tag is what serves
+ *    the archive surface.
+ *
+ * The inline prelude therefore shape-checks `window.mermaid` (the same "an
+ * impostor must not pass" idiom as src/ui.mjs's `looksLikeMermaidEngine` -- a
+ * corrupt or truncated engine file that still defines the name must degrade, not
+ * render nothing) and, when the real engine did not arrive, installs a small
+ * facade with the same API surface that renders by asking the PARENT, over the
+ * stage message channel, and swaps the returned SVG in only on success. Failure
+ * anywhere leaves the raw diagram source exactly where it was -- never a blanked
+ * figure, the same honesty board-level mermaid already keeps.
+ *
+ * Exotic mermaid API use past `initialize`/`run`/`init`/`render`/`startOnLoad`
+ * degrades to raw source; accepted rather than shipping the 3.4MB engine into
+ * every stored page (ADR 70's weight argument), which is what this whole shape
+ * exists to avoid.
+ *
+ * The payload below is deliberately terse -- it is stored inside an attribute of
+ * every diagram-bearing stage in every written page, so its comments would be
+ * paid for per stage forever (ADR 70's weight argument again). What a reader
+ * needs is here instead:
+ *
+ *  - `shaped()` is `looksLikeMermaidEngine`'s idiom (src/ui.mjs): a DOM element
+ *    carrying `id="mermaid"` becomes `window.mermaid` for free, and so does half
+ *    a truncated download, so the served surface is detected by API shape and
+ *    never by truthiness.
+ *  - The inbound check is `ev.source === window.parent`, not an origin
+ *    comparison: a stage cannot know the parent's origin in advance (any port,
+ *    or `file://`), and no script in any window can make `event.source` equal a
+ *    different window's `window.parent`. This is the stage half of the rule
+ *    PROTOCOL.md's "Origin validation" already states for this channel.
+ *  - A node is claimed with `data-processed` BEFORE the round trip, the way the
+ *    real engine claims one before its own first await, so two overlapping runs
+ *    never draw the same figure. A node whose render failed has its claim
+ *    RELEASED and its own text left untouched: the figure reads as raw source,
+ *    never as nothing, and a later pass may still succeed. `settle` is the ONE
+ *    place that decides that, which is why a `postMessage` that never left
+ *    (an artifact config carrying something unclonable, no parent at all) goes
+ *    through it too rather than leaving the figure claimed and waiting forever.
+ *  - `startOnLoad` fires on `load` and not on `DOMContentLoaded`, which is
+ *    exactly what the real engine registers. An artifact that draws its own
+ *    diagrams from an end-of-body script has already run (and already turned
+ *    `startOnLoad` off through `initialize`) by the time this fires, so nothing
+ *    is ever drawn twice.
+ *  - EVERY REQUEST IS REPEATED UNTIL IT IS ANSWERED, and that is the one part
+ *    of this payload that is not an optimisation. The parent's `message`
+ *    listener belongs to its DEFERRED client script (ADR 70's `ui-<hash>.js`),
+ *    which by spec cannot run until the whole board page has parsed -- while
+ *    this document's own scripts run as soon as its frame exists. Nothing
+ *    orders those two, so a single fire-and-forget send is simply LOST whenever
+ *    this side wins, and the figure sits on raw source for the rest of the
+ *    page's life with nothing to say why. Measured as an intermittent archive
+ *    failure across five headless recipes before this existed
+ *    (test/browser-check-mermaid-stage.mjs). A resend carries the SAME
+ *    `requestId`, and src/ui.mjs drops a `requestId` already in flight for that
+ *    frame, so repeating costs the parent nothing and can never draw a figure
+ *    twice. `RESEND_TICKS` bounds it at twelve seconds, past any plausible
+ *    parse; giving up releases every claim so the figures read as their own raw
+ *    source rather than staying claimed forever.
+ *
+ * The same race exists, unfixed, for `stageAgentScript`'s own `ready` message
+ * one function up -- a stage that announces itself before the parent listens is
+ * never wired for comment mode, pins or the chrome band. It predates this and
+ * is not this function's to fix; a shared handshake would not close it either,
+ * since a parent broadcast can land on the `about:blank` window a `srcdoc`
+ * frame holds before its own navigation commits. The honest fix there is the
+ * same one used here, applied to that script. */
+export function stageMermaidPrelude() {
+  return `<script src="${MERMAID_ASSET}"></script><script>(function () {
+  var CB = 'cb-stage', pending = {}, seq = 0, config = {}, timer = null, ticks = 0;
+  var RESEND_MS = 150, RESEND_TICKS = 80;
+  function shaped(m) { return !!m && typeof m.run === 'function' && typeof m.initialize === 'function'; }
+  if (shaped(window.mermaid)) return;
+  function post(msg) {
+    try { msg.cb = CB; window.parent.postMessage(msg, '*'); return true; } catch (e) { return false; }
+  }
+  function settle(job, svgs) {
+    for (var i = 0; i < job.nodes.length; i++) {
+      var svg = typeof svgs[i] === 'string' && svgs[i] ? svgs[i] : null;
+      if (svg) job.nodes[i].innerHTML = svg;
+      else job.nodes[i].removeAttribute('data-processed');
+    }
+    job.resolve(typeof svgs[0] === 'string' && svgs[0] ? svgs[0] : null);
+  }
+  function pump() {
+    var id, live = false;
+    for (id in pending) { live = true; post(pending[id].msg); }
+    if (!live || ++ticks < RESEND_TICKS) { if (!live) { clearInterval(timer); timer = null; } return; }
+    clearInterval(timer);
+    timer = null;
+    for (id in pending) { var job = pending[id]; delete pending[id]; settle(job, []); }
+  }
+  function ask(nodes, sources) {
+    var id = 'sm' + (++seq);
+    return new Promise(function (resolve) {
+      var msg = { type: 'mermaid', requestId: id, sources: sources, config: config };
+      var job = { nodes: nodes, resolve: resolve, msg: msg };
+      pending[id] = job;
+      if (!post(msg)) { delete pending[id]; settle(job, []); return; }
+      if (!timer) { ticks = 0; timer = setInterval(pump, RESEND_MS); }
+    });
+  }
+  window.addEventListener('message', function (ev) {
+    if (ev.source !== window.parent) return;
+    var d = ev.data;
+    if (!d || typeof d !== 'object' || d.cb !== CB || d.type !== 'diagrams') return;
+    var job = pending[d.requestId];
+    if (!job) return;
+    delete pending[d.requestId];
+    settle(job, Array.isArray(d.svgs) ? d.svgs : []);
+  });
+  function run(opts) {
+    opts = opts || {};
+    var raw = opts.nodes
+      ? (opts.nodes.length === undefined ? [opts.nodes] : [].slice.call(opts.nodes))
+      : [].slice.call(document.querySelectorAll(opts.querySelector || '.mermaid'));
+    var nodes = [], sources = [];
+    for (var i = 0; i < raw.length; i++) {
+      var el = raw[i];
+      if (!el || !el.getAttribute || el.getAttribute('data-processed') === 'true') continue;
+      var src = String(el.textContent || '').trim();
+      if (!src) continue;
+      el.setAttribute('data-processed', 'true');
+      nodes.push(el);
+      sources.push(src);
+    }
+    if (!nodes.length) return Promise.resolve();
+    return ask(nodes, sources);
+  }
+  function initialize(c) {
+    config = c && typeof c === 'object' ? c : {};
+    if (config.startOnLoad !== undefined) api.startOnLoad = !!config.startOnLoad;
+  }
+  var api = {
+    startOnLoad: true,
+    initialize: initialize,
+    run: run,
+    init: function (c, nodes) {
+      if (c && typeof c === 'object') initialize(c);
+      return run(nodes ? { nodes: typeof nodes === 'string' ? document.querySelectorAll(nodes) : nodes } : undefined);
+    },
+    render: function (id, text) {
+      return ask([], [String(text == null ? '' : text)]).then(function (svg) {
+        if (!svg) throw new Error('the board could not draw this diagram');
+        return { svg: svg, bindFunctions: function () {} };
+      });
+    },
+    contentLoaded: function () { if (api.startOnLoad) run(); },
+  };
+  window.mermaid = api;
+  window.addEventListener('load', function () { api.contentLoaded(); });
+})();</script>`;
+}
+
 /** The `srcdoc` every html stage gets, whole-block or nested in a question's
- * context (renderContextInner, below) alike: the margin reset, the mock's own
- * markup, then the stage-side agent script -- one construction, so the two
- * call sites can never drift apart on what a stage actually is. */
-function buildStageSrcdoc(block) {
-  return STAGE_MARGIN_RESET + block.html + stageAgentScript();
+ * context (renderContextInner, below) alike: the margin reset, the engine
+ * prelude if this stage has a diagram at all, the mock's own markup, then the
+ * stage-side agent script -- one construction, so the two call sites can never
+ * drift apart on what a stage actually is.
+ *
+ * The prelude is strictly conditional and sits BEFORE the mock's own markup:
+ * a stage with no diagram in it names no engine and its page's bytes are exactly
+ * what they were before any of this existed, and a stage with one has the engine
+ * live before its own first script. Both tags are head-only elements, so they
+ * hoist out of `body` with the margin reset already there (see renderHtmlBlock's
+ * own comment on that hoist) and no `dom` anchor's index chain shifts. */
+export function buildStageSrcdoc(block) {
+  const prelude = stageCarriesMermaid(block.html) ? stageMermaidPrelude() : '';
+  return STAGE_MARGIN_RESET + prelude + block.html + stageAgentScript();
 }
 
 /** The awaited page's own send control (ADR.md

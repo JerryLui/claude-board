@@ -87,6 +87,15 @@ export const STYLE_ASSET = SHARED_ASSETS[1].name;
  * never be a board id, and a board's page is `<id>.html`, so it can never be an asset. */
 export const ASSET_NAME = /^(?:ui|styles|mermaid)-[0-9a-f]{16}\.(?:js|css)$/;
 
+/** The vendored mermaid engine's name shape ALONE — the one asset an html stage is
+ * allowed to fetch with no credential (src/server.mjs `isOpenRoute`, which argues the
+ * exception). Deliberately its own anchored pattern rather than a substring test carved
+ * out of `ASSET_NAME` above: the gate's entire value is that it admits the public
+ * library bytes and nothing else, so `ui-`/`styles-` — which carry this board's own
+ * client behaviour and stylesheet — have to fail it by construction, not by the order
+ * of an `if`. */
+export const MERMAID_ASSET_NAME = /^mermaid-[0-9a-f]{16}\.js$/;
+
 /** Which assets does this text name? The question a prune has to answer for every
  * surviving file before it may delete anything, so the name shape above is deliberately
  * self-identifying: a scan of the bytes answers it, with no HTML/JS parsing, no

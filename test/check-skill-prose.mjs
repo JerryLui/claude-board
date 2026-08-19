@@ -129,13 +129,20 @@ check('PROTOCOL.md does not promise the wider "anything rendered" commenting rul
 // The two rules the manual is the single home for: `/visualize`, `/explain` and `/gamify`
 // cite it rather than restating them, so a rule that drifts out of this file is a rule
 // that exists nowhere. Both are mechanism, not taste — a stage renders in an opaque-origin
-// frame and an opaque origin resolves no relative URL (ADR.md entry 32), and outside a page
+// frame and a relative reference there resolves against the BOARD PAGE's own URL rather
+// than the artifact's folder (ADR.md entries 32 and 108; the "resolves to nothing" version
+// of that sentence was measured wrong in Chrome and corrected), and outside a page
 // board the frame's height is whatever the stage reports. Entry 33 is the shape rule those
 // two hang off: it is invisible at the call site, so a caller that posts a second block
 // loses the layout with nothing to tell it so.
+//
+// The self-contained rule now carries one exception, and the manual has to state its exact
+// width or a renderer will read it as licence to reference anything: mermaid is provided by
+// the board (ADR 108), fonts, images and styles stay inline.
 const ARTIFACT_RULES = {
   'an artifact is one self-contained file': [
-    /self-contained/i, /`data:`/, /opaque-origin/i, /relative URL/i,
+    /self-contained/i, /`data:`/, /opaque-origin/i, /relative reference/i,
+    /mermaid/i, /fonts, images and styles stay inline/i,
   ],
   'a stage is sized from its own content': [
     /sizes itself from its own content, never from the viewport/i,

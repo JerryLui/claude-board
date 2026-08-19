@@ -1687,6 +1687,15 @@
       return;
     }
     if (data.type === 'height') { handleStageHeight(data, frame); return; }
+    if (data.type === 'mermaid') {
+      // A stage asking this page to draw its diagrams -- the archive half of
+      // stage mermaid delivery (src/render.mjs's stage prelude), where the frame
+      // cannot load the engine sibling itself. Everything in 'data' is hostile
+      // input; handleStageMermaid validates it and replies to THIS frame only,
+      // never to anything the message claims about itself.
+      handleStageMermaid(data, frame);
+      return;
+    }
     if (data.type === 'scroll') {
       // Shape-checked before anything reads it, exactly like every other type on
       // this channel: a stage is agent-authored input, and 'top' is a number
@@ -3644,6 +3653,24 @@
       document.head.appendChild(el);
     });
   }
+  /** The one guarded path to a live engine, shared by this page's own diagrams
+   * and by the stage render service below. Throws rather than returning a
+   * half-usable value, so every caller degrades the same honest way: the raw
+   * source fallback, never a wiped figure and never mermaidMod cached as
+   * something useless forever.
+   *
+   * Never trust a pre-set window.mermaid by truthiness -- only accept it if it
+   * already has the real shape (a test's own mock, chiefly; a clobbering DOM
+   * element never does), otherwise load the vendored copy for real. A load that
+   * still doesn't leave the right shape behind throws here for the same
+   * reason. */
+  async function ensureMermaidEngine() {
+    if (mermaidMod) return mermaidMod;
+    if (!looksLikeMermaidEngine(window.mermaid)) await loadMermaidEngine();
+    if (!looksLikeMermaidEngine(window.mermaid)) throw new Error('mermaid engine did not load in the expected shape');
+    mermaidMod = window.mermaid;
+    return mermaidMod;
+  }
   async function runMermaidRenderPass(root) {
     var nodes = qsa('pre.mermaid', root);
     if (!nodes.length) return;
@@ -3657,19 +3684,10 @@
       if (mermaidSourceByBlock && !mermaidSourceByBlock.has(n)) mermaidSourceByBlock.set(n, n.textContent);
     });
     try {
-      if (!mermaidMod) {
-        // Never trust a pre-set window.mermaid by truthiness -- only accept it
-        // if it already has the real shape (a test's own mock, chiefly; a
-        // clobbering DOM element never does), otherwise load the vendored copy
-        // for real. A load that still doesn't leave the right shape behind
-        // takes the SAME catch as every other failure below, so a clobber (or
-        // a load that silently fails to attach) degrades exactly like an
-        // engine that was never reachable at all -- the source fallback,
-        // never mermaidMod cached as something useless forever.
-        if (!looksLikeMermaidEngine(window.mermaid)) await loadMermaidEngine();
-        if (!looksLikeMermaidEngine(window.mermaid)) throw new Error('mermaid engine did not load in the expected shape');
-        mermaidMod = window.mermaid;
-      }
+      // A clobber, or a load that silently fails to attach, degrades exactly
+      // like an engine that was never reachable at all -- ensureMermaidEngine
+      // throws and the catch below takes it to the source fallback.
+      await ensureMermaidEngine();
       // Initialize before EVERY run(), not once ever, on
       // whatever mermaidMod already is -- gating this behind "only the first
       // time the engine loads" is exactly how a round that arrives long
@@ -3716,6 +3734,186 @@
     return queueMermaidTask(function () { return runMermaidRenderPass(root); });
   }
   renderMermaidBlocks(document);
+
+  // --- mermaid: the render service an html stage asks for -------------------
+  //
+  // A stage is sandboxed at an opaque origin, and Chrome refuses a 'file:'
+  // subresource to such a context at the local-resource level, CSP-independent
+  // -- so on the archive surface a stage cannot load the engine sibling itself,
+  // however the page spells the reference. The stage's prelude (src/render.mjs)
+  // therefore installs a facade that posts its diagram sources here instead, and
+  // this page -- which CAN load the engine on either surface, and already does
+  // for its own blocks -- draws them and posts the SVG back.
+  //
+  // This is a TRUST BOUNDARY, and the hostile input is the whole message. The
+  // listener above has already established the two things no payload can claim:
+  // the origin is opaque ('null') and event.source is the live contentWindow of
+  // a '.html-stage' frame currently mounted in THIS document, re-derived from
+  // the DOM. What is left is this file's job: every field shape-checked, every
+  // count and length capped, the reply sent to the re-derived frame only, and
+  // the stage's own config forwarded through an allowlist that can never reach
+  // 'securityLevel'.
+  //
+  // Bounds, all of them deliberate rather than generous. A batch past
+  // MERMAID_STAGE_BATCH would spend this page's main thread on a stage's behalf
+  // for as long as the stage likes; a source past MERMAID_STAGE_SOURCE is past
+  // anything mermaid itself will parse (its own maxTextSize default is 50000).
+  // An over-cap entry is answered with null rather than dropped, so a reply's
+  // indices always line up with the request's and a rejected diagram degrades to
+  // its own raw source instead of silently taking a neighbour's SVG.
+  var MERMAID_STAGE_BATCH = 32;
+  var MERMAID_STAGE_SOURCE = 50000;
+  var MERMAID_STAGE_ID_MAX = 64;
+  // How many batches ONE stage may have waiting on the shared mermaid chain at
+  // once. The per-batch caps above bound a single request; without this a stage
+  // could post in a loop and queue unbounded work, starving this page's own
+  // diagrams behind it for as long as it liked. Counted PER FRAME, on the frame
+  // element itself (the '__cbLocateId' idiom above), and never globally: a board
+  // carrying six diagram-bearing stages is the board author's own doing and its
+  // work has to happen regardless, so one shared budget would refuse legitimate
+  // stages the moment enough of them loaded together. What this bounds is what
+  // one stage can do, which is the thing that is actually attacker-chosen. Four
+  // is well past any honest artifact -- one batch per render pass, one more per
+  // theme flip -- and counts what is OUTSTANDING, never what was ever asked for.
+  var MERMAID_STAGE_QUEUE = 4;
+  // The only mermaid config keys a stage may influence, and the list is this
+  // short on purpose. 'securityLevel' is absent and must stay absent: it is what
+  // keeps mermaid's own sanitizer on, and a stage that could set it to 'loose'
+  // would get arbitrary markup rendered into the SVG this page hands back.
+  // 'startOnLoad' is fixed by this file, never taken. What is left is
+  // presentation only -- an artifact computes themeVariables from its OWN
+  // palette so the diagram matches the page it sits on, which is the entire
+  // reason the config travels at all. Top-level 'fontFamily'/'fontSize' are
+  // deliberately NOT here: mermaid copies a top-level fontFamily into
+  // themeVariables itself, so the pair already reaches everything an artifact
+  // actually sends, and every key on this list is one more that has to be
+  // reasoned about the next time board-level theming changes.
+  var MERMAID_STAGE_CONFIG_KEYS = ['theme', 'themeVariables'];
+  // Mermaid's own built-in theme names. An unknown one is dropped rather than
+  // passed through: mermaid indexes its theme table by this string.
+  var MERMAID_STAGE_THEMES = ['base', 'default', 'dark', 'forest', 'neutral', 'null'];
+  var nextStageDiagramId = 1;
+
+  /** A short presentational scalar -- what every value inside a forwarded
+   * themeVariables is allowed to be. Bounded because these end up inside the
+   * generated SVG's own <style>. */
+  function isStageConfigScalar(v) {
+    return (typeof v === 'string' && v.length <= 120) || typeof v === 'boolean' || (typeof v === 'number' && isFinite(v));
+  }
+
+  /** The stage's config, reduced to what this page is willing to hand mermaid.
+   * Returns a fresh object every time -- never the received one, which is a
+   * live reference into attacker-controlled data. */
+  function sanitizeStageMermaidConfig(raw) {
+    var out = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+    for (var i = 0; i < MERMAID_STAGE_CONFIG_KEYS.length; i++) {
+      var key = MERMAID_STAGE_CONFIG_KEYS[i];
+      if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+      var value = raw[key];
+      if (key === 'theme') {
+        if (MERMAID_STAGE_THEMES.indexOf(value) !== -1) out.theme = value;
+        continue;
+      }
+      if (key === 'themeVariables') {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+        var vars = {};
+        var n = 0;
+        for (var name in value) {
+          if (!Object.prototype.hasOwnProperty.call(value, name)) continue;
+          if (++n > 64) break;
+          if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name)) continue;
+          if (!isStageConfigScalar(value[name])) continue;
+          vars[name] = value[name];
+        }
+        out.themeVariables = vars;
+        continue;
+      }
+      if (isStageConfigScalar(value)) out[key] = value;
+    }
+    return out;
+  }
+
+  /** Draw one stage's batch and answer it. Queued onto the SAME chain as this
+   * page's own passes (queueMermaidTask): mermaid is a singleton with global
+   * config, so a stage batch running inside a board-level run() would draw one
+   * of them in the other's palette, or worse, hand a half-written node back.
+   *
+   * The reply always goes out, even when nothing could be drawn. A stage that is
+   * never answered leaves its figures claimed and waiting; answered with nulls
+   * it releases them and the raw source stays on screen, which is the same
+   * degradation this file's own blocks take.
+   *
+   * Config bleed is closed at the source rather than by restoring afterwards:
+   * mermaid's initialize() resets its site config from its own defaults on every
+   * call, and runMermaidRenderPass/runMermaidRedrawPass both initialize before
+   * every run, so the next board-level pass cannot inherit anything a stage set
+   * here. That is what keeps board-level theming pinned to this page's tokens. */
+  function handleStageMermaid(data, frame) {
+    if (typeof data.requestId !== 'string' || !data.requestId || data.requestId.length > MERMAID_STAGE_ID_MAX) return;
+    if (!Array.isArray(data.sources) || !data.sources.length || data.sources.length > MERMAID_STAGE_BATCH) return;
+    var requestId = data.requestId;
+    // A RESEND of a batch already in flight. The stage's facade repeats every
+    // request until it is answered, because this listener belongs to a DEFERRED
+    // script and may not have existed when the stage first sent (src/render.mjs's
+    // stageMermaidPrelude says why), so duplicates are normal traffic and not an
+    // attack. Dropped outright, never queued and never refused: queueing would
+    // draw the same figures twice, and a refusal reply would race the real one
+    // and latch failure onto figures that were about to be drawn. Bounded by the
+    // ceiling below -- an id lands here only while its batch is queued, and at
+    // most MERMAID_STAGE_QUEUE batches are. Null-prototype so a requestId of
+    // '__proto__' or 'constructor' is an ordinary key rather than a truthy hit
+    // on Object.prototype.
+    if (!frame.__cbMermaidInFlight) frame.__cbMermaidInFlight = Object.create(null);
+    if (frame.__cbMermaidInFlight[requestId]) return;
+    var svgs = data.sources.map(function () { return null; });
+    // Refused past the ceiling -- but ANSWERED, like every other outcome here. A
+    // stage that is simply ignored keeps the 'data-processed' claim its facade
+    // took before posting, so its figures are never drawn and never retried;
+    // answered with nulls, it releases them and shows its own raw source, which
+    // is the honest degradation and leaves the next pass free to succeed.
+    if ((frame.__cbMermaidQueued || 0) >= MERMAID_STAGE_QUEUE) {
+      postToStage(frame, { type: 'diagrams', requestId: requestId, svgs: svgs });
+      return;
+    }
+    var sources = data.sources.map(function (s) {
+      return typeof s === 'string' && s && s.length <= MERMAID_STAGE_SOURCE ? s : null;
+    });
+    var config = sanitizeStageMermaidConfig(data.config);
+    frame.__cbMermaidQueued = (frame.__cbMermaidQueued || 0) + 1;
+    frame.__cbMermaidInFlight[requestId] = true;
+    queueMermaidTask(async function () {
+      frame.__cbMermaidQueued--;
+      try {
+        var engine = await ensureMermaidEngine();
+        // Only keys the stage actually sent are carried over: mermaid deep-assigns
+        // this object onto its own defaults, so writing an absent key as
+        // 'undefined' would clear a default rather than leave it alone.
+        config.startOnLoad = false;
+        if (!config.theme) config.theme = 'base';
+        // Written even when empty, so every batch states its whole palette
+        // rather than leaving the previous one's in place by omission.
+        if (!config.themeVariables) config.themeVariables = {};
+        engine.initialize(config);
+        for (var i = 0; i < sources.length; i++) {
+          if (sources[i] === null) continue;
+          try {
+            // The id is minted HERE and is never derived from anything the stage
+            // sent: mermaid interpolates it into the generated SVG's own
+            // markup and ids.
+            var out = await engine.render('cb-stage-diagram-' + (nextStageDiagramId++), sources[i]);
+            var svg = typeof out === 'string' ? out : (out && typeof out.svg === 'string' ? out.svg : null);
+            if (svg) svgs[i] = svg;
+          } catch (e) { /* one unparseable diagram must not cost the batch its other figures */ }
+        }
+      } catch (e) { /* engine unavailable or wrong shape: every figure stays raw source */ }
+      // Released only once the answer is actually out: while this id is in
+      // flight every resend of it is dropped above, and the stage stops
+      // resending the moment this reply lands.
+      delete frame.__cbMermaidInFlight[requestId];
+      postToStage(frame, { type: 'diagrams', requestId: requestId, svgs: svgs });
+    });
+  }
 
   // Re-run every diagram already on the page against whatever the
   // NEW active theme's variables are. mermaid.run() silently no-ops on a

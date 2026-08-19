@@ -27,7 +27,7 @@ import { readBoard, writeBoard, searchBoards } from '../src/store.mjs';
 import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src/pomodoro.mjs';
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { assetsNamedBy } from '../src/assets.mjs';
+import { assetsNamedBy, MERMAID_ASSET, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
 import { isPageRound } from '../src/badge.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
@@ -2356,6 +2356,34 @@ async function main() {
     // plain curl to decide whether the service came up.
     const health = await rawRequest(port, 'GET', '/api/health', `127.0.0.1:${port}`);
     assert.equal(health.status, 200, '/api/health stays open — install.sh has no credential to offer');
+  });
+
+  await check('SEC: the vendored mermaid engine is the ONE asset a credential-less GET may have, and ui/styles still are not', async () => {
+    // The stage that fetches it is sandboxed with no `allow-same-origin`, so it runs at
+    // an opaque origin and its subresource request carries no cookie at all — gated, the
+    // engine 401s and every diagram inside every posted artifact stays raw source. What
+    // the exception discloses is a third-party library's own bytes under a name that is a
+    // digest of them; see src/server.mjs's `isOpenRoute` for the full argument.
+    const engine = await rawRequest(port, 'GET', `/b/${MERMAID_ASSET}`, `127.0.0.1:${port}`);
+    assert.equal(engine.status, 200, 'a stage holds no credential, so the engine must answer without one');
+    assert.match(engine.headers['content-type'] || '', /javascript/, 'and answer as script');
+
+    // The exception is name-shaped and nothing else rides on it. (Ablation: widen
+    // `isOpenRoute`'s test to `ASSET_NAME` and both of these turn 200.)
+    const script = await rawRequest(port, 'GET', `/b/${SCRIPT_ASSET}`, `127.0.0.1:${port}`);
+    assert.equal(script.status, 401, 'the client script is this board\'s own behaviour and stays gated');
+    const style = await rawRequest(port, 'GET', `/b/${STYLE_ASSET}`, `127.0.0.1:${port}`);
+    assert.equal(style.status, 401, 'the stylesheet stays gated');
+
+    // A name that merely starts the right way is not the right shape.
+    for (const name of ['mermaid-0123456789abcde.js', 'mermaid-0123456789abcdefg.js', 'mermaid-0123456789ABCDEF.js', 'mermaid-0123456789abcdef.css']) {
+      const bad = await rawRequest(port, 'GET', `/b/${name}`, `127.0.0.1:${port}`);
+      assert.equal(bad.status, 401, `"${name}" is not the engine's name shape and must stay behind the gate`);
+    }
+    // A hash-shaped name that is simply not on disk is still open, and says nothing:
+    // 404, the same answer a credential-holding caller gets.
+    const absent = await rawRequest(port, 'GET', '/b/mermaid-0123456789abcdef.js', `127.0.0.1:${port}`);
+    assert.equal(absent.status, 404, 'an engine version this store never wrote is a plain 404');
   });
 
   await check('SEC: the refusal a browser navigation gets is a page naming the recovery command, not a bare status', async () => {

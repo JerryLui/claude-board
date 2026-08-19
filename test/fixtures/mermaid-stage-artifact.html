@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mermaid stage fixture</title>
+</head>
+<body>
+<div class="doc">
+  <figure class="fig">
+    <pre class="mermaid">flowchart LR
+  A[Start] --> B[End]</pre>
+    <figcaption>fixture diagram: real-browser end-to-end check for stage-mermaid</figcaption>
+  </figure>
+</div>
+<script>
+/* The /explain template's own loader shape, verbatim (2026-08-18-nightly.html
+   lines 806-829): window.mermaid short-circuit, same-origin sibling first, the
+   CDN as a second fallback only, dataset.src reset before every re-run. A
+   fixture, not a copy of the reproducer -- this file exists so the committed
+   browser check does not carry the 55KB nightly report (or its assets/) into
+   the repo just to prove the loader shape. */
+function mermaidConfig() {
+  return { startOnLoad: false, theme: "base" };
+}
+var mermaidLoading = false;
+function renderMermaidAll() {
+  var pres = document.querySelectorAll("pre.mermaid");
+  if (!pres.length) return;
+  if (!window.mermaid) {
+    if (mermaidLoading) return;
+    mermaidLoading = true;
+    var load = function (src, onFail) {
+      var s = document.createElement("script");
+      s.src = src;
+      s.onload = function () { mermaidLoading = false; renderMermaidAll(); };
+      s.onerror = onFail;
+      document.head.appendChild(s);
+    };
+    load("assets/mermaid.min.js", function () {
+      load("https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.min.js",
+        function () { mermaidLoading = false; });
+    });
+    return;
+  }
+  pres.forEach(function (p) {
+    if (!p.dataset.src) p.dataset.src = p.textContent;
+    p.removeAttribute("data-processed");
+    p.textContent = p.dataset.src;
+  });
+  window.mermaid.initialize(mermaidConfig());
+  window.mermaid.run({ nodes: pres, suppressErrors: true });
+}
+renderMermaidAll();
+</script>
+</body>
+</html>

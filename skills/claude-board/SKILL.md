@@ -118,11 +118,16 @@ beside the artifact silently costs it the full-size layout and puts it back in t
 Post the artifact alone and ask about it in a later round.
 
 **An artifact is one self-contained file: every script, style, font and image inline or a
-`data:` URI.** A stage renders in an opaque-origin frame, and a frame with no origin
-resolves a relative URL to nothing, so a sibling `assets/mermaid.min.js`, a linked
-stylesheet or an `<img src="logo.png">` never loads — the page arrives with that piece
-silently missing. The renderer meets this contract before the post; nothing in the call
-can repair a file that does not.
+`data:` URI.** A stage renders in a sandboxed opaque-origin frame, and a relative
+reference resolves against the board page's own URL, never the artifact's original
+folder — so a sibling `assets/mermaid.min.js`, a linked stylesheet or an
+`<img src="logo.png">` never loads, and the page arrives with that piece silently
+missing. The renderer meets this contract before the post; nothing in the call can
+repair a file that does not. One exception, mermaid: a stage whose bytes carry a
+mermaid class marker gets the board's own vendored engine — `window.mermaid` exists
+before the stage's scripts run, so an `if (!window.mermaid)` loader short-circuits
+unmodified and an artifact needs no bundled engine. The exception is exactly that wide:
+fonts, images and styles stay inline.
 
 **A stage sizes itself from its own content, never from the viewport.** Outside a page
 board the frame's height is derived from what the stage reports, so a page laid out in

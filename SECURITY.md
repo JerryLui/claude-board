@@ -316,14 +316,20 @@ asked of that one descriptor rather than of the name again.
 
 #### Another local process reading your boards, or forging an answer on one
 
-Every route but `GET /api/health` and `GET /auth/<token>` requires a credential — the index, a board
+Every route but `GET /api/health`, `GET /auth/<token>` and `GET /b/mermaid-<hash>.js` requires a
+credential — the index, a board
 page, archive search, the blocking wait and the event stream alike. Not every one of those
 accepts the *same* credential, though: `GET /api/board/:id/wait` also writes — `handleWait`
 persists the board on its timeout branch and spends undelivered comments on every branch — so
 it is gated exactly like a write, the secret only, never the cookie alone; every other route in
 that list accepts either. (`/auth/<token>` is
 the route that *hands out* the credential, so it cannot require one; it is protected by
-the token being unguessable, single-use and seconds-lived.) There are exactly two
+the token being unguessable, single-use and seconds-lived. The third open route is the vendored mermaid
+engine, and only that one name shape: the caller is a board page's own `html` stage, which is
+sandboxed with no `allow-same-origin` and so holds no credential by construction, and what the
+route hands back is a third-party library's public bytes under a name that is a digest of
+them — no board, no path, no store contents. `ui-<hash>.js` and `styles-<hash>.css` are this
+board's own behaviour and stay gated.) There are exactly two
 credentials: the secret file above, and a cookie the daemon derives from it and hands to
 your browser through that single-use handoff. **The cookie has a caveat worth reading
 before you rely on it — see "Any other HTTP server on your machine" under [Known and

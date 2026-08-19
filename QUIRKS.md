@@ -76,14 +76,18 @@ and stricter, and `test/check-pure.mjs` now enforces exactly it:
   CORS-blocks module scripts over `file:`, so a module reference silently breaks the
   Finder surface. `defer` is what preserves a module tag's execution timing.
 
-Mermaid's own sibling reference is NOT a static tag in the page's markup at all, unlike
-the other two (`ui-<hash>.js`/`styles-<hash>.css`, always present) — it is fetched by a
-`<script>` element src/ui.mjs's own client script builds and inserts at runtime, only when
-the page actually has a mermaid block, using a bare filename spliced into `ui`'s own text
-(so a board with no diagram never even names it). That is also why a prune
+Mermaid's own sibling reference reaches a page two ways, neither of them the other two's
+always-present static tag (`ui-<hash>.js`/`styles-<hash>.css`). For a BOARD-LEVEL diagram
+it is not in the page's markup at all — fetched by a `<script>` element src/ui.mjs's own
+client script builds and inserts at runtime, using a bare filename spliced into `ui`'s own
+text, so a page with only board-level diagrams never names it. Since ADR 108 a
+diagram-bearing html STAGE carries it as a real tag inside its escaped `srcdoc`, prepended
+by the renderer, so that page's own bytes DO name it. A board with no diagram anywhere
+still names it nowhere. The prune consequence stands either way: a prune
 (`sweepUnreferencedAssets`, `src/store.mjs`) has to scan every surviving ASSET's bytes for
-a further reference, not just every page's: an ordinary page's own markup never mentions
-mermaid at all, only `ui-<hash>.js`'s bytes do.
+a further reference, not just every page's — a board-level-only page never mentions
+mermaid, only `ui-<hash>.js`'s bytes do, while the stage case is caught by the page scan
+itself (`test/check-prune.mjs` pins both).
 
 The cost, accepted in ADR 70 and widened by mermaid's vendoring: an archive is a file plus
 its folder, not one mailable file. `examples/sample-board.html` is committed with its
@@ -1970,9 +1974,13 @@ bisecting "how many reps until this blows up" actually wants.
 - [The stage is a constant `100vh` box, not a box that grows to its content](#the-stage-is-a-constant-100vh-box-not-a-box-that-grows-to-its-content)
 - [`handleStageHeight` has a floor as well as a cap](#handlestageheight-has-a-floor-as-well-as-a-cap)
 - [The board's own mermaid engine is vendored, and that broke stage-rendered diagrams on purpose](#the-boards-own-mermaid-engine-is-vendored-and-that-broke-stage-rendered-diagrams-on-purpose)
+- [What a `srcdoc` stage can actually load: siblings served, nothing over `file://`](#what-a-srcdoc-stage-can-actually-load-siblings-served-nothing-over-file)
+- [A stage's first message can beat the parent's deferred listener -- fire-and-forget is wrong by construction](#a-stages-first-message-can-beat-the-parents-deferred-listener----fire-and-forget-is-wrong-by-construction)
+- [Two traps from driving the browser checks, and one env var](#two-traps-from-driving-the-browser-checks-and-one-env-var)
 
-Three constraints that look arbitrary at the call site. Each was settled deliberately; none
-is load-bearing enough for `.agents/adr/`, and all three break silently if changed.
+Constraints that look arbitrary at the call site. Each was settled deliberately (the first
+three without an `.agents/adr/` entry, the mermaid-delivery ones under ADR 108), and every
+one breaks silently if changed.
 
 ### The stage is a constant `100vh` box, not a box that grows to its content
 
@@ -2030,3 +2038,65 @@ rendered after it). The degradation is the honest one the renderer already imple
 never a wiped diagram. If stage diagrams are ever wanted back, the only route that keeps the host
 out of the CSP is inlining the engine into the stage's own `srcdoc`, which costs ~3.4 MB per such
 stage inside the stored board document; that was weighed and declined.
+
+Superseded in part (ADR 108, measured 2026-08-19): "`'self'` matches nothing at an opaque origin
+and a relative URL resolves to nothing" is wrong for a `srcdoc` frame, and a third route existed --
+see the next section. The supply-chain closure itself stands unchanged.
+
+### What a `srcdoc` stage can actually load: siblings served, nothing over `file://`
+
+Measured (Chrome stable and `--headless=new`, a static harness mirroring the exact page CSP and the
+`sandbox="allow-scripts"` srcdoc shape), against the section above's reasoning:
+
+- A `srcdoc` document inherits the parent's **base URL**, so a bare relative `src` resolves against
+  the board page's own URL -- `/b/<sibling>` served, the sibling file over `file://`. It does not
+  "resolve to nothing".
+- It also inherits the parent's **CSP with `'self'` still bound to the parent's origin**. The
+  frame's own origin being opaque changes neither binding: a bare sibling
+  `<script src="mermaid-<hash>.js">` inside a stage is admitted by `script-src 'self'` and, served,
+  it loads and runs. What refused it in production was never the CSP but the credential gate -- an
+  opaque-origin fetch carries no `SameSite=Strict` cookie and answered 401, which is why
+  `isOpenRoute` (src/server.mjs) carries its one asset exception for the mermaid name shape.
+- Over `file://` the same tag can NEVER load, and no CSP spelling changes it: probed identical with
+  the page CSP, with no CSP at all, and with `script-src file:`. Chrome's local-resource rule grants
+  `file:` subresources only to file:-origin contexts, and a sandboxed frame is an opaque origin.
+  (`allow-same-origin` cures it in the probe -- that is the proof it is the origin rule, not policy,
+  and not a lever this repo pulls: the opaque origin is the stage's security model.)
+
+So anything that wants bytes inside a stage on the Finder surface has exactly two routes: inline
+them in the `srcdoc`, or let the parent do the work and message the result in. Mermaid delivery is
+therefore hybrid (ADR 108): sibling tag for the served surface, and a `window.mermaid` facade in
+the injected prelude that renders via the parent for archives. Test the two surfaces separately,
+always -- a green served page says nothing about Finder, and the DOM stand-in can see neither.
+
+### A stage's first message can beat the parent's deferred listener -- fire-and-forget is wrong by construction
+
+The page's `message` listener registers when deferred `ui-<hash>.js` executes, after the whole
+parent document parses. A srcdoc stage's own scripts run on the frame's schedule, not the
+parent's, so a stage that posts on its first parse can post into a window with no listener --
+the message is silently lost, nothing errors, and the symptom is "works most runs" (measured:
+one archive render in two lost real-time headless, 100% lost with CDP instrumented, 100% fine
+under `--virtual-time-budget` -- the skew between recipes IS the diagnostic that it is a race).
+Two non-fixes, both measured or reasoned to death in the mermaid work: a parent ready-broadcast
+can be missed too (at parent-parse time the iframe's `contentWindow` is still `about:blank`; the
+srcdoc navigation replaces it, losing the ping), and registering a buffering listener inline in
+the head costs bytes on every page, which AC-level byte-purity refuses. The shape that is
+deterministic: the STAGE resends on a timer until answered (mermaid facade: 150ms x 80 ticks,
+then the honest degrade), and the PARENT drops a `requestId` already in flight for that frame so
+a duplicate is never drawn twice and never bounces off the batch ceiling into a refusal that
+races the real reply. `stageAgentScript`'s own `ready` announce has the SAME exposure and is NOT
+fixed -- a stage that announces before the parent listens gets no comment mode, no pins, no
+chrome band; if that ever surfaces, the fix is this same resend, not a broadcast.
+
+### Two traps from driving the browser checks, and one env var
+
+- **CDP `Network.enable` misses a brand-new OOPIF's first bytes.** Attaching instrumentation to
+  a freshly created sandboxed iframe's target races its first subresource fetch; the request you
+  care most about (the stage's engine fetch) is exactly the one that got away. Assert network
+  behaviour at the PROCESS level instead: launch Chrome with `--proxy-server` pointed at a local
+  sink and read what actually tried to connect (`test/browser-check-mermaid-stage.mjs`). Expect
+  Chrome's own background chatter (accounts.google.com etc.) in the sink; filter by host, don't
+  assert an empty log.
+- **`CLAUDE_BOARD_PORT=0` silently becomes 7391**: `Number(...) || DEFAULT_PORT` in
+  src/server.mjs treats the legitimate "give me an ephemeral port" zero as unset. Pick a real
+  scratch port in harnesses; do not ask for 0.

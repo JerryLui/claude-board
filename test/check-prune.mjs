@@ -297,6 +297,30 @@ async function main() {
       'mermaid must survive the sweep even though no page names it directly -- src/store.mjs\'s sweepUnreferencedAssets has to scan every surviving ASSET\'s bytes too, not just every page\'s, or this is exactly the file it would wrongly reclaim');
   });
 
+  await check('AC 13: a board whose only mermaid is an html STAGE names the engine in its own bytes, keeps it beside the page, and keeps it across a prune', async () => {
+    // The stage case is the one where a page's own markup DOES name the engine: the
+    // srcdoc of a diagram-bearing stage carries the bare filename, HTML-escaped into an
+    // attribute but byte-for-byte intact, which is exactly what `assetsNamedBy`'s scan is
+    // built to find. That is what makes such an archive self-describing -- the folder a
+    // reader mails around says, in the page's own bytes, which sibling it needs.
+    const stage = { kind: 'html', html: '<div class="doc"><pre class="mermaid">flowchart LR\n  A --> B</pre></div>' };
+    const boardId = (await post('A diagram inside a stage', [stage, { kind: 'markdown', text: 'not a page board' }])).boardId;
+    const page = readFileSync(pagePath(boardId), 'utf8');
+    assert.ok(assetsNamedBy(page).includes(MERMAID_ASSET),
+      'a stage-diagram page must name the engine in its OWN bytes -- the escaped srcdoc carries the bare filename');
+    assert.equal(existsSync(path.join(pagesDir, MERMAID_ASSET)), true,
+      'and the engine must be on disk beside the page, or the archive opens from Finder with nothing to render the diagram with');
+    // Resolved the way a browser resolves a bare sibling filename on a page served at
+    // /b/<id>, never hand-built.
+    const served = await fetch(new URL(MERMAID_ASSET, `${base}/b/${boardId}`));
+    assert.equal(served.status, 200, 'and the same name must resolve served');
+
+    const res = await prune({ days: 3650 });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.boards, 0, 'setup failure: this prune must remove no board');
+    assert.equal(existsSync(path.join(pagesDir, MERMAID_ASSET)), true, 'the engine a stage names must survive the sweep');
+  });
+
   await check('AC 13: an asset no page has EVER named is reclaimed too -- the sweep is about references, not about which board went', async () => {
     const orphan = sharedAssets('/* named by nothing at all */', '/* nor this */');
     writeSharedAssets(home, orphan);

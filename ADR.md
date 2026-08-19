@@ -81,7 +81,7 @@ link where it is worth reading.
 | 92 | [The Banner covers a Suppressed content-only board](.agents/adr/0092-the-banner-covers-a-suppressed-content-only-board.md) | 2026-08-11 | widens 55; widens 91; narrowed by 106 |
 | 93 | [A click surfaces the existing tab](.agents/adr/0093-a-click-surfaces-the-existing-tab.md) | 2026-08-11 | narrows 57; relates to 72 |
 | 94 | [The ring is work's alone](.agents/adr/0094-the-ring-is-works-alone.md) | 2026-08-11 | narrows 84; relates to 83 |
-| 95 | [Mermaid is vendored, closing the CSP's last external-host allowance](.agents/adr/0095-mermaid-is-vendored-closing-the-csp-s-last.md) | 2026-08-11 | widens 62; relates to 70 |
+| 95 | [Mermaid is vendored, closing the CSP's last external-host allowance](.agents/adr/0095-mermaid-is-vendored-closing-the-csp-s-last.md) | 2026-08-11 | widens 62; relates to 70; widened by 108 |
 | 96 | [The Notice is transient, never standing](.agents/adr/0096-the-notice-is-transient-never-standing.md) | 2026-08-11 | relates to 28 |
 | 97 | [An amend to the marked round moves it back one, unless the reviewer is Attended](.agents/adr/0097-an-amend-to-the-marked-round-moves-it-back-one.md) | 2026-08-11 | narrows 74 |
 | 98 | [The comment toggle follows commentability](.agents/adr/0098-comment-toggle-follows-commentability.md) | 2026-08-11 | widens 46; widened by 101 |
@@ -94,3 +94,4 @@ link where it is worth reading.
 | 105 | [The pomodoro ships off](.agents/adr/0105-the-pomodoro-ships-off.md) | 2026-08-12 | narrows 103; relates to 68, 84, 90 |
 | 106 | [Off silences even a Suppressed board's Banner](.agents/adr/0106-off-silences-even-a-suppressed-boards-banner.md) | 2026-08-14 | narrows 92 |
 | 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50 |
+| 108 | [The board lends its engine to a marked stage](.agents/adr/0108-the-board-lends-its-engine-to-a-marked-stage.md) | 2026-08-19 | widens 95; relates to 70 |
