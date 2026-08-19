@@ -1824,3 +1824,62 @@ export class StandInIntersectionObserver {
     this.callback([{ target, isIntersecting }], this);
   }
 }
+
+// --- fetch settling, for checks that run a page against a live daemon ---------
+//
+// test/check-index-live.mjs and test/check-pomodoro-page.mjs both rewrite
+// globalThis.fetch to carry a page's relative URLs to a real daemon on 127.0.0.1,
+// then need "the page has finished reacting" before asserting on the DOM. A fixed
+// sleep is a bet on loopback latency, and node 26 lost it: requests that took
+// single-digit ms on 22/24 intermittently take 45ms+ there (QUIRKS.md "A fixed
+// flush sleep is a bet on node's loopback latency"), stepping over any margin that
+// is still recognisably a margin. This settles deterministically instead: every
+// wrapped request is tracked from send to LAST BODY BYTE, and settle() returns
+// only once no request is in flight and one macrotask hop surfaces no new one.
+//
+// `track` buffers the whole body and hands the page a pre-read Response on
+// purpose: fetch resolves at the HEADERS, so a page's own `r.json()` is more real
+// I/O that tracking the response promise alone would miss -- the exact tail the
+// fixed sleeps kept losing to. A bodyless status (204/205/304) must pass `null`,
+// the one body `new Response` accepts for it.
+//
+// The hop in `settle` is what closes the page's own reaction chain: a request's
+// `.then` work (json -> patch -> in-flight flag cleared -> maybe ANOTHER fetch,
+// src/indexpage.mjs patchRows' rowsPending replay) is all microtasks against a
+// buffered body, and a macrotask fires after every pending microtask -- so by the
+// time the hop lands, a chained fetch is already in `inFlight` and the loop goes
+// around again. Exit means quiescent, not "probably done by now".
+//
+// One settler is shared across a check file's "tabs": tabs run sequentially, and
+// draining a previous tab's straggler is harmless where racing it is not. The
+// deadline turns a daemon that never answers into a named failure instead of a
+// hung suite -- a check that WANTS an unanswered fetch stubs fetch by hand and
+// never tracks it (check-index-live.mjs "a daemon slower than the tick").
+export function fetchSettler() {
+  const inFlight = new Set();
+  return {
+    /** Wrap one real fetch's response promise; returns what the page awaits. */
+    track(responsePromise) {
+      const p = (async () => {
+        const r = await responsePromise;
+        const body = await r.arrayBuffer();
+        const bodyless = r.status === 204 || r.status === 205 || r.status === 304;
+        return new Response(bodyless ? null : body, { status: r.status, statusText: r.statusText, headers: r.headers });
+      })();
+      inFlight.add(p);
+      p.finally(() => inFlight.delete(p)).catch(() => {});
+      return p;
+    },
+    /** Resolve once every tracked request AND the page work it triggers are done. */
+    async settle() {
+      const deadline = Date.now() + 10_000;
+      do {
+        while (inFlight.size) {
+          if (Date.now() > deadline) throw new Error('fetchSettler.settle: tracked fetches still in flight after 10s');
+          await Promise.allSettled([...inFlight]);
+        }
+        await new Promise(resolve => setTimeout(resolve, 0));
+      } while (inFlight.size);
+    },
+  };
+}

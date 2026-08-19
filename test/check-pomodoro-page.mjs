@@ -25,7 +25,7 @@ import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc, defaultDoc, p
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, fetchSettler } from './dom-stand-in.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -94,7 +94,7 @@ function loadIndexAgainstDaemon(port, { pomodoroEnabled = true, hash = '', failS
     const target = `http://127.0.0.1:${port}${url}`;
     const dropCookie = failSettingsWrite && url === '/api/pomodoro/settings';
     const headers = { ...(opts && opts.headers), ...(dropCookie ? {} : { cookie: sessionCookieHeader() }) };
-    return REAL_FETCH(target, { ...opts, headers });
+    return settler.track(REAL_FETCH(target, { ...opts, headers }));
   };
   // 'window'/'location'/'history' join the parameters this already passed:
   // indexScript reads all three for the settings panel's '#pomodoro-settings'
@@ -166,12 +166,10 @@ function pomodoroWidgetMarkup(html) {
   return html.slice(start, end);
 }
 
-/** A real network round trip against 127.0.0.1 settles in low single-digit ms,
- * but this is still real I/O, not a stubbed microtask (test/check-pure.mjs's
- * own flushPomodoro) -- 50ms is a generous, still-fast margin. */
-function flush() {
-  return new Promise(resolve => setTimeout(resolve, 50));
-}
+/** Settling, not sleeping: node 26 broke the fixed-sleep version of this
+ * (QUIRKS.md "A fixed flush sleep is a bet on node's loopback latency"). */
+const settler = fetchSettler();
+const flush = () => settler.settle();
 
 async function main() {
   let server = await startServer({ home, port: 0 });

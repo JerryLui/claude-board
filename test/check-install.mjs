@@ -849,8 +849,13 @@ async function main() {
     // compiled in.
     const exec = path.join(appDir, 'claude-board.app', 'Contents', 'MacOS', 'claude-board');
     const before = readFileSync(exec);
+    // An exec wrapper, NOT a copy of the binary: homebrew's node links libnode
+    // via @rpath (@loader_path/../lib), so a copied binary dies in dyld before
+    // main and `--version` prints nothing (QUIRKS.md "A copied homebrew node
+    // binary dies before main"). The test only needs a real node ANSWERING AT A
+    // DIFFERENT PATH, which a wrapper is.
     const fakeNode = path.join(binDir, 'node-alias');
-    cpSync(process.execPath, fakeNode);
+    writeFileSync(fakeNode, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`);
     chmodSync(fakeNode, 0o755);
     const r = spawnSync('bash', [installScript], { env: { ...env, ...quietStubs('rebuild-node'), CLAUDE_BOARD_NODE: fakeNode }, encoding: 'utf8' });
     assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);

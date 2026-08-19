@@ -737,6 +737,8 @@ answer.
 - [A machine-identity sweep cannot be `includes(os.hostname())`](#a-machine-identity-sweep-cannot-be-includesoshostname)
 - [A comment-only edit to src/ui.mjs can still break check-sample-board.mjs](#a-comment-only-edit-to-srcuimjs-can-still-break-check-sample-boardmjs)
 - [A `new Function` harness inherits the host's globals, so a `typeof` guard can pass for the wrong reason](#a-new-function-harness-inherits-the-hosts-globals-so-a-typeof-guard-can-pass-for-the-wrong-reason)
+- [A fixed flush sleep is a bet on node's loopback latency, and node 26 lost it](#a-fixed-flush-sleep-is-a-bet-on-nodes-loopback-latency-and-node-26-lost-it)
+- [A copied homebrew node binary dies before main](#a-copied-homebrew-node-binary-dies-before-main)
 
 ### A client script that parses is not a client script that is on the page
 
@@ -1096,6 +1098,52 @@ lands, with no preload required to notice.
 The general shape, worth suspecting anywhere: a check that passes because of what the
 interpreter does or does not expose is not passing. If a script under test reads a global
 you did not name, name it.
+
+### A fixed flush sleep is a bet on node's loopback latency, and node 26 lost it
+
+`test/check-index-live.mjs` and `test/check-pomodoro-page.mjs` run a real page script
+against a real daemon on 127.0.0.1, so "the page has finished reacting" used to be a
+fixed sleep (60ms and 50ms) after each action — generous against the single-digit-ms
+round trips node 22/24 deliver. Node 26 intermittently takes 45–75ms for the same
+loopback fetch (and the tail lands in the BODY read, after the response promise has
+already resolved), so whichever check happened to draw a slow request failed, a
+different one each run. CI never saw it while the matrix stopped at 24; a homebrew
+machine on 26 saw it constantly.
+
+The fix is `fetchSettler` (test/dom-stand-in.mjs): the harness's fetch wrapper tracks
+every request from send to last body byte (it buffers the body and hands the page a
+pre-read `Response`, so `r.json()` costs a microtask instead of untracked I/O), and
+`flush()` settles — drains every in-flight request, then hops one macrotask so the
+page's own `.then` chain (including a chained re-fetch, `patchRows`' `rowsPending`
+replay) is either finished or back in the tracked set. No duration appears anywhere,
+so there is no margin to lose.
+
+Two shapes to keep straight when touching those files:
+
+- A check that WANTS an unanswered or failing fetch stubs `globalThis.fetch` by hand,
+  bypassing the wrapper — its promise is deliberately untracked, and `settle()` must
+  not (and does not) wait on it.
+- `test/check-install-doc.mjs`'s settle-then-sample loops had the same bet in a
+  different coat: a 1s wall-clock window of 50ms-spaced samples "obviously" yields ~19,
+  and its `samples >= 5` sanity floor failed when each sample's round trip ran slow.
+  The floor is part of the property, so it now extends the window
+  (`while (elapsed < 1000 || samples < 5)`) instead of hoping.
+
+### A copied homebrew node binary dies before main
+
+Homebrew's node (26.x formula, Apple Silicon) is no longer self-contained: it links
+`libnode` as `@rpath/libnode.147.dylib` with `LC_RPATH @loader_path/../lib`. Copy the
+binary anywhere without an adjacent `../lib` and dyld aborts it before `main` —
+`--version` prints NOTHING to stdout, and the abort note goes to stderr. install.sh
+then reports `could not read a version from '...' (got: nothing)`, which reads like a
+broken install rather than a broken fixture.
+
+`test/check-install.mjs`'s rebuild-on-changed-node check used to `cpSync(process.execPath)`
+to mint "a node at a different path"; on CI's official builds (static) that works, on
+homebrew it cannot. The fixture is now an exec wrapper (`#!/bin/sh` + `exec "$real" "$@"`),
+which is all the test ever needed: a real node ANSWERING at a different path, so the
+path bakes into the launcher and forces the rebuild. The same trap awaits anything else
+that relocates a node binary instead of pointing at it.
 
 ---
 

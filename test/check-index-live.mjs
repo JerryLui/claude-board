@@ -39,7 +39,7 @@ import http from 'node:http';
 import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { startServer } from '../src/server.mjs';
 import { renderIndexPage, indexScript } from '../src/indexpage.mjs';
-import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, StandInEventSource, fetchSettler } from './dom-stand-in.mjs';
 
 let failures = 0;
 async function check(name, fn) {
@@ -149,7 +149,7 @@ function openIndexTab(port, { threads = [], query = '', eventSource = true } = {
   globalThis.fetch = (url, opts) => {
     const target = `http://127.0.0.1:${port}${url}`;
     const headers = { ...(opts && opts.headers), cookie: sessionCookieHeader() };
-    return REAL_FETCH(target, { ...opts, headers });
+    return settler.track(REAL_FETCH(target, { ...opts, headers }));
   };
   // 'window'/'location' ride along for the same reason test/check-pomodoro-page.mjs
   // passes them: indexScript registers a 'hashchange' listener for the settings
@@ -190,7 +190,10 @@ function openIndexTab(port, { threads = [], query = '', eventSource = true } = {
   };
 }
 
-const flush = () => new Promise(resolve => setTimeout(resolve, 60));
+// Settling, not sleeping: node 26 broke the fixed-sleep version of this
+// (QUIRKS.md "A fixed flush sleep is a bet on node's loopback latency").
+const settler = fetchSettler();
+const flush = () => settler.settle();
 
 /** A second subscriber on `GET /api/events`, held open beside the page the way
  * bin/menubar.m holds it -- raw HTTP, no page, no client script (the shape

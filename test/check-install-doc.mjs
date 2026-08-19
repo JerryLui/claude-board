@@ -202,9 +202,13 @@ async function main() {
     // across a window long enough for a loopback request to land, and asserting the
     // deadline never moves at ANY sample, is what actually proves "no-op" rather than
     // "hadn't happened yet when I looked".
+    // `|| samples < 5`: the count is part of the property (one sample proves
+    // nothing), so a node whose loopback round trips run slow (node 26 does,
+    // QUIRKS.md "A fixed flush sleep is a bet on node's loopback latency") extends
+    // the window rather than failing the sanity floor below.
     const start = Date.now();
     let samples = 0;
-    while (Date.now() - start < 1000) {
+    while (Date.now() - start < 1000 || samples < 5) {
       const doc = await pomodoroDoc();
       assert.equal(doc.timer.deadline, deadlineBefore, 'ensure against a running timer must be a true no-op');
       samples++;
@@ -284,9 +288,11 @@ async function main() {
     // rather than through GET /api/pomodoro -- the criterion is that no part of the
     // document moved, settings and cycle included, and a read through the daemon is
     // itself a chance for something to rewrite the file.
+    // `|| samples < 5` for the same reason the running-timer no-op check gives:
+    // the floor is part of the property, so slow iterations extend the window.
     const start = Date.now();
     let samples = 0;
-    while (Date.now() - start < 1000) {
+    while (Date.now() - start < 1000 || samples < 5) {
       const now = readFileSync(pomodoroFile);
       assert.ok(now.equals(before), `an unattended session must leave pomodoro.json byte-identical; it became:\n${now}`);
       samples++;
