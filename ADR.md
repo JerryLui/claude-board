@@ -95,3 +95,4 @@ link where it is worth reading.
 | 106 | [Off silences even a Suppressed board's Banner](.agents/adr/0106-off-silences-even-a-suppressed-boards-banner.md) | 2026-08-14 | narrows 92 |
 | 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50 |
 | 108 | [The board lends its engine to a marked stage](.agents/adr/0108-the-board-lends-its-engine-to-a-marked-stage.md) | 2026-08-19 | widens 95; relates to 70 |
+| 109 | [The positions payload is answered in frame viewport coordinates](.agents/adr/0109-positions-are-answered-in-frame-viewport-coordinates.md) | 2026-08-20 | relates to 99 |

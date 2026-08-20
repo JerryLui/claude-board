@@ -1832,15 +1832,27 @@ export function stageAgentScript() {
     }
     if (data.type === 'locate') {
       if (typeof data.requestId !== 'string' || !Array.isArray(data.refs)) return;
+      // Answered in THIS FRAME'S VIEWPORT coordinates: the element's own client
+      // rect, read straight off getBoundingClientRect with nothing subtracted.
+      // The pin layer overlays the frame's viewport, so the old "minus the body
+      // box" shape was a document coordinate answering a viewport question --
+      // the two agree only at scroll 0 and only for a marginless body, and they
+      // agree for exactly one scroller: the body box moves with whichever
+      // element actually scrolled (QUIRKS.md "The thing that scrolls a rendered
+      // artifact is often not its document"), while the layer stays where it
+      // was. The raw client rect is correct for every scroller at once, with no
+      // offset to remember. An element scrolled out of the frame reports a
+      // position outside the frame's box, which the layer's own overflow clip
+      // (src/styles.mjs .pin-layer) hides rather than drawing over the chrome;
+      // it comes back on its own when the element scrolls back in.
       var positions = {};
-      var bodyBox = document.body.getBoundingClientRect ? document.body.getBoundingClientRect() : null;
       for (var i = 0; i < data.refs.length; i++) {
         var ref = data.refs[i];
         if (typeof ref !== 'string') continue;
         var el = resolveRef(ref);
-        if (el && bodyBox && el.getBoundingClientRect) {
+        if (el && el.getBoundingClientRect) {
           var box = el.getBoundingClientRect();
-          positions[ref] = { left: box.left - bodyBox.left, top: box.top - bodyBox.top };
+          positions[ref] = { left: box.left, top: box.top };
         } else {
           positions[ref] = null;
         }

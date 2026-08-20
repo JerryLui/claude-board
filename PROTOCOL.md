@@ -1264,7 +1264,7 @@ from anything else that might postMessage this window (an extension, devtools, a
 | `ready` | — | listeners attached. Sent once, unconditionally, at the end of the agent script |
 | `hover` | `{ ref, tag, text }` | innermost element under the cursor, or `ref: null` on mouseout. The stage also applies its own outline locally |
 | `click` | `{ ref, tag, text }` | step path plus **raw** tag/text, never a composed hint |
-| `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` relative to this document's `<body>`, or `null` if the ref no longer resolves. Numbers and null only |
+| `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` in the frame's viewport coordinates (the element's own client rect), or `null` if the ref no longer resolves. Numbers and null only |
 | `height` | `{ height }` | `document.body.scrollHeight` |
 | `scroll` | `{ top }` | "I am at this offset". Deduplicated on the last reported value |
 | `mermaid` | `{ requestId, sources, config }` | "draw these diagrams for me". Sent only by the engine facade a diagram-bearing stage is given, and **repeated under the same `requestId` until answered** (see below) |
@@ -1340,7 +1340,9 @@ had. Parent to stage only: reserving space for the board's chrome is the board's
 negotiation.
 
 `locate` and `band` are both sent once a stage announces `ready`, and again whenever the parent's
-own refresh runs (resize, a comment queued, a submit landing, a round flip).
+own refresh runs (resize, a comment queued, a submit landing, a round flip). `locate` alone
+additionally rides each `scroll` report from a stage that has pins to follow -- `band` is a fact
+about the board's own chrome, which a stage's scroll changes nothing about.
 
 ### `mermaid`/`diagrams`: the board draws a stage's diagrams
 

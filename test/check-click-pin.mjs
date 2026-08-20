@@ -105,17 +105,15 @@ check('clicking an element, then submitting the opened comment form, draws a num
   // src/ui.mjs's position computations with a hardcoded {left:9999, top:-4242}
   // caused zero check failures anywhere in the suite. The stand-in now derives a
   // deterministic, per-element box (see Element.getBoundingClientRect's own
-  // comment), so the SAME formula src/ui.mjs's renderDomPins uses --
-  // `elBox.left - stageBox.left`, `elBox.top - stageBox.top`, both relative to the
-  // REAL (post-loadSrcdoc) stage body -- can be recomputed independently, here,
-  // from the actual clicked element and actual stage root, and compared against
+  // comment), so the stage's own answer -- the element's client rect, frame
+  // viewport coordinates (PROTOCOL.md 'positions') -- can be recomputed
+  // independently, here, from the actual clicked element, and compared against
   // what the pin actually got. A hardcoded-garbage ablation fails this outright;
   // a stage root swapped for the about:blank placeholder (a different `left`/`top`
   // altogether) would fail it too.
   const expectedBox = button.getBoundingClientRect();
-  const stageBox = stageDoc.body.getBoundingClientRect();
-  const expectedLeft = expectedBox.left - stageBox.left;
-  const expectedTop = expectedBox.top - stageBox.top;
+  const expectedLeft = expectedBox.left;
+  const expectedTop = expectedBox.top;
   assert.equal(pin.style.left, expectedLeft + 'px', `expected the pin's left to be computed from the REAL stage document's own layout (${expectedLeft}px), got ${JSON.stringify(pin.style.left)}`);
   assert.equal(pin.style.top, expectedTop + 'px', `expected the pin's top to be computed from the REAL stage document's own layout (${expectedTop}px), got ${JSON.stringify(pin.style.top)}`);
 });
@@ -165,11 +163,10 @@ check('two different elements inside the same stage get two different, independe
   const pins = layer.querySelectorAll('.anchor-pin');
   assert.equal(pins.length, 2, `expected two pins after queueing two comments, got ${pins.length}`);
 
-  const stageBox = stageDoc.body.getBoundingClientRect();
   const buttonBox = button.getBoundingClientRect();
   const pBox = p.getBoundingClientRect();
-  const expectedButton = { left: (buttonBox.left - stageBox.left) + 'px', top: (buttonBox.top - stageBox.top) + 'px' };
-  const expectedP = { left: (pBox.left - stageBox.left) + 'px', top: (pBox.top - stageBox.top) + 'px' };
+  const expectedButton = { left: buttonBox.left + 'px', top: buttonBox.top + 'px' };
+  const expectedP = { left: pBox.left + 'px', top: pBox.top + 'px' };
 
   assert.notEqual(expectedButton.left + ',' + expectedButton.top, expectedP.left + ',' + expectedP.top,
     'setup failure: the two fixture elements must have distinguishable positions under the stand-in\'s layout model, or this check cannot tell them apart');

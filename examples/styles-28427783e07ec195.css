@@ -899,9 +899,16 @@ body.sent-page .comment-btn { display: none; }
 
 /* element-level anchoring: pin-layer overlays the html-stage iframe or
  * the rendered mermaid SVG exactly, and src/ui.mjs positions numbered .anchor-pin
- * badges inside it once the element they point at is resolvable in the live DOM. */
+ * badges inside it once the element they point at is resolvable in the live DOM.
+ * 'overflow: hidden' clips a stage pin at the frame edge: the stage reports
+ * positions in frame viewport coordinates (PROTOCOL.md 'positions'), so an
+ * element scrolled out of the frame answers with a spot outside the frame's box,
+ * which must be cut at the edge rather than drawn over the header, Tray or the
+ * next block. The pin is not omitted, so it reappears by itself when its element
+ * scrolls back into view. The same clip applies to a mermaid or failed-html
+ * layer, where no pin ever sits off-edge, so it costs nothing there. */
 .stage-wrap { position: relative; }
-.pin-layer { position: absolute; inset: 0; pointer-events: none; }
+.pin-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .anchor-pin { position: absolute; transform: translate(-50%, -50%); pointer-events: auto;
   min-width: 20px; height: 20px; padding: 0 5px; border-radius: var(--r-pill); background: var(--accent);
   color: var(--accent-ink); font-size: 11px; font-weight: 700; line-height: 20px; text-align: center;

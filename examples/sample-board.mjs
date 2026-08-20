@@ -62,20 +62,21 @@ import path from 'node:path';
 //
 // Every mock takes its vertical spacing from `body`'s own PADDING, or from a
 // HORIZONTAL-only margin (`margin: 0 auto`) on a wrapper, never from a
-// VERTICAL margin on body's direct child, and that is load-bearing twice
-// over. A vertical margin on body's only child collapses through body
-// (nothing on body contains it), which (a) moves `document.body`'s own box
-// down by that much, and the stage reports pin positions relative to body
-// while the pin layer is aligned to the iframe VIEWPORT -- so every pin in the
-// stage draws that many px high, and a comment anchored to the Confirm button
-// lands on the chip above it; and (b) is silently absent from
-// `document.body.scrollHeight`, which src/ui.mjs's handleStageHeight uses to
-// size a stage under a fixed-height + overflow:hidden rule -- undercounting the
-// height and clipping the mock. Padding never collapses and is always counted,
-// so it avoids both. (A page-board stage is exempt from the sizing half: its
-// frame is a constant 100vh and ignores the height the artifact reports --
-// src/styles.mjs. The pin-offset half still bites there, which is what the
-// dom-anchored comment below depends on.) No `vh` unit appears anywhere below:
+// VERTICAL margin on body's direct child. A vertical margin on body's only
+// child collapses through body (nothing on body contains it) and is silently
+// absent from `document.body.scrollHeight`, which src/ui.mjs's
+// handleStageHeight uses to size a stage under a fixed-height +
+// overflow:hidden rule -- undercounting the height and clipping the mock.
+// Padding never collapses and is always counted, so it avoids that. (A
+// page-board stage is exempt from the sizing half: its frame is a constant
+// 100vh and ignores the height the artifact reports -- src/styles.mjs.)
+//
+// Pin positions are a fact about the VIEWPORT, not the document: the stage
+// answers each dom anchor with the element's own client rect (frame viewport
+// coordinates, PROTOCOL.md 'positions'), so a pin lands on its element
+// wherever the body box sits -- a body-child margin can no longer displace a
+// pin, and the dom-anchored comment below lands on the button it names.
+// No `vh` unit appears anywhere below:
 // an artifact must size from its own content, never from the viewport it
 // happens to be shown in, and that rule binds outside a page board too, where
 // the frame IS derived from what the stage reports (skills/claude-board/SKILL.md).

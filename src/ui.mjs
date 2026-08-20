@@ -482,6 +482,19 @@ export const ui = `
       .map(function (c) { return c.anchor.ref; });
   }
 
+  // The 'dom'-anchored comments on blockId that currently need a pin -- the
+  // server-verdict ones plus whatever is still queued (commentsWithPending,
+  // below), the full set a pin layer asks its stage about. One helper, two
+  // call sites: requestStagePositions asks about exactly this list, and
+  // handleStageScroll's re-ask gate skips blocks whose list is empty. Kept as
+  // one function rather than two inline copies of the predicate, so a change
+  // to what counts as pinnable cannot drift between the ask and its gate.
+  function domPinCommentsFor(blockId) {
+    return commentsWithPending().filter(function (c) {
+      return c.blockId === blockId && c.anchor && c.anchor.kind === 'dom';
+    });
+  }
+
   // --- element-level anchoring -------------------------------------------------
   //
   // Click an element inside an html stage, or a node inside a rendered mermaid
@@ -961,14 +974,12 @@ export const ui = `
 
   /** Ask 'frame''s stage for the current position of every 'dom'-anchored
    * comment on 'blockId' (server-verdict comments plus whatever is still
-   * queued -- commentsWithPending, same source page-scoped pins already use).
-   * The response ('positions', handled below) draws the pins; this function
-   * only ever decides WHICH refs to ask about and remembers what a response
-   * should draw once it lands. */
+   * queued -- domPinCommentsFor, the same helper the scroll-driven re-ask
+   * gate below uses). The response ('positions', handled below) draws the
+   * pins; this function only ever decides WHICH refs to ask about and
+   * remembers what a response should draw once it lands. */
   function requestStagePositions(frame, blockId, layer) {
-    var comments = commentsWithPending().filter(function (c) {
-      return c.blockId === blockId && c.anchor && c.anchor.kind === 'dom';
-    });
+    var comments = domPinCommentsFor(blockId);
     var requestId = 'loc' + (nextLocateId++);
     // The layer's own "latest outstanding request" marker: a 'positions' reply
     // for a SUPERSEDED request (e.g. a resize fired again before the first
@@ -1257,10 +1268,30 @@ export const ui = `
    * Chrome 152; QUIRKS.md), so a reviewer who flips away from a half-read
    * artifact and returns is back where they left off with nothing to re-report
    * it -- the recorded top is the only thing refreshStageChrome can re-derive
-   * from on the return flip. */
-  function handleStageScroll(data, frame) {
+   * from on the return flip.
+   *
+   * Since pins follow their elements (the stage answers 'locate' in frame
+   * viewport coordinates), a scroll report is also the moment to re-ask THIS
+   * frame's own block for positions, so a pin already drawn moves with its
+   * element instead of sitting where it was minted. The re-ask is gated the
+   * same way every other position ask is: the frame has to be wired (a stage
+   * that never announced 'ready' can never answer) and a layer has to exist,
+   * and it is skipped outright when the block has no 'dom' comment to pin --
+   * requestStagePositions would otherwise send an empty-refs 'locate' on every
+   * report of the hottest gesture this board has, a ping-pong that can change
+   * nothing. No timer anywhere: the one-outstanding-request-per-layer guard
+   * inside requestStagePositions bounds the STACKING of in-flight asks (one
+   * unanswered locate per layer), not the rate of wipe/rebuild passes a
+   * hostile stage could drive -- and the hostile self-trigger is not new in
+   * kind, a stage could already drive re-asks by re-posting 'ready', which
+   * lands in the same request path. A superseded reply is discarded when it
+   * lands. */
+  function handleStageScroll(data, frame, blockId, layer) {
     frame.__cbStageTop = data.top;
     refreshStageChrome();
+    if (!blockId || !layer || !isWiredStage(frame)) return;
+    if (!domPinCommentsFor(blockId).length) return;
+    requestStagePositions(frame, blockId, layer);
   }
 
   /** Shared by refreshStageChrome and refreshDocumentScrollChrome (below): both
@@ -1629,7 +1660,7 @@ export const ui = `
       // false against the threshold and silently pin the header expanded, which
       // reads as a broken feature rather than as rejected input.
       if (typeof data.top !== 'number' || !isFinite(data.top)) return;
-      handleStageScroll(data, frame);
+      handleStageScroll(data, frame, blockId, layer);
       return;
     }
   });

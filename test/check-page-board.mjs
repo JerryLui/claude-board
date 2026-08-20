@@ -918,17 +918,97 @@ check('criterion 5: the pin is drawn over the right element after a re-render, n
   const pins = layer.querySelectorAll('.anchor-pin');
   assert.equal(pins.length, 1, 'a queued comment on a page board gets its pin immediately, exactly as one on an ordinary board does');
 
-  // Recomputed independently, the way the stage agent itself does it
-  // (element box minus body box, both from test/dom-stand-in.mjs's deterministic
-  // per-element boxes) -- so this asserts the pin is over the ELEMENT that was
-  // clicked, not merely that some pin exists somewhere.
-  const bodyBox = frame.contentDocument.body.getBoundingClientRect();
+  // Recomputed independently, the way the stage agent itself does it: the
+  // element's OWN client rect (frame viewport coordinates, PROTOCOL.md
+  // 'positions'), straight from test/dom-stand-in.mjs's deterministic
+  // per-element boxes -- so this asserts the pin is over the ELEMENT that was
+  // clicked, not merely that some pin exists somewhere. The client rect and
+  // the old body-minus shape differ by the body box's own non-zero {left,
+  // top}, so this pins the viewport meaning rather than passing under either
+  // coordinate rule.
   const elBox = el.getBoundingClientRect();
-  const expected = { left: (elBox.left - bodyBox.left) + 'px', top: (elBox.top - bodyBox.top) + 'px' };
+  const expected = { left: elBox.left + 'px', top: elBox.top + 'px' };
   assert.deepEqual({ left: pins[0].style.left, top: pins[0].style.top }, expected,
     'the pin must land on the element the comment names');
   assert.notDeepEqual({ left: pins[0].style.left, top: pins[0].style.top }, { left: '10px', top: '10px' },
     'and never at the stacked-fallback corner, which is what "the stage answered nothing" looks like');
+});
+
+check('criterion 5: a scroll report re-asks the stage for positions, and the reply to that second locate still draws the pin', () => {
+  const { document, frame, blockId } = openPageBoard();
+  enableCommentMode(document);
+
+  const el = frame.contentDocument.getElementById('theme');
+  el.dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + blockId);
+  form.querySelector('input[type=text]').value = 'follow the element';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  const layer = document.querySelector('.stage-wrap .pin-layer');
+  assert.equal(layer.querySelectorAll('.anchor-pin').length, 1,
+    'setup: the queued comment has drawn its pin');
+
+  // Parent -> stage traffic, watched on the frame's own window: a 'locate' is
+  // postToStage's message asking the stage where every pinned ref sits right
+  // now. Registered AFTER the submit above, so only the scroll-driven ask is
+  // counted (the submit's own refreshPins ask landed before this listener
+  // existed).
+  const locates = [];
+  frame.contentWindow.addEventListener('message', (ev) => {
+    if (ev.data && ev.data.cb === 'cb-stage' && ev.data.type === 'locate') locates.push(ev.data);
+  });
+
+  reportScroll(frame, 800);
+
+  assert.equal(locates.length, 1,
+    'a scroll report from a wired stage with pins must send one fresh locate for that frame\'s layer');
+  assert.deepEqual(locates[0].refs, [form.getAttribute('data-anchor-ref')],
+    'asking about the one dom-anchored comment this layer pins');
+
+  // The reply to the second locate lands through the same handler as the
+  // first, so the pin is redrawn (in the stand-in the whole round trip is
+  // synchronous) -- proving the re-ask feeds the draw path rather than being
+  // a locate nobody answers.
+  const pins = layer.querySelectorAll('.anchor-pin');
+  assert.equal(pins.length, 1, 'the re-ask must still draw exactly the one pin');
+  const elBox = el.getBoundingClientRect();
+  assert.deepEqual({ left: pins[0].style.left, top: pins[0].style.top },
+    { left: elBox.left + 'px', top: elBox.top + 'px' },
+    'and the reply to that re-ask draws it at the element\'s client rect, the same rule as the first');
+});
+
+check('a scroll report from a stage with no dom comment to pin sends no locate at all', () => {
+  // The negative half of the same gate the check above proves the positive
+  // half of: with nothing to pin, a scroll report must not produce a 'locate'
+  // at all. Dropping the handleStageScroll guard leaves every check in this
+  // suite green -- requestStagePositions would still send its empty-refs ask,
+  // and nothing observes the stage being pinged for refs it can never have --
+  // so this is the one assertion that fails on that regression.
+  const { document, frame } = openPageBoard();
+
+  // Registered AFTER the ready-time ask (openPageBoard's loadSrcdoc), so only
+  // a scroll-driven locate is counted, same shape as the check above.
+  const locates = [];
+  frame.contentWindow.addEventListener('message', (ev) => {
+    if (ev.data && ev.data.cb === 'cb-stage' && ev.data.type === 'locate') locates.push(ev.data);
+  });
+
+  reportScroll(frame, 800);
+  assert.equal(condensed(document), true, 'setup: the scroll report itself must have been accepted');
+
+  assert.equal(locates.length, 0,
+    'the hottest gesture on a pinless board must stay off the locate channel -- the re-ask gate exists so every scroll report does not ping the stage with an empty refs list');
+});
+
+check('the pin layer clips at the frame edge -- a pin whose element scrolled out is not drawn over the chrome', () => {
+  // Effect-level, through the same cascade resolver the rest of this file
+  // uses, not an exact-text match of the rule (QUIRKS.md: a text match can
+  // pass for a rule that selects nothing any browser renders).
+  const { document } = openPageBoard();
+  const layer = document.querySelector('.stage-wrap .pin-layer');
+  assert.ok(layer, 'setup failure: the page board has no .pin-layer');
+  assert.equal(computed(layer, 'overflow'), 'hidden',
+    'the layer must clip: a pin whose element scrolled out of the frame reports a position outside the frame\'s box, and an unclipped layer would draw it over the floating chrome forever');
 });
 
 // =================================================================================
