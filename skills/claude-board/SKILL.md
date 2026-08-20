@@ -1,6 +1,6 @@
 ---
 name: claude-board
-description: Review surface - a round of questions, or a rendered artifact, on one browser page the user answers at once. Read this manual before putting more than one question to the user, before showing a mock or diagram for reaction, and when another skill names the board.
+description: One browser page for a round of questions or an artifact to react to. Read before asking the user more than one question, showing a mock or diagram, or when a skill names the board.
 ---
 
 <!-- Installed by claude-board's install.sh from skills/claude-board/SKILL.md in the clone.
