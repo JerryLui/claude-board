@@ -104,6 +104,20 @@ Everything a board shows is one. _Avoid_: card, section, element.
 that do — `question` and `compare`. Chrome as far as commenting goes: never Commentable itself,
 though a rendered block nested inside it still is. _Avoid_: container, layout block.
 
+**Explainer**: the one to three sentences a question carries under its prompt, on the card's full
+row above the options and the context, saying what is being decided and what it changes — markdown by value in the question's
+`explainer` field, the agent's words, never the reviewer's. _Avoid_: description (an option's),
+context (what the reviewer looks up), note (the reviewer's).
+
+**Context**: what a question carries beside its options for the reviewer to look up — the
+section under discussion, the code it constrains, a diagram — rendered as one panel of plain
+prose, items in posted order, no card and no kind label per item. _Avoid_: context block (see
+Content block), attachment, sidebar.
+
+**Fold**: a prose item clipped at about a dozen lines under a fade, opened in place by Show
+more — per item, wherever the item sits, decided by a count of its source; a code excerpt keeps
+its own scroll box, and a diagram or a mock never folds. _Avoid_: collapse, truncate, clamp.
+
 **Commentable**: carrying the comment control and the click-to-anchor gesture — only the
 rendered content kinds, `mermaid` and `html`, wherever they appear; `markdown` and `code` never
 are. Kind is necessary, not sufficient: the round it sits on has to still be listening, so a page
