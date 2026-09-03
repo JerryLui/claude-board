@@ -1836,6 +1836,8 @@ shim on one shared cap and asserts the ROUND was closed on disk.
 
 - [The same absolute-looking path can name two different checkouts](#the-same-absolute-looking-path-can-name-two-different-checkouts)
 - [Scratch probe scripts belong in the worktree, not `/tmp`](#scratch-probe-scripts-belong-in-the-worktree-not-tmp)
+- [Git in a worktree agent runs only when piped](#git-in-a-worktree-agent-runs-only-when-piped)
+- [A `cd <shared> && python3` write is not guarded](#a-cd-shared--python3-write-is-not-guarded)
 
 ### The same absolute-looking path can name two different checkouts
 
@@ -1881,6 +1883,26 @@ files' diff there (`git diff -- <your files> > p && git apply p`), and run the s
 that. It answers "is this mine" and "is the branch itself red" at once. Then
 `git worktree remove --force` it. The same tree-sharing also means `git commit -a` sweeps
 up the other agent's work: name your files explicitly on `git add`, every time.
+
+### Git in a worktree agent runs only when piped
+
+Inside an isolation worktree the Bash hook refuses a bare `git status`, `git diff`,
+`git log`, `git add` and `git commit` ("runs rtk with a git command among its operands",
+or "must target its own worktree"): rtk rewrites the command into an `rtk`-wrapped form the
+isolation check cannot resolve. rtk leaves an already-piped command alone, so the same
+command with `2>&1 | tail -20` on the end runs, and so does `/usr/bin/git ...` (rtk does not
+rewrite an absolute launcher). `git merge` and `git rev-parse` need nothing; an `&&` chain,
+`git -C <worktree>`, `env git` and `rtk proxy git` are all refused. Two owners lost about six calls each to it
+(2026-09-03) before finding the pipe.
+
+### A `cd <shared> && python3` write is not guarded
+
+The guard that refuses `cd <shared checkout> && git ...` and the `Edit` tool's refusal of a
+shared-checkout path do not cover a plain Bash write: `cd <shared> && python3 - <<'EOF'`
+edits the shared checkout's tracked file and the worktree's `git status` stays clean, so
+nothing tells you. One owner did it six times to `src/ui.mjs` before noticing (2026-09-03)
+and had to reverse each edit by hand. Never `cd` out of the worktree for an edit; the
+entry above says why the path looks right and is not.
 
 ### Scratch probe scripts belong in the worktree, not `/tmp`
 
