@@ -96,21 +96,44 @@ const BLOCK_SPEC = [
     // chrome, and a click on a rendered node is the diagram's own gesture (covered
     // end to end in test/check-mermaid-anchor.mjs). Two of them, because several
     // checks below need two independent, simultaneously-live anchor targets.
-    { kind: 'mermaid', source: { path: 'no-such-diagram-28a.mmd' } },
-    { kind: 'mermaid', source: { path: 'no-such-diagram-28b.mmd' } },
+    // Minted BY VALUE here and given the failed-reference shape by
+    // storeFailedDiagramRefs below (see its comment).
+    { kind: 'mermaid', text: '' },
+    { kind: 'mermaid', text: '' },
     {
       kind: 'compare',
-      left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-28c.mmd' } } },
+      left: { label: 'Before', block: { kind: 'mermaid', text: '' } },
       right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Send</button></div>' } },
     },
     { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
   { kind: 'question', prompt: 'Explain', widget: 'text', options: [] },
 ];
-const board = createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC });
+
+/** Give the three BLOCK_SPEC diagrams (two top-level, one inside the compare side)
+ * the shape an ALREADY-STORED board carries for a reference that failed to resolve.
+ * A post naming an unresolvable reference is refused whole now (ADR.md entry 112),
+ * so this shape only ever comes off disk -- the blocks are minted by value first, so
+ * each still gets a real id from createBoard and competes in the id ledger, and
+ * `text: ''` already carries the sha a failed resolve produced. Applied to every
+ * board minted from BLOCK_SPEC, so the shared fixture and the second one below stay
+ * identical. */
+function storeFailedDiagramRefs(b) {
+  const targets = [
+    [b.blocks[2], 'no-such-diagram-28a.mmd'],
+    [b.blocks[3], 'no-such-diagram-28b.mmd'],
+    [b.blocks[4].left.block, 'no-such-diagram-28c.mmd'],
+  ];
+  for (const [block, path] of targets) {
+    Object.assign(block, { source: { path }, error: `cannot read ${path}: no such file` });
+  }
+  return b;
+}
+
+const board = storeFailedDiagramRefs(createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC }));
 const [mdBlock, codeBlock, diagramBlock, diagram2Block, compareBlock, choiceBlock, textBlock] = board.blocks;
 for (const b of [diagramBlock, diagram2Block, compareBlock.left.block]) {
   assert.equal(typeof b.error, 'string',
-    'setup failure: the diagram fixtures must actually fail to resolve, or they render no .resolve-error note to anchor against');
+    'setup failure: the diagram fixtures must carry a stored failed reference, or they render no .resolve-error note to anchor against');
 }
 
 /** The one generic-gesture target a mermaid section offers: its resolve-error
@@ -1038,7 +1061,7 @@ check('an element carrying a SENT dom comment is not a comment target, and its n
   const sentHint = probeForm.getAttribute('data-anchor-label');
   assert.ok(sentRef, 'setup failure: the probe click minted no ref');
 
-  const sentBoard = createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC });
+  const sentBoard = storeFailedDiagramRefs(createBoard({ title: 'Ticket 03 -- any element takes a comment', blocks: BLOCK_SPEC }));
   const sentDiagramId = sentBoard.blocks[2].id;
   const liveDiagramId = sentBoard.blocks[3].id;
   applySubmit(sentBoard, {
@@ -1115,7 +1138,7 @@ const WRAPPER_BOARD = createBoard({
         // reaches the prose context path alongside something that IS one -- which
         // makes this the case that would go unnoticed if the affordance were
         // restored for `html` alone.
-        { kind: 'mermaid', source: { path: 'no-such-diagram-28e.mmd' } },
+        { kind: 'mermaid', text: '' },
         { kind: 'markdown', text: 'Some supporting prose.' },
       ],
     },
@@ -1128,7 +1151,7 @@ const WRAPPER_BOARD = createBoard({
     {
       kind: 'compare',
       // Another position for the same rule: a mermaid diagram in a compare side.
-      left: { label: 'Left', block: { kind: 'mermaid', source: { path: 'no-such-diagram-28d.mmd' } } },
+      left: { label: 'Left', block: { kind: 'mermaid', text: '' } },
       right: { label: 'Right' }, // no `block` -- "a side that carries no content block"
     },
   ],
@@ -1137,11 +1160,20 @@ const [wrapperChoiceBlock, wrapperRankBlock, wrapperCompareBlock] = WRAPPER_BOAR
 const wrapperContextStage = wrapperChoiceBlock.context[0];
 const wrapperContextDiagram = wrapperChoiceBlock.context[1];
 const wrapperContextProse = wrapperChoiceBlock.context[2];
-assert.equal(typeof wrapperContextDiagram.error, 'string',
-  'setup failure: the context diagram must actually fail to resolve, or it renders no .resolve-error note to anchor against');
 const wrapperCompareLeftBlock = wrapperCompareBlock.left.block;
+// Both diagrams are minted by value and then given the shape an ALREADY-STORED
+// board carries for a reference that failed to resolve -- same reasoning as
+// storeFailedDiagramRefs above (ADR.md entry 112 refuses the post that names one).
+for (const [block, path] of [
+  [wrapperContextDiagram, 'no-such-diagram-28e.mmd'],
+  [wrapperCompareLeftBlock, 'no-such-diagram-28d.mmd'],
+]) {
+  Object.assign(block, { source: { path }, error: `cannot read ${path}: no such file` });
+}
+assert.equal(typeof wrapperContextDiagram.error, 'string',
+  'setup failure: the context diagram must carry a stored failed reference, or it renders no .resolve-error note to anchor against');
 assert.equal(typeof wrapperCompareLeftBlock.error, 'string',
-  'setup failure: the compare side\'s diagram must actually fail to resolve, or it renders no .resolve-error note to anchor against');
+  'setup failure: the compare side\'s diagram must carry a stored failed reference, or it renders no .resolve-error note to anchor against');
 
 /** Fresh document/window for WRAPPER_BOARD, same pattern as loadBoard() -- never
  * shared across checks. */
@@ -1490,10 +1522,18 @@ check('a round with at least one Commentable block shows the toggle unchanged (A
 check('an errored html block still counts as Commentable (ADR 98): a round holding only an unresolved html reference still shows the toggle', () => {
   const erroredBoard = createBoard({
     title: 'Ticket -- an errored stage is still Commentable',
-    blocks: [{ kind: 'html', source: { path: 'no-such-html-98.html' } }],
+    blocks: [{ kind: 'html', html: '' }],
   });
+  // The stored failed-reference shape, minted by value then patched: `html: ''`
+  // already carries the sha a failed resolve produced, and the post that named an
+  // unresolvable reference is refused whole now (ADR.md entry 112).
+  erroredBoard.blocks[0] = {
+    ...erroredBoard.blocks[0],
+    source: { path: 'no-such-html-98.html' },
+    error: 'cannot read no-such-html-98.html: no such file',
+  };
   assert.equal(typeof erroredBoard.blocks[0].error, 'string',
-    'setup failure: the html fixture must actually fail to resolve, or this proves nothing about the errored branch');
+    'setup failure: the html fixture must carry a stored failed reference, or this proves nothing about the errored branch');
   const document = parseHTML(renderBoardPage(erroredBoard));
   const window = document.defaultView;
   new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });

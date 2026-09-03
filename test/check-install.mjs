@@ -480,6 +480,10 @@ async function spawnDaemonWithEnv(extraEnv) {
     return {
       port,
       secret,
+      // The daemon's own store, so a caller can assert what a refused post did NOT
+      // write -- no board document, no page -- rather than only what came back over
+      // HTTP.
+      home,
       cleanup() {
         try { child.kill('SIGKILL'); } catch { /* already gone */ }
         rmSync(dWork, { recursive: true, force: true });
@@ -1464,18 +1468,18 @@ async function main() {
 
     const daemon = await spawnDaemonWithEnv({ CLAUDE_BOARD_REF_ROOTS: recordedRoots });
     try {
-      const posted = await fetch(`http://127.0.0.1:${daemon.port}/api/board`, {
+      // TWO posts, not one: since ADR.md entry 112 a reference that does not resolve
+      // refuses the whole post it rode in on, so a single post carrying the allowed and
+      // the forbidden reference together would prove only that the forbidden one refused
+      // both. Split, each half still proves what it always did -- the recorded root is
+      // really in force, and it is the ONLY thing it widened.
+      const post = blocks => fetch(`http://127.0.0.1:${daemon.port}/api/board`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-claude-board-secret': daemon.secret },
-        body: JSON.stringify({
-          title: 'recorded roots round trip',
-          cwd: projectDir,
-          blocks: [
-            { kind: 'markdown', source: { path: allowed } },
-            { kind: 'markdown', source: { path: forbidden } },
-          ],
-        }),
+        body: JSON.stringify({ title: 'recorded roots round trip', cwd: projectDir, blocks }),
       });
+
+      const posted = await post([{ kind: 'markdown', source: { path: allowed } }]);
       const postedBody = await posted.text(); // read once: the failure message needs it too
       assert.equal(posted.status, 200, postedBody);
       const { boardId } = JSON.parse(postedBody);
@@ -1489,6 +1493,37 @@ async function main() {
         html.includes('CONTENT-INSIDE-THE-CONFIGURED-ROOT'),
         'the root install.sh resolved and recorded must be an allowlisted root in the running daemon',
       );
+
+      const refusedPost = await post([{ kind: 'markdown', source: { path: forbidden } }]);
+      const refusedBody = await refusedPost.text();
+      assert.equal(refusedPost.status, 400, `a reference outside every root must refuse the post: ${refusedBody}`);
+      const refusedError = JSON.parse(refusedBody).error;
+      assert.ok(
+        refusedError.startsWith(`refusing reference ${forbidden}: it does not resolve inside the boundary.`),
+        `and say so in the boundary refusal, got: ${refusedError}`,
+      );
+      assert.ok(
+        refusedError.includes(rootDir),
+        'the refusal names the roots actually in force, which is what makes it actionable',
+      );
+      assert.ok(!refusedError.includes('CONTENT-OUTSIDE-EVERY-ROOT'), 'and never the content it refused to read');
+
+      // Nothing was stored for it: the store holds exactly the one board the allowed
+      // post wrote, and its page is the only page there is.
+      const boards = readdirSync(path.join(daemon.home, 'boards')).filter(f => !f.includes('.tmp-')).sort();
+      assert.deepEqual(boards, [`${boardId}.json`], 'the refused post must write no board document');
+      // `.html` only: pages/ also holds the shared style/script assets every render
+      // links to (src/assets.mjs), which have nothing to do with what was posted.
+      const pages = readdirSync(path.join(daemon.home, 'pages')).filter(f => f.endsWith('.html')).sort();
+      assert.deepEqual(pages, [`${boardId}.html`], 'and no page');
+      // ...and the widened root is the ONLY thing it widened: the forbidden content
+      // never reaches ANY page the daemon has written or serves.
+      for (const f of pages) {
+        assert.ok(
+          !readFileSync(path.join(daemon.home, 'pages', f), 'utf8').includes('CONTENT-OUTSIDE-EVERY-ROOT'),
+          `content outside every root reached ${f}`,
+        );
+      }
       assert.ok(
         !html.includes('CONTENT-OUTSIDE-EVERY-ROOT'),
         'and it must be the ONLY thing it widened -- a reference outside every root is still refused',

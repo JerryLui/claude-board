@@ -143,9 +143,17 @@ check('C4, re-pointed: a mermaid block NESTED inside a compare side is genuinely
     title: 'ADR entry 28 -- a compare side\'s nested diagram stays commentable',
     blocks: [{
       kind: 'compare',
-      left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-28.mmd' } } },
+      left: { label: 'Before', block: { kind: 'mermaid', text: '' } },
       right: { label: 'After', block: { kind: 'markdown', text: 'new copy' } },
     }],
+  });
+  // A failed reference as an ALREADY-STORED board carries it: the post that named
+  // one is refused whole now (ADR.md entry 112), so this shape only ever comes off
+  // disk. Minted by value so the nested block still gets a real id; `text: ''`
+  // already carries the sha a failed resolve produced.
+  Object.assign(board.blocks[0].left.block, {
+    source: { path: 'no-such-diagram-28.mmd' },
+    error: 'cannot read no-such-diagram-28.mmd: no such file',
   });
   const document = loadBoard(renderBoardPage(board));
   enableCommentMode(document);
@@ -202,10 +210,17 @@ check('C4, re-pointed: a mermaid block NESTED inside a compare side is genuinely
 check('C4: a mermaid block that failed to resolve is still anchorable -- clicking its .resolve-error note draws a correctly positioned pin, even though the block has no stage-wrap/live-svg at all', () => {
   const board = createBoard({
     title: 'a broken mermaid reference is still commentable',
-    blocks: [{ kind: 'mermaid', source: { path: 'no-such-diagram-09.mmd' } }],
+    blocks: [{ kind: 'mermaid', text: '' }],
   });
+  // Same stored-failure shape as the compare-side case above, and for the same
+  // reason (ADR.md entry 112 refuses the post that names an unresolvable reference).
+  board.blocks[0] = {
+    ...board.blocks[0],
+    source: { path: 'no-such-diagram-09.mmd' },
+    error: 'cannot read no-such-diagram-09.mmd: no such file',
+  };
   const blockId = board.blocks[0].id;
-  assert.equal(typeof board.blocks[0].error, 'string', 'setup failure: the block must actually fail to resolve');
+  assert.equal(typeof board.blocks[0].error, 'string', 'setup failure: the block must carry a stored failed reference');
   const document = loadBoard(renderBoardPage(board));
   enableCommentMode(document);
 

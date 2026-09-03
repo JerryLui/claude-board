@@ -293,6 +293,70 @@ function stageWrap(blockId, inner) {
   </div>`;
 }
 
+/** The fold's trigger (ADR.md entry 110), counted on the item's MARKDOWN SOURCE
+ * -- lines and characters -- and never on measured pixels. The server has no
+ * layout, and neither does the DOM stand-in the checks read a rendered page
+ * with, so a pixel-measured fold would be assertable only in a real browser.
+ * The visible clip is about a dozen rendered lines ('.folded > .fold-body',
+ * src/styles.mjs); these two numbers are its source-side stand-ins:
+ *
+ *   - `lines`: 12 NON-BLANK source lines. A heading, a list item or a short
+ *     paragraph is one source line and one rendered line, so for structured
+ *     prose (a referenced spec section, the common case) this count matches the
+ *     clip almost directly. Blank lines are skipped because in markdown they
+ *     are the paragraph separator rather than content: counting them would fold
+ *     an airy six-paragraph note that renders well inside the clip.
+ *   - `chars`: 900. One long paragraph is ONE source line and still overruns the
+ *     clip, so the line count alone under-fires on a wall of prose. 900 is about
+ *     a dozen rendered lines at the ~70-character measure of the half-column
+ *     panel a question's context sits in -- the narrowest surface a fold lands
+ *     on, so it is the one the cap is set against.
+ *
+ * Either count over the cap marks the item. The pair is deliberately generous:
+ * over-firing is cheap and self-correcting (src/ui.mjs drops the fold at load
+ * when the body does not actually overflow the clip, so a fade never paints over
+ * fully visible text), while under-firing is the failure the reviewer sees. */
+export const FOLD_CAP = { lines: 12, chars: 900 };
+
+/** What a NOT-folded item splices in at each of the fold's four seams: nothing,
+ * four times over. Named so the seams read the same whether the item folds or
+ * not, and so a caller that has no source to count (a failed reference, a kind
+ * that never folds) has something to pass. */
+const NO_FOLD = { itemClass: '', bodyClass: '', bodyId: '', control: '' };
+
+/** The fold, in the four pieces a caller splices into its own markup: the state
+ * class for the ITEM (the element that already wraps the prose -- there is no
+ * new wrapper), the class and the id for the BODY that gets clipped, and the
+ * control under it. Prose only: every caller is a `markdown` item or a
+ * question's `explainer`, never a `code` excerpt (which keeps its own scroll
+ * box), a diagram or a mock (unreadable cut in half).
+ *
+ * Server-rendered, so a standalone `file:` archive carries the control in its
+ * own bytes rather than having the client mint it -- the same rule every other
+ * control on the page follows.
+ *
+ * `aria-controls` names the body, so the id has to exist in the markup; minted
+ * off the block's own id exactly as `note-`/`comment-list-` are, and escaped
+ * the same way. */
+function foldParts(source, idSeed) {
+  const text = String(source ?? '');
+  // The char half first, and the line walk stops at the cap: this runs for every
+  // markdown block in the thread on every GET, over sources up to the 512 KiB cap.
+  let over = text.length > FOLD_CAP.chars;
+  if (!over) {
+    let lines = 0;
+    for (const line of text.split('\n')) if (line.trim() && ++lines > FOLD_CAP.lines) { over = true; break; }
+  }
+  if (!over) return NO_FOLD;
+  const bodyId = escAttr(`fold-${idSeed}`);
+  return {
+    itemClass: ' folded',
+    bodyClass: ' fold-body',
+    bodyId: ` id="${bodyId}"`,
+    control: `<button type="button" class="fold-toggle" aria-expanded="false" aria-controls="${bodyId}">Show more</button>`,
+  };
+}
+
 /** No commentButton/commentArea/pageDomPinLayer here (ADR.md entry 28, "Only the
  * rendered kinds can be commented on"): the reviewer comments on rendered output,
  * never on prose, so `markdown` carries neither the button nor the click-to-anchor
@@ -311,10 +375,16 @@ function renderMarkdownBlock(block) {
   <p class="resolve-error">Could not resolve: ${escHtml(block.error)}</p>
 </section>`;
   }
+  // Top-level prose folds at the same cap as prose in a question's context, with
+  // no exception for a round that is one lone document (ADR.md entry 110): one
+  // rule, and the reader clicks Show more once. The section itself is the item
+  // -- '.md-content' is the body that gets clipped, and the control sits under
+  // it inside the same card.
+  const fold = foldParts(block.text, block.id);
   return `
-<section class="block markdown-block" data-block-id="${escAttr(block.id)}" data-block-kind="markdown">
+<section class="block markdown-block${fold.itemClass}" data-block-id="${escAttr(block.id)}" data-block-kind="markdown">
   <div class="block-kicker">Markdown</div>
-  <div class="md-content">${block.html}</div>
+  <div class="md-content${fold.bodyClass}"${fold.bodyId}>${block.html}</div>${fold.control}
 </section>`;
 }
 
@@ -542,10 +612,12 @@ function questionCarriesStage(block) {
 }
 
 /** A context block's bare content, with none of `.block`'s card chrome --
- * ADR.md entry 26, "context stacks under the prompt as plain prose with no
- * card, no kicker": no `.block` border/background, no `.block-kicker` label.
- * Reuses `.md-content`'s own prose/code styling for both markdown and code (a
- * fenced fragment reads the same as one embedded in prose either way) and
+ * ADR.md entry 26, widened by entry 110 from "the question that carries a
+ * stage" to EVERY question: a question's context is ONE panel of prose, items
+ * in posted order, "no card, no kicker" -- no `.block` border/background, no
+ * `.block-kicker`, and no per-item kind label ("MARKDOWN", "MERMAID"), which
+ * was card chrome rather than information.
+ * Reuses `.md-content`'s own prose styling for markdown and
  * `.mermaid-block`'s borderless-`<pre>` rule for mermaid, so no new CSS is
  * needed for either. `data-block-id`/`data-block-kind` ride on the wrapper
  * (renderContextItem below), which is both a stable "which block is this" hook
@@ -559,12 +631,28 @@ function questionCarriesStage(block) {
  * three things entry 26 actually removed (a card, a border, a kicker), so both
  * rules hold at once. `markdown` and `code` keep no affordance, here or
  * anywhere. */
-function renderContextInner(block, board, commentsByBlock, historical) {
+function renderContextInner(block, board, commentsByBlock, historical, fold = NO_FOLD) {
   switch (block.kind) {
     case 'markdown':
-      return block.error ? resolveErrorNote(block) : `<div class="md-content">${block.html}</div>`;
-    case 'code':
-      return block.error ? resolveErrorNote(block) : `<div class="md-content"><pre><code>${escHtml(String(block.text ?? ''))}</code></pre></div>`;
+      // The one kind that folds here (ADR.md entry 110, prose only): `fold` is
+      // decided by renderContextItem, which needs the same answer for the
+      // item's own state class and for the control under this body.
+      return block.error ? resolveErrorNote(block) : `<div class="md-content${fold.bodyClass}"${fold.bodyId}>${block.html}</div>`;
+    case 'code': {
+      // The panel drops the CARD, never the excerpt's provenance (ADR.md entry
+      // 110). So a code item renders through the code block's OWN body --
+      // `codeBody`: the line gutter at the file's real line numbers, the
+      // server-side highlighting, and `.code-block pre`'s 480px scroll box (the
+      // wrapper wears `.code-block` for it, renderContextItem below) -- rather
+      // than through the plain `<pre><code>` prose path this used to take, which
+      // dropped all three. The source label follows the same rule: it is the one
+      // thing that tells a quoted file from a pasted snippet, so it survives the
+      // dropped kicker as a caption UNDER the excerpt. A by-value snippet has no
+      // source and so carries no caption, exactly like a markdown item.
+      if (block.error) return resolveErrorNote(block);
+      const label = sourceLabel(block.source);
+      return `${codeBody(block)}${label ? `<div class="context-caption">${escHtml(label)}</div>` : ''}`;
+    }
     case 'mermaid':
       return block.error ? resolveErrorNote(block) : stageWrap(block.id, `<pre class="mermaid">${escHtml(block.text)}</pre>`);
     case 'html':
@@ -613,10 +701,28 @@ function renderContextCompareSide(side, board, commentsByBlock, historical) {
  * renderMermaidBlock emits one: a failed reference renders a
  * `.resolve-error` note, which is not chrome and IS anchorable, so a click there
  * must have a layer to draw its pin into rather than resolving to a comment with
- * no pin anywhere on the page. */
+ * no pin anywhere on the page. That layer is `inset: 0` over its nearest
+ * POSITIONED ancestor, so `.context-item` is a positioning root of its own
+ * (src/styles.mjs): without that the layer sizes to the whole question card and
+ * every pin on a context item lands somewhere else on the card.
+ *
+ * `.context-tools` is the control group a commentable item wears in place of the
+ * kicker the panel dropped: the comment button, plus the expand control for a
+ * diagram (ADR.md entry 110 -- a diagram beside a question is half the column
+ * wide, so the lens is the only way to read it). `wireDiagramExpand` finds it by
+ * `section.querySelector('.expand-btn')` from the `.mermaid-block` the wrapper
+ * already wears, so the control needs no wiring of its own. A failed reference
+ * gets no expand button, the same carve-out renderMermaidBlock makes: it would
+ * open an empty lens. */
 function renderContextItem(block, board, commentsByBlock, historical) {
   const commentable = block.kind === 'html' || block.kind === 'mermaid';
-  const kindClass = block.kind === 'html' ? ' html-block' : block.kind === 'mermaid' ? ' mermaid-block' : '';
+  // `code` wears `.code-block` for the same reason `html`/`mermaid` wear theirs:
+  // the class, not `.block`, is what carries the gutter/scroll-box styling
+  // `codeBody`'s markup needs (and what src/ui.mjs's unlockCodeCapForDrag keys
+  // its resize-past-the-cap pass on). None of the three carries card styling.
+  const kindClass = block.kind === 'html' ? ' html-block'
+    : block.kind === 'mermaid' ? ' mermaid-block'
+    : block.kind === 'code' ? ' code-block' : '';
   // Mirrors what the two kinds do at top level. `mermaid` renders inline in THIS
   // document, so its page layer is where a `dom` anchor on the block's own chrome
   // belongs and renderMermaidBlock emits one unconditionally. A healthy `html`
@@ -627,10 +733,19 @@ function renderContextItem(block, board, commentsByBlock, historical) {
   // comment a second time, at a fabricated position, from refs that cannot resolve
   // outside the frame.
   const pinLayer = block.kind === 'mermaid' || block.error ? pageDomPinLayer(block.id) : '';
+  const expand = block.kind === 'mermaid' && !block.error ? expandButton(block.id) : '';
   const affordance = commentable
-    ? `${commentButton(block.id)}${pinLayer}${commentArea(block.id, commentsByBlock, historical)}`
+    ? `<div class="context-tools">${commentButton(block.id)}${expand}</div>${pinLayer}${commentArea(block.id, commentsByBlock, historical)}`
     : '';
-  return `<div class="context-item${kindClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${renderContextInner(block, board, commentsByBlock, historical)}${affordance}</div>`;
+  // The fold is per item and PROSE ONLY (ADR.md entry 110): a `markdown` item
+  // that reads long is clipped with a Show more control, and no other kind ever
+  // is -- `code` keeps its own 480px scroll box and the fold never stacks on it,
+  // a diagram or a mock cut in half is unreadable, and a failed reference's note
+  // is two lines. A markdown block on a compare side reaches this same line
+  // (renderContextCompareSide calls back into here), so it folds too, which is
+  // the prose-only rule holding rather than a second decision.
+  const fold = block.kind === 'markdown' && !block.error ? foldParts(block.text, block.id) : NO_FOLD;
+  return `<div class="context-item${kindClass}${fold.itemClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${renderContextInner(block, board, commentsByBlock, historical, fold)}${fold.control}${affordance}</div>`;
 }
 
 /** No commentButton/commentArea/pageDomPinLayer here (ADR "Commenting is
@@ -639,25 +754,34 @@ function renderContextItem(block, board, commentsByBlock, historical) {
  * names no item the agent can act on, and says strictly less than the `note`
  * field on the same card already says.
  *
- * Context rendering forks on whether the question carries a rendered stage
- * anywhere in its options or its own context (`questionCarriesStage`, ADR.md
- * entry 26). A question with no stage is untouched: its context still goes
- * through renderBlock exactly as before, in its own `.question-context` card
- * beside `.question-main` -- the pre-existing `.question-block:not(:has(
- * .question-context))` rule is what already collapses THAT case to one
- * column, so a stage-free question keeps today's markup byte for byte. A
- * question that DOES carry a stage renders its context as bare prose
- * (renderContextItem) stacked inside `.question-main`, between the prompt and
- * the widget, and never emits a `.question-context` card at all -- which is
- * what lets the SAME pre-existing `:not(:has(.question-context))` rule carry
- * the full-width layout too, with no new grid CSS of its own.
+ * EVERY context item now goes through renderContextItem (ADR.md entry 110):
+ * one panel of prose, no per-item card and no kind label, whichever shape the
+ * question takes. Only PLACEMENT still forks on whether the question carries a
+ * rendered stage anywhere in its options or its own context
+ * (`questionCarriesStage`, ADR.md entry 26), and that fork is a WRAPPER
+ * CLASS, not a second way of rendering an item:
  *
- * The note field and the footer are children of the `section`, not of
- * `.question-main`: both are about the question as a whole rather than about
- * either column, so they sit on their own grid rows below both (the stylesheet
- * spans them `1 / -1`). Keeping the note inside `.question-main` cost it half
- * the card's width for no reason -- a two-column question got a note box as
- * narrow as its options while the context card sat beside empty space. */
+ *   - stage-free: the items sit in a `.question-context` panel beside
+ *     `.question-main`, the two columns of the ordinary layout.
+ *   - stage-carrying: the items sit in `.question-context-prose` inside
+ *     `.question-main`, full width under the head row, and the section emits
+ *     NO `.question-context` at all -- which is what lets the pre-existing
+ *     `.question-block:not(:has(.question-context))` rule carry the
+ *     full-width layout with no modifier class of its own.
+ *
+ * Entry 110 kept those two wrappers apart rather than unifying them for
+ * exactly that reason: a single wrapper class would put a rendered-variants
+ * question back at half width, which is the failure entry 26 fixed.
+ *
+ * The head row (`.question-head`) is the kicker, the prompt and the optional
+ * `explainer` (ADR.md entry 111), spanning the card's full grid row so the
+ * options and the context panel start UNDER them rather than beside the
+ * prompt. The note field and the footer are children of the `section` for the
+ * same reason: all three answer FOR the question rather than for either
+ * column, so they take their own full-width rows (the stylesheet spans them
+ * `1 / -1`). Keeping the note inside `.question-main` cost it half the card's
+ * width for no reason -- a two-column question got a note box as narrow as
+ * its options while the context panel sat beside empty space. */
 function renderQuestionBlock(block, board, commentsByBlock, historical) {
   const answer = board.answers[block.id];
   const statusText = `status: ${answer ? answer.status : 'unanswered'}`;
@@ -665,21 +789,39 @@ function renderQuestionBlock(block, board, commentsByBlock, historical) {
   const widgetHtml = renderWidget(block, answer, historical, board, commentsByBlock);
   const contextItems = block.context || [];
   const stagey = questionCarriesStage(block);
-  const proseContextHtml = stagey && contextItems.length
-    ? `<div class="question-context-prose">${contextItems.map(c => renderContextItem(c, board, commentsByBlock, historical)).join('')}</div>`
-    : '';
-  const cardContextHtml = !stagey && contextItems.length
-    ? contextItems.map(c => renderBlock(c, board, commentsByBlock, historical)).join('')
+  const items = contextItems.map(c => renderContextItem(c, board, commentsByBlock, historical)).join('');
+  const proseContextHtml = stagey && contextItems.length ? `<div class="question-context-prose">${items}</div>` : '';
+  const panelContextHtml = !stagey && contextItems.length ? `<div class="question-context">${items}</div>` : '';
+  // Rendered to HTML at post time by src/board.mjs (`explainerHtml`), the same
+  // way a by-value markdown block is: render.mjs cannot reach src/markdown.mjs
+  // without closing a second import cycle. Absent on a question that carries no
+  // explainer, which then renders with the prompt alone on the head row.
+  //
+  // It folds at the same cap as any other prose, as a backstop (ADR.md entry
+  // 110): the manual asks for one to three sentences, and this is what keeps a
+  // caller who writes ten from pushing the options off the screen. The state
+  // class rides on '.question-head' because that is the element the explainer
+  // already sits in -- the explainer is the head row's own prose, and giving it
+  // a wrapper of its own would be a second element for nothing. Only the
+  // explainer is ever a '.fold-body', so the clip reaches the kicker and the
+  // prompt on that row no more than it reaches the kicker of a folded markdown
+  // block.
+  const explainerFold = block.explainerHtml ? foldParts(block.explainer, `${block.id}-explainer`) : NO_FOLD;
+  const explainerHtml = block.explainerHtml
+    ? `<div class="question-explainer md-content${explainerFold.bodyClass}"${explainerFold.bodyId}>${block.explainerHtml}</div>${explainerFold.control}`
     : '';
   return `
 <section class="block question-block" data-block-id="${escAttr(block.id)}" data-block-kind="question" data-widget="${escAttr(block.widget)}">
-  <div class="question-main">
+  <div class="question-head${explainerFold.itemClass}">
     <div class="block-kicker">Question · ${escHtml(block.widget)}</div>
     <p class="question-prompt">${escHtml(block.prompt)}</p>
+    ${explainerHtml}
+  </div>
+  <div class="question-main">
     ${proseContextHtml}
     ${widgetHtml}
   </div>
-  ${cardContextHtml ? `<div class="question-context">${cardContextHtml}</div>` : ''}
+  ${panelContextHtml}
   <div class="note-field">
     <label for="note-${escAttr(block.id)}">Note</label>
     <textarea id="note-${escAttr(block.id)}" data-note-for="${escAttr(block.id)}" placeholder="Optional note"${historical ? ' disabled' : ''}>${escHtml(answer ? answer.note : '')}</textarea>
@@ -2468,11 +2610,14 @@ function hasOpenRound(board) {
  * `questionCount` for that round: the same top-level count src/ui.mjs's
  * outstandingBlocks() walks once the client script takes over. src/ui.mjs recomputes
  * this live as the reviewer answers; this is only ever the FIRST-PAINT value, before
- * any client script has run -- same division of labour as initialRoundInView below. */
+ * any client script has run -- same division of labour as initialRoundInView below.
+ * A `rank` is never outstanding: the widget always shows an order and src/ui.mjs's
+ * currentAnswer sends that order as the answer, so counting one here painted
+ * "1 question left" over a round the reviewer could send as it stood. */
 function openRoundQuestionCount(board) {
   const latest = board.rounds[board.rounds.length - 1];
   if (!latest || latest.status !== 'open') return 0;
-  return board.blocks.filter(b => b.round === latest.n && b.kind === 'question').length;
+  return board.blocks.filter(b => b.round === latest.n && b.kind === 'question' && b.widget !== 'rank').length;
 }
 
 /** Is this board a PAGE board — one rendered artifact filling the viewport

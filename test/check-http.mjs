@@ -18,7 +18,10 @@ import { startServer, activeWaitCount, buildPacketWithUndelivered, DEFAULT_WAIT_
 import { DEFAULT_AWAIT_TIMEOUT_MS, STRANDED_BANNER, ANSWERS_DELIVERED, MAX_SUBMIT_COMMENTS, MAX_ANSWER_CHOICES, createBoard } from '../src/board.mjs';
 // The one cap every by-value string on a board shares (src/resolve.mjs), read rather
 // than restated so a check cannot pass against a number the product no longer uses.
-import { MAX_REF_BYTES } from '../src/resolve.mjs';
+// `resolveRefRoots` for the same reason: the roots a refusal names are the ones the
+// daemon has in force right now, read from the product's own parser rather than
+// restated here.
+import { MAX_REF_BYTES, resolveRefRoots } from '../src/resolve.mjs';
 import { readBoard, writeBoard, searchBoards } from '../src/store.mjs';
 // Used only to ARRANGE fixture states the HTTP surface itself has no fast way to reach
 // (a nonzero cycle, a timer already mid-break) -- every ASSERTION below still goes
@@ -100,6 +103,21 @@ function snapshotTree(dir) {
   }
   walk(dir);
   return out;
+}
+
+/** Every board document and page file the store holds right now. A post refused under
+ * ADR.md entry 112 has to leave the store exactly as it found it, and "no board id came
+ * back" does not prove that -- only the files do. `.tmp-` entries are atomicWrite's
+ * (src/store.mjs) and never outlive the call that made them. */
+function storeListing() {
+  const list = dir => {
+    try {
+      return readdirSync(path.join(home, dir)).filter(f => !f.includes('.tmp-')).sort();
+    } catch {
+      return [];
+    }
+  };
+  return { boards: list('boards'), pages: list('pages') };
 }
 
 let failures = 0;
@@ -1353,10 +1371,15 @@ async function main() {
           {
             kind: 'compare',
             // ADR.md entry 28: a compare SIDE is judged on its own kind, so a
-            // diagram here keeps the affordance. Sourced from a path that cannot
-            // resolve, because a mermaid section's `.resolve-error` note is the one
-            // element the generic page-scoped gesture can reach.
-            left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-rr.mmd' } } },
+            // diagram here keeps the affordance. What this round trip needs is an
+            // ERRORED diagram -- a mermaid section's `.resolve-error` note is the one
+            // element the generic page-scoped gesture can reach -- and since ADR.md
+            // entry 112 no POST can produce one: a reference that fails to resolve now
+            // refuses its whole post. So the block is minted by value with `text: ''`
+            // (already the sha of the empty content a failed reference leaves behind)
+            // and patched into the errored shape on disk below, which is exactly what an
+            // already-stored board carrying such a failure holds.
+            left: { label: 'Before', block: { kind: 'mermaid', text: '' } },
             right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Send</button></div>' } },
           },
           {
@@ -1379,6 +1402,16 @@ async function main() {
     });
     assert.equal(postRes.status, 200);
     const { boardId: rrBoardId } = await postRes.json();
+    // The stored shape of a block whose reference failed, patched in rather than posted
+    // (see the compare side above). src/render.mjs still renders `error`, so a GET
+    // re-renders this into the '.resolve-error' note the gesture below aims at.
+    const rrPatched = readBoard(rrBoardId, home);
+    rrPatched.blocks[2].left.block = {
+      ...rrPatched.blocks[2].left.block,
+      source: { path: 'no-such-diagram-rr.mmd' },
+      error: 'cannot read no-such-diagram-rr.mmd: no such file',
+    };
+    writeBoard(rrPatched, home);
     const rrStored = readBoard(rrBoardId, home);
     const mdBlockId = rrStored.blocks[0].id;
     const codeBlockId = rrStored.blocks[1].id;
@@ -1386,7 +1419,7 @@ async function main() {
     const compareRightId = rrStored.blocks[2].right.block.id;
     const questionContextId = rrStored.blocks[3].context[0].id;
     assert.equal(typeof rrStored.blocks[2].left.block.error, 'string',
-      'setup failure: the compare side\'s diagram must actually fail to resolve');
+      'setup failure: the compare side\'s diagram must carry a stored resolve error');
 
     /** Loads a served page through the real client script, exactly like
      * check-comment-mode.mjs's loadBoard -- a fresh document per call. */
@@ -1508,30 +1541,79 @@ async function main() {
     }
   });
 
-  await check('C2: the live exfil PoC is refused end to end -- neither an absolute source path nor an unbounded cwd reads a file outside the project', async () => {
-    // The coordinator's reproduction, run against the real daemon. Both halves have to
-    // hold: the per-reference confinement (an absolute `source.path`) AND the cwd
-    // binding (a caller-chosen `cwd: '/'` that would make confinement vacuous).
+  await check('C2: the live exfil PoC is refused end to end -- an absolute source path reaches exactly what its relative spelling reaches and nothing more, an unbounded cwd is refused, and a climb out refuses the post', async () => {
+    // The coordinator's reproduction, run against the real daemon, restated for the rule
+    // src/resolve.mjs's `resolvePath` actually enforces: the boundary is ONE realpath
+    // check, never the leading slash, so an absolute path is accepted exactly where its
+    // relative spelling would be and refused everywhere else. Three things have to hold:
+    // the per-reference confinement, the cwd binding (a caller-chosen `cwd: '/'` that
+    // would make confinement vacuous), and ADR.md entry 112 -- a reference that does not
+    // resolve refuses the post that carried it, whole.
     const secretDir = mkdtempSync(path.join(tmpdir(), 'claude-board-secret-'));
     try {
       const secretFile = path.join(secretDir, 'private.md');
       writeFileSync(secretFile, '# Private\n\nTHE-SECRET-STRING', 'utf8');
 
-      // 1. absolute source.path, cwd naming the secret's own directory
+      const project = projectDir('confined');
+      const insideFile = path.join(project, 'inside.md');
+      writeFileSync(insideFile, '# Inside\n\nINSIDETHEPROJECT', 'utf8');
+
+      // 1. an ABSOLUTE source.path landing inside the board's own project directory
+      //    resolves -- and resolves to the identical snapshot the relative spelling of
+      //    the same file produces, byte for byte, because one check decides both.
       const absPost = await fetch(`${base}/api/board`, {
         method: 'POST',
         headers: writeHeaders(),
         body: JSON.stringify({
+          title: 'absolute spelling',
+          cwd: project,
+          blocks: [{ kind: 'code', source: { path: insideFile } }],
+        }),
+      });
+      assert.equal(absPost.status, 200, 'an absolute path inside the project directory is an ordinary reference now');
+      const absBlock = readBoard((await absPost.json()).boardId, home).blocks[0];
+      assert.equal(absBlock.error, undefined, 'a reference that resolves carries no block error');
+
+      const relPost = await fetch(`${base}/api/board`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({
+          title: 'relative spelling',
+          cwd: project,
+          blocks: [{ kind: 'code', source: { path: 'inside.md' } }],
+        }),
+      });
+      assert.equal(relPost.status, 200);
+      const relBoard = (await relPost.json()).boardId;
+      const relBlock = readBoard(relBoard, home).blocks[0];
+      assert.ok(relBlock.text.includes('INSIDETHEPROJECT'), 'setup failure: the relative spelling never resolved either');
+      assert.equal(absBlock.text, relBlock.text, 'the two spellings must snapshot the same bytes');
+      assert.equal(absBlock.sha, relBlock.sha, 'and therefore the same sha');
+      const relPage = await (await fetch(`${base}/b/${relBoard}`)).text();
+      assert.ok(relPage.includes('INSIDETHEPROJECT'), 'and the resolved content reaches the served page');
+
+      // 1b. ...and the SET of reachable files is unchanged by that: an absolute path
+      //     outside the project directory and outside every configured root is still
+      //     refused, and now takes its whole post down with it.
+      const beforeOutside = storeListing();
+      const outsidePost = await fetch(`${base}/api/board`, {
+        method: 'POST',
+        headers: writeHeaders(),
+        body: JSON.stringify({
           title: 'exfil',
-          cwd: secretDir,
+          cwd: project,
           blocks: [{ kind: 'code', source: { path: secretFile } }],
         }),
       });
-      assert.equal(absPost.status, 200, 'the post itself still succeeds: a bad reference is a block-level error');
-      const absBoard = (await absPost.json()).boardId;
-      const absPage = await (await fetch(`${base}/b/${absBoard}`)).text();
-      assert.ok(!absPage.includes('THE-SECRET-STRING'), 'an absolute source.path must not reach the served page');
-      assert.match(readBoard(absBoard, home).blocks[0].error, /absolute/);
+      assert.equal(outsidePost.status, 400, 'an absolute path outside the boundary must refuse the post, not land as a block error');
+      const outsideBody = await outsidePost.json();
+      assert.equal(outsideBody.boardId, undefined, 'a refused post mints no board');
+      assert.ok(
+        outsideBody.error.startsWith(`refusing reference ${secretFile}: it does not resolve inside the boundary.`),
+        `the refusal must be the boundary refusal, got: ${outsideBody.error}`,
+      );
+      assert.ok(!outsideBody.error.includes('THE-SECRET-STRING'));
+      assert.deepEqual(storeListing(), beforeOutside, 'and nothing at all is stored for it');
 
       // 2. cwd:'/' plus a relative path -- confinement is vacuous if the caller picks cwd
       const rootPost = await fetch(`${base}/api/board`, {
@@ -1546,8 +1628,11 @@ async function main() {
       assert.equal(rootPost.status, 400, 'a cwd of / must be refused at post time, not stored');
       assert.match((await rootPost.json()).error, /filesystem root/);
 
-      // 3. a legitimate cwd, but a ../ climb out of it to the same secret
-      const project = projectDir('confined');
+      // 3. a legitimate cwd, but a ../ climb out of it to the same secret. Same subject
+      //    as before, opposite vehicle: the climb is refused by the same one realpath
+      //    check, and the post it rode in on never lands -- so there is no page for the
+      //    secret to be absent from, which is the stronger guarantee.
+      const beforeClimb = storeListing();
       const climbPost = await fetch(`${base}/api/board`, {
         method: 'POST',
         headers: writeHeaders(),
@@ -1557,10 +1642,12 @@ async function main() {
           blocks: [{ kind: 'code', source: { path: path.relative(project, secretFile) } }],
         }),
       });
-      const climbBoard = (await climbPost.json()).boardId;
-      const climbPage = await (await fetch(`${base}/b/${climbBoard}`)).text();
-      assert.ok(!climbPage.includes('THE-SECRET-STRING'), 'a ../ climb must not reach the served page');
-      assert.match(readBoard(climbBoard, home).blocks[0].error, /outside the board's project directory/);
+      assert.equal(climbPost.status, 400, 'a ../ climb out of the project directory must refuse the post');
+      const climbBody = await climbPost.json();
+      assert.equal(climbBody.boardId, undefined);
+      assert.match(climbBody.error, /does not resolve inside the boundary/);
+      assert.ok(!climbBody.error.includes('THE-SECRET-STRING'));
+      assert.deepEqual(storeListing(), beforeClimb, 'no board and no page was written for the refused climb');
     } finally {
       rmSync(secretDir, { recursive: true, force: true });
     }
@@ -1592,20 +1679,17 @@ async function main() {
         blocks: [{ kind: 'markdown', source: { path: 'b.md' } }],
       }),
     });
-    // Either the server never forwards `cwd` on a board-id post (it currently does not),
-    // or src/board.mjs refuses it -- both are the same guarantee from the reviewer's
-    // side, and this asserts the guarantee rather than the mechanism: the board's cwd
-    // does not move, and project B's content never appears on it.
+    // src/board.mjs's `assertCwdNotRetargeted` refuses it before a single block of the
+    // post is normalised, and src/server.mjs turns that throw into a 400 -- so the
+    // guarantee is now the whole outcome, not a branch: the board's cwd does not move,
+    // no round is added, and project B's content never appears on it.
+    assert.equal(retarget.status, 400, 'a post naming a different cwd on a live board is refused, not silently ignored');
+    assert.match((await retarget.json()).error, /cannot change the project directory of a live board/);
     const stored = readBoard(created.boardId, home);
     assert.equal(stored.cwd, projectA, 'the board must still be bound to the directory it was created with');
-    if (retarget.status === 200) {
-      const page = await (await fetch(`${base}/b/${created.boardId}`)).text();
-      assert.ok(!page.includes('SECRET-FROM-B'), 'a later round must not read out of a different project directory');
-      const added = stored.blocks[stored.blocks.length - 1];
-      assert.match(added.error, /outside the board's project directory|cannot read/);
-    } else {
-      assert.equal(retarget.status, 400);
-    }
+    assert.equal(stored.rounds.length, 1, 'the refused post added no round');
+    const page = await (await fetch(`${base}/b/${created.boardId}`)).text();
+    assert.ok(!page.includes('SECRET-FROM-B'), 'a later round must not read out of a different project directory');
   });
 
   await check('a code block resolved by reference (line range) snapshots the file text and sha at post time', async () => {
@@ -1660,24 +1744,177 @@ async function main() {
     assert.equal(block.error, undefined);
   });
 
-  await check('a reference to a missing file fails the block, not the whole post, and is reported not dropped', async () => {
-    const r = await fetch(`${base}/api/board`, {
+  await check('ADR.md entry 112: a reference to a missing file refuses the WHOLE post -- nothing is stored, and the identical post with the file in place lands and renders', async () => {
+    // This check used to assert the opposite ("fails the block, not the whole post"): a
+    // 200, and a red note on the reviewer's page. The agent never sees the blocks it
+    // posted -- only a packet after a submit -- so the one party that could fix the typo
+    // was the one party never told about it. Now the post is refused before anything is
+    // stored, rendered, broadcast or pushed, and the reason rides back in the 400.
+    mkdirSync(srcDir, { recursive: true });
+    const missing = path.join(srcDir, 'later-written.js');
+    try { unlinkSync(missing); } catch { /* the usual state: not there */ }
+    // ONE body, posted twice: the only thing that changes between the 400 and the 200 is
+    // whether the file the reference names exists.
+    const body = JSON.stringify({
+      title: 'Broken reference over HTTP',
+      cwd: srcDir,
+      blocks: [{ kind: 'code', source: { path: 'later-written.js' } }],
+    });
+
+    const before = storeListing();
+    const r = await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body });
+    assert.equal(r.status, 400, 'a reference that cannot resolve refuses the post');
+    const refused = await r.json();
+    assert.equal(refused.boardId, undefined, 'no board id comes back');
+    assert.ok(refused.error.startsWith('cannot read later-written.js: no such file.'),
+      `the 400 must name the reference that failed, got: ${refused.error}`);
+    assert.deepEqual(storeListing(), before,
+      'a refused post writes no board document and no page -- nothing is stored at all');
+
+    writeFileSync(missing, 'const laterWritten = 1;\n', 'utf8');
+    const fixed = await fetch(`${base}/api/board`, { method: 'POST', headers: writeHeaders(), body });
+    assert.equal(fixed.status, 200, 'the same post lands once the reference resolves');
+    const fixedId = (await fixed.json()).boardId;
+    assert.equal(readBoard(fixedId, home).blocks[0].error, undefined);
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${fixedId}`)).text());
+    assert.ok(markup.includes('laterWritten'), 'and the content it names is what renders');
+    assert.ok(!markup.includes('class="resolve-error"'));
+  });
+
+  await check('ADR.md entry 112: one message per failed reference, collected from EVERY position in a post, and the post refused whole', async () => {
+    // The four places a Ref can sit -- a top-level block, a question's `context`, a
+    // compare side's `block`, and a choose-between-rendered-variants option's `block` --
+    // are the same tree normalizeBlock recurses through. All four are walked BEFORE
+    // anything is refused, so a round with four typos costs the agent one re-post rather
+    // than four: four messages come back at once, and no partial round is left behind.
+    const project = projectDir('every-position');
+    const markers = { 'top.md': 'TOPCONTENT', 'context.md': 'CONTEXTCONTENT', 'side.md': 'SIDECONTENT', 'variant.md': 'VARIANTCONTENT' };
+    for (const [name, marker] of Object.entries(markers)) {
+      writeFileSync(path.join(project, name), `# ${name}\n\n${marker}\n`, 'utf8');
+    }
+    /** The same round, once with names that resolve and once with names that do not. */
+    const roundOf = names => [
+      { kind: 'markdown', source: { path: names.top } },
+      {
+        kind: 'question',
+        prompt: 'Which one?',
+        widget: 'choose-between-rendered-variants',
+        context: [{ kind: 'markdown', source: { path: names.context } }],
+        options: [{ label: 'A', block: { kind: 'markdown', source: { path: names.variant } } }],
+      },
+      {
+        kind: 'compare',
+        left: { label: 'Before', block: { kind: 'markdown', source: { path: names.side } } },
+        right: { label: 'After', block: { kind: 'markdown', text: 'by value: nothing to resolve' } },
+      },
+    ];
+
+    const created = await fetch(`${base}/api/board`, {
       method: 'POST',
       headers: writeHeaders(),
-      body: JSON.stringify({
-        title: 'Broken reference over HTTP',
-        blocks: [{ kind: 'code', source: { path: path.join(srcDir, 'does-not-exist.js') } }],
-      }),
+      body: JSON.stringify({ title: 'Every position', cwd: project, blocks: [{ kind: 'markdown', text: '# Round one' }] }),
     });
-    assert.equal(r.status, 200); // the post itself succeeds
-    const j = await r.json();
-    const stored = readBoard(j.boardId, home);
-    assert.equal(stored.blocks.length, 1);
-    assert.equal(typeof stored.blocks[0].error, 'string');
+    assert.equal(created.status, 200);
+    const positionsBoard = (await created.json()).boardId;
+    const boardFile = path.join(home, 'boards', `${positionsBoard}.json`);
+    const docBefore = readFileSync(boardFile, 'utf8');
+    const storeBefore = storeListing();
 
-    const markup = renderedMarkup(await (await fetch(`${base}/b/${j.boardId}`)).text());
-    assert.ok(markup.includes('class="resolve-error"'));
-    assert.ok(markup.includes('Could not resolve'));
+    const broken = { top: 'missing-top.md', context: 'missing-context.md', side: 'missing-side.md', variant: 'missing-variant.md' };
+    const refused = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: positionsBoard, title: 'Four broken references', blocks: roundOf(broken) }),
+    });
+    assert.equal(refused.status, 400, 'one broken reference anywhere refuses the post');
+    const refusedError = (await refused.json()).error;
+    const lines = refusedError.split('\n');
+    assert.equal(lines.length, 4, `exactly one message per failed reference and no more, got:\n${refusedError}`);
+    for (const name of Object.values(broken)) {
+      assert.equal(lines.filter(l => l.includes(name)).length, 1, `exactly one of the four messages names ${name}:\n${refusedError}`);
+    }
+
+    assert.equal(readFileSync(boardFile, 'utf8'), docBefore,
+      'the board the refused post was pushed into must be byte-identical -- same rounds, same blocks');
+    assert.deepEqual(storeListing(), storeBefore, 'and no new board document or page was written anywhere');
+
+    const landed = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: positionsBoard, title: 'Four fixed references', blocks: roundOf({ top: 'top.md', context: 'context.md', side: 'side.md', variant: 'variant.md' }) }),
+    });
+    assert.equal(landed.status, 200, 'the same post, with every reference fixed, goes through');
+    const after = readBoard(positionsBoard, home);
+    const round2 = after.blocks.filter(b => b.round === 2);
+    const question = round2.find(b => b.kind === 'question');
+    const compare = round2.find(b => b.kind === 'compare');
+    const resolved = [
+      ['top.md', round2.find(b => b.kind === 'markdown' && b.source && b.source.path === 'top.md')],
+      ['context.md', question.context[0]],
+      ['variant.md', question.options[0].block],
+      ['side.md', compare.left.block],
+    ];
+    for (const [name, block] of resolved) {
+      assert.ok(block, `setup failure: no stored block for ${name}`);
+      assert.equal(block.error, undefined, `${name} must resolve cleanly`);
+      assert.ok(block.text.includes(markers[name]), `${name} must carry its own resolved content`);
+    }
+  });
+
+  await check('a refused reference names the boundary and the ways across it, and says nothing whatever about what is out there', async () => {
+    // A refusal is the agent's only feedback -- the post is gone and nothing reached the
+    // reviewer's page -- so "no" without the way out costs a round of guessing at a rule
+    // the agent cannot see. Everything the message names is something the CALLER already
+    // supplied or configured; what it must never leak is whether the file it refused is
+    // actually there.
+    const project = projectDir('refusal-text');
+    const outsideDir = mkdtempSync(path.join(tmpdir(), 'claude-board-outside-'));
+    try {
+      const real = path.join(outsideDir, 'exists.md');
+      writeFileSync(real, '# Out\n\nOUTSIDEBOUNDARY', 'utf8');
+      const ghost = path.join(outsideDir, 'never-existed.md');
+
+      const refusalFor = async target => {
+        const r = await fetch(`${base}/api/board`, {
+          method: 'POST',
+          headers: writeHeaders(),
+          body: JSON.stringify({ title: 'outside', cwd: project, blocks: [{ kind: 'markdown', source: { path: target } }] }),
+        });
+        assert.equal(r.status, 400, `an absolute path outside the boundary must be refused: ${target}`);
+        return (await r.json()).error;
+      };
+
+      const existing = await refusalFor(real);
+      const missing = await refusalFor(ghost);
+
+      // The boundary, as it stands right now: this board's project directory and the
+      // roots the daemon has in force (read from the product's own parser, so an
+      // ambient CLAUDE_BOARD_REF_ROOTS cannot make this check assert a fiction).
+      const roots = resolveRefRoots(process.env.CLAUDE_BOARD_REF_ROOTS);
+      assert.ok(existing.includes(`This board's project directory is ${project};`), `the refusal must name the project directory: ${existing}`);
+      assert.ok(existing.includes(`the reference roots in force are ${roots.length ? roots.join(', ') : '(none)'}.`),
+        `the refusal must name the roots in force: ${existing}`);
+      // ...and the three ways across it: relative to the project, a root added to the
+      // env var and the installer rerun, by value until then.
+      assert.match(existing, /path relative to it/);
+      assert.ok(existing.includes('CLAUDE_BOARD_REF_ROOTS'));
+      assert.match(existing, /running the installer again/);
+      assert.match(existing, /send the content by value/);
+      assert.ok(!existing.includes('OUTSIDEBOUNDARY'), 'and never the content it refused to read');
+
+      // Not an existence probe: the file that IS there and the file that never was get
+      // the same sentence, differing only in the path each repeats back. (Each message
+      // does repeat its own path -- asserted first, so the comparison below cannot pass
+      // by both messages simply saying nothing.)
+      assert.ok(existing.includes(real) && missing.includes(ghost), 'a refusal names the reference it refused');
+      assert.equal(
+        existing.split(real).join('<PATH>'),
+        missing.split(ghost).join('<PATH>'),
+        'a refusal for a path that exists and one for a path that does not must be identical apart from the path',
+      );
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 
   // --- snapshot and standalone archive -----------------------------------
@@ -3203,7 +3440,16 @@ async function main() {
     const shapes = [
       ['two blocks, so not a page board', [{ kind: 'html', html }, { kind: 'markdown', text: 'beside it' }]],
       ['content only, no html block at all', [{ kind: 'markdown', text: 'just prose' }]],
-      ['one html block whose reference cannot resolve', [{ kind: 'html', source: 'no-such-file.html' }]],
+      // Rendered html, but nested rather than filling the viewport, so `isPageRound`
+      // (src/badge.mjs) is false. This slot used to hold a single html block whose
+      // reference could not resolve -- the other way that predicate reads false -- and
+      // ADR.md entry 112 made that shape unpostable: the reference refuses the post now,
+      // so there is no round left to ask about `awaited` at all.
+      ['html only inside a compare, so no single artifact fills the viewport', [{
+        kind: 'compare',
+        left: { label: 'Before', block: { kind: 'html', html } },
+        right: { label: 'After', block: { kind: 'html', html } },
+      }]],
     ];
     for (const [what, blocks] of shapes) {
       const posted = await (await fetch(`${base}/api/board`, {

@@ -300,10 +300,19 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), positions a
   // section the generic page-scoped gesture can reach (`pre.mermaid` and
   // `.stage-wrap` are chrome). This used to be a markdown block with three list
   // items; markdown carries no page-scoped pin-layer at all now.
-  const round2 = addRound(board, { blocks: [{ kind: 'mermaid', source: { path: 'no-such-diagram-u3.mmd' } }] });
+  //
+  // Minted by value, then given the shape an ALREADY-STORED board carries for a
+  // failed reference: a round that names an unresolvable one is refused whole now
+  // (ADR.md entry 112), so this shape only ever comes off disk. `text: ''` already
+  // gives the sha a failed resolve produced, so only `source`/`error` are added.
+  const round2 = addRound(board, { blocks: [{ kind: 'mermaid', text: '' }] });
   const round2Block = board.blocks.find(b => b.round === round2);
   const round2BlockId = round2Block.id;
-  assert.equal(typeof round2Block.error, 'string', 'setup failure: the pushed block must actually fail to resolve');
+  Object.assign(round2Block, {
+    source: { path: 'no-such-diagram-u3.mmd' },
+    error: 'cannot read no-such-diagram-u3.mmd: no such file',
+  });
+  assert.equal(typeof round2Block.error, 'string', 'setup failure: the pushed block must carry a stored failed reference');
 
   // Mint the comment through a REAL client session first, same pattern as the
   // html-stage check above -- 'EventSource' declared and left unpassed for the

@@ -340,6 +340,11 @@ export function buildSampleBoard() {
       {
         kind: 'question',
         prompt: 'Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?',
+        // The explainer (ADR.md entry 111) is the sentence ahead of the options:
+        // what this question decides. It sits under the prompt on the card's full
+        // row, with the options and the context panel side by side beneath it, so
+        // the sample shows the shape the manual asks callers for.
+        explainer: "This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.",
         widget: 'single',
         context: [
           {
@@ -362,6 +367,11 @@ export function buildSampleBoard() {
           { label: 'Salad' },
           { label: 'Expo' },
           { label: 'Bar' },
+          // Every multi carries a way to say none (skills/claude-board/SKILL.md):
+          // an empty selection reads back as `unanswered`, which is a blank, not an
+          // answer of none. Unmarked here -- the recorded answer is Grill and Expo,
+          // so none is not the recommended answer on this board.
+          { label: 'None of these' },
         ],
       },
       {

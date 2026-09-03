@@ -652,7 +652,7 @@ function bodyRootChildren(root) {
 // and fail-safe (a reported "lost", never a wrong resolve) compared to a
 // forged ref actually reaching real page chrome.
 const CHROME_CLASSES = new Set([
-  'block-kicker', 'comment-btn', 'comment-form', 'comment-target',
+  'block-kicker', 'context-tools', 'fold-toggle', 'comment-btn', 'comment-form', 'comment-target',
   'comment-list', 'pin-layer', 'anchor-pin', 'mode-toggle', 'compare-label',
   'round-label', 'html-stage',
 ]);

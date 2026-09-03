@@ -21,8 +21,8 @@ import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
 // still resolves") is asserted by running BOTH implementations over one corpus, not
 // by golden strings re-derived from the current source. See the fixture's header.
 import { mdToHtmlAndAnchors as legacyMdToHtmlAndAnchors } from './fixtures/markdown-pre-marked.mjs';
-import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks } from '../src/board.mjs';
-import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, INDEX_CSP, COMMENT_ICON, highlightFenceHtml } from '../src/render.mjs';
+import { createBoard, addRound, amendRound, applySubmit, buildPacket, resolveComment, findBlock, questionBlocks, normalizeBlock } from '../src/board.mjs';
+import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock, stageAgentScript, STAGE_ACCENT_HEX, STAGE_MARGIN_RESET, isPageBoard, renderRefusalPage, CSP, INDEX_CSP, COMMENT_ICON, highlightFenceHtml, FOLD_CAP } from '../src/render.mjs';
 import { sessionToken, sessionCookieMatches, SESSION_COOKIE } from '../src/secret.mjs';
 import { createHandoffStore, handoffTarget, recoveryCommand, shellQuote } from '../src/handoff.mjs';
 import { resolveRef, langForPath, resolvePath, resolveRefRoots, resolveBoardCwd, DEFAULT_REF_ROOTS, MAX_REF_BYTES } from '../src/resolve.mjs';
@@ -1861,15 +1861,16 @@ check('U1, re-verified (previously not reproduced; confirmed here with the real 
   const qid = board.blocks[0].id;
   const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
   const sectionRoot = parseHtmlTree(sectionHtml).children[0];
-  // question-footer(3) > answer-status span(2) -- fixed sibling positions for a
-  // question with no context card: question-main, note-field and footer are the
-  // section's three children, and the note and the footer are the section's own
-  // (full-width rows under both columns), not question-main's.
-  const statusNode = resolveSteps(sectionRoot, pathToSteps('3.2'));
-  assert.ok(statusNode && (statusNode.cls || []).includes('answer-status'), 'setup failure: "3.2" must address the status span');
+  // question-footer(4) > answer-status span(2) -- fixed sibling positions for a
+  // question with no context panel: question-head, question-main, note-field and
+  // footer are the section's four children, and the head, the note and the
+  // footer are the section's own (full-width rows over and under both columns),
+  // not question-main's.
+  const statusNode = resolveSteps(sectionRoot, pathToSteps('4.2'));
+  assert.ok(statusNode && (statusNode.cls || []).includes('answer-status'), 'setup failure: "4.2" must address the status span');
   const hint = extractHint(elementText(statusNode));
   assert.equal(hint, 'status: unanswered');
-  assert.equal(resolveDomAnchorInSection(sectionHtml, '3.2', hint), true, 'setup failure: must resolve while genuinely unanswered');
+  assert.equal(resolveDomAnchorInSection(sectionHtml, '4.2', hint), true, 'setup failure: must resolve while genuinely unanswered');
 
   // The reviewer's ONE Send carries both the comment minted against the
   // still-unanswered status line AND the answer itself -- an answer can only
@@ -1879,7 +1880,7 @@ check('U1, re-verified (previously not reproduced; confirmed here with the real 
   applySubmit(board, {
     action: 'send',
     answers: [{ id: qid, choice: 'Yes' }],
-    comments: [{ blockId: qid, anchor: { kind: 'dom', ref: '3.2', hint }, text: 'still says unanswered?' }],
+    comments: [{ blockId: qid, anchor: { kind: 'dom', ref: '4.2', hint }, text: 'still says unanswered?' }],
   }, 1);
 
   const resolved = resolveComment(board, board.comments[0]);
@@ -1899,12 +1900,14 @@ check('U2, re-measured with C1 fixed: a rank re-order that used to silently misa
   const rid = board.blocks[0].id;
   const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
   const sectionRoot = parseHtmlTree(sectionHtml).children[0];
-  // question-main(1) > rank-list(3) > 2nd <li> ("Ship it later")
-  const secondLi = resolveSteps(sectionRoot, pathToSteps('1.3.2'));
+  // question-main(2) > rank-list(1) > 2nd <li> ("Ship it later") -- the head row
+  // (kicker, prompt, explainer) is the section's first child, so question-main
+  // holds the widget alone.
+  const secondLi = resolveSteps(sectionRoot, pathToSteps('2.1.2'));
   const hint = extractHint(elementText(secondLi));
   assert.equal(hint, '2 Ship it later');
 
-  board.comments.push({ n: 1, blockId: rid, anchor: { kind: 'dom', ref: '1.3.2', hint }, text: 'about this one', createdAt: new Date().toISOString(), round: 1, mintBlockKind: 'question' });
+  board.comments.push({ n: 1, blockId: rid, anchor: { kind: 'dom', ref: '2.1.2', hint }, text: 'about this one', createdAt: new Date().toISOString(), round: 1, mintBlockKind: 'question' });
   assert.equal(resolveComment(board, board.comments[0]).resolved, true, 'setup failure: must resolve before any re-rank');
 
   // Re-rank so "Ship it" (a literal prefix of the stored hint's identity
@@ -2465,21 +2468,17 @@ check('langForPath guesses a language from the extension, falling back to empty'
   assert.equal(langForPath('README'), '');
 });
 
-check('a board carrying reference-resolved content snapshots text+sha at post time, and a bad reference reports an error without dropping the block', () => {
+check('a board carrying reference-resolved content snapshots text+sha at post time, and one bad reference refuses the whole post', () => {
   const codeFile = path.join(fixturesDir, 'snippet.js');
   writeFileSync(codeFile, ['function add(a, b) {', '  return a + b;', '}', ''].join('\n'), 'utf8');
   const mdFile = path.join(fixturesDir, 'contract.md');
   writeFileSync(mdFile, '# Contract\n\n## Notes\n\nresolved by reference', 'utf8');
 
-  const board = createBoard({
-    title: 'Reference resolution',
-    cwd: fixturesDir,
-    blocks: [
-      { kind: 'code', source: { path: 'snippet.js', lines: [1, 2] } },
-      { kind: 'markdown', source: { path: 'contract.md', section: 'notes' } },
-      { kind: 'markdown', source: { path: 'missing-file.md' } },
-    ],
-  });
+  const good = [
+    { kind: 'code', source: { path: 'snippet.js', lines: [1, 2] } },
+    { kind: 'markdown', source: { path: 'contract.md', section: 'notes' } },
+  ];
+  const board = createBoard({ title: 'Reference resolution', cwd: fixturesDir, blocks: good });
 
   const code = board.blocks[0];
   assert.equal(code.text, 'function add(a, b) {\n  return a + b;');
@@ -2492,20 +2491,35 @@ check('a board carrying reference-resolved content snapshots text+sha at post ti
   assert.ok(md.html.includes('resolved by reference'));
   assert.equal(md.error, undefined);
 
-  const broken = board.blocks[2];
-  assert.equal(board.blocks.length, 3); // the bad reference is still minted, not dropped
-  assert.equal(broken.kind, 'markdown');
-  assert.equal(broken.text, '');
-  assert.equal(typeof broken.error, 'string');
-  assert.ok(broken.error.includes('missing-file.md'));
+  assert.equal(board.blocks.length, 2);
+
+  // ADR.md entry 112: the same post with one reference that does not resolve is refused
+  // whole. The two blocks that DID resolve buy it nothing -- a round that reached the
+  // reviewer with a red note where content should be told the reviewer about a mistake
+  // the agent could not see, and the agent nothing at all until submit.
+  const refusal = refusedPost(() => createBoard({
+    title: 'Reference resolution',
+    cwd: fixturesDir,
+    blocks: [...good, { kind: 'markdown', source: { path: 'missing-file.md' } }],
+  }));
+  assert.ok(refusal.includes('missing-file.md'));
+  assert.equal(refusal.split('\n').length, 1, 'one message per failed reference, and only one failed');
 });
 
-check('a block with a failed resolution renders its error on the page instead of vanishing', () => {
+check('a STORED block whose reference failed renders its error on the page instead of vanishing', () => {
+  // A post naming a reference that does not resolve is refused now (ADR.md entry 112),
+  // so this shape only ever comes off disk: a board minted before that rule, or one
+  // whose file went away after the post. The page still has to render it.
   const board = createBoard({
     title: 'Broken reference',
     cwd: fixturesDir,
-    blocks: [{ kind: 'code', source: { path: 'does-not-exist.js' } }],
+    blocks: [{ kind: 'code', text: '' }],
   });
+  board.blocks[0] = {
+    ...board.blocks[0],
+    source: { path: 'does-not-exist.js' },
+    error: 'cannot read does-not-exist.js: no such file',
+  };
   const markup = renderedMarkup(renderBoardPage(board));
   assert.ok(markup.includes('class="resolve-error"'));
   assert.ok(markup.includes('Could not resolve'));
@@ -2558,69 +2572,87 @@ check('an html source ref renders a stage byte-identical to the same content pos
   assert.deepEqual(Object.keys(valueBlock).sort(), Object.keys(refBlock).sort());
 });
 
-check('lines or section on an html source is refused with a block-level error naming markup slicing, never thrown', () => {
+check('lines or section on an html source refuses the post, naming markup slicing', () => {
   const file = path.join(fixturesDir, 'sliceable-stage.html');
   writeFileSync(file, '<html><body><p>one</p><p>two</p></body></html>', 'utf8');
 
-  const linesBoard = createBoard({
+  // Refused on the same terms as a reference that does not resolve -- it IS one, a
+  // reference this daemon will not read -- so it refuses the post with it, rather than
+  // being silently ignored or landing markup that only breaks (ADR.md entry 112).
+  const linesRefusal = refusedPost(() => createBoard({
     title: 'html source, lines refused',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'html', source: { path: 'sliceable-stage.html', lines: [1, 1] } }],
+  }));
+  assert.match(linesRefusal, /slic/i);
+  assert.match(linesRefusal, /markup/i);
+
+  const sectionRefusal = refusedPost(() => createBoard({
+    title: 'html source, section refused',
+    cwd: fixturesDir,
+    blocks: [{ kind: 'html', source: { path: 'sliceable-stage.html', section: 'notes' } }],
+  }));
+  assert.match(sectionRefusal, /slic/i);
+  assert.match(sectionRefusal, /markup/i);
+
+  // The refusal counts as one failed reference among however many the post carried, and
+  // every one of them is reported: a round with two mistakes costs one re-post.
+  const both = refusedPost(() => createBoard({
+    title: 'html source, lines refused beside a missing file',
     cwd: fixturesDir,
     blocks: [
       { kind: 'html', source: { path: 'sliceable-stage.html', lines: [1, 1] } },
       { kind: 'markdown', source: { path: 'no-such-file.md' } },
     ],
-  });
-  const linesBlock = linesBoard.blocks[0];
-  assert.equal(typeof linesBlock.error, 'string'); // reported on the block, not thrown -- createBoard above did not throw
-  assert.match(linesBlock.error, /slic/i);
-  assert.match(linesBlock.error, /markup/i);
+  }));
+  assert.deepEqual(both.split('\n').length, 2, 'one message per failed reference');
+  assert.match(both.split('\n')[1], /no-such-file\.md/);
+
+  // The shape a STORED block carries when this is what failed: content empty, sha the
+  // hash of that empty content -- not absent. This refusal fires before resolveContent
+  // runs, so it is the one error path that could silently drift from the shape the rest
+  // of the protocol promises. Asserted through normalizeBlock, which mints one block
+  // outside any post and so still reports a failure the pre-112 way, and against a
+  // sibling that failed the ordinary way rather than a hardcoded digest.
+  const linesBlock = normalizeBlock({ kind: 'html', source: { path: 'sliceable-stage.html', lines: [1, 1] } }, 1, {}, fixturesDir);
+  const failedSibling = normalizeBlock({ kind: 'markdown', source: { path: 'no-such-file.md' } }, 1, {}, fixturesDir);
+  assert.equal(typeof linesBlock.error, 'string');
   assert.equal(linesBlock.html, '');
-  // Same shape every other resolve failure takes (PROTOCOL.md's resolve-failure
-  // contract): content empty, sha the hash of that empty content -- not absent. This
-  // refusal fires before resolveContent runs, so it is the one error path that could
-  // silently drift from the shape the rest of the protocol promises. Asserted against
-  // a sibling block that failed the ordinary way rather than a hardcoded digest, so
-  // the two can never disagree without this failing.
-  const failedSibling = linesBoard.blocks[1];
   assert.equal(typeof failedSibling.error, 'string');
   assert.equal(linesBlock.sha, failedSibling.sha);
 
-  const sectionBoard = createBoard({
-    title: 'html source, section refused',
-    cwd: fixturesDir,
-    blocks: [{ kind: 'html', source: { path: 'sliceable-stage.html', section: 'notes' } }],
-  });
-  const sectionBlock = sectionBoard.blocks[0];
-  assert.equal(typeof sectionBlock.error, 'string');
-  assert.match(sectionBlock.error, /slic/i);
-  assert.match(sectionBlock.error, /markup/i);
-
-  // Refused is visible on the page, not silently ignored (the parameter is not
-  // dropped and the whole file is not quietly substituted for the requested slice).
-  const markup = renderedMarkup(renderBoardPage(linesBoard));
-  assert.ok(markup.includes('class="resolve-error"'));
+  // And that stored shape is visible on the page, not silently ignored (the parameter is
+  // not dropped and the whole file is not quietly substituted for the requested slice).
+  const stored = createBoard({ title: 'html source, lines refused', cwd: fixturesDir, blocks: [{ kind: 'html', html: '' }] });
+  stored.blocks[0] = { ...stored.blocks[0], source: linesBlock.source, error: linesBlock.error };
+  assert.ok(renderedMarkup(renderBoardPage(stored)).includes('class="resolve-error"'));
 });
 
-check('a referenced html file over the 512 KiB cap is refused as a block-level error, and the board still posts with its other blocks intact', () => {
+check('a referenced html file over the 512 KiB cap refuses the post, and the same post without it lands', () => {
   const big = path.join(fixturesDir, 'oversize-stage.html');
   writeFileSync(big, 'x'.repeat(MAX_REF_BYTES + 1), 'utf8');
   try {
-    const board = createBoard({
+    const refusal = refusedPost(() => createBoard({
       title: 'html source, over cap',
       cwd: fixturesDir,
       blocks: [
         { kind: 'html', source: { path: 'oversize-stage.html' } },
         { kind: 'markdown', text: 'still here' },
       ],
+    }));
+    assert.match(refusal, /exceeds the .* cap/);
+    // Refused whole: the by-value sibling does not land on its own, and nothing about
+    // this post reaches a board.
+    assert.equal(refusal.split('\n').length, 1);
+
+    const board = createBoard({
+      title: 'html source, over cap removed',
+      cwd: fixturesDir,
+      blocks: [{ kind: 'markdown', text: 'still here' }],
     });
-    assert.equal(board.blocks.length, 2); // the oversize reference is refused, not dropped
-    const htmlBlock = board.blocks[0];
-    assert.equal(typeof htmlBlock.error, 'string');
-    assert.match(htmlBlock.error, /exceeds the .* cap/);
-    assert.equal(htmlBlock.html, '');
-    const mdBlock = board.blocks[1];
-    assert.equal(mdBlock.error, undefined);
-    assert.equal(mdBlock.text, 'still here'); // the surrounding board is untouched
+    assert.equal(board.blocks.length, 1);
+    assert.equal(board.blocks[0].error, undefined);
+    assert.equal(board.blocks[0].text, 'still here'); // the same post minus the refusal is ordinary
   } finally {
     unlinkSync(big);
   }
@@ -2978,15 +3010,22 @@ check('the whole-block comment button still opens the comment form when a conten
   // A reference that failed to resolve renders a .resolve-error note instead of
   // content, but the button/form survive -- they live in the kicker/commentArea,
   // outside the `block.error` branch. Checked on `mermaid` rather than `code`:
-  // ADR.md entry 28 leaves a code block no button to survive with.
+  // ADR.md entry 28 leaves a code block no button to survive with. The failure is
+  // stored onto the block rather than posted, since a post naming one is refused now
+  // (ADR.md entry 112) and this is a board read back off disk.
   const board = createBoard({
     title: 'Blank content, button still works',
     cwd: fixturesDir,
     blocks: [
-      { kind: 'mermaid', source: { path: 'does-not-exist.mmd' } },
+      { kind: 'mermaid', text: '' },
       { kind: 'html', html: '' }, // a stage that came up blank
     ],
   });
+  board.blocks[0] = {
+    ...board.blocks[0],
+    source: { path: 'does-not-exist.mmd' },
+    error: 'cannot read does-not-exist.mmd: no such file',
+  };
   const diagramId = board.blocks[0].id;
   const htmlId = board.blocks[1].id;
   const markup = renderedMarkup(renderBoardPage(board));
@@ -3359,7 +3398,7 @@ check('a question whose OPTIONS carry a rendered stage (choose-between-rendered-
   assert.ok(markup.includes('class="question-context-prose"'));
 });
 
-check('negative case: a question with NO rendered stage anywhere -- in options or context -- is genuinely unaffected and keeps the .question-context card (ablation: this must fail if questionCarriesStage or the branch reading it is ever deleted in favour of "always full width")', () => {
+check('negative case: a question with NO rendered stage anywhere -- in options or context -- keeps the .question-context panel and its two columns (ablation: this must fail if questionCarriesStage or the branch reading it is ever deleted in favour of "always full width")', () => {
   const board = createBoard({
     title: 'No stage anywhere',
     blocks: [{
@@ -3371,11 +3410,14 @@ check('negative case: a question with NO rendered stage anywhere -- in options o
     }],
   });
   const markup = renderedMarkup(renderBoardPage(board));
-  assert.ok(markup.includes('class="question-context"'), 'a stage-free question must keep today\'s .question-context card');
+  assert.ok(markup.includes('class="question-context"'), 'a stage-free question must keep the two-column .question-context panel');
   assert.ok(!markup.includes('class="question-context-prose"'), 'and must never render the prose wrapper');
-  // The card still goes through the ordinary renderBlock path -- kicker, comment
-  // button and all -- exactly as it did before this entry.
-  assert.ok(markup.includes('Markdown'), 'the nested block\'s own kicker label must still render, unaffected');
+  // ADR.md entry 110 dropped the per-item card here too: the panel holds bare
+  // context items, so the kind label the old renderBlock path emitted is gone.
+  // Kept as an assertion rather than deleted -- it is the ablation for "the
+  // panel dropped the card, not just the wrapper class".
+  assert.ok(markup.includes('class="context-item"'), 'the panel holds bare context items');
+  assert.ok(!markup.includes('>Markdown<'), 'and no per-item kind label survives inside it');
 });
 
 check('a stage nested inside a compare side, inside a question\'s context, also counts as a rendered stage (blockCarriesStage recurses into compare)', () => {
@@ -3462,7 +3504,7 @@ check('a stage-carrying question\'s context renders no card, no border-carrying 
   assert.ok(promptIdx < contextIdx && contextIdx < optionsIdx, 'context prose must sit under the prompt and above the options');
 });
 
-check('a code block in a stage-carrying question\'s context renders as plain prose -- no per-line anchor spans, no comment affordance, and no ReferenceError on the way', () => {
+check('a code block in a stage-carrying question\'s context renders through the code block\'s own body -- no per-line anchor spans, no comment affordance, and no ReferenceError on the way', () => {
   // The prose context path is the one place `code` is rendered by something
   // other than renderCodeBlock. When ADR.md entry 28 deleted renderCodeLines it
   // was still being CALLED from there, so this whole branch threw
@@ -3487,10 +3529,487 @@ check('a code block in a stage-carrying question\'s context renders as plain pro
     'a code block in a stage-carrying question\'s context must render at all');
 
   assert.ok(markup.includes('class="question-context-prose"'), 'setup failure: this fixture must take the prose context path');
-  assert.ok(markup.includes('<pre><code>const x = 1;\nconst y = 2;</code></pre>'), 'the snippet renders as plain escaped text');
+  // ADR.md entry 110: the excerpt keeps the code block's own body -- gutter rows
+  // at real line numbers and the highlighting -- rather than the plain
+  // <pre><code> prose path it used to take.
+  assert.ok(markup.includes('<span class="code-row" data-line="1">'), 'the excerpt keeps its line gutter');
+  assert.ok(markup.includes('<span class="code-row" data-line="2">'), 'one row per source line');
   assert.ok(!markup.includes('code-line'), 'no per-line anchor spans anywhere (ADR.md entry 28)');
   assert.ok(!markup.includes(`comment-form-${codeId}`), 'a code context item carries no comment form');
   assert.ok(!markup.includes(`data-block-id="${codeId}" data-anchor-kind="block"`), 'and no comment button');
+});
+
+// --- ADR.md entry 110: a question's context is ONE panel ---------------------
+//
+// Entry 26 made context prose for the one question that carried a rendered
+// stage; entry 110 widens that to every question. The board used to draw each
+// context item as its own card with a kind label ("MARKDOWN", "MERMAID"),
+// stacked beside the question, so one question read as a pile of panels. The
+// label was card chrome, not information: a reviewer reads context, they do not
+// sort it by kind.
+//
+// The two shapes differ in PLACEMENT and in nothing else -- a '.question-context'
+// panel beside the options for an ordinary question, '.question-context-prose'
+// full width under the head row for a stage-carrying one -- and the checks below
+// assert that by rendering the same context both ways and diffing the items.
+
+/** A rendered fragment with every minted id blanked, so two boards' markup can be
+ * compared for structure without their (necessarily different) block ids. */
+const idBlind = html => html.replace(/(data-block-id|data-expand-for|data-note-for|data-defer-for|id|for)="[^"]*"/g, '$1="X"');
+
+const questionSection = markup => {
+  const start = markup.indexOf('<section class="block question-block"');
+  assert.ok(start !== -1, 'setup failure: no question section in the markup');
+  return markup.slice(start, markup.indexOf('</section>', start) + '</section>'.length);
+};
+
+check('AC 1: several markdown context items render as ONE panel -- no per-item card, no kind label, in posted order', () => {
+  const board = createBoard({
+    title: 'Three notes',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Ship it?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [
+        { kind: 'markdown', text: 'First note.' },
+        { kind: 'markdown', text: 'Second note.' },
+        { kind: 'markdown', text: 'Third note.' },
+      ],
+    }],
+  });
+  const document = parseHTML(renderBoardPage(board));
+  const panels = document.querySelectorAll('.question-context');
+  assert.equal(panels.length, 1, 'one panel for the whole context, never one per item');
+
+  const panel = panels[0];
+  assert.equal(panel.querySelectorAll('.context-item').length, 3, 'all three items live in that one panel');
+  assert.equal(panel.querySelector('.block'), null, 'no .block card wrapper on any item');
+  assert.equal(panel.querySelector('.block-kicker'), null, 'and no kind label on any item');
+
+  const ids = panel.querySelectorAll('.context-item').map(el => el.getAttribute('data-block-id'));
+  assert.deepEqual(ids, board.blocks[0].context.map(c => c.id), 'posted order, not sorted or grouped by kind');
+
+  const texts = panel.querySelectorAll('.md-content').map(el => el.textContent.trim());
+  assert.deepEqual(texts, ['First note.', 'Second note.', 'Third note.']);
+});
+
+check('AC 2: markdown and a mermaid diagram render in that same one panel, and the diagram keeps its comment control AND its expand control', () => {
+  const board = createBoard({
+    title: 'Note and diagram',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Does the flow match the note?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [
+        { kind: 'markdown', text: 'The flow, in words.' },
+        { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
+      ],
+    }],
+  });
+  const mermaidId = board.blocks[0].context[1].id;
+  const document = parseHTML(renderBoardPage(board));
+  const panel = document.querySelector('.question-context');
+  assert.ok(panel, 'setup failure: this fixture must take the panel path');
+  assert.equal(panel.querySelectorAll('.context-item').length, 2, 'both kinds in the one panel');
+  assert.equal(panel.querySelector('.block-kicker'), null, 'neither carries a kind label');
+
+  const diagram = document.querySelector('.context-item.mermaid-block');
+  assert.ok(diagram, 'the diagram item wears .mermaid-block, which is what src/ui.mjs walks up to');
+  assert.ok(diagram.querySelector('pre.mermaid'), 'and still emits the raw diagram source for the client to render');
+
+  // The controls the kicker used to carry, now in the item's own control group.
+  const tools = diagram.querySelector('.context-tools');
+  assert.ok(tools, 'the diagram carries a control group');
+  assert.ok(tools.querySelector('.comment-btn'), 'its comment control (ADR.md entry 28)');
+  const expand = tools.querySelector('.expand-btn');
+  assert.ok(expand, 'and its expand control -- a diagram beside a question is half the column wide (ADR.md entry 110)');
+  assert.equal(expand.getAttribute('data-expand-for'), mermaidId, 'wired to the diagram\'s own block id');
+
+  // The markdown item beside it carries neither: the rule is drawn on kind.
+  const mdItem = document.querySelectorAll('.context-item')[0];
+  assert.equal(mdItem.getAttribute('data-block-kind'), 'markdown', 'setup failure: the markdown item comes first');
+  assert.equal(mdItem.querySelector('.context-tools'), null, 'a markdown item carries no control group');
+});
+
+check('AC 3: a mock-carrying question renders its context THE SAME WAY, full width under the prompt -- only the placement wrapper differs', () => {
+  const context = () => ([
+    { kind: 'markdown', text: 'A note about the mock.' },
+    { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
+  ]);
+  const ordinary = createBoard({
+    title: 'Ordinary',
+    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }], context: context() }],
+  });
+  const mockCarrying = createBoard({
+    title: 'Mock-carrying',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Ship it?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'html', html: '<p>a</p>' } },
+        { label: 'B', block: { kind: 'html', html: '<p>b</p>' } },
+      ],
+      context: context(),
+    }],
+  });
+
+  const items = page => {
+    const found = parseHTML(page).querySelectorAll('.context-item');
+    assert.ok(found.length, 'setup failure: no context items found');
+    return found.map(el => idBlind(el.outerHTML));
+  };
+  const ordinaryPage = renderBoardPage(ordinary);
+  const mockPage = renderBoardPage(mockCarrying);
+  const ordinaryMarkup = renderedMarkup(ordinaryPage);
+  const mockMarkup = renderedMarkup(mockPage);
+  assert.ok(ordinaryMarkup.includes('class="question-context"'), 'setup failure: the ordinary question takes the panel path');
+  assert.ok(mockMarkup.includes('class="question-context-prose"'), 'setup failure: the mock-carrying one takes the prose path');
+  assert.ok(!mockMarkup.includes('class="question-context"'),
+    'and emits no .question-context at all -- the full-width rule keys on that class being absent, which the DOM stand-in cannot evaluate through :has()');
+  assert.deepEqual(items(mockPage), items(ordinaryPage),
+    'the items themselves render identically in both shapes: one panel is a rule about ITEM rendering, and only the wrapper differs');
+
+  // Placement: the prose wrapper sits under the head row and above the options.
+  const section = questionSection(mockMarkup);
+  assert.ok(section.indexOf('question-head') < section.indexOf('question-context-prose'), 'context under the prompt');
+  assert.ok(section.indexOf('question-context-prose') < section.indexOf('choice-variant'), 'and above the widget');
+  assert.ok(questionSection(ordinaryMarkup).indexOf('class="options"') < questionSection(ordinaryMarkup).indexOf('class="question-context"'),
+    'while the ordinary shape puts the panel after the options, the two side by side');
+});
+
+check('AC 5: a question may carry an explainer -- prompt and explainer take the card\'s full head row, options and context panel sit under them', () => {
+  const board = createBoard({
+    title: 'With an explainer',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which wave carries these?',
+      widget: 'single',
+      explainer: 'Recommended: **none of these**. Everything below lands in the launch wave.',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [{ kind: 'markdown', text: 'The background.' }],
+    }],
+  });
+  const q = board.blocks[0];
+  assert.equal(q.explainer, 'Recommended: **none of these**. Everything below lands in the launch wave.',
+    'the source markdown is stored verbatim, like a markdown block\'s own text');
+  assert.ok(q.explainerHtml.includes('<strong>none of these</strong>'), 'and is rendered server-side as markdown');
+
+  const document = parseHTML(renderBoardPage(board));
+  const head = document.querySelector('.question-head');
+  assert.ok(head, 'the head row exists');
+  assert.ok(head.querySelector('.question-prompt'), 'holding the prompt');
+  const explainer = head.querySelector('.question-explainer');
+  assert.ok(explainer, 'and the explainer');
+  assert.ok(explainer.classList.contains('md-content'), 'which is markdown prose, styled as such');
+  assert.ok(explainer.textContent.includes('none of these'));
+
+  // The options and the panel are siblings UNDER the head row, not beside the prompt.
+  const section = questionSection(renderedMarkup(renderBoardPage(board)));
+  assert.ok(section.indexOf('question-head') < section.indexOf('class="question-main"'), 'head row first');
+  assert.ok(section.indexOf('class="question-main"') < section.indexOf('class="question-context"'), 'then the options, then the panel');
+  assert.ok(section.indexOf('question-explainer') < section.indexOf('class="question-main"'), 'the explainer is inside the head row, not inside a column');
+});
+
+check('AC 5: a question with no explainer renders as today -- the prompt alone on that row, and no explainer field stored', () => {
+  const board = createBoard({
+    title: 'No explainer',
+    blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] }],
+  });
+  const q = board.blocks[0];
+  assert.ok(!('explainer' in q), 'absent, not an empty string: an optional field that always exists rewrites every stored board for nothing');
+  assert.ok(!('explainerHtml' in q));
+
+  const document = parseHTML(renderBoardPage(board));
+  const head = document.querySelector('.question-head');
+  assert.ok(head.querySelector('.question-prompt'), 'the prompt is still on the head row');
+  assert.equal(head.querySelector('.question-explainer'), null, 'with nothing beside it');
+});
+
+check('AC 5: an explainer is bounded like every other by-value string on a question -- over the cap is a 400 naming the field, never a silent truncation', () => {
+  assert.throws(
+    () => createBoard({
+      title: 'Huge explainer',
+      blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }], explainer: 'x'.repeat(MAX_REF_BYTES + 1) }],
+    }),
+    /block explainer is over the .*-byte cap/,
+  );
+});
+
+check('AC 14: a code context item keeps its source label as a CAPTION under the excerpt, plus its gutter and its scroll box; a markdown item carries no label', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'cb-code-caption-'));
+  writeFileSync(path.join(dir, 'app.js'), 'const a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\n');
+  try {
+    const board = createBoard({
+      title: 'Code in context',
+      cwd: dir,
+      blocks: [{
+        kind: 'question',
+        prompt: 'Does the excerpt back the note?',
+        widget: 'single',
+        options: [{ label: 'Yes' }, { label: 'No' }],
+        context: [
+          { kind: 'markdown', text: 'A note, which carries no label of its own.' },
+          { kind: 'code', source: { path: 'app.js', lines: [2, 3] }, lang: 'javascript' },
+        ],
+      }],
+    });
+    const document = parseHTML(renderBoardPage(board));
+    const codeItem = document.querySelector('.context-item.code-block');
+    assert.ok(codeItem, 'the excerpt wears .code-block -- the class the 480px scroll box and the gutter are drawn on');
+    assert.ok(styles.includes('.code-block pre'), 'setup failure: that class is what carries the scroll box');
+    assert.ok(/\.code-block pre \{[^}]*max-height: 480px/.test(styles), 'and the box is the same 480px cap a top-level excerpt gets');
+
+    // The gutter numbers from the file's own lines, not from 1.
+    const rows = codeItem.querySelectorAll('.code-row');
+    assert.deepEqual(rows.map(r => r.getAttribute('data-line')), ['2', '3'], 'the line gutter survives, at the file\'s real line numbers');
+
+    // The provenance survives the dropped kicker, as a caption UNDER the excerpt.
+    const caption = codeItem.querySelector('.context-caption');
+    assert.ok(caption, 'the source label survives as a caption');
+    assert.equal(caption.textContent, 'app.js:2-3', 'naming the path and the line range');
+    assert.equal(codeItem.querySelector('.block-kicker'), null, 'and never as a card kicker');
+    const itemHtml = renderedMarkup(renderBoardPage(board));
+    assert.ok(itemHtml.indexOf('context-caption') > itemHtml.indexOf('class="code-row"'), 'the caption sits UNDER the excerpt, not over it');
+
+    const mdItem = document.querySelectorAll('.context-item')[0];
+    assert.equal(mdItem.getAttribute('data-block-kind'), 'markdown', 'setup failure: the markdown item comes first');
+    assert.equal(mdItem.querySelector('.context-caption'), null, 'a markdown item carries no label at all');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check('AC 14: a by-value code excerpt has no source, so it carries no caption -- the caption is provenance, not a kind label by another name', () => {
+  const board = createBoard({
+    title: 'By-value code',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Ship it?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [{ kind: 'code', text: 'const x = 1;', lang: 'javascript' }],
+    }],
+  });
+  const document = parseHTML(renderBoardPage(board));
+  const codeItem = document.querySelector('.context-item.code-block');
+  assert.ok(codeItem.querySelector('.code-row'), 'it still gets the gutter and the scroll box');
+  assert.equal(codeItem.querySelector('.context-caption'), null, 'but nothing to caption it with');
+});
+
+// ---------------------------------------------------------------------------
+// AC 4: a prose item longer than the cap folds under a fade with a Show more
+// control. The trigger is a count the SERVER makes from the item's markdown
+// source (src/render.mjs's FOLD_CAP), never measured pixels -- which is exactly
+// what lets these checks assert it at all, since the DOM stand-in has no layout
+// engine (QUIRKS.md). What is asserted here is the MARKING: the state class, the
+// clipped body and its id, and the control with its aria pair. The client half
+// (toggling, focus, the drop) is driven in test/check-archive.mjs and
+// test/check-send-guard.mjs, against the real client script.
+// ---------------------------------------------------------------------------
+
+const SHORT_PROSE = 'A short note about the change.';
+// Over the line half of the cap and nowhere near the character half: a list of
+// short items is the shape a source-LINE count exists for.
+const LONG_BY_LINES = Array.from({ length: FOLD_CAP.lines + 4 }, (_, i) => `- point ${i + 1}`).join('\n');
+// The mirror image: ONE source line, so the line count sees nothing, and well
+// over the character half -- the wall-of-prose shape a line count alone misses.
+const LONG_BY_CHARS = 'The referenced section, as one unbroken paragraph. '.repeat(24);
+
+/** The one context item on a question rendered from `context`, with the fold's
+ * three marks read off it. */
+function foldMarks(item) {
+  const body = item.querySelectorAll('.fold-body')[0] || null;
+  const control = item.querySelectorAll('.fold-toggle')[0] || null;
+  return { folded: item.classList.contains('folded'), body, control };
+}
+
+const questionWith = (context, extra = {}) => createBoard({
+  title: 'Fold',
+  blocks: [{ kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }], context, ...extra }],
+});
+
+check('AC 4: a prose item longer than the cap is marked folded in a question\'s context panel -- clipped body, its own id, and a Show more control carrying the aria pair; a short one is untouched', () => {
+  const board = questionWith([
+    { kind: 'markdown', text: SHORT_PROSE },
+    { kind: 'markdown', text: LONG_BY_LINES },
+  ]);
+  const document = parseHTML(renderBoardPage(board));
+  const panel = document.querySelector('.question-context');
+  assert.ok(panel, 'setup failure: this fixture must take the panel path');
+  const [short, long] = panel.querySelectorAll('.context-item');
+
+  const shortMarks = foldMarks(short);
+  assert.equal(shortMarks.folded, false, 'a short item is not marked: a fade over fully visible text is the failure this cap exists to avoid');
+  assert.equal(shortMarks.body, null, 'and nothing on it is a fold body');
+  assert.equal(shortMarks.control, null, 'and it carries no control');
+
+  const longMarks = foldMarks(long);
+  assert.equal(longMarks.folded, true, 'the long item wears the state class the clip and the fade hang off');
+  assert.ok(longMarks.body, 'its prose is the clipped body');
+  assert.ok(longMarks.body.classList.contains('md-content'), 'still styled as prose -- the fold wraps the body, it does not replace it');
+  assert.equal(longMarks.body.parentElement, long, 'the body is the item\'s own prose, not a new wrapper around it');
+  assert.ok(longMarks.control, 'and it carries the control');
+  assert.equal(longMarks.control.parentElement, long, 'which sits in the item, under the body it opens');
+
+  assert.equal(longMarks.control.getAttribute('aria-expanded'), 'false', 'folded is the closed state, stated for a screen reader too');
+  const controls = longMarks.control.getAttribute('aria-controls');
+  assert.ok(controls, 'aria-controls names something');
+  assert.equal(controls, longMarks.body.getAttribute('id'), 'and what it names is the folded body');
+  assert.equal(document.getElementById(controls), longMarks.body, 'an id that actually resolves in the page');
+  assert.equal(longMarks.control.textContent.trim(), 'Show more');
+});
+
+check('AC 4: the fold\'s trigger is a SOURCE count, and both halves fire on their own -- many short lines, or one long paragraph', () => {
+  const document = parseHTML(renderBoardPage(questionWith([
+    { kind: 'markdown', text: LONG_BY_LINES },
+    { kind: 'markdown', text: LONG_BY_CHARS },
+    // Right at the line cap and under the character cap: the boundary is
+    // "longer than", so exactly the cap is not long enough.
+    { kind: 'markdown', text: Array.from({ length: FOLD_CAP.lines }, (_, i) => `- point ${i + 1}`).join('\n') },
+    // Blank lines are markdown's paragraph separator, not content: six short
+    // paragraphs are eleven source lines but six rendered ones, and must not
+    // fold.
+    { kind: 'markdown', text: Array.from({ length: 6 }, (_, i) => `Paragraph ${i + 1}.`).join('\n\n') },
+  ])));
+  const marks = document.querySelectorAll('.context-item').map(foldMarks).map(m => m.folded);
+  assert.deepEqual(marks, [true, true, false, false], [
+    'over the line half alone folds (a list the character count never sees),',
+    'over the character half alone folds (one paragraph the line count never sees),',
+    'exactly at the line cap does not,',
+    'and blank source lines do not count toward it',
+  ].join(' '));
+
+  assert.ok(LONG_BY_LINES.length < FOLD_CAP.chars, 'setup failure: the lines fixture must be under the character cap, or it proves nothing about the line half');
+  assert.equal(LONG_BY_CHARS.split('\n').length, 1, 'setup failure: the characters fixture must be one source line, or it proves nothing about the character half');
+});
+
+check('AC 4: prose folds the same way in the stage-carrying shape -- the fold rides on the item, so it does not care which wrapper the panel took', () => {
+  const board = createBoard({
+    title: 'Fold beside a mock',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which one?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'A', block: { kind: 'html', html: '<p>a</p>' } },
+        { label: 'B', block: { kind: 'html', html: '<p>b</p>' } },
+      ],
+      context: [{ kind: 'markdown', text: LONG_BY_LINES }],
+    }],
+  });
+  const document = parseHTML(renderBoardPage(board));
+  const prose = document.querySelector('.question-context-prose');
+  assert.ok(prose, 'setup failure: a stage-carrying question must take the prose shape');
+  assert.equal(document.querySelector('.question-context'), null,
+    'setup failure: and must emit no .question-context at all -- the full-width rule keys on its absence');
+  const marks = foldMarks(prose.querySelectorAll('.context-item')[0]);
+  assert.equal(marks.folded, true, 'the long item folds here too');
+  assert.ok(marks.control, 'with its own control');
+});
+
+check('AC 4: a top-level markdown block folds at the same cap, with no exception for a round that is one lone document', () => {
+  const board = createBoard({
+    title: 'Top-level fold',
+    blocks: [
+      { kind: 'markdown', text: SHORT_PROSE },
+      { kind: 'markdown', text: LONG_BY_LINES },
+    ],
+  });
+  const document = parseHTML(renderBoardPage(board));
+  const [short, long] = document.querySelectorAll('.markdown-block');
+
+  assert.equal(foldMarks(short).folded, false, 'a short block is left alone');
+  assert.equal(foldMarks(short).control, null);
+
+  const marks = foldMarks(long);
+  assert.equal(marks.folded, true, 'the long one folds -- one rule, and the reader clicks Show more once');
+  assert.equal(marks.body.parentElement, long, 'the card\'s own prose is the clipped body');
+  assert.equal(marks.control.parentElement, long, 'and the control sits under it, inside the card');
+  assert.ok(marks.body.classList.contains('md-content'), 'the kicker above it is not part of the fold');
+  assert.equal(document.getElementById(marks.control.getAttribute('aria-controls')), marks.body);
+});
+
+check('AC 4: a question\'s explainer folds at the same cap as a backstop, and a one-to-three-sentence one does not', () => {
+  const shortDoc = parseHTML(renderBoardPage(questionWith([], { explainer: 'Recommended: none of these.' })));
+  const shortHead = shortDoc.querySelector('.question-head');
+  assert.ok(shortHead.querySelector('.question-explainer'), 'setup failure: the short explainer must render at all');
+  assert.equal(shortHead.classList.contains('folded'), false, 'an explainer the size the manual asks for is never folded');
+  assert.equal(foldMarks(shortHead).control, null);
+
+  const longDoc = parseHTML(renderBoardPage(questionWith([], { explainer: LONG_BY_CHARS })));
+  const head = longDoc.querySelector('.question-head');
+  const marks = foldMarks(head);
+  assert.equal(marks.folded, true, 'an explainer past the cap folds rather than pushing the options off the screen');
+  assert.ok(marks.body.classList.contains('question-explainer'), 'the explainer itself is the clipped body');
+  assert.equal(marks.body.parentElement, head, 'which is the head row\'s own prose, not a new wrapper');
+  assert.equal(longDoc.getElementById(marks.control.getAttribute('aria-controls')), marks.body);
+  // The kicker and the prompt share that row and are not fold bodies, so the
+  // clip never reaches them.
+  assert.equal(head.querySelectorAll('.fold-body').length, 1, 'exactly one thing on the head row is clipped');
+  assert.equal(head.querySelector('.question-prompt').classList.contains('fold-body'), false, 'and it is not the prompt');
+});
+
+check('AC 4: the fold is PROSE ONLY -- a code excerpt, a diagram and a mock never carry the marking, however long their source', () => {
+  const longCode = Array.from({ length: 60 }, (_, i) => `const line${i} = ${i};`).join('\n');
+  const longDiagram = 'flowchart LR\n' + Array.from({ length: 40 }, (_, i) => `  N${i} --> N${i + 1}`).join('\n');
+  const board = questionWith([
+    { kind: 'code', text: longCode, lang: 'javascript' },
+    { kind: 'mermaid', text: longDiagram },
+    { kind: 'html', html: '<p>' + 'a mock with a lot of markup. '.repeat(60) + '</p>' },
+  ]);
+  const document = parseHTML(renderBoardPage(board));
+  assert.equal(document.querySelectorAll('.folded').length, 0, 'nothing on this page folds');
+  assert.equal(document.querySelectorAll('.fold-body').length, 0);
+  assert.equal(document.querySelectorAll('.fold-toggle').length, 0, 'and no control invites anyone to try');
+
+  // AC 14 alongside: a code excerpt keeps its own scroll box instead, in
+  // context exactly as at top level -- the fold never stacks on it.
+  const codeItem = document.querySelector('.context-item.code-block');
+  assert.ok(codeItem.querySelector('.code-row'), 'the excerpt keeps its gutter and its scroll box');
+  const topLevel = parseHTML(renderBoardPage(createBoard({
+    title: 'Top-level code',
+    blocks: [{ kind: 'code', text: longCode, lang: 'javascript' }],
+  })));
+  assert.equal(topLevel.querySelectorAll('.folded').length, 0, 'and does not fold at top level either');
+  assert.ok(topLevel.querySelector('.code-block .code-row'), 'where it keeps the same scroll box');
+});
+
+check('AC 4: the fold control wears its own class and never .expand-btn, so a page counting lens controls never counts one', () => {
+  const board = questionWith([
+    { kind: 'markdown', text: LONG_BY_LINES },
+    { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
+  ]);
+  const html = renderBoardPage(board);
+  const document = parseHTML(html);
+  const control = document.querySelector('.fold-toggle');
+  assert.ok(control, 'setup failure: this fixture must fold');
+  assert.equal(control.classList.contains('expand-btn'), false,
+    '.expand-btn is what the readonly and sent-round disable loops carve out by name and what the page-board checks count by string -- the fold gets its own class instead');
+  assert.equal(document.querySelectorAll('.expand-btn').length, 1,
+    'the diagram\'s lens control is still the only .expand-btn on the page');
+  assert.equal(control.tagName, 'BUTTON', 'a real button, so it is reachable by keyboard for free');
+});
+
+check('a context item is its own positioning root, so a pin on a context diagram draws over the ITEM and not over the whole question card', () => {
+  const board = createBoard({
+    title: 'Pin scope',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Right?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [{ kind: 'mermaid', text: 'flowchart LR\n  A --> B' }],
+    }],
+  });
+  const document = parseHTML(renderBoardPage(board));
+  const diagram = document.querySelector('.context-item.mermaid-block');
+  assert.ok(diagram.querySelector('.pin-layer'), 'the item carries its own pin layer');
+  // The layer is `inset: 0` over its nearest POSITIONED ancestor; without this
+  // rule that is the question .block, and every pin lands elsewhere on the card.
+  assert.ok(/\.context-item \{[^}]*position: relative/.test(styles), '.context-item is positioned');
 });
 
 // --- snapshot and standalone archive ------------------------------------
@@ -3959,7 +4478,9 @@ check('an amend that replaces a block clears the reviewer\'s local field state f
   assert.ok(/delete selections\[id\]/.test(clearBody));
   assert.ok(/delete notes\[id\]/.test(clearBody));
   assert.ok(/delete deferred\[id\]/.test(clearBody));
-  assert.ok(/delete touched\[id\]/.test(clearBody));
+  // There is no fourth dict: 'touched' (has this widget been interacted with)
+  // existed only to decide whether a rank list counted as answered, and a rank
+  // list is now answered by the order it shows, so nothing read it any more.
 });
 
 // This check used to read "the emitted page has no external script or stylesheet
@@ -4183,13 +4704,54 @@ check('N5: a caller-supplied id must carry the kind letter of the block it names
 
 // --- C2: content resolution is confined to the board's project directory ---------
 
-check('C2: an absolute reference path is refused, not read', () => {
-  // Ablation: restore `path.isAbsolute(ref.path) ? ref.path : ...` in resolvePath and
-  // /etc/passwd's contents land in the board JSON and the served page.
+check('C2: an absolute reference path outside the project directory is refused, not read', () => {
+  // Ablation: drop the `contains(root, real) || insideRoots(real, roots)` requirement in
+  // resolvePath and /etc/passwd's contents land in the board JSON and the served page.
+  // The leading slash is not what refuses it -- see the two checks below, where an
+  // absolute path inside the project resolves -- the realpath boundary is.
   const r = resolveRef({ path: '/etc/passwd' }, { cwd: fixturesDir });
   assert.equal(typeof r.error, 'string');
-  assert.match(r.error, /absolute/);
+  assert.match(r.error, /does not resolve inside the boundary/);
   assert.equal(r.text, undefined);
+});
+
+check('C2: an absolute reference path inside the project directory resolves exactly as its relative spelling does', () => {
+  // The refusal an absolute path used to get was not confinement -- the realpath check
+  // above is -- it was "a project file is always reachable relatively", which cost the
+  // agent the one spelling every tool it holds hands it. Ablation: refuse on
+  // `path.isAbsolute` again and the two halves below stop matching.
+  writeFileSync(path.join(fixturesDir, 'abs-inside.md'), '# Inside\n\nreachable either way\n', 'utf8');
+  const abs = path.join(realpathSync(fixturesDir), 'abs-inside.md');
+
+  const byAbs = resolveRef({ path: abs }, { cwd: fixturesDir });
+  const byRel = resolveRef({ path: 'abs-inside.md' }, { cwd: fixturesDir });
+  assert.equal(byAbs.error, undefined);
+  assert.deepEqual(byAbs, byRel, 'the same file by either spelling snapshots to the same text, sha and startLine');
+  assert.equal(resolvePath({ path: abs }, fixturesDir).path, resolvePath({ path: 'abs-inside.md' }, fixturesDir).path);
+
+  // A selector rides along unchanged: the spelling decides nothing but which candidate
+  // is built.
+  assert.deepEqual(
+    resolveRef({ path: abs, section: 'inside' }, { cwd: fixturesDir }),
+    resolveRef({ path: 'abs-inside.md', section: 'inside' }, { cwd: fixturesDir }),
+  );
+
+  // And the set of reachable files is exactly what it was: the project directory itself
+  // is still not a target, and an absolute climb out of it is still refused, whichever
+  // way it is spelled.
+  assert.equal(resolvePath({ path: realpathSync(fixturesDir) }, fixturesDir).path, undefined);
+  assert.equal(resolvePath({ path: path.join(realpathSync(fixturesDir), '..') }, fixturesDir).path, undefined);
+  assert.equal(resolvePath({ path: path.join(realpathSync(fixturesDir), '..', 'etc', 'hosts') }, fixturesDir).path, undefined);
+});
+
+check('C2: an absolute path inside the project that is not there reads as the missing file it is', () => {
+  // The one thing a caller may still learn is whether a name it is ALREADY allowed to
+  // read exists -- so a typo inside the project reads as a typo instead of sending the
+  // agent looking for a confinement bug. Same answer either spelling, like everything
+  // else on this path.
+  const typo = path.join(realpathSync(fixturesDir), 'abs-inside.mb');
+  assert.match(resolvePath({ path: typo }, fixturesDir).error, /^cannot read .*: no such file\./);
+  assert.match(resolvePath({ path: 'abs-inside.mb' }, fixturesDir).error, /^cannot read .*: no such file\./);
 });
 
 check('C2: a relative reference cannot traverse out of the board cwd with ../', () => {
@@ -4232,12 +4794,35 @@ check('C2: an ordinary relative reference inside the project still resolves, and
 // References now resolve inside `cwd` OR inside a configured root (default
 // `~/.claude`), and nowhere else. This is the one security boundary this batch moves,
 // so both halves are asserted rather than hand-verified: an allowlisted path resolves
-// AND reaches the page, and a path outside both is still refused -- with the same two
-// error strings it was refused with when `cwd` was the whole boundary, spelled out
-// here in full so a quiet rewording cannot pass as "still refused".
+// AND reaches the page, and a path outside both is still refused -- with the error
+// string it is refused with spelled out here in full, so a quiet rewording cannot pass
+// as "still refused".
+//
+// ONE refusal string covers every way out of the boundary (absolute, `../`, a symlink),
+// deliberately: a refusal that varied would answer questions about what sits outside.
+// Its trailing sentence is the whole of what a refused agent is told, so it is pinned
+// word for word: the project directory, the roots in force, and the three ways across.
 
-const ABSOLUTE_REFUSAL = p => `refusing absolute reference path ${p}: references resolve inside the board's project directory`;
-const OUTSIDE_REFUSAL = p => `refusing reference ${p}: resolves outside the board's project directory`;
+const BOUNDARY_HELP = (cwd, roots) => `This board's project directory is ${cwd ?? '(none)'}; `
+  + `the reference roots in force are ${roots.length ? roots.join(', ') : '(none)'}. `
+  + 'Name a file in the project directory by a path relative to it; reach a file in another '
+  + 'directory by adding that directory to CLAUDE_BOARD_REF_ROOTS and running the installer '
+  + 'again; until then send the content by value.';
+const REFUSAL = (p, cwd, roots = []) => `refusing reference ${p}: it does not resolve inside the boundary. ${BOUNDARY_HELP(cwd, roots)}`;
+const MISSING = (p, cwd, roots = []) => `cannot read ${p}: no such file. ${BOUNDARY_HELP(cwd, roots)}`;
+
+/** The message a post refused for its references came back with (ADR.md entry 112: a
+ * reference that does not resolve refuses the whole post, one message per failure).
+ * Fails the check if the post was accepted instead, which is the failure mode worth
+ * catching -- an assertion on a message nobody threw would pass by accident. */
+function refusedPost(post) {
+  try {
+    post();
+  } catch (err) {
+    return err.message;
+  }
+  throw new assert.AssertionError({ message: 'the post was accepted; a reference that does not resolve must refuse it' });
+}
 
 /** Run `fn` with CLAUDE_BOARD_REF_ROOTS set to `spec` (or unset, for `undefined`),
  * restoring whatever this process actually has afterwards. The daemon reads the
@@ -4278,6 +4863,11 @@ check('allowlist: a reference under an allowlisted root resolves, and its conten
     // reason is spelled out rather than lifted from errno; see the oracle check below.
     const typo = path.join(root, 'skills', 'explain', 'SKILL.mb');
     assert.match(resolvePath({ path: typo }, project, [realpathSync(root)]).error, /cannot read .*no such file/);
+    assert.equal(
+      resolvePath({ path: typo }, project, [realpathSync(root)]).error,
+      MISSING(typo, realpathSync(project), [realpathSync(root)]),
+      'and it says which boundary it is inside and how to widen it, like every other refusal',
+    );
 
     // ...and end to end, through CLAUDE_BOARD_REF_ROOTS, which is the only way the
     // daemon under launchd ever learns about a root.
@@ -4307,69 +4897,139 @@ check('allowlist: a path outside BOTH cwd and the allowlist is still refused, wi
     writeFileSync(path.join(outside, 'secret.txt'), 'exfiltrated', 'utf8');
     const roots = [realpathSync(root)];
 
-    // An absolute path naming nothing inside a root: the refusal that has always
-    // covered /etc/passwd, unchanged, wording included.
+    const project = realpathSync(fixturesDir);
+
+    // An absolute path naming nothing inside cwd or a root: the refusal that has always
+    // covered /etc/passwd, wording included.
     const abs = resolvePath({ path: '/etc/passwd' }, fixturesDir, roots);
     assert.equal(abs.path, undefined);
-    assert.equal(abs.error, ABSOLUTE_REFUSAL('/etc/passwd'));
+    assert.equal(abs.error, REFUSAL('/etc/passwd', project, roots));
 
     // ...including one that only *looks* allowlisted until it is normalised. Built by
     // concatenation, not path.join, which would normalise the `..` away before
     // resolvePath ever saw it.
     const sneaky = `${realpathSync(root)}/../${path.basename(realpathSync(outside))}/secret.txt`;
-    assert.equal(resolvePath({ path: sneaky }, fixturesDir, roots).error, ABSOLUTE_REFUSAL(sneaky));
+    assert.equal(resolvePath({ path: sneaky }, fixturesDir, roots).error, REFUSAL(sneaky, project, roots));
 
     // A relative path traversing out of the project and landing outside every root.
-    const rel = path.relative(realpathSync(fixturesDir), path.join(realpathSync(outside), 'secret.txt'));
+    const rel = path.relative(project, path.join(realpathSync(outside), 'secret.txt'));
     const traversal = resolvePath({ path: rel }, fixturesDir, roots);
     assert.equal(traversal.path, undefined);
-    assert.equal(traversal.error, OUTSIDE_REFUSAL(rel));
+    assert.equal(traversal.error, REFUSAL(rel, project, roots));
+
+    // The two are the SAME sentence, path aside: which way a reference left the boundary
+    // is not something a refusal answers, any more than whether the file was there.
+    assert.equal(
+      traversal.error.replace(rel, 'REF'),
+      abs.error.replace('/etc/passwd', 'REF'),
+      'one refusal text for every way out of the boundary, or the message becomes a probe',
+    );
+    const neverThere = path.join(realpathSync(outside), 'no-such-secret.txt');
+    assert.equal(
+      resolvePath({ path: neverThere }, fixturesDir, roots).error.replace(neverThere, 'REF'),
+      abs.error.replace('/etc/passwd', 'REF'),
+      'and it never says whether a file outside the boundary exists',
+    );
 
     // And the whole way through resolveRef: refused means not read.
     const r = resolveRef({ path: rel }, { cwd: fixturesDir, roots });
     assert.equal(r.text, undefined);
-    assert.equal(r.error, OUTSIDE_REFUSAL(rel));
+    assert.equal(r.error, REFUSAL(rel, project, roots));
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
   }
 });
 
-check('a referenced html path outside cwd and every allowlisted root is refused as a block-level error, on the same terms as any other kind\'s ref', () => {
+check('a referenced html path outside cwd and every allowlisted root refuses the post, on the same terms as any other kind\'s ref', () => {
   const outside = mkdtempSync(path.join(tmpdir(), 'claude-board-html-outside-'));
   try {
     const secret = path.join(outside, 'secret.html');
     writeFileSync(secret, '<script>alert(document.cookie)</script>', 'utf8');
+    const project = realpathSync(fixturesDir);
 
-    // Absolute, naming nothing inside a root -- the identical refusal an absolute
+    // Absolute, naming nothing inside cwd or a root -- the identical refusal an absolute
     // code reference to the same path gets, since both route through resolveRef
     // with no kind-specific carve-out.
-    const htmlBoard = createBoard({
+    const htmlRefusal = refusedPost(() => createBoard({
       title: 'html source, absolute path refused',
       cwd: fixturesDir,
       blocks: [{ kind: 'html', source: { path: secret } }],
-    });
-    const codeBoard = createBoard({
+    }));
+    const codeRefusal = refusedPost(() => createBoard({
       title: 'code source, absolute path refused (for comparison)',
       cwd: fixturesDir,
       blocks: [{ kind: 'code', source: { path: secret } }],
-    });
-    assert.equal(htmlBoard.blocks[0].error, ABSOLUTE_REFUSAL(secret));
-    assert.equal(htmlBoard.blocks[0].error, codeBoard.blocks[0].error, 'html is confined on the same terms as any other kind');
-    assert.equal(htmlBoard.blocks[0].html, '');
+    }));
+    assert.equal(htmlRefusal, REFUSAL(secret, project, []));
+    assert.equal(htmlRefusal, codeRefusal, 'html is confined on the same terms as any other kind');
 
     // A relative reference that traverses out of the project.
-    const rel = path.relative(realpathSync(fixturesDir), secret);
-    const relBoard = createBoard({
+    const rel = path.relative(project, secret);
+    const relRefusal = refusedPost(() => createBoard({
       title: 'html source, traversal refused',
       cwd: fixturesDir,
       blocks: [{ kind: 'html', source: { path: rel } }],
-    });
-    assert.equal(relBoard.blocks[0].error, OUTSIDE_REFUSAL(rel));
-    assert.ok(!(relBoard.blocks[0].html || '').includes('alert(document.cookie)'));
+    }));
+    assert.equal(relRefusal, REFUSAL(rel, project, []));
+    assert.ok(!relRefusal.includes('alert(document.cookie)'));
   } finally {
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+check('a failed reference anywhere in a post refuses the post whole, with one message each, and the fixed post lands', () => {
+  // ADR.md entry 112. The walk has to reach every place a block can sit -- a question's
+  // context, a compare side, a variant option -- or a broken reference in one of them
+  // lands on the reviewer's page while the agent is told the round went out fine.
+  const project = realpathSync(fixturesDir);
+  writeFileSync(path.join(fixturesDir, 'four-positions.md'), '# Ref\n\nresolved by reference\n', 'utf8');
+  const post = ([top, ctx, side, option]) => ({
+    title: 'four positions',
+    cwd: fixturesDir,
+    blocks: [
+      { kind: 'markdown', source: { path: top } },
+      {
+        kind: 'question',
+        prompt: 'Which?',
+        widget: 'single',
+        options: [{ label: 'A' }],
+        context: [{ kind: 'markdown', source: { path: ctx } }],
+      },
+      {
+        kind: 'compare',
+        left: { label: 'L', block: { kind: 'markdown', source: { path: side } } },
+        right: { label: 'R', block: null },
+      },
+      {
+        kind: 'question',
+        prompt: 'Which render?',
+        widget: 'choose-between-rendered-variants',
+        options: [{ label: 'A', block: { kind: 'markdown', source: { path: option } } }],
+      },
+    ],
+  });
+
+  const broken = ['no-top.md', 'no-context.md', 'no-side.md', 'no-option.md'];
+  const lines = refusedPost(() => createBoard(post(broken))).split('\n');
+  assert.equal(lines.length, 4, 'one message per failed reference -- a round with four mistakes costs one re-post, not four');
+  broken.forEach((p, i) => assert.equal(lines[i], MISSING(p, project, []), `position ${i} must report its own path`));
+
+  // The same post with the references fixed lands normally: the refusal is about the
+  // references, and it leaves nothing behind that a retry has to work around.
+  const board = createBoard(post(broken.map(() => 'four-positions.md')));
+  assert.equal(board.blocks.length, 4);
+  assert.ok(board.blocks[0].text.includes('resolved by reference'));
+  assert.ok(board.blocks[1].context[0].text.includes('resolved by reference'));
+  assert.ok(board.blocks[2].left.block.text.includes('resolved by reference'));
+  assert.ok(board.blocks[3].options[0].block.text.includes('resolved by reference'));
+
+  // And a refused round leaves the board it was pushed into exactly as it was: the
+  // refusal happens during normalisation, before anything is spliced or appended.
+  const before = JSON.stringify(board);
+  assert.throws(() => addRound(board, { blocks: [{ kind: 'markdown', source: { path: 'no-top.md' } }] }), /no-top\.md/);
+  assert.throws(() => amendRound(board, { blocks: [{ kind: 'markdown', source: { path: 'no-top.md' } }] }), /no-top\.md/);
+  assert.equal(JSON.stringify(board), before, 'a refused round mutates nothing');
 });
 
 check('allowlist: a symlink out of cwd, and a symlink out of a root, are both refused -- confinement stays on the REALPATH', () => {
@@ -4389,7 +5049,7 @@ check('allowlist: a symlink out of cwd, and a symlink out of a root, are both re
     symlinkSync(target, inProject);
     const fromProject = resolveRef({ path: 'escape-link-allowlist' }, { cwd: fixturesDir, roots });
     assert.equal(fromProject.text, undefined);
-    assert.equal(fromProject.error, OUTSIDE_REFUSAL('escape-link-allowlist'));
+    assert.equal(fromProject.error, REFUSAL('escape-link-allowlist', realpathSync(fixturesDir), roots));
 
     // The same trick from inside an allowlisted root: lexically allowlisted, really
     // not. The allowlist must not become a hole the old boundary did not have.
@@ -4397,7 +5057,7 @@ check('allowlist: a symlink out of cwd, and a symlink out of a root, are both re
     symlinkSync(target, inRoot);
     const fromRoot = resolveRef({ path: inRoot }, { cwd: fixturesDir, roots });
     assert.equal(fromRoot.text, undefined);
-    assert.equal(fromRoot.error, OUTSIDE_REFUSAL(inRoot));
+    assert.equal(fromRoot.error, REFUSAL(inRoot, realpathSync(fixturesDir), roots));
   } finally {
     try { unlinkSync(path.join(fixturesDir, 'escape-link-allowlist')); } catch { /* already gone */ }
     rmSync(root, { recursive: true, force: true });
@@ -4435,7 +5095,7 @@ check('allowlist: an unusable configured root is dropped, never widened and neve
     // ...and a dropped root really is dropped: nothing under it resolves.
     assert.equal(
       resolvePath({ path: '/etc/passwd' }, fixturesDir, resolveRefRoots('/')).error,
-      ABSOLUTE_REFUSAL('/etc/passwd'),
+      REFUSAL('/etc/passwd', realpathSync(fixturesDir), []),
     );
   } finally {
     rmSync(good, { recursive: true, force: true });
@@ -4849,7 +5509,7 @@ check('NEW-3: the project directory itself is never a reference target, wherever
       for (const spelling of ['.', './']) {
         const r = resolvePath({ path: spelling }, project, roots);
         assert.equal(r.path, undefined, `a project ${where} must not resolve as its own reference (${spelling})`);
-        assert.equal(r.error, OUTSIDE_REFUSAL(spelling));
+        assert.equal(r.error, REFUSAL(spelling, project, roots));
       }
     }
   } finally {
@@ -4886,7 +5546,7 @@ check('NEW-4: a RELATIVE reference reaches an allowlisted root too, not only an 
     const escape = path.join('..', 'neither', 'private.md');
     const refused = resolveRef({ path: escape }, { cwd: project, roots });
     assert.equal(refused.text, undefined);
-    assert.equal(refused.error, OUTSIDE_REFUSAL(escape));
+    assert.equal(refused.error, REFUSAL(escape, project, roots));
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -4913,8 +5573,8 @@ check('S7: which refusal comes back never depends on anything outside the bounda
     symlinkSync(absent, toAbsent);
     const hit = resolvePath({ path: toPresent }, project, roots).error;
     const miss = resolvePath({ path: toAbsent }, project, roots).error;
-    assert.equal(hit, OUTSIDE_REFUSAL(toPresent));
-    assert.equal(miss, OUTSIDE_REFUSAL(toAbsent));
+    assert.equal(hit, REFUSAL(toPresent, realpathSync(project), roots));
+    assert.equal(miss, REFUSAL(toAbsent, realpathSync(project), roots));
     assert.equal(
       hit.replace(toPresent, 'P'), miss.replace(toAbsent, 'P'),
       'the reply must carry no bit about the target, only the path the caller already knew',
@@ -4923,8 +5583,8 @@ check('S7: which refusal comes back never depends on anything outside the bounda
     // Relative: ../ reaches the same places and leaked the same errno.
     const relPresent = path.relative(realpathSync(project), present);
     const relAbsent = path.relative(realpathSync(project), absent);
-    assert.equal(resolvePath({ path: relPresent }, project, roots).error, OUTSIDE_REFUSAL(relPresent));
-    assert.equal(resolvePath({ path: relAbsent }, project, roots).error, OUTSIDE_REFUSAL(relAbsent));
+    assert.equal(resolvePath({ path: relPresent }, project, roots).error, REFUSAL(relPresent, realpathSync(project), roots));
+    assert.equal(resolvePath({ path: relAbsent }, project, roots).error, REFUSAL(relAbsent, realpathSync(project), roots));
 
     // What survives is the one distinction that is entirely in-boundary, and the reason
     // the second message exists at all: a name that is simply not there inside a place
@@ -5055,8 +5715,8 @@ check("the by-value over-cap message no longer tells the caller a source referen
   const big = path.join(fixturesDir, 'criterion5-oversize.html');
   writeFileSync(big, oversize, 'utf8');
   try {
-    const board = createBoard({ title: 't', cwd: fixturesDir, blocks: [{ kind: 'html', source: { path: 'criterion5-oversize.html' } }] });
-    assert.match(board.blocks[0].error, /exceeds the .* cap/);
+    const refusal = refusedPost(() => createBoard({ title: 't', cwd: fixturesDir, blocks: [{ kind: 'html', source: { path: 'criterion5-oversize.html' } }] }));
+    assert.match(refusal, /exceeds the .* cap/);
   } finally {
     unlinkSync(big);
   }
@@ -6666,11 +7326,13 @@ check('C2b: a board with NO cwd cannot resolve a reference at all -- it never fa
   // Ablation: restore `realpathSync(cwd || process.cwd())` and a board that named no
   // project directory resolves against whatever directory launchd started the daemon
   // in -- a directory nobody chose, that no board records, and that is plausibly /.
-  const board = createBoard({ title: 't', blocks: [{ kind: 'markdown', source: { path: 'package.json' } }] });
-  assert.equal(board.cwd, null);
-  assert.match(board.blocks[0].error, /no project directory/);
-  assert.equal(board.blocks[0].text, '');
+  const refusal = refusedPost(() => createBoard({ title: 't', blocks: [{ kind: 'markdown', source: { path: 'package.json' } }] }));
+  assert.match(refusal, /no project directory/);
   assert.match(resolveRef({ path: 'package.json' }).error, /no project directory/);
+  // An ABSOLUTE path on such a board is decided on the roots alone -- there is no
+  // project directory for it to be inside, and it is not relative to anything.
+  assert.match(resolveRef({ path: path.join(realpathSync(fixturesDir), 'inside.txt') }).error, /does not resolve inside the boundary/);
+  assert.equal(createBoard({ title: 't', blocks: [] }).cwd, null);
 });
 
 // --- N10: an out-of-range line reference is an error, not an empty block ----------
@@ -10825,6 +11487,48 @@ check('the stylesheet is structurally well formed: every comment closes, no stra
   // reads as "the gutter is gone" rather than as an abstract parse complaint.
   assert.ok(preludes.includes('.code-row::before'),
     'the gutter rule must be its own rule, with its own prelude -- not absorbed into the prelude of whatever precedes it');
+});
+
+// --- review fixes on the fold, the reference boundary and the sent-round pass ----------
+
+check('a forged dom ref addressing a folded markdown block\'s own Show more control reports lost, like the kicker beside it', () => {
+  const long = Array.from({ length: FOLD_CAP.lines + 3 }, (_, i) => `- item ${i + 1}`).join('\n');
+  const board = createBoard({ title: 'fold chrome', blocks: [{ kind: 'markdown', text: `# Long\n\n${long}` }] });
+  const sectionHtml = renderBlock(board.blocks[0], board, new Map(), false);
+  assert.ok(sectionHtml.includes('class="fold-toggle"'), 'setup failure: the block must fold');
+  const sectionRoot = parseHtmlTree(sectionHtml).children[0];
+  const idx = sectionRoot.children.findIndex(c => (c.cls || []).includes('fold-toggle'));
+  assert.ok(idx >= 0, 'setup failure: the control must be a direct child of the section');
+  const control = resolveSteps(sectionRoot, pathToSteps(String(idx + 1)));
+  const hint = extractHint(elementText(control));
+  assert.ok(hint, 'setup failure: the control carries text a forged hint would claim');
+  assert.equal(resolveDomAnchorInSection(sectionHtml, String(idx + 1), hint), false,
+    'the fold control is chrome the page drew, never a comment target');
+});
+
+check('an absolute reference into a configured root still resolves when the board\'s project directory has stopped resolving; a relative one still fails on it', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'claude-board-root-'));
+  try {
+    writeFileSync(path.join(rootDir, 'in-root.md'), '# In a root\n', 'utf8');
+    const roots = resolveRefRoots(rootDir);
+    assert.equal(roots.length, 1, 'setup failure: the temp root must validate');
+    const goneCwd = path.join(tmpdir(), 'claude-board-gone-cwd-' + process.pid);
+    const abs = resolvePath({ path: path.join(realpathSync(rootDir), 'in-root.md') }, goneCwd, roots);
+    assert.equal(abs.error, undefined, `an absolute path into a root needs no project directory: ${abs.error}`);
+    assert.ok(abs.path);
+    const rel = resolvePath({ path: 'in-root.md' }, goneCwd, roots);
+    assert.match(rel.error || '', /not a readable directory/, 'a relative path still reports the project directory it has nothing to be relative to');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+check('the fold\'s safety valve re-measures a push subtree once it is attached: refreshPins calls dropSettledFolds', () => {
+  const start = ui.indexOf('function refreshPins(root)');
+  const end = ui.indexOf('function wirePageDomPins(root)', start);
+  assert.ok(start > 0 && end > start, 'setup failure: both functions must exist in that order');
+  assert.ok(ui.slice(start, end).includes('dropSettledFolds(root)'),
+    'wireRoot runs on a detached subtree where the valve measures nothing; the attached redo must run it');
 });
 
 if (asyncFailures) failures += asyncFailures;

@@ -8,10 +8,11 @@
 // model — that is where paraphrase creeps in.
 //
 // Resolve failures (missing file, bad range, missing section) are returned as
-// `{ error }`, never thrown: board.mjs stores the error on the block instead of
-// dropping it, so a bad reference is visible on the page rather than silently
-// swallowed. That includes every confinement and stat refusal added below — a
-// refused reference is a block-level error, never an exception that aborts a post.
+// `{ error }`, never thrown: this module reports a failure, it does not decide what one
+// costs. What it costs is board.mjs's call, and under ADR.md entry 112 it costs the
+// whole post — a reference that does not resolve refuses the post that carried it, and
+// the block-level `error` field survives only on boards already stored. That includes
+// every confinement and stat refusal added below.
 //
 // Confinement (widened by ADR.md entry 3, narrowed again since): a reference
 // names a file inside the board's project *or* inside one
@@ -19,10 +20,10 @@
 // `ref.path` is untrusted input that ends up verbatim in the board JSON and on the
 // served page, so every path is resolved through `realpathSync` and required to
 // still sit under `cwd` or under an allowlisted root afterwards — which is what
-// stops `../../../../etc/hosts` and a symlink pointing out of the project alike. An
-// absolute path is refused unless it lands inside an allowlisted root, since a
-// project file is always reachable relatively and `/etc/passwd` is the exact string
-// that closes.
+// stops `../../../../etc/hosts` and a symlink pointing out of the project alike. The
+// SPELLING of the reference is not part of that: an absolute path reaches exactly what
+// its relative spelling reaches, because one realpath check decides both, and
+// `/etc/passwd` is closed by that check rather than by a rule about leading slashes.
 //
 // The allowlist is `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths). An
 // ABSENT variable is an EMPTY allowlist — the cwd-only boundary — and the default a
@@ -345,6 +346,22 @@ function nameExists(p) {
   }
 }
 
+/** The sentence every path refusal ends with: the boundary as it stands right now, and
+ * the three ways across it. A refusal is the only feedback the agent gets — the post is
+ * refused whole (ADR.md entry 112) and nothing reaches the reviewer's page — so "no"
+ * without the way out costs a round of guessing at a rule the agent cannot see.
+ *
+ * Everything named here is something the CALLER already supplied or configured: the
+ * project directory it bound, and the roots this machine's launchd plist declares. It
+ * says nothing whatever about the reference itself beyond repeating it — no existence,
+ * no type, no errno — which is what keeps a refusal from being a probe of the disk. */
+function boundaryHelp(root, roots) {
+  return `This board's project directory is ${root ?? '(none)'}; the reference roots in force are `
+    + `${roots.length ? roots.join(', ') : '(none)'}. Name a file in the project directory by a path `
+    + `relative to it; reach a file in another directory by adding that directory to `
+    + `CLAUDE_BOARD_REF_ROOTS and running the installer again; until then send the content by value.`;
+}
+
 /** Resolve `ref.path` against `cwd` and confine it to `cwd` or the allowlist.
  * Returns `{ path }` with the fully-resolved real path on success, or `{ error }` —
  * never a bare string, never a throw. `cwd` is the board's `cwd` — the project
@@ -353,21 +370,35 @@ function nameExists(p) {
  * running. `roots` is the allowlist (ADR.md entry 3); it defaults to whatever
  * `CLAUDE_BOARD_REF_ROOTS` names, and is a parameter so a check can pin it.
  *
- * The refusals, in order: an absolute path that does not even name a place inside an
- * allowlisted root (the agent addresses project content relatively, so `/etc/passwd`
- * is the exact string this closes); a path that does not exist; and a path whose
- * realpath — symlinks already followed — lands outside `cwd` AND outside every root,
- * which covers `../` traversal and a symlink aimed out of the project or out of a
- * root alike. The refusal messages are unchanged from the cwd-only boundary: a
- * reference outside everything is refused exactly as it always was.
+ * One candidate, one check, whatever the spelling. An absolute `ref.path` IS its own
+ * candidate; a relative one is joined to `cwd` first; from there both go through the
+ * same realpath / `contains` / `insideRoots` gate. An absolute path used to be refused
+ * outright unless it landed in an allowlisted root, which confined nothing extra — the
+ * realpath gate below is what confines — while costing the agent the one spelling every
+ * tool it holds hands it, for a file it can already read relatively. So the boundary is
+ * unchanged and the set of reachable files with it; only the spellings that reach it
+ * grew.
+ *
+ * The refusals: a path whose realpath — symlinks already followed — lands outside `cwd`
+ * AND outside every root, which covers `/etc/passwd`, `../` traversal and a symlink
+ * aimed out of the project or out of a root alike; and a path that names a place inside
+ * the boundary and is not there. Both messages state the boundary and the ways out of
+ * it (a relative path for a project file, a root added to `CLAUDE_BOARD_REF_ROOTS` and
+ * the installer rerun, by value until then) because the post they refuse is the agent's
+ * only feedback — see PROTOCOL.md "Reference confinement and caps".
+ *
+ * ONE refusal text covers every "not inside the boundary" outcome. Naming the boundary
+ * is safe because the caller supplied `cwd` and configured the roots; saying anything
+ * about what sits outside it is not, so a path that resolves out, a path that dangles
+ * out and a path that was never there read identically.
  *
  * WHICH refusal comes back is decided only on names inside the boundary. It used to
  * splice `err.code` from the failed `realpathSync` into the
  * message, which made every refusal an existence-and-errno oracle for the whole disk:
  * point a symlink from inside an allowlisted root at any path you like, and ENOENT
  * versus EACCES versus ELOOP told you what was there. Now a reference that is present
- * but does not resolve inside the boundary reports the same "resolves outside" refusal
- * whether its target exists, is unreadable or was never there, and the only thing a
+ * but does not resolve inside the boundary reports the one refusal above — the same
+ * words whether its target exists, is unreadable or was never there — and the only thing a
  * caller can still learn is whether a name it is already allowed to read exists — which
  * is what makes a typo inside a root read as the missing file it is instead of sending
  * the agent looking for a confinement bug.
@@ -381,35 +412,6 @@ function nameExists(p) {
 export function resolvePath(ref, cwd, roots = resolveRefRoots(process.env.CLAUDE_BOARD_REF_ROOTS)) {
   if (!ref || !ref.path) return { error: 'reference has no path' };
   if (typeof ref.path !== 'string') return { error: 'reference path must be a string' };
-  const absoluteRefusal = { error: `refusing absolute reference path ${ref.path}: references resolve inside the board's project directory` };
-  const outsideRefusal = { error: `refusing reference ${ref.path}: resolves outside the board's project directory` };
-  const missing = { error: `cannot read ${ref.path}: no such file` };
-
-  if (path.isAbsolute(ref.path)) {
-    let realAbs = null;
-    try {
-      realAbs = realpathSync(ref.path);
-    } catch {
-      realAbs = null; // dangling, unreadable, a loop -- all one answer, see above
-    }
-    if (realAbs !== null && insideRoots(realAbs, roots)) return { path: realAbs };
-    // Refused. An absolute path that does not even name a place inside a root is just
-    // an absolute path, refused exactly as it always was; one that does is either a
-    // name that is not there (a typo) or something that left the root, and the two are
-    // told apart by lstat'ing the reference ITSELF, never by what its target turned
-    // out to be.
-    if (!namesPlaceInside(ref.path, roots)) return absoluteRefusal;
-    if (realAbs === null && !nameExists(ref.path)) return missing;
-    return outsideRefusal;
-  }
-  // No cwd, no reference. Falling back to `process.cwd()` used to make a board with no
-  // project directory resolve against whatever directory launchd happened to start the
-  // daemon in -- a directory nobody chose, that no board records, and that is plausibly
-  // `/`. A reference needs a project to be relative TO; without one it is an error, not
-  // a guess.
-  if (!cwd) {
-    return { error: `cannot resolve ${ref.path}: this board has no project directory` };
-  }
   // `cwd` was already validated once, at bind time (`bindBoardCwd` -> `resolveBoardCwd`,
   // src/board.mjs) -- rejected there if it wasn't a directory, was `/`, or was `$HOME`
   // or above. But that was a realpath of this same NAME, done before this particular
@@ -422,11 +424,29 @@ export function resolvePath(ref, cwd, roots = resolveRefRoots(process.env.CLAUDE
   // HERE, on whatever the name resolves to right now, rather than on what it resolved
   // to whenever the board was created.
   const boundRoot = resolveBoardCwd(cwd);
-  if (boundRoot.error) return { error: boundRoot.error };
-  const root = boundRoot.path;
-  // The same treatment for a relative path, which reaches every absolute path on the
-  // disk through enough `../` and so leaked the identical oracle.
-  const candidate = path.resolve(root, ref.path);
+  // A relative reference has nothing without the project directory, so its failure is
+  // the answer. An absolute one is decided on the roots alone (below), so a project
+  // directory that stopped resolving since bind time (a removed worktree, an unmounted
+  // volume) costs it nothing: the root is simply not there to resolve inside of.
+  if (boundRoot.error && !path.isAbsolute(ref.path)) return { error: boundRoot.error };
+  const root = boundRoot.error ? null : boundRoot.path;
+  // No cwd, no relative reference. Falling back to `process.cwd()` used to make a board
+  // with no project directory resolve against whatever directory launchd happened to
+  // start the daemon in -- a directory nobody chose, that no board records, and that is
+  // plausibly `/`. A relative reference needs a project to be relative TO; without one it
+  // is an error, not a guess. An absolute one needs no such anchor and is decided below
+  // on the roots alone.
+  if (!root && !path.isAbsolute(ref.path)) {
+    return { error: `cannot resolve ${ref.path}: this board has no project directory` };
+  }
+  const refusal = { error: `refusing reference ${ref.path}: it does not resolve inside the boundary. ${boundaryHelp(root, roots)}` };
+  const missing = { error: `cannot read ${ref.path}: no such file. ${boundaryHelp(root, roots)}` };
+  // An absolute path is already the candidate; a relative one gets the same treatment it
+  // always had, since it reaches every absolute path on the disk through enough `../`
+  // and so leaked the identical oracle. `path.resolve` would collapse the two lines into
+  // one, but only by reading as if `root` were consulted for an absolute ref, which is
+  // the thing this function must be readable about.
+  const candidate = path.isAbsolute(ref.path) ? ref.path : path.resolve(root, ref.path);
   let real = null;
   try {
     real = realpathSync(candidate);
@@ -438,12 +458,12 @@ export function resolvePath(ref, cwd, roots = resolveRefRoots(process.env.CLAUDE
   // directory happened to live under an allowlisted root, and `{ path: <the project
   // directory> }` came back as a successful resolution. The
   // project directory is never a reference target, wherever the project happens to sit.
-  if (real !== null && real !== root && (contains(root, real) || insideRoots(real, roots))) {
+  if (real !== null && real !== root && ((root && contains(root, real)) || insideRoots(real, roots))) {
     return { path: real };
   }
-  if (!namesPlaceInside(candidate, roots, root)) return outsideRefusal;
+  if (!namesPlaceInside(candidate, roots, root)) return refusal;
   if (real === null && !nameExists(candidate)) return missing;
-  return outsideRefusal;
+  return refusal;
 }
 
 /** The file's lines, with the phantom trailing element a final newline produces

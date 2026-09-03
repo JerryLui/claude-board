@@ -254,8 +254,10 @@ one, so pulling and reinstalling a security fix is the reader's job, not the dae
 
 A reference resolves in exactly two places: inside the
 board's own project directory, or inside the reference allowlist —
-`CLAUDE_BOARD_REF_ROOTS`, colon-separated absolute paths. Anywhere else is refused, as a
-visible error on the block rather than a silent empty read. `PROTOCOL.md` carries the
+`CLAUDE_BOARD_REF_ROOTS`, colon-separated absolute paths. Anywhere else is refused, and since
+ADR 112 the refusal is the whole post's: a 400 naming the boundary and the ways out, one message
+per failed reference, nothing stored (the block-level `error` survives only on boards stored
+before that entry). `PROTOCOL.md` carries the
 enumerated rules — what is refused, in what order, and on what. What matters here is that
 every path is resolved through `realpath` before it is checked, so `../` traversal and a
 symlink aimed out of the project or out of a root are refused alike; that `/`, `$HOME` and

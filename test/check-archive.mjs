@@ -235,7 +235,7 @@ const board = createBoard({
       // affordance -- the rule is drawn on kind, never on position. An errored
       // diagram, because its `.resolve-error` note is the one element of a mermaid
       // section the generic page-scoped gesture can reach.
-      left: { label: 'Before', block: { kind: 'mermaid', source: { path: 'no-such-diagram-arch-a.mmd' } } },
+      left: { label: 'Before', block: { kind: 'mermaid', text: '' } },
       right: { label: 'After', block: { kind: 'html', html: '<div class="mock"><button>Ship it</button></div>' } },
     },
     { kind: 'html', html: '<div class="mock"><button>Launch</button></div>' },
@@ -252,9 +252,21 @@ const board = createBoard({
     },
     // A second errored diagram, so the page-scoped half has two independent
     // targets (the markdown/code blocks used to supply four).
-    { kind: 'mermaid', source: { path: 'no-such-diagram-arch-b.mmd' } },
+    { kind: 'mermaid', text: '' },
   ],
 });
+// The two diagrams above are minted BY VALUE and then given the shape an
+// ALREADY-STORED board carries for a reference that failed to resolve: a post that
+// names an unresolvable reference is refused whole now (ADR.md entry 112), so this
+// shape only ever comes off disk. Minting first is what gives each block a real id
+// in the ledger; `text: ''` already carries the sha a failed resolve produced, so
+// only `source` and `error` are added, in place.
+for (const [block, path] of [
+  [board.blocks[2].left.block, 'no-such-diagram-arch-a.mmd'],
+  [board.blocks[6], 'no-such-diagram-arch-b.mmd'],
+]) {
+  Object.assign(block, { source: { path }, error: `cannot read ${path}: no such file` });
+}
 const mdBlockId = board.blocks[0].id;
 const codeBlockId = board.blocks[1].id;
 const compareLeftId = board.blocks[2].left.block.id;
@@ -995,6 +1007,113 @@ check('criterion 7: every reference the archived page board loads resolves insid
   // stage's `<style>`/`<script>` are attribute text, not tags, and cannot be reached by
   // the tag scan above. This is what keeps them accounted for.
   assert.ok(pageFileContents.includes('&lt;style&gt;'), 'the artifact must still be carried inline, escaped into its srcdoc');
+});
+
+// =================================================================================
+// AC 4's read-only half: the fold works in a standalone archive.
+//
+// The control is SERVER-rendered (src/render.mjs), so it is in the archive's own
+// bytes with nothing to fetch -- and it has to stay live once the readonly pass
+// has disabled every other button on the page, or an offline reader is left
+// looking at a fade with no way past it. That carve-out is the one the diagram's
+// expand control already has, and this is the check that it was actually made
+// for the fold too rather than only intended.
+//
+// A board of its own, written to the same temp folder as the two above and read
+// back the same way (its own bytes, its own named sibling script): the fixture at
+// the top of this file is anchored to a specific set of minted comments, and a
+// block added to it would be a second thing to keep in step for no gain.
+// =================================================================================
+
+const foldBoardDoc = createBoard({
+  title: 'Archived fold',
+  cwd: archiveDir,
+  blocks: [{
+    kind: 'question',
+    prompt: 'Ship it?',
+    widget: 'single',
+    options: [{ label: 'Yes' }, { label: 'No' }],
+    // Comfortably past the source-line half of the cap (src/render.mjs's
+    // FOLD_CAP), which test/check-pure.mjs pins on its own -- here it only has
+    // to be long enough that the server marks it.
+    context: [{ kind: 'markdown', text: Array.from({ length: 20 }, (_, i) => `- a point worth reading, number ${i + 1}`).join('\n') }],
+  }],
+});
+const foldArchivePath = path.join(archiveDir, `${foldBoardDoc.id}.html`);
+writePage(foldBoardDoc.id, renderBoardPage(foldBoardDoc), archiveHome);
+const foldFileContents = readFileSync(foldArchivePath, 'utf8');
+const foldArchiveScript = namedScript(foldArchivePath, foldFileContents);
+
+function loadFoldArchive() {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.reject(new Error('the archive must never call fetch'));
+  // No EventSource spy: this pair of checks is not about the SSE gate (the
+  // loadArchive() checks above own that), and `undefined` here would make a
+  // regressed gate throw loudly rather than pass quietly.
+  const document = loadBoard(foldFileContents, 'file:', foldArchiveScript);
+  return { document, restore() { globalThis.fetch = originalFetch; } };
+}
+
+const foldItem = document => {
+  const item = document.querySelector('.context-item.folded') || document.querySelector('.context-item');
+  assert.ok(item, 'setup failure: no context item in the fold archive');
+  return item;
+};
+
+check('archive: the fold arrives folded in the page\'s own bytes, and its control is the one thing readonly leaves live', () => {
+  const { document, restore } = loadFoldArchive();
+  try {
+    assert.ok(foldFileContents.includes('fold-toggle'),
+      'the control must be in the archive\'s own bytes -- an offline page has nothing to mint it from');
+    const item = foldItem(document);
+    assert.equal(item.classList.contains('folded'), true, 'and the item arrives folded, not opened by the client on load');
+
+    const control = item.querySelector('.fold-toggle');
+    assert.equal(control.disabled, false,
+      'the fold control must survive the readonly disable pass -- the same carve-out .expand-btn gets, for the same reason');
+    // The carve-out is a carve-out, not a hole: everything else on the same
+    // page is still hard-disabled.
+    assert.equal(document.querySelector('.choice-single').disabled, true, 'the answer widget is still disabled');
+    assert.equal(document.querySelector('.btn-defer').disabled, true, 'so is Defer');
+    assert.equal(document.querySelector('.note-field textarea').disabled, true, 'so is the note field');
+  } finally { restore(); }
+});
+
+check('archive: Show more opens the fold in place and becomes Show less, with aria-expanded following, and closes again', () => {
+  const { document, restore } = loadFoldArchive();
+  try {
+    const item = foldItem(document);
+    const control = item.querySelector('.fold-toggle');
+    const body = document.getElementById(control.getAttribute('aria-controls'));
+    assert.ok(body, 'setup failure: aria-controls must resolve to the folded body');
+
+    control.dispatchEvent(new StandInEvent('click'));
+    assert.equal(item.classList.contains('folded'), false, 'the fold opens IN PLACE -- the state comes off the item, nothing navigates or re-renders');
+    assert.equal(body.parentElement, item, 'and the prose is the same element it always was');
+    assert.equal(control.textContent, 'Show less', 'the control now says how to close it');
+    assert.equal(control.getAttribute('aria-expanded'), 'true', 'and says the same thing to a screen reader');
+
+    control.dispatchEvent(new StandInEvent('click'));
+    assert.equal(item.classList.contains('folded'), true, 'Show less closes it again');
+    assert.equal(control.textContent, 'Show more');
+    assert.equal(control.getAttribute('aria-expanded'), 'false');
+  } finally { restore(); }
+});
+
+check('archive: keyboard focus reaching into the clipped part of a folded item opens the fold', () => {
+  const { document, restore } = loadFoldArchive();
+  try {
+    const item = foldItem(document);
+    const body = item.querySelector('.fold-body');
+    // A Tab landing on something below the fade: focus is inside the clip, and
+    // the box does not scroll, so opening is the only honest answer.
+    const inner = body.querySelector('li') || body;
+    inner.dispatchEvent(new StandInEvent('focusin'));
+
+    assert.equal(item.classList.contains('folded'), false, 'the fold opens rather than leaving focus on text nobody can see');
+    assert.equal(item.querySelector('.fold-toggle').getAttribute('aria-expanded'), 'true',
+      'and the control agrees -- one state, not two');
+  } finally { restore(); }
 });
 
 if (failures) {

@@ -119,7 +119,13 @@ const MAX_ID_ORDINAL_DIGITS = 9;
  * accumulates the ids this pass has handed out, so two blocks in the same post can
  * never both claim one. `openRound` is only used to phrase the rejection. */
 function emptyIdLedger() {
-  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null };
+  // `refusals` is not about ids, and rides here anyway: it is the one object threaded
+  // through the WHOLE pass (top-level blocks, a question's context, a compare side, a
+  // variant option), which is exactly the reach a post-wide refusal needs. Every
+  // reference that fails to resolve appends its message; `normalizePost` below turns a
+  // non-empty list into one throw, so the agent gets every broken reference in the post
+  // at once rather than one per re-post (ADR.md entry 112).
+  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [] };
 }
 
 /** Resolve a block's id: the caller's `raw.id` when present, well-formed and
@@ -185,16 +191,52 @@ function resolveBlockId(raw, kind, counters, ids, topLevel = true) {
   return id;
 }
 
+/** Record one reference that did not resolve on the pass's ledger, and hand back the
+ * block fields a failed reference has always produced (empty content, the sha of that
+ * empty content, the reason on `error`). Both halves in one place because they must not
+ * drift: a block minted with an `error` the ledger never saw is a broken reference the
+ * post would go on to store. */
+function refuse(message, ids, fields) {
+  if (ids) ids.refusals.push(message);
+  return { ...fields, error: message };
+}
+
+/** Normalise every block of ONE post, or refuse the post whole (ADR.md entry 112).
+ *
+ * A reference that fails to resolve used to land as a red note on the reviewer's page
+ * while the post returned 200, so the reviewer saw the breakage and the agent -- which
+ * gets no blocks back, only a packet after submit -- never did. Now the post is refused
+ * before anything is stored, broadcast or rendered, with one message per failed
+ * reference: the whole walk runs first (`ids.refusals` collects from top-level blocks, a
+ * question's `context`, a compare side and a variant option alike) so a round with three
+ * typos costs one re-post rather than three.
+ *
+ * Thrown, not returned, because every caller here already ends a bad post that way (an
+ * unknown widget, a duplicate id, an over-cap payload) and src/server.mjs turns the throw
+ * into the 400 the shim reports to the agent verbatim. */
+function normalizePost(blocks, round, counters, cwd, ids) {
+  const normalized = (blocks || []).map(b => normalizeBlock(b, round, counters, cwd, ids));
+  if (ids.refusals.length) throw new Error(ids.refusals.join('\n'));
+  return normalized;
+}
+
 /** Resolve a content block's text: by reference when `raw.source` is a Ref (read
  * once, sliced, sha'd — see src/resolve.mjs), by value from `raw.text` otherwise.
- * A resolve failure never throws: it comes back as `{ text: '', sha, error }` so the
- * block still gets minted and rendered, with the failure visible on it (see
- * PROTOCOL.md Blocks — additive `error` field), rather than the whole post failing
- * or the block silently vanishing. */
-function resolveContent(raw, cwd) {
+ *
+ * A resolve failure is RECORDED, not thrown: the message goes on the pass's ledger
+ * (`ids.refusals`) and the block is minted with `{ text: '', sha, error }` so the walk
+ * finishes and every OTHER broken reference in the same post is found too. The throw is
+ * `normalizePost`'s, once, after the walk. Minting the block anyway is not a fallback
+ * path -- nothing this pass produces is ever stored once a refusal is on the ledger --
+ * it is what keeps the message list complete.
+ *
+ * `ids` is optional so a caller normalising one block on its own (never the daemon: see
+ * `normalizePost`) keeps the pre-ADR-112 shape, a block carrying its own `error`, which
+ * is also what an already-stored board holds and what src/render.mjs renders. */
+function resolveContent(raw, cwd, ids = null) {
   if (raw.source) {
     const result = resolveRef(raw.source, { cwd });
-    if (result.error) return { text: '', sha: sha256(''), error: result.error };
+    if (result.error) return refuse(result.error, ids, { text: '', sha: sha256('') });
     // `startLine` (1-based) rides along so a code block's gutter can show the file's
     // OWN line numbers for a `section:` slice too, not just a `lines:` range -- only
     // src/resolve.mjs knows where a named section actually starts. Carried as a
@@ -241,7 +283,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
   switch (raw.kind) {
     case 'markdown': {
       const id = resolveBlockId(raw, 'markdown', counters, ids, topLevel);
-      const { text, sha, error } = resolveContent(raw, cwd);
+      const { text, sha, error } = resolveContent(raw, cwd, ids);
       const { html, anchors } = mdToHtmlAndAnchors(text, { highlight: highlightFenceHtml });
       return {
         ...base,
@@ -257,7 +299,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     }
     case 'mermaid': {
       const id = resolveBlockId(raw, 'mermaid', counters, ids, topLevel);
-      const { text, sha, error } = resolveContent(raw, cwd);
+      const { text, sha, error } = resolveContent(raw, cwd, ids);
       return {
         ...base,
         id,
@@ -270,7 +312,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     }
     case 'code': {
       const id = resolveBlockId(raw, 'code', counters, ids, topLevel);
-      const { text, sha, error, startLine } = resolveContent(raw, cwd);
+      const { text, sha, error, startLine } = resolveContent(raw, cwd, ids);
       const lang = raw.lang ?? (raw.source ? langForPath(raw.source.path) : '');
       return {
         ...base,
@@ -289,23 +331,25 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       // Path-only: the other referenced kinds slice
       // because text stays text under a knife, but cutting markup at a line or a
       // section yields unclosed tags and orphaned <style>/<script> -- a broken stage,
-      // not a smaller one. Refused as a block-level error, same shape every other
-      // resolve failure takes (never thrown, block still minted and rendered with the
-      // reason visible), rather than silently ignoring the parameter or slicing markup
-      // that only breaks.
+      // not a smaller one. Refused on the same terms as a reference that fails to
+      // resolve (it IS one: a reference this module will not read), so the post carrying
+      // it is refused whole rather than silently ignoring the parameter or slicing
+      // markup that only breaks.
       if (raw.source && (raw.source.lines || raw.source.section)) {
         return {
           ...base,
           id,
           kind: 'html',
           source: raw.source,
-          html: '',
-          // sha of the empty string, not absent: PROTOCOL.md's resolve-failure contract
-          // says a failed block is still minted with its content empty and its sha the
-          // hash of that empty content. This refusal happens before resolveContent runs,
-          // so it has to state the same shape by hand rather than inheriting it.
-          sha: sha256(''),
-          error: 'html source refuses lines/section: slicing markup yields unclosed tags and orphaned styles, not a valid fragment -- reference the whole file',
+          // `refuse` supplies the same empty-content shape resolveContent does -- empty
+          // html, the sha OF that empty content, the reason on `error` -- which this
+          // branch used to spell out by hand because it happens before resolveContent
+          // runs. It is what an already-stored board carrying this failure holds.
+          ...refuse(
+            'html source refuses lines/section: slicing markup yields unclosed tags and orphaned styles, not a valid fragment -- reference the whole file',
+            ids,
+            { html: '', sha: sha256('') },
+          ),
         };
       }
       if (raw.source) {
@@ -315,7 +359,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         // every consumer of an html block already reads (render.mjs's renderHtmlBlock,
         // src/anchor.mjs's htmlBodyRootFrom) -- renamed here so a referenced file
         // reaches the stage through the identical field a by-value mock always used.
-        const { text, sha, error } = resolveContent(raw, cwd);
+        const { text, sha, error } = resolveContent(raw, cwd, ids);
         return {
           ...base,
           id,
@@ -386,11 +430,24 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       if (widget !== 'text' && options.length === 0) {
         throw new Error(`question widget '${widget}' requires at least one option`);
       }
+      // ADR.md entry 111: the one or two sentences a caller writes ahead of the
+      // options had no home but `context`, which lays out BESIDE the options
+      // rather than ahead of them. `explainer` is that home -- markdown by
+      // value, bounded through byValueText exactly like `prompt`, and rendered
+      // to HTML here (src/render.mjs cannot reach src/markdown.mjs without
+      // closing a second import cycle) the same way a by-value markdown block
+      // is. Source AND html are both stored, mirroring a markdown block's own
+      // text/html pair, so the packet and the archive keep what the caller
+      // actually wrote. Both fields are absent, not empty, on a question with no
+      // explainer: an optional field that always exists would rewrite every
+      // stored board's JSON for nothing.
+      const explainer = byValueText(raw.explainer ?? '', 'explainer');
       return {
         ...base,
         id,
         kind: 'question',
         prompt: byValueText(raw.prompt ?? '', 'prompt'),
+        ...(explainer ? { explainer, explainerHtml: mdToHtmlAndAnchors(explainer, { highlight: highlightFenceHtml }).html } : {}),
         context,
         widget,
         options,
@@ -579,7 +636,7 @@ export function createBoard({ title, blocks, cwd = null, thread = null, threadCw
   const boundCwd = bindBoardCwd(cwd, threadCwd);
   const counters = {};
   const ids = emptyIdLedger();
-  const normalized = (blocks || []).map(b => normalizeBlock(b, 1, counters, boundCwd, ids));
+  const normalized = normalizePost(blocks, 1, counters, boundCwd, ids);
   const { awaited, awaitDeadline } = mintAwait(normalized, 1, wait, now, awaitTimeoutMs);
   return {
     id: mintBoardId(),
@@ -615,7 +672,7 @@ export function addRound(board, { blocks, cwd, title, wait = false, awaitTimeout
   const counters = countersFromBoard(board);
   const ids = idLedgerFromBoard(board, null);
   ids.openRound = n;
-  const normalized = (blocks || []).map(b => normalizeBlock(b, n, counters, board.cwd, ids));
+  const normalized = normalizePost(blocks, n, counters, board.cwd, ids);
   const { awaited, awaitDeadline } = mintAwait(normalized, n, wait, now, awaitTimeoutMs);
   // Per-round title, stored rather than dropped. `ask` requires a non-empty title on
   // every call and commands/grill.md tells the agent to make it the branch name, so a
@@ -660,7 +717,7 @@ export function amendRound(board, { blocks, cwd, title }) {
   // rendering as if the question had never been asked. That is not an amend, it is corruption of a round that
   // already went out.
   const ids = idLedgerFromBoard(board, openRound.n);
-  const normalized = (blocks || []).map(b => normalizeBlock(b, openRound.n, counters, board.cwd, ids));
+  const normalized = normalizePost(blocks, openRound.n, counters, board.cwd, ids);
   const blockIds = [];
   for (const nb of normalized) {
     const idx = board.blocks.findIndex(b => b.id === nb.id);

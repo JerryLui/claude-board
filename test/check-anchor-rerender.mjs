@@ -82,11 +82,20 @@ function directChildPinLayer(section) {
 const lostBoard = createBoard({
   title: 'Ticket 04 -- a lost page-scoped anchor',
   blocks: [
-    { kind: 'mermaid', source: { path: 'no-such-diagram-04.mmd' } },
+    { kind: 'mermaid', text: '' },
   ],
 });
+// A failed reference as an ALREADY-STORED board carries it: the post that named one
+// is refused whole now (ADR.md entry 112), so this shape only ever comes off disk.
+// Minted by value so the block still gets a real id; `text: ''` already carries the
+// sha a failed resolve produced, so only `source` and `error` are added.
+lostBoard.blocks[0] = {
+  ...lostBoard.blocks[0],
+  source: { path: 'no-such-diagram-04.mmd' },
+  error: 'cannot read no-such-diagram-04.mmd: no such file',
+};
 assert.equal(typeof lostBoard.blocks[0].error, 'string',
-  'setup failure: the block must actually fail to resolve, or it renders no .resolve-error note to anchor against');
+  'setup failure: the block must carry a stored failed reference, or it renders no .resolve-error note to anchor against');
 const lostBlockId = lostBoard.blocks[0].id;
 // A `dom` anchor naming an element this block's content never had at this
 // index -- the same "hand-edited/stale ref" shape every other anchor kind's
@@ -154,8 +163,14 @@ check('what the reviewer sees -- a lost page-scoped dom anchor draws a pin-lost 
 check('contrast -- the same shape of board, but a ref/hint that DOES still match, resolves (proving the lost check above is discriminating, not just always-false)', () => {
   const okBoard = createBoard({
     title: 'Ticket 04 -- contrast, a page-scoped anchor that resolves',
-    blocks: [{ kind: 'mermaid', source: { path: 'no-such-diagram-04b.mmd' } }],
+    blocks: [{ kind: 'mermaid', text: '' }],
   });
+  // Same stored-failure shape as lostBoard above, and for the same reason.
+  okBoard.blocks[0] = {
+    ...okBoard.blocks[0],
+    source: { path: 'no-such-diagram-04b.mmd' },
+    error: 'cannot read no-such-diagram-04b.mmd: no such file',
+  };
   const blockId = okBoard.blocks[0].id;
   // Minted through the REAL click gesture rather than hand-written, so the ref and
   // the hint are exactly what a reviewer's click produces -- the alternative

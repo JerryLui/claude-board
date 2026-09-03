@@ -242,7 +242,16 @@ check('a context-nested html stage carries exactly one pin layer, like the same 
   // stage, and the .resolve-error note IS anchorable.
   const errBoard = createBoard({
     title: 'Context stage that failed to resolve',
-    blocks: [{ kind: 'question', prompt: 'p', widget: 'text', options: [], context: [{ kind: 'html', source: { path: 'nope.html' } }] }],
+    blocks: [{ kind: 'question', prompt: 'p', widget: 'text', options: [], context: [{ kind: 'html', html: '' }] }],
+  });
+  // A failed reference as an ALREADY-STORED board carries it: the post that named
+  // one is refused whole now (ADR.md entry 112), so this shape only ever comes off
+  // disk. Minted by value first so the context block still gets a real id, then
+  // patched in place -- minting with `html: ''` already gives the sha a failed
+  // resolve produced, so only `source` and `error` are missing.
+  Object.assign(errBoard.blocks[0].context[0], {
+    source: { path: 'nope.html' },
+    error: 'cannot read nope.html: no such file',
   });
   const errItem = parseHTML(renderBoardPage(errBoard)).querySelector('.context-item.html-block');
   assert.equal(errItem.querySelectorAll('.pin-layer').length, 1, 'a failed reference still needs somewhere to draw a pin');

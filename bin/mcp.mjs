@@ -675,10 +675,18 @@ function packetResult(text, packet) {
  * The clear happens FIRST and unconditionally, before the daemon is told anything. The
  * boundary is the agent's declaration, not the daemon's to ratify — a daemon that is
  * down, or that 404s a board someone pruned, must not be able to wedge this conversation
- * onto the previous one's board. So the abandon call is best-effort and its failure is a
- * stderr line: the worst it costs is a round left awaited on a board nobody is reading,
- * which is exactly the state this whole flag exists to avoid but strictly better than
- * posting into it.
+ * onto the previous one's board.
+ *
+ * TELLING the daemon is `flushBoundary` below, and it happens only once this
+ * conversation's post has actually landed. The two used to be one call, made before the
+ * post: a post the daemon then REFUSED (ADR.md entry 112 refuses one carrying a
+ * reference that does not resolve) had already closed the previous conversation's open
+ * round, so a typo in a path cost a reviewer the question they were still looking at and
+ * nothing replaced it. The declaration itself cannot wait for the post — it is what
+ * decides the post mints a new board at all — but the abandon can, and the id it needs
+ * is parked here until it does. Parked rather than dropped: a refused post is normally
+ * re-posted a moment later with the reference fixed, and that post is what closes the
+ * old rounds.
  *
  * A no-op when there is no board yet, which is the ordinary case for the first `ask` of a
  * conversation that never had one: nothing is abandoned, and the post below mints one
@@ -688,7 +696,7 @@ function packetResult(text, packet) {
  * nowhere else. That is what keeps two sessions in one project directory out of each
  * other's way: a second shim's board is a different id this one has never seen, and the
  * daemon route is scoped to the id it is given. */
-async function declareBoundary(session) {
+function declareBoundary(session) {
   const abandoned = session.boardId;
   session.boardId = null;
   session.thread = null;
@@ -698,8 +706,26 @@ async function declareBoundary(session) {
   session.createRequestId = null;
   // Same gate as safeBoardUrl, and for the same reason: this string goes into a URL path
   // segment. A daemon that once answered with something that is not a board id gets no
-  // second chance to have it sent back.
+  // second chance to have it sent back. An unusable id (or none at all) leaves whatever
+  // is already parked alone -- a second `fresh` call after a refused post must not
+  // overwrite the id the first one parked with the null it now sees. Nor may a VALID
+  // one: a create that settled after its caller's deadline set `boardId` without the
+  // parked id ever being flushed, and the next `fresh` would park that board over the
+  // first, leaving the first's round awaited forever. First parked, first closed.
   if (typeof abandoned !== 'string' || !BOARD_ID_RE.test(abandoned)) return;
+  if (session.pendingAbandon == null) session.pendingAbandon = abandoned;
+}
+
+/** Close the round(s) the declared boundary walked away from, now that this conversation
+ * has a board of its own. Best-effort and its failure is a stderr line: the worst it
+ * costs is a round left awaited on a board nobody is reading, which is exactly the state
+ * the `fresh` flag exists to avoid but strictly better than failing a post that has
+ * already succeeded. Cleared before the call, so a daemon that is slow or down cannot
+ * make the next post try again forever. */
+async function flushBoundary(session) {
+  const abandoned = session.pendingAbandon;
+  session.pendingAbandon = null;
+  if (!abandoned) return;
   try {
     await httpJson('POST', `${BASE_URL}/api/board/${abandoned}/abandon`, null, { timeoutMs: POST_TIMEOUT_MS });
   } catch (err) {
@@ -785,7 +811,10 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     // After that wait and before the create-vs-push branch below: a boundary declared while
     // another call was mid-mint has to walk away from the board that call actually made,
     // not from the null it saw on the way in. Once per call, and the loop re-checks the
-    // guard afterwards because the boundary's own await is a yield like any other.
+    // guard afterwards rather than falling straight through -- the declaration used to
+    // await the daemon's abandon here (that await is `flushBoundary`'s now, after the
+    // post), and re-reading a guard that only ever moves across a yield is right whether
+    // or not this particular step still yields.
     //
     // Never for a board THIS CALL just waited out, though. `fresh` says "this conversation
     // has posted no board", so it walks away from what a PREVIOUS conversation left behind
@@ -795,7 +824,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     // ask first, fresh second) that the guard alone does not cover.
     if (fresh && !boundaryDeclared && !joinedMint) {
       boundaryDeclared = true;
-      await declareBoundary(session);
+      declareBoundary(session);
       continue;
     }
     break;
@@ -992,6 +1021,12 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     throw toolErrorFor(err, session.url);
   }
 
+  // This post landed, so the board the boundary walked away from can be closed (see
+  // declareBoundary). Only here: a refused post -- the throw above -- leaves the previous
+  // conversation's open round exactly as the reviewer left it, which is what makes a
+  // refusal cost nothing but a re-post.
+  await flushBoundary(session);
+
   // Built here, never taken from the response body (see safeBoardUrl).
   const url = safeBoardUrl(posted.boardId);
   if (!url) throw new ToolError(`daemon returned an unusable board id: ${JSON.stringify(posted.boardId)}`);
@@ -1016,13 +1051,15 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // openBoardTab), so "the tab opened" was never a state this could return on; "the
   // post succeeded" is.
   //
-  // The daemon's own verdict wins when it gives one. `isAwaited` reads the RAW blocks
-  // and cannot know whether an `html` block's `source` resolved, so on a page board with
-  // a broken reference the two sides disagree: the daemon mints the round not-awaited
-  // (its block carries `error`) and never builds a packet, while this side would block
-  // out the full cap on a round nothing will ever answer. `awaited` on the post response
-  // is that same `mintAwait` result. Optional by design: a daemon from before the field
-  // existed returns `undefined`, and the local shape check decides exactly as it did.
+  // The daemon's own verdict wins when it gives one. `isAwaited` reads the RAW blocks and
+  // cannot know what the daemon made of them: it was a page board whose `html` source
+  // failed to resolve that first split the two answers (the daemon minted the round
+  // not-awaited and never built a packet, while this side blocked out the full cap on a
+  // round nothing would ever answer), and that particular case is now a refusal instead
+  // (ADR.md entry 112) -- but the asymmetry it exposed is not, and the daemon is still the
+  // only side that has seen the normalized round. `awaited` on the post response is that
+  // same `mintAwait` result. Optional by design: a daemon from before the field existed
+  // returns `undefined`, and the local shape check decides exactly as it did.
   if (posted.awaited === false || !isAwaited(blocks, wait)) {
     const text = `Board posted; no response needed (nothing awaited in this round).\nBoard: ${url}`;
     return packetResult(text, {
@@ -1168,7 +1205,7 @@ function sendProgressNotification(token, elapsedMs, totalMs, boardUrl) {
 // that minted it is gone, which clears both and starts the next one over. This process
 // outlives `/clear`, so the flag is the only thing that can tell those two apart.
 // Nothing call-scoped lives here (see askTool's comment).
-const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null };
+const session = { boardId: null, thread: null, url: null, creatingThread: null, createRequestId: null, pendingAbandon: null };
 
 /** In-flight `tools/call` requests by JSON-RPC id, so `notifications/cancelled` has
  * something to cancel. Without it a cancelled call leaks three things: the progress

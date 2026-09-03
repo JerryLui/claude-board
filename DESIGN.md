@@ -304,15 +304,21 @@ before the click, which closes the gap between "delete is unsent-only" and "a se
 The de-affordance rides comment mode's existing hover reinterpretation rather than marking the
 element permanently, so the reading view stays unmarked.
 
-**Only code blocks get a height cap.** Markdown is read top to bottom with its own headings to skim
-by; capping it would fight how it is used. Mermaid gets a lens instead, because a scaled-down
-diagram is unreadable rather than merely long. (The first draft justified this by "`.html-stage` is
-already capped", which is false — it is FLOORED. Only the supporting claim was wrong.)
+**Only code blocks get a scroll cap; long prose folds.** Code keeps the scroll box below. Markdown
+past about a dozen lines folds under a fade with a Show more that opens it in place (ADR 110),
+decided by a count of its source rather than measured pixels, so the check suite can assert it;
+this reversed the earlier "markdown is never capped" rule once a question's context started
+carrying whole spec sections beside a short explainer. Rejected there: scroll-in-place for prose (a
+reader loses the page's own scroll inside the item) and folding a diagram or a mock (cut in half,
+unreadable). Mermaid gets a lens instead, because a scaled-down diagram is unreadable rather than
+merely long. (The first draft justified the code cap by "`.html-stage` is already capped", which is
+false — it is FLOORED. Only the supporting claim was wrong.)
 
 **The cap is `max-height` + `overflow: auto` + `resize: vertical` at ~480px**, one idiom for every
-long stage on the page. Rejected: a fade-and-Expand toggle (sidesteps the pin-position problem but
-adds new markup, a class and new JS) and a bare cap with no handle (leaves the reviewer no way out
-when 480px is genuinely too short). **The recipe was assumed rather than built, and does not work
+long stage on the page. Rejected for code: a fade-and-Expand toggle (sidesteps the pin-position
+problem but adds new markup, a class and new JS; it is what prose got later, where there is no pin
+to place) and a bare cap with no handle (leaves the reviewer no way out when 480px is genuinely
+too short). **The recipe was assumed rather than built, and does not work
 alone:** `max-height` clamps a box permanently, including against the explicit inline `height` that
 the element's own `resize: vertical` drag sets, so "can be dragged taller" is unreachable from CSS.
 Shipped fix is `unlockCodeCapForDrag`, which swaps the cap for a plain `height` read off live

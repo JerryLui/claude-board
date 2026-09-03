@@ -184,6 +184,59 @@ check('two different elements inside the same stage get two different, independe
   assert.equal(pPin.style.top, expectedP.top);
 });
 
+check('a stored dom ref on a CONTEXT diagram is dropped rather than walked: the pin stacks in the item\'s own layer instead of landing on whatever the re-based index now hits', () => {
+  // ADR.md entry 110 dropped the kicker from every context item, which re-bases
+  // every child index a comment minted against the old card shape: a ref that
+  // named the diagram's own stage now names the control group beside it. The
+  // server's verdict is no help -- resolveComment walks the block RE-RENDERED
+  // through renderBlock, a full card with its kicker still first, so it and this
+  // page are not even looking at the same tree. Dropped on read: the pin stacks,
+  // the way a lost anchor's already does. A comment on a diagram NODE is a
+  // 'mermaid' anchor carrying the node's own id and is unaffected.
+  const contextBoard = createBoard({
+    title: 'a stale index on a context diagram',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Does the flow look right?',
+      widget: 'single',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      context: [{ kind: 'mermaid', text: 'flowchart LR\n  A --> B' }],
+    }],
+  });
+  const diagramId = contextBoard.blocks[0].context[0].id;
+  // "2" addressed the stage under the old card shape (kicker first); under the
+  // panel it addresses the control group, a real element with a real box.
+  contextBoard.comments.push({
+    n: 1, blockId: diagramId, text: 'about the diagram', round: 1,
+    createdAt: new Date().toISOString(),
+    anchor: { kind: 'dom', ref: '2', hint: 'flowchart LR A --> B' },
+  });
+
+  const document = parseHTML(renderBoardPage(contextBoard));
+  const window = document.defaultView;
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, { protocol: 'http:' });
+
+  const item = document.querySelector('.context-item.mermaid-block');
+  assert.ok(item, 'setup failure: no context diagram item on the page');
+  const tools = item.querySelector('.context-tools');
+  assert.ok(tools, 'setup failure: the item must carry the control group the stale index now addresses');
+  const toolsBox = tools.getBoundingClientRect();
+  assert.notEqual(toolsBox.left + ',' + toolsBox.top, '10,10',
+    'setup failure: the wrongly-addressed element must be distinguishable from the stacked fallback, or this check cannot tell them apart');
+
+  // The item's OWN layer, a direct child -- not the stage-scoped one nested
+  // inside .stage-wrap, which a deep querySelector finds first and which only
+  // ever holds 'mermaid'-kind pins (src/ui.mjs's directChildPinLayer).
+  const layer = item.children.find(el => (el.getAttribute('class') || '').split(' ').includes('pin-layer'));
+  assert.ok(layer, 'setup failure: the context item has no pin-layer of its own');
+  const pins = layer.querySelectorAll('.anchor-pin');
+  assert.equal(pins.length, 1, 'the comment is still shown -- dropped means "not trusted for a position", never "not shown"');
+  assert.equal(pins[0].style.left, '10px', 'the pin stacks at the layer\'s own offset');
+  assert.equal(pins[0].style.top, '10px');
+  assert.notEqual(pins[0].style.left, toolsBox.left + 'px',
+    'and never at the control group the re-based index happens to hit (ablation: drop the .context-item guard from renderDomPins and it lands here)');
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

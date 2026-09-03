@@ -125,6 +125,8 @@
       "id": "q1",
       "kind": "question",
       "prompt": "Does the kitchen display in round 1 match the routing flow (Placed -> In prep -> Ready -> Served) we discussed?",
+      "explainer": "This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.",
+      "explainerHtml": "<p>This decides whether round 1's mockup ships as drawn. A tweak here changes the display only; the routing rewrite underneath it ships either way.</p>",
       "context": [
         {
           "round": 2,
@@ -181,6 +183,11 @@
         },
         {
           "label": "Bar",
+          "description": "",
+          "preview": null
+        },
+        {
+          "label": "None of these",
           "description": "",
           "preview": null
         }

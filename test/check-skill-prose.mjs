@@ -40,6 +40,9 @@ function check(name, fn) {
 const prose = readFileSync(SKILL_PATH, 'utf8');
 const protocol = readFileSync(PROTOCOL_PATH, 'utf8');
 const readme = readFileSync(README_PATH, 'utf8');
+// Prose wraps at the line, so every rule matched below is matched on whitespace-normalized
+// text rather than a regex threaded with \s* at every wrap point.
+const norm = s => s.replace(/\s+/g, ' ');
 
 // --- the generic battery, against a live shim ---------------------------------
 const result = await checkProseFile(SKILL_PATH);
@@ -85,9 +88,21 @@ check('branching on status rather than choice is stated', () => {
   // alone records a decision the reviewer explicitly declined to make.
   assert.match(prose, /deferred/);
 });
-check('an unresolvable reference is described as a visible block error, not a failed post', () => {
-  assert.match(prose, /error/i);
-  assert.match(prose, /still lands|still posts|still minted/i);
+check('an unresolvable reference is described as a refused post, and the boundary with it', () => {
+  // ADR.md entry 112: the post is refused whole, so the manual has to say so and name the
+  // ways out. The claim it replaced -- the block still lands, the post still returns 200,
+  // nothing in the return value tells you -- taught the agent to ignore a broken reference.
+  assert.match(norm(prose), /refused whole/i);
+  assert.match(norm(prose), /`CLAUDE_BOARD_REF_ROOTS`/);
+  assert.doesNotMatch(norm(prose), /still lands|still returns 200|nothing in the return value/i);
+});
+check('the refusal check fails on prose that regains the landed-block claim', () => {
+  const reverted = norm(prose).replace(
+    /is refused whole\*\* [^.]*?\./,
+    'still lands and the post still returns 200.',
+  );
+  assert.match(reverted, /still lands/i);
+  assert.doesNotMatch(reverted, /refused whole/i);
 });
 check('the section-slug rule is stated with a worked example', () => {
   assert.match(prose, /slug/i);
@@ -102,9 +117,6 @@ check('the section-slug rule is stated with a worked example', () => {
 // both this manual and PROTOCOL.md are measured against. The source is gitignored
 // and unreachable from this repo, so the rule is pinned here by hand rather than
 // read live — exactly the shape every other check in this file already takes.
-// Prose wraps at the line, so the rule is matched on whitespace-normalized text
-// rather than a regex threaded with \s* at every wrap point.
-const norm = s => s.replace(/\s+/g, ' ');
 const COMMENTABLE_RULE = norm(
   "Only the rendered kinds are — `mermaid` and `html` — and they are wherever they " +
   "appear, including inside a question's `context` and inside a `compare` side. " +

@@ -24,6 +24,11 @@
 //   6 (this chunk's half): the guard never engages in a read-only (file://)
 //      archive -- a click on Send there posts nothing, arms nothing, rings
 //      nothing.
+//   a rank question is answered by the order it shows: neither the guard nor
+//      the pill ever counts an untouched rank list, Send posts it as
+//      'answered' with the rendered order as its choice, and Defer is the one
+//      way to leave it open -- on a freshly loaded page, on a round pushed
+//      over SSE, and never on a round already sent.
 //
 // What this file deliberately does NOT do: re-litigate the Cmd+Enter
 // traversal itself (advance-to-next-question, plain Enter, Discuss's dead
@@ -33,10 +38,10 @@
 // same checks.
 
 import assert from 'node:assert/strict';
-import { createBoard } from '../src/board.mjs';
-import { renderBoardPage } from '../src/render.mjs';
+import { createBoard, addRound, applySubmit } from '../src/board.mjs';
+import { renderBoardPage, renderRoundSection, groupCommentsByBlock } from '../src/render.mjs';
 import { ui } from '../src/ui.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
+import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
 
 let failures = 0;
 function check(name, fn) {
@@ -341,6 +346,200 @@ check('the send guard never engages in a read-only (file://) archive', () => {
   assert.equal(sendBtn.textContent, 'Send', 'a read-only archive must never arm Send');
   assert.equal(sendBtn.classList.contains('warn'), false, 'a read-only archive must never apply the warning treatment');
   assert.equal(blocks.some(b => b.classList.contains('flagged')), false, 'a read-only archive must never ring any question');
+});
+
+// === a rank question is answered by the order it shows =========================
+//
+// A rank list always SHOWS an order, so there is no blank state for the reviewer
+// to see: what is on screen is the answer from the moment it renders, and Defer
+// is the one way to leave it open. What that has to mean for this file's own
+// subject -- the guard, the pill, and the body a Send posts -- is asserted here
+// through the real widgets, never by calling currentAnswer directly.
+//
+// Ablation for every check below: gate src/ui.mjs's rank branch on an
+// interaction flag again ('answered: !!touched[qid]') and an untouched list
+// goes back to 'unanswered', arming the guard and counting toward the pill.
+
+/** Fresh block literals every call -- createBoard normalizes in place (it mints
+ * ids onto the blocks it is handed), so one shared literal cannot seed two boards. */
+function rankSpec(labels) {
+  return { kind: 'question', prompt: 'Order these', widget: 'rank', options: labels.map(label => ({ label })) };
+}
+
+function singleSpec() {
+  return { kind: 'question', prompt: 'Pick one', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] };
+}
+
+/** loadBoard's twin for a page that is not the shared three-question fixture.
+ * 'EventSourceClass' is left undefined by default, exactly as loadBoard leaves
+ * it, so the client subscribes to nothing unless a check wants a live push. */
+function loadPage(html, EventSourceClass) {
+  const document = parseHTML(html);
+  const window = document.defaultView;
+  const location = { protocol: 'http:' };
+  new Function('document', 'window', 'location', 'EventSource', ui)(document, window, location, EventSourceClass);
+  return document;
+}
+
+/** A rank question and a single-choice one, in that order: the rank is never
+ * what the guard counts or rings, and the single-choice one is the question
+ * that legitimately is. */
+function loadRankAndSingle() {
+  const board = createBoard({ title: 'Rank default', blocks: [rankSpec(['A', 'B', 'C']), singleSpec()] });
+  return loadPage(renderBoardPage(board));
+}
+
+check('an untouched rank list is answered by the order it shows: Send posts it as answered with the rendered order as its choice, and the guard neither counts nor rings it', () => {
+  const document = loadRankAndSingle();
+  const blocks = openBlocks(document);
+  const sendBtn = document.getElementById('send-btn');
+  const pill = document.getElementById('questions-left-pill');
+
+  assert.equal(pill.textContent, '1 question left',
+    'only the single-choice question is outstanding: the rank list already shows an order, so it is answered');
+
+  const armed = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+  assert.equal(armed.length, 0, 'setup failure: the untouched single-choice question must still arm the guard');
+  assert.equal(sendBtn.textContent, '1 question unanswered — send anyway?',
+    'the untouched rank must not be counted among the outstanding questions');
+  assert.equal(blocks[0].classList.contains('flagged'), false, 'the rank question must never be the one the guard rings');
+  assert.equal(blocks[1].classList.contains('flagged'), true, 'the single-choice question must be the one flagged');
+
+  const calls = withFetchCapture(() => sendBtn.dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 1, 'setup failure: the second press must submit');
+  const [rank, single] = calls[0].body.answers;
+  assert.equal(rank.status, 'answered', 'an untouched rank list goes out answered, never unanswered');
+  assert.deepEqual(rank.choice, ['A', 'B', 'C'], 'and its choice is the exact order the reviewer was shown');
+  assert.equal(single.status, 'unanswered', 'the genuinely blank question is still reported blank');
+});
+
+check('a round whose only question is a rank leaves nothing outstanding: the pill reads zero and the first press of Send submits', () => {
+  const board = createBoard({ title: 'Rank only', blocks: [rankSpec(['A', 'B', 'C'])] });
+  const document = loadPage(renderBoardPage(board));
+  const pill = document.getElementById('questions-left-pill');
+
+  assert.equal(pill.textContent, '0 questions left', 'a rank question is never outstanding');
+  assert.equal(pill.classList.contains('visible'), false, 'a count of zero must never be shown');
+
+  const calls = withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 1, 'nothing is outstanding, so the first press must submit rather than arm');
+  assert.deepEqual(calls[0].body.answers.map(a => a.status), ['answered']);
+});
+
+check('Defer is the one way to leave a rank open: a deferred untouched rank posts as deferred, carrying the order it showed', () => {
+  const document = loadRankAndSingle();
+  const blocks = openBlocks(document);
+  deferBlock(blocks[0]);
+  answerSingle(blocks[1], 'Yes');
+
+  const calls = withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
+
+  assert.equal(calls.length, 1, 'a deferred rank counts as complete, so the first press submits');
+  assert.equal(calls[0].body.answers[0].status, 'deferred',
+    'defer must override the order-is-the-answer default -- it is the one way to leave a rank open');
+  // The choice rides along: PROTOCOL.md pins that a caller reads `status` and
+  // never infers from `choice`, precisely because a deferred answer may carry
+  // one (src/board.mjs, normalizeStatus).
+  assert.deepEqual(calls[0].body.answers[0].choice, ['A', 'B', 'C']);
+});
+
+check('a rank arriving in a round pushed over SSE is answered by the order it shows too', () => {
+  const board = createBoard({ title: 'Rank over SSE', blocks: [singleSpec()] });
+  let captured = null;
+  class CapturingEventSource extends StandInEventSource {
+    constructor(url) { super(url); captured = this; }
+  }
+  const document = loadPage(renderBoardPage(board), CapturingEventSource);
+  assert.ok(captured, 'setup failure: the client never constructed an EventSource');
+  answerSingle(openBlocks(document)[0], 'Yes');
+
+  const round2 = addRound(board, { blocks: [rankSpec(['D', 'E'])] });
+  const pushedRankId = board.blocks[1].id;
+  captured.dispatch('round', JSON.stringify({
+    round: round2,
+    mode: 'new-round',
+    blockIds: [pushedRankId],
+    html: renderRoundSection(board, round2, groupCommentsByBlock([])),
+    board,
+  }));
+
+  assert.equal(document.getElementById('questions-left-pill').textContent, '0 questions left',
+    'the pushed round is re-wired, so its rank list is answered by the order it shows and nothing is outstanding');
+
+  const calls = withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
+  assert.equal(calls.length, 1, 'nothing outstanding: the first press must submit');
+  const pushedRank = calls[0].body.answers.find(a => a.id === pushedRankId);
+  assert.ok(pushedRank, 'the pushed round\'s rank question must be collected at all');
+  assert.equal(pushedRank.status, 'answered',
+    'a rank that arrived over a push is answered by the order it shows, exactly like one that was on the page at load');
+  assert.deepEqual(pushedRank.choice, ['D', 'E']);
+});
+
+check('a rank on a round already sent is never re-collected by a later Send', () => {
+  const board = createBoard({ title: 'Sent rank', blocks: [rankSpec(['A', 'B', 'C'])] });
+  const sentRank = board.blocks[0].id;
+  applySubmit(board, { action: 'send', answers: [{ id: sentRank, status: 'deferred', choice: null, note: '' }], comments: [] }, 1);
+  addRound(board, { blocks: [singleSpec()] });
+  const document = loadPage(renderBoardPage(board));
+
+  answerSingle(openBlocks(document)[0], 'Yes');
+  const calls = withFetchCapture(() => document.getElementById('send-btn').dispatchEvent(new StandInEvent('click')));
+
+  assert.equal(calls.length, 1, 'setup failure: the open round must submit on the first press');
+  assert.equal(calls[0].body.answers.length, 1, 'only the OPEN round is collected -- the sent round\'s rank must not ride along');
+  assert.equal(calls[0].body.answers.every(a => a.id !== sentRank), true,
+    'a rank deferred on a sent round must never be silently rewritten to answered by a later Send');
+});
+
+// AC 4's sent-round half, here because this is the file that already drives a
+// round from open to sent through the real client script. A round collapsing
+// into history makes its ANSWERS immutable; it does not make its long context
+// unreadable, and a settled round is precisely where someone re-reads one -- so
+// the fold's control gets the same carve-out from the sent-round disable loop
+// that the diagram's expand control has (src/ui.mjs's markRoundHistory). The
+// server-side marking, and the archive half of the same rule, are pinned in
+// test/check-pure.mjs and test/check-archive.mjs respectively.
+
+check('the fold\'s Show more control stays live on a round that has just gone to history, while every other control in it is disabled', () => {
+  const longProse = Array.from({ length: 20 }, (_, i) => `- a point worth reading, number ${i + 1}`).join('\n');
+  const board = createBoard({
+    title: 'Fold on a sent round',
+    blocks: [{ ...singleSpec(), context: [{ kind: 'markdown', text: longProse }] }],
+  });
+  let captured = null;
+  class CapturingEventSource extends StandInEventSource {
+    constructor(url) { super(url); captured = this; }
+  }
+  const document = loadPage(renderBoardPage(board), CapturingEventSource);
+  assert.ok(captured, 'setup failure: the client never constructed an EventSource');
+  const round1 = document.querySelector('.round[data-round="1"]');
+  const control = round1.querySelector('.fold-toggle');
+  assert.ok(control, 'setup failure: the context item must be long enough to fold');
+  assert.equal(control.disabled, false, 'setup failure: it must start live on the open round');
+
+  // Round 1 goes to history live, exactly as a push does it -- markRoundHistory
+  // is the loop the carve-out lives in.
+  applySubmit(board, { action: 'send', answers: [], comments: [] }, 1);
+  const round2 = addRound(board, { blocks: [singleSpec()] });
+  captured.dispatch('round', JSON.stringify({
+    round: round2,
+    mode: 'new-round',
+    blockIds: [board.blocks[1].id],
+    html: renderRoundSection(board, round2, groupCommentsByBlock([])),
+    board,
+  }));
+  assert.equal(round1.classList.contains('round-history'), true, 'setup failure: round 1 must have collapsed into history');
+
+  assert.equal(round1.querySelector('.btn-defer').disabled, true, 'the sent round\'s own controls are disabled, as always');
+  assert.equal(round1.querySelector('.choice-single').disabled, true);
+  assert.equal(control.disabled, false, 'but the fold control survives the pass -- the same carve-out .expand-btn gets');
+
+  const item = control.parentElement;
+  assert.equal(item.classList.contains('folded'), true, 'setup failure: the item must still be folded');
+  control.dispatchEvent(new StandInEvent('click'));
+  assert.equal(item.classList.contains('folded'), false, 'and it still opens: a settled round is where the context gets re-read');
+  assert.equal(control.textContent, 'Show less');
+  assert.equal(control.getAttribute('aria-expanded'), 'true');
 });
 
 if (failures) {

@@ -48,7 +48,6 @@
   var selections = {};   // qid -> string (single/text) | string[] (multi/rank)
   var notes = {};
   var deferred = {};     // qid -> bool, the per-question defer affordance
-  var touched = {};      // qid -> bool, has this widget actually been interacted with
 
   // Comment mode: off by default, so every ordinary
   // widget handler below runs exactly as it always has. Declared here, at the very
@@ -373,7 +372,7 @@
     blockIds.forEach(function (id) {
       var a = (boardData.answers || {})[id];
       if (!a) return;
-      if (a.choice != null) { selections[id] = a.choice; touched[id] = true; }
+      if (a.choice != null) selections[id] = a.choice;
       if (a.note) notes[id] = a.note;
       if (a.status === 'deferred') deferred[id] = true;
     });
@@ -383,14 +382,26 @@
 
   function qsa(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
 
+  /** The controls that stay live when everything else on a round is disabled:
+   * the diagram's expand control and the fold's Show more. Read by both the
+   * readonly pass below and the sent-round pass (markRoundSent), so a new
+   * read-only affordance is one edit, not two that drift apart silently. */
+  function staysLive(el) {
+    return !!(el.classList && (el.classList.contains('expand-btn') || el.classList.contains('fold-toggle')));
+  }
+
   // Read-only mode is enforced at the element level, not just by guarding the
   // mutation handlers below: pointer-events:none (src/styles.mjs) stops clicks, but
   // a real <textarea>/<button> still accepts keyboard input and native HTML5 drag
   // unless actually disabled. Belt and suspenders — every input-capable element is
   // hard-disabled here, on top of every handler's own readonly guard.
   //
-  // One deliberate exception: the diagram's expand
-  // control. 'The lens is view-only under body.readonly. Pan and zoom work in a
+  // Two deliberate exceptions, both read-only affordances: the fold's Show more
+  // control, and the diagram's expand
+  // control. The fold is a reading convenience over content the archive already
+  // carries in its own bytes -- disabling it would leave a reader looking at a
+  // fade with no way past it, which is strictly worse than not folding at all.
+  // As for the lens: 'The lens is view-only under body.readonly. Pan and zoom work in a
   // standalone archive (pure JS, no network, consistent with the archive's
   // guarantee); the comment gesture inside it is gated exactly like every other
   // comment gesture' -- so the control that OPENS it has to stay live, while the
@@ -402,7 +413,7 @@
   // until review.)
   if (readonly) {
     qsa('textarea, input, button').forEach(function (el) {
-      if (el.classList && el.classList.contains('expand-btn')) return;
+      if (staysLive(el)) return;
       el.disabled = true;
     });
     qsa('.rank-list li[draggable]').forEach(function (li) { li.removeAttribute('draggable'); });
@@ -857,9 +868,23 @@
   function renderDomPins(blockId, stageRoot, layer) {
     layer.innerHTML = '';
     resetStackedOffset(layer);
+    // A 'dom' ref is a chain of child indices, and a context item is the one
+    // root whose children this page and the server's own resolver do not agree
+    // on: 'resolveComment' walks the block RE-RENDERED through renderBlock -- a
+    // full card, kicker first -- while the live item is the kickerless
+    // '.context-item' (ADR.md entry 110 dropped that kicker for every context
+    // item, not just a stage-carrying question's). Every stored index on a
+    // context item is therefore re-based by one against the tree standing here,
+    // so walking it can only land the pin on whatever element the shifted chain
+    // now happens to hit -- the comment button, for a diagram whose ref named
+    // its stage. Dropped rather than trusted: the pin stacks in the item's own
+    // layer, which is what a lost anchor already does. A comment on a diagram
+    // NODE is unaffected -- it is a 'mermaid' anchor carrying the node's own
+    // id, and mermaidHostFor lands it from that id.
+    var rebased = stageRoot && stageRoot.classList && stageRoot.classList.contains('context-item');
     commentsWithPending().forEach(function (c) {
       if (c.blockId !== blockId || !c.anchor || c.anchor.kind !== 'dom') return;
-      var steps = pathToSteps(c.anchor.ref);
+      var steps = rebased ? [] : pathToSteps(c.anchor.ref);
       var el = steps.length && stageRoot ? resolveSteps(stageRoot, steps) : null;
       var position = null;
       if (el && el.getBoundingClientRect && stageRoot.getBoundingClientRect) {
@@ -2791,6 +2816,11 @@
       if (layer) renderMermaidPins(section.getAttribute('data-block-id'), svg || null, layer, section);
     });
     wirePageDomPins(root);
+    // Same trap as the pins: wireRoot ran on a DETACHED push subtree, where the
+    // valve measures nothing and keeps the server's marking, so a paragraph the
+    // valve had already unfolded on this page comes back folded after a Send.
+    // Re-measured here, attached, like unlockCodeCapForDrag above.
+    dropSettledFolds(root);
     // The lens's own pin layer is not under any 'root' -- the dialog is a direct
     // child of <body> -- so it needs its own line here rather than being found by
     // the loops above. This is what makes a comment queued from INSIDE the lens
@@ -2987,7 +3017,15 @@
   // their own delegated listener below, which carries no comment-mode guard: with
   // the Tray unlisted, one press in comment mode both submitted the round AND
   // opened a compose form over the artifact.
-  var ANCHOR_CHROME_SELECTOR = '.block-kicker, .comment-btn, .comment-form, .comment-target, '
+  // .context-tools is the kicker's replacement on a context item (ADR.md entry
+  // 110) and is listed for the reason .block-kicker is: it is a control group
+  // this page drew, so a click on the gap between its two buttons must mint
+  // nothing, exactly as a click beside the kicker's comment button does.
+  // .fold-toggle is the Show more control under a folded prose item (ADR.md
+  // entry 110), listed for the same reason: it is a control this page drew, not
+  // authored content, and unlike the expand control it sits directly in the item
+  // rather than inside a '.context-tools' group that is already listed here.
+  var ANCHOR_CHROME_SELECTOR = '.block-kicker, .context-tools, .fold-toggle, .comment-btn, .comment-form, .comment-target, '
     + '.comment-list, .page-comments, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
     + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens';
 
@@ -3195,11 +3233,60 @@
     var qid = card.getAttribute('data-question-id');
     var choice = card.getAttribute('data-choice');
     selections[qid] = choice;
-    touched[qid] = true;
     qsa('.choice-variant[data-question-id="' + qid + '"]').forEach(function (c) {
       c.classList.toggle('selected', c === card);
     });
     updateQuestionsLeftPill();
+  }
+
+  // --- the fold: a long prose item is clipped with a Show more control ---------
+  //
+  // The SERVER decides which item folds, from a count of the item's markdown
+  // source (src/render.mjs's FOLD_CAP), and renders the control itself -- so a
+  // standalone file:// archive carries it in its own bytes and this file only
+  // has to open and close it. Nothing here measures anything to decide the
+  // fold; the one measurement below is the safety valve, not the trigger.
+  //
+  // Declared at the client script's outer scope rather than inside wireRoot,
+  // because the two listeners below are page-scoped (QUIRKS.md: "A
+  // function declared inside wireRoot is invisible from a page-scoped
+  // listener, and the failure is silent").
+
+  /** The folded state, in one place: the class the clip and the fade hang off,
+   * the control's label, and aria-expanded, which is the same fact stated for
+   * a screen reader. 'item' is whatever element wraps the prose -- a
+   * '.context-item', a '.markdown-block' section, or a '.question-head' -- and
+   * carries exactly one '.fold-body' and one '.fold-toggle'. */
+  function setFoldState(item, folded) {
+    item.classList.toggle('folded', folded);
+    var btn = item.querySelector('.fold-toggle');
+    if (!btn) return;
+    btn.setAttribute('aria-expanded', folded ? 'false' : 'true');
+    btn.textContent = folded ? 'Show more' : 'Show less';
+  }
+
+  /** Drop the fold on an item that does not actually overflow its clip, so a
+   * fade never paints over fully visible text. The server's count is a source
+   * count, deliberately generous (under-firing is what the reviewer sees); this
+   * is where a generous mark that turned out not to be needed is taken back.
+   *
+   * Guarded on a real measurement EXISTING, not just on the comparison: a
+   * clientHeight of 0 means "this node has no box", never "this node is empty"
+   * -- true of a detached subtree (wireRoot runs against one on every push
+   * path), of a round page that is display:none, and of the DOM stand-in, which
+   * models no layout at all (QUIRKS.md). Without the guard every one of those
+   * would read 0 <= 0 as "fits" and silently unfold the whole board. With it,
+   * the server's marking stands wherever there is nothing to measure, and the
+   * drop only ever fires on a laid-out item that genuinely fits. */
+  function dropSettledFolds(root) {
+    qsa('.folded', root).forEach(function (item) {
+      var body = item.querySelector('.fold-body');
+      if (!body || !body.clientHeight) return;
+      if (body.scrollHeight > body.clientHeight) return;
+      setFoldState(item, false);
+      var btn = item.querySelector('.fold-toggle');
+      if (btn) btn.replaceWith();
+    });
   }
 
   // --- wiring, factored so it can run once at hydrate (root = document) and again
@@ -3225,7 +3312,6 @@
         return;
       }
       selections[qid] = choice;
-      touched[qid] = true;
       qsa('.choice-single[data-question-id="' + qid + '"]').forEach(function (b) {
         b.classList.toggle('selected', b === btn);
       });
@@ -3248,7 +3334,6 @@
       var idx = arr.indexOf(choice);
       if (idx === -1) arr.push(choice); else arr.splice(idx, 1);
       selections[qid] = arr;
-      touched[qid] = true;
       btn.classList.toggle('selected', idx === -1);
       updateQuestionsLeftPill();
     });
@@ -3317,7 +3402,6 @@
     ta.addEventListener('input', function () {
       if (readonly) return;
       selections[qid] = ta.value;
-      touched[qid] = true;
       updateQuestionsLeftPill();
     });
   });
@@ -3355,7 +3439,6 @@
       dragging.classList.remove('dragging');
       dragging = null;
       selections[qid] = rankOrder(list);
-      touched[qid] = true;
       renumberRankList(list);
       updateQuestionsLeftPill();
     });
@@ -3513,9 +3596,47 @@
 
   wirePageDomPins(root);
 
+  // Last, so it measures a root the rest of this pass has finished with. A no-op
+  // on a detached push subtree (see its own comment) -- the fold a push brings in
+  // simply keeps the server's marking, which is the conservative half of the
+  // valve rather than a second code path.
+  dropSettledFolds(root);
+
   } // end wireRoot
 
   wireRoot(document);
+
+  // The fold's two gestures, both delegated from the document: a control can
+  // arrive at any time (a round pushed over SSE, a round re-rendered by a
+  // submit), and one page-scoped listener covers every one of them without a
+  // second wiring pass per root.
+  //
+  // Live in readonly and on a sent round alike, deliberately and by the same
+  // reasoning the diagram's expand control is (the disable loops carve both out
+  // by class): a settled round is precisely where someone re-reads the context,
+  // and an archive reader is exactly who cannot ask for the rest of the text any
+  // other way. Live in comment mode too -- the reviewer may need to read what
+  // the clip hides before they can comment on it -- which is why '.fold-toggle'
+  // is listed in ANCHOR_CHROME_SELECTOR above: the control is chrome this page
+  // drew, so the generic click-to-anchor gesture must mint nothing on it, the
+  // same carve-out '.block-kicker' and '.context-tools' get.
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('.fold-toggle');
+    if (!btn) return;
+    var item = btn.parentElement;
+    if (item) setFoldState(item, !item.classList.contains('folded'));
+  });
+
+  // Keyboard focus reaching into the clipped part opens the fold: a Tab that
+  // lands on a link below the fade would otherwise leave the reviewer's focus
+  // on something they cannot see, in a box that does not scroll to reveal it. Opening is the only honest answer -- the fold is a reading
+  // convenience, and focus means someone is past it.
+  document.addEventListener('focusin', function (ev) {
+    var body = ev.target && ev.target.closest && ev.target.closest('.fold-body');
+    if (!body) return;
+    var item = body.parentElement;
+    if (item && item.classList.contains('folded')) setFoldState(item, false);
+  });
 
   // (ADR.md entry 28: the "click a comment's list entry to highlight the heading
   // it is about" gesture lived here, and went with the 'md' anchor kind it was
@@ -4063,9 +4184,11 @@
   //
   // Every widget's current value is read generically off data-widget: status is
   // computed here rather than trusted from a prior render, so a question the
-  // reviewer never touched comes back explicitly 'unanswered' (never defaulted,
+  // reviewer left blank comes back explicitly 'unanswered' (never defaulted,
   // never silently dropped), and defer overrides whatever status the widget
-  // itself would imply. Only the currently OPEN round's questions are collected —
+  // itself would imply. The one exception is rank, which has no blank state to
+  // leave -- see its own branch below.
+  // Only the currently OPEN round's questions are collected —
   // a sent round's blocks are already recorded and their controls are disabled
   // server-side (see src/render.mjs renderRoundSection), so Send can never
   // silently rewrite an answer that already went out.
@@ -4081,7 +4204,14 @@
       return { choice: t ? raw : null, answered: t.length > 0 };
     }
     if (widget === 'rank') {
-      return { choice: touched[qid] ? (raw || null) : null, answered: !!touched[qid] };
+      // The one widget with no blank state: a rank list always SHOWS an order,
+      // seeded into selections at wire time from the order rendered (see the
+      // '.rank-list' wiring), so what is on screen IS the answer from the moment
+      // it renders, drag or no drag -- a reviewer who agrees with the
+      // recommended order has answered it, and Defer is the only way to leave it
+      // open. Accepted trade-off: a rank nobody read sends that order back.
+      var order = Array.isArray(raw) ? raw : [];
+      return { choice: order.length ? order : null, answered: order.length > 0 };
     }
     // single, and choose-between-rendered-variants: both are one label picked
     // by clicking a card, so both share this same branch -- see
@@ -4669,6 +4799,14 @@
   // first paint deliberately left for the client to compute (badge.mjs's
   // header comment on why -- no 'Date.now()' at render time).
   refreshPager();
+  // The pill's first paint is the open round's whole question count
+  // (openRoundQuestionCount, src/render.mjs): "nothing is answered yet
+  // server-side while a round is open" held for every widget until a rank list
+  // became answered by the order it shows, which no stored answer records. So
+  // the client's own count -- the one collectAnswers computes, the same one the
+  // guard reads -- takes over here at hydrate, exactly as the countdown figure
+  // above does, and the two can never report different totals.
+  updateQuestionsLeftPill();
   // AC 5: an awaited page round opens with comment mode ON, so the reviewer
   // never has to find the toggle first -- the hint inside the empty
   // Tray (renderPageCommentPanel, src/render.mjs) is what teaches the
@@ -5667,13 +5805,15 @@
     // path -- no new stand-in surface needed for this.
     var rail = section.querySelector('.round-end');
     if (rail) rail.replaceWith();
-    // The diagram's expand control is exempt, exactly as it is in the readonly
+    // The diagram's expand control and the fold's Show more control are exempt,
+    // exactly as they are in the readonly
     // pass at the top of this file, and for the same reason ("the lens is
     // view-only under body.readonly ... pan and zoom work"). A round collapsing
     // into history makes its ANSWERS immutable; it does not make its diagrams
-    // unreadable, and a settled round is precisely where someone re-reads one.
+    // unreadable or its long context unreadable, and a settled round is
+    // precisely where someone re-reads one.
     qsa('textarea, input, button', section).forEach(function (el) {
-      if (el.classList && el.classList.contains('expand-btn')) return;
+      if (staysLive(el)) return;
       el.disabled = true;
     });
     // Mirror renderRoundSection's server-side markup exactly (draggable="false"
@@ -5696,7 +5836,6 @@
       delete selections[id];
       delete notes[id];
       delete deferred[id];
-      delete touched[id];
     });
   }
 

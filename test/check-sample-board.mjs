@@ -7,7 +7,9 @@
 //
 // Also asserts the substance of every other acceptance criterion the sample
 // board exists to demonstrate: every block kind and widget rendered, every
-// question answered, all three comment-anchor flavors resolved, the round
+// question answered, the manual's own rules for a question card (an explainer
+// under the prompt, the context as one panel of plain items, a None option on
+// the multi), all three comment-anchor flavors resolved, the round
 // pager naming both of the board's two rounds and opening on the newest
 // (ADR.md entry 42 -- rounds are pages now, flipped by the pager, not stacked
 // and collapsed into a history rail), round 1 as a page board and round 2 as
@@ -83,9 +85,58 @@ check('every one of the five widgets appears on a rendered question block', () =
   assert.equal(WIDGETS.length, 5, 'setup failure: expected exactly five widgets in the protocol');
 });
 
-check('at least one question carries a non-empty context (not only a bare prompt)', () => {
+// =================================================================================
+// 4b. The sample keeps the manual's own rules for a question card (ADR.md
+//     entries 110/111): the explainer under the prompt, the context as one
+//     panel of plain items, a None option on the multi. A showcase that broke
+//     the rules the manual states would teach every caller the wrong shape.
+// =================================================================================
+
+check('one question carries an explainer, rendered as prose beside its prompt on the head row', () => {
+  const withExplainer = questionBlocks(committedBoard).filter(b => b.explainer);
+  assert.equal(withExplainer.length, 1, 'the sample should showcase exactly one explainer');
+  const q = withExplainer[0];
+  const section = document.querySelector(`.question-block[data-block-id="${q.id}"]`);
+  assert.ok(section, `the question carrying the explainer (${q.id}) does not render`);
+  const head = section.querySelector('.question-head');
+  assert.ok(head, 'the explainer question renders no .question-head row');
+  assert.ok(head.querySelector('.question-prompt'), 'the prompt does not share the head row with the explainer');
+  const explainer = head.querySelector('.question-explainer');
+  assert.ok(explainer, 'the explainer does not render under the prompt, inside the head row');
+  assert.equal(explainer.textContent.trim(), q.explainer, 'the rendered explainer does not read back the posted text');
+  assert.equal(section.querySelector('.question-main .question-explainer'), null,
+    'the explainer sits in the options column instead of the card\'s full row');
+});
+
+check("the multi question carries a None option, rendered as one of its choices", () => {
+  const multi = questionBlocks(committedBoard).find(b => b.widget === 'multi');
+  assert.ok(multi, 'the sample carries no multi question');
+  const none = multi.options.find(o => /^none\b/i.test(o.label));
+  assert.ok(none, 'the multi question carries no None option -- an empty selection reads back as `unanswered`, which is a blank, not an answer of none');
+  const section = document.querySelector(`.question-block[data-block-id="${multi.id}"]`);
+  assert.ok(section, 'the multi question does not render');
+  const rendered = [...section.querySelectorAll('.card-choice')].map(el => el.getAttribute('data-choice'));
+  assert.deepEqual(rendered, multi.options.map(o => o.label),
+    'the rendered choices do not match the multi question\'s options, in order');
+});
+
+check("a question's context renders as one panel of plain items -- no per-item card, no kind label", () => {
   const withContext = questionBlocks(committedBoard).filter(b => Array.isArray(b.context) && b.context.length > 0);
   assert.ok(withContext.length > 0, 'no question block on the committed board carries a context block');
+  for (const q of withContext) {
+    const section = document.querySelector(`.question-block[data-block-id="${q.id}"]`);
+    assert.ok(section, `question ${q.id} does not render`);
+    const panel = section.querySelector('.question-context');
+    assert.ok(panel, `question ${q.id} does not render its context as one .question-context panel`);
+    const items = [...panel.querySelectorAll('.context-item')];
+    assert.equal(items.length, q.context.length, `question ${q.id} renders ${items.length} context items, posted ${q.context.length}`);
+    for (const [i, item] of items.entries()) {
+      assert.equal(item.getAttribute('data-block-kind'), q.context[i].kind,
+        `context item ${i} of question ${q.id} renders out of posted order`);
+      assert.equal(item.querySelector('.block-kicker'), null,
+        `context item ${i} of question ${q.id} still renders a kind label`);
+    }
+  }
 });
 
 // =================================================================================

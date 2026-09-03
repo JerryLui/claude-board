@@ -510,13 +510,21 @@ body.sent-page .comment-btn { display: none; }
 .question-block { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
   column-gap: var(--space-5); row-gap: var(--space-3); align-items: start;
   scroll-margin-top: var(--head-clear); }
-/* The note and the footer answer FOR the question, not for either column, so
-   they take their own full-width rows under both -- a two-column question used
+/* The head row, the note and the footer answer FOR the question, not for either
+   column, so they take their own full-width rows -- a two-column question used
    to get a note box only as wide as its options while the context card beside
    it ended halfway up the card. Row spacing is the grid's own row-gap, so the
    widget's trailing margin (.options and friends carry one) is zeroed where it
-   would double up against it. */
-.question-block > .note-field, .question-block > .question-footer { grid-column: 1 / -1; }
+   would double up against it.
+   The head row is the prompt and (ADR.md entry 111) the explainer: entry 110
+   put the two columns UNDER them rather than beside the prompt, so a reviewer
+   reads what the question is before either column starts. A question with no
+   explainer gets the same row with the prompt alone on it. */
+.question-block > .question-head, .question-block > .note-field, .question-block > .question-footer { grid-column: 1 / -1; }
+.question-head > :last-child { margin-bottom: 0; }
+.question-explainer { margin: 0 0 var(--space-3); color: var(--ink-2); }
+.question-explainer > :first-child { margin-top: 0; }
+.question-explainer > :last-child { margin-bottom: 0; }
 .question-main > :last-child { margin-bottom: 0; }
 /* ADR.md entry 26: a question carrying a rendered stage (anywhere in its
    options or its context, src/render.mjs's questionCarriesStage) never emits
@@ -536,17 +544,76 @@ body.sent-page .comment-btn { display: none; }
    plain hairline. */
 .question-block.flagged { border-color: var(--warning-border-strong); box-shadow: 0 0 0 3px var(--warning-soft); }
 .question-main { min-width: 0; }
+/* ONE panel (ADR.md entry 110), not one card per item: a single surface holding
+   every context item as prose, in posted order. The items stack on the panel's
+   own gap; each brings its own typography and none brings a card or a kind
+   label. */
 .question-context { min-width: 0; background: var(--panel-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-md); padding: var(--space-3) var(--space-4); }
+  border-radius: var(--r-md); padding: var(--space-3) var(--space-4);
+  display: flex; flex-direction: column; gap: var(--space-3); }
 /* The prose counterpart to '.question-context' above, for a question that
    carries a rendered stage (ADR.md entry 26): no background, no border, no
-   padding -- just vertical stacking between the prompt and the widget, each
-   context item in reading order. Each item supplies its own typography
-   ('.md-content', '.mermaid-block', '.html-stage') exactly as it would
+   padding -- just vertical stacking under the head row and above the widget,
+   each context item in reading order. Deliberately a SECOND class rather than
+   '.question-context' with a modifier: the full-width rule above keys on the
+   absence of '.question-context', so one shared wrapper class would put a
+   rendered-variants question back at half width -- the exact failure entry 26
+   fixed. Each item supplies its own typography ('.md-content',
+   '.mermaid-block', '.code-block', '.html-stage') exactly as it would
    top-level; only '.compare-side''s own card look is stripped below, since a
    compare nested here is still "context", not a card. */
 .question-context-prose { display: flex; flex-direction: column; gap: var(--space-3); margin: 0 0 var(--space-3); }
+/* A context item is its own positioning root. 'pageDomPinLayer' (src/render.mjs)
+   is 'inset: 0' over its nearest POSITIONED ancestor, and without this that is
+   the question '.block' -- so a pin on a context diagram, or on a failed
+   reference's note, would be drawn against the whole card instead of against
+   the item it is about. */
+.context-item { position: relative; min-width: 0; }
+.context-item > .md-content > :first-child { margin-top: 0; }
+.context-item > .md-content > :last-child { margin-bottom: 0; }
+/* The controls a commentable item wears in place of the kicker the panel
+   dropped -- the comment button, and the expand control on a diagram. */
+.context-tools { display: flex; gap: 6px; margin-top: 6px; }
+/* A code excerpt's source label (path and line range), demoted from the card's
+   kicker to a caption under the excerpt: the provenance survives the dropped
+   card, in the position a caption belongs. */
+.context-caption { margin-top: 5px; font-size: 11.5px; color: var(--muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .context-item .compare-side { background: none; border: none; padding: 0; }
+/* The fold (ADR.md entry 110): a prose item that reads long is clipped to about
+   a dozen rendered lines and faded out, with a Show more control under it that
+   opens it in place. Three items wear this, all of them prose -- a 'markdown'
+   item in a question's context, a top-level 'markdown' block, and a question's
+   explainer -- and the state class sits on whichever element already wraps that
+   prose ('.context-item', the '.markdown-block' section, '.question-head'), so
+   the fold adds a control and no wrapper. Which item folds is decided by the
+   SERVER, from a count of the markdown source (src/render.mjs's FOLD_CAP);
+   src/ui.mjs drops the class at load if the body turns out not to overflow.
+
+   The fade is a MASK rather than a gradient painted in a surface colour, because
+   a fold lands on three different surfaces -- '--panel-2' inside a question's
+   context panel, '--panel' for a top-level block, and '--history-bg' once the
+   round is sent. That last one is translucent (rgba, .55), so a gradient drawn
+   to it would leave the clipped text legibly showing through its own fade. A
+   mask fades the CONTENT to transparent instead and is right on all three
+   surfaces at once, in one rule with no per-surface custom property to keep in
+   step with '.block'/'.round-history .block' above.
+
+   A mask reads only the ALPHA of its gradient, so the first stop means "opaque
+   here" and names no colour of its own -- 'currentColor' is the opaque value
+   already in scope, which is why this rule carries no literal and needs no
+   token (the raw-literal rule below is satisfied for the right reason, not
+   dodged). */
+.folded > .fold-body { max-height: 17em; overflow: hidden;
+  mask-image: linear-gradient(to bottom, currentColor calc(100% - 4.5em), transparent); }
+/* Same pill chrome as the expand control, shared by selector rather than copied:
+   the two are the same affordance ("open the thing you cannot read from here"),
+   sitting on the same surfaces. A class of its own, though, and never
+   '.expand-btn': that class is what the readonly and sent-round disable loops
+   carve out BY NAME (src/ui.mjs) and what the page-board checks count, so a
+   second control wearing it would be counted as a lens control that is not
+   there. */
+.fold-toggle { margin-top: 6px; }
 .question-prompt { font-size: 16px; font-weight: 600; line-height: 1.4; letter-spacing: -0.01em; margin: 0 0 var(--space-3); }
 
 .options { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -728,11 +795,11 @@ body.sent-page .comment-btn { display: none; }
    rules in this file are asserted by their text -- QUIRKS.md). It deliberately
    does NOT also carry .comment-btn: that class is what wireRoot binds the
    "open a block-level comment form" click handler to. */
-.expand-btn { display: inline-flex; align-items: center; gap: 5px; background: transparent;
+.expand-btn, .fold-toggle { display: inline-flex; align-items: center; gap: 5px; background: transparent;
   border: 1px solid var(--hairline); color: var(--muted); font-size: 10.5px; font-weight: 600;
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
-.expand-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.expand-btn:hover:not(:disabled), .fold-toggle:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 .comment-list { margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
 .comment-item { position: relative; font-size: 12.5px; color: var(--ink-2); background: var(--panel-2);

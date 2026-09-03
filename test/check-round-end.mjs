@@ -472,6 +472,14 @@ check('the open round\'s pill renders with the live count, pluralized, and start
     'expected a visible pill naming both outstanding questions at first paint');
 });
 
+check('a rank question is never outstanding at first paint: it is answered by the order it shows', () => {
+  const R = { kind: 'question', prompt: 'R: order these', widget: 'rank', options: [{ label: 'One' }, { label: 'Two' }] };
+  const board = createBoard({ title: 'Pill - rank', blocks: [Q1, R] });
+  const html = renderBoardPage(board);
+  assert.match(html, /class="questions-left-pill visible" id="questions-left-pill">1 question left</,
+    'the single is outstanding, the rank is not');
+});
+
 check('singular at exactly one outstanding question', () => {
   const board = createBoard({ title: 'Pill - singular', blocks: [Q1] });
   const html = renderBoardPage(board);

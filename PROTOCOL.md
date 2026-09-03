@@ -225,7 +225,7 @@ Every block has `{ id, round, kind }`. Content blocks additionally carry the res
 { kind: 'code',     source: Ref,      text, sha, lang, error? }
 { kind: 'html',     source: Ref|null, html, sha, error? } // path-only source: `lines`/`section` refused
 { kind: 'compare',  left: { label, block }, right: { label, block } }
-{ kind: 'question', prompt, context: [ContentBlock], widget, options: [Option] }
+{ kind: 'question', prompt, explainer?, explainerHtml?, context: [ContentBlock], widget, options: [Option] }
 
 Ref    = { path, section?, lines? }               // lines is [from, to], 1-based inclusive
 Option = { label, description?, preview? }                  // every widget except the one below
@@ -238,17 +238,29 @@ A markdown block's `anchors` is markdown's own slug index for headings and top-l
 and a different vocabulary from the comment `Anchor` below.
 
 **`error`**: when a block carries `source` and `src/resolve.mjs` fails to resolve it (missing
-file, out-of-range lines, section not found), the block is still minted and kept — `text`
-(`html`, for an `html` block) comes back `''` and `sha` the hash of the empty string — with
-`error` set to a human-readable reason, which the page renders in place of the content. Nothing
-is dropped and the post does not abort. A block with no `source` never sets `error`.
+file, out-of-range lines, section not found), the block holds the failure where its content
+would be — `text` (`html`, for an `html` block) is `''`, `sha` the hash of the empty string, and
+`error` a human-readable reason the page renders in place of the content. **A post carrying one
+is refused whole** (ADR 112; see `POST /api/board` below for the refusal and its message), so a
+new round never lands with this field set: it is what an already-stored board carries, and what
+the page renders for a board minted before that rule. A block with no `source` never sets
+`error`.
 
 **`html` may carry a `source`** (ADR 7), for an agent that renders a real page to disk rather
 than re-emitting the bytes as generated tokens. It resolves through the same reader, confinement,
-512 KiB cap and block-level `error` behaviour as `markdown`, `code` and `mermaid`. It is the one
-exception to what a `Ref` may carry: `lines` and `section` are refused with a block-level `error`
-naming markup slicing as the reason. Cutting text at a line boundary still yields text; cutting
-markup yields unclosed tags and orphaned `<style>`.
+512 KiB cap and refusal behaviour as `markdown`, `code` and `mermaid`. It is the one
+exception to what a `Ref` may carry: `lines` and `section` are refused, naming markup slicing as
+the reason, and refuse the post with them. Cutting text at a line boundary still yields text;
+cutting markup yields unclosed tags and orphaned `<style>`.
+
+**`explainer`** (ADR 111) is the question's own one-to-three-sentence lead-in: markdown by value,
+optional, bounded by the same by-value cap as `prompt`, rendered as plain prose directly under the
+prompt and ahead of the options. A caller sends `explainer`; the board stores that source verbatim
+and stores the rendered markup beside it as `explainerHtml`, the same `text`/`html` pair a
+`markdown` block keeps. Both fields are absent, not empty, on a question that carries none, and
+that question renders with the prompt alone on its head row. It is a separate field from `context`
+because the two sit in different places: the explainer takes the card's full row with the prompt,
+while `context` is what the reviewer looks up, laid out beside the options.
 
 **A widget outside the union is a 400**, not a silent fallback to `single`: an unrenderable
 widget produces a question with no control, which Send then reports back as `unanswered`, so the
@@ -294,11 +306,15 @@ and creates nothing. A board with no `cwd` resolves no references at all; it nev
 the daemon's own working directory.
 
 **Reference confinement and caps** (ADR 3). A `Ref.path` names a file *inside the board's `cwd`,
-or inside one of the configured reference roots*, and nothing else. Every violation is an `error`
-on the block — never a throw, never a read:
+or inside one of the configured reference roots*, and nothing else. The **spelling** does not
+enter into it — one realpath check decides every reference, absolute or relative. Every violation
+refuses the post that carried it (ADR 112) and never reads:
 
 ```
-absolute path                        refused unless it lands inside a reference root
+absolute path                        resolves wherever its relative spelling would: accepted
+                                      inside the cwd or a root, refused like anything else
+                                      outside both. A board with no cwd resolves an absolute
+                                      path against the roots alone
 realpath outside cwd and every root  refused (covers ../ traversal AND symlinks out)
 the project directory itself         refused: a directory is never a reference target
 not a regular file                   refused (a fifo blocks the daemon's only thread
@@ -313,6 +329,14 @@ reference is opened exactly once, refusing to follow a symlink in any component 
 Which refusal comes back is decided only on names inside the boundary — a reference that does not
 resolve inside it reports the same thing whether its target is absent, unreadable or simply
 elsewhere, so a refusal is never an existence probe for the rest of the disk.
+
+A confinement refusal **states the boundary and the ways across it**, because the post it refuses
+is the only feedback the caller gets: the board's project directory, the reference roots in force
+(none, when `CLAUDE_BOARD_REF_ROOTS` is absent), that a file in the project directory is named by
+a path relative to it, that another directory is reached by adding it to `CLAUDE_BOARD_REF_ROOTS`
+and running the installer again, and that the content goes up by value until then. Every one of
+those is something the caller already supplied or configured; nothing in the message describes the
+reference beyond repeating it, which is what keeps the rule above intact.
 
 The reference roots are `CLAUDE_BOARD_REF_ROOTS` (colon-separated absolute paths), so a session can
 render the skill, command or agent file it is discussing, and reference a page it has just rendered
@@ -329,10 +353,10 @@ name containing `:` degenerates into) grants nothing at all.
 A markdown `section` is located with the same fence-aware scan `src/markdown.mjs` uses, so the
 slug the agent is shown for a heading is the slug that resolves.
 
-The same 512 KiB cap applies to by-value `text` and `html`, where it is a **400 on the post**
-rather than a block-level `error`: by-value content came from the caller, so there is a caller to
-tell. A `source` ref never raises this cap for any kind — the whole file's size is checked from
-`fstat` before any of it is read.
+The same 512 KiB cap applies to by-value `text` and `html`, and it is a **400 on the post** either
+way now: by-value or by reference, the content came from the caller, so there is a caller to tell.
+A `source` ref never raises this cap for any kind — the whole file's size is checked from `fstat`
+before any of it is read.
 
 ### Answers, comments, anchors
 
@@ -345,7 +369,9 @@ comment half of entry 26 and narrows entry 28).
 Answer  = { id, status, choice, note }
           // status: 'answered' | 'unanswered' | 'deferred'
           // choice: string (single, text) | string[] (multi) | string[] ordered (rank) | null
-          // note is always present, '' when empty. unanswered is explicit, never a default.
+          // note is always present, '' when empty. unanswered is explicit, never a default --
+          // with one widget-level exception: a rank always shows an order, so an untouched
+          // rank list sends that order as `answered`, and only Defer leaves it open.
 
 Comment = { n, blockId, anchor, text, createdAt, round, mintBlockKind }
           // mintBlockKind is the target block's kind at mint time, so an amend that
@@ -801,13 +827,23 @@ not lapsed**. Otherwise it mints a new round. A wait-lapsed round stays `status:
 (only a submit or an abandon moves `status`), so `open` alone would send every later question in
 the conversation into a round nothing is listening to.
 
+**A reference that does not resolve refuses the whole post** (ADR 112): a **400** carrying one
+message per failed reference — every one of them, wherever it sits (top level, a question's
+`context`, a `compare` side, a variant option) — in the shape "Reference confinement and caps"
+above describes, and nothing is stored, rendered, broadcast or pushed. The refusal is decided
+during normalisation, before the board document is written or amended, so a refused post leaves
+the store exactly as it was: the same post with the reference fixed lands normally, and a round
+already open on another board stays open. This is what replaced landing the round with a
+"could not resolve" note on the reviewer's page while the caller got a 200 and never learnt.
+
 Either way the response is `{ boardId, thread, round, url, clients, suppressed, awaited }`, `round`
 naming whichever round was amended or minted and `awaited` carrying that round's own minted
-`awaited` flag. The flag is on the response because the poster cannot always compute it: the shim
-checks the raw blocks it sent and has no way to know that an `html` block's `source` failed to
-resolve, which is exactly the case where the daemon mints the round *not* awaited. A caller
-deciding whether to wait should prefer this field and fall back to its own shape check only when
-it is absent (a daemon older than this field).
+`awaited` flag. The flag is on the response because the daemon is the only side that has seen the
+normalised round: the poster checks the raw blocks it sent, which is a different question (the
+case that first split the two answers — a page board whose `html` `source` failed to resolve, minted
+*not* awaited — is a refusal now rather than a round). A caller deciding whether to wait should
+prefer this field and fall back to its own shape check only when it is absent (a daemon older than
+this field).
 
 **`suppressed`** answers whether this *board's* auto-open was Suppressed (CONTEXT.md "Suppressed";
 ADR.md entry 91), in which case a caller that would otherwise open a tab must not, and the stranded
@@ -1467,6 +1503,12 @@ command), a non-interactive session, or a session on which nothing can open a ta
 session on a machine with no display passes the first two checks and would otherwise post a board
 nobody can see and block for the full wall-clock cap. Both session checks are below.
 
+A daemon **refusal** (any 4xx, which is what a post carrying a reference that does not resolve
+comes back as) is loud in a different key: the tool result carries the daemon's own message
+verbatim — every failed reference's line of it — plus "the daemon is running, fix what was posted
+and call `ask` again", and deliberately no revive command, since kickstarting a healthy daemon
+fixes nothing and costs the reviewer the session.
+
 The shim tracks one thread per CONVERSATION, not one per process (ADR.md entry 69): the first
 `ask` call starts a new thread and opens its tab; every later `ask` call in the same conversation
 pushes a round into the same live board (`POST /api/board` with `boardId` set) and opens no tab of
@@ -1487,8 +1529,11 @@ this conversation?" is a question the agent can always answer. `fresh: true` mea
 shim clears `session.boardId` and `session.thread` on it, so this call mints a new thread and opens
 its tab; the board it walks away from has its open rounds closed through
 `POST /api/board/:id/abandon` above. The clear happens first and unconditionally — a daemon that is
-down cannot wedge a new conversation onto the old one's board — and the abandon call is
-best-effort, its failure a stderr line. `fresh` on a conversation that has posted no board is a
+down cannot wedge a new conversation onto the old one's board — while the abandon waits for this
+call's post to actually land, because a refused post (ADR 112) must close nothing: the previous
+conversation's open round is still the reviewer's until something replaces it, and a re-post with
+the reference fixed is what closes it. The abandon itself is best-effort, its failure a stderr
+line. `fresh` on a conversation that has posted no board is a
 no-op: one board, one thread, one tab. Correctness rests on the agent passing it; nothing can
 detect a missed one, which is why the manual has the agent state the board URL in chat each round
 (a `/compact` is built from chat, not from tool results).

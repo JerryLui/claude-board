@@ -654,13 +654,13 @@ async function main() {
     }
   });
 
-  await check('wait: true on a page board whose html reference cannot resolve returns at once -- the daemon\'s own verdict, not the shim\'s guess at it', async () => {
-    // The two sides used to disagree about exactly this shape. `isPageRoundShape`
-    // (bin/mcp.mjs) reads the RAW blocks and cannot know that a `source` failed to
-    // resolve; `mintAwait` (src/board.mjs) reads the normalized ones and marks the
-    // round not-awaited, so no packet would ever be built -- and the call sat out
-    // the full wall-clock cap on a round nothing could answer. The post response
-    // now carries the minted round's own `awaited`, and the shim agrees with it.
+  await check('wait: true on a page board whose html reference cannot resolve is refused at once, and nothing is posted', async () => {
+    // This shape used to land: the round was minted not-awaited (its block carried
+    // `error`), the reviewer got a red note where the mock should have been, and the
+    // call sat out the full wall-clock cap on a round nothing could answer. The post
+    // response carries the minted round's own `awaited` now, and the reference itself
+    // refuses the post (ADR.md entry 112) -- so what the agent gets back is the reason,
+    // in the time one HTTP round trip takes, with nothing on the reviewer's screen.
     const knownIds = listBoardIds(home);
     const brokenClient = spawnShim(baseEnv);
     try {
@@ -669,17 +669,23 @@ async function main() {
         name: 'ask',
         arguments: {
           title: 'Page board with a broken reference',
-          blocks: [{ kind: 'html', source: 'definitely-not-here.html' }],
+          blocks: [{ kind: 'html', source: { path: 'definitely-not-here-9d2f1a.html' } }],
           wait: true,
         },
-      }), 5000, 'a round the daemon minted not-awaited must return promptly, not block for the wall clock');
+      }), 5000, 'a refused post must come back at once, not block for the wall clock');
       const elapsed = Date.now() - start;
-      const boardId = await waitForNewBoardFile(home, knownIds);
-      assert.ok(elapsed < 3000, `must return as soon as the post lands, took ${elapsed}ms`);
-      assert.equal(res.result.status, 'posted', 'nothing is awaited on it, so the packet says posted');
-      assert.match(res.result.content[0].text, /nothing awaited/i);
-      const round = JSON.parse(readFileSync(path.join(home, 'boards', `${boardId}.json`), 'utf8')).rounds[0];
-      assert.equal(round.awaited, false, 'setup: the daemon really did mint it not-awaited');
+      assert.ok(elapsed < 3000, `must return as soon as the daemon refuses, took ${elapsed}ms`);
+      assert.equal(res.result.isError, true, 'a refused post is an error result, not a posted board');
+      const text = res.result.content[0].text;
+      assert.match(text, /definitely-not-here-9d2f1a\.html/, 'name the reference that failed');
+      assert.match(text, /CLAUDE_BOARD_REF_ROOTS/, 'and the way out of the boundary');
+      assert.ok(!text.includes('launchctl kickstart'), 'a refusal is not a dead daemon: no revive command, which would cost the reviewer the session');
+
+      await sleep(300); // ample time for a board file to show up if one were coming
+      assert.deepEqual(
+        [...listBoardIds(home)].filter(id => !knownIds.has(id)), [],
+        'a refused post stores nothing: no board, no page, nothing for the reviewer to see',
+      );
     } finally {
       brokenClient.close();
     }
@@ -1286,6 +1292,64 @@ async function main() {
       assert.equal(resFresh.result.board, boardId, 'and the declaring call belongs to that same board');
     } finally {
       reverseClient.close();
+    }
+  });
+
+  // --- a refused post closes nothing (ADR.md entry 112 meeting entry 69) --------
+  // `fresh` used to abandon the previous conversation's board before the post went out,
+  // so a post the daemon then REFUSED had already closed the round the reviewer was
+  // looking at, and nothing replaced it: one mistyped path cost a live question. The
+  // declaration still happens first (it is what makes the call mint a new board at all),
+  // but telling the daemon waits for the post to land.
+
+  await check('a refused post declaring a boundary leaves the previous board\'s open round open, and the re-post closes it', async () => {
+    const knownIds = listBoardIds(home);
+    const client = spawnShim(baseEnv);
+    try {
+      // The conversation before this one: a live board with an open, awaited round.
+      const previous = client.request('tools/call', {
+        name: 'ask', arguments: { title: 'Previous conversation', blocks: [QUESTION] }, _meta: { progressToken: 'refused-prev' },
+      });
+      const previousId = await waitForNewBoardFile(home, knownIds);
+      const storedPath = path.join(home, 'boards', `${previousId}.json`);
+      assert.equal(JSON.parse(readFileSync(storedPath, 'utf8')).rounds[0].status, 'open', 'setup: the previous round is open');
+
+      // The new conversation's first call declares the boundary and is refused.
+      const refused = await withTimeout(client.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'New conversation, bad reference', blocks: [{ kind: 'markdown', source: { path: 'definitely-not-here-4c81ba.md' } }], fresh: true },
+      }), 8000, 'the refusal must come back promptly');
+      assert.equal(refused.result.isError, true);
+      assert.match(refused.result.content[0].text, /definitely-not-here-4c81ba\.md/);
+
+      await sleep(300);
+      assert.deepEqual(
+        [...listBoardIds(home)].filter(id => !knownIds.has(id)), [previousId],
+        'a refused post mints no board of its own',
+      );
+      assert.equal(
+        JSON.parse(readFileSync(storedPath, 'utf8')).rounds[0].status, 'open',
+        'and it closes nothing: the previous conversation\'s round is still the reviewer\'s',
+      );
+
+      // The same call with the reference fixed lands -- and THAT is what closes the
+      // board the boundary walked away from, so the parked abandon is not lost either.
+      const landed = client.request('tools/call', {
+        name: 'ask', arguments: { title: 'New conversation, fixed', blocks: [QUESTION], fresh: true }, _meta: { progressToken: 'refused-next' },
+      });
+      const newId = await waitForNewBoardFile(home, new Set([...knownIds, previousId]));
+      assert.notEqual(newId, previousId);
+      const previousResult = await withTimeout(previous, 8000, 'the previous call must be released by the abandon');
+      assert.equal(previousResult.result.status, 'abandoned', 'the boundary is honoured once a post actually lands');
+      assert.equal(JSON.parse(readFileSync(storedPath, 'utf8')).rounds[0].status, 'abandoned');
+
+      await submitBoard(base, newId, {
+        answers: [{ id: 'q1', status: 'answered', choice: 'Yes', note: '' }],
+      });
+      const landedResult = await withTimeout(landed, 8000, 'the new board\'s call must return');
+      assert.equal(landedResult.result.board, newId);
+    } finally {
+      client.close();
     }
   });
 
