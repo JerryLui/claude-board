@@ -22,9 +22,12 @@ you reference stays read-only.
 ask({ title, blocks, wait, fresh })
 ```
 
-`title` names the round in the tab and on its page in the round pager. `blocks` is the ordered array the
-page shows. One call is one round: the first surfaces the board, later calls push into the same
-board. Post a branch's questions together; only a question whose *shape* depends on an
+`title` names the round in its label and in the round pager, and round 1's title is the
+board's for good: the tab, the page heading, the index row and the menu bar all show it, and
+later rounds never rename it. Shape every title `<work>: <this round>`, the work named the
+same way on every round and the round's own subject after the colon. The pager prefixes
+`Round N` itself, so the title carries none. `blocks` is the ordered array the page shows.
+One call is one round: the first surfaces the board, later calls push into the same board. Post a branch's questions together; only a question whose *shape* depends on an
 answer in this round waits for the next one.
 
 Surfacing it means a tab when no board tab is open anywhere, and otherwise a desktop
