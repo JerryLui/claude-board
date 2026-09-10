@@ -1721,9 +1721,24 @@ refusal regardless, which is the hook an unattended runner sets. `ask` is the wh
 section and of the tab check below it: `read` shows a human nothing, so it runs in a session both
 of them refuse (see "The `read` tool" above).
 
+**Codex and OpenCode export no entrypoint an MCP server can read**, so for them the registration
+itself is the declaration (ADR.md entry 116): `install.sh` step 5 bakes `CLAUDE_BOARD_CLIENT=codex`
+into Codex's `env` table and `CLAUDE_BOARD_CLIENT=opencode` into OpenCode's `environment`, and a
+non-empty `CLAUDE_BOARD_CLIENT` passes the allowlist above. The value names the client for the
+reader; the guard checks only that it is set. A hand-written registration for some other client
+sets it the same way, and in doing so takes on the promise Claude Code's entrypoint makes for it:
+a human is at the keyboard of every session that loads this registration. Codex hands a stdio
+server an allowlist of the parent environment plus that `env` table and nothing else, so the
+declaration has no other way in there, and neither does `CLAUDE_BOARD_HEADLESS` from a shell.
+
 Known residual gap, deliberately not papered over: `/nightly` and `/loop` run *inside* an
 interactive session, so the entrypoint still reads `cli` and no env check can see them. That is a
-rule those commands must carry, not a mechanism the shim can enforce.
+rule those commands must carry, not a mechanism the shim can enforce. `codex exec` and
+`opencode run` are the same gap one step out: they load the same registration as the interactive
+TUI, so the declaration passes there too. The rule an unattended run carries is to leave the
+board out for that run: `codex exec -c mcp_servers.claude-board.enabled=false`, and for OpenCode
+either `CLAUDE_BOARD_HEADLESS=1 opencode run` (OpenCode does pass its environment through) or
+`OPENCODE_CONFIG_CONTENT='{"mcp":{"claude-board":{"enabled":false}}}'`.
 
 **A third, distinct refusal: the daemon cannot open a tab.** SSH onto a machine with no display
 exports `CLAUDE_CODE_ENTRYPOINT=cli` and reaches the daemon fine, but `openBoardTab`

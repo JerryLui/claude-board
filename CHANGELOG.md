@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Codex and OpenCode**: `install.sh` registers the board with every client it finds
+  on `PATH` (`claude mcp add`, `codex mcp add`, one key in OpenCode's `opencode.json`)
+  and needs only one of the three; the Codex and OpenCode registrations carry
+  `CLAUDE_BOARD_CLIENT`, the interactivity declaration the shim's no-human guard
+  accepts in place of Claude Code's entrypoint (ADR 116); the manual is copied to
+  `~/.agents/skills/` for Codex; `uninstall.sh` takes all of it back.
+
 ## 0.1.0 - 2026-08-12
 
 claude-board is a local review surface for Claude Code: instead of asking questions

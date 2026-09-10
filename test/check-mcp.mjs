@@ -2685,16 +2685,46 @@ async function main() {
 
   await check('an absent CLAUDE_CODE_ENTRYPOINT is refused (fails closed)', async () => {
     const before = countBoardFiles(home);
-    const noEntrypointClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined });
+    const noEntrypointClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: undefined });
     const res = await noEntrypointClient.request('tools/call', {
       name: 'ask',
       arguments: { title: 'No entrypoint check', blocks: [{ kind: 'markdown', text: '# x' }] },
     });
     const result = res.result;
     assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /CLAUDE_BOARD_CLIENT is unset/, 'the refusal must name the declaration a Codex or OpenCode registration carries');
     assert.equal(countBoardFiles(home), before);
 
     noEntrypointClient.close();
+  });
+
+  // ADR.md entry 116: Codex and OpenCode export no entrypoint an MCP server can read, so
+  // install.sh bakes CLAUDE_BOARD_CLIENT into their registrations and that declaration
+  // is what passes the guard. HEADLESS=1 still wins over it.
+  await check('CLAUDE_BOARD_CLIENT set with no CLAUDE_CODE_ENTRYPOINT is accepted, and posts', async () => {
+    const knownIds = listBoardIds(home);
+    const declaredClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: 'codex' });
+    const pending = declaredClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'Declared client check', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    const boardId = await waitForNewBoardFile(home, knownIds);
+    assert.ok(boardId, 'a declared client must get its board posted');
+    declaredClient.close();
+    await pending.catch(() => {});
+  });
+
+  await check('CLAUDE_BOARD_HEADLESS=1 still refuses a declared client', async () => {
+    const before = countBoardFiles(home);
+    const forcedClient = spawnShim({ ...baseEnv, CLAUDE_CODE_ENTRYPOINT: undefined, CLAUDE_BOARD_CLIENT: 'opencode', CLAUDE_BOARD_HEADLESS: '1' });
+    const res = await forcedClient.request('tools/call', {
+      name: 'ask',
+      arguments: { title: 'Declared but headless', blocks: [{ kind: 'markdown', text: '# x' }] },
+    });
+    assert.equal(res.result.isError, true);
+    assert.match(res.result.content[0].text, /CLAUDE_BOARD_HEADLESS/);
+    assert.equal(countBoardFiles(home), before);
+    forcedClient.close();
   });
 }
 

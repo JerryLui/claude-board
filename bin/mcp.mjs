@@ -103,6 +103,9 @@ function logErr(...args) {
 // with no human in it": an allowlist on CLAUDE_CODE_ENTRYPOINT that fails
 // closed, plus the CLAUDE_BOARD_HEADLESS=1 override. Measured on Claude Code
 // 2.1.220: `claude -p` exports sdk-cli, an interactive terminal exports cli.
+// Codex and OpenCode export nothing an MCP server can read, so their
+// registrations (install.sh step 5) declare it: CLAUDE_BOARD_CLIENT names the
+// client, and a non-empty value passes. ADR.md entry 116.
 // ---------------------------------------------------------------------------
 
 const INTERACTIVE_ENTRYPOINTS = new Set(['cli', 'vscode', 'jetbrains', 'ide', 'claude-desktop', 'claude-desktop-3p']);
@@ -114,9 +117,9 @@ function assertInteractive() {
     throw new ToolError(headlessRefusalMessage('CLAUDE_BOARD_HEADLESS=1 is set'));
   }
   const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT;
-  if (!entrypoint || !INTERACTIVE_ENTRYPOINTS.has(entrypoint)) {
+  if (!(entrypoint && INTERACTIVE_ENTRYPOINTS.has(entrypoint)) && !process.env.CLAUDE_BOARD_CLIENT) {
     throw new ToolError(headlessRefusalMessage(
-      `CLAUDE_CODE_ENTRYPOINT=${entrypoint ?? '(unset)'} is not one of ${[...INTERACTIVE_ENTRYPOINTS].join(', ')}`
+      `CLAUDE_CODE_ENTRYPOINT=${entrypoint ?? '(unset)'} is not one of ${[...INTERACTIVE_ENTRYPOINTS].join(', ')}, and CLAUDE_BOARD_CLIENT is unset`
     ));
   }
 }
@@ -125,8 +128,8 @@ function headlessRefusalMessage(reason) {
   return (
     `ask refused: no human appears to be watching this session (${reason}). ` +
     `A board is never posted where no human is watching. Nothing was posted or written. ` +
-    `If this is an unattended run (a scheduled routine, /nightly, /loop), it must not call ` +
-    `ask — set CLAUDE_BOARD_HEADLESS=1 or avoid the board entirely.`
+    `If this is an unattended run (a scheduled routine, /nightly, /loop, codex exec, opencode run), it must not call ` +
+    `ask — set CLAUDE_BOARD_HEADLESS=1, disable the server for that run, or avoid the board entirely.`
   );
 }
 

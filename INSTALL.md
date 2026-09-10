@@ -7,12 +7,15 @@ the optional session-start hook it never writes.
 ## Refreshing the board manual
 
 `skills/claude-board/SKILL.md`, the manual for the `ask` tool, is copied to
-`~/.claude/skills/claude-board/SKILL.md` by step 6 of `install.sh`. The copy in `~/.claude`
-is what the agent reads, so editing the clone changes nothing on a machine that already
-installed. Re-run `install.sh`, or copy the one file:
+`~/.claude/skills/claude-board/SKILL.md` by step 6 of `install.sh`, and to
+`~/.agents/skills/claude-board/SKILL.md` when Codex is installed. The copies are what the
+agent reads (Claude Code and OpenCode the first, Codex the second), so editing the clone
+changes nothing on a machine that already installed. Re-run `install.sh`, or copy the one
+file:
 
 ```sh
 cp skills/claude-board/SKILL.md ~/.claude/skills/claude-board/SKILL.md
+cp skills/claude-board/SKILL.md ~/.agents/skills/claude-board/SKILL.md   # Codex
 ```
 
 Make the edit in the clone: a reinstall overwrites the installed copy rather than

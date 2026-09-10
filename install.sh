@@ -13,8 +13,13 @@
 #       grant does and does not widen: SECURITY.md.
 #   2.  ~/Library/LaunchAgents/claude-board.plist -- RunAtLoad + KeepAlive, running
 #       the daemon through that launcher, or directly on the DEGRADED path.
-#   5.  MCP registration: `claude mcp add --scope user`, absolute path into THIS clone.
-#   6.  skills/claude-board/SKILL.md -> ~/.claude/skills/claude-board/.
+#   5.  MCP registration, absolute path into THIS clone, with every client found on
+#       PATH: `claude mcp add --scope user`, `codex mcp add`, and an entry in
+#       ~/.config/opencode/opencode.json. The Codex and OpenCode registrations carry
+#       CLAUDE_BOARD_CLIENT, the interactivity declaration bin/mcp.mjs needs from a
+#       client that exports no entrypoint of its own (ADR.md entry 116).
+#   6.  skills/claude-board/SKILL.md -> ~/.claude/skills/claude-board/ (read by Claude
+#       Code and OpenCode), and -> ~/.agents/skills/claude-board/ when Codex is found.
 #
 # A run that starts under the Claude Code plugin cache installs a fifth thing first:
 # a checkout of itself (default ~/Library/Application Support/claude-board-checkout),
@@ -337,6 +342,9 @@ DAEMON_PATH="$REPO_DIR/bin/daemon.mjs"
 MCP_PATH="$REPO_DIR/bin/mcp.mjs"
 
 MCP_CMD="${CLAUDE_BOARD_MCP_CMD:-claude}"
+CODEX_CMD="${CLAUDE_BOARD_CODEX_CMD:-codex}"
+OPENCODE_CMD="${CLAUDE_BOARD_OPENCODE_CMD:-opencode}"
+OPENCODE_CONFIG_DIR="${CLAUDE_BOARD_OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 LAUNCHCTL_CMD="${CLAUDE_BOARD_LAUNCHCTL_CMD:-launchctl}"
 PLUTIL_CMD="${CLAUDE_BOARD_PLUTIL_CMD:-plutil}"
 LAUNCH_AGENTS_DIR="${CLAUDE_BOARD_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
@@ -346,8 +354,10 @@ APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
 CC_CMD="${CLAUDE_BOARD_CC:-cc}"
 CODESIGN_CMD="${CLAUDE_BOARD_CODESIGN:-codesign}"
 SKILLS_DIR="${CLAUDE_BOARD_SKILLS_DIR:-$HOME/.claude/skills}"
+AGENTS_SKILLS_DIR="${CLAUDE_BOARD_AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 SKILL_SRC="$REPO_DIR/skills/claude-board/SKILL.md"
 SKILL_DEST_DIR="$SKILLS_DIR/claude-board"
+AGENTS_SKILL_DEST_DIR="$AGENTS_SKILLS_DIR/claude-board"
 
 # Needed before the roots/store/port resolution just below, which now carries a previous
 # choice forward by reading it back from here rather than from the plist -- see that
@@ -616,13 +626,19 @@ if [ "$NODE_MAJOR" -lt "$MIN_NODE_MAJOR" ]; then
   exit 1
 fi
 
-# Without the Claude Code CLI there is nothing to register with, and a daemon no session
-# can reach is not an install.
-if ! command -v "$MCP_CMD" >/dev/null 2>&1; then
-  echo "error: the Claude Code CLI ('$MCP_CMD') was not found." >&2
-  echo "       claude-board registers its MCP server with it (step 5 below), so an install" >&2
-  echo "       without it would leave a running daemon no session can reach. Install Claude" >&2
-  echo "       Code — or set CLAUDE_BOARD_MCP_CMD to its path — and re-run this script." >&2
+# Without a client CLI there is nothing to register with, and a daemon no session can
+# reach is not an install. Every client found on PATH is registered at step 5; the
+# decision is made once, here, so step 5 and step 6 branch on the same answer.
+HAVE_CLAUDE=0; HAVE_CODEX=0; HAVE_OPENCODE=0
+command -v "$MCP_CMD" >/dev/null 2>&1 && HAVE_CLAUDE=1
+command -v "$CODEX_CMD" >/dev/null 2>&1 && HAVE_CODEX=1
+command -v "$OPENCODE_CMD" >/dev/null 2>&1 && HAVE_OPENCODE=1
+if [ "$HAVE_CLAUDE" -eq 0 ] && [ "$HAVE_CODEX" -eq 0 ] && [ "$HAVE_OPENCODE" -eq 0 ]; then
+  echo "error: no client CLI was found: Claude Code ('$MCP_CMD'), Codex ('$CODEX_CMD') or OpenCode ('$OPENCODE_CMD')." >&2
+  echo "       claude-board registers its MCP server with each one it finds (step 5 below), so an" >&2
+  echo "       install without any would leave a running daemon no session can reach. Install one" >&2
+  echo "       — or set CLAUDE_BOARD_MCP_CMD, CLAUDE_BOARD_CODEX_CMD or CLAUDE_BOARD_OPENCODE_CMD" >&2
+  echo "       to its path — and re-run this script." >&2
   exit 1
 fi
 
@@ -1529,39 +1545,88 @@ HEALTH_ELAPSED_SECONDS=$((SECONDS - HEALTH_START_SECONDS))
 cbs_step_ok "health" "responding" "${HEALTH_ELAPSED_SECONDS}s"
 
 # --- 5. MCP registration ---------------------------------------------------
-# Claude Code owns this config, not this repo. Remove-then-add unconditionally: the remove
+# Each client owns its config, not this repo. Remove-then-add unconditionally: the remove
 # is an ignored no-op on a fresh machine and clears a stale registration from another clone
 # path, so a second run neither duplicates nor errors. Last, so nothing above can fail with
 # this half-rewritten. `claude mcp add`'s own stdout chatter (it prints two lines about
-# writing its config) is captured, not shown, on a good run.
-"$MCP_CMD" mcp remove "$LABEL" --scope user >/dev/null 2>&1 || true
-if ! cbs_run_captured "$MCP_CMD" mcp add "$LABEL" --scope user -- "$NODE_BIN" "$MCP_PATH"; then
-  cbs_step_fail "mcp" "'$MCP_CMD mcp add' failed"
-  cbs_detail "the daemon is running, but Claude Code has no registration for it"
+# writing its config) is captured, not shown, on a good run. One step line for all three
+# clients (ADR.md entry 100 holds the transcript to its budget), naming the ones served.
+#
+# Codex and OpenCode export no entrypoint an MCP server could read, so their registrations
+# carry CLAUDE_BOARD_CLIENT (ADR.md entry 116; bin/mcp.mjs assertInteractive). Codex hands
+# a stdio server only an allowlist of the parent environment plus the registration's own
+# `env` table, so that table is the ONLY way the declaration reaches the shim there.
+mcp_step_failed() {  # CLIENT COMMAND-DESCRIPTION
+  cbs_step_fail "mcp" "$2 failed"
+  cbs_detail "the daemon is running, but $1 has no registration for it"
   cbs_detail "re-run this script once that command works"
   cbs_print_captured
   exit 1
+}
+REGISTERED_WITH=""
+if [ "$HAVE_CLAUDE" -eq 1 ]; then
+  "$MCP_CMD" mcp remove "$LABEL" --scope user >/dev/null 2>&1 || true
+  cbs_run_captured "$MCP_CMD" mcp add "$LABEL" --scope user -- "$NODE_BIN" "$MCP_PATH" \
+    || mcp_step_failed "Claude Code" "'$MCP_CMD mcp add'"
+  REGISTERED_WITH="claude"
 fi
-cbs_step_ok "mcp" "registered with claude"
+if [ "$HAVE_CODEX" -eq 1 ]; then
+  "$CODEX_CMD" mcp remove "$LABEL" >/dev/null 2>&1 || true
+  cbs_run_captured "$CODEX_CMD" mcp add "$LABEL" --env CLAUDE_BOARD_CLIENT=codex -- "$NODE_BIN" "$MCP_PATH" \
+    || mcp_step_failed "Codex" "'$CODEX_CMD mcp add'"
+  REGISTERED_WITH="${REGISTERED_WITH:+$REGISTERED_WITH, }codex"
+fi
+if [ "$HAVE_OPENCODE" -eq 1 ]; then
+  # OpenCode has no registrar command; its global config is a JSON file it merges with
+  # any opencode.jsonc beside it, so this script owns one key in opencode.json and never
+  # touches the jsonc (the file a user hand-edits and comments). Read-modify-write through
+  # node: a file this script cannot parse is reported, never overwritten.
+  mkdir -p "$OPENCODE_CONFIG_DIR"
+  cbs_run_captured "$NODE_BIN" - "$OPENCODE_CONFIG_DIR/opencode.json" "$LABEL" "$NODE_BIN" "$MCP_PATH" <<'JS' \
+    || mcp_step_failed "OpenCode" "writing $(display_path "$OPENCODE_CONFIG_DIR/opencode.json")"
+const fs = require('node:fs');
+const [file, label, node, shim] = process.argv.slice(2);
+let cfg = { $schema: 'https://opencode.ai/config.json' };
+if (fs.existsSync(file)) {
+  try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (err) { console.error(`${file} is not plain JSON (${err.message}); add the claude-board entry by hand, see README`); process.exit(1); }
+}
+if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) { console.error(`${file} is not a JSON object`); process.exit(1); }
+cfg.mcp = cfg.mcp && typeof cfg.mcp === 'object' ? cfg.mcp : {};
+cfg.mcp[label] = { type: 'local', command: [node, shim], environment: { CLAUDE_BOARD_CLIENT: 'opencode' } };
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n');
+JS
+  REGISTERED_WITH="${REGISTERED_WITH:+$REGISTERED_WITH, }opencode"
+fi
+cbs_step_ok "mcp" "registered with $REGISTERED_WITH"
 
 # --- 6. The manual ---------------------------------------------------------
-# skills/claude-board/SKILL.md -> where Claude Code looks for a personal skill. Not a
-# caller (ADR.md entries 5 and 11): it teaches the `ask` tool's call shape, blocks, widgets,
-# packet and failure modes, and decides nothing about when to ask, so callers name it and
-# keep only what is specific to them.
+# skills/claude-board/SKILL.md -> where Claude Code looks for a personal skill, which
+# OpenCode reads too; Codex reads ~/.agents/skills instead, so a second copy lands there
+# when Codex was found. Not a caller (ADR.md entries 5 and 11): it teaches the `ask` tool's
+# call shape, blocks, widgets, packet and failure modes, and decides nothing about when to
+# ask, so callers name it and keep only what is specific to them.
 #
 # Unconditional overwrite -- no hash record, no did-they-edit-it branch. The file is this
 # repo's and a copy that quietly stops matching the shim is the failure this step prevents.
 # Non-fatal: a daemon and a registration are the install.
+MANUAL_DESTS=("$SKILL_DEST_DIR")
+[ "$HAVE_CODEX" -eq 1 ] && MANUAL_DESTS+=("$AGENTS_SKILL_DEST_DIR")
 if [ ! -f "$SKILL_SRC" ]; then
   cbs_step_warn "manual" "$SKILL_SRC is missing"
   cbs_detail "skills that name the claude-board skill will not find it"
   cbs_detail "the daemon and the MCP registration are unaffected"
-elif ! (mkdir -p "$SKILL_DEST_DIR" && cp "$SKILL_SRC" "$SKILL_DEST_DIR/SKILL.md"); then
-  cbs_step_warn "manual" "could not write $SKILL_DEST_DIR/SKILL.md"
-  cbs_detail "the daemon and the MCP registration are unaffected"
 else
-  cbs_step_ok "manual" "installed" "$(display_path "$SKILL_DEST_DIR/SKILL.md")"
+  MANUAL_INSTALLED=""
+  for _dest in "${MANUAL_DESTS[@]}"; do
+    if ! (mkdir -p "$_dest" && cp "$SKILL_SRC" "$_dest/SKILL.md"); then
+      cbs_step_warn "manual" "could not write $_dest/SKILL.md"
+      cbs_detail "the daemon and the MCP registration are unaffected"
+    else
+      MANUAL_INSTALLED="${MANUAL_INSTALLED:+$MANUAL_INSTALLED, }$(display_path "$_dest/SKILL.md")"
+    fi
+  done
+  [ -n "$MANUAL_INSTALLED" ] && cbs_step_ok "manual" "installed" "$MANUAL_INSTALLED"
 fi
 echo
 

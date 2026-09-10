@@ -102,3 +102,4 @@ link where it is worth reading.
 | 113 | [A stage link is handled by the board, and an outbound address opens at once](.agents/adr/0113-a-stage-link-is-handled-by-the-board.md) | 2026-09-10 | relates to 95, 59 |
 | 114 | [An Abandoned round accepts a late Send](.agents/adr/0114-an-abandoned-round-accepts-a-late-send.md) | 2026-09-10 | narrows 69; relates to 50, 107 |
 | 115 | [`read` is a pure read of a board](.agents/adr/0115-read-is-a-pure-read-of-a-board.md) | 2026-09-10 | relates to 35, 107, 114 |
+| 116 | [One daemon, three clients: the registration declares the human](.agents/adr/0116-one-daemon-three-clients-the-registration-declares-the-human.md) | 2026-09-10 | relates to 5, 68, 100 |

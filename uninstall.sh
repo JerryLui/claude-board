@@ -3,11 +3,12 @@
 # this repository:
 #
 #   1. the launchd job (bootout) and its plist in ~/Library/LaunchAgents,
-#   2. the MCP registration (`claude mcp remove --scope user`),
+#   2. the MCP registrations (`claude mcp remove --scope user`, `codex mcp remove`, and
+#      the claude-board key in ~/.config/opencode/opencode.json),
 #   3. ~/Applications/claude-board.app, the launcher bundle, the stamp that records
 #      what it was built from, and the bundle's LaunchServices record,
-#   4. ~/.claude/skills/claude-board/SKILL.md, the manual install.sh step 6 copied
-#      there out of this clone,
+#   4. ~/.claude/skills/claude-board/SKILL.md and ~/.agents/skills/claude-board/SKILL.md,
+#      the manual install.sh step 6 copied there out of this clone,
 #   5. the plugin checkout (default ~/Library/Application Support/claude-board-checkout)
 #      and its record beside the secret — only when it carries the marker file the
 #      plugin-origin relocation plants, see step 2e.
@@ -68,6 +69,8 @@
 #   CLAUDE_BOARD_LAUNCH_AGENTS_DIR   default: ~/Library/LaunchAgents
 #   CLAUDE_BOARD_LOG_DIR             default: ~/Library/Logs/claude-board (report only)
 #   CLAUDE_BOARD_MCP_CMD             default: claude
+#   CLAUDE_BOARD_CODEX_CMD           default: codex
+#   CLAUDE_BOARD_OPENCODE_CONFIG_DIR default: ~/.config/opencode
 #   CLAUDE_BOARD_LAUNCHCTL_CMD       default: launchctl
 #   CLAUDE_BOARD_SECRET_FILE         default: ~/.config/claude-board/secret (report only)
 #   CLAUDE_BOARD_HOME                default: the store install.sh recorded in
@@ -79,6 +82,7 @@
 #                                     boards/ and pages/ are never touched)
 #   CLAUDE_BOARD_APP_DIR             default: ~/Applications
 #   CLAUDE_BOARD_SKILLS_DIR          default: ~/.claude/skills
+#   CLAUDE_BOARD_AGENTS_SKILLS_DIR   default: ~/.agents/skills
 #   CLAUDE_BOARD_COLOR               default: unset (colour on when stdout is a terminal, off
 #                                     under NO_COLOR or TERM=dumb; "1" or "always" forces it
 #                                     on, even when piped)
@@ -88,7 +92,9 @@
 #                                     copy of the fence is)
 #
 # macOS only, zero dependencies: bash + coreutils + launchctl, nothing this OS
-# doesn't already ship.
+# doesn't already ship -- except that the OpenCode entry in step 2 is one key in a JSON
+# file, read and rewritten through the node the install needed anyway (CLAUDE_BOARD_NODE
+# or PATH); without one the entry is named for removal by hand, and nothing else waits.
 
 set -euo pipefail
 
@@ -331,6 +337,8 @@ cbs_print_captured() {
 # --- END transcript styling ---
 
 MCP_CMD="${CLAUDE_BOARD_MCP_CMD:-claude}"
+CODEX_CMD="${CLAUDE_BOARD_CODEX_CMD:-codex}"
+OPENCODE_CONFIG_DIR="${CLAUDE_BOARD_OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 LAUNCHCTL_CMD="${CLAUDE_BOARD_LAUNCHCTL_CMD:-launchctl}"
 LAUNCH_AGENTS_DIR="${CLAUDE_BOARD_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 LOG_DIR="${CLAUDE_BOARD_LOG_DIR:-$HOME/Library/Logs/claude-board}"
@@ -338,6 +346,7 @@ SECRET_FILE="${CLAUDE_BOARD_SECRET_FILE:-$HOME/.config/claude-board/secret}"
 
 APP_DIR="${CLAUDE_BOARD_APP_DIR:-$HOME/Applications}"
 SKILLS_DIR="${CLAUDE_BOARD_SKILLS_DIR:-$HOME/.claude/skills}"
+AGENTS_SKILLS_DIR="${CLAUDE_BOARD_AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 
 LABEL="claude-board"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/${LABEL}.plist"
@@ -366,6 +375,9 @@ APP_PATH="$APP_DIR/${LABEL}.app"
 LAUNCHER_STAMP_FILE="$SECRET_DIR/launcher.stamp"
 SKILL_DIR="$SKILLS_DIR/${LABEL}"
 SKILL_FILE="$SKILL_DIR/SKILL.md"
+AGENTS_SKILL_DIR="$AGENTS_SKILLS_DIR/${LABEL}"
+AGENTS_SKILL_FILE="$AGENTS_SKILL_DIR/SKILL.md"
+OPENCODE_CONFIG="$OPENCODE_CONFIG_DIR/opencode.json"
 
 cbs_header "claude-board uninstall"
 echo
@@ -475,11 +487,50 @@ else
   cbs_step_ok "launcher" "nothing to remove" "$APP_PATH"
 fi
 
-# --- 2. MCP registration -------------------------------------------------------
+# --- 2. MCP registrations ------------------------------------------------------
 # After launchd, not before: once this script has already started tearing the
-# daemon down, there is no reason to still be telling Claude Code to talk to it.
+# daemon down, there is no reason to still be telling any client to talk to it. One
+# step line naming the clients it was removed from, mirroring install.sh step 5. The
+# OpenCode entry is one key in a JSON file this script did not create, so the key goes
+# and the file stays; a file that does not parse is left alone and named.
+REMOVED_FROM=""
 if "$MCP_CMD" mcp remove "$LABEL" --scope user >/dev/null 2>&1; then
-  cbs_step_ok "mcp" "removed from claude"
+  REMOVED_FROM="claude"
+fi
+# `codex mcp remove` exits 0 for a server that was never there (it prints "No MCP server
+# named ... found." and moves on), so `mcp get`, which does exit 1, is the question.
+if command -v "$CODEX_CMD" >/dev/null 2>&1 && "$CODEX_CMD" mcp get "$LABEL" >/dev/null 2>&1 \
+   && "$CODEX_CMD" mcp remove "$LABEL" >/dev/null 2>&1; then
+  REMOVED_FROM="${REMOVED_FROM:+$REMOVED_FROM, }codex"
+fi
+NODE_BIN="${CLAUDE_BOARD_NODE:-$(command -v node 2>/dev/null || true)}"
+if [ -f "$OPENCODE_CONFIG" ] && [ -z "$NODE_BIN" ]; then
+  OPENCODE_RESULT="unparsed: no node on PATH to read it with (set CLAUDE_BOARD_NODE)"
+elif [ -f "$OPENCODE_CONFIG" ]; then
+  OPENCODE_RESULT="$("$NODE_BIN" - "$OPENCODE_CONFIG" "$LABEL" <<'JS' 2>&1 || true
+const fs = require('node:fs');
+const [file, label] = process.argv.slice(2);
+let cfg;
+try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (err) { console.log(`unparsed: ${err.message}`); process.exit(0); }
+if (!cfg || typeof cfg !== 'object' || !cfg.mcp || !(label in cfg.mcp)) { console.log('absent'); process.exit(0); }
+delete cfg.mcp[label];
+if (Object.keys(cfg.mcp).length === 0) delete cfg.mcp;
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n');
+console.log('removed');
+JS
+)"
+else
+  OPENCODE_RESULT="absent"
+fi
+case "$OPENCODE_RESULT" in
+  removed) REMOVED_FROM="${REMOVED_FROM:+$REMOVED_FROM, }opencode" ;;
+  absent) ;;
+  *) cbs_step_warn "mcp" "could not read $OPENCODE_CONFIG"
+     cbs_detail "$OPENCODE_RESULT"
+     cbs_detail "remove its mcp.$LABEL entry by hand" ;;
+esac
+if [ -n "$REMOVED_FROM" ]; then
+  cbs_step_ok "mcp" "removed from $REMOVED_FROM"
 else
   cbs_step_ok "mcp" "not registered"
 fi
@@ -512,11 +563,18 @@ fi
 # in the clone, and says so in its own first line).
 #
 # The directory goes only if the copy left it empty, so a `check.mjs` or a note the user
-# put beside it survives.
-if [ -f "$SKILL_FILE" ]; then
-  rm -f "$SKILL_FILE"
-  rmdir "$SKILL_DIR" 2>/dev/null || true
-  cbs_step_ok "manual" "removed" "$SKILL_FILE"
+# put beside it survives. The ~/.agents/skills copy install.sh writes for Codex goes the
+# same way; one step line names every copy found.
+MANUAL_REMOVED=""
+for _skill_dir in "$SKILL_DIR" "$AGENTS_SKILL_DIR"; do
+  if [ -f "$_skill_dir/SKILL.md" ]; then
+    rm -f "$_skill_dir/SKILL.md"
+    rmdir "$_skill_dir" 2>/dev/null || true
+    MANUAL_REMOVED="${MANUAL_REMOVED:+$MANUAL_REMOVED, }$_skill_dir/SKILL.md"
+  fi
+done
+if [ -n "$MANUAL_REMOVED" ]; then
+  cbs_step_ok "manual" "removed" "$MANUAL_REMOVED"
 else
   cbs_step_ok "manual" "not installed" "$SKILL_FILE"
 fi

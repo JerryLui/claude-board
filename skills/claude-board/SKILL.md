@@ -16,7 +16,9 @@ you reference stays read-only.
 
 ## The call
 
-`mcp__claude-board__ask` takes four arguments, two of them optional:
+`ask`, on the `claude-board` MCP server, takes four arguments, two of them optional. Claude
+Code lists it as `mcp__claude-board__ask`; Codex and OpenCode prefix the same server and tool
+name their own way, so find it under `claude-board` in the tool list:
 
 ```js
 ask({ title, blocks, wait, fresh })
@@ -269,7 +271,8 @@ packet: the same `round` check is what tells you it is an answer you already hav
 
 ## Collecting a late answer
 
-`mcp__claude-board__read` takes one argument, and returns one board:
+`read`, on the same server (`mcp__claude-board__read` in Claude Code), takes one argument, and
+returns one board:
 
 ```js
 read({ board })   // the URL an ask returned, or the bare board id

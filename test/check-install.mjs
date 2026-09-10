@@ -50,7 +50,11 @@ function loadState() {
 }
 function saveState(state) { fs.writeFileSync(statePath, JSON.stringify(state, null, 2)); }
 
-if (args[0] === 'mcp' && args[1] === 'remove') {
+if (args[0] === 'mcp' && args[1] === 'get') {
+  // \`codex mcp get NAME\`: exit 1 when absent, which is what uninstall.sh asks, since the
+  // real \`codex mcp remove\` exits 0 either way.
+  process.exit(args[2] in loadState() ? 0 : 1);
+} else if (args[0] === 'mcp' && args[1] === 'remove') {
   const label = args[2];
   const state = loadState();
   if (!(label in state)) process.exit(1); // nothing to remove, like the real CLI
@@ -63,14 +67,21 @@ if (args[0] === 'mcp' && args[1] === 'remove') {
   const scope = scopeIdx >= 0 ? args[scopeIdx + 1] : null;
   const dashIdx = args.indexOf('--');
   const command = dashIdx >= 0 ? args.slice(dashIdx + 1) : [];
+  // \`codex mcp add\`'s --env KEY=VALUE, repeatable; \`claude mcp add\` has one too.
+  const env = {};
+  args.forEach((a, i) => { if (a === '--env' && i < dashIdx) { const [k, ...v] = args[i + 1].split('='); env[k] = v.join('='); } });
   const state = loadState();
-  state[label] = { scope, command };
+  state[label] = { scope, command, env };
   saveState(state);
   process.exit(0);
 } else {
   process.exit(1);
 }
 `;
+// The same stub standing in for \`codex\`: its \`mcp add NAME --env K=V -- CMD...\` and
+// \`mcp remove NAME\` are the claude CLI's minus --scope, so one template serves both,
+// keyed to its own log and state files.
+const STUB_CODEX = STUB_CLAUDE.replaceAll('STUB_CLAUDE_', 'STUB_CODEX_').replace('the real `claude` CLI', 'the real `codex` CLI');
 
 const STUB_LAUNCHCTL = `#!/usr/bin/env node
 // Test stub standing in for the real launchctl. Records every invocation and
@@ -154,14 +165,24 @@ const pomodoroFile = path.join(storeDir, 'pomodoro.json');
 writeFileSync(pomodoroFile, JSON.stringify({ deadline: 1234567890, cycles: 2, workMinutes: 25 }));
 
 const claudeStub = path.join(binDir, 'claude-stub.mjs');
+const codexStub = path.join(binDir, 'codex-stub.mjs');
+// install.sh only asks whether \`opencode\` is on PATH (its registration is a config file,
+// not a command), so the stub standing in for it is an executable that is never run.
+const opencodeStub = path.join(binDir, 'opencode-stub.sh');
 const launchctlStub = path.join(binDir, 'launchctl-stub.mjs');
 writeFileSync(claudeStub, STUB_CLAUDE);
+writeFileSync(codexStub, STUB_CODEX);
+writeFileSync(opencodeStub, '#!/bin/sh\nexit 0\n');
 writeFileSync(launchctlStub, STUB_LAUNCHCTL);
 chmodSync(claudeStub, 0o755);
+chmodSync(codexStub, 0o755);
+chmodSync(opencodeStub, 0o755);
 chmodSync(launchctlStub, 0o755);
 
 const claudeLog = path.join(workDir, 'claude-invocations.log');
 const claudeState = path.join(workDir, 'claude-registrations.json');
+const codexLog = path.join(workDir, 'codex-invocations.log');
+const codexState = path.join(workDir, 'codex-registrations.json');
 const launchctlLog = path.join(workDir, 'launchctl-invocations.log');
 const launchctlState = path.join(workDir, 'launchctl-state.json');
 
@@ -247,10 +268,22 @@ const secretFile = path.join(workDir, 'config', 'claude-board', 'secret');
 // write into the real ~/.claude/skills on the developer's machine.
 const skillsDir = path.join(workDir, 'skills');
 const installedSkill = path.join(skillsDir, 'claude-board', 'SKILL.md');
+// The two other client surfaces step 5 and step 6 write, seamed for the same reason:
+// the Codex copy of the manual (~/.agents/skills) and OpenCode's global config file.
+const agentsSkillsDir = path.join(workDir, 'agents-skills');
+const installedAgentsSkill = path.join(agentsSkillsDir, 'claude-board', 'SKILL.md');
+const opencodeDir = path.join(workDir, 'opencode');
+const opencodeConfig = path.join(opencodeDir, 'opencode.json');
 
 const env = {
   ...process.env,
   CLAUDE_BOARD_SKILLS_DIR: skillsDir,
+  CLAUDE_BOARD_AGENTS_SKILLS_DIR: agentsSkillsDir,
+  CLAUDE_BOARD_OPENCODE_CONFIG_DIR: opencodeDir,
+  CLAUDE_BOARD_CODEX_CMD: codexStub,
+  CLAUDE_BOARD_OPENCODE_CMD: opencodeStub,
+  STUB_CODEX_LOG: codexLog,
+  STUB_CODEX_STATE: codexState,
   // Both scripts default this to a real path under ~/Library and delete what they
   // find there (marker-gated); the suite's runs stay inside workDir.
   CLAUDE_BOARD_CHECKOUT_DIR: path.join(workDir, 'checkout'),
@@ -298,10 +331,24 @@ function quietStubs(tag) {
   return {
     STUB_CLAUDE_LOG: path.join(workDir, `claude-invocations-${tag}.log`),
     STUB_CLAUDE_STATE: path.join(workDir, `claude-registrations-${tag}.json`),
+    STUB_CODEX_LOG: path.join(workDir, `codex-invocations-${tag}.log`),
+    STUB_CODEX_STATE: path.join(workDir, `codex-registrations-${tag}.json`),
+    // The OpenCode config and the Codex manual copy are registrations too: a run
+    // sharing them with the main install would overwrite the entry it asserts on.
+    CLAUDE_BOARD_OPENCODE_CONFIG_DIR: path.join(workDir, `opencode-${tag}`),
+    CLAUDE_BOARD_AGENTS_SKILLS_DIR: path.join(workDir, `agents-skills-${tag}`),
     STUB_LAUNCHCTL_LOG: path.join(workDir, `launchctl-invocations-${tag}.log`),
     STUB_LAUNCHCTL_STATE: path.join(workDir, `launchctl-state-${tag}.json`),
   };
 }
+
+/** No client CLI on the machine at all: the preflight refusal, and the way a check
+ * that wants install.sh to abort before writing anything gets there. */
+const NO_CLIENTS = {
+  CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
+  CLAUDE_BOARD_CODEX_CMD: 'claude-board-no-such-cli',
+  CLAUDE_BOARD_OPENCODE_CMD: 'claude-board-no-such-cli',
+};
 
 // --- a source edit must not restart the daemon --------------------------------
 //
@@ -1158,6 +1205,39 @@ async function main() {
     assert.equal(removes.length, 2, 'one reconciling remove attempt per install.sh run');
   });
 
+  // ADR.md entry 116: the same step 5 serves Codex and OpenCode, each registration
+  // carrying CLAUDE_BOARD_CLIENT, the declaration bin/mcp.mjs's guard needs from a client
+  // that exports no entrypoint of its own.
+  await check('the same runs register with codex, declaring the client, and reconcile the same way', async () => {
+    const state = JSON.parse(readFileSync(codexState, 'utf8'));
+    assert.deepEqual(Object.keys(state), ['claude-board']);
+    const reg = state['claude-board'];
+    assert.equal(reg.command[1], path.join(repoRoot, 'bin', 'mcp.mjs'));
+    assert.deepEqual(reg.env, { CLAUDE_BOARD_CLIENT: 'codex' });
+    const lines = readFileSync(codexLog, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    assert.equal(lines.filter(l => l[0] === 'mcp' && l[1] === 'add').length, 2, 'one add per install.sh run');
+    assert.equal(lines.filter(l => l[0] === 'mcp' && l[1] === 'remove').length, 2, 'one reconciling remove per install.sh run');
+  });
+
+  await check('and write the OpenCode entry into a fresh opencode.json, with the schema pointer OpenCode expects', async () => {
+    const cfg = JSON.parse(readFileSync(opencodeConfig, 'utf8'));
+    assert.equal(cfg.$schema, 'https://opencode.ai/config.json');
+    assert.deepEqual(cfg.mcp['claude-board'], {
+      type: 'local',
+      command: [JSON.parse(readFileSync(codexState, 'utf8'))['claude-board'].command[0], path.join(repoRoot, 'bin', 'mcp.mjs')],
+      environment: { CLAUDE_BOARD_CLIENT: 'opencode' },
+    });
+  });
+
+  await check('one mcp line names every client served, and one manual line every copy', async () => {
+    assert.match(second.stdout, /registered with claude, codex, opencode$/m);
+    assert.equal(readFileSync(installedAgentsSkill, 'utf8'), readFileSync(installedSkill, 'utf8'), 'the Codex copy is the same manual');
+    const manualLine = second.stdout.split('\n').find(l => /manual/.test(l) && /installed/.test(l));
+    assert.ok(manualLine, 'a manual step line');
+    assert.match(manualLine, /\.claude\/skills\/claude-board\/SKILL\.md|skills\/claude-board\/SKILL\.md/);
+    assert.match(manualLine, /agents-skills\/claude-board\/SKILL\.md/);
+  });
+
   await check('launchd is (re)loaded idempotently: bootout/bootstrap/enable/kickstart each run, never the real launchctl', async () => {
     const lines = readFileSync(launchctlLog, 'utf8').trim().split('\n').map(l => JSON.parse(l));
     const verbs = lines.map(l => l[0]);
@@ -1568,6 +1648,10 @@ async function main() {
         CLAUDE_BOARD_SECRET_FILE: path.join(secretDir, 'secret'),
         STUB_CLAUDE_LOG: path.join(fakeHome, 'claude-invocations.log'),
         STUB_CLAUDE_STATE: path.join(fakeHome, 'claude-registrations.json'),
+        STUB_CODEX_LOG: path.join(fakeHome, 'codex-invocations.log'),
+        STUB_CODEX_STATE: path.join(fakeHome, 'codex-registrations.json'),
+        CLAUDE_BOARD_OPENCODE_CONFIG_DIR: path.join(fakeHome, 'opencode'),
+        CLAUDE_BOARD_AGENTS_SKILLS_DIR: path.join(fakeHome, 'agents-skills'),
         STUB_LAUNCHCTL_LOG: path.join(fakeHome, 'launchctl-invocations.log'),
         STUB_LAUNCHCTL_STATE: path.join(fakeHome, 'launchctl-state.json'),
       };
@@ -1648,6 +1732,10 @@ async function main() {
         CLAUDE_BOARD_SKILLS_DIR: path.join(fakeHome, 'skills'),
         STUB_CLAUDE_LOG: path.join(fakeHome, 'claude-invocations.log'),
         STUB_CLAUDE_STATE: path.join(fakeHome, 'claude-registrations.json'),
+        STUB_CODEX_LOG: path.join(fakeHome, 'codex-invocations.log'),
+        STUB_CODEX_STATE: path.join(fakeHome, 'codex-registrations.json'),
+        CLAUDE_BOARD_OPENCODE_CONFIG_DIR: path.join(fakeHome, 'opencode'),
+        CLAUDE_BOARD_AGENTS_SKILLS_DIR: path.join(fakeHome, 'agents-skills'),
         STUB_LAUNCHCTL_LOG: path.join(fakeHome, 'launchctl-invocations.log'),
         STUB_LAUNCHCTL_STATE: path.join(fakeHome, 'launchctl-state.json'),
       };
@@ -1913,16 +2001,99 @@ async function main() {
     assert.ok(!existsSync(root), 'a refused install must not have written anything at all');
   });
 
-  await check('preflight refuses a missing claude CLI, before writing anything', async () => {
-    const { root, env: e } = preflightRun('no-claude', { CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli' });
+  await check('preflight refuses a machine with no client CLI at all, before writing anything', async () => {
+    const { root, env: e } = preflightRun('no-clients', NO_CLIENTS);
     const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
     assert.notEqual(r.status, 0, 'no CLI to register with must fail the install');
     assert.match(r.stderr, /claude-board-no-such-cli/, 'the message must name the command it looked for');
-    assert.match(r.stderr, /Claude Code/, 'and what that command is');
+    for (const client of ['Claude Code', 'Codex', 'OpenCode']) {
+      assert.match(r.stderr, new RegExp(client), `and name ${client} as one of the clients it accepts`);
+    }
     assert.ok(
       !existsSync(root),
       'this is the one that used to fail at step 5 of 6, after the plist, the bundle and the daemon were already there',
     );
+  });
+
+  // ADR.md entry 116: Claude Code is one client of three, not the gate.
+  await check('a machine with codex but no claude still installs, registering with codex alone', async () => {
+    const { root, env: e } = preflightRun('codex-only', {
+      CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
+      CLAUDE_BOARD_OPENCODE_CMD: 'claude-board-no-such-cli',
+    });
+    e.CLAUDE_BOARD_AGENTS_SKILLS_DIR = path.join(root, 'agents-skills');
+    e.CLAUDE_BOARD_OPENCODE_CONFIG_DIR = path.join(root, 'opencode');
+    const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(r.stdout, /registered with codex$/m, 'the mcp line names codex and nothing else');
+    const state = JSON.parse(readFileSync(e.STUB_CODEX_STATE, 'utf8'));
+    assert.ok('claude-board' in state, 'codex must hold the registration');
+    assert.ok(!existsSync(e.STUB_CLAUDE_STATE), 'the absent claude CLI must never have been invoked');
+    assert.ok(!existsSync(path.join(root, 'opencode')), 'no OpenCode config may be written for a client that is not there');
+    assert.ok(existsSync(path.join(root, 'agents-skills', 'claude-board', 'SKILL.md')), 'the Codex copy of the manual must land');
+    assert.ok(existsSync(path.join(root, 'skills', 'claude-board', 'SKILL.md')), 'and so must the ~/.claude/skills copy, which OpenCode also reads');
+  });
+
+  await check('a machine with claude alone writes nothing for codex or opencode', async () => {
+    const { root, env: e } = preflightRun('claude-only', {
+      CLAUDE_BOARD_CODEX_CMD: 'claude-board-no-such-cli',
+      CLAUDE_BOARD_OPENCODE_CMD: 'claude-board-no-such-cli',
+    });
+    e.CLAUDE_BOARD_AGENTS_SKILLS_DIR = path.join(root, 'agents-skills');
+    e.CLAUDE_BOARD_OPENCODE_CONFIG_DIR = path.join(root, 'opencode');
+    const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(r.stdout, /registered with claude$/m);
+    assert.ok(!existsSync(e.STUB_CODEX_STATE), 'the absent codex CLI must never have been invoked');
+    assert.ok(!existsSync(path.join(root, 'opencode')));
+    assert.ok(!existsSync(path.join(root, 'agents-skills')), 'no ~/.agents/skills copy without Codex to read it');
+  });
+
+  await check('the OpenCode entry merges into an existing opencode.json and survives a re-run byte for byte', async () => {
+    const { root, env: e } = preflightRun('opencode-merge', {});
+    e.CLAUDE_BOARD_AGENTS_SKILLS_DIR = path.join(root, 'agents-skills');
+    e.CLAUDE_BOARD_OPENCODE_CONFIG_DIR = path.join(root, 'opencode');
+    const file = path.join(root, 'opencode', 'opencode.json');
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ theme: 'dark', mcp: { other: { type: 'remote', url: 'https://example.test' } } }, null, 2) + '\n');
+    const first = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+    const cfg = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(cfg.theme, 'dark', 'the user\'s other keys survive');
+    assert.deepEqual(cfg.mcp.other, { type: 'remote', url: 'https://example.test' }, 'and so do their other servers');
+    assert.equal(cfg.mcp['claude-board'].type, 'local');
+    assert.equal(cfg.mcp['claude-board'].command[1], path.join(repoRoot, 'bin', 'mcp.mjs'));
+    assert.deepEqual(cfg.mcp['claude-board'].environment, { CLAUDE_BOARD_CLIENT: 'opencode' }, 'the registration carries the interactivity declaration');
+    const bytes = readFileSync(file, 'utf8');
+    const second = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.equal(second.status, 0);
+    assert.equal(readFileSync(file, 'utf8'), bytes, 'a second run rewrites nothing');
+
+    // And uninstall takes back exactly that key: the neighbour server and the user's
+    // keys stay, and the file itself is theirs, so it stays too.
+    const u = spawnSync('bash', [uninstallScript], { env: e, encoding: 'utf8' });
+    assert.equal(u.status, 0, `stdout:\n${u.stdout}\nstderr:\n${u.stderr}`);
+    const after = JSON.parse(readFileSync(file, 'utf8'));
+    assert.ok(!('claude-board' in after.mcp), 'uninstall must remove the entry');
+    assert.deepEqual(after.mcp.other, { type: 'remote', url: 'https://example.test' });
+    assert.equal(after.theme, 'dark');
+  });
+
+  await check('an opencode.json that is not plain JSON fails the mcp step, names the file, and is left untouched', async () => {
+    const { root, env: e } = preflightRun('opencode-jsonc', {});
+    e.CLAUDE_BOARD_AGENTS_SKILLS_DIR = path.join(root, 'agents-skills');
+    e.CLAUDE_BOARD_OPENCODE_CONFIG_DIR = path.join(root, 'opencode');
+    const file = path.join(root, 'opencode', 'opencode.json');
+    mkdirSync(path.dirname(file), { recursive: true });
+    const bytes = '{\n  // a comment OpenCode tolerates and JSON.parse does not\n  "theme": "dark"\n}\n';
+    writeFileSync(file, bytes);
+    const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
+    assert.notEqual(r.status, 0, 'a config this script cannot parse must fail loudly, not be overwritten');
+    assert.match(r.stderr, /opencode\.json/, 'naming the file');
+    assert.match(r.stderr, /by hand/, 'and the way out');
+    assert.equal(readFileSync(file, 'utf8'), bytes, 'the file is untouched');
+    // The clients before it in step 5 are registered by then: the message says so.
+    assert.match(r.stderr, /OpenCode has no registration/);
   });
 
   await check("install.sh's minimum node major is package.json's engines floor, not a number of its own", async () => {
@@ -1961,7 +2132,7 @@ async function main() {
       const { root, env: e } = preflightRun(`vm-${label.replace(/[^a-z]+/gi, '-')}`, {
         PATH: `${dir}:${process.env.PATH}`,
         CLAUDE_BOARD_NODE: '',
-        CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
+        ...NO_CLIENTS,
       });
       const r = spawnSync('bash', [installScript], { env: e, encoding: 'utf8' });
       // Every warning goes to stderr now.
@@ -1983,7 +2154,7 @@ async function main() {
     const { env: plainEnv } = preflightRun('vm-plain', {
       PATH: `${plainDir}:${process.env.PATH}`,
       CLAUDE_BOARD_NODE: '',
-      CLAUDE_BOARD_MCP_CMD: 'claude-board-no-such-cli',
+      ...NO_CLIENTS,
     });
     const plain = spawnSync('bash', [installScript], { env: plainEnv, encoding: 'utf8' });
     assert.doesNotMatch(plain.stderr, /version-managed/, 'a plain interpreter path must not be flagged');
@@ -2557,6 +2728,10 @@ http.createServer((req, res) => {
         CLAUDE_BOARD_SECRET_FILE: path.join(fakeHome, 'config', 'claude-board', 'secret'),
         STUB_CLAUDE_LOG: path.join(fakeHome, 'claude-invocations.log'),
         STUB_CLAUDE_STATE: path.join(fakeHome, 'claude-registrations.json'),
+        STUB_CODEX_LOG: path.join(fakeHome, 'codex-invocations.log'),
+        STUB_CODEX_STATE: path.join(fakeHome, 'codex-registrations.json'),
+        CLAUDE_BOARD_OPENCODE_CONFIG_DIR: path.join(fakeHome, 'opencode'),
+        CLAUDE_BOARD_AGENTS_SKILLS_DIR: path.join(fakeHome, 'agents-skills'),
         STUB_LAUNCHCTL_LOG: path.join(fakeHome, 'launchctl-invocations.log'),
         STUB_LAUNCHCTL_STATE: path.join(fakeHome, 'launchctl-state.json'),
       };
@@ -2628,6 +2803,16 @@ http.createServer((req, res) => {
   await check('uninstall removes the MCP registration', async () => {
     const state = existsSync(claudeState) ? JSON.parse(readFileSync(claudeState, 'utf8')) : {};
     assert.ok(!('claude-board' in state), 'the MCP registration must be removed');
+  });
+
+  await check('uninstall removes the codex registration, the OpenCode entry and the Codex copy of the manual', async () => {
+    const state = existsSync(codexState) ? JSON.parse(readFileSync(codexState, 'utf8')) : {};
+    assert.ok(!('claude-board' in state), 'the codex registration must be removed');
+    const cfg = JSON.parse(readFileSync(opencodeConfig, 'utf8'));
+    assert.ok(!cfg.mcp || !('claude-board' in cfg.mcp), 'the OpenCode entry must be removed');
+    assert.equal(cfg.$schema, 'https://opencode.ai/config.json', 'and the file, which is OpenCode\'s, stays');
+    assert.ok(!existsSync(installedAgentsSkill), 'the ~/.agents/skills copy must be gone');
+    assert.match(uninstallResult.stdout, /removed from claude, codex, opencode$/m, `one mcp line naming every client:\n${uninstallResult.stdout}`);
   });
 
   await check('uninstall leaves the store untouched -- directory and contents survive', async () => {
@@ -2812,9 +2997,17 @@ http.createServer((req, res) => {
         CLAUDE_BOARD_CHECKOUT_DIR: path.join(freshWorkDir, 'checkout'),
         CLAUDE_BOARD_HOME: path.join(freshWorkDir, 'Store'),
         CLAUDE_BOARD_MCP_CMD: claudeStub, // still stubbed -- never touches the real `claude`
+        // The fourth and fifth, added with the clients themselves (ADR.md entry 116):
+        // `codex mcp remove` on the real CLI, and the real ~/.config/opencode/opencode.json
+        // and ~/.agents/skills, all of which this script reaches for by default.
+        CLAUDE_BOARD_CODEX_CMD: codexStub,
+        CLAUDE_BOARD_OPENCODE_CONFIG_DIR: path.join(freshWorkDir, 'opencode'),
+        CLAUDE_BOARD_AGENTS_SKILLS_DIR: path.join(freshWorkDir, 'agents-skills'),
         CLAUDE_BOARD_LAUNCHCTL_CMD: launchctlStub,
         STUB_CLAUDE_LOG: path.join(freshWorkDir, 'claude-invocations.log'),
         STUB_CLAUDE_STATE: path.join(freshWorkDir, 'claude-registrations.json'),
+        STUB_CODEX_LOG: path.join(freshWorkDir, 'codex-invocations.log'),
+        STUB_CODEX_STATE: path.join(freshWorkDir, 'codex-registrations.json'),
         STUB_LAUNCHCTL_LOG: path.join(freshWorkDir, 'launchctl-invocations.log'),
         STUB_LAUNCHCTL_STATE: path.join(freshWorkDir, 'launchctl-state.json'),
       };

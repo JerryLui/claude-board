@@ -2,8 +2,8 @@
 
 [![check](https://github.com/JerryLui/claude-board/actions/workflows/check.yml/badge.svg)](https://github.com/JerryLui/claude-board/actions/workflows/check.yml)
 
-A local review surface for Claude Code. Instead of answering questions one at a time
-in a terminal, the agent hands you a **board**: a browser page carrying every question
+A local review surface for Claude Code, Codex and OpenCode. Instead of answering
+questions one at a time in a terminal, the agent hands you a **board**: a browser page carrying every question
 at once, with its real context beside it. Rendered markdown, a diagram, a code
 reference, a side-by-side comparison. You answer in any order, click any rendered
 artifact to comment on it, and submit once. The tool call returns the whole packet as
@@ -67,8 +67,9 @@ cd ~/src/claude-board
 bash install.sh
 ```
 
-Both run the same `install.sh`: one idempotent command, and one click. Verify and
-revive:
+Both run the same `install.sh`: one idempotent command, and one click. It registers the
+board with every client it finds on your `PATH`: Claude Code, Codex and OpenCode, in any
+combination. Verify and revive:
 
 ```sh
 curl -s http://127.0.0.1:7391/api/health          # expect {"ok":true,...}
@@ -80,6 +81,30 @@ Authorizing a second browser is below, under "this browser is not authorized."
 A session that was already running when you installed does not have the `ask` tool;
 start a new one.
 
+### Codex and OpenCode
+
+The same install, no extra step. With `codex` on your `PATH`, `install.sh` runs
+`codex mcp add` and copies the manual to `~/.agents/skills/claude-board/`, where Codex
+looks for skills. With `opencode` on your `PATH`, it adds a `claude-board` entry to
+`~/.config/opencode/opencode.json` (OpenCode merges that file with any `opencode.jsonc`
+beside it, which is never touched), and OpenCode reads the manual straight from
+`~/.claude/skills/`. Both registrations carry `CLAUDE_BOARD_CLIENT`, the declaration
+the board needs from a client that, unlike Claude Code, exports nothing an MCP server
+can read to tell an interactive session from a scripted one.
+
+That declaration is the one thing to know: `codex exec` and `opencode run` load the
+same registration, so a scripted run must leave the board out itself, with
+`codex exec -c mcp_servers.claude-board.enabled=false` or
+`CLAUDE_BOARD_HEADLESS=1 opencode run ...`. An `opencode.json` with comments in it is
+left alone and named; add the entry by hand from the one the installer would have
+written:
+
+```json
+"mcp": { "claude-board": { "type": "local",
+  "command": ["/opt/homebrew/bin/node", "/path/to/claude-board/bin/mcp.mjs"],
+  "environment": { "CLAUDE_BOARD_CLIENT": "opencode" } } }
+```
+
 ### Requirements
 
 - macOS. `install.sh` refuses anything else, before it writes a thing.
@@ -87,7 +112,8 @@ start a new one.
   `/usr/local/bin/node`, or the system `/usr/bin/node`). Checked up front. A node
   managed by `mise`, `nodenv`, `fnm` or similar gets a warning: launchd would keep
   pointing at wherever that path was on install day.
-- Claude Code, with `claude` on your `PATH`. Also checked up front.
+- At least one client on your `PATH`: Claude Code (`claude`), Codex (`codex`) or
+  OpenCode (`opencode`). Also checked up front; every one found is registered.
 - Xcode Command Line Tools (`xcode-select --install`), for the one `cc` call that
   builds the launcher. Optional: without them the install still works, but cannot read
   references out of `~/Documents`, `~/Desktop` or `~/Downloads`.
@@ -103,9 +129,11 @@ About seven places, all under your home directory:
 `~/Applications/claude-board.app` (the launcher), `~/Library/LaunchAgents/claude-board.plist`
 (the launchd job), `~/Library/Application Support/claude-board/` (the board store, your
 review history), `~/.config/claude-board/secret` (the local auth secret),
-`~/.claude/skills/claude-board/` (the manual Claude Code reads),
-`~/Library/Logs/claude-board/` (logs), and Claude Code's own MCP registration
-(`claude mcp add`). No sudo, no network beyond a loopback health check.
+`~/.claude/skills/claude-board/` (the manual Claude Code and OpenCode read),
+`~/Library/Logs/claude-board/` (logs), and each client's own MCP registration
+(`claude mcp add`, `codex mcp add`, one key in `~/.config/opencode/opencode.json`). With
+Codex found, one more: `~/.agents/skills/claude-board/`, its copy of the manual. No sudo,
+no network beyond a loopback health check.
 
 A plugin install adds an eighth: `~/Library/Application Support/claude-board-checkout`,
 a code copy `install.sh` makes and re-runs from. Claude Code sweeps old plugin versions
@@ -163,13 +191,17 @@ next login, or on `bash install.sh`. Actual removal is `bash uninstall.sh` (belo
 ## Use
 
 `install.sh` copies [`skills/claude-board/SKILL.md`](skills/claude-board/SKILL.md) into
-`~/.claude/skills/claude-board/`, where Claude Code picks it up on its own, so asking
-the agent to put its questions on the board is enough. Any command, skill or session
-can also call the tool directly:
+`~/.claude/skills/claude-board/`, where Claude Code and OpenCode pick it up on their own
+(and into `~/.agents/skills/` for Codex), so asking the agent to put its questions on
+the board is enough. Any command, skill or session can also call the tool directly; in
+Claude Code it is named
 
 ```js
 mcp__claude-board__ask({ title, blocks, wait, fresh })
 ```
+
+and Codex and OpenCode list the same `ask` under the `claude-board` server with their own
+prefix.
 
 `title` and `blocks` are required; `wait` and `fresh` are optional booleans. `fresh`
 starts a new board instead of adding a round to the one this conversation already has
@@ -252,9 +284,10 @@ review content is never committed.
 bash uninstall.sh
 ```
 
-Removes the launchd job, its plist, the MCP registration, the launcher bundle with its
-LaunchServices record, and the installed manual. It names what it deliberately leaves:
-the store, the secret, the logs. Safe to run twice, and on a machine that never had it.
+Removes the launchd job, its plist, the MCP registrations (Claude Code, Codex, and the
+one key in OpenCode's config), the launcher bundle with its LaunchServices record, and
+every installed copy of the manual. It names what it deliberately leaves: the store, the
+secret, the logs. Safe to run twice, and on a machine that never had it.
 
 From a plugin install with no clone around:
 `bash ~/Library/Application\ Support/claude-board-checkout/uninstall.sh` (it removes

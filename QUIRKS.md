@@ -1718,6 +1718,7 @@ anything about a backoff schedule's own timing — see the cluster-based check i
 - [Two open flags macOS will not accept together](#two-open-flags-macos-will-not-accept-together)
 - [A temp dir's spelling is not its realpath, and path confinement compares realpaths](#a-temp-dirs-spelling-is-not-its-realpath-and-path-confinement-compares-realpaths)
 - [Two processes racing the same timeout: the daemon loses by its own poll interval](#two-processes-racing-the-same-timeout-the-daemon-loses-by-its-own-poll-interval)
+- [Codex hands a stdio MCP server an allowlist of the environment, not the environment](#codex-hands-a-stdio-mcp-server-an-allowlist-of-the-environment-not-the-environment)
 
 ### An apostrophe inside `${VAR:-...}` swallows the rest of a bash script
 
@@ -1831,6 +1832,22 @@ report `status: 'timeout'` either way. The check that catches it runs a daemon a
 shim on one shared cap and asserts the ROUND was closed on disk.
 
 ---
+
+### Codex hands a stdio MCP server an allowlist of the environment, not the environment
+
+Claude Code and OpenCode spawn a stdio MCP server with the whole parent environment plus
+the registration's own variables, so a `CLAUDE_BOARD_*` knob exported in the shell that
+started the session reaches `bin/mcp.mjs`. Codex does not: `codex-rs/rmcp-client` builds
+the child's environment from a fixed allowlist (`HOME`, `PATH`, `USER`, `SHELL`, `TMPDIR`,
+the locale and CA variables) plus the `[mcp_servers.<name>.env]` table, and forwards
+nothing else. `CLAUDE_BOARD_HEADLESS=1 codex exec ...` therefore silences nothing, and a
+`CLAUDE_BOARD_PORT` or `CLAUDE_BOARD_SECRET_FILE` in the shell is invisible to the shim
+under Codex (the port record beside the secret still works, since `HOME` gets through).
+This is why the interactivity declaration for Codex lives in the registration's `env`
+table (`codex mcp add --env CLAUDE_BOARD_CLIENT=codex`, install.sh step 5) and nowhere
+else, and why the unattended-run rule for Codex is `-c mcp_servers.claude-board.enabled=false`
+rather than an environment variable. `codex mcp add` has `--env` only; the `env_vars`
+forwarding list is config.toml-only.
 
 ## Worktrees, the shared checkout, and two files with the same tail
 
