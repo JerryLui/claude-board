@@ -3876,8 +3876,27 @@
     mermaidMod = window.mermaid;
     return mermaidMod;
   }
+  /** A diagram is drawn only while its round is the page on screen. Rounds
+   * are pages and a page that is not current is display:none (goToRound), and
+   * mermaid measures its labels inside the very node it draws into, so a
+   * diagram drawn under display:none measures every label at zero and comes
+   * out blank -- 'data-processed' set, nothing left to retry, and the flip that
+   * finally shows the round shows an empty card (the harness board of
+   * 2026-09-10: five figures on round 1, all blank once round 2 existed).
+   * Left as raw source instead, a hidden diagram is drawn by the flip that
+   * shows it (goToRound calls renderMermaidBlocks on the arriving section).
+   * A node outside any round section is always drawable. */
+  function mermaidNodeOnScreen(n) {
+    var round = n.closest ? n.closest('.round') : null;
+    return !round || round.classList.contains('round-current');
+  }
   async function runMermaidRenderPass(root) {
-    var nodes = qsa('pre.mermaid', root);
+    // Undrawn nodes on the page on screen, and only those: a flip re-scans a
+    // section that may already be drawn (goToRound), and an engine initialize
+    // for nothing to draw is a palette write nobody asked for.
+    var nodes = qsa('pre.mermaid', root).filter(function (n) {
+      return mermaidNodeOnScreen(n) && n.getAttribute('data-processed') !== 'true';
+    });
     if (!nodes.length) return;
     // Stash each node's raw diagram source before mermaid ever
     // touches it -- mermaid.run() replaces a node's own content with its
@@ -4163,7 +4182,10 @@
       if (original == null) return; // never successfully rendered -- nothing to restore
       n.textContent = original;
       n.removeAttribute('data-processed');
-      restorable.push(n);
+      // A hidden round's diagram is put back to source and left there: drawn
+      // under display:none it would come out blank (mermaidNodeOnScreen), so
+      // the flip that shows it draws it, in whatever theme is live by then.
+      if (mermaidNodeOnScreen(n)) restorable.push(n);
     });
     if (!restorable.length) return;
     try {
@@ -4668,6 +4690,11 @@
     if (!section) return;
     currentRound = n;
     qsa('.round').forEach(function (s) { s.classList.toggle('round-current', s === section); });
+    // The arriving page's diagrams are drawn now, not at load: a diagram drawn
+    // while its round was the hidden page is blank (mermaidNodeOnScreen), so
+    // the render pass left them as source until this flip. Queued, so it runs
+    // after this flip has settled and skips anything already drawn.
+    renderMermaidBlocks(section);
     refreshPager();
     // ADR.md entry 40's chrome belongs to the page that earned it, so it is
     // re-derived here from whatever the page flipped TO last reported -- after

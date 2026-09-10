@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Diagrams on an earlier round render**: a mermaid block on a round that is not
+  the page on screen used to be drawn while hidden and came out blank for good;
+  it is now drawn by the flip that shows it, and a theme switch redraws only the
+  page on screen.
 - **Codex and OpenCode**: `install.sh` registers the board with every client it finds
   on `PATH` (`claude mcp add`, `codex mcp add`, one key in OpenCode's `opencode.json`)
   and needs only one of the three; the Codex and OpenCode registrations carry
