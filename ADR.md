@@ -99,6 +99,6 @@ link where it is worth reading.
 | 110 | [A question's context is one panel, and long prose folds](.agents/adr/0110-a-questions-context-is-one-panel-and-long-prose-folds.md) | 2026-09-03 | widens 26; relates to 28, 111 |
 | 111 | [A question carries an explainer of its own](.agents/adr/0111-a-question-carries-an-explainer-of-its-own.md) | 2026-09-03 | relates to 26, 110 |
 | 112 | [A post with a failed reference is refused](.agents/adr/0112-a-post-with-a-failed-reference-is-refused.md) | 2026-09-03 | relates to 3 |
-| 113 | [A stage link is handled by the board, and an outbound address is shown before it opens](.agents/adr/0113-a-stage-link-is-handled-by-the-board.md) | 2026-09-10 | relates to 95, 59 |
+| 113 | [A stage link is handled by the board, and an outbound address opens at once](.agents/adr/0113-a-stage-link-is-handled-by-the-board.md) | 2026-09-10 | relates to 95, 59 |
 | 114 | [An Abandoned round accepts a late Send](.agents/adr/0114-an-abandoned-round-accepts-a-late-send.md) | 2026-09-10 | narrows 69; relates to 50, 107 |
 | 115 | [`read` is a pure read of a board](.agents/adr/0115-read-is-a-pure-read-of-a-board.md) | 2026-09-10 | relates to 35, 107, 114 |

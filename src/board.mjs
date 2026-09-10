@@ -751,13 +751,20 @@ export function amendRound(board, { blocks, cwd, title }) {
  *    advertising itself as open on a board nothing will ever post to again.
  *
  * So the round is closed and labelled as neither: not answered, not lapsed, abandoned.
- * Every reader that asks "is this round open" already asks `status === 'open'`
- * (`roundIsAwaitedOpen` and `closeLapsedAwaitedRounds` in src/badge.mjs, `amendRound`
- * above, `handleSubmit` and the `requestId` dedupe in src/server.mjs,
- * `openAwaitedRounds` in src/indexpage.mjs, `hasOpenRound` in src/render.mjs), so all of
- * them drop an abandoned round with no code of their own — including the stranded rule,
- * which is the load-bearing one: a round nobody is listening for is exactly what its
- * Banner exists to announce, and `waitingRounds` must stop finding this one.
+ * Every reader that asks "is anybody still waiting on this round" already asks
+ * `status === 'open'` (`roundIsAwaitedOpen` and `closeLapsedAwaitedRounds` in
+ * src/badge.mjs, `amendRound` above, the `requestId` dedupe in src/server.mjs,
+ * `openAwaitedRounds` in src/indexpage.mjs), so all of them drop an abandoned round with
+ * no code of their own — including the stranded rule, which is the load-bearing one: a
+ * round nobody is listening for is exactly what its Banner exists to announce, and
+ * `waitingRounds` must stop finding this one.
+ *
+ * What that question is NOT is "may this round still be answered". ADR 114: a round
+ * nobody sent still takes a Send, abandoned included, so `handleSubmit` (src/server.mjs)
+ * and the browser's own send bar (`hasOpenRound` in src/render.mjs, `openRoundNumber` in
+ * src/ui.mjs) ask `status !== 'sent'` instead. Abandoning ends the WAIT and the
+ * conversation, not the answer: the late answer is stored here and collected by `read`
+ * (ADR 115).
  *
  * `awaited: false` is set here rather than left for a clock, because the wait did not
  * lapse — it was abandoned, now. `awaitDeadline` is left exactly as minted, the same way

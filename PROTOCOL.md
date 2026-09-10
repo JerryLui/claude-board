@@ -541,10 +541,12 @@ what it lost, exactly as above; a consumer that used to branch on `resolved === 
 no question block anywhere in it — top-level, or nested in a question's `context` or a `compare`
 side — and it was not a page board (one `html` block, nothing else) posted with `wait: true`
 (ADR.md entry 45) — so there was nothing to submit and the shim returned the instant the post
-succeeded rather than waiting at all. `answers` and `comments` are always empty on a `posted`
-packet. `discuss` means the reviewer chose Discuss in chat: partial answers
-are included and the agent must stop posting boards for the rest of the session. `timeout` is the
-wall-clock cap (default 40m, ADR.md entry 47) and carries an explicit no-response about ITS OWN
+succeeded rather than waiting at all. A `posted` packet carries `answers` and `comments` only on
+the drain path `noWait` opens (`POST /api/board` below): what the thread is owed and no packet has
+carried rides that one response, each entry naming its own round. Without the field, and on a
+daemon older than it, both arrays are empty. `discuss` means the reviewer chose Discuss in chat:
+partial answers are included and the agent must stop posting boards for the rest of the session.
+`timeout` is the wall-clock cap (default 40m, ADR.md entry 47) and carries an explicit no-response about ITS OWN
 round — an empty `answers` and no comments of its own — plus whatever the two exceptions below
 owe the thread, which are owed to a timed-out round exactly as they are to any other. `abandoned`
 is the round being closed under a blocked call — the
@@ -567,7 +569,10 @@ built, are told apart by the `round` every entry carries, and change nothing abo
 shape, so a consumer that has never heard of either keeps working unread. "Once" means committed
 as delivered only after the response has actually left the daemon, so a dropped connection
 re-delivers rather than loses, and what has been delivered is never sent again. They ride whatever
-packet comes next, `timeout` and `abandoned` included.
+packet comes next, `timeout` and `abandoned` included. `GET /api/board/:id/read` is not a packet
+and marks nothing (ADR 115), so what it returned is still owed: the same entry can ride a later
+packet too, and the `round` every entry carries is what tells a caller it is looking at an answer
+it already has.
 
 **The first exception: a comment left on a round that is not *awaited*** (ADR.md entry 35, narrowed by
 entry 45). A page board posted without `wait: true` is a round nothing ever waits on, so nothing
@@ -622,9 +627,16 @@ GET  /auth/:token                   consume a handoff -> 302 + Set-Cookie  (open
 POST /api/handoff                   { boardId? } -> { token, expiresAt, ttlMs }
 POST /api/board                     post a board or a round into a live thread
                                     -> { boardId, thread, round, url, clients, suppressed,
-                                    awaited }
+                                    awaited }, plus { answers, comments } on a post that
+                                    carried noWait (see the section below)
 GET  /api/board/:id/wait?round=N    blocks until the round is sent -> Packet. Secret only:
                                     never cookie-reachable -- `handleWait` also writes
+GET  /api/board/:id/read            one board's rounds, answers and comments, in packet
+                                    shape (ADR 115) -> { board, thread, title, url, rounds,
+                                    answers, comments }. A pure read: nothing is marked
+                                    delivered and nothing is written, so the same call twice
+                                    answers the same twice. Secret only, like /wait: a tool
+                                    calls it, never a page
 GET  /api/board/:id/events          SSE: round pushes, state changes
 POST /api/board/:id/submit          { round, action: 'send'|'discuss', answers, comments }
 POST /api/board/:id/abandon         {} -> { ok: true, rounds }; closes every round still
@@ -692,8 +704,9 @@ Posting and waiting are separate routes on purpose, so splitting `ask` into post
 cheap.
 
 **Four gates, in order:** loopback `Host` (403), same-origin on every non-GET (403), a credential
-on every non-GET -- plus the one GET that writes, `/wait` (401, secret only) -- and a credential
-on every other GET but two (401, secret or cookie). Both credential gates are written
+on every non-GET -- plus the two GETs held to the secret alone (401): `/wait`, because it also
+writes, and `/read`, because only a tool ever calls it -- and a credential on every other GET but
+two (401, secret or cookie). Both credential gates are written
 as "everything, minus an explicit exception list", so a route added later is gated by default
 rather than by whoever adds it remembering.
 
@@ -725,8 +738,9 @@ shim that owns a board may close its rounds, never a browser looking at it. A mi
 credential is **401 with no body**: nothing about
 what is behind it, not even whether the board exists. A daemon that finds no secret file says so
 on stderr at startup and refuses everything gated: it fails closed, never open. `bin/mcp.mjs`
-reads the secret at startup, sends it on every call, and refuses to post at all (naming
-`./install.sh`, writing nothing) when it has none or the daemon answers 401. `SECURITY.md` carries
+reads the secret at startup, sends it on every call, and refuses every tool call it has, `read`
+included (naming `./install.sh`, writing nothing, and naming the tool it refused), when it has
+none or the daemon answers 401. `SECURITY.md` carries
 why a local secret exists at all.
 
 ## The browser session cookie
@@ -811,14 +825,24 @@ the same page is served whether or not the board exists.
 
 ## `POST /api/board`
 
-`{ title, blocks, cwd?, thread?, wait? }` starts a new thread; `{ boardId, blocks, title?, wait? }`
-pushes into a live one. `cwd` is only meaningful on the thread-creating form. `title` is meaningful
+`{ title, blocks, cwd?, thread?, wait?, noWait? }` starts a new thread;
+`{ boardId, blocks, title?, wait?, noWait? }` pushes into a live one. `cwd` is only meaningful on
+the thread-creating form. `title` is meaningful
 on **both**: on the `boardId` form it labels the round being minted or amended. `wait` (boolean,
 default `false`) is meaningful only on whichever call actually MINTS the round being posted — an
 amend never mints one, so `wait` on an amending post is inert (the round it would apply to was
 already stamped `awaited` when it was first minted, per the paragraph above naming
 `awaited`/`awaitDeadline`). It sets `round.awaited` together with the question-block check
 already run on the same blocks: see "Round `awaited` / `awaitDeadline`" above.
+
+**`noWait` (boolean) is the caller stating it will not open `/wait` on this post**, which is what
+makes the response the thread's next packet. On it the daemon drains into that response whatever
+the thread is owed and no packet has carried (an answer sent after an earlier round's wait ended,
+every undelivered comment, the amended round's own included), so the body carries `answers` and
+`comments` beside its usual fields, once. The FIELD decides and the daemon's own `awaited` verdict
+does not: the two sides can disagree about whether a post is awaited, and a shim from before the
+field never sends it, so an old shim can never mark delivered what it did not return. A post the
+shim then waits on carries no `noWait` at all and is never drained twice.
 
 Pushing into a live board **amends** the latest round in place — a block whose incoming id
 already exists on the board replaces it, everything else is appended to that same round — while
@@ -836,7 +860,8 @@ the store exactly as it was: the same post with the reference fixed lands normal
 already open on another board stays open. This is what replaced landing the round with a
 "could not resolve" note on the reviewer's page while the caller got a 200 and never learnt.
 
-Either way the response is `{ boardId, thread, round, url, clients, suppressed, awaited }`, `round`
+Either way the response is `{ boardId, thread, round, url, clients, suppressed, awaited }`, plus
+`answers` and `comments` on a post that carried `noWait: true` (below) and on no other, `round`
 naming whichever round was amended or minted and `awaited` carrying that round's own minted
 `awaited` flag. The flag is on the response because the daemon is the only side that has seen the
 normalised round: the poster checks the raw blocks it sent, which is a different question (the
@@ -910,11 +935,12 @@ must name, the round an amend lands on — it means the **latest** open one.
 }
 ```
 
-`round` names the round the page believed was open when the reviewer pressed the button. Omitting
-it is a **400**; naming any round other than the currently-open one is a **409** whose body carries
-`{ error, board, round }`, `round` naming the round that IS open (`null` when none is). Without it,
-a second tab — or a plain double-click, since the send bar sits outside the round section and so is
-never disabled by the history collapse — appends the same comments a second time under fresh
+`round` names the round the page believed it was answering when the reviewer pressed the button.
+Omitting it is a **400**; naming a round that has already been **sent** is a **409** whose body
+carries `{ error, board, round }`, `round` naming the latest round still unsent (`null` when every
+round has gone out, which is also what a submit naming no round at all is answered with). Without
+it, a second tab — or a plain double-click, since the send bar sits outside the round section and
+so is never disabled by the history collapse — appends the same comments a second time under fresh
 numbers and re-applies answers to a round that already went out. A 409 means "already sent" and is
 not an error state.
 
@@ -925,6 +951,18 @@ second path:
 - `'send'` → `board.state = 'submitted'`, packet `status: 'submitted'`.
 - `'discuss'` → `board.state = 'discuss'`, packet `status: 'discuss'`; partial answers are
   included and the calling agent must stop posting boards for the rest of the session.
+
+**Not sent, rather than still open** (ADR 114): a round nobody has answered takes a Send however
+the agent's wait ended. A Lapsed round (still `status: 'open'`, ADR 50) always did; an
+**abandoned** round does too, and `applySubmit` marks it `sent` from whichever state it was in. Its
+answers are then owed to the thread's next packet, or collected by `read` above, which is the only
+path an abandoned board has, since no wait ever returns to it. The page says as much rather than
+hiding it: the round keeps its widgets and its Send bar live (`historical` in `renderRoundSection`
+is `sent` alone, server-side too, so a reload takes nothing back), and the pill still reads
+`read-only`, with a hover text promising that comments and answers sent here are saved and reach
+the next agent that reads the board. A page board's comment panel is the one exception: it renders
+only while a wait is open on its round (`renderPageCommentPanel`), so an abandoned page round
+shows its comments and no compose form, exactly as a lapsed one does.
 
 The page renders both as buttons in one `.send-bar` (`#send-btn`, `#discuss-btn`), which
 `body.readonly` hides wholesale — so the standalone `file:` archive offers neither.
@@ -942,8 +980,11 @@ is empty when there was nothing left open. Idempotent by construction: a second 
 round and closes none. A board id that names nothing is a **404**.
 
 The board document and its `pages/<id>.html` are both rewritten, unlike the `/wait` timeout branch
-which writes only the document: this is the last write an abandoned board will ever get, so a page
-left showing live widgets would stay that way in the archive for good. `awaitExpired` is broadcast
+which writes only the document: this is the last write an abandoned board will ever get, and since
+ADR 114 what it has to carry is the opposite of what it once did. The round keeps its widgets and
+its Send bar live in the stored page, because a reviewer who reloads after the abandon can still
+answer and that answer is stored (`POST /api/board/:id/submit` above); freezing the page would
+freeze away the one path an abandoned board's answers have. `awaitExpired` is broadcast
 once per closed round, the same nudge and the same event a wait dying of its own clock sends.
 
 **Secret-only.** It is off `BOARD_COOKIE_ACTIONS`, so the session cookie does not reach it and a
@@ -1300,6 +1341,7 @@ from anything else that might postMessage this window (an extension, devtools, a
 | `ready` | — | listeners attached. Sent once, unconditionally, at the end of the agent script |
 | `hover` | `{ ref, tag, text }` | innermost element under the cursor, or `ref: null` on mouseout. The stage also applies its own outline locally |
 | `click` | `{ ref, tag, text }` | step path plus **raw** tag/text, never a composed hint |
+| `link` | `{ url }` | "the reviewer clicked this `http`/`https` address inside me". The board shows it and opens it only on a click of its own (ADR 113, and "Links inside a stage" below) |
 | `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` in the frame's viewport coordinates (the element's own client rect), or `null` if the ref no longer resolves. Numbers and null only |
 | `height` | `{ height }` | `document.body.scrollHeight` |
 | `scroll` | `{ top }` | "I am at this offset". Deduplicated on the last reported value |
@@ -1379,6 +1421,48 @@ negotiation.
 own refresh runs (resize, a comment queued, a submit landing, a round flip). `locate` alone
 additionally rides each `scroll` report from a stage that has pins to follow -- `band` is a fact
 about the board's own chrome, which a stage's scroll changes nothing about.
+
+### Links inside a stage
+
+A stage is a `srcdoc` frame, so every relative href in it, an in-page `#anchor` included,
+resolves against the **board page's own address**. A click's default action is therefore a
+navigation of the frame to `/b/<id>#s1`, which the page CSP (`default-src 'none'`, no
+`frame-src`, inherited through `srcdoc`) refuses: Chrome paints its blocked page over the
+artifact. So the stage script owns the click and cancels that default for every `<a href>`,
+whichever mode is on, and decides what happens instead (ADR 113):
+
+- **Comment mode on**: the click mints a comment anchor exactly as any other click does, and
+  nothing else: it neither scrolls nor opens.
+- **`href="#id"`**: `scrollIntoView` on the target, inside the frame. The browser's own
+  algorithm is what walks the target's real scrolling ancestors, so an artifact whose
+  scrolling element is an inner pane (an app-shell layout, where the document itself never
+  scrolls) works with no second measurement. `scroll-margin-top` is set to the last `band`
+  the parent reported, so the target lands **below** the board's floating header rather than
+  under it. A fragment naming nothing scrolls nothing; the click is cancelled either way.
+- **`http:`/`https:`**: posted as `link` above, read off the raw `href` attribute rather than
+  the resolved `.href` property. Resolved, `#s1` reads as an ordinary http address (the base
+  URL is the board's), and the in-page case would post the board's own URL.
+- **Anything else** (`javascript:`, `file:`, `data:`, a relative path, a protocol-relative
+  `//host/x`) is dropped in silence. Nothing is opened and nothing is navigated.
+
+The parent's half is `handleStageLink` (`src/ui.mjs`), which **opens the address at once**, in a
+new tab. It is a trust boundary like every other handler here:
+
+- `url` must be a string of at most 4096 characters and must **parse** (`new URL`) to an
+  `http:`/`https:` address. The parsed `href` is what opens. Anything else opens nothing and
+  changes nothing on the page at all.
+- `window.open(href, '_blank', 'noopener')`: a new tab, and no `window.opener` back into a board
+  page holding every answer on it. Such an open hands back `null` by definition, and nothing
+  reads it.
+- No address is shown and nothing is confirmed first: the reviewer's click inside the frame is
+  the gesture, and Chrome's own hover bubble already names the target. That click also gives the
+  ancestor document its user activation, which is what keeps the open out of the popup blocker.
+  The callback token is a fixed literal, so a stage's own script can post a `link` with no
+  reviewer gesture behind it; with no activation to spend, that one meets the blocker.
+  `SECURITY.md`, "The one outbound path a stage has", carries the risk this accepts.
+
+Stage to parent only: what a board does with an address is the board's decision, and a stage is
+never told the outcome.
 
 ### `mermaid`/`diagrams`: the board draws a stage's diagrams
 
@@ -1481,7 +1565,8 @@ as an object exposing only `postMessage`, never `.document`, for the same reason
 
 ## MCP surface
 
-One tool, `ask`, on the stdio shim. Arguments mirror the board document:
+Two tools on the stdio shim: `ask`, which posts a board and blocks on it, and `read`, which reads
+one back (ADR 115, its own subsection below). `ask` arguments mirror the board document:
 `{ title, blocks, wait?, fresh? }`, where question blocks carry their questions by value and
 content blocks carry a `source` ref. It posts a board and opens the tab on the thread's first
 board.
@@ -1498,10 +1583,11 @@ The return condition is the post succeeding, never the tab opening: `open` is sp
 this process never learns whether a tab appeared. Opening stays best-effort and its failure stays
 non-fatal.
 
-Failure is loud and writes nothing, on three triggers: an unreachable daemon (returns the revive
+`ask` fails loudly and writes nothing, on three triggers: an unreachable daemon (returns the revive
 command), a non-interactive session, or a session on which nothing can open a tab at all — an SSH
 session on a machine with no display passes the first two checks and would otherwise post a board
-nobody can see and block for the full wall-clock cap. Both session checks are below.
+nobody can see and block for the full wall-clock cap. Both session checks are below, and both are
+`ask`'s alone: `read` skips them.
 
 A daemon **refusal** (any 4xx, which is what a post carrying a reference that does not resolve
 comes back as) is loud in a different key: the tool result carries the daemon's own message
@@ -1533,10 +1619,53 @@ down cannot wedge a new conversation onto the old one's board — while the aban
 call's post to actually land, because a refused post (ADR 112) must close nothing: the previous
 conversation's open round is still the reviewer's until something replaces it, and a re-post with
 the reference fixed is what closes it. The abandon itself is best-effort, its failure a stderr
-line. `fresh` on a conversation that has posted no board is a
+line. Every result text of a `fresh` call names the board it walked away from, in one fixed
+sentence: `Abandoned board: <url> (the previous conversation's board, closed by this fresh ask).
+Call read with that URL to collect any answer left on it.` That id does not survive the boundary
+any other way, and a reviewer answering after the abandon is exactly the case ADR 114 stopped
+throwing away, so the URL is what makes the answer reachable at all. `fresh` on a conversation
+that has posted no board is a
 no-op: one board, one thread, one tab. Correctness rests on the agent passing it; nothing can
 detect a missed one, which is why the manual has the agent state the board URL in chat each round
 (a `/compact` is built from chat, not from tool results).
+
+### The `read` tool
+
+`{ board }` and nothing else: the board page URL an `ask` result ends with
+(`http://127.0.0.1:<port>/b/<id>`, any port, since a URL from an earlier session still names an id
+this daemon can look up) or a bare board id. Anything else is refused in the shim, before a request
+goes out, because the value ends up in a URL path segment. It calls `GET /api/board/:id/read` and
+hands the document back on the same three channels a packet rides:
+
+```js
+{ board, thread, title, url,
+  rounds:   [ { n, title, status, awaited, deadline } ],
+  answers:  [ { id, round, prompt, widget, status, choice, note } ],
+  comments: [ { n, blockId, blockKind, anchor, text, round, createdAt, lost? } ] }
+```
+
+The text channel carries a line per round and a line per stored entry, each naming the round it
+belongs to, because an MCP client may keep only `content`: telling round 4's late answer from
+round 1's settled one has to be possible without opening the board. `awaited` is the product's
+"this round has an open wait", not the raw mint-time flag; `deadline` is left where it was, so a
+reader can see when the wait died.
+
+It exists because a stored answer had exactly one way out (the next packet a wait on the same
+thread returned) and three ways to be stranded: a lapsed round in a conversation that asked nothing
+further, an abandoned board no thread ever waits on again, and a new conversation holding nothing
+but a URL. It is a **pure read**, and that is the whole decision (ADR 115): no delivered mark, no
+ledger write, no session state touched, so reading a previous conversation's board never makes it
+this conversation's board, no credential can burn an answer by reading it, and a board written
+before ADR 107 reads exactly like any other rather than being adopted into a rule it was never part
+of. The accepted cost is the redelivery named under "Packet" above.
+
+Neither session check below applies to it. `ask` refuses a headless session and a machine that
+cannot open a tab because it would otherwise put a board in front of nobody; `read` puts nothing in
+front of anybody and writes nothing, so an unattended run collecting an answer left overnight is a
+legitimate caller rather than the case those refusals exist for. A missing or rejected local secret
+refuses it exactly as it refuses `ask`, in the same words, naming the tool that was refused: "read
+refused: ... The claude-board daemon only serves a tool call from a caller holding the local secret
+at ~/.config/claude-board/secret".
 
 ### MCP shim environment
 
@@ -1588,7 +1717,9 @@ The shim therefore treats interactivity as an **allowlist and fails closed**: po
 `CLAUDE_CODE_ENTRYPOINT` is one of `cli`, `vscode`, `jetbrains`, `ide`, `claude-desktop`,
 `claude-desktop-3p`. Any other value — and an absent value — is a session with nobody watching,
 and `ask` refuses before anything is posted or written. `CLAUDE_BOARD_HEADLESS=1` forces the
-refusal regardless, which is the hook an unattended runner sets.
+refusal regardless, which is the hook an unattended runner sets. `ask` is the whole scope of this
+section and of the tab check below it: `read` shows a human nothing, so it runs in a session both
+of them refuse (see "The `read` tool" above).
 
 Known residual gap, deliberately not papered over: `/nightly` and `/loop` run *inside* an
 interactive session, so the entrypoint still reads `cli` and no env check can see them. That is a

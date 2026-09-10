@@ -255,7 +255,7 @@ function daemonUnreachableMessage(err, { sent = false } = {}) {
       ? `Nothing was posted or written.`
       : err && err.createPost
         ? `The board post had already gone out, so a board may or may not have been created. A thread's first post carries no idempotency key the daemon could recognise it by, so calling ask again may well create a SECOND board and tab: check the board index (or the tab that may have opened) first.`
-        : `The request had already been sent, so the round may or may not have landed. Retrying this same call is safe: it carries an idempotency key and the daemon will not duplicate it.`,
+        : `The request had already been sent, so the round may or may not have landed. Retrying this same call is safe: it carries an idempotency key and the daemon will not duplicate it. If the round asked nothing, any late answer the daemon handed the lost response is still on the board and a retry will not carry it again: read the board.`,
     `Revive it with: launchctl kickstart -k gui/$(id -u)/claude-board`,
     `If it was never installed on this machine, run ./install.sh from the claude-board repository first.`,
   ].join('\n');
@@ -277,10 +277,10 @@ function daemonRejectedMessage(err, url) {
  * fix — run the installer, which generates one if there isn't one and never rotates
  * one that already exists — and both mean nothing was posted or written. Deliberately
  * carries no revive command: the daemon is fine, the credential is not. */
-function missingSecretMessage(reason) {
+function missingSecretMessage(reason, tool = 'ask') {
   return [
-    `ask refused: ${reason}`,
-    `The claude-board daemon only accepts writes from a caller holding the local secret at ${secretPath()} ` +
+    `${tool} refused: ${reason}`,
+    `The claude-board daemon only serves a tool call from a caller holding the local secret at ${secretPath()} ` +
     `(it is what tells this session's shim from any other process on the machine). Nothing was posted or written.`,
     `Fix: run ./install.sh from the claude-board repository — it generates the secret if there isn't one, and ` +
     `never rotates an existing one — then restart this Claude Code session so the shim picks it up.`,
@@ -290,13 +290,19 @@ function missingSecretMessage(reason) {
 /** Split the two failure modes `httpJson` can produce. A connection-level failure
  * carries err.code and no status; a daemon refusal carries err.statusCode and the
  * daemon's own message. Conflating them is what makes a typo in a block kind read
- * as "the service is down". */
-function toolErrorFor(err, url) {
+ * as "the service is down".
+ *
+ * `tool` is the call this failure belongs to, and it is here for the 401 branch alone:
+ * `missingSecretMessage` opens with the tool name, so a refusal that always said `ask`
+ * sent an agent whose `read` was rejected to look at the wrong call. Defaults to `ask`,
+ * which every other caller is. */
+function toolErrorFor(err, url, tool = 'ask') {
   if (err?.statusCode === 401) {
     return new ToolError(missingSecretMessage(
       SECRET
         ? 'the daemon rejected this session\'s local secret (HTTP 401).'
-        : 'this machine has no claude-board local secret.'
+        : 'this machine has no claude-board local secret.',
+      tool
     ));
   }
   if (typeof err?.statusCode === 'number' && err.statusCode >= 400) {
@@ -585,6 +591,59 @@ const ASK_TOOL = {
   },
 };
 
+/** The second tool (ADR 115). Deliberately tiny: one string in, the whole board out.
+ *
+ * The description has to answer "when would I call this", because the two moments it
+ * exists for are ones the agent has to recognise on its own -- a `fresh` ask naming the
+ * board it walked away from, and a wait that ended before the reviewer sent. */
+const READ_TOOL = {
+  name: 'read',
+  description:
+    'Read a claude-board board back: every round with its title, status and deadline, and ' +
+    'every answer and comment stored on it, each naming its round. Reads only: nothing is ' +
+    'marked delivered, so the same call twice gives the same answer. Use it to collect an ' +
+    'answer the reviewer sent after your wait ended, to read the board an ask with fresh ' +
+    'named as abandoned, or to read a board from an earlier conversation by its URL.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      board: {
+        type: 'string',
+        description: 'The board URL an ask returned (http://127.0.0.1:<port>/b/<id>), or the bare board id.',
+      },
+    },
+    required: ['board'],
+  },
+};
+
+/** A board page URL of this daemon's own shape, for `read`'s one argument. The port is
+ * not pinned: a board URL from an earlier session on another port still names a board id
+ * this daemon can look up, and the id is the only part that reaches a request. The HOST
+ * is pinned to loopback, because a claude-board URL is never anything else and refusing
+ * the rest is what keeps "paste the URL" from meaning "fetch whatever you were given". */
+const BOARD_PAGE_URL_RE = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/b\/([^/?#]+)\/?(?:#[^?]*)?$/;
+
+/** The board id `input` names, or null if it names none. Accepts a bare id (the same
+ * class src/store.mjs will accept, checked here so a refusal is a readable sentence
+ * rather than a 400) and a board page URL; refuses everything else rather than guessing,
+ * since the value goes into a URL path segment.
+ *
+ * A trailing fragment is allowed and discarded: the daemon's own index links a board as
+ * `/b/<id>#open-round` (src/indexpage.mjs), so refusing one meant refusing a URL the
+ * product itself hands the reviewer to copy. The fragment names a place on the page and
+ * never reaches a request.
+ *
+ * The captured segment is validated by `BOARD_ID_RE` and nothing else, so the URL form
+ * and the bare form accept exactly the same ids: a second spelling of the class here is
+ * a second thing to keep in step with src/store.mjs. */
+function boardIdFrom(input) {
+  if (typeof input !== 'string') return null;
+  const value = input.trim();
+  if (BOARD_ID_RE.test(value)) return value;
+  const match = BOARD_PAGE_URL_RE.exec(value);
+  return match && BOARD_ID_RE.test(match[1]) ? match[1] : null;
+}
+
 function errorResult(message, extra = {}) {
   const packet = {
     board: extra.board ?? null,
@@ -627,27 +686,85 @@ function formatAnchor(anchor) {
  * and words, not a count. `commands/grill.md` tells the agent to address comments as
  * their own input; "3 comment(s)." makes that impossible and does it silently. */
 function summarizeAnswers(packet) {
-  const lines = (packet.answers || []).map(a => {
-    const choice = Array.isArray(a.choice) ? a.choice.join(', ') : (a.choice ?? '—');
-    const note = a.note ? ` (note: ${a.note})` : '';
-    return `  - ${a.id} [${a.status}] "${a.prompt}" -> ${choice}${note}`;
-  });
+  const lines = (packet.answers || []).map(a => `  - ${answerLine(a)}`);
   const comments = packet.comments || [];
   const commentBlock = comments.length
     ? [
       `${comments.length} comment(s) — each is feedback on the block it is anchored to, to address as its own input:`,
-      ...comments.map(c => {
-        const where = `${c.blockId}${c.blockKind ? ` (${c.blockKind})` : ''} @ ${formatAnchor(c.anchor)}`;
-        // ADR 99: the packet drops `resolved` and keeps `lost` alone, so a
-        // consumer that used to branch on `resolved === false` branches on
-        // `lost`'s presence instead -- the two were never anything but the
-        // same verdict under two names.
-        const lost = c.lost ? ' [anchor no longer resolves]' : '';
-        return `  - [${c.n}] ${where}${lost}: ${c.text}`;
-      }),
+      ...comments.map(c => `  - ${commentLine(c)}`),
     ].join('\n')
     : 'No comments.';
   return `${lines.join('\n')}\n${commentBlock}`;
+}
+
+/** One answer entry as a line of text. Extracted from `summarizeAnswers` above only
+ * because `read`'s summary needs the same line under a different prefix, and two
+ * hand-copied formatters drift at the first field either one gains. */
+function answerLine(a) {
+  const choice = Array.isArray(a.choice) ? a.choice.join(', ') : (a.choice ?? '—');
+  const note = a.note ? ` (note: ${a.note})` : '';
+  return `${a.id} [${a.status}] "${a.prompt}" -> ${choice}${note}`;
+}
+
+/** One comment entry as a line of text; see `answerLine` for why it is its own function. */
+function commentLine(c) {
+  const where = `${c.blockId}${c.blockKind ? ` (${c.blockKind})` : ''} @ ${formatAnchor(c.anchor)}`;
+  // ADR 99: the packet drops `resolved` and keeps `lost` alone, so a
+  // consumer that used to branch on `resolved === false` branches on
+  // `lost`'s presence instead -- the two were never anything but the
+  // same verdict under two names.
+  const lost = c.lost ? ' [anchor no longer resolves]' : '';
+  return `[${c.n}] ${where}${lost}: ${c.text}`;
+}
+
+/** `read`'s text: the rounds in order, then every stored entry, each line naming the
+ * round it belongs to. The text channel is the only one guaranteed to survive an MCP
+ * client (see `packetResult`), so this has to be readable on its own -- which for a read
+ * means an agent can tell round 4's late answer from round 1's settled one without
+ * opening the board.
+ *
+ * An entry whose round matches no round on the board (a comment stored before comments
+ * carried one) is listed last rather than dropped: a late answer nobody can see is the
+ * whole defect this tool exists for. */
+function summarizeBoardRead(doc) {
+  const rounds = doc.rounds || [];
+  const answers = doc.answers || [];
+  const comments = doc.comments || [];
+  const lines = [
+    `Board ${doc.board}${doc.title ? ` "${doc.title}"` : ''}, ${rounds.length} round(s). ` +
+    `A read marks nothing: reading it again returns exactly this.`,
+  ];
+  if (!rounds.length) lines.push('This board has no rounds.');
+  for (const r of rounds) {
+    lines.push(
+      `Round ${r.n}${r.title ? ` "${r.title}"` : ''}, status ${r.status}` +
+      // The reviewer's own choice on the round, when they made one. `discuss` is the
+      // reason it is here: without it a round closed with Discuss reads back as a plain
+      // `sent`, and the STOP the packet path spells out (the `discuss` branch in askTool)
+      // reaches nobody who arrives through `read` instead. What the word means is the
+      // skill's to say, in one place, rather than a second copy of that sentence here.
+      `${r.action ? `, action ${r.action}` : ''}, ` +
+      `${r.awaited ? 'still awaited' : 'not awaited'}${r.deadline ? `, deadline ${r.deadline}` : ''}`
+    );
+  }
+  const entries = [];
+  const placed = new Set();
+  for (const r of rounds) {
+    for (const a of answers) {
+      if (a.round !== r.n) continue;
+      placed.add(a);
+      entries.push(`Round ${r.n} answer: ${answerLine(a)}`);
+    }
+    for (const c of comments) {
+      if (c.round !== r.n) continue;
+      placed.add(c);
+      entries.push(`Round ${r.n} comment: ${commentLine(c)}`);
+    }
+  }
+  for (const a of answers) if (!placed.has(a)) entries.push(`Round unknown answer: ${answerLine(a)}`);
+  for (const c of comments) if (!placed.has(c)) entries.push(`Round unknown comment: ${commentLine(c)}`);
+  lines.push(entries.length ? entries.join('\n') : 'No answers and no comments are stored on this board.');
+  return lines.join('\n');
 }
 
 /** Build a tool result carrying the packet on every channel that might survive.
@@ -772,6 +889,18 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   // and the push at the end need it.
   const contentId = requestIdFor([title, blocks, Boolean(wait)]);
 
+  // What this side is about to do after the post lands, told to the daemon in the post
+  // itself (AC 8): `true` means "this call returns on the response and never opens a
+  // /wait", which is what makes the response the thread's next packet and lets it drain
+  // what the thread is owed. The daemon spends the delivered marks on nothing else, so
+  // this must be the same decision `askTool` makes below when it chooses between
+  // returning and blocking -- one predicate, `isAwaited`, read twice.
+  //
+  // Deliberately NOT part of `contentId`/`requestId` above: it is derived from `blocks`
+  // and `wait`, which are already in the hash, so folding it in would change every
+  // idempotency key this shim has ever sent for no new distinction.
+  const noWait = !isAwaited(blocks, wait);
+
   // Re-read the guard after EVERY await, never once on the way in. `session.creatingThread`
   // is null-checked before an await and written after one, so a single read let a call
   // that yielded — waiting out someone else's mint, or declaring a boundary — fall through
@@ -841,7 +970,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
     const creating = (async () => {
       const posted = await httpJson(
         'POST', `${BASE_URL}/api/board`,
-        { title, blocks, wait: Boolean(wait), cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId },
+        { title, blocks, wait: Boolean(wait), noWait, cwd: process.cwd(), thread: session.thread ?? null, requestId: createRequestId },
         { timeoutMs: CREATE_TIMEOUT_MS }
       );
       session.boardId = posted.boardId;
@@ -901,7 +1030,7 @@ async function postThisRound(session, title, blocks, wait, fresh) {
   try {
     posted = await httpJson(
       'POST', `${BASE_URL}/api/board`,
-      { boardId: session.boardId, blocks, title, wait: Boolean(wait), requestId },
+      { boardId: session.boardId, blocks, title, wait: Boolean(wait), noWait, requestId },
       { timeoutMs: POST_TIMEOUT_MS }
     );
   } catch (err) {
@@ -925,18 +1054,23 @@ async function postThisRound(session, title, blocks, wait, fresh) {
 }
 
 /** Whether `blocks` — this call's raw, not-yet-normalized input — carries a question
- * anywhere in it: top-level, or nested inside a question's own `context` array or a
- * `compare` block's `left`/`right` side, the same three places src/board.mjs's own
- * traversals (`countersFromBoard`, `idLedgerFromBoard`, `findBlock`, `questionBlocks`)
- * walk on the normalized board. A block is minted in exactly the shape it arrives, so
- * checking the raw input finds the same set an already-posted board would. A round
- * carrying a question always blocks (CONTEXT.md "Awaited"); `wait` below is the second,
- * declared route in. */
+ * anywhere in it: top-level, or nested in a `compare` block's `left`/`right` side, the
+ * same places src/board.mjs's own traversals (`countersFromBoard`, `idLedgerFromBoard`,
+ * `findBlock`, `questionBlocks`) reach on the normalized board. A block is minted in
+ * exactly the shape it arrives, so checking the raw input finds the same set an
+ * already-posted board would. A round carrying a question always blocks (CONTEXT.md
+ * "Awaited"); `wait` below is the second, declared route in.
+ *
+ * No descent into `context`: the daemon reads a `context` array only on a question
+ * (src/badge.mjs `questionBlocks`), which the line above has already answered `true` for,
+ * so descending it on any OTHER kind counted a question the daemon will never mint. That
+ * is not a harmless extra: this predicate decides `noWait` on the post, so a question
+ * nested in an `html` block's `context` had the shim declare it would wait on a round the
+ * daemon minted unawaited, and the round then drained nothing and blocked on nothing. */
 function hasQuestionBlock(blocks) {
   const found = b => {
     if (!b || typeof b !== 'object') return false;
     if (b.kind === 'question') return true;
-    if (Array.isArray(b.context) && b.context.some(found)) return true;
     if (b.kind === 'compare' && (found(b.left && b.left.block) || found(b.right && b.right.block))) return true;
     return false;
   };
@@ -1021,6 +1155,23 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     throw toolErrorFor(err, session.url);
   }
 
+  // AC 7: the board this call walked away from, named in every result text below so the
+  // id survives the boundary that closed it -- `read` is then how a late answer left on
+  // it is collected, and the agent has the one string it needs to make that call. Read
+  // BEFORE flushBoundary, which is what clears it.
+  //
+  // Only ever set by `fresh` (declareBoundary is its only caller), and only when there
+  // genuinely was a board: an ordinary ask, and a `fresh` ask in a conversation that had
+  // no board, add nothing to their result.
+  const abandonedUrl = safeBoardUrl(session.pendingAbandon);
+  const abandonedNote = abandonedUrl
+    ? `Abandoned board: ${abandonedUrl} (the previous conversation's board, closed by this fresh ask). ` +
+      `Call read with that URL to collect any answer left on it.`
+    : '';
+  // Every branch below returns through here, so the note cannot be forgotten by one of
+  // them: appended to the text, which is the channel a client cannot drop.
+  const askResult = (text, packet) => packetResult(abandonedNote ? `${text}\n${abandonedNote}` : text, packet);
+
   // This post landed, so the board the boundary walked away from can be closed (see
   // declareBoundary). Only here: a refused post -- the throw above -- leaves the previous
   // conversation's open round exactly as the reviewer left it, which is what makes a
@@ -1061,17 +1212,29 @@ async function askTool(args, session, { sendProgress, cancelled }) {
   // same `mintAwait` result. Optional by design: a daemon from before the field existed
   // returns `undefined`, and the local shape check decides exactly as it did.
   if (posted.awaited === false || !isAwaited(blocks, wait)) {
-    const text = `Board posted; no response needed (nothing awaited in this round).\nBoard: ${url}`;
-    return packetResult(text, {
+    // AC 8: this call opens no `/wait`, so this response IS the thread's next packet, and
+    // the daemon has drained into it whatever the thread was owed and no packet ever
+    // carried -- an answer the reviewer sent after an earlier round's wait had ended,
+    // and any comment left with nobody listening. Present only when the post carried
+    // `noWait` (postThisRound) AND the daemon is new enough to have drained: both older
+    // shapes arrive as `undefined` here and read as the empty packet this always was.
+    const packet = {
       board: posted.boardId,
       thread: posted.thread,
       title,
       round: posted.round,
       status: 'posted',
-      answers: [],
-      comments: [],
+      answers: Array.isArray(posted.answers) ? posted.answers : [],
+      comments: Array.isArray(posted.comments) ? posted.comments : [],
       url,
-    });
+    };
+    const owed = packet.answers.length || packet.comments.length
+      ? `\nThis round asked nothing, but the thread was owed what follows: answers sent after an ` +
+        `earlier round ended, and comments nobody had collected. Each entry names the round it came ` +
+        `from, and this is the one delivery: treat it as the reviewer's input.\n${summarizeAnswers(packet)}`
+      : '';
+    const text = `Board posted; no response needed (nothing awaited in this round).${owed}\nBoard: ${url}`;
+    return askResult(text, packet);
   }
 
   let waited;
@@ -1093,7 +1256,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     const text =
       `No response within the ${formatDuration(TIMEOUT_MS)} wall-clock cap. Explicit no-response, ` +
       `not a hang. Board is still open at ${url} — reopen it or post a fresh round to continue.`;
-    return packetResult(text, {
+    return askResult(text, {
       board: posted.boardId,
       thread: posted.thread,
       title,
@@ -1112,7 +1275,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
       `Reviewer chose Discuss in chat. STOP posting further boards for the rest of this session — ` +
       `continue the conversation in chat using the partial answers below instead.\n` +
       `${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
-    return packetResult(text, packet);
+    return askResult(text, packet);
   }
 
   // A `timeout` packet is the DAEMON's cap expiring, not the shim's, so `waited.timedOut`
@@ -1125,7 +1288,7 @@ async function askTool(args, session, { sendProgress, cancelled }) {
       `No response before the daemon's wall-clock cap. Explicit no-response, not a hang. ` +
       `The round is still open at ${packet.url} — reopen it or post a fresh round to continue.\n` +
       `${summarizeAnswers(packet)}`;
-    return packetResult(text, packet);
+    return askResult(text, packet);
   }
 
   // The board was closed under this call: the conversation that owned it declared itself
@@ -1144,12 +1307,12 @@ async function askTool(args, session, { sendProgress, cancelled }) {
       `made: this is neither an answer nor the wall-clock cap. Any comments below were left before ` +
       `it closed and still count. Post to the current board if the question still stands.\n` +
       `${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
-    return packetResult(text, packet);
+    return askResult(text, packet);
   }
 
   if (packet.status === 'submitted') {
     const text = `Board submitted.\n${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
-    return packetResult(text, packet);
+    return askResult(text, packet);
   }
 
   // Every ending this shim knows is branched above, so this is one it does not: a daemon
@@ -1164,7 +1327,51 @@ async function askTool(args, session, { sendProgress, cancelled }) {
     `say plainly that the outcome is unrecognised, and open the board yourself. If the daemon is ` +
     `newer than this shim, ./install.sh from the claude-board repository updates both.\n` +
     `${summarizeAnswers(packet)}\nBoard: ${packet.url}`;
-  return packetResult(text, packet);
+  return askResult(text, packet);
+}
+
+/** `read` (ADR 115): one board's rounds, answers and comments, by URL or id, from any
+ * conversation. Session state is untouched -- this reads a board, it does not join it,
+ * so reading the board a previous conversation left behind never makes it this
+ * conversation's board.
+ *
+ * No `assertInteractive`/`assertCanOpenTab`, unlike `ask`: those two refuse to put a
+ * board in front of a human who is not there. This one puts nothing in front of anybody
+ * and writes nothing -- it hands back what a human already typed -- so an unattended run
+ * collecting an answer left overnight is a legitimate caller, not the case those
+ * refusals exist for. */
+async function readTool(args) {
+  if (!SECRET) throw new ToolError(missingSecretMessage('this machine has no claude-board local secret.', 'read'));
+  const boardId = boardIdFrom(args && args.board);
+  if (!boardId) {
+    throw new ToolError(
+      `read requires "board": a claude-board board URL (${BASE_URL}/b/<id>) or a bare board id, ` +
+      `not ${JSON.stringify((args && args.board) ?? null)}. Nothing was read. The URL is the one every ` +
+      `ask result ends with, and an ask with fresh names the board it abandoned in the same way.`
+    );
+  }
+  const url = safeBoardUrl(boardId);
+  let doc;
+  try {
+    doc = await httpJson('GET', `${BASE_URL}/api/board/${boardId}/read`, null, { timeoutMs: POST_TIMEOUT_MS });
+  } catch (err) {
+    // Its own message, because it is the one failure a caller can act on without
+    // touching the daemon: an id that no longer names anything. Everything else --
+    // unreachable, unauthorized, refused -- reads exactly as it does for `ask`.
+    if (err && err.statusCode === 404) {
+      throw new ToolError(
+        `no board ${boardId} on this daemon: nothing was ever created under that id here, or the ` +
+        `index's prune has since removed it. Nothing was read. Check the URL, or open the board ` +
+        `index at ${BASE_URL}/ to find the board.`
+      );
+    }
+    throw toolErrorFor(err, url, 'read');
+  }
+  // The URL is this process's own, never the response body's (see safeBoardUrl), and the
+  // read document rides the same three channels a packet does -- text first, because it
+  // is the only one a client cannot drop.
+  const packet = { ...doc, url: url ?? doc.url ?? null };
+  return packetResult(`${summarizeBoardRead(packet)}\nBoard: ${packet.url}`, packet);
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,7 +1433,7 @@ async function handleToolsCall(id, params) {
   const args = (params && params.arguments) || {};
   const progressToken = params && params._meta && params._meta.progressToken;
 
-  if (name !== 'ask') {
+  if (name !== 'ask' && name !== 'read') {
     return respondError(id, -32602, `unknown tool: ${name}`);
   }
 
@@ -1241,20 +1448,34 @@ async function handleToolsCall(id, params) {
   });
 
   try {
-    const result = await askTool(args, session, { sendProgress, cancelled });
+    // `read` shares every one of these arms deliberately: the cancellation registration
+    // (a read that somehow outlives its caller is cancellable like anything else), the
+    // ToolError-to-result conversion, and the unexpected-failure log. What it does not
+    // share is `session` -- see readTool.
+    const result = name === 'read'
+      ? await readTool(args)
+      : await askTool(args, session, { sendProgress, cancelled });
     if (wasCancelled) return; // MCP: a cancelled request gets no response
     return respond(id, result);
   } catch (err) {
     if (err instanceof CancelledError || wasCancelled) {
-      logErr(`ask (request ${id}) stopped: ${err && err.message || 'cancelled'}`);
+      logErr(`${name} (request ${id}) stopped: ${err && err.message || 'cancelled'}`);
       return; // deliberately silent: the client already moved on
     }
-    const extra = { title: args && args.title, board: session.boardId, url: session.url };
+    // `read` names the board in its ARGUMENT, never the live session's: this tool touches
+    // no session, and an error packet pointing at whatever board this conversation last
+    // posted sends the agent to a board that has nothing to do with the failure. An
+    // argument naming no board leaves both fields null, which is what the packet's own
+    // shape already means by "no board".
+    const readBoardId = name === 'read' ? boardIdFrom(args && args.board) : null;
+    const extra = name === 'read'
+      ? { title: null, board: readBoardId, url: safeBoardUrl(readBoardId) }
+      : { title: args && args.title, board: session.boardId, url: session.url };
     if (err instanceof ToolError) {
       return respond(id, errorResult(err.message, extra));
     }
-    logErr('ask failed unexpectedly:', err && err.stack || err);
-    return respond(id, errorResult(`ask failed unexpectedly: ${err && err.message || err}`, extra));
+    logErr(`${name} failed unexpectedly:`, err && err.stack || err);
+    return respond(id, errorResult(`${name} failed unexpectedly: ${err && err.message || err}`, extra));
   } finally {
     inFlightCalls.delete(id);
   }
@@ -1286,7 +1507,7 @@ async function handleMessage(msg) {
     case 'ping':
       return respond(id, {});
     case 'tools/list':
-      return respond(id, { tools: [ASK_TOOL] });
+      return respond(id, { tools: [ASK_TOOL, READ_TOOL] });
     case 'tools/call':
       return handleToolsCall(id, params);
     default:

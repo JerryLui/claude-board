@@ -1197,7 +1197,7 @@ check('every live message type (a real post()/postToStage() call site) has an en
   assert.deepEqual(missing, [], `undocumented live message type(s): ${missing.join(', ')}`);
 });
 
-check('the twelve live types are exactly ready/hover/click/positions/height/scroll/mermaid/scrollBy/mode/locate/band/diagrams', () => {
+check('the thirteen live types are exactly ready/hover/click/link/positions/height/scroll/mermaid/scrollBy/mode/locate/band/diagrams', () => {
   // Pinned by hand once, so a type silently renamed (not just added) is also
   // caught: the check above only ever notices ADDITIONS relative to the
   // comment, never a live type and its comment entry drifting to two
@@ -1209,9 +1209,15 @@ check('the twelve live types are exactly ready/hover/click/positions/height/scro
   // stage's srcdoc, through the same `post({ type: ... })` shape the agent
   // script uses -- which is exactly what keeps it visible to the extractor
   // above rather than being a send this drift check cannot see.
+  //
+  // 'link' is the newest, and it is stage-to-parent only: a link the reviewer
+  // clicked inside the frame, handed over because the frame itself can neither
+  // navigate (the page CSP refuses it) nor open a tab (no 'allow-popups').
+  // There is deliberately no answer type -- what the board does with an
+  // address is the board's decision, and the stage is never told (ADR 113).
   const live = liveMessageTypes(renderSrcText, uiSrcText);
   assert.deepEqual([...live].sort(),
-    ['band', 'click', 'diagrams', 'height', 'hover', 'locate', 'mermaid', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
+    ['band', 'click', 'diagrams', 'height', 'hover', 'link', 'locate', 'mermaid', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
 });
 
 check('the deleted \'select\' type is not live, and is not required to be documented', () => {
@@ -1242,6 +1248,213 @@ check('the drift check actually fails when a type is added to the code and not t
   const documented = documentedMessageTypes(protocolText);
   const missing = [...live].filter(t => !documented.has(t));
   assert.deepEqual(missing, ['zzzUndocumented'], 'adding an undocumented send did not trip the drift check');
+});
+
+// =================================================================================
+// 5. Links inside a stage (ADR 113).
+//
+// A stage is a `srcdoc` frame, so a relative href in it -- an in-page `#anchor`
+// included -- resolves against the BOARD's own address and a click's default
+// action is a frame navigation the page CSP refuses (Chrome's blocked page).
+// The stage script owns the click instead: an anchor scrolls inside the frame,
+// an http/https address is posted to the board, and the board opens it in a new
+// tab at once. The three checks below are one per acceptance criterion.
+// =================================================================================
+
+const ANCHOR_MOCK = '<nav><a id="toc" href="#s2"><span id="inner">Section two</span></a>'
+  + ' <a id="dead" href="#nowhere">nowhere</a></nav>'
+  + '<section id="s1">one</section><section id="s2">two</section>';
+
+/** A board carrying one html stage. With `pageBoard` false a second, markdown
+ * block rides along, which is what makes the board an ordinary in-column one
+ * (QUIRKS.md: a board holding one html block and nothing else IS a page
+ * board) -- criterion 1 names both surfaces, and this is the whole difference
+ * between them here. */
+function linkBoard(mock, pageBoard) {
+  const blocks = [{ kind: 'html', html: mock }];
+  if (!pageBoard) blocks.push({ kind: 'markdown', text: 'not a page board' });
+  return createBoard({ title: 'stage links', blocks });
+}
+
+function mountStage(board) {
+  const document = loadBoard(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  frame.loadSrcdoc();
+  return { document, frame };
+}
+
+/** Every tab the board page opened, in order, as the argument lists it passed.
+ * The board's whole outbound path is one `window.open` call now (ADR.md entry
+ * 113): nothing is shown or confirmed first, so there is nothing in the
+ * document left to read the outcome off, and a stub on the window the page
+ * script was handed is what the checks below assert against. Returns null, as
+ * a real `noopener` open does. */
+function stubWindowOpen(document) {
+  const opens = [];
+  document.defaultView.open = (...args) => { opens.push(args); return null; };
+  return opens;
+}
+
+check('criterion 1: an in-page anchor scrolls the stage INSIDE the frame, below the board\'s own header band -- on a page board and on an in-column stage alike, and never as a navigation', () => {
+  for (const pageBoard of [true, false]) {
+    const where = pageBoard ? 'page board' : 'in-column stage';
+    const board = linkBoard(ANCHOR_MOCK, pageBoard);
+    const { document, frame } = mountStage(board);
+    const opens = stubWindowOpen(document);
+    const stageDoc = frame.contentDocument;
+    const target = stageDoc.getElementById('s2');
+
+    // What the board tells the stage its own floating chrome covers, the same
+    // 'band' message ADR 59 already sends on every refresh. Posted directly
+    // rather than measured off a rendered header because this stand-in has no
+    // layout at all (QUIRKS.md) -- what this check is about is the stage
+    // landing the target below WHATEVER figure the parent reported, which is
+    // the same figure its own body padding clears.
+    frame.contentWindow.postMessage({ cb: 'cb-stage', type: 'band', top: 64, bottom: 40 });
+
+    // The click lands on a <span> INSIDE the link, exactly as a real one does
+    // on a styled table-of-contents entry: the handler has to find the <a> the
+    // browser's own default action would have followed, not just ev.target.
+    const ev = new StandInEvent('click');
+    stageDoc.getElementById('inner').dispatchEvent(ev);
+
+    assert.equal(ev.defaultPrevented, true,
+      `${where}: the click must be cancelled -- an uncancelled one navigates this frame to the board's own address plus the fragment, which the page CSP refuses (the blocked page this whole feature exists to remove)`);
+    assert.equal(target.scrollIntoViewCallCount, 1, `${where}: the anchor's target must be scrolled to, inside the frame`);
+    assert.deepEqual(target.scrollIntoViewLastOptions, { block: 'start', inline: 'nearest', behavior: 'smooth' },
+      `${where}: the browser's own scroll-into-view is what walks the target's real scrolling ancestors -- an app-shell artifact scrolls an inner pane, and no arithmetic here can know that in advance`);
+    assert.equal(target.style.scrollMarginTop, '64px',
+      `${where}: the target must land BELOW the board's header band, not under it -- and by the same figure the parent reported, never one invented in the stage`);
+
+    // A fragment naming nothing scrolls nothing, and still never navigates.
+    const dead = new StandInEvent('click');
+    stageDoc.getElementById('dead').dispatchEvent(dead);
+    assert.equal(dead.defaultPrevented, true, `${where}: a fragment naming nothing must still be cancelled`);
+    assert.equal(target.scrollIntoViewCallCount, 1, `${where}: a fragment naming nothing must scroll nothing`);
+
+    // While comment mode is on the same click mints a comment anchor as it
+    // always did, and neither scrolls nor opens anything. Asserted on the
+    // in-column fixture alone: on a page board comment mode is additionally
+    // gated on the round still being awaited (pageRoundCommentsAllowed,
+    // src/ui.mjs), which is a different rule with checks of its own -- a stage
+    // told mode is off is a stage where a link click legitimately scrolls.
+    if (pageBoard) continue;
+    enableCommentMode(document);
+    const inMode = new StandInEvent('click');
+    stageDoc.getElementById('inner').dispatchEvent(inMode);
+    const form = document.getElementById('comment-form-' + board.blocks[0].id);
+    assert.equal(inMode.defaultPrevented, true, `${where}: comment mode must not let a link navigate either`);
+    assert.equal(target.scrollIntoViewCallCount, 1, `${where}: a click in comment mode must not scroll the stage`);
+    assert.deepEqual(opens, [], `${where}: a click in comment mode must open nothing`);
+    assert.ok(form && form.classList.contains('open'), `${where}: a click in comment mode must mint a comment anchor, exactly as it does today`);
+  }
+});
+
+const OUTBOUND_MOCK = '<a id="out" href="https://example.com/a?x=1">out</a>'
+  + '<a id="out2" href="http://example.org/second">second</a>'
+  + '<a id="js" href="javascript:alert(1)">js</a>'
+  + '<a id="file" href="file:///etc/passwd">file</a>'
+  + '<a id="data" href="data:text/plain,hi">data</a>'
+  + '<a id="rel" href="/b/another-board">relative</a>';
+
+check('criterion 2: an http/https link opens a new tab with no opener at once, and every other scheme opens and navigates nothing', () => {
+  const { document, frame } = mountStage(linkBoard(OUTBOUND_MOCK, false));
+  const stageDoc = frame.contentDocument;
+  const opens = stubWindowOpen(document);
+  const chromeBefore = document.body.children.length;
+
+  // Every other scheme: nothing opened, nothing navigated.
+  for (const id of ['js', 'file', 'data', 'rel']) {
+    const ev = new StandInEvent('click');
+    stageDoc.getElementById(id).dispatchEvent(ev);
+    assert.equal(ev.defaultPrevented, true, `a ${id}: link must not navigate the frame either`);
+    assert.deepEqual(opens, [], `a ${id}: link must open nothing at all`);
+  }
+
+  // An http/https one: one tab, the whole address, no opener, and no board
+  // chrome in between (ADR.md entry 113 -- the address is not shown or
+  // confirmed first, so a reviewer's click is a click, not two).
+  const ev = new StandInEvent('click');
+  stageDoc.getElementById('out').dispatchEvent(ev);
+  assert.equal(ev.defaultPrevented, true, 'the frame itself must never navigate -- the board opens the tab, or nothing does');
+  assert.equal(opens.length, 1, 'an http/https link must open exactly one tab, on the click that asked for it');
+  assert.equal(opens[0][0], 'https://example.com/a?x=1', 'the tab goes to the address the link carried, whole');
+  assert.equal(opens[0][1], '_blank', 'a new tab, never the board page itself');
+  assert.ok(/\bnoopener\b/.test(String(opens[0][2] || '')),
+    'the open must carry noopener -- the opened page must not reach back through window.opener into a board holding every answer on it');
+  assert.equal(document.body.children.length, chromeBefore,
+    'the board page stays as it was: no address panel to read, nothing to dismiss');
+
+  // A second link opens at once too. The confirmation this feature used to
+  // carry made a second click ignorable while the first was still up; with no
+  // confirmation there is nothing to answer and nothing to queue behind.
+  stageDoc.getElementById('out2').dispatchEvent(new StandInEvent('click'));
+  assert.equal(opens.length, 2, 'a second link must open at once as well');
+  assert.equal(opens[1][0], 'http://example.org/second', 'and go to the address asked for THIS time');
+});
+
+check('criterion 3: the sandbox stays allow-scripts alone, and the parent takes an open request only from a genuine stage frame and only for an address it can parse as http/https', () => {
+  // The rejected alternative, pinned: opening from inside the frame would have
+  // needed 'allow-popups' on these three attributes. All three still read
+  // exactly 'allow-scripts', and no sandbox token is added anywhere.
+  const sandboxValues = [...renderSrcText.matchAll(/sandbox="([^"]*)"/g)].map(m => m[1]);
+  assert.ok(sandboxValues.length >= 3, `setup failure: src/render.mjs has ${sandboxValues.length} sandbox attributes, expected the three stage sites at least`);
+  assert.deepEqual([...new Set(sandboxValues)], ['allow-scripts'],
+    'no sandbox attribute in src/render.mjs may name anything but allow-scripts -- \'allow-popups\' is exactly the alternative the board opening the tab itself exists so none of them needs');
+
+  const { document, frame } = mountStage(linkBoard(OUTBOUND_MOCK, false));
+  const opens = stubWindowOpen(document);
+  const stageWindow = frame.contentWindow;
+  const good = { cb: 'cb-stage', type: 'link', url: 'https://example.com/ok' };
+
+  // Not a genuine stage: a real (non-opaque) origin, or a source no live
+  // '.html-stage' frame's contentWindow matches. Same two gates every other
+  // type on this channel goes through, before any shape check runs.
+  document.defaultView.dispatchEvent({ type: 'message', data: good, origin: 'https://evil.example', source: stageWindow });
+  assert.deepEqual(opens, [], 'an open request reporting a real origin must be ignored');
+  document.defaultView.dispatchEvent({ type: 'message', data: good, origin: 'null', source: {} });
+  assert.deepEqual(opens, [], 'an open request not sourced from a live stage frame must be ignored');
+
+  // Genuine stage, hostile payload. Every one of these opens nothing at all.
+  const hostile = [
+    {},
+    { url: 42 },
+    { url: '' },
+    { url: { toString: () => 'https://example.com/x' } },
+    { url: 'javascript:alert(1)' },
+    { url: 'data:text/html,<script>alert(1)</' + 'script>' },
+    { url: 'file:///etc/passwd' },
+    { url: 'not a url at all' },
+    { url: '/b/another-board' },
+    { url: 'https://example.com/' + 'a'.repeat(5000) }, // longer than any real link carries, so refused outright
+  ];
+  for (const payload of hostile) {
+    document.defaultView.dispatchEvent({
+      type: 'message',
+      data: Object.assign({ cb: 'cb-stage', type: 'link' }, payload),
+      origin: 'null',
+      source: stageWindow,
+    });
+    assert.deepEqual(opens, [], `a hostile open request must open nothing: ${JSON.stringify(payload)}`);
+  }
+  assert.equal({}.polluted, undefined, 'a hostile open request must never pollute Object.prototype');
+
+  // A markup-shaped address opens as the URL parser leaves it: the tab goes to
+  // the PARSED string, never to the bytes the stage typed.
+  document.defaultView.dispatchEvent({
+    type: 'message',
+    data: { cb: 'cb-stage', type: 'link', url: 'https://example.com/<img src=x onerror=alert(1)>' },
+    origin: 'null',
+    source: stageWindow,
+  });
+  assert.equal(opens.length, 1, 'a parseable http address still opens, however it is dressed');
+  assert.ok(!opens[0][0].includes('<img'), 'what opens is what new URL made of it, escaped');
+
+  // And a genuine, well-formed request still works right after all of that --
+  // the validation is a filter, not a latch.
+  document.defaultView.dispatchEvent({ type: 'message', data: good, origin: 'null', source: stageWindow });
+  assert.equal(opens.length, 2, 'a genuine open request must still work after a batch of hostile ones');
+  assert.equal(opens[1][0], 'https://example.com/ok');
 });
 
 if (failures) {

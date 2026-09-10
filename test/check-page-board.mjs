@@ -35,7 +35,7 @@ import { renderBoardPage, renderRoundSection, groupCommentsByBlock, stageAgentSc
 // stay green through any change to the real one (which is how the amend path's
 // missing `fullpage` survived two other push checks).
 import { buildRoundPushPayload } from '../src/server.mjs';
-import { ui, ROUND_ABANDONED_LABEL, ROUND_ABANDONED_TITLE } from '../src/ui.mjs';
+import { ui } from '../src/ui.mjs';
 import { styles } from '../src/styles.mjs';
 import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, PILL_SUBMITTED_TITLE } from '../src/badge.mjs';
 import { themeBootScript } from '../src/theme.mjs';
@@ -1879,7 +1879,7 @@ async function withResync(es, event, data, fresh) {
   return posts;
 }
 
-await checkAsync('a page board whose round was abandoned stops counting down, freezes, and says its queued comments never went out (ablation: drop roundsClosedUnsent from applyResync and the tab keeps a live countdown over a board nothing can ever be posted to)', async () => {
+await checkAsync('a page board whose round was abandoned stops counting down, freezes, and flushes its queued comments exactly as a lapsed one does (ablation: drop roundsClosedUnsent from applyResync and the tab keeps a live countdown over a round whose queue never leaves)', async () => {
   const board = pageBoard();
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
   const frame = document.querySelector('.html-stage');
@@ -1901,18 +1901,26 @@ await checkAsync('a page board whose round was abandoned stops counting down, fr
   assert.equal(panel.classList.contains('expired'), true, 'the compose surface must freeze');
   assert.equal(pageSendBtn(document).disabled, true, 'and be genuinely disabled, not merely hidden (QUIRKS.md "Readonly is locked twice")');
   assert.equal(pageDiscussBtn(document).disabled, true);
-  assert.deepEqual(posts, [],
-    'nothing may be posted on the way into this freeze -- the round is closed, so the daemon answers every submit 409');
+  // AC 5: the queue's last exit is the same one a lapsed round takes (ADR 114 -- an
+  // abandoned round stores a Send, so there is somewhere to flush TO). This branch
+  // used to post nothing at all and tell the reviewer their comments were lost.
+  // (Ablation: restore `if (!abandoned)` in front of flushPendingOnExpiry and this
+  // is [] again, with the comment stranded in tab memory.)
+  assert.equal(posts.length, 1, 'the queued comment must be flushed on the way into the freeze, exactly as on a lapse');
+  assert.match(posts[0].url, /\/submit$/);
+  assert.equal(posts[0].body.round, 1, 'and the flush names the abandoned round, which the daemon now accepts');
+  assert.deepEqual(posts[0].body.comments.map(c => c.text), ['typed before the boundary']);
 
-  // The comments are still on screen and now genuinely stranded, which is exactly
-  // why the control that can no longer be pressed has to say so.
-  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1,
-    'a comment already left stays on screen');
+  // The queue is empty because it LANDED, not because it was dropped: this response
+  // is the flush's own, and clearing the pending mark is what says the comment now
+  // lives on the board rather than in this tab. It used to sit here marked pending
+  // for as long as the tab stayed open, with nowhere to go.
+  assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 0,
+    'the flushed comment stops being pending once the daemon has taken it');
   const frozen = pageSendBtn(document);
-  assert.equal(frozen.textContent, ROUND_ABANDONED_LABEL, 'the frozen control must say the round closed unsent...');
-  assert.equal(frozen.title, ROUND_ABANDONED_TITLE);
-  assert.notEqual(frozen.textContent, PAGE_SEND_EXPIRED_LABEL,
-    '...and must NOT borrow the lapsed-wait label, which promises the comments reach the next agent -- untrue on a board nothing will ever post to again');
+  assert.equal(frozen.textContent, PAGE_SEND_EXPIRED_LABEL,
+    'one label for both closes: the comments really do reach the next agent that reads the board');
+  assert.equal(frozen.title, PAGE_SEND_EXPIRED_TITLE);
 });
 
 await checkAsync('the expired Send label survives the flush it announces (ablation: drop the .page-comments.expired guard from updatePageSendControls and the flush\'s own refreshPins overwrites it with a dead "Nothing to add")', async () => {

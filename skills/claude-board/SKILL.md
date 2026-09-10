@@ -42,7 +42,8 @@ running across a `/clear`, so without `fresh` your first question lands as anoth
 cleared conversation's board, under that work's title, and nothing surfaces it at all. Leave it off
 for every later round, or each round gets a board of its own. It is harmless when there is nothing
 to leave (one board, one thread), and it closes any round still open on the board it walks away
-from, so nothing is left waiting there.
+from, so nothing is left waiting there. The result names that board (`Abandoned board: <url>`),
+because the reviewer may still answer it: `read`, below, is how you collect what they leave.
 
 **Say the board's URL in chat after every round**, in your own reply, not only in what you post.
 The packet's `url` is a tool result, and a `/compact` rebuilds your context from the conversation
@@ -134,6 +135,12 @@ before the stage's scripts run, so an `if (!window.mermaid)` loader short-circui
 unmodified and an artifact needs no bundled engine. The exception is exactly that wide:
 fonts, images and styles stay inline.
 
+**Links inside a stage work, and the board owns them.** A click on an in-page anchor
+(`href="#id"`) scrolls the stage to that element inside the frame, so a table of contents in
+an artifact is worth writing. A click on an `http` or `https` link opens that address in a new
+tab at once, from the board page and with no opener; a link of any other scheme does nothing at
+all. The frame itself never navigates, so an outbound link is worth writing too.
+
 **A stage sizes itself from its own content, never from the viewport.** Outside a page
 board the frame's height is derived from what the stage reports, so a page laid out in
 `vh` units reports whichever slice of itself happens to be visible and lands at the
@@ -207,25 +214,29 @@ round of content only returns the instant it lands.
 }
 ```
 
-- **`posted`**: nothing was asked, so `answers` and `comments` are empty.
+- **`posted`**: nothing was asked in this round, so `answers` and `comments` are empty unless
+  the thread was owed something no packet had carried: an answer sent after an earlier round's
+  wait ended, a comment left on a page board nobody waited on. A content-only round drains what
+  is owed into its own packet, once, each entry naming the round it came from.
 - **`submitted`**: read every answer, then every comment.
 - **`discuss`**: the reviewer chose Discuss in chat. Post no more boards this session and
   pick the remaining branches up in chat, using the partial answers.
 - **`timeout`**: an explicit no-response, not a hang. Say so, then either wait for the
-  reviewer to reopen `url` or move on in chat. **Never silently retry the round.** A round
-  that timed out is not closed — it stays open, so a re-post amends that same dead round in
-  place rather than opening a fresh one: the blocks land on a round with no live deadline and
-  nothing waiting on it, and you get `posted` straight back instead of an answer. A reviewer
-  who answers it late still reaches you: those answers arrive on your next packet the same way
-  comments already do, appended to `answers` and each naming the round it belongs to — so read
-  every entry's own `round`, and treat a late answer as settling that question rather than
-  re-asking it.
+  reviewer to reopen `url` or move on in chat. **Never silently retry the round.** A later
+  `ask` on this board opens a fresh round with a live deadline rather than amending the dead
+  one, so a question you ask again is asked on a round somebody is waiting on. A reviewer who
+  answers the dead round late still reaches you, two ways: those answers arrive on your next
+  packet the same way comments already do, appended to `answers` and each naming the round it
+  belongs to, and `read` returns them at any time. Read every entry's own `round`, and treat a
+  late answer as settling that question rather than re-asking it.
 - **`abandoned`**: the round was closed while you were still waiting on it, because the
   conversation that owned the board declared itself over — a later `ask` with `fresh: true`
-  started a new board, or the board was abandoned directly. Nobody answered and nobody will:
-  it is not a timeout and not a submit, and no answer in the packet is a decision. Read any
-  comments (they were left before it closed and still count), then post to the *current*
-  board if the question stands. This round never reopens, so never re-post into it.
+  started a new board, or the board was abandoned directly. Nobody had answered when it
+  closed: it is not a timeout and not a submit, and no answer in the packet is a decision. Read
+  any comments (they were left before it closed and still count), then post to the *current*
+  board if the question stands. No wait ever returns to this round, so never re-post into it.
+  The reviewer's Send still works on an abandoned question round, though, and what they send is
+  stored, so `read` that board later when the question mattered.
 - **`error`**: posted, but the wait did not complete, so nothing was answered and nothing
   about intent can be inferred. Report the message verbatim, name `url`, and stop rather
   than re-posting into a board that may already hold the round.
@@ -252,7 +263,37 @@ packet; collecting comments from one therefore costs either `wait: true` on it o
 round that asks something, and a `wait: true` page board whose wait times out falls back to
 exactly this. The second is a round answered after its wait died, above. Both ride whatever
 packet comes next, `timeout` and `abandoned` included, so check the `round` on every answer
-and every comment before assuming it belongs to the round you just posted.
+and every comment before assuming it belongs to the round you just posted. `read` below is
+not a packet and drains nothing, so an answer it has already shown you can still ride a later
+packet: the same `round` check is what tells you it is an answer you already have.
+
+## Collecting a late answer
+
+`mcp__claude-board__read` takes one argument, and returns one board:
+
+```js
+read({ board })   // the URL an ask returned, or the bare board id
+```
+
+Back comes that board's rounds (number, title, status, the reviewer's own action, whether a wait
+is still open, deadline) and every answer and comment stored on it, each naming its round. A round
+whose action reads `discuss` means exactly what a `discuss` packet means: stop posting further
+boards for the rest of this session and continue the conversation in chat. It reads only: nothing is
+marked delivered, nothing is written, and the same call twice returns the same thing, so reading
+a board can never be the reason an answer goes missing from a later packet.
+
+Call it whenever an answer may exist that no packet has handed you:
+
+- after an `ask` with `fresh`, on the board named in its `Abandoned board: <url>` line: the
+  previous conversation's reviewer may have answered after you walked away;
+- after a `timeout` or an `abandoned` round, once the reviewer has had time to come back;
+- in a new conversation given nothing but a board URL.
+
+It reads any board on this machine, including one from before the daemon kept track of what it
+had delivered. What it cannot do is ask: a question that still stands goes on the *current*
+board through `ask`. And because it shows a human nothing, only the first failure below can
+refuse it: a daemon that is not running. A session with nobody watching is a legitimate caller
+for collecting an answer already given.
 
 ## When the board is unavailable
 

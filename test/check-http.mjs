@@ -31,7 +31,7 @@ import { readDoc as readPomodoroDoc, writeDoc as writePomodoroDoc } from '../src
 import { cueNames, NO_CUE } from '../src/cues.mjs';
 import { renderBoardPage } from '../src/render.mjs';
 import { assetsNamedBy, MERMAID_ASSET, SCRIPT_ASSET, STYLE_ASSET } from '../src/assets.mjs';
-import { isPageRound } from '../src/badge.mjs';
+import { isPageRound, ROUND_OPEN_UNAWAITED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
 import { ui } from '../src/ui.mjs';
 import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
 
@@ -3947,7 +3947,7 @@ async function main() {
     assert.ok(Date.parse(stored.rounds[1].awaitDeadline) > Date.now(), 'the new round waits against a deadline that has not already passed');
   });
 
-  await check('an abandoned round releases a blocked /wait at once, named for what happened -- and the Send it refuses afterwards says abandoned, not submitted', async () => {
+  await check('an abandoned round releases a blocked /wait at once, named for what happened -- and the late Send that follows is stored rather than refused', async () => {
     // `POST /abandon` invents a third terminal round state (ADR 69, the ordinary
     // `fresh: true` path after a context compaction). `waitForRound` only recognised
     // `sent`, so a call already blocked on that round polled a corpse for the full
@@ -3989,18 +3989,33 @@ async function main() {
     const late = await fetch(`${base}/api/board/${posted.boardId}/wait?round=1`).then(r => r.json());
     assert.equal(late.status, 'abandoned');
 
-    // The reviewer's tab is still open and its Send bar still live. It is refused --
-    // correctly -- but it used to be refused with a sentence claiming somebody had
-    // answered this board.
+    // The reviewer's tab is still open and its Send bar still live -- and ADR 114 is
+    // that the Send lands. It used to be refused 409, which is how nine typed answers
+    // were lost on 2026-09-09: the round was abandoned out from under a reviewer
+    // mid-answer, and there is no draft saving to fall back on.
+    const qid = readBoard(posted.boardId, home).blocks.find(b => b.kind === 'question').id;
     const send = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
       method: 'POST',
       headers: writeHeaders(),
-      body: JSON.stringify({ round: 1, action: 'send', answers: [], comments: [] }),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'typed after the boundary' }], comments: [] }),
     });
-    assert.equal(send.status, 409);
-    const refusal = (await send.json()).error;
-    assert.match(refusal, /abandoned/, `the refusal names the abandon rather than inventing a submit: ${refusal}`);
-    assert.ok(!/already been submitted/.test(refusal), 'nobody submitted anything');
+    assert.equal(send.status, 200, 'a round nobody sent takes a Send however its wait ended');
+    const after = readBoard(posted.boardId, home);
+    assert.equal(after.rounds[0].status, 'sent', 'and the round becomes Submitted, like any other answered round');
+    assert.equal(after.answers[qid].note, 'typed after the boundary');
+    assert.match(after.rounds[0].sentAt, /^\d{4}-\d\d-\d\dT/);
+    assert.match(after.rounds[0].abandonedAt, /^\d{4}-\d\d-\d\dT/, 'the abandon is still stamped -- how it was answered is not rewritten');
+
+    // Sent is sent: the second press of the same button is the 409 this route still
+    // owes a stale client, and it names a submit rather than an abandon now.
+    const again = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ round: 1, action: 'send', answers: [{ id: qid, status: 'answered', choice: 'Yes', note: 'a double click' }], comments: [] }),
+    });
+    assert.equal(again.status, 409, 'a round that HAS been sent is still refused');
+    assert.match((await again.json()).error, /already been submitted/);
+    assert.equal(readBoard(posted.boardId, home).answers[qid].note, 'typed after the boundary', 'and the stored answer survives the retry');
   });
 
   await check('a submit is bounded on every axis a reviewer can repeat: comment text, comment count, and choices per answer -- an over-cap send persists nothing', async () => {
@@ -4435,6 +4450,96 @@ async function main() {
     return waiting;
   }
 
+  // --- ADR 114: a round nobody sent takes a Send however its wait ended -------------
+  //
+  // Two ways a wait ends without an answer -- the clock (Lapsed, ADR 50: the round
+  // stays `open`) and a boundary declaration (Abandoned, ADR 69) -- and only the first
+  // used to store what the reviewer typed afterwards. The second refused it with a 409
+  // and rendered its widgets disabled, which is how nine typed answers were lost on
+  // 2026-09-09. Both store it now, and the round becomes Submitted either way.
+
+  await check('ADR 114 AC 4: a Send on a LAPSED round is stored and the round becomes Submitted', async () => {
+    const r = await askRound('LAPSED_LATE_SEND_Q');
+    assert.equal((await lapse(r.boardId)).status, 'timeout', 'setup: the wait has to actually die');
+    // `lapse` above shortens the WAIT's own cap, not the round's 40-minute deadline, and
+    // Lapsed is the deadline having passed: `closeLapsedAwaitedRounds` (src/badge.mjs)
+    // runs on every readBoard and is what clears `awaited`. Moved on disk rather than
+    // waited out, the same way the follow-up-after-the-cap check above does it.
+    const boardFile = path.join(home, 'boards', `${r.boardId}.json`);
+    const raw = JSON.parse(readFileSync(boardFile, 'utf8'));
+    raw.rounds[0].awaitDeadline = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(boardFile, JSON.stringify(raw, null, 2));
+    const lapsed = readBoard(r.boardId, home).rounds[0];
+    assert.equal(lapsed.status, 'open', 'setup: a lapsed round stays `open` (ADR 50) -- that is what Lapsed IS');
+    assert.equal(lapsed.awaited, false, 'setup: ...with nobody waiting on it any more');
+
+    assert.equal((await answer(r.boardId, 1, r.qid, 'Yes', 'typed 39 minutes late')).status, 200,
+      'the Send lands: nothing about a dead wait stops the answer being recorded');
+    const stored = readBoard(r.boardId, home);
+    assert.equal(stored.rounds[0].status, 'sent', 'and the round becomes Submitted, like any other answered round');
+    assert.equal(stored.answers[r.qid].choice, 'Yes');
+    assert.equal(stored.answers[r.qid].note, 'typed 39 minutes late');
+  });
+
+  await check('ADR 114 AC 5: a Send on an ABANDONED round is stored, the page it reloads onto keeps its live widgets, and the late answer is owed to the thread\'s next packet', async () => {
+    const r = await askRound('ABANDONED_LATE_SEND_Q');
+    // The real shape, and the half of AC 5 that ADR 69 still owns: an agent is BLOCKED on
+    // this round when the boundary is declared, and is released at once rather than left
+    // polling to the wall clock. It matters to the drain too -- that released packet is
+    // what mints this board's delivery ledger, so the late answer below is genuinely
+    // undelivered rather than a legacy board's adoption.
+    const abort = new AbortController();
+    const waiting = fetch(`${base}/api/board/${r.boardId}/wait?round=1`, { signal: abort.signal }).then(res => res.json());
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fetch(`${base}/api/board/${r.boardId}/abandon`, { method: 'POST', headers: writeHeaders() });
+    const released = await waiting;
+    abort.abort();
+    assert.equal(released.status, 'abandoned', 'the blocked ask is released at once, told what happened (ADR 69)');
+    assert.equal(readBoard(r.boardId, home).rounds[0].status, 'abandoned', 'setup: the conversation declared a boundary');
+
+    // The server-side half of "the widgets render live". A reload is a fresh render
+    // from the stored board (and `pages/<id>.html` is written from the same call), so a
+    // `disabled` in these bytes is a reviewer who cannot answer the question their tab
+    // is still showing. (Ablation: ask `status !== 'open'` in renderRoundSection's
+    // `historical` and every assertion below flips.)
+    const page = await (await fetch(`${base}/b/${r.boardId}`)).text();
+    assert.match(page, /<section class="round round-open/, 'the round section stays live, not history');
+    assert.ok(!/class="card-choice[^>]*disabled/.test(page), 'no widget of an unsent round may render disabled');
+    assert.ok(page.includes('<button type="button" class="btn-send" id="send-btn">Send</button>'),
+      'and the send bar is painted live -- a first paint that greys Send out is one the reviewer believes');
+
+    // Read out of the ATTRIBUTE, never `page.includes(TITLE)`: every one of these
+    // strings is also spliced into the client script this page carries, so an
+    // includes() here is true whatever the pill actually says (QUIRKS.md, "a rendered
+    // page contains every comment's text twice").
+    const meta = page.match(/<span class="round-meta" id="round-meta" title="([^"]*)">([^<]*)</);
+    assert.ok(meta, 'setup: the header pill is on every board');
+    assert.equal(meta[2], 'read-only', 'the word itself is unchanged -- ADR 114 kept it deliberately');
+    assert.equal(meta[1], ROUND_OPEN_UNAWAITED_TITLE,
+      'the hover text is the one place the promise lives: answers sent here are saved and reach the next agent that reads the board');
+    assert.notEqual(meta[1], PILL_READONLY_TITLE, 'never "commenting is off" above a live Send button');
+
+    assert.equal((await answer(r.boardId, 1, r.qid, 'No', 'typed after the boundary')).status, 200,
+      'the Send lands: abandoning ends the conversation, not the answer');
+    const stored = readBoard(r.boardId, home);
+    assert.equal(stored.rounds[0].status, 'sent', 'and the round becomes Submitted');
+    assert.equal(stored.answers[r.qid].note, 'typed after the boundary');
+    assert.match(stored.rounds[0].abandonedAt, /^\d{4}-\d\d-\d\dT/, 'without rewriting how the wait ended');
+    assert.deepEqual(stored[ANSWERS_DELIVERED], [],
+      'nothing has carried it: the abandoned packet left before the answer existed, and marked nothing on its way');
+
+    // AC 9 for this shape, and the reason the mark matters: `sent` and unmarked is
+    // exactly what `drainUndeliveredAnswers` owes, so the thread's next packet carries
+    // it once -- an abandoned-then-sent round is not a special case to the drain.
+    const carrier = await askRound('ABANDONED_CARRIER_Q', { thread: r.thread });
+    assert.notEqual(carrier.boardId, r.boardId, 'setup: a boundary means the next round is a new board');
+    assert.equal(carrier.thread, r.thread, 'setup: ...on the same thread, or the drain has no reason to look at it');
+    const packet = await askAndAnswer(carrier.boardId, 1, carrier.qid, 'Yes');
+    assert.equal(packet.answers.filter(a => a.note === 'typed after the boundary').length, 1,
+      'the late answer rides the next packet the thread returns');
+    assert.deepEqual(readBoard(r.boardId, home)[ANSWERS_DELIVERED], [1], 'and is marked delivered once it has');
+  });
+
   await check('ADR 107 AC 1/2: a round whose wait died and which was then submitted late rides the next packet the thread returns, naming its own round -- and rides it exactly once', async () => {
     const r1 = await askRound('LATE_SUBMIT_Q1');
     const timedOut = await lapse(r1.boardId);
@@ -4717,6 +4822,203 @@ async function main() {
     assert.equal(mode(path.join(home, 'pages')), 0o700);
     assert.equal(mode(path.join(home, 'boards', `${boardId}.json`)), 0o600);
     assert.equal(mode(path.join(home, 'pages', `${boardId}.html`)), 0o600);
+  });
+
+  // --- AC 8/9: a content-only post drains what the thread is owed, but only when
+  //     the caller says it will not wait ------------------------------------------
+  //
+  // The habit agents actually developed after ADR 107 was a "collecting round": post
+  // something with no question, hoping the answers sent after the last round's wait died
+  // come back with it. They never did -- a content-only post returns a `posted` packet
+  // and only a `/wait` ever drained anything -- so four empty collecting rounds in a row
+  // delivered nothing while the answers sat on disk.
+  //
+  // The opt-in field is the whole safety argument, and these checks are shaped around
+  // it. The daemon cannot tell from the blocks alone whether anyone is about to block on
+  // the round (the two sides can disagree; see `awaited` on the post response), and
+  // marking answers delivered on a response that did not carry them destroys them. So
+  // the caller declares it, an old shim never does, and a shim that will wait leaves the
+  // drain to that wait exactly as today.
+  //
+  // These reuse the `askRound`/`lapse`/`answer`/`askAndAnswer` helpers from the ADR 107
+  // block above: the fixture is the same one -- a round whose wait died and which was
+  // then submitted anyway -- because that is still the state that owes an answer.
+
+  /** A content-only round posted into an existing board, exactly as the shim posts one.
+   * `noWait` is omitted entirely unless given, which is what an old shim's post looks
+   * like on the wire. */
+  async function postCollecting(boardId, { noWait } = {}) {
+    return (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        boardId,
+        title: 'Collecting round',
+        blocks: [{ kind: 'markdown', text: 'progress note, nothing to answer' }],
+        ...(noWait === undefined ? {} : { noWait }),
+      }),
+    })).json();
+  }
+
+  await check('AC 8: a content-only post that says it will not wait carries the thread\'s owed answers, once', async () => {
+    const r1 = await askRound('POSTED_DRAIN_Q');
+    assert.equal((await lapse(r1.boardId)).status, 'timeout', 'setup: round 1\'s wait must die');
+    assert.equal((await answer(r1.boardId, 1, r1.qid, 'No', 'POSTED_DRAIN_NOTE')).status, 200);
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'setup: nothing has carried that answer');
+
+    const posted = await postCollecting(r1.boardId, { noWait: true });
+    assert.equal(posted.round, 2, 'setup: a sent round cannot be amended, so this is a new round');
+    assert.equal(posted.answers.length, 1, 'the posted response is this thread\'s next packet, and it carries what it is owed');
+    assert.equal(posted.answers[0].round, 1, 'the owed entry names the round that owes it, not the round just posted');
+    assert.equal(posted.answers[0].note, 'POSTED_DRAIN_NOTE');
+    assert.equal(posted.answers[0].choice, 'No');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1], 'and that response leaving is what marks it');
+
+    // Once, ever -- the same guarantee a wait's packet has.
+    const again = await postCollecting(r1.boardId, { noWait: true });
+    assert.deepEqual(again.answers, [], 'a second collecting round carries nothing: an answer is delivered once');
+  });
+
+  await check('AC 8: a post that does not carry the field drains nothing and marks nothing -- an old shim cannot burn an answer', async () => {
+    // The upgrade window this exists for: the daemon restarts on install, every Claude
+    // Code session started before it keeps running the one-tool shim, and that shim goes
+    // on posting collecting rounds. It must get exactly what it always got.
+    const r1 = await askRound('OLD_SHIM_Q');
+    assert.equal((await lapse(r1.boardId)).status, 'timeout');
+    assert.equal((await answer(r1.boardId, 1, r1.qid, 'Yes', 'OLD_SHIM_NOTE')).status, 200);
+
+    const old = await postCollecting(r1.boardId);
+    assert.equal(old.answers, undefined, 'no opt-in, no packet fields: the response is byte-for-byte the one this caller has always had');
+    assert.equal(old.comments, undefined);
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'and nothing is marked delivered');
+
+    // Nor does anything that merely looks like the field. `true` is the opt-in; the
+    // string "true" is a caller that does not speak this protocol.
+    const stringy = await postCollecting(r1.boardId, { noWait: 'true' });
+    assert.equal(stringy.answers, undefined, 'a non-boolean is not an opt-in');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], []);
+
+    // And the answer is still there, undiminished, for the first caller that does opt in.
+    const upgraded = await postCollecting(r1.boardId, { noWait: true });
+    assert.equal(upgraded.answers.filter(a => a.note === 'OLD_SHIM_NOTE').length, 1,
+      'nothing was spent by the posts that carried nothing');
+  });
+
+  await check('AC 8: a post the shim then waits on is drained by that wait, and never twice', async () => {
+    // The other half of the same rule: the new shim omits the field exactly when it is
+    // about to open a `/wait`, so the post drains nothing and the wait's own packet
+    // drains once -- today's behaviour, unchanged.
+    const r1 = await askRound('WAITED_AFTER_POST_Q');
+    assert.equal((await lapse(r1.boardId)).status, 'timeout');
+    assert.equal((await answer(r1.boardId, 1, r1.qid, 'No', 'WAITED_AFTER_POST_NOTE')).status, 200);
+
+    const r2 = await askRound('WAITED_CARRIER_Q', { boardId: r1.boardId });
+    assert.equal(r2.answers, undefined, 'a post that will be waited on drains nothing');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'and marks nothing');
+
+    const packet = await askAndAnswer(r1.boardId, r2.round, r2.qid, 'Yes');
+    assert.equal(packet.answers.filter(a => a.note === 'WAITED_AFTER_POST_NOTE').length, 1,
+      'the wait that follows the post is what carries it, exactly as today');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1, r2.round],
+      'one delivery between the two calls, not two');
+  });
+
+  await check('AC 8: the posted packet carries every undelivered comment, the amended round\'s own included', async () => {
+    // A round that is still open AND asks something is AMENDED by a later post rather
+    // than followed by one. The drain's ordinary rule leaves the target round's own
+    // comments out of what it hands back -- `buildPacket` has already put them in that
+    // packet -- while still MARKING them. There is no `buildPacket` on this path, so
+    // keeping that exclusion would mark them delivered off a response that never carried
+    // them: a silent, permanent loss of the one thing ADR 35 exists to protect.
+    //
+    // The comment is spliced onto the open round by hand because the product cannot
+    // currently reach that state (every submit closes its round, so a round with a
+    // comment is a round that is no longer amendable). This is a check of the guard, and
+    // the guard is what stops the loss arriving with the first path that CAN.
+    const r1 = await askRound('AMENDED_OWN_Q');
+    const seeded = readBoard(r1.boardId, home);
+    seeded.comments.push({
+      n: 1,
+      blockId: seeded.blocks.find(b => b.round === 1).id,
+      anchor: { kind: 'block' },
+      text: 'AMENDED_ROUND_OWN',
+      createdAt: new Date().toISOString(),
+      round: 1,
+    });
+    writeBoard(seeded, home);
+
+    const posted = await postCollecting(r1.boardId, { noWait: true });
+    assert.equal(posted.round, 1, 'setup: an open round that asks something is amended, not followed');
+    assert.deepEqual(posted.comments.map(c => c.text), ['AMENDED_ROUND_OWN'],
+      'the amended round\'s own undelivered comment must be IN the response, not merely marked by it');
+    assert.equal(posted.comments[0].round, 1, 'and it names its round like every other entry');
+    assert.equal(readBoard(r1.boardId, home).comments[0].delivered, true,
+      'marked delivered because it was actually delivered');
+
+    const again = await postCollecting(r1.boardId, { noWait: true });
+    assert.deepEqual(again.comments, [], 'and once only');
+  });
+
+  await check('AC 8: a content-only post that MINTS a board in the thread drains that thread too', async () => {
+    // The create path is the one that walks the whole store before the drain does -- it
+    // has to, to bind the thread's project directory and to mint a thread id nothing else
+    // holds -- and the walk it takes describes the store BEFORE this board is in it. The
+    // drain then works off that same walk rather than paying for a second one, so the
+    // board it is draining for is a board the list has never heard of: it has to be put
+    // back in, or a create in an existing thread reads as a thread one board short and
+    // hands back nothing while the answer sits on disk.
+    const r1 = await askRound('CREATED_DRAIN_Q');
+    assert.equal((await lapse(r1.boardId)).status, 'timeout', 'setup: round 1\'s wait must die');
+    assert.equal((await answer(r1.boardId, 1, r1.qid, 'Yes', 'CREATED_DRAIN_NOTE')).status, 200);
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'setup: nothing has carried that answer');
+
+    const created = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Collecting board',
+        thread: r1.thread,
+        blocks: [{ kind: 'markdown', text: 'a second board in the same conversation' }],
+        noWait: true,
+      }),
+    })).json();
+    assert.notEqual(created.boardId, r1.boardId, 'setup: this must be a new board, not another round on the old one');
+    assert.equal(created.thread, r1.thread, 'setup: and it must have joined the same thread');
+
+    assert.equal(created.answers.filter(a => a.note === 'CREATED_DRAIN_NOTE').length, 1,
+      'the owed answer rides the packet of the board that just joined the thread');
+    assert.equal(created.answers[0].round, 1, 'and names the round that owes it, on the board that owes it');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1], 'and that response leaving is what marks it');
+  });
+
+  await check('AC 9: read is not a packet -- what it returned still rides the next ask packet, and ask packets keep today\'s rule', async () => {
+    // The cost ADR 115 accepts, asserted rather than assumed: `read` marks nothing, so
+    // the same answer can legitimately arrive twice -- once because someone read the
+    // board, once on the next packet the thread returns. The entries' own `round` is
+    // what tells them apart, and the alternative (a consuming read) is what would let a
+    // stray read burn an answer nobody saw.
+    const r1 = await askRound('READ_THEN_RIDE_Q');
+    assert.equal((await lapse(r1.boardId)).status, 'timeout');
+    assert.equal((await answer(r1.boardId, 1, r1.qid, 'No', 'READ_THEN_RIDE_NOTE')).status, 200);
+
+    const readUrl = `${base}/api/board/${r1.boardId}/read`;
+    const first = await (await fetch(readUrl)).json();
+    assert.equal(first.answers.filter(a => a.note === 'READ_THEN_RIDE_NOTE').length, 1, 'the read returns the late answer');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [], 'and marks nothing at all');
+    const second = await (await fetch(readUrl)).json();
+    assert.deepEqual(second.answers, first.answers, 'a second read returns the same thing: it is a read');
+
+    // ...and the packet rule is untouched by either read.
+    const r2 = await askRound('READ_THEN_RIDE_CARRIER_Q', { boardId: r1.boardId });
+    const packet = await askAndAnswer(r1.boardId, r2.round, r2.qid, 'Yes');
+    assert.equal(packet.answers.filter(a => a.note === 'READ_THEN_RIDE_NOTE').length, 1,
+      'an answer a read returned rides the next ask packet all the same');
+    assert.deepEqual(readBoard(r1.boardId, home)[ANSWERS_DELIVERED], [1, r2.round]);
+
+    const r3 = await askRound('READ_THEN_RIDE_THIRD_Q', { boardId: r1.boardId });
+    const third = await askAndAnswer(r1.boardId, r3.round, r3.qid, 'Yes');
+    assert.deepEqual(third.answers.map(a => a.round), [r3.round],
+      'and once a packet HAS carried it, no later packet does: that rule is unchanged');
   });
 
   // --- GET /api/waiting: the boards waiting for an answer ---------------

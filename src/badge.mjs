@@ -302,14 +302,21 @@ export const PILL_READONLY_TITLE = 'No agent is listening on this page -- commen
 // (src/ui.mjs's setSendBarEnabled reads `openRoundNumber`/`status`, never
 // `awaited`), and a comment left there is drained to whichever agent asks
 // next exactly like any other undelivered one (`drainUndeliveredComments`,
-// src/server.mjs). This title is for a round that is still `open` and simply
-// never got a live listener -- never-Awaited or Lapsed (CONTEXT.md), the two
-// closed states a reader is deliberately told nothing apart. A Submitted
-// round (`status === 'sent'`) never reaches it: ADR 89 gives that state its
-// own word and its own title, PILL_SUBMITTED_TITLE just below, so this one no
-// longer has to cover it too.
+// src/server.mjs). This title is for any round nobody is waiting on that has
+// not been sent -- never-Awaited, Lapsed, or Abandoned (CONTEXT.md), three
+// states a reader is deliberately told nothing apart, because on this surface
+// they behave identically: the widgets are live and Send still stores (ADR
+// 114). A Submitted round (`status === 'sent'`) never reaches it: ADR 89 gives
+// that state its own word and its own title, PILL_SUBMITTED_TITLE just below,
+// so this one no longer has to cover it too.
+//
+// "reads the board", not "asks": since ADR 115 an answer left here is
+// collectable by any conversation through the `read` tool, which is the only
+// thing that makes the promise true for an ABANDONED round -- no thread will
+// ever wait on that board again, so "the next agent that asks" would have been
+// a promise nothing could keep.
 export const ROUND_OPEN_UNAWAITED_TITLE =
-  'No agent is waiting live right now -- comments and answers here are saved and reach the next agent that asks.';
+  'No agent is waiting live right now -- comments and answers sent here are saved and reach the next agent that reads the board.';
 
 // The pill's title once the round in view was actually Submitted (CONTEXT.md
 // "Submitted" -- the store's `status === 'sent'`). ADR 89: a reviewer who just
@@ -329,13 +336,22 @@ export const PILL_SUBMITTED_TITLE = 'This round was submitted -- the answer alre
 // carries this instead of "Send": the reviewer's queued comments were flushed to
 // the board on their way into the freeze (src/ui.mjs's refreshAwaitDisplay), so
 // they are stored, and the drain (drainUndeliveredComments, src/server.mjs)
-// hands them to the next agent that asks -- which is a promise worth making in
-// the one place the reviewer is already looking. A frozen control that just
-// disappeared said nothing, and the reviewer had no way to tell a comment that
-// was safe from one that was lost.
-export const PAGE_SEND_EXPIRED_LABEL = 'Goes out with the next round';
+// hands them to the next agent that reads the board -- which is a promise worth
+// making in the one place the reviewer is already looking. A frozen control that
+// just disappeared said nothing, and the reviewer had no way to tell a comment
+// that was safe from one that was lost.
+//
+// "reads the board", and no mention of a next round, for the same reason
+// ROUND_OPEN_UNAWAITED_TITLE above says it: this control freezes on BOTH closes
+// (ADR 114), and on the abandoned one the conversation that owned this board
+// declared a boundary, so 'session.thread' is null (declareBoundary,
+// src/board.mjs) and no round and no thread on this board will ever ask again.
+// What does reach an agent there is the `read` tool (ADR 115), which any
+// conversation can point at this board's URL -- true on the lapsed branch too,
+// where the comments additionally ride the thread's next packet.
+export const PAGE_SEND_EXPIRED_LABEL = 'Saved for the next agent';
 export const PAGE_SEND_EXPIRED_TITLE =
-  'This round ended. Comments left here are stored and reach the next agent that asks.';
+  'This round ended. Comments left here are stored and reach the next agent that reads the board.';
 
 // The header's own pill/meta slot (ADR.md entry 40, "the pill may hold a
 // label alone", on every board's condensed header, not only a page board's):
@@ -367,6 +383,10 @@ export function pageBoardPillMeta(round, nowMs, fullpage = true) {
   const countdown = roundCountdownText(round, nowMs);
   if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
   if (!fullpage && round && round.status === 'sent') return { text: 'submitted', title: PILL_SUBMITTED_TITLE };
-  const title = (!fullpage && round && round.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
+  // Asked as "not sent", not "still open": ADR 114 -- an ORDINARY board's
+  // abandoned round keeps its live widgets and a working Send exactly like a
+  // lapsed one, so telling the reviewer "commenting is off" above a live Send
+  // button is the same false statement on both.
+  const title = (!fullpage && round && round.status !== 'sent') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   return { text: 'read-only', title };
 }

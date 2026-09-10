@@ -26,7 +26,8 @@
 import assert from 'node:assert/strict';
 import { createBoard, addRound, amendRound, applySubmit, abandonOpenRounds, resolveComments } from '../src/board.mjs';
 import { renderBoardPage, renderRoundSection, renderBlock, groupCommentsByBlock } from '../src/render.mjs';
-import { ui, ROUND_ABANDONED_TITLE } from '../src/ui.mjs';
+import { ui } from '../src/ui.mjs';
+import { ROUND_OPEN_UNAWAITED_TITLE } from '../src/badge.mjs';
 import { parseHTML, StandInEvent, StandInEventSource } from './dom-stand-in.mjs';
 
 let failures = 0;
@@ -405,8 +406,12 @@ await checkAsync('of two catch-ups in flight, the older one answering last is dr
   const board = createBoard({ title: 'Two nudges', blocks: [q(1)], wait: true });
   addRound(board, { blocks: [q(2)], wait: true });
   const { document, es } = loadBoardWithEventSource(renderBoardPage(board));
-  const sendBtn = document.getElementById('send-btn');
-  assert.equal(sendBtn.disabled, false, 'setup: two open rounds, so the newest is submittable');
+  // The countdown, not the Send button, is what says which snapshot this tab is
+  // holding: since ADR 114 an abandoned round is still submittable, so Send is live
+  // before and after the close and cannot tell the two apart. The wait is the thing
+  // abandoning really does end.
+  const countdown = document.querySelector('span#round-countdown');
+  assert.equal(countdown.textContent.endsWith('m left'), true, 'setup: two awaited rounds, so the bar counts down');
 
   // The two snapshots: what the daemon had before it closed the board, and what
   // it has after. The first nudge's read is the slow one here -- the failure the
@@ -430,7 +435,7 @@ await checkAsync('of two catch-ups in flight, the older one answering last is dr
     pending[1]({ ok: true, status: 200, text: async () => freshPage }); // the fresher answers first
     await new Promise(r => setTimeout(r, 0));
     assert.equal(parsed.length, 1, 'setup: the fresher snapshot was read');
-    assert.equal(sendBtn.disabled, true, 'setup: ...and applied -- the board is closed, so Send is gone');
+    assert.equal(countdown.textContent, '', 'setup: ...and applied -- the board is closed, so the countdown is gone');
 
     pending[0]({ ok: true, status: 200, text: async () => stalePage }); // the older answers last
     await new Promise(r => setTimeout(r, 0));
@@ -441,7 +446,7 @@ await checkAsync('of two catch-ups in flight, the older one answering last is dr
     globalThis.DOMParser = originalParser;
   }
 
-  assert.equal(sendBtn.disabled, true, 'and the closed board stays closed');
+  assert.equal(countdown.textContent, '', 'and the closed board stays closed');
 });
 
 // --- an abandoned board, on an ORDINARY board's surface ----------------------
@@ -451,8 +456,14 @@ await checkAsync('of two catch-ups in flight, the older one answering last is dr
 // ordinary send bar: a conversation declared a boundary, abandonOpenRounds closed
 // the round, and the daemon nudged every open tab with the same 'awaitExpired'
 // it sends for a wait that merely lapsed.
+//
+// What the reviewer keeps and what they lose are two different questions, and ADR
+// 114 answers them differently: the WAIT is over (no countdown, nobody is
+// listening) but the ANSWER is not (Send still stores it, and `read` collects it
+// from any later conversation). The old reading took the whole surface away and
+// cost nine typed answers on 2026-09-09.
 
-await checkAsync('an ordinary board whose round was abandoned stops counting down, takes Send away, and says why the queued comments never left (ablation: delete roundsClosedUnsent/adoptClosedRounds and the bar stays live over a board that answers every submit 409)', async () => {
+await checkAsync('an ordinary board whose round was abandoned stops counting down but keeps Send live and its queue on screen, and the pill promises the answers still land (ablation: delete roundsClosedUnsent/adoptClosedRounds and the countdown ticks on against a wait nobody is holding)', async () => {
   const board = createBoard({
     title: 'Boundary declared',
     blocks: [
@@ -493,12 +504,21 @@ await checkAsync('an ordinary board whose round was abandoned stops counting dow
 
   assert.equal(countdown.textContent, '', 'the countdown must stop -- nobody is waiting on this round any more');
   assert.equal(countdown.classList.contains('visible'), false);
-  assert.equal(document.getElementById('send-btn').disabled, true, 'Send must go, rather than stay live over a submit the daemon answers 409');
-  assert.equal(document.getElementById('discuss-btn').disabled, true);
+  assert.equal(document.getElementById('send-btn').disabled, false,
+    'Send must STAY live: the round is unsent, so the daemon stores what it posts (ADR 114)');
+  assert.equal(document.getElementById('discuss-btn').disabled, false);
   assert.equal(document.querySelectorAll('.comment-item.comment-pending').length, 1,
     'the queued comment stays on screen -- it is the reviewer\'s, and nothing here may throw it away');
-  assert.equal(document.querySelector('span#send-status').textContent, ROUND_ABANDONED_TITLE,
-    'and the one line beside the dead button has to say why it will never go out');
+  assert.equal(document.querySelector('.card-choice').disabled, false,
+    'and the widgets stay answerable, or a live Send has nothing to carry');
+
+  // The one place a reviewer is told what "read-only" now means: the wait is what
+  // ended, not the answer. The pill must not fall back to the page board's
+  // "commenting is off", which is what it said here before.
+  const meta = document.querySelector('span#round-meta');
+  assert.equal(meta.textContent, 'read-only', 'the word itself is unchanged -- only what it promises on hover');
+  assert.equal(meta.title, ROUND_OPEN_UNAWAITED_TITLE);
+  assert.match(meta.title, /reads the board/, 'the promise names the read path, the only way an abandoned board pays out');
 });
 
 if (failures) process.exit(1);

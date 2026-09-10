@@ -389,8 +389,9 @@ async function main() {
       assert.equal(spawnsFor('cleared').length, 1, 'AC 3: its Banner does not fire afterwards');
     });
 
-    // The abandoned round can never be answered again either, so the blocked call that
-    // posted it is released here rather than left polling to the wall clock.
+    // No wait on the abandoned round can ever return again (a late Send stores its
+    // answers for `read` -- ADR 114 -- but never re-arms this call), so the blocked call
+    // that posted it is released here rather than left polling to the wall clock.
     client.notify('notifications/cancelled', { requestId: firstCall.id, reason: 'check done' });
     await sleep(50);
     client.close();

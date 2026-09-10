@@ -1533,6 +1533,12 @@ export function stageAgentScript() {
   // board.comments, which lives only in the parent document (the stage's
   // isolation -- this document never sees the board JSON at all).
   var sentRefs = [];
+  // The board's own top chrome band, as last reported by the parent's 'band'
+  // message (applyBand below). Kept because an in-page anchor has to land
+  // BELOW that band rather than under it (scrollToAnchor) -- one measurement,
+  // taken once by the side that can see its own chrome, used for both the
+  // padding and the anchor offset, so the two can never disagree.
+  var bandTop = 0;
 
   var buildSteps = ${buildSteps.toString()};
   var stepsToPath = ${stepsToPath.toString()};
@@ -1599,6 +1605,7 @@ export function stageAgentScript() {
    * shape test sturdier than a single geometry snapshot -- not a guess from
    * one number. */
   function applyBand(top, bottom) {
+    bandTop = top;
     if (!document.body) return;
     document.body.style.paddingTop = '';
     document.body.style.paddingBottom = '';
@@ -1688,8 +1695,124 @@ export function stageAgentScript() {
     post({ type: 'hover', ref: null, tag: null, text: null });
   });
 
+  // --- links: the board handles them, this frame never navigates (ADR 113) ---
+
+  /** The '<a href>' a click landed on or inside, or null. 'closest', not
+   * 'ev.target' itself: a click on the '<code>' inside a link is a click on
+   * the link as far as the browser's own default action is concerned, and
+   * this has to see exactly what that default would have followed. */
+  function linkTarget(el) {
+    if (!el || el.nodeType !== 1 || typeof el.closest !== 'function') return null;
+    return el.closest('a[href]');
+  }
+
+  /** The element a fragment names, looked up by attribute rather than by
+   * 'getElementById' or a '#id' selector. The rule test/check-archive-ids.mjs
+   * enforces on every client script is "never look an id up bare, qualify it
+   * with the tag src/render.mjs emits" -- and here there is no tag to qualify
+   * with, since a fragment may legitimately name any element in an artifact
+   * nobody in this repo wrote. The attribute form is the same lookup with the
+   * same tree-order answer a browser's own fragment navigation would give,
+   * without reintroducing the shape that rule exists to keep out.
+   *
+   * ponytail: an id carrying a double quote is refused rather than escaped, so
+   * an anchor naming one never scrolls at all. The escape would have to be
+   * spelled inside this script's own template literal, where a backslash is
+   * not a backslash, and a fragment naming nothing simply scrolls nothing. The
+   * upgrade path, if an artifact ever ships such an id, is to find the target
+   * by walking this document's elements and comparing 'id' as a plain string,
+   * which needs no selector escaping anywhere. */
+  function elementWithId(id) {
+    if (id.indexOf('"') !== -1) return null;
+    try { return document.querySelector('[id="' + id + '"]'); } catch (e) { return null; }
+  }
+
+  /** An in-page anchor: put the target where the reviewer can read it, inside
+   * this frame, with no navigation of any kind.
+   *
+   * 'scrollIntoView', never arithmetic of this script's own. WHICH element
+   * scrolls is not knowable up front (onScroll's own comment below: an
+   * app-shell artifact scrolls an inner pane and its document never moves),
+   * and the browser's own scroll-into-view walks every scrolling ancestor the
+   * target actually has. The 'scroller' this script remembers cannot answer
+   * here either: it is only known once something has already scrolled, and a
+   * table-of-contents link is exactly the click that comes first.
+   *
+   * The board's header floats OVER the top of this frame (ADR 59), so a
+   * target aligned to the frame's own top edge lands under it.
+   * 'scroll-margin-top' is the browser's own name for that offset, applied by
+   * the same scroll-into-view algorithm at whatever scrolling box it ends up
+   * moving -- which is what keeps the inner-pane case correct with no second
+   * measurement anywhere. The figure is the band the parent last reported,
+   * never a number invented here.
+   *
+   * ponytail: that 'scroll-margin-top' is left on the element rather than
+   * restored, so an artifact that later scrolls the same target itself
+   * inherits the board's header band as a margin on it. A smooth scroll is
+   * still in flight when this returns, so there is no safe moment to clear it
+   * here; the upgrade path, if an artifact ever needs its own margin back, is
+   * to remember the element's previous value and restore it on the next
+   * 'scrollend' in this frame.
+   *
+   * A fragment naming nothing ('#', '#top', a stale id) scrolls nothing. The
+   * click is cancelled either way, so it can never reach the blocked page. */
+  function scrollToAnchor(id) {
+    if (!id) return;
+    var el = elementWithId(id);
+    if (!el) {
+      // A percent-encoded fragment ('#%C3%B6versikt') names an id stored
+      // decoded, which is how a browser matches one too.
+      try { el = elementWithId(decodeURIComponent(id)); } catch (e) { /* malformed escape: no such target */ }
+    }
+    if (!el || typeof el.scrollIntoView !== 'function') return;
+    if (el.style) el.style.scrollMarginTop = bandTop + 'px';
+    el.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'smooth' });
+  }
+
+  /** A link the reviewer clicked with comment mode off. Two outcomes and no
+   * third: an in-page anchor scrolls this document, an http/https address is
+   * handed to the board page -- which opens it in a new tab, at once, on the
+   * click that asked for it. Every other scheme
+   * ('javascript:', 'file:', 'data:', a relative path) is dropped in silence:
+   * nothing is shown and nothing is navigated.
+   *
+   * Read off getAttribute, never the resolved '.href' property. This
+   * document's base URL is the BOARD's address, so '#s1' resolves to
+   * 'http://127.0.0.1:PORT/b/<id>#s1' and '.href' reports it as an ordinary
+   * http link -- the in-page case would post the board's own URL to the
+   * parent instead of scrolling. The raw attribute is the one place the
+   * author's own intent survives. A protocol-relative '//host/x' therefore
+   * reads as a relative path here and opens nothing, which is the safe
+   * direction to be wrong in. */
+  function followLink(link) {
+    var href = link.getAttribute('href');
+    if (typeof href !== 'string') return;
+    href = href.trim();
+    if (href.charAt(0) === '#') { scrollToAnchor(href.slice(1)); return; }
+    var scheme = href.slice(0, 8).toLowerCase();
+    if (scheme.indexOf('http://') !== 0 && scheme.indexOf('https://') !== 0) return;
+    // The parent re-validates and re-parses this before it opens anything --
+    // it never takes a stage's word for what it just sent (src/ui.mjs's
+    // stageLinkAddress).
+    post({ type: 'link', url: href });
+  }
+
   document.body.addEventListener('click', function (ev) {
-    if (!commentMode) return;
+    // A link inside a stage never navigates this frame, whichever mode is on:
+    // 'srcdoc' resolves an href against the BOARD's own address, so the
+    // browser's default for '#s1' is a navigation of this frame to
+    // '/b/<id>#s1' -- which the page's CSP ('default-src none', no
+    // 'frame-src', inherited through srcdoc) refuses, painting Chrome's
+    // blocked page over the artifact. Cancelled here, once, ahead of both
+    // branches below: with comment mode on the click mints an anchor and does
+    // nothing else (it neither scrolls nor opens), with it off followLink
+    // decides.
+    var link = linkTarget(ev.target);
+    if (link && typeof ev.preventDefault === 'function') ev.preventDefault();
+    if (!commentMode) {
+      if (link) followLink(link);
+      return;
+    }
     var el = ev.target;
     if (!el || el.nodeType !== 1 || el === document.body) return;
     var steps = buildSteps(document.body, el);
@@ -2526,13 +2649,14 @@ export function groupCommentsByBlock(resolvedComments) {
  * whole time. */
 export function renderRoundSection(board, roundN, commentsByBlock) {
   const round = board.rounds.find(r => r.n === roundN);
-  // Anything that is not `open` is history: `sent`, and — since ADR 69 — `abandoned`,
-  // the round of a conversation that declared a boundary and walked away
-  // (`abandonOpenRounds`, src/board.mjs). Asked as "is it still open" rather than "is it
-  // sent" so a third terminal state does not silently render its widgets live again;
-  // identical for every board written before that state existed, which only ever carry
-  // `open` or `sent`.
-  const historical = !!(round && round.status !== 'open');
+  // Sent is the only history: a round is editable until somebody answers it. ADR 114
+  // narrows ADR 69 here -- an `abandoned` round (the conversation declared a boundary and
+  // walked away, `abandonOpenRounds` in src/board.mjs) still accepts a Send and stores it,
+  // so its widgets and comment forms must render LIVE, on the server too, or a reload
+  // would take back what the page kept. Nine typed answers were lost to the other reading
+  // on 2026-09-09. Identical for every board written before that state existed, which only
+  // ever carry `open` or `sent`.
+  const historical = !!(round && round.status === 'sent');
   const blocksForRound = board.blocks.filter(b => b.round === roundN);
   // Both of these are DERIVED from the board rather than passed in, and that is
   // load-bearing: src/server.mjs renders an SSE push through this same function,
@@ -2590,15 +2714,20 @@ export function renderRoundSection(board, roundN, commentsByBlock) {
 </section>`;
 }
 
-/** Is there a round waiting to be answered? Decides whether the send bar is live at
+/** Is there a round that can still be answered? Decides whether the send bar is live at
  * HYDRATE time, which nothing used to: the buttons were rendered
  * enabled unconditionally and only ever disabled by an SSE push handler, so a finished
  * board opened from the index had a live Send. Pressing it posted `round: null`, which
  * the server answers 400 — not the 409 the client special-cases — so the page showed
- * `Error: submit failed: 400` and re-enabled the buttons, forever. */
+ * `Error: submit failed: 400` and re-enabled the buttons, forever.
+ *
+ * "Not sent", the same question `openRoundNumber` (src/ui.mjs) asks at hydrate and
+ * `handleSubmit` (src/server.mjs) asks of the request itself: since ADR 114 an abandoned
+ * round is still submittable, so a first paint that greyed Send out on one would take the
+ * control away and hand it back a frame later. */
 function hasOpenRound(board) {
   const latest = board.rounds[board.rounds.length - 1];
-  return Boolean(latest && latest.status === 'open');
+  return Boolean(latest && latest.status !== 'sent');
 }
 
 /** The questions-left pill's own count: how many of the OPEN round's
@@ -2616,7 +2745,11 @@ function hasOpenRound(board) {
  * "1 question left" over a round the reviewer could send as it stood. */
 function openRoundQuestionCount(board) {
   const latest = board.rounds[board.rounds.length - 1];
-  if (!latest || latest.status !== 'open') return 0;
+  // Not sent, matching `hasOpenRound` just above and src/ui.mjs's own
+  // outstandingBlocks(), which walks `.round-open .question-block` -- a class an
+  // abandoned round now carries (ADR 114). Asked the other way, first paint said "0
+  // questions left" and hydrate immediately corrected it to the real count.
+  if (!latest || latest.status === 'sent') return 0;
   return board.blocks.filter(b => b.round === latest.n && b.kind === 'question' && b.widget !== 'rank').length;
 }
 
@@ -2640,12 +2773,12 @@ export function isPageBoard(board) {
   return isPageRound((board && board.blocks) || []);
 }
 
-// A closed round owes nothing, whichever way it closed: sent, or abandoned by a
-// conversation that declared a boundary (ADR 69). The pager's dot accuses the reviewer of
-// stalling, so it must come off a round nobody can answer any more. Its twin in
-// src/ui.mjs asks the same question the same way.
+// A SENT round owes nothing. The pager's dot accuses the reviewer of stalling, so it must
+// come off a round nobody can answer any more -- and since ADR 114 that is the sent round
+// alone: an abandoned round's questions are still answerable, so the dot stays on it. Its
+// twin in src/ui.mjs asks the same question the same way.
 function roundOwesAnswer(board, round) {
-  if (!round || round.status !== 'open') return false;
+  if (!round || round.status === 'sent') return false;
   return board.blocks.some(b => b.round === round.n && b.kind === 'question');
 }
 
@@ -2831,15 +2964,15 @@ export function renderBoardPage(board) {
   // `initialRoundSubmitted` just above). Short of that, a page board's
   // compose/send surface really does go dark the moment it stops being
   // awaited (PILL_READONLY_TITLE, badge.mjs's own comment on it), but an
-  // ordinary round with no `wait: true` stays `open` and its send bar stays
-  // enabled the whole time -- "commenting is off" would be false directly
-  // above a live Send button. badge.mjs's own comment on
+  // ordinary round that was never sent -- `open`, or `abandoned` since ADR 114
+  // -- keeps its send bar enabled the whole time, so "commenting is off" would
+  // be false directly above a live Send button. badge.mjs's own comment on
   // ROUND_OPEN_UNAWAITED_TITLE has the full reasoning; `initialRound.status`
   // is what src/ui.mjs's pageBoardPillMeta reads for the identical decision
   // at hydrate, kept in step here by hand the same way roundMetaText already is.
   const roundMetaTitle = initialRoundOpenAwaited ? ''
     : initialRoundSubmitted ? PILL_SUBMITTED_TITLE
-    : (!fullpage && initialRound && initialRound.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
+    : (!fullpage && initialRound && initialRound.status !== 'sent') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   const latestRoundOpenAwaited = roundIsAwaitedOpen(board.rounds[board.rounds.length - 1]);
   // ADR.md entry 46: a page nobody is listening to is uncommentable whatever kind
   // its one block is (CONTEXT.md "Commentable"). The entry names three things such

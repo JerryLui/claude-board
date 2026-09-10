@@ -31,9 +31,12 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { SECRET_HEADER } from '../src/secret.mjs';
+import { SECRET_HEADER, SESSION_COOKIE, sessionToken } from '../src/secret.mjs';
 import { recoveryCommand } from '../src/handoff.mjs';
 import { startServer } from '../src/server.mjs';
+// The delivery ledger's own field name, read from the product rather than restated: the
+// `read` checks below assert that reading a board never writes one.
+import { ANSWERS_DELIVERED } from '../src/board.mjs';
 // The product's own spawn of the shim (src/prose-check.mjs ships from src/ so a caller
 // outside this repo can import it): the other side of the same stdio seam this file
 // drives by hand, and the one a partial install breaks.
@@ -528,16 +531,27 @@ async function main() {
   });
   client.notify('notifications/initialized', {});
 
-  await check('tools/list exposes exactly the single ask tool', async () => {
+  await check('tools/list exposes exactly two tools, ask and read', async () => {
     const res = await client.request('tools/list', {});
-    assert.equal(res.result.tools.length, 1);
-    const tool = res.result.tools[0];
-    assert.equal(tool.name, 'ask');
+    // Two, and named: this shim's whole surface is what a session can call, so a third
+    // tool appearing (or `read` quietly disappearing behind a rename) is a change to the
+    // product's contract and not an implementation detail. ADR 115.
+    assert.deepEqual(res.result.tools.map(t => t.name).sort(), ['ask', 'read']);
+    const tool = res.result.tools.find(t => t.name === 'ask');
     assert.equal(tool.inputSchema.type, 'object');
     assert.ok(tool.inputSchema.properties.title);
     assert.ok(tool.inputSchema.properties.blocks);
     assert.ok(tool.inputSchema.required.includes('title'));
     assert.ok(tool.inputSchema.required.includes('blocks'));
+
+    const read = res.result.tools.find(t => t.name === 'read');
+    assert.equal(read.inputSchema.type, 'object');
+    assert.deepEqual(read.inputSchema.required, ['board'], 'read takes one required argument and no more');
+    assert.equal(read.inputSchema.properties.board.type, 'string');
+    // The description is the only thing that tells an agent WHEN to reach for this, and
+    // the two moments it exists for are the ones a session has to recognise on its own.
+    assert.match(read.description, /fresh/, 'the description must point at the fresh ask that abandons a board');
+    assert.match(read.description, /wait ended|after your wait/i, 'and at the answer that arrives after a wait ended');
   });
 
   // --- tools/call ask: blocking wait, progress flowing, result shape -----
@@ -2175,6 +2189,360 @@ async function main() {
       hostileClient.close();
       hostile.close();
     }
+  });
+
+  // --- `read`: a second tool, and a pure read of one board (ADR 115) -------
+  //
+  // The defect it closes: a stored answer reached an agent only through the next packet
+  // a WAIT on the same thread returned, so an answer sent after the wait ended sat on
+  // disk, and a NEW conversation could never collect it at all. Everything below is
+  // about `read` staying a read: nothing marked, nothing written, the same answer twice,
+  // because that is what makes it safe to point every session at it.
+
+  const boardOnDisk = id => JSON.parse(readFileSync(path.join(home, 'boards', `${id}.json`), 'utf8'));
+
+  /** A board built straight over HTTP, so the shim that reads it below has never seen
+   * it: "a conversation that never posted this board" is the case `read` exists for.
+   * Answered and commented with no `/wait` ever opened, which also makes it a board with
+   * NO delivery ledger, the shape a board written before ADR 107 has, and one that must
+   * read like any other. */
+  async function seedReadableBoard(title, action = 'send') {
+    const posted = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title,
+        blocks: [
+          { kind: 'markdown', text: '# Late answers\n\ncontext for the question' },
+          { kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }, { label: 'No' }] },
+        ],
+      }),
+    })).json();
+    const stored = boardOnDisk(posted.boardId);
+    const qid = stored.blocks.find(b => b.kind === 'question').id;
+    const mid = stored.blocks.find(b => b.kind === 'markdown').id;
+    const submitted = await fetch(`${base}/api/board/${posted.boardId}/submit`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        round: 1,
+        action,
+        answers: [{ id: qid, status: 'answered', choice: 'No', note: 'LATE_NOTE' }],
+        comments: [{ blockId: mid, anchor: { kind: 'block' }, text: 'LATE_COMMENT' }],
+      }),
+    });
+    assert.equal(submitted.status, 200, 'setup: the late answer must land');
+    return { ...posted, qid, mid };
+  }
+
+  await check('AC 6: read hands a conversation that never posted the board its rounds, answers and comments', async () => {
+    const seeded = await seedReadableBoard('Readable board');
+    // A second, still-open round, so the rounds list has something to be in order about
+    // and something that is genuinely still awaited.
+    const second = await (await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        boardId: seeded.boardId,
+        title: 'Second round',
+        blocks: [{ kind: 'question', prompt: 'And this?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    })).json();
+    assert.equal(second.round, 2, 'setup: the sent round 1 cannot be amended, so this must mint round 2');
+
+    const reader = spawnShim(baseEnv); // a different conversation: it has posted nothing
+    try {
+      const res = await withTimeout(reader.request('tools/call', {
+        name: 'read',
+        arguments: { board: `${base}/b/${seeded.boardId}` },
+      }), 8000, 'read must answer promptly: it opens no wait');
+      const result = res.result;
+      assert.equal(result.isError, false, result.content && result.content[0] && result.content[0].text);
+      assert.equal(result.board, seeded.boardId);
+
+      assert.deepEqual(
+        result.rounds.map(r => [r.n, r.status, r.awaited]),
+        [[1, 'sent', false], [2, 'open', true]],
+        'every round, in order, with its status and whether anyone is still expected to answer it',
+      );
+      assert.equal(result.rounds[0].title, 'Readable board');
+      assert.ok(result.rounds[1].deadline, 'an awaited round names the deadline its wait dies at');
+      // The reviewer's own choice on the round, which `status` cannot carry: `sent` is
+      // what both Send and Discuss leave behind. A round nobody has closed has none.
+      assert.deepEqual(result.rounds.map(r => r.action), ['submitted', null],
+        'every round names the action that closed it, or null while nothing has');
+
+      const answered = result.answers.find(a => a.note === 'LATE_NOTE');
+      assert.ok(answered, 'the stored answer must come back');
+      assert.equal(answered.round, 1, 'and name its own round: that is what tells it from a later one');
+      assert.equal(answered.choice, 'No');
+      assert.equal(answered.prompt, 'Ship it?');
+      assert.equal(result.answers.filter(a => a.round === 2)[0].status, 'unanswered',
+        'a round nobody has answered reads as an explicit unanswered, not as an absence');
+      assert.deepEqual(result.comments.map(c => [c.round, c.text]), [[1, 'LATE_COMMENT']]);
+
+      // The text channel is the only one an MCP client cannot drop, so the whole answer
+      // has to be readable there: rounds in order, every entry naming its round.
+      const text = result.content[0].text;
+      assert.match(text, /Round 1 .*status sent/);
+      assert.match(text, /Round 2 .*status open/);
+      assert.match(text, /Round 1 answer: .*LATE_NOTE/);
+      assert.match(text, /Round 1 comment: .*LATE_COMMENT/);
+      assert.ok(text.indexOf('Round 1') < text.indexOf('Round 2'), 'rounds are listed in order');
+
+      // A bare id is the same call: the URL is a convenience, not the contract.
+      const byId = await withTimeout(reader.request('tools/call', {
+        name: 'read', arguments: { board: seeded.boardId },
+      }), 8000, 'read by bare id must answer too');
+      assert.deepEqual(byId.result.answers, result.answers, 'a bare id reads the same board as its URL');
+      assert.deepEqual(byId.result.rounds, result.rounds);
+
+      // And so is the URL the daemon's OWN index hands the reviewer, which carries the
+      // fragment naming the round to scroll to (src/indexpage.mjs). Refusing it made the
+      // one URL a reviewer is likeliest to copy the one URL `read` would not take.
+      const withFragment = await withTimeout(reader.request('tools/call', {
+        name: 'read', arguments: { board: `${base}/b/${seeded.boardId}#open-round` },
+      }), 8000, 'a board URL carrying a fragment must answer too');
+      assert.equal(withFragment.result.isError, false, withFragment.result.content[0].text);
+      assert.equal(withFragment.result.board, seeded.boardId, 'the fragment names a place on the page, and is dropped');
+    } finally {
+      reader.close();
+    }
+  });
+
+  await check('AC 6: read marks nothing, no ledger and no delivered flag, the same result twice', async () => {
+    const seeded = await seedReadableBoard('Untouched by reading');
+    const before = readFileSync(path.join(home, 'boards', `${seeded.boardId}.json`), 'utf8');
+    assert.ok(!(ANSWERS_DELIVERED in boardOnDisk(seeded.boardId)),
+      'setup: a board no packet ever left is exactly the pre-ADR-107 shape, no ledger at all');
+
+    const reader = spawnShim(baseEnv);
+    try {
+      const first = await withTimeout(reader.request('tools/call', {
+        name: 'read', arguments: { board: seeded.boardId },
+      }), 8000, 'read must answer');
+      const second = await withTimeout(reader.request('tools/call', {
+        name: 'read', arguments: { board: seeded.boardId },
+      }), 8000, 'and answer again');
+
+      assert.deepEqual(second.result.answers, first.result.answers, 'same answers');
+      assert.deepEqual(second.result.comments, first.result.comments, 'same comments');
+      // The strongest form of "it reads only": the document on disk is byte-identical.
+      // (Ablation: adopt the board into the ledger, or mark the comment delivered, and
+      // this fails while every assertion above still passes.)
+      assert.equal(readFileSync(path.join(home, 'boards', `${seeded.boardId}.json`), 'utf8'), before,
+        'two reads must leave the stored board byte-identical: no ledger write, no delivered mark');
+    } finally {
+      reader.close();
+    }
+  });
+
+  await check('AC 6: read refuses anything that is not a board of this daemon, and says which', async () => {
+    const reader = spawnShim(baseEnv);
+    try {
+      for (const bad of ['https://evil.example/b/b_deadbeef', '../../etc/passwd', 'file:///etc/passwd', '']) {
+        const res = await withTimeout(reader.request('tools/call', {
+          name: 'read', arguments: { board: bad },
+        }), 8000, `read must refuse ${JSON.stringify(bad)} rather than hang`);
+        assert.equal(res.result.isError, true, `must refuse ${JSON.stringify(bad)}`);
+        assert.match(res.result.content[0].text, /board URL .* or a bare board id/,
+          'the refusal has to say what a good argument looks like');
+      }
+
+      // Well-formed, and names nothing: a different message, because it is a different
+      // problem: the caller has the right shape and the wrong (or a pruned) board.
+      const missing = `b_${'0'.repeat(32)}`;
+      const res = await withTimeout(reader.request('tools/call', {
+        name: 'read', arguments: { board: missing },
+      }), 8000, 'an unknown board must be answered, not waited on');
+      assert.equal(res.result.isError, true);
+      assert.match(res.result.content[0].text, new RegExp(missing), 'and name the id it could not find');
+    } finally {
+      reader.close();
+    }
+  });
+
+  await check('AC 6: the read route is gated by the local secret alone, exactly like wait', async () => {
+    const seeded = await seedReadableBoard('Gated read');
+    const url = `${base}/api/board/${seeded.boardId}/read`;
+
+    assert.equal((await fetch(url)).status, 401, 'no credential reads nothing');
+    // A browser holding the session cookie is refused too: no page ever calls this
+    // route, and the cookie is the credential a cross-origin GET could ride in on.
+    assert.equal(
+      (await fetch(url, { headers: { cookie: `${SESSION_COOKIE}=${sessionToken(SECRET)}` } })).status, 401,
+      'the session cookie is not enough: this route is the shim\'s, like /wait',
+    );
+    const ok = await fetch(url, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.equal(ok.status, 200, 'the local secret is what opens it');
+    assert.equal((await ok.json()).board, seeded.boardId);
+
+    const unknown = await fetch(`${base}/api/board/b_${'1'.repeat(32)}/read`, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.equal(unknown.status, 404, 'a well-formed id naming no board is a plain 404');
+    // The store's own id rule, not a copy of it at the route: an id that could never be
+    // a path is refused before anything is read.
+    const unsafe = await fetch(`${base}/api/board/..%2F..%2Fsecret/read`, { headers: { [SECRET_HEADER]: SECRET } });
+    assert.ok(unsafe.status === 400 || unsafe.status === 404, `an unsafe id must be refused, got ${unsafe.status}`);
+  });
+
+  await check('AC 7: an ask with fresh names the board URL it abandoned, so read can collect it later', async () => {
+    const talker = spawnShim(baseEnv);
+    try {
+      const first = await withTimeout(talker.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'The conversation that ends', blocks: [{ kind: 'markdown', text: '# first' }] },
+      }), 8000, 'a content-only round returns at once');
+      const abandoned = first.result.board;
+      assert.ok(abandoned, 'setup: the first ask must have made a board');
+      assert.doesNotMatch(first.result.content[0].text, /Abandoned board/,
+        'an ordinary ask abandons nothing and must say nothing about it');
+
+      const fresh = await withTimeout(talker.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'The conversation after it', blocks: [{ kind: 'markdown', text: '# second' }], fresh: true },
+      }), 8000, 'the fresh ask returns at once too');
+      assert.notEqual(fresh.result.board, abandoned, 'setup: fresh must actually have walked away from that board');
+
+      const text = fresh.result.content[0].text;
+      assert.match(text, new RegExp(`Abandoned board: \\S*/b/${abandoned}`),
+        'the result text must name the URL of the board this ask abandoned; the id is otherwise gone with the conversation');
+      assert.match(text, /read/, 'and point at the tool that collects what was left on it');
+
+      // And the URL it names is one `read` actually takes.
+      const named = /Abandoned board: (\S+)/.exec(text)[1];
+      assert.ok(named.endsWith(`/b/${abandoned}`),
+        `the URL has to end the moment the id does, and got ${named}: whatever punctuation follows it in the ` +
+        'sentence is punctuation an agent copies into the read call');
+      const collected = await withTimeout(talker.request('tools/call', {
+        name: 'read', arguments: { board: named },
+      }), 8000, 'the abandoned board must be readable by the URL just named');
+      assert.equal(collected.result.isError, false, collected.result.content[0].text);
+      assert.equal(collected.result.board, abandoned);
+    } finally {
+      talker.close();
+    }
+  });
+
+  await check('AC 6: a round the reviewer closed with Discuss reads back as discuss, not as a plain sent', async () => {
+    // `status` is `sent` either way -- Send and Discuss both close the round -- so a read
+    // carrying only the status turns "stop posting boards and talk to me in chat" into
+    // "answered". A packet spells that instruction out from its own `status` (bin/mcp.mjs,
+    // the `discuss` branch of askTool); an agent arriving through `read` has nothing else
+    // to learn it from, and the reviewer's whole point was that the boards should stop.
+    const seeded = await seedReadableBoard('Discussed board', 'discuss');
+    const reader = spawnShim(baseEnv);
+    try {
+      const res = await withTimeout(reader.request('tools/call', {
+        name: 'read', arguments: { board: seeded.boardId },
+      }), 8000, 'read must answer');
+      assert.equal(res.result.isError, false, res.result.content[0].text);
+      assert.equal(res.result.rounds[0].status, 'sent', 'setup: Discuss closes the round exactly as Send does');
+      assert.equal(res.result.rounds[0].action, 'discuss', 'and the action is the only thing that tells the two apart');
+      assert.match(res.result.content[0].text, /action discuss/,
+        'the text channel has to carry it too: it is the one channel an MCP client cannot drop');
+    } finally {
+      reader.close();
+    }
+  });
+
+  await check('AC 6: a read failure names the board it was asked for, never the session\'s live board', async () => {
+    const shim = spawnShim(baseEnv);
+    try {
+      // A content-only ask returns at once and leaves this session holding a board. That
+      // is the state the defect needed: a failed read then handed back an error packet
+      // pointing at whatever this conversation last posted, so an agent chasing an answer
+      // on somebody else's board was sent to its own.
+      const posted = await withTimeout(shim.request('tools/call', {
+        name: 'ask',
+        arguments: { title: 'Session board', blocks: [{ kind: 'markdown', text: 'nothing to answer here' }] },
+      }), 8000, 'a content-only ask must return without waiting');
+      const sessionBoard = posted.result.board;
+      assert.ok(sessionBoard, 'setup: this session must be holding a board of its own');
+
+      const missing = `b_${'1'.repeat(32)}`;
+      const failed = await withTimeout(shim.request('tools/call', {
+        name: 'read', arguments: { board: missing },
+      }), 8000, 'an unknown board must be answered, not waited on');
+      assert.equal(failed.result.isError, true, 'setup: the read has to fail for there to be an error packet');
+      assert.equal(failed.result.board, missing, 'the error packet names the board the read was given');
+      assert.notEqual(failed.result.board, sessionBoard,
+        'and never the one this conversation is holding: read touches no session');
+      assert.ok(!String(failed.result.url || '').includes(sessionBoard),
+        'the URL beside it must not point at the session board either');
+
+      // An argument that names no board at all leaves the fields empty rather than
+      // falling back to the session: "no board" is a thing this packet can say.
+      const nonsense = await withTimeout(shim.request('tools/call', {
+        name: 'read', arguments: { board: 'https://example.com/b/nope' },
+      }), 8000, 'a refusal must answer too');
+      assert.equal(nonsense.result.isError, true);
+      assert.equal(nonsense.result.board, null, 'no board named, no board reported');
+      assert.equal(nonsense.result.url, null);
+    } finally {
+      shim.close();
+    }
+  });
+
+  await check('the shim reads a context array only on a question, exactly as the daemon does', async () => {
+    // `noWait` on the post is this shim stating it will not open a wait, and it has to be
+    // the same verdict the daemon reaches about the round it mints, or the two sides
+    // disagree about who is waiting for whom. The daemon walks a `context` array only on a
+    // question (src/badge.mjs `questionBlocks`); a shim that walked it on ANY block called
+    // this round awaited, posted `noWait: false`, and then blocked on a round the daemon
+    // had already minted unawaited -- a wait nothing could ever end, and a post that
+    // drained nothing on the way in.
+    const shim = spawnShim(baseEnv);
+    try {
+      const res = await withTimeout(shim.request('tools/call', {
+        name: 'ask',
+        arguments: {
+          title: 'Context on a block that is not a question',
+          blocks: [{
+            kind: 'markdown',
+            text: 'a progress note',
+            context: [{ kind: 'question', prompt: 'buried', widget: 'single', options: [{ label: 'Yes' }] }],
+          }],
+        },
+      }), 8000, 'this round asks the daemon nothing, so the call must come back rather than block on a wait');
+      assert.equal(res.result.isError, false, res.result.content && res.result.content[0].text);
+      assert.equal(res.result.status, 'posted', 'an unawaited round comes back posted, and posted is what the daemon minted');
+    } finally {
+      shim.close();
+    }
+  });
+
+  // --- AC 10's doc half: the two files a session actually reads -------------
+  // The tool-list check above pins the shim's half of AC 10. This pins the other half,
+  // which no running code can fail: a `read` tool nothing documents is a tool no session
+  // calls, and a caution that stopped being true is worse than no caution at all.
+
+  await check('AC 10: the manual and the protocol name read, drop the dead-round caution, and record the outbound link', async () => {
+    const repo = f => readFileSync(path.join(here, '..', f), 'utf8');
+    const skill = repo('skills/claude-board/SKILL.md');
+    const protocol = repo('PROTOCOL.md');
+    const security = repo('SECURITY.md');
+
+    // Both surfaces of the same tool: the call a session types, and the route it rides.
+    assert.ok(skill.includes('mcp__claude-board__read'),
+      'the skill must name the read call the way a session types it');
+    assert.ok(protocol.includes('/api/board/:id/read'),
+      'and PROTOCOL.md must name the route behind it');
+
+    // The caution that stopped being true. A re-post on a lapsed round mints round N+1
+    // (src/server.mjs refuses to amend a round whose wait has lapsed), so telling an agent
+    // its re-post amends the dead round sends it round a hazard that no longer exists --
+    // and away from `read`, which is the thing that actually collects the late answer.
+    assert.ok(!skill.includes('amends that same dead round'),
+      'the re-post-amends-the-dead-round caution must be gone from the skill');
+
+    // AC 2's outbound link, on the two files that owe an account of it: what a stage link
+    // now does for the reviewer, and what the one outbound path a stage has costs.
+    // Whitespace-folded: the phrase spans a line break in the manual's own wrapping,
+    // and a doc pin that a re-wrap can turn red is a pin that teaches nothing.
+    assert.ok(skill.replace(/\s+/g, ' ').includes('in a new tab at once'),
+      'the skill must say a stage link opens at once, which is what a stage link now does');
+    assert.ok(security.includes('The one outbound path a stage has'),
+      'and SECURITY.md must carry the subsection that accounts for it, risk included');
   });
 
   // --- a second daemon on a taken port fails by name, not by stack trace ----

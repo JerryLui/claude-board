@@ -340,15 +340,10 @@
   // never does, so a rendered page stays a pure function of its board JSON.
   var ROUND_COUNTDOWN_TITLE = "Time left before this round's wait ends";
   var PILL_READONLY_TITLE = "No agent is listening on this page -- commenting is off.";
-  var ROUND_OPEN_UNAWAITED_TITLE = "No agent is waiting live right now -- comments and answers here are saved and reach the next agent that asks.";
+  var ROUND_OPEN_UNAWAITED_TITLE = "No agent is waiting live right now -- comments and answers sent here are saved and reach the next agent that reads the board.";
   var PILL_SUBMITTED_TITLE = "This round was submitted -- the answer already went out.";
-  var PAGE_SEND_EXPIRED_LABEL = "Goes out with the next round";
-  var PAGE_SEND_EXPIRED_TITLE = "This round ended. Comments left here are stored and reach the next agent that asks.";
-  // The other closed-without-sending case -- see these two constants' own comment
-  // at the top of this file for why a lapsed wait and an abandoned round may not
-  // share one label.
-  var ROUND_ABANDONED_LABEL = "Round closed, not sent";
-  var ROUND_ABANDONED_TITLE = "The conversation that opened this board ended, so this round closed. Comments queued here were never sent.";
+  var PAGE_SEND_EXPIRED_LABEL = "Saved for the next agent";
+  var PAGE_SEND_EXPIRED_TITLE = "This round ended. Comments left here are stored and reach the next agent that reads the board.";
   var roundIsAwaitedOpen = function roundIsAwaitedOpen(round) {
   return !!round && round.status === 'open' && round.awaited === true;
 };
@@ -364,7 +359,11 @@
   const countdown = roundCountdownText(round, nowMs);
   if (countdown) return { text: countdown, title: ROUND_COUNTDOWN_TITLE };
   if (!fullpage && round && round.status === 'sent') return { text: 'submitted', title: PILL_SUBMITTED_TITLE };
-  const title = (!fullpage && round && round.status === 'open') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
+  // Asked as "not sent", not "still open": ADR 114 -- an ORDINARY board's
+  // abandoned round keeps its live widgets and a working Send exactly like a
+  // lapsed one, so telling the reviewer "commenting is off" above a live Send
+  // button is the same false statement on both.
+  const title = (!fullpage && round && round.status !== 'sent') ? ROUND_OPEN_UNAWAITED_TITLE : PILL_READONLY_TITLE;
   return { text: 'read-only', title };
 };
 
@@ -1702,6 +1701,51 @@
     });
   }
 
+  // --- an outbound stage link: the one outbound path a stage has (ADR 113) ---
+  //
+  // A stage cannot open the tab itself: the sandbox is 'allow-scripts' alone,
+  // so 'allow-popups' is not on it and a 'target=_blank' inside the frame does
+  // nothing at all. What it can do is ASK, over the same channel every other
+  // stage fact travels on ('link'), and this page opens what it asks for at
+  // once. The address is neither shown nor confirmed first, by decision:
+  // Chrome's own hover bubble already names a link's target, and the artifacts
+  // this board shows are the ones its own agent authored. SECURITY.md carries
+  // the risk that comes with that, PROTOCOL.md the message shape.
+  //
+  // Opened from HERE rather than from the frame, and not stopped as a popup:
+  // the reviewer's click inside a child frame gives the whole frame tree its
+  // user activation, the ancestor document included, so this call is still
+  // inside the gesture a popup blocker looks for.
+  //
+  // 'noopener' is what stops the opened page reaching back through
+  // 'window.opener' into a board page that holds every answer on this board.
+  // Such an open hands back null by definition, so there is nothing to read
+  // off it and nothing here reads it.
+
+  /** The address this page is willing to open, normalized, or null.
+   * Everything here is stage-authored input:
+   *   - a string, non-empty, and no longer than an address a real link carries;
+   *   - PARSED, never pattern-matched: 'new URL' is what a browser would do
+   *     with it, and its output is what is opened. A URL this parser refuses
+   *     (or an environment with no parser at all) leaves 'null'.
+   *   - http/https only. The stage already drops every other scheme before
+   *     posting; this side does not take its word for it. */
+  function stageLinkAddress(raw) {
+    if (typeof raw !== 'string' || !raw || raw.length > 4096) return null;
+    var url;
+    try { url = new URL(raw); } catch (e) { return null; }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.href;
+  }
+
+  /** A stage asking the board to open an address. A refused one changes
+   * nothing at all -- nothing opens, nothing navigates, no trace. */
+  function handleStageLink(data) {
+    var url = stageLinkAddress(data.url);
+    if (!url) return;
+    window.open(url, '_blank', 'noopener');
+  }
+
   // One listener for every stage on the page, registered once (never inside
   // wireRoot: a stage's 'ready' can arrive at any time after this page loads,
   // regardless of whether it was here at hydrate or arrived over an SSE push
@@ -1725,6 +1769,15 @@
 
     if (data.type === 'ready') { handleStageReady(frame, section, blockId, layer); return; }
     if (data.type === 'click') { handleStageClick(data, section, blockId); return; }
+    if (data.type === 'link') {
+      // A link the reviewer clicked inside the frame (ADR 113). It arrives
+      // here only from a genuine stage -- origin, then 'event.source'
+      // re-derived from the live DOM, exactly like every other type on this
+      // channel -- and handleStageLink then decides whether the address
+      // itself is one this page will open at all.
+      handleStageLink(data);
+      return;
+    }
     if (data.type === 'positions') {
       if (typeof data.requestId !== 'string' || !data.positions || typeof data.positions !== 'object') return;
       handleStagePositions(data);
@@ -4293,19 +4346,20 @@
     questionsLeftPill.classList.toggle('visible', count > 0 && !railIntersecting);
   }
 
-  /** The round this page can still submit: the latest round that is still open.
+  /** The round this page can still submit: the latest round nobody has sent.
    * Posted with the body so the server can refuse a submit aimed at a round that
    * already went out (409) instead of silently rewriting it.
    *
-   * Asked as status === 'open', not status !== 'sent': since ADR 69 a round can also
-   * be 'abandoned' -- closed by a conversation that declared a boundary and walked
-   * away -- and the server's own openRounds filter (handleSubmit, src/server.mjs)
-   * asks it this way, so reading it the other way here would leave the Send bar live
-   * on a board whose every submit is a 409. Identical for every board written before
-   * that state existed: they carry only 'open' or 'sent'. */
+   * Asked as status !== 'sent', which is the identical question the server's own
+   * unsentRounds filter asks (handleSubmit, src/server.mjs) -- the two must agree or
+   * this page offers a Send the daemon refuses, or hides one it would have taken. ADR
+   * 114: an 'abandoned' round (closed by a conversation that declared a boundary and
+   * walked away) is answerable exactly like a lapsed one, and taking Send away from the
+   * reviewer already mid-answer is what lost nine answers on 2026-09-09. Identical for
+   * every board written before that state existed: they carry only 'open' or 'sent'. */
   function openRoundNumber() {
     var n = null;
-    (board.rounds || []).forEach(function (r) { if (r.status === 'open') n = r.n; });
+    (board.rounds || []).forEach(function (r) { if (r.status !== 'sent') n = r.n; });
     return n;
   }
 
@@ -4366,14 +4420,15 @@
     return (board.blocks || []).filter(function (b) { return b.round === n; });
   }
 
-  /** Does this round still owe an answer? Still open AND actually asking something
+  /** Does this round still owe an answer? Not sent AND actually asking something
    * -- the same rule the index badge counts by, which is what
    * keeps the dot off a page-board round: nothing ever sends one, so it is open
    * forever and would otherwise sit there accusing the reviewer of stalling. A round
-   * left 'abandoned' by a boundary declaration (ADR 69) is closed too, and owes
-   * nothing for the same reason a sent one does not. */
+   * left 'abandoned' by a boundary declaration still owes one (ADR 114 -- it can
+   * still be answered); only a sent round is settled. Its twin is roundOwesAnswer
+   * in src/render.mjs, asked the same way. */
   function roundOwesAnswer(r) {
-    if (!r || r.status !== 'open') return false;
+    if (!r || r.status === 'sent') return false;
     return (board.blocks || []).some(function (b) { return b.round === r.n && b.kind === 'question'; });
   }
 
@@ -4458,12 +4513,12 @@
         // first, frozen second -- the payload is captured synchronously inside
         // submitPageRound, so the disable sweep below cannot race it.
         //
-        // No flush on the abandoned branch, and not as an oversight: there is
-        // nothing left to flush TO. The round is not 'open' any more, so
-        // submitPageRound refuses it before the fetch and the daemon would answer
-        // 409 anyway. Saying so on the control (below) is the whole of what this
-        // tab can honestly do.
-        if (!abandoned) flushPendingOnExpiry(n);
+        // Both closes flush, ADR 114: an abandoned round takes a Send exactly like
+        // a lapsed one, so the queue this tab is holding has somewhere to go on
+        // either path and the reviewer keeps what they typed. The abandoned branch
+        // used to skip the flush and say so on the control instead, back when the
+        // daemon answered that submit 409.
+        flushPendingOnExpiry(n);
         panel.classList.add('expired');
         qsa('input, button', panel).forEach(function (el) { el.disabled = true; });
         // Frozen, but not mute: the control stays on screen saying where the
@@ -4471,8 +4526,8 @@
         // disable sweep so it cannot be re-enabled by it.
         var expiredSend = panel.querySelector('.page-send-btn');
         if (expiredSend) {
-          expiredSend.textContent = abandoned ? ROUND_ABANDONED_LABEL : PAGE_SEND_EXPIRED_LABEL;
-          expiredSend.title = abandoned ? ROUND_ABANDONED_TITLE : PAGE_SEND_EXPIRED_TITLE;
+          expiredSend.textContent = PAGE_SEND_EXPIRED_LABEL;
+          expiredSend.title = PAGE_SEND_EXPIRED_TITLE;
         }
       }
     });
@@ -5189,7 +5244,10 @@
   function submitPageRound(roundN, action) {
     if (readonly) return;
     var round = roundEntry(roundN);
-    if (!round || round.status !== 'open') return;
+    // Not sent, the same question openRoundNumber and the daemon's own submit guard
+    // ask (ADR 114): an abandoned round still stores what this posts, and the freeze
+    // above routes its flush straight through here.
+    if (!round || round.status === 'sent') return;
     var blocks = blocksOfRound(roundN);
     if (!isPageRound(blocks)) return;
     var blockId = blocks[0].id;
@@ -6156,9 +6214,10 @@
    * that close diffs to NOTHING: the resync returned early and this tab kept a
    * board whose round still said 'open'. Everything downstream then read that
    * stale copy and lied in step -- the countdown ticked against a deadline nobody
-   * was waiting on, the send bar stayed live over a submit the daemon answers 409,
-   * and a comment queued in this tab's memory sat there with nothing on screen
-   * saying it would never leave.
+   * was waiting on, and a page board's compose panel stayed live with its queued
+   * comments unflushed. (The ordinary send bar is deliberately NOT in that list
+   * since ADR 114: an abandoned round is still submittable, so a live Send over
+   * one is the truth, not the stale copy.)
    *
    * Asked here rather than inside computeBoardPatch: that function is spliced
    * verbatim from src/patch.mjs and its 'roundsNowSent' is read by
@@ -6179,12 +6238,12 @@
    * freeze are all written from 'board' alone, which is the only thing this
    * changed. */
   function adoptClosedRounds(fresh) {
-    // The reviewer's own queue is the half no repaint reaches: pendingComments
-    // lives only in this tab's memory and the closed round was the only thing that
-    // could ever have carried it. Said in the one place a reviewer of an ordinary
-    // board is already looking; a page board's frozen panel carries the same
-    // sentence on its own control (refreshAwaitDisplay), off the same constant.
-    if (sendStatus && pendingComments.length) sendStatus.textContent = ROUND_ABANDONED_TITLE;
+    // Nothing is said to the reviewer of an ordinary board here any more. This used
+    // to write "Comments queued here were never sent" beside the dead Send button,
+    // which ADR 114 turned into a lie: the queue rides the Send that is still live,
+    // and the pill's own hover text (ROUND_OPEN_UNAWAITED_TITLE) is where the promise
+    // now lives. A page board, whose panel really does freeze, flushes its queue
+    // instead (refreshAwaitDisplay, called through refreshPager below).
     board = fresh;
     refreshPager();
     refreshPins(document);

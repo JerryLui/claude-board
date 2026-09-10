@@ -921,9 +921,12 @@ check('pageBoardPillMeta: on an ORDINARY board (fullpage=false), an open-but-una
   // (src/board.mjs:526's default): open, not awaited. On a page board this
   // is genuinely dark (PILL_READONLY_TITLE, unchanged above); on an ordinary
   // board it sits over an ENABLED send bar (src/ui.mjs's setSendBarEnabled
-  // reads status/openRoundNumber, never awaited) and a comment left there is
-  // drained to the next agent that asks (drainUndeliveredComments,
-  // src/server.mjs) -- so the title must say that instead.
+  // reads status/openRoundNumber, never awaited) and a comment left there
+  // reaches the next agent that reads the board: drained onto the thread's
+  // next packet (drainUndeliveredComments, src/server.mjs), or collected off
+  // the board by `read` from any conversation at all (ADR 115), which is the
+  // half that is still true once a boundary has nulled the thread -- so the
+  // title must say that instead.
   const now = Date.parse('2026-08-07T12:00:00.000Z');
   const openUnawaited = { status: 'open', awaited: false, awaitDeadline: null };
   assert.deepEqual(pageBoardPillMeta(openUnawaited, now, false),
@@ -7986,11 +7989,12 @@ check('the submitted push disables the send bar, and a new round brings it back'
     /if \(!submitInFlight\) setSendBarEnabled\(open !== null && currentRound === open\)/,
     'and the one place that decides it reads both halves');
   const open = namedFunctionBody(ui, 'openRoundNumber');
-  // Asked positively, and it has to be: since ADR 69 a round can close as 'abandoned' too
-  // (a conversation declared a boundary and walked away), and "not sent" would read that
-  // as still open -- a live Send bar on a board whose every submit is a 409, which is the
-  // exact shape this whole check exists to keep off the screen.
-  assert.match(open, /r\.status === 'open'/, 'the open round is the one still open, not merely the one not sent');
+  // Asked as "not sent", and it has to be: ADR 114 -- a round closed as 'abandoned' (a
+  // conversation declared a boundary and walked away) still stores a late Send, and the
+  // daemon's own submit guard asks this same question, so reading it as 'open' only
+  // would hide the Send bar over a submit the daemon would have taken. A SENT round is
+  // the one this must never name, which is what the two assertions above pin.
+  assert.match(open, /r\.status !== 'sent'/, 'the submittable round is the one nobody has sent, not merely the one still open');
   // Never re-enable anything in a read-only page, where everything is hard-disabled.
   assert.match(namedFunctionBody(ui, 'setSendBarEnabled'), /if \(readonly\) return;/);
 });
