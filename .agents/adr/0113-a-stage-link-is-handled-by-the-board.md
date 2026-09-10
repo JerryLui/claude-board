@@ -1,0 +1,5 @@
+# 113. A stage link is handled by the board, and an outbound address is shown before it opens
+
+2026-09-10 · relates to 95, 59
+
+**Context:** a stage is a `srcdoc` frame whose relative links resolve against the board page's address, so every click inside it, an in-page `#anchor` included, becomes a frame navigation the CSP (`default-src 'none'`) refuses; the sandbox also forbids popups, and any message channel that opens URLs is the one outbound path a stage would have. **Decision:** the board's injected stage script owns link clicks: an in-page anchor scrolls inside the frame (below the header band, and never while comment mode is on); an http or https address is posted to the board page, which shows it in its own chrome and opens a tab only on the reviewer's click there. **Consequences:** sandbox and CSP stay as 95 left them; one extra click per outbound link, in exchange for a data-stuffed URL from a hostile stage being visible before anything leaves the machine; other schemes open nothing.

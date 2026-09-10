@@ -45,8 +45,8 @@ conversation that posted it declared itself over — the `fresh` flag on a later
 abandon. The second closed state told by name, and terminal in a way Lapsed is not: a lapsed round
 sits on a board that can still be posted to, while an abandoned one belongs to a conversation that
 has moved to another board. A blocked `ask` on it is released at once and told `abandoned` rather
-than left to the wall clock, and a Send that arrives after is refused by name rather than as "already
-submitted" — nobody submitted anything. _Avoid_: cancelled, dropped, discarded, closed, expired
+than left to the wall clock. A Send that arrives after is stored like a Lapsed round's and the round
+becomes Submitted; it reaches an agent through `read`, since no thread waits on that board again. _Avoid_: cancelled, dropped, discarded, closed, expired
 (that is Lapsed).
 
 **Watcher**: an open board tab holding a live stream to one board. Counted per board and

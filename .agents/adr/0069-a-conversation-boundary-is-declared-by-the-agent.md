@@ -1,6 +1,6 @@
 # 69. A conversation boundary is declared by the agent, and starts a new thread
 
-2026-08-10 · accepted
+2026-08-10 · narrowed by 114
 
 **Context:** the shim survives `/clear` — Claude Code does not restart stdio MCP servers — so
 `session.boardId` outlives the conversation that minted it and the next `ask` pushes a round onto a

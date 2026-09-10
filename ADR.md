@@ -56,7 +56,7 @@ link where it is worth reading.
 | 66 | [The owed-round dot takes a different hue in each theme](.agents/adr/0066-the-owed-round-dot-takes-a-different-hue-in-each.md) | 2026-08-09 | narrows 30 |
 | 67 | [The pomodoro day runs 05:00 to 05:00, and its rollover ends the loop](.agents/adr/0067-the-pomodoro-day-runs-05-00-to-05-00-and.md) | 2026-08-10 | narrows 8; narrowed by 68 |
 | 68 | [A session that must not start the timer marks itself](.agents/adr/0068-a-session-that-must-not-start-the-timer-marks.md) | 2026-08-10 | narrows 67 |
-| 69 | [A conversation boundary is declared by the agent, and starts a new thread](.agents/adr/0069-a-conversation-boundary-is-declared-by-the-agent.md) | 2026-08-10 | accepted |
+| 69 | [A conversation boundary is declared by the agent, and starts a new thread](.agents/adr/0069-a-conversation-boundary-is-declared-by-the-agent.md) | 2026-08-10 | narrowed by 114 |
 | 70 | [A page references its script and styles, content-addressed and never rewritten](.agents/adr/0070-a-page-references-its-script-and-styles-content-addressed.md) | 2026-08-10 | accepted |
 | 71 | [The store is prunable by hand, and the promise not to prune it is dropped](.agents/adr/0071-the-store-is-prunable-by-hand-and-the-promise-is-dropped.md) | 2026-08-10 | relates to 70 |
 | 72 | [The status item is a second process of the same bundle](.agents/adr/0072-status-item-is-a-second-process-of-the.md) | 2026-08-10 | replaces the deleted 9; narrowed by 57 |
@@ -93,9 +93,12 @@ link where it is worth reading.
 | 104 | [A shape change reloads the page; values patch in place](.agents/adr/0104-a-shape-change-reloads-values-patch-in-place.md) | 2026-08-12 | relates to 103 |
 | 105 | [The pomodoro ships off](.agents/adr/0105-the-pomodoro-ships-off.md) | 2026-08-12 | narrows 103; relates to 68, 84, 90 |
 | 106 | [Off silences even a Suppressed board's Banner](.agents/adr/0106-off-silences-even-a-suppressed-boards-banner.md) | 2026-08-14 | narrows 92 |
-| 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50 |
+| 107 | [Answers a packet never carried ride the next packet](.agents/adr/0107-answers-a-packet-never-carried-ride-the-next-packet.md) | 2026-08-17 | widens 35; relates to 50, 115 |
 | 108 | [The board lends its engine to a marked stage](.agents/adr/0108-the-board-lends-its-engine-to-a-marked-stage.md) | 2026-08-19 | widens 95; relates to 70 |
 | 109 | [The positions payload is answered in frame viewport coordinates](.agents/adr/0109-positions-are-answered-in-frame-viewport-coordinates.md) | 2026-08-20 | relates to 99 |
 | 110 | [A question's context is one panel, and long prose folds](.agents/adr/0110-a-questions-context-is-one-panel-and-long-prose-folds.md) | 2026-09-03 | widens 26; relates to 28, 111 |
 | 111 | [A question carries an explainer of its own](.agents/adr/0111-a-question-carries-an-explainer-of-its-own.md) | 2026-09-03 | relates to 26, 110 |
 | 112 | [A post with a failed reference is refused](.agents/adr/0112-a-post-with-a-failed-reference-is-refused.md) | 2026-09-03 | relates to 3 |
+| 113 | [A stage link is handled by the board, and an outbound address is shown before it opens](.agents/adr/0113-a-stage-link-is-handled-by-the-board.md) | 2026-09-10 | relates to 95, 59 |
+| 114 | [An Abandoned round accepts a late Send](.agents/adr/0114-an-abandoned-round-accepts-a-late-send.md) | 2026-09-10 | narrows 69; relates to 50, 107 |
+| 115 | [`read` is a pure read of a board](.agents/adr/0115-read-is-a-pure-read-of-a-board.md) | 2026-09-10 | relates to 35, 107, 114 |
