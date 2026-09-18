@@ -159,6 +159,8 @@ comments, the composer and the send controls in one panel over the Stage. _Avoid
 post time. The agent supplies references and question text; it never drafts the content being
 rendered. _Avoid_: link, include, embed.
 
+**Refused**: of a post or an amend, that the daemon answered it 400 and stored nothing, rendered nothing and pushed nothing, so the caller re-posts; a reference that fails to resolve and a diagram that does not parse each refuse the whole post, one message per failure. _Avoid_: rejected, failed, errored, dropped.
+
 **Fallback**: the non-board path a command takes when the board is unreachable — always
 announced, never silent, and degraded rather than equivalent: it promises a path exists, not
 the same experience. _Avoid_: offline mode, graceful degradation.
