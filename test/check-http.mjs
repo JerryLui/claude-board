@@ -1861,6 +1861,216 @@ async function main() {
     }
   });
 
+  await check('ADR.md entry 117: a bad mermaid block refuses the whole post, and fixing it lands and renders', async () => {
+    // A diagram error once reached the reviewer as a broken graphic while the caller
+    // got a 200, so this must be as atomic as a failed reference while a repaired chart lands.
+    const postBody = text => JSON.stringify({
+      title: 'Diagram refusal over HTTP',
+      blocks: [{ id: 'm1', kind: 'mermaid', text }],
+    });
+    const before = storeListing();
+    const refusedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: postBody('flowchart LR\n a --> ((b'),
+    });
+    assert.equal(refusedResponse.status, 400, 'a malformed mermaid block refuses the post');
+    const refused = await refusedResponse.json();
+    assert.equal(refused.boardId, undefined, 'a refused diagram returns no board id');
+    assert.ok(refused.error.includes('mermaid block m1'), `the refusal must name its block: ${refused.error}`);
+    assert.ok(refused.error.includes('does not parse'), `the refusal must say what failed: ${refused.error}`);
+    assert.match(refused.error, /line 2/i, `the refusal must preserve the parser line: ${refused.error}`);
+    assert.deepEqual(storeListing(), before, 'a refused diagram writes neither a board document nor a rendered page');
+
+    const fixedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: postBody('flowchart LR\n a --> b'),
+    });
+    assert.equal(fixedResponse.status, 200, 'the same post lands after the diagram is fixed');
+    const fixed = await fixedResponse.json();
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${fixed.boardId}`)).text());
+    assert.ok(markup.includes('class="mermaid"') || markup.includes('flowchart LR'),
+      'the accepted diagram must reach the served page');
+  });
+
+  await check('ADR.md entry 117: bad by-value mermaid fences refuse together from top level, question context and compare side', async () => {
+    // These nested paths all render markdown fences, so accepting one would expose the
+    // reviewer to the same broken graphic by another route.
+    const before = storeListing();
+    const badFence = '```mermaid\nflowchart LR\n a --> ((b\n```';
+    const refusedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Every by-value fence position',
+        blocks: [
+          { id: 'd1', kind: 'markdown', text: badFence },
+          { id: 'q1', kind: 'question', prompt: 'Keep this?', widget: 'single', options: [{ label: 'Yes' }], context: [{ id: 'd2', kind: 'markdown', text: badFence }] },
+          {
+            id: 'x1', kind: 'compare',
+            left: { label: 'Before', block: { id: 'd3', kind: 'markdown', text: badFence } },
+            right: { label: 'After', block: { id: 'd4', kind: 'markdown', text: 'ordinary prose' } },
+          },
+        ],
+      }),
+    });
+    assert.equal(refusedResponse.status, 400, 'a bad fence anywhere refuses the complete post');
+    const refused = await refusedResponse.json();
+    const lines = refused.error.split('\n');
+    assert.equal(lines.length, 3, `one refusal must come back for each bad fence, got:\n${refused.error}`);
+    assert.ok(lines.some(line => line.includes('markdown block d1') && line.includes('does not parse')),
+      `the top-level fence must be named: ${refused.error}`);
+    assert.ok(lines.some(line => line.includes('markdown block d2') && line.includes('context 1 of question q1')),
+      `the question context fence must be named: ${refused.error}`);
+    assert.ok(lines.some(line => line.includes('markdown block d3') && line.includes('left side of compare block x1')),
+      `the compare-side fence must be named: ${refused.error}`);
+    assert.deepEqual(storeListing(), before, 'none of the partial nested tree reaches the store');
+  });
+
+  await check('ADR.md entry 117: a bad mermaid fence in a referenced markdown file refuses the post by its posted path', async () => {
+    // Referenced markdown reaches the same renderer as by-value markdown, and the caller
+    // needs the relative spelling it supplied to repair the file that blocked the post.
+    const project = projectDir('diagram-fence-reference');
+    const sourcePath = 'broken-fence.md';
+    writeFileSync(path.join(project, sourcePath), '```mermaid\nflowchart LR\n a --> ((b\n```\n', 'utf8');
+    const before = storeListing();
+    const refusedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Referenced bad fence', cwd: project,
+        blocks: [{ id: 'd1', kind: 'markdown', source: { path: sourcePath } }],
+      }),
+    });
+    assert.equal(refusedResponse.status, 400, 'a referenced bad fence refuses the post');
+    const refused = await refusedResponse.json();
+    assert.ok(refused.error.includes(sourcePath), `the refusal must name the path as posted: ${refused.error}`);
+    assert.ok(refused.error.includes('does not parse'), `the refusal must distinguish a diagram failure: ${refused.error}`);
+    assert.deepEqual(storeListing(), before, 'a refused referenced fence stores no board or page');
+  });
+
+  await check('ADR.md entry 117: a bad diagram amend is refused and leaves the open question round byte-identical', async () => {
+    // An open question is amendable, exactly where a late malformed chart could alter an
+    // already-visible review. Refusing it must preserve the prior document.
+    const createdResponse = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Diagram amend target',
+        blocks: [{ id: 'q1', kind: 'question', prompt: 'Ship it?', widget: 'single', options: [{ label: 'Yes' }] }],
+      }),
+    });
+    assert.equal(createdResponse.status, 200, 'the open question round must exist before it is amended');
+    const created = await createdResponse.json();
+    const boardFile = path.join(home, 'boards', `${created.boardId}.json`);
+    const docBefore = readFileSync(boardFile, 'utf8');
+    const storeBefore = storeListing();
+    const refusedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({ boardId: created.boardId, blocks: [{ id: 'm1', kind: 'mermaid', text: 'flowchart LR\n a --> ((b' }] }),
+    });
+    assert.equal(refusedResponse.status, 400, 'a malformed amend is refused before changing the round');
+    const refused = await refusedResponse.json();
+    assert.ok(refused.error.includes('mermaid block m1') && refused.error.includes('does not parse'),
+      `the amend refusal must name the chart: ${refused.error}`);
+    assert.equal(readFileSync(boardFile, 'utf8'), docBefore,
+      'the existing board document remains byte-identical after the refused amend');
+    assert.deepEqual(storeListing(), storeBefore, 'the refused amend writes no replacement page or document');
+  });
+
+  await check('ADR.md entry 117: several bad diagrams and a missing reference return every refusal in one 400', async () => {
+    // One failed post should tell the caller every repair it needs rather than making one
+    // diagram typo hide a missing source or requiring a retry for each chart.
+    const project = projectDir('diagram-and-reference-refusals');
+    const before = storeListing();
+    const refusedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'All diagram repairs at once', cwd: project,
+        blocks: [
+          { id: 'm1', kind: 'mermaid', text: 'flowchart LR\n a --> ((b' },
+          { id: 'd1', kind: 'markdown', source: { path: 'missing-diagram-source.md' } },
+          { id: 'm3', kind: 'mermaid', text: 'flowchart LR\n a --> ((b' },
+        ],
+      }),
+    });
+    assert.equal(refusedResponse.status, 400, 'all failing content is reported on one refused post');
+    const refused = await refusedResponse.json();
+    const lines = refused.error.split('\n');
+    assert.equal(lines.length, 3, `two diagrams and one reference need three messages, got:\n${refused.error}`);
+    assert.equal(lines.filter(line => line.includes('does not parse')).length, 2,
+      `both diagram failures must survive the shared refusal ledger: ${refused.error}`);
+    assert.ok(lines.some(line => line.startsWith('cannot read missing-diagram-source.md:')),
+      `the missing-reference refusal must share the 400: ${refused.error}`);
+    assert.deepEqual(storeListing(), before, 'a combined refusal stores no partial board or page');
+  });
+
+  await check('ADR.md entry 117: good diagrams at every position still land through the daemon', async () => {
+    // The parser guards diagrams, not their locations: accepting these real block-tree
+    // shapes proves the new door has not turned a valid review into a blanket refusal.
+    const acceptedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST',
+      headers: writeHeaders(),
+      body: JSON.stringify({
+        title: 'Every good diagram position',
+        blocks: [
+          { id: 'm1', kind: 'mermaid', text: 'flowchart LR\n a --> b' },
+          { id: 'q1', kind: 'question', prompt: 'Which chart?', widget: 'single', options: [{ label: 'First' }], context: [{ id: 'm2', kind: 'mermaid', text: 'flowchart LR\n a --> b' }] },
+          {
+            id: 'x1', kind: 'compare',
+            left: { label: 'Before', block: { id: 'm3', kind: 'mermaid', text: 'flowchart LR\n a --> b' } },
+            right: { label: 'After', block: { id: 'd4', kind: 'markdown', text: 'ordinary prose' } },
+          },
+          {
+            id: 'q2', kind: 'question', prompt: 'Choose a rendered variant', widget: 'choose-between-rendered-variants',
+            options: [{ label: 'Diagram option', block: { id: 'm5', kind: 'mermaid', text: 'flowchart LR\n a --> b' } }],
+          },
+          { id: 'd6', kind: 'markdown', text: '```mermaid\nflowchart LR\n a --> b\n```' },
+        ],
+      }),
+    });
+    assert.equal(acceptedResponse.status, 200, 'valid diagrams in every supported position must land');
+    const accepted = await acceptedResponse.json();
+    const stored = readBoard(accepted.boardId, home);
+    assert.equal(stored.blocks.length, 5, 'the accepted post retains each top-level tree');
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${accepted.boardId}`)).text());
+    assert.ok(markup.includes('class="mermaid"') || markup.includes('flowchart LR'),
+      'the accepted page renders its valid diagrams');
+  });
+
+  await check('ADR.md entry 117: a bad fence in a question explainer refuses the post through the daemon', async () => {
+    // A question's explainer is markdown through the same renderer as a markdown block,
+    // so a broken fence there used to land 200 and reach the reviewer's open round as
+    // mermaid's error graphic -- the one outcome this door exists to stop.
+    const before = storeListing();
+    const postBody = fence => JSON.stringify({
+      title: 'Explainer diagram refusal',
+      blocks: [{
+        id: 'q1', kind: 'question', prompt: 'Pick', widget: 'single',
+        explainer: fence,
+        options: [{ label: 'Yes' }],
+      }],
+    });
+    const refusedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: postBody('```mermaid\nflowchart LR\n a --> ((b\n```'),
+    });
+    assert.equal(refusedResponse.status, 400, 'a broken explainer fence refuses the post');
+    const refused = await refusedResponse.json();
+    assert.equal(refused.boardId, undefined, 'a refused explainer returns no board id');
+    assert.ok(refused.error.includes('question q1'), `the refusal must name its question: ${refused.error}`);
+    assert.ok(refused.error.includes('explainer'), `the refusal must name the explainer: ${refused.error}`);
+    assert.ok(refused.error.includes('does not parse'), `the refusal must say what failed: ${refused.error}`);
+    assert.match(refused.error, /line 2/i, `the refusal must preserve the parser line: ${refused.error}`);
+    assert.deepEqual(storeListing(), before, 'a refused explainer writes neither a board document nor a rendered page');
+
+    const fixedResponse = await fetch(`${base}/api/board`, {
+      method: 'POST', headers: writeHeaders(), body: postBody('```mermaid\nflowchart LR\n a --> b\n```'),
+    });
+    assert.equal(fixedResponse.status, 200, 'the same question lands once its explainer parses');
+    const fixed = await fixedResponse.json();
+    const markup = renderedMarkup(await (await fetch(`${base}/b/${fixed.boardId}`)).text());
+    assert.ok(markup.includes('class="mermaid"'), 'the accepted explainer diagram reaches the served page');
+  });
+
   await check('a refused reference names the boundary and the ways across it, and says nothing whatever about what is out there', async () => {
     // A refusal is the agent's only feedback -- the post is gone and nothing reached the
     // reviewer's page -- so "no" without the way out costs a round of guessing at a rule

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Bad diagrams refuse a post**: alongside the failed-reference refusal, a `mermaid` block or
+  `mermaid` fence in `markdown` that does not parse now sends a 400 naming each failed diagram
+  and its first error line, so the source is fixed and posted again (ADR 117).
 - **Diagrams on an earlier round render**: a mermaid block on a round that is not
   the page on screen used to be drawn while hidden and came out blank for good;
   it is now drawn by the flip that shows it, and a theme switch redraws only the

@@ -17,6 +17,7 @@
 // buildPacket call.
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { parseHtmlTree } from '../src/anchor.mjs';
 import { createBoard, resolveComment, resolveComments } from '../src/board.mjs';
 
@@ -98,9 +99,24 @@ function bigDiagram(targetBytes) {
   return out;
 }
 
+// The post carries a small, valid diagram and the ~500KB text is written into the
+// STORED block afterwards, because ADR.md entry 117 refuses any diagram past
+// mermaid's own 50,000-character limit at the door: no post can carry this block
+// any more, while a board stored before that door keeps whatever it drew. The
+// door sits on the posting path alone and never runs again on a block already in
+// a board, and a stored board is exactly what resolveComments walks -- so what
+// the two checks below measure is unchanged, only how the fixture gets its bytes.
+// `sha` is rewritten alongside `text` so the stored block stays the self-consistent
+// shape normalizeBlock would have minted for it before the limit landed.
 function boardWithComments(commentCount) {
-  const board = createBoard({ title: 'v4 perf', blocks: [{ kind: 'mermaid', text: bigDiagram(500 * 1024) }] });
+  const board = createBoard({ title: 'v4 perf', blocks: [{ kind: 'mermaid', text: 'flowchart LR\n  a --> b\n' }] });
   const block = board.blocks[0];
+  block.text = bigDiagram(500 * 1024);
+  block.sha = createHash('sha256').update(block.text, 'utf8').digest('hex');
+  // Both deadlines below are only meaningful over a block of that size, so the
+  // size is asserted rather than assumed: an edit that drops the write-in would
+  // otherwise leave two checks passing in microseconds against a two-line diagram.
+  assert.ok(Buffer.byteLength(block.text, 'utf8') >= 500 * 1024, 'the stored block must carry the ~500KB diagram the deadlines are set against');
   for (let i = 0; i < commentCount; i++) {
     board.comments.push({
       n: i + 1,

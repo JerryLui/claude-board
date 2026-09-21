@@ -1128,10 +1128,11 @@ async function handlePostBoard(req, res, home, sse, stranded, stream, waiting) {
     }
   } catch (err) {
     // Everything that decides whether this post is legal happens inside the try above --
-    // an unknown widget, a duplicate id, an over-cap payload, and (ADR.md entry 112) any
-    // reference in it that does not resolve, which arrives here as one message per failed
-    // reference joined by newlines. Nothing below this line has run: no board written, no
-    // page rendered, no round pushed over SSE, no stranded rule evaluated, and an
+    // an unknown widget, a duplicate id, an over-cap payload, and (ADR.md entries 112
+    // and 117) any reference that does not resolve or diagram that does not parse. Those
+    // arrive here as one message per failure joined by newlines. Nothing below this line
+    // has run: no board written, no page rendered, no round pushed over SSE, no stranded
+    // rule evaluated, and an
     // addRound/amendRound that threw mutated nothing (src/board.mjs). So a refused post
     // leaves the store exactly as it was, and the whole message goes back to the caller,
     // which is the only place a shim can read it (bin/mcp.mjs `daemonRejectedMessage`).

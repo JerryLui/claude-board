@@ -16,6 +16,7 @@ import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mdToHtml, mdToHtmlAndAnchors, slugify } from '../src/markdown.mjs';
+import { marked } from '../src/vendor/marked/marked.esm.js';
 // The pre-marked (edb611b) markdown module, frozen as a fixture: AC 10
 // ("slugs byte-identical to today's output, so every archived section: ref
 // still resolves") is asserted by running BOTH implementations over one corpus, not
@@ -145,6 +146,48 @@ check('mdToHtml carries the visualize renderer\'s pinned behaviour', () => {
   }
   // heading now carries its anchor id (the promotion's one behavioural addition)
   assert.ok(out.includes('<h1 id="title">Title</h1>'));
+});
+
+check('ADR.md entry 117: the fence walk finds exactly the mermaid fences the renderer draws, in document order', () => {
+  const md = [
+    '```mermaid',
+    'flowchart LR',
+    '  A --> B',
+    '```',
+    '',
+    '> quoted',
+    '>',
+    '> ```mermaid',
+    '> sequenceDiagram',
+    '>   A->>B: hello',
+    '> ```',
+    '',
+    '- nested fence',
+    '',
+    '  ```mermaid',
+    '  stateDiagram-v2',
+    '    A --> B',
+    '  ```',
+    '',
+    '```mermaid extra',
+    'not a diagram host',
+    '```',
+    '',
+    '```Mermaid',
+    'also not a diagram host',
+    '```',
+  ].join('\n');
+
+  const { html, mermaidFences: fences } = mdToHtmlAndAnchors(md);
+  assert.deepEqual(fences, [
+    { ordinal: 1, text: 'flowchart LR\n  A --> B' },
+    { ordinal: 2, text: 'sequenceDiagram\n  A->>B: hello' },
+    { ordinal: 3, text: 'stateDiagram-v2\n  A --> B' },
+  ]);
+  assert.equal((html.match(/<pre class="mermaid">/g) || []).length, fences.length,
+    'the list the door parses and the hosts the page draws come off the same walk');
+  assert.equal((mdToHtml(md).match(/<pre class="mermaid">/g) || []).length, fences.length,
+    'the fence list and renderCode must recognize exactly the same language tag');
 });
 
 // --- markdown.mjs: anchors ----------------------------------------------------------
@@ -11533,6 +11576,291 @@ check('the fold\'s safety valve re-measures a push subtree once it is attached: 
   assert.ok(start > 0 && end > start, 'setup failure: both functions must exist in that order');
   assert.ok(ui.slice(start, end).includes('dropSettledFolds(root)'),
     'wireRoot runs on a detached subtree where the valve measures nothing; the attached redo must run it');
+});
+
+
+// --- ADR.md entry 117: diagram refusals at the board-normalisation door -----------
+
+check('ADR.md entry 117: a bad mermaid block names its id and parser line, while the fixed block lands', () => {
+  const bad = 'flowchart LR\n a --> ((b';
+  const message = refusedPost(() => createBoard({
+    title: 'bad mermaid',
+    blocks: [{ id: 'm1', kind: 'mermaid', text: bad }],
+  }));
+  assert.equal(message,
+    'mermaid block m1 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code');
+  assert.doesNotThrow(() => createBoard({
+    title: 'fixed mermaid',
+    blocks: [{ id: 'm1', kind: 'mermaid', text: 'flowchart LR\n a --> b' }],
+  }));
+});
+
+check('ADR.md entry 117: bad by-value markdown fences name top-level, context and compare positions together', () => {
+  const badFence = '```mermaid\nflowchart LR\n a --> ((b\n```';
+  const lines = refusedPost(() => createBoard({
+    title: 'three bad fences',
+    blocks: [
+      { kind: 'markdown', text: badFence },
+      {
+        kind: 'question', prompt: 'Context?', widget: 'single', options: [{ label: 'Yes' }],
+        context: [{ kind: 'markdown', text: badFence }],
+      },
+      {
+        kind: 'compare',
+        left: { label: 'Left', block: { kind: 'markdown', text: badFence } },
+        right: { label: 'Right', block: null },
+      },
+    ],
+  })).split('\n');
+
+  assert.equal(lines.length, 3, 'one refusal per fence, in one rejected post');
+  assert.match(lines[0], /^mermaid fence 1 in markdown block d1 does not parse\. Parse error on line 2\. Way out:/);
+  assert.match(lines[1], /^mermaid fence 1 in markdown block d2 in context 1 of question q1 does not parse\. Parse error on line 2\. Way out:/);
+  assert.match(lines[2], /^mermaid fence 1 in markdown block d3 on left side of compare block x1 does not parse\. Parse error on line 2\. Way out:/);
+});
+
+check('ADR.md entry 117: a bad fence in referenced markdown names the posted file path', () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'claude-board-diagram-refusal-'));
+  try {
+    writeFileSync(path.join(cwd, 'broken-diagram.md'), '```mermaid\nflowchart LR\n a --> ((b\n```\n', 'utf8');
+    const message = refusedPost(() => createBoard({
+      title: 'referenced bad fence',
+      cwd,
+      blocks: [{ kind: 'markdown', source: { path: 'broken-diagram.md' } }],
+    }));
+    assert.match(message, /^mermaid fence 1 in markdown block d1 from referenced file broken-diagram\.md does not parse\. Parse error on line 2\. Way out:/);
+    assert.ok(message.includes('fix the file, or post the section by value with the fence marked as code'));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+check('ADR.md entry 117: an amend with a broken diagram refuses before changing its open board', () => {
+  const board = createBoard({
+    title: 'amend refusal',
+    blocks: [{ kind: 'markdown', text: '# Ready' }],
+  });
+  const before = JSON.stringify(board);
+  assert.throws(
+    () => amendRound(board, { blocks: [{ kind: 'mermaid', text: 'flowchart LR\n a --> ((b' }] }),
+    /mermaid block m1 does not parse\. Parse error on line 2\. Way out:/,
+  );
+  assert.equal(JSON.stringify(board), before, 'a refused amend leaves the stored board byte-identical');
+});
+
+check('ADR.md entry 117: diagram and reference failures are returned together', () => {
+  // A missing reference on a board with no project directory refuses with a
+  // different message ("cannot resolve ... no project directory") than the "cannot
+  // read ... no such file" a real, missing-file lookup gets -- see MISSING above.
+  // This check is about the LATTER, joined with two diagram refusals, so it needs a
+  // real project directory the way every other MISSING() check here has one.
+  const cwd = mkdtempSync(path.join(tmpdir(), 'claude-board-diagram-refusal-mixed-'));
+  try {
+    const lines = refusedPost(() => createBoard({
+      title: 'three failures',
+      cwd,
+      blocks: [
+        { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' },
+        { kind: 'markdown', text: '```mermaid\nflowchart LR\n a --> ((b\n```' },
+        { kind: 'markdown', source: { path: 'missing-diagram-source.md' } },
+      ],
+    })).split('\n');
+
+    assert.deepEqual(lines, [
+      'mermaid block m1 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code',
+      'mermaid fence 1 in markdown block d1 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code',
+      MISSING('missing-diagram-source.md', realpathSync(cwd), []),
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+check('ADR.md entry 117: good diagrams land at every block position', () => {
+  const diagram = 'flowchart LR\n a --> b';
+  const board = createBoard({
+    title: 'good diagrams',
+    blocks: [
+      { kind: 'mermaid', text: diagram },
+      {
+        kind: 'question', prompt: 'Context?', widget: 'single', options: [{ label: 'Yes' }],
+        context: [{ kind: 'mermaid', text: diagram }],
+      },
+      {
+        kind: 'compare',
+        left: { label: 'Left', block: { kind: 'mermaid', text: diagram } },
+        right: { label: 'Right', block: null },
+      },
+      {
+        kind: 'question', prompt: 'Variant?', widget: 'choose-between-rendered-variants',
+        options: [{ label: 'Good', block: { kind: 'mermaid', text: diagram } }],
+      },
+      { kind: 'markdown', text: '```mermaid\nflowchart LR\n a --> b\n```' },
+      { kind: 'mermaid', text: '---\ntitle: Good diagram\n---\nflowchart LR\n a --> b' },
+    ],
+  });
+
+  assert.equal(board.blocks.length, 6);
+  assert.doesNotThrow(() => addRound(board, {
+    blocks: [{ kind: 'mermaid', text: diagram }],
+  }));
+  assert.equal(board.rounds.length, 2, 'a good diagram also passes the direct addRound path');
+});
+
+/** Every line `fn` printed through console.error, which is where src/board.mjs and the
+ * diagram engine both log what they let through (ADR.md entry 117). */
+function capturedErrors(fn) {
+  const printed = [];
+  const original = console.error;
+  console.error = (...args) => printed.push(args.join(' '));
+  try {
+    fn();
+  } finally {
+    console.error = original;
+  }
+  return printed;
+}
+
+check('ADR.md entry 117: a bad fence in a question explainer refuses the post naming the question', () => {
+  const message = refusedPost(() => createBoard({
+    title: 'bad explainer',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Pick',
+      widget: 'single',
+      explainer: '```mermaid\nflowchart LR\n a --> ((b\n```',
+      options: [{ label: 'Yes' }],
+    }],
+  }));
+  assert.match(message,
+    /^mermaid fence 1 in explainer of question q1 does not parse\. Parse error on line 2\. Way out: fix the source and post again/);
+
+  // The same explainer, fixed, still renders its diagram host for the page.
+  const board = createBoard({
+    title: 'good explainer',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Pick',
+      widget: 'single',
+      explainer: '```mermaid\nflowchart LR\n a --> b\n```',
+      options: [{ label: 'Yes' }],
+    }],
+  });
+  assert.ok(board.blocks[0].explainerHtml.includes('<pre class="mermaid">'));
+});
+
+check('ADR.md entry 117: a bad diagram inside a variant option names the option', () => {
+  const message = refusedPost(() => createBoard({
+    title: 'bad variant',
+    blocks: [{
+      kind: 'question',
+      prompt: 'Which?',
+      widget: 'choose-between-rendered-variants',
+      options: [
+        { label: 'Good', block: { kind: 'mermaid', text: 'flowchart LR\n a --> b' } },
+        { label: 'Bad', block: { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' } },
+      ],
+    }],
+  }));
+  assert.match(message,
+    /^mermaid block m2 in option 2 of question q1 does not parse\. Parse error on line 2\. Way out:/);
+});
+
+check('ADR.md entry 117: a bad diagram on a compare right side names the side', () => {
+  const message = refusedPost(() => createBoard({
+    title: 'bad right side',
+    blocks: [{
+      kind: 'compare',
+      left: { label: 'Left', block: { kind: 'markdown', text: '# Fine' } },
+      right: { label: 'Right', block: { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' } },
+    }],
+  }));
+  assert.match(message,
+    /^mermaid block m1 on right side of compare block x1 does not parse\. Parse error on line 2\. Way out:/);
+});
+
+check('ADR.md entry 117: a post past its diagram budget lands unchecked, with one line logged', () => {
+  // MIN_DIAGRAM_COST is 500 characters and the post's whole allowance is 50,000, so a
+  // hundred two-line diagrams spend it exactly -- the cheapest way to reach the end of
+  // the budget, and the shape the budget exists for.
+  const good = { kind: 'mermaid', text: 'flowchart LR\n a --> b' };
+  const bad = { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' };
+  let board;
+  const printed = capturedErrors(() => {
+    board = createBoard({
+      title: 'budget spent',
+      blocks: [...Array.from({ length: 100 }, () => ({ ...good })), { ...bad }, { ...bad }],
+    });
+  });
+
+  assert.equal(board.blocks.length, 102, 'a spent budget refuses nothing: the post lands whole');
+  assert.equal(board.blocks[100].text, bad.text, 'the unchecked diagram is stored as posted');
+  const budgetLines = printed.filter(line => line.includes('Diagram budget'));
+  assert.equal(budgetLines.length, 1, 'one line per post, not one per diagram left unchecked');
+  assert.match(budgetLines[0],
+    /^Diagram budget of 50,000 characters ran out at mermaid block m101, which costs 500 with 0 left; the rest of this post's diagrams go unchecked$/);
+
+  // The allowance is per post, not per process: the next post checks its first diagram.
+  assert.match(refusedPost(() => createBoard({ title: 'next post', blocks: [{ ...bad }] })),
+    /^mermaid block m1 does not parse\./);
+});
+
+check("ADR.md entry 117: a diagram over the engine's own limit is refused without touching the budget", () => {
+  // `readJsonBody` admits 25 MB, so a diagram past the engine's 50,000-character text
+  // limit is a legal post -- and the one diagram the engine is certain to reject. Its
+  // refusal comes off a length test with no parse behind it, so it costs the budget
+  // nothing and must not be paid for out of it: charging it would leave every later
+  // diagram in the post unchecked for work nobody did.
+  const head = 'flowchart LR\n a --> b\n%% ';
+  const oversized = head + 'x'.repeat(50_001 - head.length);
+  let lines;
+  const printed = capturedErrors(() => {
+    lines = refusedPost(() => createBoard({
+      title: 'over the limit first',
+      blocks: [
+        { kind: 'mermaid', text: oversized },
+        { kind: 'mermaid', text: 'flowchart LR\n a --> ((b' },
+      ],
+    })).split('\n');
+  });
+
+  assert.deepEqual(lines, [
+    "mermaid block m1 does not parse. Diagram is 50,001 characters; Mermaid's limit is 50,000. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code",
+    'mermaid block m2 does not parse. Parse error on line 2. Way out: fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code',
+  ]);
+  assert.deepEqual(printed.filter(line => line.includes('Diagram budget')), [],
+    'nothing was spent, so nothing is logged as spent');
+});
+
+check('ADR.md entry 117: a markdown block is lexed once on the post path', () => {
+  const originalLexer = marked.lexer;
+  let lexes = 0;
+  marked.lexer = function countingLexer(...args) {
+    lexes++;
+    return originalLexer.apply(this, args);
+  };
+  try {
+    createBoard({
+      title: 'one lex per block',
+      blocks: [
+        { kind: 'markdown', text: '# Title\n\n```mermaid\nflowchart LR\n a --> b\n```\n' },
+        {
+          kind: 'question',
+          prompt: 'Pick',
+          widget: 'single',
+          explainer: '```mermaid\nflowchart LR\n a --> b\n```',
+          context: [{ kind: 'markdown', text: '```mermaid\nflowchart LR\n c --> d\n```' }],
+          options: [{ label: 'Yes' }],
+        },
+      ],
+    });
+  } finally {
+    marked.lexer = originalLexer;
+  }
+  // One per markdown document in the post: the block, the question's context block and
+  // its explainer. The door reads its fences off those renders; lexing them again to
+  // find the fences is the doubled markdown work ADR.md entry 117 does without.
+  assert.equal(lexes, 3, 'every markdown document on the post path is lexed exactly once');
 });
 
 if (asyncFailures) failures += asyncFailures;

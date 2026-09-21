@@ -228,7 +228,10 @@ title, project folder or thread id. Searching *inside* archived boards is
 `GET /api/search?q=`.
 
 Content blocks reference a file rather than quoting it, and the daemon snapshots the
-file at post time.
+file at post time. A reference that does not resolve refuses the post; so does a diagram that
+does not parse, including a `mermaid` fence in markdown. The 400 names each broken diagram: fix
+the source and post again, or post an unfixable fence by value with its language changed to code
+(ADR 117).
 
 ### An example skill
 

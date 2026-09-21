@@ -355,6 +355,10 @@ const countNewlines = s => {
   return n;
 };
 
+// One predicate owns both admission and rendering, so a fence cannot be checked as a
+// diagram at the door and then drawn as code, or pass unchecked and draw as a diagram.
+const isMermaidFence = token => token.type === 'code' && (token.lang || '').trim() === 'mermaid';
+
 /** Is this heading token's raw source a SETEXT heading (`Title\n=====`) rather than
  * an ATX one (`## Title`)? An ATX heading is always one line; a setext heading is
  * always its title line(s) plus an underline, so a newline anywhere but at the very
@@ -494,7 +498,11 @@ const MAX_DOC_HIGHLIGHT_CHARS = 8192;
  *   `{ remaining }` counter shared by every fence in it and spent by the
  *   implementation (only it knows which fences cost anything); see
  *   MAX_DOC_HIGHLIGHT_CHARS above and highlightFenceHtml in src/render.mjs.
- * @returns {{ html: string, anchors: Array<{kind: 'md', ref: string, label: string}> }}
+ * @returns {{ html: string, anchors: Array<{kind: 'md', ref: string, label: string}>,
+ *   mermaidFences: Array<{ordinal: number, text: string}> }} `mermaidFences` is every
+ *   ```mermaid fence this pass turned into a diagram host, in document order, so a
+ *   caller that must judge the diagrams (src/board.mjs at the post door, ADR.md entry
+ *   117) reads them off this walk instead of lexing the same document a second time.
  */
 export function mdToHtmlAndAnchors(md, opts = {}) {
   const { highlight } = opts;
@@ -504,6 +512,11 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
   // tokenizer work", now counted per document instead of per call, so the bound
   // that file measured and documented is the bound a whole markdown block obeys.
   const fenceHighlightBudget = { remaining: MAX_DOC_HIGHLIGHT_CHARS };
+  // Every mermaid fence this document draws, in document order, filled by renderCode
+  // below. The page draws them and src/board.mjs parses them at the door (ADR.md entry
+  // 117), both off this ONE lex -- same precedent as `headings` further down, which
+  // src/resolve.mjs reads off this walk rather than scanning the source again.
+  const mermaidFences = [];
   const anchors = [];
   // Every heading this pass could place in the source, in document order (see
   // scanHeadings below, which is what src/resolve.mjs consumes). Set by
@@ -626,7 +639,10 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
     // as raw text for the client-side mermaid.js to read from .textContent, which
     // HTML-decodes entities transparently, so escaping here is both safe and
     // invisible to the diagram.
-    if ((t.lang || '').trim() === 'mermaid') return '<pre class="mermaid">' + esc(t.text) + '</pre>';
+    if (isMermaidFence(t)) {
+      mermaidFences.push({ ordinal: mermaidFences.length + 1, text: t.text });
+      return '<pre class="mermaid">' + esc(t.text) + '</pre>';
+    }
     // A bare fence: routed through the SAME tokenizer a `kind: 'code'` block uses
     // (AC 14, ADR.md entry 65) when the caller supplied one -- `highlight` is
     // `highlightFenceHtml` from src/render.mjs, injected by src/board.mjs, never
@@ -776,7 +792,7 @@ export function mdToHtmlAndAnchors(md, opts = {}) {
     }
   }
   topLevelLine = null;
-  return { html, anchors, headings };
+  return { html, anchors, headings, mermaidFences };
 }
 
 /** Every heading in `md` that this module can place in the source, in document

@@ -3,6 +3,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { mdToHtmlAndAnchors } from './markdown.mjs';
+import { checkDiagram, MERMAID_MAX_TEXT } from './mermaid-parse.mjs';
 import { resolveRef, langForPath, resolveBoardCwd, MAX_REF_BYTES } from './resolve.mjs';
 import { resolveAtRoot, sectionRootFrom, resolveMermaidAnchorAtRoot, htmlBodyRootFrom } from './anchor.mjs';
 // Circular with render.mjs (which imports resolveComment from here): safe because
@@ -122,10 +123,15 @@ function emptyIdLedger() {
   // `refusals` is not about ids, and rides here anyway: it is the one object threaded
   // through the WHOLE pass (top-level blocks, a question's context, a compare side, a
   // variant option), which is exactly the reach a post-wide refusal needs. Every
-  // reference that fails to resolve appends its message; `normalizePost` below turns a
-  // non-empty list into one throw, so the agent gets every broken reference in the post
-  // at once rather than one per re-post (ADR.md entry 112).
-  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [] };
+  // failed reference or diagram appends its message; `normalizePost` below turns a
+  // non-empty list into one throw, so the agent gets every repair in the post at once
+  // rather than one per re-post (ADR.md entries 112 and 117).
+  // `diagrams` is the post's whole diagram allowance, filled in by `normalizePost` and
+  // spent by `recordDiagramRefusal` below. Null here on purpose: a ledger nobody made
+  // for a post -- the default of the exported one-block `normalizeBlock`, which a
+  // renderer or a check calls on its own -- parses no diagrams at all, which is what
+  // that path did before the door existed.
+  return { taken: new Map(), replaceable: new Set(), minted: new Set(), openRound: null, refusals: [], diagrams: null };
 }
 
 /** Resolve a block's id: the caller's `raw.id` when present, well-formed and
@@ -201,20 +207,121 @@ function refuse(message, ids, fields) {
   return { ...fields, error: message };
 }
 
-/** Normalise every block of ONE post, or refuse the post whole (ADR.md entry 112).
+const DIAGRAM_HELP = 'fix the source and post again; a fence you cannot fix goes up by value with its language changed so it renders as code';
+const REFERENCED_FENCE_HELP = 'fix the file, or post the section by value with the fence marked as code';
+
+/** Name the nearest container that tells the caller where a nested diagram sits. The
+ * normalized block keeps no such field: this label exists only while one post is walked. */
+function diagramPositionSuffix(position) {
+  if (!position) return '';
+  if (position.kind === 'question') {
+    return ` in ${position.slot} ${position.index} of question ${position.questionId}`;
+  }
+  if (position.kind === 'compare') {
+    return ` on ${position.side} side of compare block ${position.compareId}`;
+  }
+  return '';
+}
+
+// One post's whole diagram allowance, in characters of diagram text, and the least a
+// single diagram can cost against it. The engine's own 50,000-character limit bounds ONE
+// diagram; it bounds nothing about a post, which may carry as many as it likes --
+// `readJsonBody` admits 25 MB, and every parse runs on the daemon's single thread while
+// nothing else does: no health check, no other board, no open stream. Same shape as
+// src/markdown.mjs's fence-highlight budget, for the same reason: a cap per call is not
+// a cap per document, and a cap per diagram is not a cap per post.
+//
+// The allowance is exactly what the engine would accept in a single diagram, so the
+// first diagram of any post is affordable whenever it is parseable at all. Past the
+// engine's limit there is nothing to afford: that refusal comes off a length test with
+// no parse behind it, so it is taken before the budget is consulted and spends none of
+// it (see `recordDiagramRefusal`). The floor exists because cost is not proportional to
+// length -- a two-line fence still pays the engine's fixed per-parse cost -- so a wall
+// of them would otherwise ride in free on a character count.
+//
+// Measured with the vendored engine on Node 22 (M-series Mac). Per parse: 2.7 ms for a
+// two-line flowchart; the dearest shape per character is a class diagram at 0.097 ms
+// (290 ms at 3,000 characters, 4.3 s at the engine's ceiling). At these two numbers a
+// post cannot force more than 100 parses or 50,000 characters, whichever comes first:
+// 4.6 s for 300 class diagrams of 500 characters, 4.3 s for four at the ceiling, 0.30 s
+// for a 512 KiB markdown block of 13,797 tiny fences (35 to 58 s before this) and 0.36 s
+// for ten such blocks in one post. That is the "few seconds on a pathological diagram"
+// ADR.md entry 117 accepted for one diagram, now the bound on a whole post.
+const MAX_POST_DIAGRAM_CHARS = 50_000;
+const MIN_DIAGRAM_COST = 500;
+
+/** Put a parser refusal on the same post-wide ledger as a failed reference, if the post
+ * can still afford to look. The walk continues so one rejected post tells the caller
+ * about every repair it needs. */
+function recordDiagramRefusal(text, source, location, fence, ids) {
+  // Empty text is not a diagram, there is nothing to parse: an empty `mermaid` block
+  // posted by value is a shape the render checks rely on (ADR.md entry 28), and a
+  // reference that failed to resolve leaves `text` empty too -- its own refusal is
+  // already on the ledger by the time this runs, and the walk still has to finish.
+  if (!text || !text.trim()) return;
+  // No budget, no parsing: this ledger was not made for a post (see `emptyIdLedger`).
+  // The budget, not the caller's arguments, is what switches diagram checking on, so a
+  // nesting site that forgets to say WHERE its block sits loses the position out of the
+  // message and nothing else -- it cannot quietly stop the block being checked.
+  const budget = ids.diagrams;
+  if (!budget) return;
+  // Past the engine's own text limit the refusal is free: `checkDiagram` returns it from
+  // a length test, no parse behind it, so it neither needs the budget nor spends any. It
+  // has to skip the affordability test too, or the one diagram the engine is certain to
+  // reject becomes the one the door waves through -- and, worse, the diagram that ends
+  // the budget for every block after it, for work nobody did.
+  if (text.length <= MERMAID_MAX_TEXT) {
+    const cost = Math.max(text.length, MIN_DIAGRAM_COST);
+    if (cost > budget.remaining) {
+      // Out of allowance: the rest of this post goes unchecked, and the page draws
+      // whatever the door stopped looking at -- exactly what it did before this rule
+      // existed. Refusing the post instead would refuse posts that used to land, for a
+      // budget the caller cannot see. Logged through the same `console.error` the
+      // engine's own fail-open path uses (see `checkDiagram`), once per post rather than
+      // once per skipped diagram, and naming what the post could not pay for: the
+      // allowance may still have characters left, just fewer than this diagram costs.
+      const left = budget.remaining;
+      budget.remaining = 0;
+      if (!budget.spent) {
+        budget.spent = true;
+        console.error(`Diagram budget of ${MAX_POST_DIAGRAM_CHARS.toLocaleString('en-US')} characters ran out at ${location}, which costs ${cost.toLocaleString('en-US')} with ${left.toLocaleString('en-US')} left; the rest of this post's diagrams go unchecked`);
+      }
+      return;
+    }
+    budget.remaining -= cost;
+  }
+  const failure = checkDiagram(text);
+  if (!failure) return;
+  const carriesLine = failure.line != null
+    && new RegExp(`\\bline\\s+${failure.line}\\b`, 'i').test(failure.message);
+  const detail = failure.line != null && !carriesLine
+    ? `${failure.message} (line ${failure.line})`
+    : failure.message;
+  const file = source?.path != null ? ` from referenced file ${source.path}` : '';
+  const help = fence && source ? REFERENCED_FENCE_HELP : DIAGRAM_HELP;
+  const parserLine = detail.replace(/[.:]$/, '');
+  ids.refusals.push(`${location}${file} does not parse. ${parserLine}. Way out: ${help}`);
+}
+
+/** Normalise every block of ONE post, or refuse the post whole (ADR.md entries 112 and 117).
  *
- * A reference that fails to resolve used to land as a red note on the reviewer's page
- * while the post returned 200, so the reviewer saw the breakage and the agent -- which
- * gets no blocks back, only a packet after submit -- never did. Now the post is refused
- * before anything is stored, broadcast or rendered, with one message per failed
- * reference: the whole walk runs first (`ids.refusals` collects from top-level blocks, a
+ * A failed reference or diagram used to land as a red note or error graphic on the
+ * reviewer's page while the post returned 200, so the reviewer saw the breakage and the
+ * agent, which gets no blocks back, only a packet after submit, never did. Now the post
+ * is refused before anything is stored, broadcast or rendered, with one message per
+ * failure: the whole walk runs first (`ids.refusals` collects from top-level blocks, a
  * question's `context`, a compare side and a variant option alike) so a round with three
- * typos costs one re-post rather than three.
+ * repairs costs one re-post rather than three.
  *
  * Thrown, not returned, because every caller here already ends a bad post that way (an
  * unknown widget, a duplicate id, an over-cap payload) and src/server.mjs turns the throw
  * into the 400 the shim reports to the agent verbatim. */
 function normalizePost(blocks, round, counters, cwd, ids) {
+  // ONE allowance for the whole post, opened here and spent by every diagram the walk
+  // below reaches, at any depth (ADR.md entry 117). This is also what tells the walk it
+  // is normalising a post at all, so a `mermaid` block or a ```mermaid fence anywhere in
+  // the tree is parsed whether or not its container remembered to name its position.
+  ids.diagrams = { remaining: MAX_POST_DIAGRAM_CHARS, spent: false };
   const normalized = (blocks || []).map(b => normalizeBlock(b, round, counters, cwd, ids));
   if (ids.refusals.length) throw new Error(ids.refusals.join('\n'));
   return normalized;
@@ -273,9 +380,16 @@ function byValueText(value, field) {
  * anchors. Content is resolved once here: by reference (`raw.source`, a Ref) through
  * src/resolve.mjs, or by value (`raw.text`) when there is no source. `cwd` is the board's project directory, against which a relative Ref
  * resolves. `ids` is the pass's id ledger (see `emptyIdLedger`); it is threaded
- * through the recursion so a nested context/compare block competes for ids with
- * every other block in the same post, not just its siblings. */
-export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLedger(), topLevel = true) {
+ * through the recursion so a nested context/compare block competes for ids with every
+ * other block in the same post, not just its siblings.
+ *
+ * The last argument is where this block SITS, not what it may do: `topLevel` scopes the
+ * ids it competes for, and `position` names the container a diagram refusal has to point
+ * at (`diagramPositionSuffix`). It is an object rather than the two trailing booleans it
+ * grew out of because a nesting site that drops it should lose a label and nothing more
+ * -- whether diagrams are parsed at all is the ledger's `diagrams` budget to say, which
+ * every recursion site already threads because ids depend on it. */
+export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLedger(), { topLevel = true, position = null } = {}) {
   if (!raw || typeof raw !== 'object' || !raw.kind) {
     throw new Error('block requires a kind');
   }
@@ -284,7 +398,22 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     case 'markdown': {
       const id = resolveBlockId(raw, 'markdown', counters, ids, topLevel);
       const { text, sha, error } = resolveContent(raw, cwd, ids);
-      const { html, anchors } = mdToHtmlAndAnchors(text, { highlight: highlightFenceHtml });
+      // The render hands back the fences it drew (src/markdown.mjs), so the door judges
+      // exactly what the page will draw off the same lex. A reference that failed to
+      // resolve has its own refusal on the ledger already and no text to parse.
+      const { html, anchors, mermaidFences } = mdToHtmlAndAnchors(text, { highlight: highlightFenceHtml });
+      if (!error) {
+        const suffix = diagramPositionSuffix(position);
+        for (const fence of mermaidFences) {
+          recordDiagramRefusal(
+            fence.text,
+            raw.source ?? null,
+            `mermaid fence ${fence.ordinal} in markdown block ${id}${suffix}`,
+            true,
+            ids,
+          );
+        }
+      }
       return {
         ...base,
         id,
@@ -300,6 +429,15 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
     case 'mermaid': {
       const id = resolveBlockId(raw, 'mermaid', counters, ids, topLevel);
       const { text, sha, error } = resolveContent(raw, cwd, ids);
+      if (!error) {
+        recordDiagramRefusal(
+          text,
+          raw.source ?? null,
+          `mermaid block ${id}${diagramPositionSuffix(position)}`,
+          false,
+          ids,
+        );
+      }
       return {
         ...base,
         id,
@@ -385,8 +523,8 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
         ...base,
         id,
         kind: 'compare',
-        left: normalizeCompareSide(raw.left, round, counters, cwd, ids),
-        right: normalizeCompareSide(raw.right, round, counters, cwd, ids),
+        left: normalizeCompareSide(raw.left, round, counters, cwd, ids, { kind: 'compare', compareId: id, side: 'left' }),
+        right: normalizeCompareSide(raw.right, round, counters, cwd, ids, { kind: 'compare', compareId: id, side: 'right' }),
       };
     }
     case 'question': {
@@ -402,7 +540,10 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       }
       const widget = raw.widget ?? 'single';
       const context = Array.isArray(raw.context)
-        ? raw.context.map(c => normalizeBlock(c, round, counters, cwd, ids, false))
+        ? raw.context.map((c, index) => normalizeBlock(c, round, counters, cwd, ids, {
+          topLevel: false,
+          position: { kind: 'question', questionId: id, slot: 'context', index: index + 1 },
+        }))
         : [];
       // choose-between-rendered-variants is the one widget whose
       // options are not a { preview } string: each option's `block` is a real
@@ -423,8 +564,15 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       // cost is quadratic in its length -- a 400KB preview measured ~46s per render,
       // paid again on every read because the board persists first.
       const options = Array.isArray(raw.options)
-        ? raw.options.map(o => widget === 'choose-between-rendered-variants'
-          ? { label: byValueText(o.label ?? '', 'option label'), description: byValueText(o.description ?? '', 'option description'), block: o.block ? normalizeBlock(o.block, round, counters, cwd, ids, false) : null }
+        ? raw.options.map((o, index) => widget === 'choose-between-rendered-variants'
+          ? {
+            label: byValueText(o.label ?? '', 'option label'),
+            description: byValueText(o.description ?? '', 'option description'),
+            block: o.block ? normalizeBlock(o.block, round, counters, cwd, ids, {
+              topLevel: false,
+              position: { kind: 'question', questionId: id, slot: 'option', index: index + 1 },
+            }) : null,
+          }
           : { label: byValueText(o.label ?? '', 'option label'), description: byValueText(o.description ?? '', 'option description'), preview: o.preview == null ? null : byValueText(o.preview, 'option preview') })
         : [];
       if (widget !== 'text' && options.length === 0) {
@@ -442,12 +590,29 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
       // explainer: an optional field that always exists would rewrite every
       // stored board's JSON for nothing.
       const explainer = byValueText(raw.explainer ?? '', 'explainer');
+      // The explainer is markdown through the same renderer, so a ```mermaid fence in it
+      // draws a diagram on the page like any other -- and is parsed at the door like any
+      // other (ADR.md entry 117), off this render's own fence list. It is by value only,
+      // so there is no referenced file to name and no resolve error to skip.
+      const explainerRender = explainer ? mdToHtmlAndAnchors(explainer, { highlight: highlightFenceHtml }) : null;
+      if (explainerRender) {
+        const suffix = diagramPositionSuffix(position);
+        for (const fence of explainerRender.mermaidFences) {
+          recordDiagramRefusal(
+            fence.text,
+            null,
+            `mermaid fence ${fence.ordinal} in explainer of question ${id}${suffix}`,
+            true,
+            ids,
+          );
+        }
+      }
       return {
         ...base,
         id,
         kind: 'question',
         prompt: byValueText(raw.prompt ?? '', 'prompt'),
-        ...(explainer ? { explainer, explainerHtml: mdToHtmlAndAnchors(explainer, { highlight: highlightFenceHtml }).html } : {}),
+        ...(explainer ? { explainer, explainerHtml: explainerRender.html } : {}),
         context,
         widget,
         options,
@@ -458,7 +623,7 @@ export function normalizeBlock(raw, round, counters, cwd = null, ids = emptyIdLe
   }
 }
 
-function normalizeCompareSide(side, round, counters, cwd, ids) {
+function normalizeCompareSide(side, round, counters, cwd, ids, position) {
   if (!side) return { label: '', block: null };
   return {
     // `byValueText` like every sibling label on the board (an option's label and
@@ -467,7 +632,7 @@ function normalizeCompareSide(side, round, counters, cwd, ids) {
     // compare side's label was `readJsonBody`'s 25 MB -- persisted, re-rendered on every
     // read, and handed to a client that renders it as a heading.
     label: byValueText(side.label ?? '', 'compare side label'),
-    block: side.block ? normalizeBlock(side.block, round, counters, cwd, ids, false) : null,
+    block: side.block ? normalizeBlock(side.block, round, counters, cwd, ids, { topLevel: false, position }) : null,
   };
 }
 

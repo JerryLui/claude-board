@@ -246,6 +246,11 @@ new round never lands with this field set: it is what an already-stored board ca
 the page renders for a board minted before that rule. A block with no `source` never sets
 `error`.
 
+**`mermaid` blocks and `mermaid` fences in `markdown` are diagram input:** one that does not
+parse refuses the whole post (ADR 117; see `POST /api/board`), including a diagram over the
+page's own 50,000-character limit, while an engine failure that is not a parse failure fails
+open.
+
 **`html` may carry a `source`** (ADR 7), for an agent that renders a real page to disk rather
 than re-emitting the bytes as generated tokens. It resolves through the same reader, confinement,
 512 KiB cap and refusal behaviour as `markdown`, `code` and `mermaid`. It is the one
@@ -859,6 +864,17 @@ during normalisation, before the board document is written or amended, so a refu
 the store exactly as it was: the same post with the reference fixed lands normally, and a round
 already open on another board stays open. This is what replaced landing the round with a
 "could not resolve" note on the reviewer's page while the caller got a 200 and never learnt.
+
+**A diagram that does not parse refuses the whole post** (ADR 117): the daemon checks every
+by-value or referenced `mermaid` block, and every `mermaid` fence in a by-value or referenced
+`markdown` block, wherever it sits in the block tree. Its **400** carries one message per
+failing diagram, joined with any reference-refusal messages: the block id, the question and
+context position, or the fence's ordinal and its referenced file; the page engine's first error
+line and line number; and the ways out, fix the source and post again, or post an unfixable
+fence by value with its language changed so it renders as code. The same page engine runs in a
+sealed VM context; a diagram over the page's own 50,000-character limit is refused before it
+parses, while a non-parse engine failure is logged and fails open. Nothing is stored, rendered,
+broadcast or pushed, and the same rule applies on an amend, leaving its stored round unchanged.
 
 Either way the response is `{ boardId, thread, round, url, clients, suppressed, awaited }`, plus
 `answers` and `comments` on a post that carried `noWait: true` (below) and on no other, `round`

@@ -109,6 +109,13 @@ goes up by value. **A post carrying a reference that fails to resolve is refused
 failed reference, nothing stored and nothing shown — so a bad path costs you a re-post rather
 than costing the reviewer a broken page.
 
+**A post or amend carrying a diagram that does not parse is refused** (ADR 117), whether
+it is a `mermaid` block or a `mermaid` fence in a by-value or referenced `markdown` block. The
+400 carries one message per failing diagram, naming its block id, question and context position, or
+fence ordinal and referenced file, then the engine's first error line with its line number: fix
+the source and post again; a fence you cannot fix goes up by value with its language changed so
+it renders as code.
+
 ## Posting a rendered artifact
 
 **Write a generated stage into the render directory and reference it**, rather than
