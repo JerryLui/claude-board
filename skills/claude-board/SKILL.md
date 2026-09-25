@@ -29,8 +29,11 @@ board's for good: the tab, the page heading, the index row and the menu bar all 
 later rounds never rename it. Shape every title `<work>: <this round>`, the work named the
 same way on every round and the round's own subject after the colon. The pager prefixes
 `Round N` itself, so the title carries none. `blocks` is the ordered array the page shows.
-One call is one round: the first surfaces the board, later calls push into the same board. Post a branch's questions together; only a question whose *shape* depends on an
-answer in this round waits for the next one.
+One call is one round: the first surfaces the board, later calls push into the same board.
+**A round carries at most 6 questions or about 4,000 characters of prompts, explainers and
+options**, whichever comes first; past that the reviewer loses the thread. Within the cap, post
+a branch's questions together, and split a branch too big for one round across rounds; only a
+question whose *shape* depends on an answer in this round waits for the next one.
 
 Surfacing it means a tab when no board tab is open anywhere, and otherwise a desktop
 notification — a new tab is not thrown in front of a reviewer already reading a board. Either
@@ -195,6 +198,10 @@ optional `explainer`:
 Two to four options reads best, and every answer carries a free-text note beside its
 choice. A widget outside that list, or empty `options` on any widget but `text`, is a 400.
 
+**Every option commits to an answer.** Picking the recommended one is already how the reviewer
+accepts your judgment, so never offer a "your call" or "you decide" option: it leaves every
+recommended pick ambiguous between agreement and delegation.
+
 **The `explainer` goes under the prompt; `context` is what the reviewer looks up.** An
 explainer is one to three sentences of markdown by value, rendered as plain prose across the
 card's full row, with the options and the context panel side by side beneath it. `context`
@@ -203,6 +210,9 @@ each — beside the options, or full width under the prompt when the question ca
 rendered variants. A markdown item longer than about a dozen lines folds under a Show more
 control; a code excerpt keeps its own scroll box, and a diagram or a mock never folds.
 
+**A question about a screen or control carries its mock in its own `context`, in the same
+round**, never a description or a pointer to an earlier round: the reviewer judges what they
+can see.
 For a question about something rendered — `choose-between-rendered-variants`, or any
 question whose `context` holds a mock or a diagram — skip the code excerpt: the rendered
 stage is the thing being judged, and it lays out full width for exactly that reason. Reach

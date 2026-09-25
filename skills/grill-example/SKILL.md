@@ -41,8 +41,8 @@ the understanding is shared.
 the fallback** — that skill is the protocol, and none of it is restated here. What a grill
 adds on top:
 
-- **A round is the frontier.** Title the post with the dominant branch name; three to ten
-  questions in one call, grouped under it.
+- **A round is the frontier**, up to the manual's round cap, the rest in the next round.
+  Title the post with the dominant branch name, the questions grouped under it.
 - **Every question carries your recommended answer and the reason for it**, whatever its
   shape — a ranking, a multi-select and an open text question each get one.
 - **Attach what the decision rests on**, by reference: the plan section under discussion,

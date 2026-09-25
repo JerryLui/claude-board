@@ -198,6 +198,42 @@ check('the manual points at no served file, now that the route is gone', () => {
   assert.match(reverted, /\/file\//, 'the section being reverted no longer exists in the manual');
 });
 
+// --- what one round holds --------------------------------------------------------
+// Three rules that bind every round whoever posts it, so the manual is their one home: a round
+// is capped (the reviewer's confusion grows with round size), a question about a screen carries
+// its mock rather than a description of one, and no option hands the decision back, since a
+// "your call" option makes every recommended pick read as either agreement or delegation.
+const ROUND_RULES = {
+  'a round is capped, and a branch too big for one splits': [
+    /at most 6 questions or about 4,000 characters of prompts, explainers and options/i,
+    /split a branch too big for one round across rounds/i,
+  ],
+  'a question about a screen carries its mock in the same round': [
+    /a question about a screen or control carries its mock in its own `context`, in the same round/i,
+  ],
+  'no option delegates the decision': [
+    /never offer a "your call" or "you decide" option/i,
+    /ambiguous between agreement and delegation/i,
+  ],
+};
+for (const [rule, patterns] of Object.entries(ROUND_RULES)) {
+  check(`the manual states that ${rule}`, () => {
+    for (const p of patterns) assert.match(norm(prose), p, `manual is missing: ${p}`);
+  });
+}
+check('the round-rule checks fail on prose that lost the cap', () => {
+  assert.ok(!statesRule(drifted(/at most 6 questions/g), ROUND_RULES['a round is capped, and a branch too big for one splits']),
+    'dropping the round cap from the manual did not fail its check');
+});
+check('the round-rule checks fail on prose that lost the mock rule', () => {
+  assert.ok(!statesRule(drifted(/carries its mock/g), ROUND_RULES['a question about a screen carries its mock in the same round']),
+    'dropping the mock rule from the manual did not fail its check');
+});
+check('the round-rule checks fail on prose that lost the no-delegation rule', () => {
+  assert.ok(!statesRule(drifted(/never offer a "your call"/g), ROUND_RULES['no option delegates the decision']),
+    'dropping the no-delegation rule from the manual did not fail its check');
+});
+
 // --- the other direction --------------------------------------------------------
 // A check that only ever passes is worth nothing (test/check-prose-check.mjs's own
 // rule, applied here). The absence checks above are the ones at risk of being vacuous —

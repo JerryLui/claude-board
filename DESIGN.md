@@ -106,7 +106,8 @@ originally collapsed into a *history rail* below the open one. `ADR.md` entry 42
 and makes rounds the board's pages; the thread-with-rounds decision itself is untouched.]
 
 **`/grill` asks in layer-sized rounds.** A round carries every branch that nothing unresolved
-gates, its questions grouped by branch, typically three to ten, posted together. Rounds track the
+gates, its questions grouped by branch and posted together, up to the manual's round cap, a
+wider layer splitting across rounds. Rounds track the
 depth of the decision graph, not the number of branches in it. Rejected: branch-sized rounds, one
 branch per round, which serialises branches that merely sit near each other in the design. A lone
 follow-up or a yes/no still goes through `AskUserQuestion` in the terminal, because opening a tab
