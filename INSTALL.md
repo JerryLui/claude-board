@@ -1,8 +1,8 @@
 # Installing by hand
 
-Three pieces `install.sh` cannot do on its own: the board manual it writes only when it
-runs, the skills already on this machine that could route their questions to the board, and
-the optional session-start hook it never writes.
+Four pieces `install.sh` cannot do on its own: the board manual it writes only when it
+runs, the skills already on this machine that could route their questions to the board, the
+optional session-start hook it never writes, and answering one Mac's boards from another.
 
 ## Refreshing the board manual
 
@@ -219,3 +219,77 @@ it found it — `null` if there was none.
 
 `uninstall.sh` doesn't touch this hook — it didn't install it. Delete the entry from
 `~/.claude/settings.json` yourself.
+
+## Remote review: answering another Mac's boards
+
+For when the agent runs on one Mac (the remote Mac, a Mac mini say) and you sit at another
+(your Mac, a MacBook say), driving the sessions over SSH. The remote Mac's daemon still
+listens on its own loopback only; your Mac reaches it through the SSH connection you already
+open, and your browser shows it at `http://localhost:7392` (ADR 118).
+
+### On the remote Mac
+
+claude-board installed as usual (`install.sh`), Remote Login on (System Settings, General,
+Sharing), and the clone at `~/Documents/claude-board`, or wherever
+`CLAUDE_BOARD_REMOTE_DIR` below says. `node` may be an nvm shell function: the helper runs
+`bin/authorize.mjs --print` there through an interactive login `zsh`, which loads `~/.zshrc`.
+
+### On your Mac
+
+A clone of this repository, for the helper; `install.sh` is not needed for it. One line in
+`~/.ssh/config`, under the remote Mac's host entry:
+
+```
+Host mini
+  HostName mini.local
+  LocalForward 7392 127.0.0.1:7391
+```
+
+`7391` is the remote Mac's daemon port (its `CLAUDE_BOARD_PORT`, if it set one); `7392` is
+the port on your Mac, and differs so your Mac's own board keeps 7391. Reconnect the SSH
+session; `curl -s localhost:7392/api/health` then answers `{"ok":true,...}`.
+
+Tell the helper which host that is, in your shell profile:
+
+```sh
+export CLAUDE_BOARD_REMOTE_HOST=mini
+```
+
+Overrides, each with its default: `CLAUDE_BOARD_REMOTE_PORT` (7392, the left side of the
+`LocalForward`), `CLAUDE_BOARD_REMOTE_DIR` (`~/Documents/claude-board` on the remote Mac),
+`CLAUDE_BOARD_REMOTE_SSH` (`ssh`) and `CLAUDE_BOARD_OPEN_CMD` (`open`).
+
+### Log in, then open boards
+
+From the clone on your Mac:
+
+```sh
+npm run remote -- login                              # your browser, logged in to the remote board
+npm run remote -- open http://127.0.0.1:7391/b/<id>  # a board URL the agent printed
+npm run remote -- open <id>                          # or just its id
+```
+
+`login` mints a one-time handoff on the remote Mac over SSH and opens it at
+`localhost:7392`, landing on the remote Mac's board index; pin that tab. `login <id>` lands on
+one board instead. A URL the agent prints names the remote Mac's own address, which on your
+Mac is your own board: `open` rewrites it to `localhost:7392`. A round waiting for you shows
+up as a new board in the pinned index tab and as the session in your terminal stalling on
+`ask`.
+
+**Once a month**: the login is the board's 30-day session cookie. When a tab says it is not
+authorized, run `login` again.
+
+### Limits
+
+- **The tunnel must be up.** It rides the SSH session carrying the `LocalForward`; close
+  that session and `localhost:7392` goes dark. The helper says so rather than opening a dead
+  tab.
+- **The remote Mac must be logged in.** The daemon runs in the user's login session. After a
+  reboot with automatic login off (FileVault forces it off), nothing answers until someone
+  logs in there; Screen Sharing is enough.
+- **Banners stay on the remote Mac.** Notifications are shown where the daemon runs; your
+  cue is the pinned index tab and the stalled session.
+- **Keep your own board on `127.0.0.1`.** Cookies are not port-scoped, which is why the
+  remote board lives under `localhost`: the two logins sit under different hosts and
+  neither logs the other out. Browsing your own board as `localhost:7391` would put both
+  under one host and one cookie name.

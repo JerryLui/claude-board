@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Remote review**: answer a second Mac's boards from the Mac you sit at. One
+  `LocalForward 7392 127.0.0.1:7391` in `~/.ssh/config` carries the remote daemon, which stays
+  loopback-only; `npm run remote -- login` logs your browser in over SSH for the cookie's 30
+  days, and `npm run remote -- open <url|id>` opens a board the agent printed. The address is
+  `localhost:7392`, so the remote login and your own board's login never overwrite each other.
+  Setup and limits in INSTALL.md (ADR 118).
 - **A label with `<br/>` or `<b>` no longer waves a diagram through**: the door's sandbox was
   missing the DOM method Mermaid's sanitizer calls on HTML in a label, so any such diagram
   failed open unchecked; the sandbox now has it, so these diagrams are checked and a broken
