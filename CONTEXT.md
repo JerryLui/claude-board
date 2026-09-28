@@ -53,6 +53,10 @@ becomes Submitted; it reaches an agent through `read`, since no thread waits on 
 never per machine: a reviewer sitting on another board's tab is not a watcher of this one.
 _Avoid_: client, connection, viewer.
 
+**Remote review**: answering boards from a second Mac's browser while the agent and the daemon
+run on another, reached through an SSH tunnel to that Mac's loopback; the daemon itself never
+listens beyond loopback. _Avoid_: remote access, LAN mode, network mode.
+
 **Attended**: of a board, that a Watcher has it visible and focused, or had it focused within
 the last two minutes, so a tab left open behind the terminal still counts as watched for a
 short while. Reported by the tab, since a live stream proves only that a tab exists.

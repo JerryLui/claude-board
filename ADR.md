@@ -104,3 +104,4 @@ link where it is worth reading.
 | 115 | [`read` is a pure read of a board](.agents/adr/0115-read-is-a-pure-read-of-a-board.md) | 2026-09-10 | relates to 35, 107, 114 |
 | 116 | [One daemon, three clients: the registration declares the human](.agents/adr/0116-one-daemon-three-clients-the-registration-declares-the-human.md) | 2026-09-10 | relates to 5, 68, 100 |
 | 117 | [A post with a diagram that does not parse is refused](.agents/adr/0117-a-post-with-a-diagram-that-does-not-parse-is-refused.md) | 2026-09-18 | widens 112; relates to 62 |
+| 118 | [Remote review rides an SSH tunnel; the daemon stays loopback-only](.agents/adr/0118-remote-review-rides-an-ssh-tunnel.md) | 2026-09-28 | relates to 116 |
