@@ -41,6 +41,9 @@ function createSandbox() {
   };
   document.implementation = {
     createHTMLDocument() { return document; },
+    // The sanitizer calls this on any label holding HTML (`<br/>`, `<b>`); without it
+    // the parse throws and the diagram fails open unchecked.
+    createDocument() { return document; },
   };
 
   const sandbox = {

@@ -126,6 +126,34 @@ if (!importError) {
     assert.equal(lexical?.line, 2);
   });
 
+  const htmlBrNodeLog = [];
+  const htmlBrNode = checkDiagram('flowchart LR\n a["x<br/>y"] --> b', { log: line => htmlBrNodeLog.push(line) });
+  check('ADR.md entry 117: a flowchart with a <br/> node label passes with no fail-open log', () => {
+    assert.equal(htmlBrNode, null);
+    assert.equal(htmlBrNodeLog.length, 0);
+  });
+
+  const htmlBrEdgeLog = [];
+  const htmlBrEdge = checkDiagram('flowchart LR\n a -->|"x<br/>y"| b', { log: line => htmlBrEdgeLog.push(line) });
+  check('ADR.md entry 117: a flowchart with a <br/> edge label passes with no fail-open log', () => {
+    assert.equal(htmlBrEdge, null);
+    assert.equal(htmlBrEdgeLog.length, 0);
+  });
+
+  const htmlBoldLog = [];
+  const htmlBold = checkDiagram('flowchart LR\n a["<b>x</b>"] --> b', { log: line => htmlBoldLog.push(line) });
+  check('ADR.md entry 117: a flowchart with a <b> label passes with no fail-open log', () => {
+    assert.equal(htmlBold, null);
+    assert.equal(htmlBoldLog.length, 0);
+  });
+
+  const brokenHtmlLog = [];
+  const brokenHtml = checkDiagram('flowchart LR\n a["x<br/>y"] --> ((b', { log: line => brokenHtmlLog.push(line) });
+  check('ADR.md entry 117: a broken flowchart with a <br/> label is refused naming its line, not failed open', () => {
+    assert.deepEqual(brokenHtml, { message: 'Parse error on line 2:', line: 2 });
+    assert.equal(brokenHtmlLog.length, 0);
+  });
+
   const unknown = checkDiagram('notADiagram\n A --> B');
   check('ADR.md entry 117: an unknown diagram type is refused', () => {
     assert.deepEqual(unknown, {

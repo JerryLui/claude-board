@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A label with `<br/>` or `<b>` no longer waves a diagram through**: the door's sandbox was
+  missing the DOM method Mermaid's sanitizer calls on HTML in a label, so any such diagram
+  failed open unchecked; the sandbox now has it, so these diagrams are checked and a broken
+  one is refused like any other.
 - **Bad diagrams refuse a post**: alongside the failed-reference refusal, a `mermaid` block or
   `mermaid` fence in `markdown` that does not parse now sends a 400 naming each failed diagram
   and its first error line, so the source is fixed and posted again (ADR 117).
