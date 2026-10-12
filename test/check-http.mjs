@@ -32,7 +32,7 @@ import { assetsNamedBy, MERMAID_ASSET, SCRIPT_ASSET, STYLE_ASSET } from '../src/
 import { isPageRound, ROUND_OPEN_UNAWAITED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
 import { StandInEvent } from './dom-stand-in.mjs';
 import {
-  check, execFileAsync, freshLog, openSseClient, pageHarness, rawRequest, renderedMarkup, runMain,
+  check, execFileAsync, freshLog, openSseClient, pageHarness, postBoard, rawRequest, renderedMarkup, runMain,
   secretFetch, secretHome, sessionCookieHeader, sleep, waitForCount, withEnv, writeHeaders,
 } from './support.mjs';
 
@@ -1237,6 +1237,59 @@ async function main() {
           `every pin re-rendered from a real submit for block ${blockId} must land resolved, not lost (title: ${JSON.stringify(pin.title)})`);
       }
     }
+  });
+
+  // --- the page's own Send, into the daemon --------------------------------------
+  //
+  // Every other submit in this file is a body written by hand and posted with the
+  // secret, and the page checks elsewhere capture the page's fetch instead of letting
+  // it land. Here the page's own request meets the real route: the page as the daemon
+  // serves it, the real client script, a caller holding what a browser tab holds (the
+  // session cookie and nothing else), and the agent's /wait on the other end. The wait
+  // is asked for only once the Send has landed, so a refused Send fails this check
+  // alone and leaves no waiter behind for the checks after it.
+  // The picked label carries `&` and `"` on purpose: it crosses an HTML attribute, the
+  // DOM, a JSON body and the store before the agent reads it back.
+  await check('a variant card clicked on the served page and sent with the page\'s own Send reaches the agent\'s wait as that option\'s label', async () => {
+    const picked = 'Roomy & "wide"';
+    const posted = await postBoard(port, SECRET, {
+      title: 'Variant pick',
+      blocks: [{
+        kind: 'question', prompt: 'Which layout?', widget: 'choose-between-rendered-variants',
+        options: [
+          { label: 'Compact', block: { kind: 'markdown', text: 'Dense rows.' } },
+          { label: picked, block: { kind: 'markdown', text: 'Airy rows.' } },
+        ],
+      }],
+    });
+    const pageHtml = await (await fetch(`${base}/b/${posted.boardId}`)).text();
+    const pageCalls = [];
+    globalThis.fetch = (url, init = {}) => {
+      const response = rawFetch(`${base}${url}`, { ...init, headers: { ...init.headers, cookie: sessionCookieHeader(SECRET) } });
+      pageCalls.push({ url, response });
+      return response;
+    };
+    try {
+      const document = loadBoard(pageHtml);
+      const cards = document.querySelectorAll('.choice-variant');
+      assert.equal(cards.length, 2, 'setup failure: expected the two variant cards on the served page');
+      cards[1].dispatchEvent(new StandInEvent('click'));
+      document.getElementById('send-btn').dispatchEvent(new StandInEvent('click'));
+
+      const submits = pageCalls.filter(c => c.url.endsWith('/submit'));
+      assert.equal(submits.length, 1, 'one press of Send on a fully answered round must post exactly one submit');
+      const landed = await submits[0].response;
+      assert.equal(landed.status, 200, `the daemon must accept the page's own Send exactly as the page sends it (answered ${landed.status})`);
+    } finally {
+      globalThis.fetch = rawFetch;
+    }
+
+    const packet = await (await fetch(`${base}/api/board/${posted.boardId}/wait?round=1`)).json();
+    assert.equal(packet.status, 'submitted');
+    assert.equal(packet.answers.length, 1);
+    assert.equal(packet.answers[0].widget, 'choose-between-rendered-variants');
+    assert.equal(packet.answers[0].status, 'answered');
+    assert.equal(packet.answers[0].choice, picked, 'the agent must read back the label of the option the reviewer clicked, byte for byte');
   });
 
   await check('C2: the live exfil PoC is refused end to end -- an absolute source path reaches exactly what its relative spelling reaches and nothing more, an unbounded cwd is refused, and a climb out refuses the post', async () => {
