@@ -695,9 +695,9 @@ await check('the lens: a theme switch while the lens is OPEN re-clones the redra
   const inlineBefore = document.querySelector('.mermaid-block pre.mermaid svg');
   assert.ok(inlineBefore, 'setup failure: the diagram never rendered');
 
-  const expand = document.querySelector('.mermaid-block .expand-btn');
-  assert.ok(expand, 'setup failure: no .expand-btn rendered');
-  expand.dispatchEvent(new StandInEvent('click'));
+  const pullOut = document.querySelector('.mermaid-block .pull-out');
+  assert.ok(pullOut, 'setup failure: no .pull-out rendered');
+  pullOut.dispatchEvent(new StandInEvent('click'));
   const canvas = document.querySelector('.diagram-lens .lens-canvas');
   assert.ok(canvas, 'setup failure: the lens did not open');
   assert.equal(canvas.querySelector('svg').getAttribute('id'), inlineBefore.getAttribute('id'),

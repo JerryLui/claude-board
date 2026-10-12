@@ -143,10 +143,10 @@ check('a block amended into the still-open round over SSE (mode: amend) is genui
 // asserts that second tab's swapped-in (now-historical) stage still shows the
 // pin. The pin itself is drawn by the page-level stage 'ready' listener, which
 // needs no per-push wiring; what wireRoot(replacement) alone provides is the
-// swapped-in section's own controls, so the stage's expand control -- kept live
+// swapped-in section's own controls, so the stage's Pull-out -- kept live
 // on a sent round -- is pressed last and must open the lens.
 
-check('a round that just went sent, pushed over SSE (\'submitted\'), still shows an existing comment\'s pin on its (now historical) html stage, and its expand control still opens the lens (ablation: deleting applySubmittedPush\'s wireRoot(replacement) call)', () => {
+check('a round that just went sent, pushed over SSE (\'submitted\'), still shows an existing comment\'s pin on its (now historical) html stage, and its Pull-out still opens the lens (ablation: deleting applySubmittedPush\'s wireRoot(replacement) call)', () => {
   const board = freshBoard();
   // A trailing markdown block, same reasoning as this file's other two
   // fixtures above: round 2 stays an ORDINARY round, not a page round whose
@@ -218,12 +218,12 @@ check('a round that just went sent, pushed over SSE (\'submitted\'), still shows
   assert.equal(pins.length, 1, `expected the pre-existing comment's pin to render on the swapped-in (historical) stage once its real document "loads", got ${pins.length} pin(s)`);
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'the comment minted against this exact element moments earlier must not render as lost');
 
-  const expand = section.querySelector('.expand-btn');
-  assert.ok(expand, 'setup failure: the swapped-in stage has no expand control');
-  assert.equal(expand.disabled, false, 'the expand control stays live on a sent round');
-  expand.dispatchEvent(new StandInEvent('click'));
+  const pullOut = section.querySelector('.pull-out');
+  assert.ok(pullOut, 'setup failure: the swapped-in stage has no Pull-out');
+  assert.equal(pullOut.disabled, false, 'the Pull-out stays live on a sent round');
+  pullOut.dispatchEvent(new StandInEvent('click'));
   assert.ok(document.querySelector('.stage-lens-frame'),
-    'pressing the swapped-in stage\'s expand control must open the lens -- if it does nothing, the replacement section was never wired');
+    'pressing the swapped-in stage\'s Pull-out must open the lens -- if it does nothing, the replacement section was never wired');
 });
 
 // --- the html-stage case above self-corrects  ----

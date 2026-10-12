@@ -310,10 +310,12 @@ past about a dozen lines folds under a fade with a Show more that opens it in pl
 decided by a count of its source rather than measured pixels, so the check suite can assert it;
 this reversed the earlier "markdown is never capped" rule once a question's context started
 carrying whole spec sections beside a short explainer. Rejected there: scroll-in-place for prose (a
-reader loses the page's own scroll inside the item) and folding a diagram or a mock (cut in half,
-unreadable). Mermaid gets a lens instead, because a scaled-down diagram is unreadable rather than
-merely long. (The first draft justified the code cap by "`.html-stage` is already capped", which is
-false — it is FLOORED. Only the supporting claim was wrong.)
+reader loses the page's own scroll inside the item) and folding a diagram or a mock under a fade
+(cut in half, unreadable). A mock later got a fold of its own that scrolls instead of clipping
+(below); a diagram still does not fold. Mermaid gets a lens instead, because a scaled-down diagram
+is unreadable rather than merely long. (The first draft justified the code cap by "`.html-stage`
+is already capped", which was false then: it was FLOORED at 320px. Only the supporting claim was
+wrong.)
 
 **The cap is `max-height` + `overflow: auto` + `resize: vertical` at ~480px**, one idiom for every
 long stage on the page. Rejected for code: a fade-and-Expand toggle (sidesteps the pin-position
@@ -343,6 +345,49 @@ diagram after Send. Rejected: a separate overlay recomputed on every pointer mov
 scroll-tracking cost just avoided on code blocks) and letting pins scale with the diagram (buries
 the node under its own pin at high zoom). Two traps the lens inherits from `/explain`'s — a cloned
 SVG duplicating element ids, and pointer capture retargeting the click — are in `QUIRKS.md`.
+
+**A stage fits its content, and folds past 600px by scrolling, not clipping** (ADR 119). Every
+stage outside a page board takes its reported height up to 600px, the rendered-variant cap it
+already had; past that it stays 600px tall and scrolls inside, and Show full height in a bar under
+the frame grows it in place to the whole artifact, with Show less folding it back. It replaced a
+fixed 320px box with inner scrollbars and a drag grip, through which a mock inside a question was
+judged as if through a keyhole. Rejected: always full height (a long mock pushes the options a
+screen down), keeping the box and relying on the lens alone, and clipping under a fade the way prose
+folds, which breaks in-page links, keyboard focus and fixed footers inside the mock unless each
+gets its own handling. Top-level stages fold too, one rule as prose folds everywhere; a variant
+option keeps its clip with no bar, since a click on its card picks it. Four rules came out of a
+red-team round, each against a mock that sizes itself from its own frame:
+
+- **An open is a one-time snapshot**, capped at 30,000px. A mock sized in viewport units grows with
+  the frame it is measured in, so an open that followed its reports would never stop growing.
+- **Below 320px only on two matching reports**, never under 120px. A mock that lays out from the
+  viewport can measure as a sliver before it has built itself; the stage posts each new height a
+  second time after a re-measure, so a short mock that has settled says so twice.
+- **One applied height per animation frame, grow at once, shrink after a 300ms settle, 32px of
+  slack under the fold line.** A mock whose height keeps moving (an animation, a loader) would
+  otherwise jump everything under it, or flicker the bar in and out at 600.
+- **A stage holding a comment renders opened, decided by the server.** A board opened in a
+  background tab gets no height report until it is shown, so the browser cannot know where the
+  fold line is; opened, a pin is never under a fold the reader has to find first.
+
+The height is measured from the whole document, not the body, so a margin collapsing through the
+body does not leave a fitted stage a stray scrollbar. An in-page link in a stage with nothing to
+scroll (fitted, or opened) asks the board to scroll to the target instead, and every applied
+height re-asks the stage's pin positions, since a new box moves a centred or bottom-docked element
+with no scroll to notice it.
+
+**One Pull-out in the corner of every stage and diagram opens the lens** (ADR 120). A 28px button
+in the frame's top-right corner, wherever the frame sits, is the only way in; it replaced the
+label-row and tools-row pills, which a stage inside a question never had at all. It opens the
+existing lens on the board page, which copies the stage's sandbox, so it adds no security surface.
+It is always visible, never hover-only: nothing on the board hides until hover, and hover does not
+exist on touch. It hides while comment mode is on, so the artifact's own top-right corner stays a
+comment target (the stage lens is view-only), and it stays live on a sent round and in an archive,
+since opening a mock to read it is not an answer. Rejected: a corner button on stages only, on
+context stages only, and opening the stage in a new browser tab, which needs a new daemon address
+serving agent HTML and a security round of its own. The cost is the corner itself: the control
+covers the artifact's own top-right corner. A page board and a block that failed to render carry
+none.
 
 **References may resolve inside a configured allowlist as well as `cwd`.** `cwd` confinement alone
 means a session can never render the skill, command or agent file it is discussing, a real and
@@ -390,6 +435,20 @@ values that break in light, and leaving a subset behind leaves the stylesheet's 
 half-true. The sandboxed stage stylesheet is the one exemption and keeps its literal: it is
 injected into the same document as agent-authored HTML, so declaring the accent as a token there
 hands that document a lever. `QUIRKS.md` "Two stylesheets, one palette" owns the trap.
+
+**A stage is told the theme and stays a light surface.** The artboard behind a stage is a light
+neutral in both palettes, so a mock that sets no colour has to draw the light scheme's defaults on
+it in a dark board too. The board sends a stage its theme as `data-theme` and nothing else, and
+both stage frames declare `color-scheme: light`: black text reads 12.28:1 on the dark palette's
+artboard and an unstyled link 5.50:1. Measured in Chrome and rejected: stamping the board's scheme
+on the stage's root (white default ink on the artboard, 1.71:1); dropping that stamp while the
+frame still inherits the dark page's scheme (the two schemes differ, so the browser paints an
+opaque white canvas in place of the artboard); an explicit black ink under a dark stamp (text
+reads, an unstyled link stays the dark scheme's `#9e9eff` at 1.40:1, and form controls stay dark on
+a light surface). A dark artboard under a dark board is the other way to settle it and a different
+product, not chosen here. The cost: `prefers-color-scheme` inside a stage reads light whatever the
+board's theme, and a template with a dark palette of its own declares `color-scheme: dark` itself.
+The Lens's copy is sent no theme at all. `PROTOCOL.md` "The theme a stage is told" has the rest.
 
 **Mermaid is re-initialized and re-run on every switch, then pins are re-wired**, so the
 client script's duplicated palette becomes theme-derived rather than a second source of truth. Pin
@@ -698,7 +757,9 @@ the board, and nothing shows what a caller that defers its mechanism actually lo
 - Redesigning the answer widgets or the round model.
 - Editing or deleting a **sent** comment, or any affordance implying either is possible.
 - Capping markdown or html blocks the way code blocks are capped.
-- Fixing the pre-existing `.html-stage` pin drift on inner scroll and resize-drag.
+- Fixing the pre-existing `.html-stage` pin drift on inner scroll and resize-drag. (Both went
+  later: a stage's scroll re-asks its pin positions, and ADR 119 replaced the drag with a stage
+  that fits its content.)
 - A high-contrast or forced-colors variant, a user-customizable accent, a print stylesheet, and
   per-board theme — theme is a reader preference, never a property of a posted board.
 - Loopback host canonicalization.

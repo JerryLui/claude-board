@@ -149,12 +149,11 @@ function safeJson(value) {
  * what actually renders. */
 export const COMMENT_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 
-/** The diagram-expand control's icon: four arrowheads
- * pointing out of the corners, the standard "open this full size" glyph and
- * distinct from the comment glyph above. Inline SVG for the same reason every
- * other icon here is — the standalone archive has no network to fetch anything
- * from. */
-const EXPAND_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg>';
+/** The Pull-out's glyph (ADR.md entry 120): two arrowheads pointing out of
+ * opposite corners, the standard "open this full size" mark and distinct from
+ * the comment glyph above. Inline SVG for the same reason every other icon here
+ * is -- the standalone archive has no network to fetch anything from. */
+const PULL_OUT_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 20H4v-6"/><path d="M20 4l-7 7"/><path d="M4 20l7-7"/></svg>';
 
 /** The comment-mode toggle. See "The gesture is an explicit comment mode": this
  * button is the one thing on the page that makes the generic element-level
@@ -171,32 +170,36 @@ function commentModeToggle() {
   return `<button type="button" id="comment-mode-toggle" class="mode-toggle" aria-pressed="false">${COMMENT_ICON}<span class="mode-toggle-label">Comment</span></button>`;
 }
 
-/** The explicit control that opens a
- * diagram in the full-viewport lens. Explicit, and never the diagram itself —
- * "the click gesture on a diagram keeps its current meaning in both modes",
- * so clicking a node still means "comment on this node"
- * with comment mode on and still means nothing with it off.
+/** The Pull-out (ADR.md entry 120): the one way into the lens, for a stage
+ * and for a diagram alike, wherever the block sits -- top level, a compare
+ * side, a question's context, a rendered-variant option. It sits in the
+ * top-right corner of the frame itself (the '.stage-wrap' around the iframe or
+ * the diagram, src/styles.mjs) rather than in a label row, so a context item,
+ * which has no kicker, carries it exactly as a top-level block does.
+ *
+ * Explicit, and never the artifact itself: a click on a diagram node or inside
+ * a stage keeps its own meaning (comment on it, with comment mode on; nothing,
+ * with it off), so the lens needs a control of its own.
  *
  * Rendered server-side rather than injected by src/ui.mjs so it is in the
- * standalone archive's own bytes, where the lens is still expected to pan and
- * zoom ("The lens is view-only under `body.readonly`" — view-only, not
- * absent). That is also why src/ui.mjs's readonly pass, which hard-disables
- * every other button on the page, skips this one by class.
+ * standalone archive's own bytes, where the lens is still expected to open
+ * (view-only under 'body.readonly', not absent). That is also why src/ui.mjs's
+ * readonly and sent-round passes, which hard-disable every other button on the
+ * page, skip this one by class ('staysLive').
  *
- * src/ui.mjs's `wireDiagramExpand` removes it again if mermaid never produced an
- * SVG (CDN unreachable, invalid chart): a control that opens an empty lens is
- * worse than no control.
+ * Inside a variant option's card it is a real <button>, and the card's own
+ * click handler stands down for any nested button, so pressing it opens the
+ * lens and never picks the option.
  *
- * The same control appears on every `html` stage, and both
- * reasons above carry over unchanged — a stage in a standalone archive still
- * opens in the lens, so the button has to be in the archive's own bytes and has
- * to survive the readonly pass. `what` names the thing being opened in the
- * accessible name and is this file's own word, never board content; the two
- * kinds share one class, since the class is what src/ui.mjs's readonly carve-out
- * and the stylesheet both key on, and one control that behaves the same way in
- * two kickers should not be two. */
-function expandButton(blockId, what) {
-  return `<button type="button" class="expand-btn" data-expand-for="${escAttr(blockId)}" aria-label="Open this ${what || 'diagram'} in the lens">${EXPAND_ICON}expand</button>`;
+ * Not emitted where there is nothing to open: a page board (the stage already
+ * fills the window) and a block whose reference failed (no stage, no diagram).
+ * src/ui.mjs's 'wireDiagramPullOut' removes it again from a diagram mermaid
+ * never drew: a control that opens an empty lens is worse than no control.
+ *
+ * 'what' names the thing being opened in the accessible name and is this
+ * file's own word, never board content. */
+function pullOut(blockId, what) {
+  return `<button type="button" class="pull-out" data-pull-out-for="${escAttr(blockId)}" aria-label="Open this ${what} full size" title="Open full size">${PULL_OUT_ICON}</button>`;
 }
 
 /** The whole-block comment control. Emitted only by the two kinds ADR.md entry 28
@@ -278,19 +281,60 @@ function pageDomPinLayer(blockId) {
   return `<div class="pin-layer" data-block-id="${escAttr(blockId)}"></div>`;
 }
 
-/** A stage (an html iframe, a mermaid `<pre>`) and the absolutely-positioned pin
- * layer over it, inside the `position: relative` wrapper the two need to line up.
- * renderMermaidBlock and renderHtmlBlock write this same shape inline, each in
- * its own section's indentation; this exists for renderContextItem, which needs
- * the identical structure for a stage rendered as prose under a question's
- * prompt. Left as a third spelling rather than folded into those two, because
- * both of theirs sit inside larger template literals whose exact emitted text a
- * handful of checks match on. */
-function stageWrap(blockId, inner) {
+/** A stage (an html iframe, a mermaid `<pre>`), the absolutely-positioned pin
+ * layer over it and its Pull-out in the corner, inside the `position: relative`
+ * wrapper the three need to line up. renderMermaidBlock and renderHtmlBlock
+ * write this same shape inline, each in its own section's indentation; this
+ * exists for renderContextItem, which needs the identical structure for a stage
+ * rendered as prose under a question's prompt. Left as a third spelling rather
+ * than folded into those two, because both of theirs sit inside larger template
+ * literals whose exact emitted text a handful of checks match on. */
+function stageWrap(blockId, inner, what) {
   return `<div class="stage-wrap">
     ${inner}
     <div class="pin-layer" data-block-id="${escAttr(blockId)}"></div>
+    ${pullOut(blockId, what)}
   </div>`;
+}
+
+/** The Show full height bar under an html stage (ADR.md entry 119). Emitted for
+ * every stage outside a page board, top-level and in a question's context
+ * alike, and hidden until src/ui.mjs folds the stage: '.stage-folded' on the
+ * stage's own '.html-block' shows it, '.stage-opened' keeps it up labelled Show
+ * less (applyStageHeight and toggleStageFold there). Server-rendered, so an
+ * archive carries the control in its own bytes; never 'disabled', since opening
+ * a mock to read it is not an answer and stays live on a sent round and in an
+ * archive. A variant option's stage gets none (renderHtmlBlock's `folds`): it
+ * clips at the cap instead of folding, because a click on its card picks it.
+ * `opened` renders it already reading Show less, for a stage
+ * stageRendersOpened marks. */
+function stageFoldBar(opened = false) {
+  return `<div class="stage-fold"><button type="button" class="stage-fold-toggle" aria-expanded="${opened}">${opened ? 'Show less' : 'Show full height'}</button></div>`;
+}
+
+/** A stage holding a comment renders opened (ADR.md entry 119): '.stage-opened'
+ * on its '.html-block' and its bar reading Show less, straight from the server.
+ * The browser cannot make this call itself: whether a stage folds at all is
+ * known only from the stage's own height report, and a board opened in a
+ * background tab gets none until the tab is shown (QUIRKS.md "A sandboxed
+ * srcdoc frame's own script runs before its first layout"). Opened, a comment's
+ * pin sits on its element wherever in the mock that is, never under a fold the
+ * reader has to find and open first.
+ *
+ * Every stored comment counts, whatever its anchor: an anchor always names the
+ * block and only optionally an element in it (CONTEXT.md, Anchor), so a
+ * whole-block comment holds the stage as surely as one on an element, and an
+ * element comment whose element has since gone is still a comment on this
+ * mock. Stored means sent: a comment the reviewer has only queued lives in the
+ * page alone until Send, and the round a Send pushes back is re-rendered here.
+ * src/ui.mjs's applyStageHeight takes the mark from there: the first report
+ * past the cap becomes the opened box, and two matching reports under it drop
+ * the mark and the stage fits like any other.
+ *
+ * `folds` is false in a variant option's card, whose stage clips at the cap and
+ * never folds, so never opens either. */
+function stageRendersOpened(block, commentsByBlock, folds) {
+  return folds && (commentsByBlock.get(block.id) || []).length > 0;
 }
 
 /** The fold's trigger (ADR.md entry 110), counted on the item's MARKDOWN SOURCE
@@ -541,10 +585,14 @@ function renderRankWidget(block, answer, historical) {
  * untouched, on the same reasoning `renderHtmlBlock`'s own header comment gives
  * for why only `html` needed the sandboxed-iframe treatment in the first place:
  * they render inline, at whatever width the grid already gives them, with no
- * unreadable-at-a-third-width problem to solve. */
+ * unreadable-at-a-third-width problem to solve.
+ *
+ * The one thing the dispatch is told: its stages do not fold (`folds` false),
+ * since a stage in a card clips at the cap and a click on the card picks it
+ * (ADR.md entry 119) -- so a comment on one renders it clipped, never opened. */
 function renderVariantOption(opt, isSelected, board, commentsByBlock, historical, questionId) {
   const body = opt.block
-    ? renderBlock(opt.block, board, commentsByBlock, historical)
+    ? renderBlock(opt.block, board, commentsByBlock, historical, false, false)
     : '<p class="unsupported-widget">no content</p>';
   const stageModifier = opt.block && opt.block.kind === 'html' ? ' variant-card--stage' : '';
   return `<div class="variant-card choice-variant${stageModifier}${isSelected ? ' selected' : ''}" role="button" tabindex="${historical ? '-1' : '0'}"${historical ? ' aria-disabled="true"' : ''} data-question-id="${escAttr(questionId)}" data-choice="${escAttr(opt.label)}">
@@ -630,8 +678,12 @@ function questionCarriesStage(block) {
  * it is chrome ABOUT the content rather than part of it -- and it is none of the
  * three things entry 26 actually removed (a card, a border, a kicker), so both
  * rules hold at once. `markdown` and `code` keep no affordance, here or
- * anywhere. */
-function renderContextInner(block, board, commentsByBlock, historical, fold = NO_FOLD) {
+ * anywhere.
+ *
+ * `opened` is an html stage's stageRendersOpened answer, decided by
+ * renderContextItem below, which needs the same answer for the item's own
+ * class. */
+function renderContextInner(block, board, commentsByBlock, historical, fold = NO_FOLD, opened = false) {
   switch (block.kind) {
     case 'markdown':
       // The one kind that folds here (ADR.md entry 110, prose only): `fold` is
@@ -654,10 +706,10 @@ function renderContextInner(block, board, commentsByBlock, historical, fold = NO
       return `${codeBody(block)}${label ? `<div class="context-caption">${escHtml(label)}</div>` : ''}`;
     }
     case 'mermaid':
-      return block.error ? resolveErrorNote(block) : stageWrap(block.id, `<pre class="mermaid">${escHtml(block.text)}</pre>`);
+      return block.error ? resolveErrorNote(block) : stageWrap(block.id, `<pre class="mermaid">${escHtml(block.text)}</pre>`, 'diagram');
     case 'html':
       return block.error ? resolveErrorNote(block)
-        : stageWrap(block.id, `<iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(buildStageSrcdoc(block))}"></iframe>`);
+        : stageWrap(block.id, `<iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(buildStageSrcdoc(block))}"></iframe>`, 'stage') + stageFoldBar(opened);
     case 'compare':
       return `<div class="compare-grid">${renderContextCompareSide(block.left, board, commentsByBlock, historical)}${renderContextCompareSide(block.right, board, commentsByBlock, historical)}</div>`;
     default:
@@ -707,13 +759,11 @@ function renderContextCompareSide(side, board, commentsByBlock, historical) {
  * every pin on a context item lands somewhere else on the card.
  *
  * `.context-tools` is the control group a commentable item wears in place of the
- * kicker the panel dropped: the comment button, plus the expand control for a
- * diagram (ADR.md entry 110 -- a diagram beside a question is half the column
- * wide, so the lens is the only way to read it). `wireDiagramExpand` finds it by
- * `section.querySelector('.expand-btn')` from the `.mermaid-block` the wrapper
- * already wears, so the control needs no wiring of its own. A failed reference
- * gets no expand button, the same carve-out renderMermaidBlock makes: it would
- * open an empty lens. */
+ * kicker the panel dropped: the comment button. The way into the lens is not in
+ * it: a context stage or diagram carries its Pull-out in its own frame's corner
+ * (stageWrap), the same place a top-level one does (ADR.md entry 120), and
+ * src/ui.mjs finds it from the `.html-block`/`.mermaid-block` class the wrapper
+ * already wears, so it needs no wiring of its own. */
 function renderContextItem(block, board, commentsByBlock, historical) {
   const commentable = block.kind === 'html' || block.kind === 'mermaid';
   // `code` wears `.code-block` for the same reason `html`/`mermaid` wear theirs:
@@ -733,9 +783,8 @@ function renderContextItem(block, board, commentsByBlock, historical) {
   // comment a second time, at a fabricated position, from refs that cannot resolve
   // outside the frame.
   const pinLayer = block.kind === 'mermaid' || block.error ? pageDomPinLayer(block.id) : '';
-  const expand = block.kind === 'mermaid' && !block.error ? expandButton(block.id) : '';
   const affordance = commentable
-    ? `<div class="context-tools">${commentButton(block.id)}${expand}</div>${pinLayer}${commentArea(block.id, commentsByBlock, historical)}`
+    ? `<div class="context-tools">${commentButton(block.id)}</div>${pinLayer}${commentArea(block.id, commentsByBlock, historical)}`
     : '';
   // The fold is per item and PROSE ONLY (ADR.md entry 110): a `markdown` item
   // that reads long is clipped with a Show more control, and no other kind ever
@@ -745,7 +794,11 @@ function renderContextItem(block, board, commentsByBlock, historical) {
   // (renderContextCompareSide calls back into here), so it folds too, which is
   // the prose-only rule holding rather than a second decision.
   const fold = block.kind === 'markdown' && !block.error ? foldParts(block.text, block.id) : NO_FOLD;
-  return `<div class="context-item${kindClass}${fold.itemClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${renderContextInner(block, board, commentsByBlock, historical, fold)}${fold.control}${affordance}</div>`;
+  // A stage, which is not that fold: ADR.md entry 119's Show full height, and a
+  // stage holding a comment renders opened (stageRendersOpened). The class goes
+  // on this item, the stage's own '.html-block'; the bar renderContextInner draws.
+  const opened = block.kind === 'html' && !block.error && stageRendersOpened(block, commentsByBlock, true);
+  return `<div class="context-item${kindClass}${opened ? ' stage-opened' : ''}${fold.itemClass}" data-block-id="${escAttr(block.id)}" data-block-kind="${escAttr(block.kind)}">${renderContextInner(block, board, commentsByBlock, historical, fold, opened)}${fold.control}${affordance}</div>`;
 }
 
 /** No commentButton/commentArea/pageDomPinLayer here (ADR "Commenting is
@@ -862,10 +915,11 @@ function renderMermaidBlock(block, board, commentsByBlock, historical) {
   <div class="stage-wrap">
     <pre class="mermaid">${escHtml(block.text)}</pre>
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
+    ${pullOut(block.id, 'diagram')}
   </div>`;
   return `
 <section class="block mermaid-block" data-block-id="${escAttr(block.id)}" data-block-kind="mermaid">
-  <div class="block-kicker">Mermaid ${commentButton(block.id)} ${block.error ? '' : expandButton(block.id)}</div>
+  <div class="block-kicker">Mermaid ${commentButton(block.id)}</div>
   ${body}
   ${pageDomPinLayer(block.id)}
   ${commentArea(block.id, commentsByBlock, historical)}
@@ -1475,8 +1529,10 @@ function codeBody(block) {
  * none. So the old justification for one literal ("the stage is white in both
  * palettes, so this outline is theme-independent") is gone -- what replaces it
  * is arithmetic, not a premise: both artboards are light neutrals (they have
- * to be, a srcdoc that paints no background renders the UA's BLACK text on
- * them), and one mid-blue clears the 3:1 WCAG floor for non-text UI on both.
+ * to be: the stage's frame is `color-scheme: light` in both themes, so a srcdoc
+ * that paints no background renders the UA's light-scheme ink on them, black
+ * text and the #0000ee link blue, whatever the board's theme), and one mid-blue
+ * clears the 3:1 WCAG floor for non-text UI on both.
  * The light accent measures 3.89:1 on the dark palette's artboard and 5.43:1
  * on the light one; the DARK accent measures 1.52:1 and 2.13:1, i.e. the same
  * colour that used to sit at 2.61:1 on white is still the wrong one, and now
@@ -1727,35 +1783,53 @@ export function stageAgentScript() {
     try { return document.querySelector('[id="' + id + '"]'); } catch (e) { return null; }
   }
 
-  /** An in-page anchor: put the target where the reviewer can read it, inside
-   * this frame, with no navigation of any kind.
+  /** An in-page anchor: put the target where the reviewer can read it, with no
+   * navigation of any kind.
    *
-   * 'scrollIntoView', never arithmetic of this script's own. WHICH element
-   * scrolls is not knowable up front (onScroll's own comment below: an
-   * app-shell artifact scrolls an inner pane and its document never moves),
-   * and the browser's own scroll-into-view walks every scrolling ancestor the
-   * target actually has. The 'scroller' this script remembers cannot answer
-   * here either: it is only known once something has already scrolled, and a
-   * table-of-contents link is exactly the click that comes first.
+   * WHICH element scrolls is not knowable up front: an app-shell artifact
+   * scrolls an inner pane and its document never moves (onScroll's own comment
+   * below), and the 'scroller' this script remembers is only known once
+   * something has already scrolled, while a table-of-contents link is exactly
+   * the click that comes first. So the boxes are found from this document's
+   * own geometry at the click (frameScrollBoxes, below), innermost first, and
+   * each is moved by its OWN 'scrollTo' (scrollBoxTo).
    *
-   * The board's header floats OVER the top of this frame (ADR 59), so a
-   * target aligned to the frame's own top edge lands under it.
-   * 'scroll-margin-top' is the browser's own name for that offset, applied by
-   * the same scroll-into-view algorithm at whatever scrolling box it ends up
-   * moving -- which is what keeps the inner-pane case correct with no second
-   * measurement anywhere. The figure is the band the parent last reported,
-   * never a number invented here.
+   * Never 'scrollIntoView'. Measured in Chrome 154
+   * (test/browser-check-stage-fold.mjs): a frame's scroll-into-view does not
+   * stop at the frame. It carries on into the board, through the opaque-origin
+   * boundary, and scrolls the board until the frame's top meets the window's:
+   * a second scroll the reader did not ask for, which leaves the target under
+   * the board's sticky header. A box's own 'scrollTo' moves that box and
+   * nothing past it.
    *
-   * ponytail: that 'scroll-margin-top' is left on the element rather than
-   * restored, so an artifact that later scrolls the same target itself
-   * inherits the board's header band as a margin on it. A smooth scroll is
-   * still in flight when this returns, so there is no safe moment to clear it
-   * here; the upgrade path, if an artifact ever needs its own margin back, is
-   * to remember the element's previous value and restore it on the next
-   * 'scrollend' in this frame.
+   * On a page board the board's header floats OVER the top of this frame
+   * (ADR 59), so a target aligned to a box's top edge would land under it.
+   * Each box puts the target 'bandTop' below its visible top: the band the
+   * parent last reported, never a number invented here.
    *
    * A fragment naming nothing ('#', '#top', a stale id) scrolls nothing. The
-   * click is cancelled either way, so it can never reach the blocked page. */
+   * click is cancelled either way, so it can never reach the blocked page.
+   *
+   * A frame with nothing of its own to scroll hands the move to the board
+   * instead: a stage that fits its content, or one opened by Show full height,
+   * shows the whole document, so the only thing that can bring its target into
+   * view is the BOARD scrolling (ADR 119). This document cannot see the board,
+   * so it says where the target sits in its own viewport ('link' with 'top' and
+   * no 'url') and src/ui.mjs's handleStageAnchor decides how far the board
+   * moves. It does not also scroll itself: there is nothing here to move.
+   *
+   * A frame that does scroll still tells the board where the target ended up
+   * ('top' as above, plus 'scrolled: true'). Off a page board no band reaches
+   * this frame, so the target lands at the frame's own top, and the reader may
+   * have scrolled that top above the window or under the board's sticky
+   * header. A target near the document's end stops lower, where this frame's
+   * scroll runs out, which may be past the window's bottom edge. This document
+   * cannot see either edge of the window. The board can: it stays still when
+   * the target landed in its visible band, from '--head-clear' under the
+   * window top to '--head-clear' above the window bottom (window.innerHeight
+   * less '--head-clear'), and otherwise moves once, bringing the target to
+   * '--head-clear' under the top. The frame's move and the board's add up to
+   * one, and neither box scrolls twice. */
   function scrollToAnchor(id) {
     if (!id) return;
     var el = elementWithId(id);
@@ -1764,13 +1838,78 @@ export function stageAgentScript() {
       // decoded, which is how a browser matches one too.
       try { el = elementWithId(decodeURIComponent(id)); } catch (e) { /* malformed escape: no such target */ }
     }
-    if (!el || typeof el.scrollIntoView !== 'function') return;
-    if (el.style) el.style.scrollMarginTop = bandTop + 'px';
-    el.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'smooth' });
+    if (!el || typeof el.getBoundingClientRect !== 'function') return;
+    var box = el.getBoundingClientRect();
+    if (!box || !isFinite(box.top)) return;
+    var boxes = frameScrollBoxes(el);
+    if (!boxes.length) { post({ type: 'link', top: box.top }); return; }
+    // An inner pane first brings the target to its own top, then each box
+    // around it takes it the rest of the way, by what is left after the moves
+    // before it: the walk the browser's own scroll-into-view makes, stopped at
+    // this frame's edge.
+    var moved = 0;
+    for (var i = 0; i < boxes.length; i++) moved += scrollBoxTo(boxes[i], box.top - moved);
+    post({ type: 'link', top: box.top - moved, scrolled: true });
+  }
+
+  /** The boxes inside this frame that can scroll vertically toward 'el',
+   * innermost first, empty when none can. Asked of this document's own
+   * geometry rather than told by the board, because only this side can see an
+   * app-shell's inner pane: a mock whose '100vh' main pane scrolls on its own
+   * fits its frame exactly and still has somewhere to go.
+   *
+   * Each ancestor of 'el' that holds more than it shows AND is a scroll box
+   * ('overflow-y' anything but visible or clip): a box whose content simply
+   * spills out visibly has nowhere to scroll it. Then the frame's own viewport
+   * (the scrolling element), when the document reaches past the frame's
+   * height: a folded stage, a page board, and a stage whose growth has not
+   * landed yet. 1px of slack each, since a box fitted to a rounded-up
+   * measurement can still read a pixel over. Without a computed style (the DOM
+   * stand-in has none for an inner element) no ancestor counts, the same answer
+   * as an artifact with no inner pane. */
+  function frameScrollBoxes(el) {
+    var boxes = [];
+    var root = document.scrollingElement || document.documentElement;
+    if (typeof getComputedStyle === 'function') {
+      for (var a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+        if (a === root || !(a.scrollHeight - a.clientHeight > 1)) continue;
+        var oy = '';
+        try { oy = getComputedStyle(a).getPropertyValue('overflow-y'); } catch (e) { /* unreadable: not a scroll box */ }
+        if (oy === 'auto' || oy === 'scroll' || oy === 'hidden' || oy === 'overlay') boxes.push(a);
+      }
+    }
+    if (root && root.scrollHeight - root.clientHeight > 1) boxes.push(root);
+    return boxes;
+  }
+
+  /** Scroll 'box' so a point 'top' down this frame's viewport lands 'bandTop'
+   * below the box's visible top, as far as the box can scroll, and return how
+   * far it moves. The viewport's visible top is 0; any other box's is its
+   * border edge plus its top border. Only the vertical offset is written, so a
+   * wide mock keeps its sideways scroll. Rounded down to a whole pixel, so the
+   * target never sits a fraction above 'bandTop', and so what this returns is
+   * where the browser actually stops. Feature-detected with 'scrollTop' as the
+   * floor, the same shape as scrollTo below. */
+  function scrollBoxTo(box, top) {
+    var root = document.scrollingElement || document.documentElement;
+    var visibleTop = 0;
+    if (box !== root) visibleTop = box.getBoundingClientRect().top + (box.clientTop || 0);
+    var from = box.scrollTop || 0;
+    var max = Math.max(0, box.scrollHeight - box.clientHeight);
+    var to = Math.floor(Math.min(max, Math.max(0, from + top - visibleTop - bandTop)));
+    if (typeof box.scrollTo === 'function') {
+      try {
+        box.scrollTo({ top: to, behavior: 'smooth' });
+        return to - from;
+      } catch (e) { /* no options form: the floor below */ }
+    }
+    box.scrollTop = to;
+    return to - from;
   }
 
   /** A link the reviewer clicked with comment mode off. Two outcomes and no
-   * third: an in-page anchor scrolls this document, an http/https address is
+   * third: an in-page anchor scrolls to its target (this document, or the
+   * board when this frame has nothing to scroll), an http/https address is
    * handed to the board page -- which opens it in a new tab, at once, on the
    * click that asked for it. Every other scheme
    * ('javascript:', 'file:', 'data:', a relative path) is dropped in silence:
@@ -1838,11 +1977,16 @@ export function stageAgentScript() {
   // a '.choice-variant' card -- renderHtmlBlock/stageAgentScript are the same
   // function either way, and this script has no way to know which kind of
   // card it ended up in -- so src/ui.mjs is the one that decides whether a
-  // report is acted on. 'document.body.scrollHeight', not
-  // 'document.documentElement''s: a mock supplied by value (renderHtmlBlock)
-  // is exactly the fragment that lands in this document's '<body>', same as
-  // every 'dom' ref this script already mints is rooted at 'document.body',
-  // not the synthetic '<html>' wrapper around it.
+  // report is acted on (applyStageHeight there: fit, fold or clip, ADR.md
+  // entry 119).
+  //
+  // WHAT it measures is the whole document, not 'document.body' alone
+  // (measureHeight, below), and the viewport's own horizontal scrollbar with
+  // it. A mock's first heading's top margin collapses through '<body>' and
+  // sits outside it, so a box sized to 'body.scrollHeight' came up that
+  // margin short and showed a stray inner scrollbar -- the one thing a fitted
+  // stage exists not to have. The same goes for a wide mock's sideways
+  // scrollbar, which takes its height out of the frame's own viewport.
   //
   // WHEN this runs matters as much as WHAT it reads, and got it wrong on the
   // first cut: calling this synchronously (here, at script scope) measures
@@ -1857,8 +2001,69 @@ export function stageAgentScript() {
   // call comes from; this function itself stays the plain, unconditional
   // measure-and-post -- ResizeObserver (below) also calls it directly, once a
   // real layout pass has actually happened.
+  //
+  // A NEW height is posted twice: now, and again after one more full rendering
+  // update (heightConfirm). The parent believes a height under its 320px
+  // placeholder only when two reports in a row agree, so a mock that settles
+  // short says so twice, while one measured mid-build -- a sliver before its
+  // own script has laid it out -- is followed by a different number and moves
+  // nothing.
+  var heightLast = -1;
+  var heightConfirmQueued = false;
   function reportHeight() {
-    post({ type: 'height', height: document.body ? document.body.scrollHeight : 0 });
+    var h = measureHeight();
+    post({ type: 'height', height: h });
+    if (h === heightLast) return;
+    heightLast = h;
+    heightConfirm();
+  }
+  function heightConfirm() {
+    if (heightConfirmQueued || typeof requestAnimationFrame !== 'function') return;
+    heightConfirmQueued = true;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        heightConfirmQueued = false;
+        reportHeight();
+      });
+    });
+  }
+
+  // The height a frame needs to show this whole document with no vertical
+  // scrollbar. Three readings, the largest wins:
+  //   - the root element's own box: the body plus every margin collapsed
+  //     through it, and unlike the root's scrollHeight it can come out
+  //     SHORTER than the frame, which is what lets a stage shrink to fit;
+  //   - the root's scrollHeight, but only once the document overflows the
+  //     viewport (until then it reads the viewport itself, never less): what
+  //     reaches past the root's box, a body pinned to 'height: 100%' with
+  //     content spilling out of it, say;
+  //   - the body's own scrollHeight, for content spilling out of a short body
+  //     while the document still fits.
+  // Then the horizontal scrollbar, if the viewport has one ('innerHeight'
+  // counts it, the root's 'clientHeight' does not), except for a document
+  // exactly the viewport's height: one laid out from the viewport itself (a
+  // 'min-height: 100vh' body), where 100vh is 'innerHeight' with the bar
+  // already in it. Adding the bar there asks for a frame 15px taller, which
+  // the document fills in turn, and so on up to the fold. A document of its
+  // own height that happens to land on the viewport's to the pixel is read the
+  // same way and keeps a bar's worth of vertical scroll, the cheaper miss.
+  // Rounded up, since a fraction of a pixel short is still a scrollbar. Every
+  // read is guarded: the DOM stand-in has no layout and answers 0, undefined
+  // or a fixture's declared value.
+  function measureHeight() {
+    var root = document.documentElement;
+    var body = document.body;
+    var h = 0;
+    if (root && root.getBoundingClientRect) {
+      var box = root.getBoundingClientRect();
+      if (box && isFinite(box.height)) h = box.height;
+    }
+    if (root && root.scrollHeight > root.clientHeight) h = Math.max(h, root.scrollHeight);
+    if (body && body.scrollHeight > h) h = body.scrollHeight;
+    var view = window.innerHeight;
+    var bar = root ? view - root.clientHeight : 0;
+    if (bar > 0 && root.clientHeight > 0 && !(Math.abs(h - view) < 1)) h += bar;
+    return Math.ceil(h);
   }
 
   // requestAnimationFrame's callback runs as part of the SAME per-frame
@@ -1878,9 +2083,8 @@ export function stageAgentScript() {
   // reading something else, say) still gets a correct report the moment it
   // is actually looked at, with no separate visibilitychange plumbing
   // needed. Until either this or ResizeObserver's own first delivery lands,
-  // src/styles.mjs's own starting height for a variant option's stage is the
-  // fallback -- see that rule's own comment for why it is pinned at the same
-  // 320px the fixed floor this feature replaces used, not lower.
+  // '.html-stage''s own starting height in src/styles.mjs (320px) is what
+  // every stage shows -- see that rule's own comment.
   function reportHeightAfterLayout() {
     if (typeof requestAnimationFrame !== 'function') return;
     requestAnimationFrame(function () { requestAnimationFrame(reportHeight); });
@@ -2013,22 +2217,33 @@ export function stageAgentScript() {
     if (typeof target.scrollTo === 'function') target.scrollTo(0, scrollTopNow() + delta);
   }
 
-  // The board's theme control paints this document too, so a
-  // rendered artifact needs none of its own. The parent resolves its own
-  // three-state control (light / dark / the attribute's ABSENCE, meaning
-  // System) down to a concrete 'light' or 'dark' before sending -- see
-  // src/ui.mjs's activeTheme -- so this side never queries a media it would
-  // then have to re-query on every OS flip. 'data-theme' on <html> is the same
-  // attribute src/styles.mjs keys the board's own palette off, so a template
-  // that already themes itself needs no new vocabulary; 'color-scheme' is set
-  // beside it so an artifact that knows nothing about the attribute still gets
-  // its scrollbars, form controls and canvas default from the right palette.
+  // The board tells this document its theme, so a rendered artifact needs no
+  // theme control of its own. The parent resolves its own three-state control
+  // (light / dark / the attribute's ABSENCE, meaning System) down to a concrete
+  // 'light' or 'dark' before sending -- see src/ui.mjs's activeTheme -- so this
+  // side never queries a media it would then have to re-query on every OS flip.
+  // 'data-theme' on <html> is the same attribute src/styles.mjs keys the board's
+  // own palette off, so a template that already themes itself needs no new
+  // vocabulary.
+  //
+  // The attribute is ALL this sets. 'color-scheme' stays whatever the artifact
+  // made it, which for one that sets no colour is the light scheme, in a dark
+  // board too: the artboard behind this document is a light neutral in both
+  // palettes, and the frame it renders in is declared 'color-scheme: light' to
+  // match (src/styles.mjs's '.html-stage' and '.stage-lens-frame'). So the UA's
+  // default ink here is always the light scheme's: black text, the #0000ee link
+  // blue, light form controls and scrollbars. Measured in real Chrome on the
+  // dark artboard (#c3c6cd): stamping the board's scheme on this root turns that
+  // ink white, 1.71:1, and the link #9e9eff, 1.40:1; black reads 12.28:1 and
+  // the link blue 5.50:1. An artifact that paints a dark palette of its own
+  // under [data-theme="dark"] declares 'color-scheme: dark' there itself, which
+  // darkens its controls and scrollbars and, where it paints no background, puts
+  // the UA's dark canvas under its light ink in place of the artboard.
   function applyTheme(theme) {
     var root = document.documentElement;
     if (!root) return;
     try {
       root.setAttribute('data-theme', theme);
-      if (root.style) root.style.colorScheme = theme;
     } catch (e) { /* nothing to theme; the artifact keeps its own colours */ }
   }
 
@@ -2139,8 +2354,13 @@ export function stageAgentScript() {
   // test/check-pure.mjs's stubbed requestAnimationFrame for how far the
   // stand-in check goes anyway (the real entry point, not a fabricated
   // scrollHeight fed straight into reportHeight).
+  // The root is observed beside the body because the root's box is what
+  // measureHeight reads first: a margin collapsing through the body moves the
+  // root and leaves the body's own box exactly as it was.
   if (typeof ResizeObserver === 'function') {
-    new ResizeObserver(reportHeight).observe(document.body);
+    var heightObserver = new ResizeObserver(reportHeight);
+    heightObserver.observe(document.body);
+    if (document.documentElement) heightObserver.observe(document.documentElement);
   }
   // Capture phase, on 'document', is what makes this one listener see BOTH the
   // viewport's own scroll and an inner pane's -- an element's scroll event does
@@ -2483,12 +2703,19 @@ function renderPageCommentPanel(block, round, commentsByBlock) {
  * exists for, and would do it silently (every stage message would simply be
  * dropped at that lookup).
  *
- * The kicker's two controls go rather than being hidden, since neither holds any
- * state: the comment button mints a whole-block comment the click gesture inside
- * the frame already covers, and the expand control opens a lens that is a copy
- * of what already fills the viewport. The send bar is the
- * opposite case and is deliberately still emitted — see renderBoardPage. */
-function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = false) {
+ * The kicker's comment button and the frame's Pull-out go rather than being
+ * hidden, since neither holds any state: the comment button mints a whole-block
+ * comment the click gesture inside the frame already covers, and the Pull-out
+ * opens a lens that is a copy of what already fills the viewport (ADR.md entry
+ * 120). The send bar is the
+ * opposite case and is deliberately still emitted: see renderBoardPage.
+ * Nor does a page board's stage ever render opened (stageRendersOpened): it has
+ * no fold to open, since it already fills the window.
+ *
+ * `folds` (default true) is false for a stage in a variant option's card
+ * (renderVariantOption), which clips at the cap rather than folding, and so
+ * carries no fold bar. */
+function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = false, folds = true) {
   // A referenced source can fail to resolve (sliced
   // with lines/section, over the byte cap, or outside the confinement boundary) --
   // same block-level-error shape as renderMarkdownBlock/renderCodeBlock/
@@ -2540,21 +2767,24 @@ function renderHtmlBlock(block, board, commentsByBlock, historical, fullpage = f
   <div class="page-comments">${renderPageCommentPanel(block, round, commentsByBlock)}</div>
 </section>`;
   }
+  const opened = stageRendersOpened(block, commentsByBlock, folds);
   return `
-<section class="block html-block" data-block-id="${escAttr(block.id)}" data-block-kind="html">
-  <div class="block-kicker">HTML stage ${commentButton(block.id)} ${expandButton(block.id, 'stage')}</div>
+<section class="block html-block${opened ? ' stage-opened' : ''}" data-block-id="${escAttr(block.id)}" data-block-kind="html">
+  <div class="block-kicker">HTML stage ${commentButton(block.id)}</div>
   <div class="stage-wrap">
     <iframe class="html-stage" sandbox="allow-scripts" srcdoc="${escAttr(srcdocContent)}"></iframe>
     <div class="pin-layer" data-block-id="${escAttr(block.id)}"></div>
+    ${pullOut(block.id, 'stage')}
   </div>
+  ${folds ? stageFoldBar(opened) : ''}
   ${commentArea(block.id, commentsByBlock, historical)}
 </section>`;
 }
 
-function renderCompareSide(side, board, commentsByBlock, historical) {
+function renderCompareSide(side, board, commentsByBlock, historical, folds = true) {
   const label = side && side.label ? side.label : '';
   const body = side && side.block
-    ? renderBlock(side.block, board, commentsByBlock, historical)
+    ? renderBlock(side.block, board, commentsByBlock, historical, false, folds)
     : '<p class="unsupported-widget">no content</p>';
   return `<div class="compare-side">
     <div class="compare-label">${escHtml(label)}</div>
@@ -2579,14 +2809,17 @@ function renderCompareSide(side, board, commentsByBlock, historical) {
  * outer section; that is an accepted, documented cost now (a comparison can no
  * longer be commented on as a whole, only one side or the other), not an
  * oversight -- there is nothing left on this wrapper that could ever populate
- * a pin here, so the layer itself would be permanently empty markup. */
-function renderCompareBlock(block, board, commentsByBlock, historical) {
+ * a pin here, so the layer itself would be permanently empty markup.
+ *
+ * `folds` passes renderBlock's own through to both sides, so a comparison in a
+ * variant option's card keeps its stages clipped there too. */
+function renderCompareBlock(block, board, commentsByBlock, historical, folds = true) {
   return `
 <section class="block compare-block" data-block-id="${escAttr(block.id)}" data-block-kind="compare">
   <div class="block-kicker">Compare</div>
   <div class="compare-grid">
-    ${renderCompareSide(block.left, board, commentsByBlock, historical)}
-    ${renderCompareSide(block.right, board, commentsByBlock, historical)}
+    ${renderCompareSide(block.left, board, commentsByBlock, historical, folds)}
+    ${renderCompareSide(block.right, board, commentsByBlock, historical, folds)}
   </div>
 </section>`;
 }
@@ -2603,15 +2836,19 @@ function renderCompareBlock(block, board, commentsByBlock, historical) {
  * only `html` reads it — it is exactly "this stage IS the board", which no other
  * kind can ever be, since a board carrying anything else is not a page board at
  * all. Threaded rather than derived here: the shape rule is a property of the
- * BOARD (isPageBoard, below), and a block cannot see the board it sits in. */
-export function renderBlock(block, board, commentsByBlock, historical = false, fullpage = false) {
+ * BOARD (isPageBoard, below), and a block cannot see the board it sits in.
+ *
+ * `folds` (default true) is whether a stage rendered here can fold, and so
+ * render opened (stageRendersOpened): false in a variant option's card, threaded
+ * for the same reason -- a block cannot see the card it sits in. */
+export function renderBlock(block, board, commentsByBlock, historical = false, fullpage = false, folds = true) {
   switch (block.kind) {
     case 'markdown': return renderMarkdownBlock(block);
     case 'question': return renderQuestionBlock(block, board, commentsByBlock, historical);
     case 'mermaid': return renderMermaidBlock(block, board, commentsByBlock, historical);
     case 'code': return renderCodeBlock(block);
-    case 'html': return renderHtmlBlock(block, board, commentsByBlock, historical, fullpage);
-    case 'compare': return renderCompareBlock(block, board, commentsByBlock, historical);
+    case 'html': return renderHtmlBlock(block, board, commentsByBlock, historical, fullpage, folds);
+    case 'compare': return renderCompareBlock(block, board, commentsByBlock, historical, folds);
     default: return '';
   }
 }

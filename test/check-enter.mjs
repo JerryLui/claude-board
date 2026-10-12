@@ -301,7 +301,7 @@ check('criterion 8: tabbing to #discuss-btn and pressing Cmd+Enter does not fire
 // and the send button is live, so isolating that one line would mean asserting
 // against a state the page cannot be in. Keep the line anyway: every other
 // mutation handler in src/ui.mjs carries the same redundant guard, and the
-// element-level lock has documented exceptions (.expand-btn, the theme control)
+// element-level lock has documented exceptions (.pull-out, the theme control)
 // that a future one could easily extend to the send bar.
 check('criterion 9a: Cmd+Enter does nothing at all in a read-only (file://) archive', () => {
   const document = loadBoard(pageHtml, { protocol: 'file:' });

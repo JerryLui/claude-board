@@ -245,7 +245,7 @@ await check('rendered: an already-persisted, resolved mermaid comment draws its 
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'a still-resolving mermaid anchor must not render as lost');
 });
 
-await check('CDN unreachable: pins still render from the server\'s verdict, resolved and lost alike, and the expand control removes itself', async () => {
+await check('CDN unreachable: pins still render from the server\'s verdict, resolved and lost alike, and the Pull-out removes itself', async () => {
   const cdnBoard = createBoard({
     title: 'Ticket 05 -- CDN unreachable still shows pins',
     blocks: [{ kind: 'mermaid', text: DIAGRAM_SOURCE }],
@@ -284,8 +284,8 @@ await check('CDN unreachable: pins still render from the server\'s verdict, reso
   assert.equal(lostPins.length, 1, 'exactly one of the two anchors must render lost -- the one whose node id was never declared');
   assert.ok(String(lostPins[0].title || '').indexOf('a node this diagram never declared') !== -1,
     `expected the lost pin's title to carry the stored hint, got ${JSON.stringify(lostPins[0].title)}`);
-  assert.equal(findExpandControl(document), null,
-    'with no rendered SVG there is nothing to expand, so the control removes itself rather than opening an empty lens');
+  assert.equal(findPullOut(document), null,
+    'with no rendered SVG there is nothing to open, so the Pull-out removes itself rather than opening an empty lens');
 });
 
 await check('rendered, but the node the anchor names is gone from THIS diagram: still draws a lost pin from the server\'s verdict, not a live-DOM guess', async () => {
@@ -369,16 +369,16 @@ await check('the window.mermaid clobber: a DOM element sitting in that slot is n
   assert.equal(pins.length, 1, 'the comment must still get a pin from the server\'s own verdict, exactly as the no-engine-at-all case does');
   assert.equal(pins[0].classList.contains('pin-lost'), false, 'node A is genuinely still in the source, so this pin must not render lost even with no live SVG to confirm it against');
 
-  // And the clobber never got a second life: the expand control (gated on a
+  // And the clobber never got a second life: the Pull-out (gated on a
   // live SVG existing) must be gone, exactly like the plain engine-unavailable
-  // case a few checks up -- proving this ISN'T a state the code thinks is a
-  // normal offline diagram.
-  assert.equal(findExpandControl(document), null, 'with the clobber correctly rejected, there is nothing rendered to expand');
+  // case (test/check-stage-lens.mjs, "a diagram that drew no picture") --
+  // proving this ISN'T a state the code thinks is a normal offline diagram.
+  assert.equal(findPullOut(document), null, 'with the clobber correctly rejected, there is nothing rendered to open');
 });
 
 // --- the diagram lens ------------------------------
 //
-// "A mermaid block carries an expand control that opens the diagram
+// "A mermaid block carries a Pull-out (ADR.md entry 120) that opens the diagram
 // in a full-viewport lens: drag pans, scroll zooms, with fit and 1:1 controls."
 // "A mermaid node can be commented on from inside the lens, and
 // that comment is the same comment as one minted inline -- same anchor, and its
@@ -393,19 +393,19 @@ await check('the window.mermaid clobber: a DOM element sitting in that slot is n
 // node mints. That last one is the whole point: "same anchor" is checked by
 // minting BOTH and comparing, not by re-deriving what the anchor ought to be.
 
-/** The expand control src/render.mjs renders into every mermaid block's kicker. */
-function findExpandControl(document) {
-  return document.querySelector('.mermaid-block .expand-btn');
+/** The Pull-out src/render.mjs renders into the corner of every mermaid block's frame. */
+function findPullOut(document) {
+  return document.querySelector('.mermaid-block .pull-out');
 }
 
 /** Open the lens on the page's only diagram and hand back its parts. */
 function openLens(document) {
-  const btn = findExpandControl(document);
-  assert.ok(btn, 'setup failure: no .expand-btn rendered on the mermaid block');
+  const btn = findPullOut(document);
+  assert.ok(btn, 'setup failure: no .pull-out rendered on the mermaid block');
   btn.dispatchEvent(new StandInEvent('click'));
   const dlg = document.querySelector('.diagram-lens');
-  assert.ok(dlg, 'clicking the expand control must open the lens dialog');
-  assert.equal(dlg.hasAttribute('open'), true, 'the lens dialog must actually be open after the expand control is clicked');
+  assert.ok(dlg, 'clicking the Pull-out must open the lens dialog');
+  assert.equal(dlg.hasAttribute('open'), true, 'the lens dialog must actually be open after the Pull-out is clicked');
   return {
     dlg,
     canvas: document.querySelector('.diagram-lens .lens-canvas'),
@@ -428,10 +428,10 @@ function anchorOnForm(document, blockId) {
   };
 }
 
-await check('a mermaid block carries an expand control, and clicking it opens a lens holding a CLONE of the diagram -- with fit and 1:1 controls', async () => {
+await check('the Pull-out on a mermaid block opens a lens holding a CLONE of the diagram -- with fit and 1:1 controls', async () => {
   const document = loadBoard(pageHtml, { mermaid: mockMermaid() });
   await flush(1);
-  assert.equal(document.querySelectorAll('.diagram-lens').length, 0, 'the lens must not exist before it is asked for -- it is built lazily on the first expand');
+  assert.equal(document.querySelectorAll('.diagram-lens').length, 0, 'the lens must not exist before it is asked for -- it is built lazily on the first open');
 
   const lens = openLens(document);
   assert.ok(lens.svg, 'the lens canvas must hold an SVG');
@@ -456,7 +456,7 @@ await check('a mermaid block carries an expand control, and clicking it opens a 
   assert.match(String(document.querySelector('.diagram-lens .lens-canvas').style.transform || ''), /^translate\(.*\) scale\(1\)$/);
 });
 
-await check('the expand control is the ONLY way in -- clicking the diagram itself never opens the lens, in either mode', async () => {
+await check('the Pull-out is the ONLY way in -- clicking the diagram itself never opens the lens, in either mode', async () => {
   // The click gesture on a diagram keeps its current
   // meaning in both modes. /explain's lens opens on a diagram click, and
   // copying that would have silently taken the comment gesture's click away.
@@ -635,7 +635,7 @@ await check('the dialog\'s own close event tears the lens down -- Esc must not s
   // lens.open stays true, lensReturnAdopted() never runs, the block's
   // .comment-form and .comment-target are left behind a now-hidden dialog with
   // a bare <span class="lens-slot"> standing where they belong -- and lensOpen's
-  // own 'if (l.open) return' re-entry guard then makes the expand control dead
+  // own 'if (l.open) return' re-entry guard then makes the Pull-out dead
   // for the rest of the page's life. Every other lens check drove the CLOSE
   // BUTTON, which calls lensTeardown directly and so passes either way.
   const document = loadBoard(pageHtml, { mermaid: mockMermaid() });
@@ -658,7 +658,7 @@ await check('the dialog\'s own close event tears the lens down -- Esc must not s
   // ...and the lens is genuinely reusable afterwards, which is the half the
   // re-entry guard would otherwise silently take away.
   const reopened = openLens(document);
-  assert.equal(reopened.dlg.hasAttribute('open'), true, 'the expand control must still open the lens after an Esc close');
+  assert.equal(reopened.dlg.hasAttribute('open'), true, 'the Pull-out must still open the lens after an Esc close');
   assert.ok(document.getElementById('comment-form-' + blockId).closest('.diagram-lens'),
     'and the form must be adopted again, exactly as on the first open');
 });
@@ -901,15 +901,12 @@ async function loadReadonlyBoard(html, mermaidMock) {
   return document;
 }
 
-await check('readonly: the expand control survives the hard-disable pass every other button gets, and still opens the lens', async () => {
+// That the Pull-out survives the readonly pass at all, for a diagram and a stage
+// alike, is test/check-stage-lens.mjs's archive row; this is the lens it opens.
+await check('readonly: the Pull-out opens the diagram lens in a standalone archive, with its fit and 1:1 view controls', async () => {
   const document = await loadReadonlyBoard(pageHtml, mockMermaid());
-  const btn = findExpandControl(document);
-  assert.ok(btn, 'the expand control must still be rendered in a standalone archive');
-  assert.equal(btn.disabled, false,
-    'readonly hard-disables every input-capable element; the expand control is the one deliberate exception, because pan and zoom must work in an archive');
-  // Every other button on the page still IS disabled -- so this is an exception,
-  // not a hole in the readonly pass.
-  assert.equal(document.querySelector('.comment-btn').disabled, true);
+  const btn = findPullOut(document);
+  assert.ok(btn, 'the Pull-out must still be rendered in a standalone archive');
 
   btn.dispatchEvent(new StandInEvent('click'));
   const dlg = document.querySelector('.diagram-lens');
@@ -924,7 +921,7 @@ await check('readonly: the expand control survives the hard-disable pass every o
 
 await check('readonly: clicking a node inside the lens comments on nothing, and the block\'s form is never moved in there at all', async () => {
   const document = await loadReadonlyBoard(pageHtml, mockMermaid());
-  findExpandControl(document).dispatchEvent(new StandInEvent('click'));
+  findPullOut(document).dispatchEvent(new StandInEvent('click'));
   const lensSvg = document.querySelector('.diagram-lens .lens-canvas svg');
   assert.ok(lensSvg, 'setup failure: the readonly lens did not render the diagram');
 
@@ -957,7 +954,7 @@ await check('readonly: an archived board still PINS its sent comments inside the
   const inlinePins = document.querySelector(`[data-block-id="${archivedBlockId}"]`).querySelectorAll('.stage-wrap .pin-layer .anchor-pin');
   assert.equal(inlinePins.length, 1, `an archived comment must be pinned on the inline diagram, got ${inlinePins.length}`);
   assert.equal(inlinePins[0].classList.contains('pin-lost'), false, 'and resolved against the live diagram, not lost');
-  findExpandControl(document).dispatchEvent(new StandInEvent('click'));
+  findPullOut(document).dispatchEvent(new StandInEvent('click'));
   const lensPins = document.querySelectorAll('.diagram-lens .lens-canvas .pin-layer .anchor-pin');
   assert.equal(lensPins.length, 1, `an archived comment must still be pinned inside the lens, got ${lensPins.length}`);
   assert.equal(lensPins[0].classList.contains('pin-pending'), false, 'a sent comment\'s pin is solid, not hollow');

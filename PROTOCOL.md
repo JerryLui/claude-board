@@ -1357,9 +1357,9 @@ from anything else that might postMessage this window (an extension, devtools, a
 | `ready` | — | listeners attached. Sent once, unconditionally, at the end of the agent script |
 | `hover` | `{ ref, tag, text }` | innermost element under the cursor, or `ref: null` on mouseout. The stage also applies its own outline locally |
 | `click` | `{ ref, tag, text }` | step path plus **raw** tag/text, never a composed hint |
-| `link` | `{ url }` | "the reviewer clicked this `http`/`https` address inside me". The board shows it and opens it only on a click of its own (ADR 113, and "Links inside a stage" below) |
+| `link` | `{ url }`, `{ top }` or `{ top, scrolled: true }` | `{ url }`: "the reviewer clicked this `http`/`https` address inside me", which the board opens in a new tab. `{ top }`, no `url`: "the reviewer clicked an in-page anchor I have nothing of my own to scroll to; its target sits this far down my viewport", which the board scrolls itself to. `{ top, scrolled: true }`: "I scrolled to an in-page anchor myself; its target now sits this far down my viewport", which the board scrolls to only if that spot is hidden: under its header, or within the same clearance of the window's bottom edge or past it (ADR 113 and 119, and "Links inside a stage" below) |
 | `positions` | `{ requestId, positions }` | response to `locate`: per requested ref, `{left, top}` in the frame's viewport coordinates (the element's own client rect), or `null` if the ref no longer resolves. Numbers and null only |
-| `height` | `{ height }` | `document.body.scrollHeight` |
+| `height` | `{ height }` | the height this whole document needs to show with no vertical scrollbar (see below) |
 | `scroll` | `{ top }` | "I am at this offset". Deduplicated on the last reported value |
 | `mermaid` | `{ requestId, sources, config }` | "draw these diagrams for me". Sent only by the engine facade a diagram-bearing stage is given, and **repeated under the same `requestId` until answered** (see below) |
 
@@ -1377,14 +1377,46 @@ why `composeHint` needs no third copy embedded here: only
 server-verdict-derived comment list (`commentsWithPending`), never to decide *whether* a pin
 exists.
 
-`height` is stage-authored like every other field, so the parent clamps it between
-`STAGE_HEIGHT_FLOOR` and `STAGE_HEIGHT_CAP` (320 / 600) before it touches a frame's inline
-style. The cap stops a hostile or viewport-sized report growing a card without limit; the floor
-stops a report that measured a collapsed sliver of chrome from locking the card there forever,
-since a taller report never arrives from content that is not reflowing. Applied only to a stage
-inside a `.choice-variant` card. What the cap hides is not lost: the same reported height is what
-tells the parent this stage has somewhere to scroll, which is what `scrollBy` below forwards a
-wheel notch for.
+`height` is measured by the stage, since the parent cannot reach its document: the largest of
+the root element's box (the body plus any margin collapsed through it), the root's
+`scrollHeight` once the document overflows the frame, and the body's own `scrollHeight`, plus
+the viewport's horizontal scrollbar when there is one, rounded up. The first report waits two
+animation frames for a real layout (a sandboxed `srcdoc` frame reads 0 before one), and a
+`ResizeObserver` on the body and the root reports every change after it. A new value is posted
+twice: at once, and again from a re-measure two frames later, so a height that holds arrives as
+two matching reports.
+
+It is stage-authored like every other field, so the parent (`handleStageHeight` and
+`applyStageHeight`, `src/ui.mjs`) drops a non-finite or non-positive value and caps the rest at
+`STAGE_TRAVEL_CAP` (30,000) before applying its own rules (ADR 119). They apply to every stage
+outside a page board: top level, in a compare side, in a question's context and in a variant
+option. A page board's stage keeps its full-window box and no report is applied to it (ADR 33).
+
+- **Placeholder.** Until its first report a stage holds 320px (`STAGE_HEIGHT_FLOOR`, the
+  `.html-stage` starting height). A board opened in a background tab gets no report until the
+  tab is shown.
+- **Fit.** The box is the report plus the frame's 2px border, never under 120px
+  (`STAGE_HEIGHT_MIN`). A box under 320 is believed only on two matching reports in a row: a
+  single sliver, measured before a mock that lays out from the viewport has built itself, holds
+  the box where it stood.
+- **Fold.** Past 600px (`STAGE_HEIGHT_CAP`) the box stays at 600, the mock scrolls inside its
+  frame, and the block carries `.stage-folded`, which shows the Show full height bar. It unfolds
+  only once the content falls 32px (`STAGE_FOLD_SLACK`) under the cap, so a mock breathing
+  around 600 does not flicker the bar. A variant option's stage clips at 600 instead and never
+  shows the bar: a click on its card picks it (ADR 22).
+- **Open.** Show full height sets `.stage-opened` and a one-time snapshot of the report, capped
+  at 30,000, which later reports never move: a mock sized in viewport units grows with its own
+  frame and would otherwise never stop. Show less folds it back to 600 and the latest report
+  applies again. A stage the server renders opened (one holding a stored comment, so its pins
+  are never under a fold) takes its first report past the cap as that snapshot; a first report
+  under the cap drops the mark and the stage fits.
+- **Pace.** At most one applied height per animation frame, however many reports arrive.
+  Growth applies at once; a shrink waits until the smaller box has held for 300ms
+  (`STAGE_SETTLE_MS`), and any growth in between cancels it.
+
+What the cap hides on a variant option is not lost: the same reported height is what tells the
+parent the stage has somewhere to scroll, which is what `scrollBy` below forwards a wheel notch
+for.
 
 `scroll` exists because ADR 40's page-board header condenses on the reader's scroll, but on a page
 board the document itself never scrolls — the artifact scrolls inside the opaque-origin frame — so
@@ -1394,7 +1426,7 @@ the parent cannot observe it short of being told.
 
 | type | payload | meaning |
 | --- | --- | --- |
-| `mode` | `{ commentMode }` | comment mode on/off. The stage keeps its own flag, read by the same `if (!commentMode) return;` guards the old in-parent listeners used |
+| `mode` | `{ commentMode, sentRefs?, theme? }` | comment mode on/off. The stage keeps its own flag, read by the same `if (!commentMode) return;` guards the old in-parent listeners used. `sentRefs` lists the block's `dom` refs already sent. `theme` is the board's theme resolved to `light` or `dark` (System included); see below |
 | `locate` | `{ requestId, refs }` | asks for the current `{left, top}` of every ref |
 | `band` | `{ top, bottom }` | the board's own chrome band, right now (ADR 59) |
 | `scroll` | `{ top }` | "put yourself at this offset" |
@@ -1418,12 +1450,43 @@ delta whichever unit the wheel reported, and it applies `behavior: 'auto'` — o
 already the reader's granularity.
 
 Forwarding a notch is not a hole in the rule above it: no pointer event reaches the stage, so
-this adds no path from a stage to its own selection, and the expand control (the lens) remains
-the only place a stage becomes genuinely live.
+this adds no path from a stage to its own selection, and the Lens, opened by the stage's
+Pull-out (ADR 120), remains the only place a variant's stage becomes genuinely live.
 
 The hover stylesheet is injected lazily, the first time `commentMode` turns true. A read-only
-archive never sends `mode` at all (`setCommentMode` refuses to enable comment mode when
+archive never sends `commentMode: true` (`setCommentMode` refuses to enable comment mode when
 `readonly`), so an archived stage's document never gains one.
+
+**The theme a stage is told.** `mode` goes to a stage when it announces `ready` and again on
+every theme change, an OS flip under System included, and `theme` is all the stage learns of the
+board's theme: it sets `data-theme` on its own root and nothing else, and any value but `light`
+or `dark` leaves the attribute as it was. A template that conditions its colors on `data-theme`
+follows the board that way, in a read-only archive too.
+
+The stage's `color-scheme` is not the board's to set. The artboard behind a stage (`--stage-bg`)
+is a light neutral in both palettes, `#c3c6cd` dark and `#e6e8ee` light, and both frames
+(`.html-stage`, `.stage-lens-frame`) declare `color-scheme: light`, so a mock that sets no color
+draws the browser's light-scheme defaults on it whatever the board's theme. Measured in Chrome on
+the dark artboard: black text 12.28:1, the `#0000ee` link blue 5.50:1, a text input 21:1 on its
+own white field, a button 18.26:1 on its own face. The frame's declaration and the document's
+scheme have to agree for the artboard to show at all: where they differ the browser paints the
+frame an opaque canvas of the document's scheme. So:
+
+- A frame left on the dark page's scheme with its document stamped dark as well draws white
+  default ink on the light artboard (1.71:1), and with its document left light draws an opaque
+  white canvas in place of the artboard.
+- A mock that declares `color-scheme: dark` on its own root, for a dark palette it paints under
+  `[data-theme="dark"]`, gets dark form controls and scrollbars, and the browser's dark canvas
+  wherever it paints no background.
+- `prefers-color-scheme` inside a stage follows the frame's declaration, so it reads light
+  whatever the board's theme or the OS.
+
+The Lens's copy is told the theme as well, parent to frame only. It is not a wired stage: its
+`ready` is never answered and no message from it is acted on. Once its document has loaded, and
+again on every theme change while the Lens is open, the board posts it one `mode` carrying
+`commentMode: false`, an empty `sentRefs` and the resolved `theme`, whatever the board's own
+comment mode. So the copy carries the same `data-theme` as the stage in its block, a template
+draws the same side of its palette in both, and the Lens stays view-only.
 
 `band` exists because the parent's header, dock and comment rail float **over** the frame rather
 than pushing it down, so an artifact that pads nothing loses its own opening under them. No fixed
@@ -1436,7 +1499,10 @@ negotiation.
 `locate` and `band` are both sent once a stage announces `ready`, and again whenever the parent's
 own refresh runs (resize, a comment queued, a submit landing, a round flip). `locate` alone
 additionally rides each `scroll` report from a stage that has pins to follow -- `band` is a fact
-about the board's own chrome, which a stage's scroll changes nothing about.
+about the board's own chrome, which a stage's scroll changes nothing about -- and every applied
+`height` and fold toggle, two animation frames after the new box is written, at most one ask per
+frame: a mock lays out against its own frame, so a new box moves a centred or bottom-docked
+element with no scroll or resize to re-ask on.
 
 ### Links inside a stage
 
@@ -1449,12 +1515,31 @@ whichever mode is on, and decides what happens instead (ADR 113):
 
 - **Comment mode on**: the click mints a comment anchor exactly as any other click does, and
   nothing else: it neither scrolls nor opens.
-- **`href="#id"`**: `scrollIntoView` on the target, inside the frame. The browser's own
-  algorithm is what walks the target's real scrolling ancestors, so an artifact whose
-  scrolling element is an inner pane (an app-shell layout, where the document itself never
-  scrolls) works with no second measurement. `scroll-margin-top` is set to the last `band`
-  the parent reported, so the target lands **below** the board's floating header rather than
-  under it. A fragment naming nothing scrolls nothing; the click is cancelled either way.
+- **`href="#id"`, a frame that can scroll to it**: the stage scrolls the boxes inside the frame
+  that can move the target (`frameScrollBoxes`: each ancestor of the target that is a scroll
+  box holding more than it shows, innermost first, then the frame's own viewport when the
+  document overflows it), each with its own `scrollTo`, so an artifact whose scrolling element
+  is an inner pane (an app-shell layout, where the document itself never scrolls) works too.
+  Each box puts the target the last `band` the parent reported below its visible top, so the
+  target lands **below** the board's floating header rather than under it. Never
+  `scrollIntoView`: Chrome carries a frame's scroll-into-view on into the board, through the
+  opaque-origin boundary, and the board would scroll as well, leaving the target under its
+  header. Then the stage posts `link` with `top`, where the target now sits in its own
+  viewport, and `scrolled: true`. Off a page board no `band` is sent, so that is the frame's own
+  top, and the reader may have scrolled the frame's top above the window or under the sticky
+  header, which the stage cannot see. Nor can it see the window's bottom edge: a frame that runs
+  out of scroll before the target reaches its top (a target near the document's end) leaves the
+  target lower in the frame, which may be below the window. The board can see both. It leaves
+  its window still when the target landed in the visible band, from `--head-clear` under the
+  window's top to the same clearance above its bottom (room for the target's first lines above
+  the sticky send bar), and otherwise moves once, bringing the target to `--head-clear` under
+  the top. A fragment naming nothing scrolls nothing and posts nothing; the click is cancelled
+  either way.
+- **`href="#id"`, a frame with nothing to scroll**: a stage that fits its content, or one
+  opened by Show full height, shows its whole document, so only the board scrolling can bring
+  the target into view (ADR 119). The stage decides which case it is in from its own geometry
+  (`frameScrollBoxes` finds no box), and here posts `link` with `top`, the target's top in its
+  own viewport, and does not scroll itself, so no second scroll races the board's.
 - **`http:`/`https:`**: posted as `link` above, read off the raw `href` attribute rather than
   the resolved `.href` property. Resolved, `#s1` reads as an ordinary http address (the base
   URL is the board's), and the in-page case would post the board's own URL.
@@ -1476,6 +1561,19 @@ new tab. It is a trust boundary like every other handler here:
   The callback token is a fixed literal, so a stage's own script can post a `link` with no
   reviewer gesture behind it; with no activation to spend, that one meets the blocker.
   `SECURITY.md`, "The one outbound path a stage has", carries the risk this accepts.
+
+A `link` with no `url` goes to `handleStageAnchor` instead, which scrolls the board and opens
+nothing. `top` must be a finite number, and is clamped to the frame's own box, so a stage can
+only bring a point inside itself to the top of the window, never send the board elsewhere.
+`scrolled` must be absent or exactly `true`; anything else moves nothing. The board scrolls
+smoothly until that point sits `--head-clear` (88px by default) under the window's top, the
+clearance every other scroll-to on the page uses, its offset rounded down so the point never
+lands a fraction under the header. With `scrolled: true` it does so only when the point sits
+outside the visible band: above `--head-clear`, or lower than `--head-clear` above the window's
+bottom edge (`window.innerHeight - --head-clear`, which covers a point past that edge too).
+Inside the band the board stays still, so the frame's move and the board's add up to one and
+neither box scrolls twice. A page board's stage is never acted on: it fills the window, and the
+page under it does not scroll.
 
 Stage to parent only: what a board does with an address is the board's decision, and a stage is
 never told the outcome.

@@ -2300,10 +2300,10 @@ check('a post carrying a question, or any second block, renders exactly as a boa
   assert.equal(body.className, '', 'an ordinary board carries no page-board class');
   assert.equal(resolveComputedProperty(styles, shell, true, 'max-width'), '1120px', 'the artifact is back in the column');
   assert.equal(resolveComputedProperty(styles, head, true, 'position'), 'sticky');
-  assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '', 'and the stage is back at its ordinary size');
-  assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '320px');
+  assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '320px', 'and the stage is back at its ordinary placeholder, to fit its content from its first report (ADR.md entry 119)');
+  assert.equal(resolveComputedProperty(styles, frame, true, 'min-height'), '', 'with no floor that would stop it fitting a short mock');
   assert.ok(document.querySelector('.html-block .block-kicker'), 'the kicker is back');
-  assert.ok(document.querySelector('.html-block .expand-btn'), 'and its lens is one click away');
+  assert.ok(document.querySelector('.html-block .pull-out'), 'and its lens is one click away');
   assert.ok(document.querySelector('.round-label'), 'and the round renders as an ordinary round');
   assert.notEqual(resolveComputedProperty(styles, sendBar, true, 'display'), 'none', 'and the send bar is live, since there is now something to answer');
 
@@ -2327,29 +2327,12 @@ check('a page board offers no way to send -- no Send, no Discuss, no unanswered 
   assert.equal(document.querySelectorAll('.round-open .question-block').length, 0, 'and there is nothing on the page to answer');
 });
 
-check('a page board carries no expand control, and every other stage still carries one', () => {
+// The page board's missing Pull-out, and every other placement's one, are rows
+// in test/check-stage-lens.mjs (ADR.md entry 120); this keeps the kicker half.
+check('criterion 25: a page board carries no comment button -- the click gesture inside the frame is the affordance', () => {
   const { document } = renderedPage(pageBoard());
-  assert.equal(document.querySelectorAll('.expand-btn').length, 0,
-    'the lens a page board would open is a copy of what already fills the viewport');
   assert.equal(document.querySelectorAll('.comment-btn').length, 0,
-    'and the kicker\'s comment button goes with it -- the click gesture inside the frame is the affordance here');
-
-  // every other stage that has one is unchanged: standalone in a column, and a
-  // variant option. (A question's context renders as prose with no kicker at
-  // all -- ADR.md entry 26, unrelated to this and untouched by it.)
-  const ordinary = parseHTML(renderBoardPage(createBoard({
-    title: 'every other stage',
-    blocks: [
-      { kind: 'html', html: PAGE_ARTIFACT },
-      {
-        kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
-        options: [{ label: 'A', block: { kind: 'html', html: PAGE_ARTIFACT } }],
-        context: [{ kind: 'html', html: PAGE_ARTIFACT }],
-      },
-    ],
-  })));
-  assert.equal(ordinary.querySelectorAll('.expand-btn').length, 2,
-    'the standalone stage and the variant option each keep their own expand control');
+    'the kicker\'s comment button goes with the kicker -- the click gesture inside the frame is the affordance here');
 });
 
 // --- src/resolve.mjs: content-by-reference resolution -----------------------------
@@ -3356,7 +3339,7 @@ check('a code block in a stage-carrying question\'s context renders through the 
 
 /** A rendered fragment with every minted id blanked, so two boards' markup can be
  * compared for structure without their (necessarily different) block ids. */
-const idBlind = html => html.replace(/(data-block-id|data-expand-for|data-note-for|data-defer-for|id|for)="[^"]*"/g, '$1="X"');
+const idBlind = html => html.replace(/(data-block-id|data-pull-out-for|data-note-for|data-defer-for|id|for)="[^"]*"/g, '$1="X"');
 
 const questionSection = markup => {
   const start = markup.indexOf('<section class="block question-block"');
@@ -3395,7 +3378,7 @@ check('several markdown context items render as ONE panel -- no per-item card, n
   assert.deepEqual(texts, ['First note.', 'Second note.', 'Third note.']);
 });
 
-check('markdown and a mermaid diagram render in that same one panel, and the diagram keeps its comment control AND its expand control', () => {
+check('AC 2: markdown and a mermaid diagram render in that same one panel, and the diagram keeps its comment control', () => {
   const board = createBoard({
     title: 'Note and diagram',
     blocks: [{
@@ -3409,7 +3392,6 @@ check('markdown and a mermaid diagram render in that same one panel, and the dia
       ],
     }],
   });
-  const mermaidId = board.blocks[0].context[1].id;
   const document = parseHTML(renderBoardPage(board));
   const panel = document.querySelector('.question-context');
   assert.ok(panel, 'setup failure: this fixture must take the panel path');
@@ -3420,13 +3402,12 @@ check('markdown and a mermaid diagram render in that same one panel, and the dia
   assert.ok(diagram, 'the diagram item wears .mermaid-block, which is what src/ui.mjs walks up to');
   assert.ok(diagram.querySelector('pre.mermaid'), 'and still emits the raw diagram source for the client to render');
 
-  // The controls the kicker used to carry, now in the item's own control group.
+  // The comment control the kicker used to carry, now in the item's own control
+  // group. Its way into the lens is the Pull-out in the frame's corner, a row of
+  // its own in test/check-stage-lens.mjs (ADR.md entry 120).
   const tools = diagram.querySelector('.context-tools');
   assert.ok(tools, 'the diagram carries a control group');
   assert.ok(tools.querySelector('.comment-btn'), 'its comment control (ADR.md entry 28)');
-  const expand = tools.querySelector('.expand-btn');
-  assert.ok(expand, 'and its expand control -- a diagram beside a question is half the column wide (ADR.md entry 110)');
-  assert.equal(expand.getAttribute('data-expand-for'), mermaidId, 'wired to the diagram\'s own block id');
 
   // The markdown item beside it carries neither: the rule is drawn on kind.
   const mdItem = document.querySelectorAll('.context-item')[0];
@@ -3778,7 +3759,7 @@ check('AC 4: the fold is PROSE ONLY -- a code excerpt, a diagram and a mock neve
   assert.ok(topLevel.querySelector('.code-block .code-row'), 'where it keeps the same scroll box');
 });
 
-check('AC 4: the fold control wears its own class and never .expand-btn, so a page counting lens controls never counts one', () => {
+check('AC 4: the fold control wears its own class and never .pull-out, so a page counting lens controls never counts one', () => {
   const board = questionWith([
     { kind: 'markdown', text: LONG_BY_LINES },
     { kind: 'mermaid', text: 'flowchart LR\n  A --> B' },
@@ -3787,10 +3768,10 @@ check('AC 4: the fold control wears its own class and never .expand-btn, so a pa
   const document = parseHTML(html);
   const control = document.querySelector('.fold-toggle');
   assert.ok(control, 'setup failure: this fixture must fold');
-  assert.equal(control.classList.contains('expand-btn'), false,
-    '.expand-btn is what the readonly and sent-round disable loops carve out by name and what the page-board checks count by string -- the fold gets its own class instead');
-  assert.equal(document.querySelectorAll('.expand-btn').length, 1,
-    'the diagram\'s lens control is still the only .expand-btn on the page');
+  assert.equal(control.classList.contains('pull-out'), false,
+    '.pull-out is what the readonly and sent-round disable loops carve out by name and what the page-board checks count by string -- the fold gets its own class instead');
+  assert.equal(document.querySelectorAll('.pull-out').length, 1,
+    'the diagram\'s Pull-out is still the only .pull-out on the page');
   assert.equal(control.tagName, 'BUTTON', 'a real button, so it is reachable by keyboard for free');
 });
 
@@ -5894,38 +5875,6 @@ check('choose-between-rendered-variants: an html-kind option carries the full-wi
     'src/styles.mjs must span an html-kind option across every grid column, not size it like the other columns');
 });
 
-check('choose-between-rendered-variants (fallback): a variant option\'s stage starts at the 320px floor, never shorter, and is clipped at 600px with no resize handle -- the floor must not cost a mock height while its report is still in flight or never arrives (ablation: drop the starting height in src/styles.mjs\'s .choice-variant .html-stage rule below 320px and this fails)', () => {
-  // Real Chrome measurement (see this feature's own entry in QUIRKS.md and
-  // src/render.mjs's "WHEN this runs" comment): a stage's first accurate
-  // report is necessarily deferred past this document's own first layout
-  // pass, which can in principle be late, or -- on a browser old enough to
-  // lack requestAnimationFrame, or a mock whose script throws before it ever
-  // reports -- never arrive at all. An earlier cut of this rule shipped a
-  // 200px starting height, which is 120px SHORTER than the fixed floor this
-  // whole feature exists to improve on: worse than before, for as long (or,
-  // in the never-arrives case, as often) as that gap lasts. The stand-in has
-  // no layout (QUIRKS.md), but its cascade resolves the declared values on the
-  // rendered stage, so an override anywhere in the sheet counts as well as the
-  // rule's own text. min-height 0 is the half that undoes the ordinary stage's
-  // 320px min-height, so the clamp in handleStageHeight is what sizes the card.
-  const board = createBoard({
-    title: 'variants',
-    blocks: [{
-      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
-      options: [{ label: 'A', block: { kind: 'html', html: '<p>mock</p>' } }],
-    }],
-  });
-  const frame = parseHTML(renderBoardPage(board)).querySelector('.choice-variant .html-stage');
-  assert.ok(frame, 'setup failure: no variant option stage rendered');
-  const computed = prop => resolveComputedProperty(styles, frame, false, prop).trim();
-  assert.equal(computed('height'), '320px',
-    'a variant option\'s stage must start as tall as the 320px floor it replaces, not the old 200px placeholder');
-  assert.equal(computed('min-height'), '0', 'and must not keep the ordinary stage\'s own min-height under it');
-  assert.equal(computed('max-height'), '600px', 'the stylesheet backstop beside STAGE_HEIGHT_CAP');
-  assert.equal(computed('resize'), 'none', 'a variant card sizes from its report, never from a drag handle');
-  assert.equal(computed('overflow'), 'hidden', 'what the cap hides is reached by the wheel, not by a second scrollbar');
-});
-
 /** Stub the ONE entry point a real browser actually uses for a stage's first
  * height report -- requestAnimationFrame, called twice in a row
  * (stageAgentScript's reportHeightAfterLayout) -- rather than driving the
@@ -5967,68 +5916,6 @@ function withCapturedRAF(fn) {
   }
 }
 
-check('choose-between-rendered-variants: a variant option\'s stage grows to the height it reports, floored at the 320px placeholder and capped at 600px -- never below the floor, never past the cap, and never before its own rendering opportunity (ablation 1: change handleStageHeight\'s Math.min(data.height, STAGE_HEIGHT_CAP) to just data.height and the "taller than the cap" assertion fails; ablation 2: drop the Math.max(STAGE_HEIGHT_FLOOR, ...) wrapper and the "collapsed report floors" assertion fails; ablation 3: change reportHeightAfterLayout\'s body back to a bare reportHeight() call and the "not yet applied" assertion fails)', () => {
-  const board = createBoard({
-    title: 'variants',
-    blocks: [{
-      kind: 'question', prompt: 'Which?', widget: 'choose-between-rendered-variants',
-      options: [
-        // dom-stand-in.mjs models scrollHeight as exactly one fact: whatever a
-        // fixture declares via data-standin-scroll-height, once the node is
-        // connected (QUIRKS.md "The stand-in has no layout"). An explicit
-        // top-level <body> in a mock's own html is honoured as given by
-        // parseHTML, so the declared attribute lands on the same node
-        // stageAgentScript's reportHeight() reads (document.body.scrollHeight).
-        { label: 'Collapsed', block: { kind: 'html', html: '<body data-standin-scroll-height="180"><p>collapsed mock</p></body>' } },
-        { label: 'Tall', block: { kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' } },
-      ],
-    }],
-  });
-  const document = loadVariantBoard(board);
-  const frames = document.querySelectorAll('.html-stage');
-  assert.equal(frames.length, 2, 'setup failure: expected two rendered stages');
-
-  withCapturedRAF((drain) => {
-    frames.forEach(f => f.loadSrcdoc());
-    // The measured-in-real-Chrome property itself: nothing is applied yet,
-    // because nothing has told this document its rendering opportunity has
-    // happened. This is the assertion that fails against the ORIGINAL bug
-    // (a synchronous reportHeight() call, which always reads 0 pre-layout in
-    // a real browser but would read the fixture's declared value HERE,
-    // immediately, since the stand-in's declared scrollHeight has no notion
-    // of "before" or "after" layout at all).
-    assert.ok(!frames[0].style.height, 'a height report must not be applied before this document\'s own rendering opportunity');
-    assert.ok(!frames[1].style.height, 'a height report must not be applied before this document\'s own rendering opportunity');
-    drain(); // a real browser: waits for the actual rendering opportunity, then runs the queued (nested) rAF callbacks
-  });
-
-  // A stage that measures itself from the viewport can report a
-  // collapsed height (here, 180 -- shorter than the 320px placeholder) that
-  // never grows again. Before the floor, this locked the card at 180px
-  // forever; now it renders at the placeholder instead.
-  assert.equal(frames[0].style.height, '320px',
-    'a mock that reports a collapsed height (below the 320px placeholder) must floor there, never lock the card at the collapsed height it actually reported');
-  assert.equal(frames[1].style.height, '600px',
-    'a mock taller than the cap must be clipped there, not at its full reported height (4000px)');
-});
-
-check('choose-between-rendered-variants (scope): a standalone html stage on an ordinary board never takes its reported height -- the existing floor/resize stays untouched, this feature is variant-option-only (ablation: delete handleStageHeight\'s frame.closest(\'.choice-variant\') gate and this fails, because the report would then apply everywhere)', () => {
-  // The markdown block is what makes this an ordinary board: an html block alone
-  // is a page board (isPageBoard), whose constant-100vh frame is
-  // test/check-page-board.mjs's own case.
-  const board = createBoard({
-    title: 'standalone',
-    blocks: [
-      { kind: 'html', html: '<body data-standin-scroll-height="4000"><p>tall mock</p></body>' },
-      { kind: 'markdown', text: 'not a page board' },
-    ],
-  });
-  const document = loadVariantBoard(board);
-  const frame = document.querySelector('.html-stage');
-  withCapturedRAF((drain) => { frame.loadSrcdoc(); drain(); });
-  assert.ok(!frame.style.height, 'a standalone stage sends the same \'height\' message every html stage does (stageAgentScript cannot tell which kind of card it is in) -- the parent must decline to apply it outside a .choice-variant card');
-});
-
 check('choose-between-rendered-variants: a mock the cap CLIPS scrolls under the wheel, in place -- the notch is forwarded to the stage, chains back to the page at both ends, and never reaches an unclipped card (ablation 1: drop forwardStageWheel\'s "travel <= 0" gate and the short mock\'s notch is consumed; ablation 2: drop either chaining guard and the notch stops going back to the page at that end; ablation 3: delete the stage\'s \'scrollBy\' branch and nothing moves at all)', () => {
   // The gap this closes: an option's stage is 'pointer-events: none' (ADR.md
   // entry 78, and this must not relax it), so a wheel over the mock lands on
@@ -6056,7 +5943,7 @@ check('choose-between-rendered-variants: a mock the cap CLIPS scrolls under the 
   const frames = document.querySelectorAll('.html-stage');
   withCapturedRAF((drain) => { frames.forEach(f => f.loadSrcdoc()); drain(); });
   assert.equal(frames[0].style.height, '600px', 'setup failure: the tall mock must be the clipped one');
-  assert.equal(frames[1].style.height, '400px', 'setup failure: the short mock must not be clipped');
+  assert.equal(frames[1].style.height, '402px', 'setup failure: the short mock must not be clipped (its 400px, plus the frame\'s own 1px border top and bottom)');
 
   // Captured, not performed: the stand-in lays nothing out, so this stands in
   // for the stage document actually moving -- and it is the real
@@ -8125,12 +8012,16 @@ check('the sandboxed stage stylesheet is exempt from the raw-literal rule, and t
     // The legibility half, and it is not implied by the outline bar
     // below: a near-black surface would leave the mid-blue outline at ~3.16:1
     // (passing) while rendering a mock that paints no background invisible.
-    // Such a mock sets no color either, so its text is the UA's black -- which
-    // is the whole reason both artboards are light neutrals rather than one
-    // light and one dark.
-    const inkRatio = contrast('#000000', stageBg);
-    assert.ok(inkRatio >= 4.5,
-      `the ${themeName} palette's stage surface ${stageBg} leaves the UA's default BLACK text at ${inkRatio.toFixed(2)}:1 -- under the 4.5:1 body-text bar. A mock that paints no background of its own also sets no color, so that is exactly what it renders in; the stage surface has to stay light enough to read it in BOTH palettes (src/styles.mjs's --stage-bg comments)`);
+    // Such a mock sets no color either, so it draws the UA's default ink, and
+    // the stage's frame is 'color-scheme: light' in both themes, so that ink
+    // is the light scheme's whatever the board's theme: black text and the
+    // #0000ee link blue, the tighter of the two. Which is the whole reason
+    // both artboards are light neutrals rather than one light and one dark.
+    for (const [inkName, ink] of [['BLACK text', '#000000'], ['link blue', '#0000ee']]) {
+      const inkRatio = contrast(ink, stageBg);
+      assert.ok(inkRatio >= 4.5,
+        `the ${themeName} palette's stage surface ${stageBg} leaves the UA's default ${inkName} (${ink}) at ${inkRatio.toFixed(2)}:1 -- under the 4.5:1 body-text bar. A mock that paints no background of its own also sets no color, so that is exactly what it renders in; the stage surface has to stay light enough to read it in BOTH palettes (src/styles.mjs's --stage-bg comments)`);
+    }
 
     const ratio = contrast(STAGE_ACCENT_HEX, stageBg);
     assert.ok(ratio >= 3,

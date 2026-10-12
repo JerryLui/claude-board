@@ -37,10 +37,10 @@ import { fileURLToPath } from 'node:url';
 import { createBoard, applySubmit } from '../src/board.mjs';
 import { renderBoardPage, CSP, STAGE_MARGIN_RESET } from '../src/render.mjs';
 import { styles } from '../src/styles.mjs';
-import { StandInEvent, resolveComputedProperty } from './dom-stand-in.mjs';
+import { StandInEvent, resolveComputedProperty, withFrameClock } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
 
-const { loadBoard, enableCommentMode } = await pageHarness();
+const { loadBoard, enableCommentMode, clickThemeToggle } = await pageHarness();
 
 // =================================================================================
 // 1. The rendered sandbox attribute never carries allow-same-origin.
@@ -476,72 +476,628 @@ function variantsBoard(mocks) {
   });
 }
 
-check('A forged "height" message from a live, correctly-addressed stage is clamped between the floor and the cap, never applied as reported outside that range, and a malformed one is silently ignored', () => {
+// =================================================================================
+// Stage sizing (ADR.md entry 119): every stage outside a page board fits the
+// height it reports up to 600px and folds past it; the Show full height bar opens
+// it in place. Driven through the real stageAgentScript where a measurement is
+// the point, and through forged reports where the rule is: the stand-in has no
+// layout, so a mock "is" whatever height its fixture declares (QUIRKS.md
+// "scrollHeight and clientHeight model exactly one fact"), and the clock is
+// turned by hand (withFrameClock).
+// =================================================================================
+
+// '.html-stage' draws a 1px border top and bottom and '* { box-sizing:
+// border-box; }' counts it inside the height, so a box that shows N pixels of
+// mock with no inner scrollbar is N + 2 tall.
+const FRAME_EDGE = 2;
+
+/** One mock, rendered in the two places a stage stands outside a variant card:
+ * as a top-level block and inside a question's context. Two blocks, so the board
+ * is not a page board. */
+function placements(html) {
+  const board = createBoard({
+    title: 'stage sizing',
+    blocks: [
+      { kind: 'html', html },
+      { kind: 'question', prompt: 'Which?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }], context: [{ kind: 'html', html }] },
+    ],
+  });
+  const document = loadBoard(renderBoardPage(board));
+  const top = document.querySelector('section.html-block .html-stage');
+  const context = document.querySelector('.context-item.html-block .html-stage');
+  assert.ok(top && context, 'setup failure: expected a top-level stage and a question-context stage');
+  return { document, top, context };
+}
+
+function forgeStageHeight(document, frame, height) {
+  document.defaultView.dispatchEvent({
+    type: 'message',
+    data: { cb: 'cb-stage', type: 'height', height },
+    origin: 'null',
+    source: frame.contentWindow,
+  });
+}
+
+function blockOf(frame) { return frame.closest('.html-block'); }
+function barOf(frame) { return blockOf(frame).querySelector('.stage-fold'); }
+function toggleOf(frame) { return blockOf(frame).querySelector('.stage-fold-toggle'); }
+function barShown(frame) { return resolveComputedProperty(styles, barOf(frame), true, 'display') !== 'none'; }
+
+check('A forged "height" message from a live, correctly-addressed stage is clamped at the cap, never applied as reported past it, and a malformed one is silently ignored', () => {
   const board = variantsBoard(['<div class="mock"><button>A</button></div>']);
   const document = loadBoard(renderBoardPage(board));
   const frame = document.querySelector('.html-stage');
-  // The real stageAgentScript already reports once here, over the real
-  // channel -- this mock declares no data-standin-scroll-height, so the
-  // stand-in reports its (undeclared) scrollHeight as 0 and the parent's own
-  // shape check (data.height <= 0) drops it, leaving frame.style.height unset.
-  // That is the baseline every assertion below moves from.
+  // Loaded before the clock is installed, so the real stageAgentScript books
+  // no animation frame and reports nothing of its own: every height below is
+  // one this check forged, which is the baseline every assertion moves from.
   frame.loadSrcdoc();
-  assert.ok(!frame.style.height, 'setup failure: the real, unrelated initial report should not have set a height');
+  assert.ok(!frame.style.height, 'setup failure: no height should be applied before any report');
 
-  function forgeHeight(fields) {
-    document.defaultView.dispatchEvent({
-      type: 'message',
-      data: { cb: 'cb-stage', type: 'height', ...fields },
-      origin: 'null',
-      source: frame.contentWindow,
-    });
+  withFrameClock((clock) => {
+    function forgeHeight(fields) {
+      document.defaultView.dispatchEvent({
+        type: 'message',
+        data: { cb: 'cb-stage', type: 'height', ...fields },
+        origin: 'null',
+        source: frame.contentWindow,
+      });
+      clock.frames();
+    }
+
+    // A hostile, oversized report -- exactly what the stage's own script could
+    // post directly (this file's header comment: 'cb: cb-stage' is a fixed,
+    // public string, and origin/identity both pass BY CONSTRUCTION for a
+    // message a stage forges about itself). Unclamped, a single option's card
+    // could grow without limit and push every other option -- and the board's
+    // own chrome -- off screen. Ablation: change applyStageHeight's fold
+    // branch to take the reported height instead of STAGE_HEIGHT_CAP and this
+    // fails.
+    forgeHeight({ height: 999999 });
+    assert.equal(frame.style.height, '600px', 'a hostile oversized height report must be clamped at the cap, never applied as reported');
+
+    // Every shape a hostile or malformed report could take -- none may move the
+    // frame off the clamped baseline the line above just set, however long it
+    // is left to settle. Ablation: loosen handleStageHeight's guard from
+    // '!Number.isFinite(data.height) || data.height <= 0' to just
+    // '!data.height' and the zero/NaN/Infinity cases below still pass, but
+    // weakening it further (e.g. dropping the sign check entirely) makes the
+    // negative case fail.
+    const hostile = [
+      { height: -600 },       // negative
+      { height: 0 },          // zero -- rejected, not "shrink to nothing"
+      { height: Infinity },   // not finite
+      { height: NaN },        // not finite
+      { height: '600' },      // string, even one that would coerce usefully
+      {},                     // no height field at all
+    ];
+    for (const fields of hostile) {
+      forgeHeight(fields);
+      clock.elapse(5000);
+      clock.frames();
+      assert.equal(frame.style.height, '600px', `a malformed height report must be ignored, not applied: ${JSON.stringify(fields)}`);
+    }
+
+    // Sanity: a genuine, well-formed report under the cap still applies right
+    // after a batch of hostile ones was refused -- the validation is a range
+    // filter, not a latch that got stuck at the edge once it saw something
+    // outside it.
+    forgeHeight({ height: 450 });
+    clock.elapse(5000);
+    clock.frames();
+    assert.equal(frame.style.height, `${450 + FRAME_EDGE}px`, 'a genuine height report under the cap must still apply after other reports were refused');
+  });
+});
+
+check('stage sizing: a stage outside a variant card fits the height its own document reports, top-level and in a question\'s context alike, and not before its first layout (ablation 1: put back handleStageHeight\'s "if (!frame.closest(\'.choice-variant\')) return;" and both stay at the placeholder; ablation 2: make reportHeightAfterLayout call reportHeight() straight away and a height lands on the first frame)', () => {
+  const { top, context } = placements('<body data-standin-scroll-height="450"><p>a short mock</p></body>');
+  withFrameClock((clock) => {
+    top.loadSrcdoc();
+    context.loadSrcdoc();
+    // A srcdoc frame's own script measures 0 until its document has been
+    // through a layout pass, which the first animation frame does not promise
+    // (QUIRKS.md "A sandboxed srcdoc frame's own script runs before its first
+    // layout"): the measurement waits for the second.
+    clock.frame();
+    assert.ok(!top.style.height && !context.style.height,
+      'nothing may apply before the stage has had its own first layout');
+    clock.frames();
+  });
+  assert.equal(top.style.height, `${450 + FRAME_EDGE}px`, 'a top-level stage must take its content height');
+  assert.equal(context.style.height, `${450 + FRAME_EDGE}px`, 'a question-context stage must take its content height too');
+  assert.equal(barShown(top), false, 'a stage that fits shows no Show full height bar');
+  assert.equal(barShown(context), false);
+});
+
+check('stage sizing: every stage holds the 320px placeholder until its first report -- top-level, in a question\'s context and in a variant option -- and none carries the drag grip (ablation: put "resize: vertical" back on .html-stage, or drop its "height: 320px")', () => {
+  const { document, top, context } = placements('<p>a mock</p>');
+  const variants = loadBoard(renderBoardPage(variantsBoard(['<p>a mock</p>'])));
+  const variant = variants.querySelector('.choice-variant .html-stage');
+  for (const [where, frame] of [['top-level', top], ['context', context], ['variant', variant]]) {
+    assert.equal(resolveComputedProperty(styles, frame, true, 'height'), '320px', `${where}: the placeholder must be 320px, never lower`);
+    assert.ok(!frame.style.height, `${where}: and nothing inline before a report`);
+    assert.ok(['', 'none'].includes(resolveComputedProperty(styles, frame, true, 'resize')),
+      `${where}: no stage carries a drag grip -- a stage the reader can drag is a stage whose height is no longer its content's`);
   }
+  assert.equal(document.querySelectorAll('.stage-fold').length, 2, 'setup failure: both placements carry the Show full height bar');
+});
 
-  // A hostile, oversized report -- exactly what the stage's own script could
-  // post directly (this file's header comment: 'cb: cb-stage' is a fixed,
-  // public string, and origin/identity both pass BY CONSTRUCTION for a
-  // message a stage forges about itself). Unclamped, a single option's card
-  // could grow without limit and push every other option -- and the board's
-  // own chrome -- off screen. Ablation: change handleStageHeight's
-  // 'Math.min(data.height, STAGE_HEIGHT_CAP)' to just 'data.height' and this
-  // fails.
-  forgeHeight({ height: 999999 });
-  assert.equal(frame.style.height, '600px', 'a hostile oversized height report must be clamped at the cap, never applied as reported');
+check('stage sizing: a stage goes under 320px only on two matching reports, and never under 120px (ablation 1: drop the __cbStageMatched test in applyStageHeight and a lone sliver shrinks the stage; ablation 2: drop STAGE_HEIGHT_MIN and a matched sliver lands at its own height)', () => {
+  // The real stage, settling short: stageAgentScript posts a new height twice,
+  // one full rendering update apart, so a mock that IS short says so twice.
+  const { top } = placements('<body data-standin-scroll-height="150"><p>a short mock</p></body>');
+  withFrameClock((clock) => {
+    top.loadSrcdoc();
+    clock.frames();
+    assert.ok(!top.style.height, 'a shrink waits out the settle delay, even a confirmed one');
+    clock.elapse(5000);
+    clock.frames();
+  });
+  assert.equal(top.style.height, `${150 + FRAME_EDGE}px`, 'a short mock that reports the same height twice fits it');
 
-  // Every shape a hostile or malformed report could take -- none may move the
-  // frame off the clamped baseline the line above just set. Same discipline
-  // as this file's own 'hostilePayloads' table further up. Ablation: loosen
-  // handleStageHeight's guard from '!Number.isFinite(data.height) ||
-  // data.height <= 0' to just '!data.height' and the zero/NaN/Infinity cases
-  // below still pass, but weakening it further (e.g. dropping the sign check
-  // entirely) makes the negative case fail.
-  const hostile = [
-    { height: -600 },       // negative
-    { height: 0 },          // zero -- rejected, not "shrink to nothing"
-    { height: Infinity },   // not finite
-    { height: NaN },        // not finite
-    { height: '600' },      // string, even one that would coerce usefully
-    {},                     // no height field at all
+  // Forged, to take the two reports apart.
+  const { document, context } = placements('<p>a mock</p>');
+  context.loadSrcdoc();
+  withFrameClock((clock) => {
+    const report = (h) => { forgeStageHeight(document, context, h); clock.frames(); clock.elapse(5000); clock.frames(); };
+    report(150);
+    assert.ok(!context.style.height, 'one report under 320px moves nothing: a mock laid out from the viewport reports a sliver');
+    report(40);
+    assert.ok(!context.style.height, 'nor does a different one after it -- two reports have to MATCH');
+    report(40);
+    assert.equal(context.style.height, '120px', 'two matching slivers shrink it, but never under the 120px floor');
+    report(150);
+    assert.equal(context.style.height, `${150 + FRAME_EDGE}px`, 'growth needs no second report');
+    report(60);
+    assert.equal(context.style.height, `${150 + FRAME_EDGE}px`, 'and a lone smaller report under 320px still moves nothing');
+  });
+});
+
+check('stage sizing: past 600px a stage folds -- 600px tall, scrolling inside, with the Show full height bar under the frame -- top-level and in a question\'s context alike (ablation: give the fold branch of applyStageHeight a null state and no bar shows)', () => {
+  const { top, context } = placements('<body data-standin-scroll-height="4000"><p>a tall mock</p></body>');
+  withFrameClock((clock) => {
+    top.loadSrcdoc();
+    context.loadSrcdoc();
+    clock.frames();
+  });
+  for (const [where, frame] of [['top-level', top], ['context', context]]) {
+    assert.equal(frame.style.height, '600px', `${where}: a stage taller than the cap stands at the cap`);
+    assert.equal(blockOf(frame).classList.contains('stage-folded'), true, `${where}: and is marked folded`);
+    assert.equal(barShown(frame), true, `${where}: the Show full height bar shows under the frame`);
+    const siblings = barOf(frame).parentElement.children;
+    assert.equal(siblings[siblings.indexOf(barOf(frame)) - 1], frame.parentElement, `${where}: the bar sits right under the stage's own frame`);
+    assert.equal(toggleOf(frame).textContent, 'Show full height');
+    assert.equal(toggleOf(frame).getAttribute('aria-expanded'), 'false');
+    assert.equal(frame.hasAttribute('scrolling'), false, `${where}: nothing stops the folded mock scrolling inside its frame, either way`);
+  }
+});
+
+check('stage sizing: Show full height opens a folded stage in place to a one-time snapshot of its height, capped at 30,000px, and Show less folds it back to 600px (ablation: drop the snapshot test at the top of applyStageHeight and a later report moves an opened stage)', () => {
+  const { document, top, context } = placements('<body data-standin-scroll-height="4000"><p>a tall mock</p></body>');
+  // Loaded with no clock installed, so it reports nothing of its own and the
+  // forged claim further down is the only height it ever has.
+  context.loadSrcdoc();
+  withFrameClock((clock) => {
+    top.loadSrcdoc();
+    clock.frames();
+    toggleOf(top).dispatchEvent(new StandInEvent('click'));
+    assert.equal(top.style.height, `${4000 + FRAME_EDGE}px`, 'opened, the stage shows its whole reported height');
+    assert.equal(blockOf(top).classList.contains('stage-opened'), true);
+    assert.equal(blockOf(top).classList.contains('stage-folded'), false);
+    assert.equal(barShown(top), true, 'the bar stays, to fold it back');
+    assert.equal(toggleOf(top).textContent, 'Show less');
+    assert.equal(toggleOf(top).getAttribute('aria-expanded'), 'true');
+
+    // A mock sized in viewport units grows with its own frame: opened at 4002,
+    // it reports more, and would again at whatever it was given next.
+    forgeStageHeight(document, top, 12000);
+    clock.frames();
+    clock.elapse(5000);
+    clock.frames();
+    assert.equal(top.style.height, `${4000 + FRAME_EDGE}px`, 'an opened stage takes its height once, on open, and never follows its frame');
+
+    toggleOf(top).dispatchEvent(new StandInEvent('click'));
+    assert.equal(top.style.height, '600px', 'Show less folds it back to the cap');
+    assert.equal(blockOf(top).classList.contains('stage-folded'), true);
+    assert.equal(toggleOf(top).textContent, 'Show full height');
+
+    // The cap on an open: the report is the stage's own claim.
+    forgeStageHeight(document, context, 999999);
+    clock.frames();
+    toggleOf(context).dispatchEvent(new StandInEvent('click'));
+    assert.equal(context.style.height, '30000px', 'an open never takes more than 30,000px, whatever the stage claims');
+  });
+});
+
+// A folded stage as a browser lays it out: the 600px frame, and under it the
+// bar the reader pressed, 6px down ('.stage-fold' margin-top) and 28px tall.
+const FOLDED_BAR_BOTTOM = 600 + 6 + 28;
+
+/** Where the board's bottom chrome stands in a window `innerHeight` tall: the
+ * sticky send bar stuck to the window's bottom edge, the questions-left pill
+ * floating over it, the round pager's dock fixed just above the edge. */
+function bottomChromeTops(innerHeight) {
+  return { sendBar: innerHeight - 77, pill: innerHeight - 123, dock: innerHeight - 70 };
+}
+
+/** Declares that chrome the way a browser would measure it. One the page is
+ * not `showing` has no box, as 'display: none' leaves it; the pill sits inside
+ * the send bar and has a box only while it also carries 'visible', the one
+ * class that turns its display on. */
+function declareBottomChrome(document, innerHeight, showing) {
+  const tops = bottomChromeTops(innerHeight);
+  const none = rectAt(0, 0);
+  const pill = document.querySelector('.questions-left-pill');
+  const pillBox = rectAt(tops.pill, 34);
+  const withSendBar = showing.includes('send bar');
+  document.querySelector('.send-bar').getBoundingClientRect = withSendBar ? rectAt(tops.sendBar, 77) : none;
+  document.querySelector('.round-pager-dock').getBoundingClientRect = showing.includes('dock') ? rectAt(tops.dock, 54) : none;
+  pill.getBoundingClientRect = () => (withSendBar && pill.classList.contains('visible') ? pillBox() : none());
+  return tops;
+}
+
+/** Show less, pressed on an opened stage over a board 5000px down. The
+ * stand-in lays nothing out, so where the frame's top stands once its box is
+ * back at 600px, and where the bar and the bottom chrome stand with it, is
+ * declared, the way a browser would measure it. `pill` is the questions-left
+ * pill at the press: 'showing'; 'hidden by the rail', as the round's closing
+ * rail on screen leaves it with a question still open; or 'none left', the
+ * round's one question answered. `frameTop` may be a function of the page's
+ * --head-clear. Returns the board scrolls the press asked for, with that
+ * clearance and the frame top it declared. */
+function pressShowLess({ innerHeight, frameTop: declared, showing = ['send bar', 'dock'], pill = 'showing' }) {
+  const { document, top: frame } = placements('<body data-standin-scroll-height="4000"><p>a tall mock</p></body>');
+  const clear = headClear(document);
+  const frameTop = typeof declared === 'function' ? declared(clear) : declared;
+  const pillEl = document.querySelector('.questions-left-pill');
+  let scrolls;
+  withFrameClock((clock) => {
+    frame.loadSrcdoc();
+    clock.frames();
+    toggleOf(frame).dispatchEvent(new StandInEvent('click'));
+    assert.equal(blockOf(frame).classList.contains('stage-opened'), true, 'setup failure: Show full height opens a 4000px mock');
+    if (pill === 'none left') {
+      document.querySelector('.round-open .question-block .choice-single').dispatchEvent(new StandInEvent('click'));
+    }
+    assert.equal(pillEl.classList.contains('visible'), pill !== 'none left',
+      'setup failure: the pill shows exactly while the round has a question left');
+    if (pill === 'hidden by the rail') pillEl.classList.remove('visible');
+    const pillShown = pillEl.classList.contains('visible');
+    frame.getBoundingClientRect = rectAt(frameTop, 600);
+    toggleOf(frame).getBoundingClientRect = rectAt(frameTop + FOLDED_BAR_BOTTOM - 28, 28);
+    declareBottomChrome(document, innerHeight, showing);
+    scrolls = stubWindowScroll(document, 5000, innerHeight);
+
+    toggleOf(frame).dispatchEvent(new StandInEvent('click'));
+    clock.frames();
+
+    assert.equal(frame.style.height, '600px', 'setup failure: Show less folds the stage back to the cap');
+    assert.equal(toggleOf(frame).scrollIntoViewCallCount, 0,
+      'the bar itself is never scrolled to, which is what left it at the window\'s top edge, under the header');
+    assert.equal(pillEl.classList.contains('visible'), pillShown, 'measuring the pill leaves it shown or hidden as the page had it');
+  });
+  return { scrolls, clear, frameTop };
+}
+
+check('stage sizing: Show less keeps the folded stage in view: in a window that shows the folded frame and its bar together, a frame whose top the fold left above --head-clear (above the window, or under the sticky header) is brought down to it by one board scroll, rounded down, and a top already clear with its bar in sight leaves the board still (falsify: put the bar\'s scrollIntoView back in toggleStageFold; or drop the top test in keepFoldedStageInView and a clear stage moves)', () => {
+  // A 900px window, the send bar, the pill and the dock all showing: the bar
+  // under a frame standing at the clearance ends above all three.
+  const rows = [
+    { frameTop: -1450, board: clear => [[{ top: 5000 - 1450 - clear }]], what: 'above the window' },
+    { frameTop: -606.3, board: clear => [[{ top: Math.floor(5000 - 606.3 - clear) }]], what: 'above the window, on a fraction of a pixel' },
+    { frameTop: 40, board: clear => [[{ top: 5000 + 40 - clear }]], what: 'under the sticky header' },
+    { frameTop: clear => clear, board: () => [], what: 'exactly at the clearance' },
+    { frameTop: 120, board: () => [], what: 'below the header, its bar above the bottom chrome' },
   ];
-  for (const fields of hostile) {
-    forgeHeight(fields);
-    assert.equal(frame.style.height, '600px', `a malformed height report must be ignored, not applied: ${JSON.stringify(fields)}`);
+  for (const row of rows) {
+    const { scrolls, clear, frameTop } = pressShowLess({ innerHeight: 900, frameTop: row.frameTop });
+    assert.ok(Math.max(frameTop, clear) + FOLDED_BAR_BOTTOM <= bottomChromeTops(900).pill,
+      'setup failure: this window does not show the folded frame and its bar together');
+    assert.deepEqual(scrolls, row.board(clear),
+      `folded frame top ${frameTop}px down the window (${row.what}): the board moves only when the frame's top is above --head-clear (${clear}px), once, bringing that top down to it`);
   }
+});
 
-  // A stage that sizes itself from the viewport rather than its own
-  // content can report a collapsed height that never grows again -- a
-  // sliver of label, nothing else. Unfloored, that report would lock the
-  // card there permanently. Ablation: drop handleStageHeight's
-  // Math.max(STAGE_HEIGHT_FLOOR, ...) wrapper and this fails.
-  forgeHeight({ height: 40 });
-  assert.equal(frame.style.height, '320px', 'a collapsed height report must floor at the 320px placeholder, never lock the card at the collapsed height it actually reported');
+check('stage sizing: Show less keeps the bar the reader pressed in sight before the folded frame\'s top: in a window too short for both, one board scroll lands the bar\'s bottom on the top edge of the highest bottom chrome showing (the send bar, the questions-left pill, the pager dock; none: the window\'s bottom), rounded up, the frame\'s top left above --head-clear; the pill\'s place counts whenever the round has a question left, shown or not; a bar the chrome covers under a clear top comes up to that edge (falsify: drop the bar branch in keepFoldedStageInView and every row lands the frame\'s top at --head-clear or stays still; drop the pill\'s lift in boardFloor and the hidden-pill row lands the frame\'s top at --head-clear, its bar where the pill comes back; round the bar\'s landing down in scrollBoardSo and the fraction row leaves 0.6px of it under the dock)', () => {
+  const rows = [
+    { innerHeight: 813, frameTop: -1450, pill: 'showing', bar: tops => tops.pill, short: true,
+      what: 'the pill showing: the bar stops above it' },
+    { innerHeight: 813, frameTop: -1450, pill: 'hidden by the rail', bar: tops => tops.pill, short: true,
+      what: 'the pill hidden at the press, a question still open: the move can bring it back, so its place is kept clear' },
+    { innerHeight: 813, frameTop: -1450, pill: 'none left', frame: true,
+      what: 'no question left, so no pill: the window shows both and the frame\'s top lands at the clearance' },
+    { innerHeight: 700, frameTop: -1450, pill: 'none left', bar: tops => tops.sendBar, short: true,
+      what: 'the send bar' },
+    { innerHeight: 700, frameTop: -1450, showing: ['dock'], bar: tops => tops.dock, short: true,
+      what: 'a sent round or an archive, no send bar: the pager dock' },
+    { innerHeight: 700, frameTop: -1450.4, showing: ['dock'], bar: tops => tops.dock, short: true,
+      what: 'on a fraction of a pixel: rounded up, so no fraction of the bar lands under the dock' },
+    { innerHeight: 700, frameTop: -1450, showing: [], bar: () => 700, short: true,
+      what: 'no bottom chrome showing: the window\'s own bottom edge' },
+    { innerHeight: 700, frameTop: 700 - 70 - FOLDED_BAR_BOTTOM, showing: ['dock'], still: true,
+      what: 'the bar already just above the dock, the frame\'s top above the clearance: nothing to gain' },
+    { innerHeight: 700, frameTop: 200, pill: 'none left', bar: tops => tops.sendBar, short: true,
+      what: 'a clear top with its bar under the send bar: the board moves up, the frame\'s top going under the header' },
+    { innerHeight: 900, frameTop: 300, pill: 'showing', bar: tops => tops.pill,
+      what: 'a clear top with its bar under the pill, in a window tall enough: the board moves up and both show' },
+  ];
+  for (const row of rows) {
+    const tops = bottomChromeTops(row.innerHeight);
+    const { scrolls, clear } = pressShowLess(row);
+    const where = `a ${row.innerHeight}px window, folded frame top ${row.frameTop}px down it (${row.what})`;
+    if (row.still) {
+      assert.deepEqual(scrolls, [], `${where}: the board stays still`);
+      continue;
+    }
+    if (row.frame) {
+      assert.deepEqual(scrolls, [[{ top: 5000 + row.frameTop - clear }]], `${where}: one board scroll, the frame's top to --head-clear (${clear}px)`);
+      continue;
+    }
+    const edge = row.bar(tops);
+    // With the bar's bottom on that edge, the frame's top stands a frame and a
+    // bar above it: over the clearance in a window too short for both.
+    const landsAt = edge - FOLDED_BAR_BOTTOM;
+    assert.equal(landsAt < clear, !!row.short,
+      `setup failure: ${where} leaves the frame's top ${landsAt}px down, --head-clear ${clear}px`);
+    assert.deepEqual(scrolls, [[{ top: Math.ceil(5000 + row.frameTop + FOLDED_BAR_BOTTOM - edge) }]],
+      `${where}: one board scroll, the bar's bottom to ${edge}px down the window`);
+  }
+});
 
-  // Sanity: a genuine, well-formed report between the floor and the cap
-  // still applies right after a batch of hostile ones (and a collapsed one)
-  // was correctly clamped -- the validation is a range filter, not a latch
-  // that got stuck at either edge once it saw something outside it.
-  forgeHeight({ height: 450 });
-  assert.equal(frame.style.height, '450px', 'a genuine height report between the floor and the cap must still apply after other reports were clamped');
+check('stage sizing: a stage the server rendered opened (it holds a comment) takes its first report past the cap as its opened box, and one that fits drops the mark and fits, top-level and in a question\'s context alike (ablation: drop the stage-opened branch at the top of applyStageHeight and the tall one folds at 600px)', () => {
+  for (const [height, box, opened] of [[4000, `${4000 + FRAME_EDGE}px`, true], [450, `${450 + FRAME_EDGE}px`, false]]) {
+    const html = `<body data-standin-scroll-height="${height}"><p>a mock</p></body>`;
+    const board = createBoard({
+      title: 'opened by a comment',
+      blocks: [
+        { kind: 'html', html },
+        { kind: 'question', prompt: 'Which?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }], context: [{ kind: 'html', html }] },
+      ],
+    });
+    applySubmit(board, {
+      action: 'send',
+      answers: [],
+      comments: [board.blocks[0].id, board.blocks[1].context[0].id].map(blockId => ({ blockId, anchor: { kind: 'block' }, text: 'about this mock' })),
+    }, 1);
+    const document = loadBoard(renderBoardPage(board));
+    const frames = [['top-level', document.querySelector('section.html-block .html-stage')], ['context', document.querySelector('.context-item.html-block .html-stage')]];
+    for (const [where, frame] of frames) {
+      assert.equal(blockOf(frame).classList.contains('stage-opened'), true, `setup failure: ${where}: a stage holding a comment renders opened`);
+    }
+    withFrameClock((clock) => {
+      for (const [, frame] of frames) frame.loadSrcdoc();
+      clock.frames();
+    });
+    for (const [where, frame] of frames) {
+      assert.equal(frame.style.height, box, opened
+        ? `${where}: a ${height}px mock opens to its whole height on its first report, never folding at the cap first`
+        : `${where}: a ${height}px mock fits under the cap, so it takes its own height`);
+      assert.equal(blockOf(frame).classList.contains('stage-opened'), opened, `${where}: the mark stays only on a stage that would fold`);
+      assert.equal(blockOf(frame).classList.contains('stage-folded'), false, `${where}: and neither one is folded`);
+      assert.equal(toggleOf(frame).textContent, opened ? 'Show less' : 'Show full height');
+      assert.equal(barShown(frame), opened, `${where}: the bar stays to fold an opened stage and goes with the mark`);
+    }
+  }
+});
+
+check('stage sizing: a mock sized in viewport units settles at one height and never grows on its own (ablation: drop the fold branch\'s cap and the loop never stops)', () => {
+  // A '100vh' section under a heading: every report is the frame it was
+  // measured in plus the heading, so every box it is given makes it report a
+  // taller one. Played out against the real handler for as long as it keeps
+  // asking.
+  const { document, top } = placements('<p>a mock</p>');
+  top.loadSrcdoc();
+  const heights = [];
+  withFrameClock((clock) => {
+    for (let i = 0; i < 60; i++) {
+      const box = parseInt(top.style.height || '320', 10);
+      forgeStageHeight(document, top, box - FRAME_EDGE + 40);
+      clock.frames();
+      clock.elapse(5000);
+      clock.frames();
+      heights.push(top.style.height);
+    }
+  });
+  assert.equal(heights[heights.length - 1], '600px', 'it folds at the cap');
+  assert.deepEqual(new Set(heights.slice(-30)), new Set(['600px']), 'and stays there, folded, however long it keeps asking');
+  assert.equal(blockOf(top).classList.contains('stage-folded'), true);
+});
+
+check('stage sizing: reports are applied at most once an animation frame -- the latest wins (ablation: call applyStageHeight straight from handleStageHeight and the box moves on every report)', () => {
+  const { document, top } = placements('<p>a mock</p>');
+  top.loadSrcdoc();
+  withFrameClock((clock) => {
+    forgeStageHeight(document, top, 400);
+    forgeStageHeight(document, top, 450);
+    forgeStageHeight(document, top, 500);
+    assert.ok(!top.style.height, 'three reports inside one frame move nothing until the frame');
+    assert.equal(clock.booked, 1, 'and book one frame between them, not three');
+    clock.frame();
+    assert.equal(top.style.height, `${500 + FRAME_EDGE}px`, 'the frame applies the latest');
+    assert.equal(clock.booked, 0);
+  });
+});
+
+check('stage sizing: growth applies at once, a shrink only after it has settled, and the fold bar does not flicker around 600px (ablation 1: drop STAGE_FOLD_SLACK and a dip under the cap unfolds it; ablation 2: apply a shrink without the settle timer and the 400 report lands before the growth that cancels it)', () => {
+  const { document, top } = placements('<p>a mock</p>');
+  top.loadSrcdoc();
+  withFrameClock((clock) => {
+    const report = (h) => { forgeStageHeight(document, top, h); clock.frames(); };
+    report(500);
+    assert.equal(top.style.height, `${500 + FRAME_EDGE}px`, 'growth applies at once');
+    report(400);
+    assert.equal(top.style.height, `${500 + FRAME_EDGE}px`, 'a shrink waits');
+    report(520);
+    assert.equal(top.style.height, `${520 + FRAME_EDGE}px`, 'growth in the meantime applies at once');
+    clock.elapse(5000);
+    clock.frames();
+    assert.equal(top.style.height, `${520 + FRAME_EDGE}px`, 'and the shrink it overtook never lands');
+
+    // Breathing either side of the cap: folded on the way up at once, and never
+    // unfolded by a dip that stays close to it.
+    const shown = [];
+    for (const h of [610, 590, 612, 585, 605, 588]) {
+      report(h);
+      clock.elapse(5000);
+      clock.frames();
+      shown.push(barShown(top));
+      assert.equal(top.style.height, '600px', `a mock breathing around the cap stays folded at 600px (report ${h})`);
+    }
+    assert.deepEqual(shown, [true, true, true, true, true, true], 'the bar never drops out between frames');
+
+    report(400);
+    assert.equal(top.style.height, '600px', 'a real drop waits out the settle delay');
+    clock.elapse(5000);
+    clock.frames();
+    assert.equal(top.style.height, `${400 + FRAME_EDGE}px`, 'then unfolds and fits');
+    assert.equal(barShown(top), false);
+  });
+});
+
+check('stage sizing: a stage measures its whole document -- margins collapsed through the body and a sideways scrollbar included -- so a fitted stage shows no stray inner scrollbar (ablation: measure document.body.scrollHeight alone again)', () => {
+  const { top, context } = placements('<body data-standin-scroll-height="400"><h1>a heading with a margin</h1></body>');
+  withFrameClock((clock) => {
+    top.loadSrcdoc();
+    context.loadSrcdoc();
+    // What the stand-in cannot lay out, declared: the heading's top margin has
+    // collapsed through the body, so the root's box is taller than the body's.
+    const root = top.contentDocument.documentElement;
+    root.getBoundingClientRect = () => ({ left: 0, top: 0, right: 800, bottom: 437.5, width: 800, height: 437.5 });
+    // And a mock wider than its frame: the viewport's sideways scrollbar takes
+    // 15px out of the frame's height.
+    const wideRoot = context.contentDocument.documentElement;
+    wideRoot.setAttribute('data-standin-client-height', '305');
+    context.contentWindow.innerHeight = 320;
+    clock.frames();
+  });
+  assert.equal(top.style.height, `${438 + FRAME_EDGE}px`, 'the root\'s box, rounded up -- a fraction of a pixel short is still a scrollbar');
+  assert.equal(context.style.height, `${400 + 15 + FRAME_EDGE}px`, 'the sideways scrollbar is added, so the mock keeps it with no vertical one beside it');
+});
+
+check('stage sizing: a variant option clips at 600px and never folds (ablation: let applyStageHeight fold a .choice-variant stage and it carries .stage-folded)', () => {
+  // It renders no Show full height bar at all (test/check-stage-lens.mjs, "Fold
+  // bar"): a click on its card picks it.
+  const document = loadBoard(renderBoardPage(variantsBoard(['<body data-standin-scroll-height="4000"><p>a tall option</p></body>'])));
+  const frame = document.querySelector('.choice-variant .html-stage');
+  withFrameClock((clock) => {
+    frame.loadSrcdoc();
+    clock.frames();
+  });
+  assert.equal(frame.style.height, '600px', 'a variant option keeps its 600px clip');
+  assert.equal(blockOf(frame).classList.contains('stage-folded'), false, 'and never folds');
+  assert.equal(blockOf(frame).classList.contains('stage-opened'), false, 'nor opens');
+});
+
+// =================================================================================
+// Stage sizing, the review fixes (ADR.md entry 119): a stage the server rendered
+// opened keeps the mark through a mid-build sliver, and a mock laid out at its
+// own viewport's height counts a sideways scrollbar once, not twice.
+// =================================================================================
+
+/** One mock in the two places a stage stands outside a variant card, each holding
+ * a stored comment, so the server renders both opened. */
+function commentedPlacements(html) {
+  const board = createBoard({
+    title: 'opened by a comment',
+    blocks: [
+      { kind: 'html', html },
+      { kind: 'question', prompt: 'Which?', widget: 'single', options: [{ label: 'A' }, { label: 'B' }], context: [{ kind: 'html', html }] },
+    ],
+  });
+  applySubmit(board, {
+    action: 'send',
+    answers: [],
+    comments: [board.blocks[0].id, board.blocks[1].context[0].id].map(blockId => ({ blockId, anchor: { kind: 'block' }, text: 'about this mock' })),
+  }, 1);
+  const document = loadBoard(renderBoardPage(board));
+  return {
+    document,
+    frames: [['top-level', document.querySelector('section.html-block .html-stage')], ['context', document.querySelector('.context-item.html-block .html-stage')]],
+  };
+}
+
+check('stage sizing: a stage the server rendered opened keeps the mark through a short first report, so a sliver measured mid-build never lets the real height fold it (ablation: drop the two-matching-reports condition on the opened branch of applyStageHeight and the 900px report folds at 600px)', () => {
+  // Each sequence is the reports a stage sends, in order; the stage's own script
+  // posts every new height twice, so a mock that really is short says so twice.
+  const SEQUENCES = [
+    { reports: [200, 900], box: `${900 + FRAME_EDGE}px`, opened: true, why: 'a sliver, then the real height past the cap: it opens to the real height' },
+    { reports: [200, 450], box: '', opened: true, why: 'two short reports that disagree: still building, so nothing moves' },
+    { reports: [200, 450, 450], box: `${450 + FRAME_EDGE}px`, opened: false, why: 'two matching short reports: it fits, and the mark goes' },
+  ];
+  for (const { reports, box, opened, why } of SEQUENCES) {
+    const { document, frames } = commentedPlacements('<p>a mock</p>');
+    for (const [where, frame] of frames) {
+      assert.equal(blockOf(frame).classList.contains('stage-opened'), true, `setup failure: ${where}: a stage holding a comment renders opened`);
+      // Loaded before the clock, so the stage reports nothing of its own and
+      // every height below is one this check forged.
+      frame.loadSrcdoc();
+    }
+    withFrameClock((clock) => {
+      for (const [, frame] of frames) {
+        for (const h of reports) {
+          forgeStageHeight(document, frame, h);
+          clock.frames();
+        }
+      }
+      clock.elapse(5000);
+      clock.frames();
+    });
+    for (const [where, frame] of frames) {
+      const after = `${where}, reports ${reports.join(' then ')} (${why})`;
+      assert.equal(frame.style.height || '', box, `${after}: box ('' is the 320px placeholder, no box written)`);
+      assert.equal(blockOf(frame).classList.contains('stage-opened'), opened, `${after}: opened mark`);
+      assert.equal(blockOf(frame).classList.contains('stage-folded'), false, `${after}: never folded`);
+      assert.equal(barShown(frame), opened, `${after}: the bar shows exactly while the mark stays`);
+    }
+  }
+});
+
+/** Lays the stage's document out against whatever box the board last gave its
+ * frame, as a browser would, for a mock wider than the frame: a 15px sideways
+ * scrollbar that 'innerHeight' counts and the root's 'clientHeight' does not.
+ * 'content' is the document's height for a given viewport height. */
+function layOutWideStage(frame, content) {
+  const BAR = 15;
+  const win = frame.contentWindow;
+  const root = frame.contentDocument.documentElement;
+  const body = frame.contentDocument.body;
+  const view = () => parseInt(frame.style.height || '320', 10) - FRAME_EDGE;
+  const own = (el, prop, get) => Object.defineProperty(el, prop, { configurable: true, get });
+  own(win, 'innerHeight', view);
+  own(root, 'clientHeight', () => view() - BAR);
+  own(root, 'scrollHeight', () => Math.max(content(view()), view() - BAR));
+  own(body, 'scrollHeight', () => content(view()));
+  root.getBoundingClientRect = () => ({ left: 0, top: 0, right: 2400, bottom: content(view()), width: 2400, height: content(view()) });
+}
+
+check('stage sizing: a wide mock counts its sideways scrollbar once -- one laid out at 100vh settles where it stands and never grows to the fold, one of fixed height settles at its content plus the bar (ablation: add the bar whatever the document\'s height, as before, and the 100vh mock grows 15px a report until it folds)', () => {
+  const MOCKS = [
+    // A 'min-height: 100vh' body: 100vh is innerHeight, sideways bar included,
+    // so the document already fills the frame and the bar is inside it.
+    { name: 'a 100vh mock', content: view => view, box: '', reports: [320 - FRAME_EDGE] },
+    // Content of its own height: the bar takes 15px under it, so the frame
+    // needs both to show it with no vertical scrollbar.
+    { name: 'a 400px mock', content: () => 400, box: `${400 + 15 + FRAME_EDGE}px`, reports: [415] },
+  ];
+  for (const { name, content, box, reports } of MOCKS) {
+    const { document, top } = placements('<p>a wide mock</p>');
+    const seen = [];
+    document.defaultView.addEventListener('message', (ev) => {
+      if (ev.source === top.contentWindow && ev.data && ev.data.type === 'height') seen.push(ev.data.height);
+    });
+    withFrameClock((clock) => {
+      top.loadSrcdoc();
+      layOutWideStage(top, content);
+      for (let i = 0; i < 5; i++) {
+        clock.frames();
+        clock.elapse(5000);
+      }
+      clock.frames();
+    });
+    assert.equal(top.style.height || '', box, `${name}: box after every report it sends ('' is the 320px placeholder, no box written)`);
+    assert.deepEqual([...new Set(seen)], reports, `${name}: the heights it reports, the bar counted once`);
+    assert.equal(blockOf(top).classList.contains('stage-folded'), false, `${name}: never folded`);
+    assert.equal(barShown(top), false, `${name}: no Show full height`);
+  }
 });
 
 // Merge guard, not a criterion: `main` grew a document-level Cmd+Enter board
@@ -646,7 +1202,7 @@ check('The existing element-level comment-anchor gesture into an html option\'s 
 /** Render a one-stage board, run the client script, and open the lens on it.
  * The trailing markdown block keeps this an ORDINARY board: one html block and
  * nothing else is a page board (src/render.mjs's isPageBoard, ADR.md entry 33),
- * and a page board carries no expand control to open the lens with. */
+ * and a page board carries no Pull-out to open the lens with. */
 function openLensOn(mockHtml) {
   const board = createBoard({
     title: 'isolation: the stage lens',
@@ -654,13 +1210,13 @@ function openLensOn(mockHtml) {
   });
   const document = loadBoard(renderBoardPage(board));
   const inline = document.querySelector('.html-stage');
-  document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
+  document.querySelector('.html-block .pull-out').dispatchEvent(new StandInEvent('click'));
   return { board, blockId: board.blocks[0].id, document, inline, lens: document.querySelector('.stage-lens-frame') };
 }
 
 check('S1: the lens frame is sandboxed identically to the inline stage -- same attribute, and still no allow-same-origin', () => {
   const { inline, lens } = openLensOn('<div class="mock"><button>Send</button></div>');
-  assert.ok(lens, 'setup failure: the expand control did not mount a lens frame');
+  assert.ok(lens, 'setup failure: the Pull-out did not mount a lens frame');
   const sandbox = lens.getAttribute('sandbox');
   assert.equal(sandbox, inline.getAttribute('sandbox'),
     'the lens frame\'s sandbox must be byte-identical to the inline stage\'s -- it is copied off that frame, never re-spelled');
@@ -679,13 +1235,13 @@ check('S1: with no sandbox attribute to copy, the lens refuses to open at all ra
   // a visibly broken control, which is the direction to fail in.
   const board = createBoard({
     title: 'isolation: the lens fails closed',
-    // Two blocks, so this is an ordinary board with an expand control -- see
+    // Two blocks, so this is an ordinary board with a Pull-out -- see
     // openLensOn above.
     blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' }, { kind: 'markdown', text: 'not a page board' }],
   });
   const document = loadBoard(renderBoardPage(board));
   document.querySelector('.html-stage').removeAttribute('sandbox');
-  document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
+  document.querySelector('.html-block .pull-out').dispatchEvent(new StandInEvent('click'));
   assert.equal(document.querySelectorAll('.stage-lens').length, 0,
     'the lens must not even be built when there is no sandbox attribute to copy onto its frame');
 });
@@ -734,15 +1290,71 @@ check('S1: a real click inside the lens frame\'s own document is inert too -- th
   const form = document.getElementById('comment-form-' + blockId);
 
   // The lens frame's agent announced 'ready' when its script ran; the parent
-  // dropped it (not a .html-stage), so no 'mode' message ever came back and the
-  // agent's own `if (!commentMode) return` gate keeps it silent. Two independent
-  // reasons the same click is inert, which is the point: the mount is a viewer.
+  // dropped it (not a .html-stage), and the one 'mode' message the copy is sent
+  // says comment mode is off (the next check), so the agent's own
+  // `if (!commentMode) return` gate keeps it silent. Two independent reasons the
+  // same click is inert, which is the point: the mount is a viewer.
   lens.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
   assert.equal(form.classList.contains('open'), false, 'a click inside the lens copy must not mint an anchor');
 
   // ... while the same click in the inline stage still does.
   inline.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
   assert.equal(form.classList.contains('open'), true, 'setup failure: the inline stage\'s own gesture must be unaffected');
+});
+
+check('S1: the lens copy is sent the board\'s theme and nothing else -- one mode message when it loads, comment mode off and no sent refs, while the block\'s own stage is told comment mode is on and which element is sent; a theme change sends the open copy the same shape again, and a closed lens\'s copy nothing (falsify: build the lens post from commentMode and sentDomRefsForBlock, as handleStageReady does)', () => {
+  // The mock keeps everything its window is sent, which is all a real mock could
+  // observe of the parent: the stand-in delivers a parent post to the stage
+  // window's own 'message' listeners.
+  const HEARS = '<script>window.__heard = []; window.addEventListener("message", function (e) { window.__heard.push(e.data); });</script>';
+  const board = createBoard({
+    title: 'isolation: what the lens copy is sent',
+    blocks: [{ kind: 'html', html: '<div class="mock"><button>Send</button></div>' + HEARS }, { kind: 'markdown', text: 'not a page board' }],
+  });
+  const blockId = board.blocks[0].id;
+
+  // A sent comment on the mock's button, so the block's own stage has a sent ref
+  // to be told: learn the ref from a real in-stage click, then send it.
+  const probeDoc = loadBoard(renderBoardPage(board));
+  enableCommentMode(probeDoc);
+  const probeFrame = probeDoc.querySelector('.html-stage');
+  probeFrame.loadSrcdoc();
+  probeFrame.contentDocument.querySelector('button').dispatchEvent(new StandInEvent('click'));
+  const ref = probeDoc.getElementById('comment-form-' + blockId).getAttribute('data-anchor-ref');
+  assert.ok(ref, 'setup failure: no ref minted by a real in-stage click');
+  applySubmit(board, {
+    action: 'send',
+    answers: [],
+    comments: [{ blockId, anchor: { kind: 'dom', ref, hint: 'Send' }, text: 'already sent' }],
+  }, 1);
+
+  const document = loadBoard(renderBoardPage(board), { theme: true, finish: true });
+  document.querySelector('.html-block .pull-out').dispatchEvent(new StandInEvent('click'));
+  enableCommentMode(document);
+  const inline = document.querySelector('.html-stage');
+  const lens = document.querySelector('.stage-lens-frame');
+  assert.ok(lens, 'setup failure: the Pull-out did not mount a lens frame');
+  inline.loadSrcdoc();
+  lens.loadSrcdoc();
+  const told = theme => ({ cb: 'cb-stage', type: 'mode', commentMode: false, sentRefs: [], theme });
+
+  // The control: the same board state reaches the block's own stage as comment
+  // mode on and one sent ref, so a lens post built the same way would carry both.
+  assert.deepEqual(inline.contentWindow.__heard.filter(m => m && m.type === 'mode'),
+    [{ cb: 'cb-stage', type: 'mode', commentMode: true, sentRefs: [ref], theme: 'dark' }],
+    'setup failure: the block\'s own stage must be told comment mode is on and which element is sent');
+  const heard = lens.contentWindow.__heard;
+  assert.deepEqual(heard, [told('dark')],
+    'the lens copy must be sent exactly one message when it loads: the theme, with comment mode off and no sent refs');
+
+  clickThemeToggle(document); // System -> Light, with the lens open
+  assert.deepEqual(heard, [told('dark'), told('light')],
+    'a theme change must send the open copy one more message of the same shape, and nothing besides');
+
+  document.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
+  assert.equal(document.querySelector('.stage-lens').hasAttribute('open'), false, 'setup failure: the lens did not close');
+  clickThemeToggle(document); // Light -> Dark, with the lens closed
+  assert.equal(heard.length, 2, 'a closed lens\'s copy must be sent nothing');
 });
 
 // =================================================================================
@@ -779,20 +1391,20 @@ function pickBoard(mocks = ['<div class="mock"><button>A</button></div>', '<div 
   return board;
 }
 
-function expandOn(section) {
-  const btn = section.querySelector('.expand-btn');
-  assert.ok(btn, 'setup failure: no expand control on that stage');
+function pullOutOn(section) {
+  const btn = section.querySelector('.pull-out');
+  assert.ok(btn, 'setup failure: no Pull-out on that stage');
   btn.dispatchEvent(new StandInEvent('click'));
   return btn;
 }
 
 function lensPick(document) { return document.querySelector('.stage-lens .lens-pick'); }
 
-check('Activating the expand control on a variant option opens the lens and does not select that option', () => {
+check('Activating the Pull-out on a variant option opens the lens and does not select that option', () => {
   // INHERITED, not newly built: the card's own click handler already stands
   // down for a click landing on any nested <button> ("a click landing on
   // interactive chrome nested inside this option's OWN rendered block keeps its
-  // own meaning", src/ui.mjs), and the expand control is a <button>. It still
+  // own meaning", src/ui.mjs), and the Pull-out is a <button>. It still
   // needs its own check, because nothing else in the suite would notice if that
   // exclusion list lost 'button' -- the comment button beside it would silently
   // start recording picks too. Ablation: drop 'button, ' from that closest(...)
@@ -800,9 +1412,9 @@ check('Activating the expand control on a variant option opens the lens and does
   const board = pickBoard();
   const document = loadBoard(renderBoardPage(board));
   const cards = document.querySelectorAll('.choice-variant');
-  expandOn(cards[0]);
+  pullOutOn(cards[0]);
 
-  assert.equal(document.querySelector('.stage-lens').hasAttribute('open'), true, 'setup failure: the expand control did not open the lens');
+  assert.equal(document.querySelector('.stage-lens').hasAttribute('open'), true, 'setup failure: the Pull-out did not open the lens');
   assert.equal(cards[0].classList.contains('selected'), false,
     'opening a variant option in the lens must not pick it -- looking at a mock full size is not choosing it');
   assert.equal(cards[1].classList.contains('selected'), false, 'and must not pick any other option either');
@@ -814,7 +1426,7 @@ check('A lens opened from a variant option carries a pick control naming that op
   const document = loadBoard(renderBoardPage(board));
   const cards = document.querySelectorAll('.choice-variant');
 
-  expandOn(cards[1]);
+  pullOutOn(cards[1]);
   const pick = lensPick(document);
   assert.ok(pick, 'a lens opened from a variant option must carry a pick control');
   assert.match(pick.textContent, /Card B/, `the control must name the option it will pick, got ${JSON.stringify(pick.textContent)}`);
@@ -827,7 +1439,7 @@ check('A lens opened from a variant option carries a pick control naming that op
   document.dispatchEvent(new StandInEvent('keydown', { key: 'Escape' }));
   const standalone = document.querySelector(`.html-block[data-block-id="${standaloneId}"]`);
   assert.ok(standalone, 'setup failure: no standalone html block rendered');
-  expandOn(standalone);
+  pullOutOn(standalone);
   assert.equal(document.querySelector('.stage-lens').hasAttribute('open'), true, 'setup failure: the standalone lens did not open');
   assert.equal(lensPick(document), null,
     'a lens opened from a standalone stage must carry no pick control -- there is no option to pick');
@@ -836,7 +1448,7 @@ check('A lens opened from a variant option carries a pick control naming that op
 check('The pick control is page chrome in the PARENT document, outside the framed stage, and the stage has no way to cover it', () => {
   const board = pickBoard();
   const document = loadBoard(renderBoardPage(board));
-  expandOn(document.querySelectorAll('.choice-variant')[0]);
+  pullOutOn(document.querySelectorAll('.choice-variant')[0]);
   const pick = lensPick(document);
   const frame = document.querySelector('.stage-lens-frame');
   const body = document.querySelector('.stage-lens-body');
@@ -874,7 +1486,7 @@ check('An option label is agent-authored content and reaches the control as TEXT
   const label = '<img src=x onerror="window.__pwned = true"></button><b>Card A</b>';
   const board = pickBoard(['<div class="mock"><button>A</button></div>'], [label]);
   const document = loadBoard(renderBoardPage(board));
-  expandOn(document.querySelector('.choice-variant'));
+  pullOutOn(document.querySelector('.choice-variant'));
   const pick = lensPick(document);
 
   assert.ok(pick.textContent.includes(label), 'the label must reach the control verbatim, as its text');
@@ -900,7 +1512,7 @@ check('(adversarial): a hostile mock in the lens cannot reach, press or forge it
   const board = pickBoard([hostile, '<div class="mock"><button>B</button></div>']);
   const document = loadBoard(renderBoardPage(board));
   const cards = document.querySelectorAll('.choice-variant');
-  expandOn(cards[0]);
+  pullOutOn(cards[0]);
   const frame = document.querySelector('.stage-lens-frame');
   frame.loadSrcdoc(); // runs the hostile script inside the lens copy, for real
 
@@ -1174,6 +1786,8 @@ check('the thirteen live types are exactly ready/hover/click/link/positions/heig
   // navigate (the page CSP refuses it) nor open a tab (no 'allow-popups').
   // There is deliberately no answer type -- what the board does with an
   // address is the board's decision, and the stage is never told (ADR 113).
+  // An in-page anchor the frame cannot scroll to itself rides the same type
+  // ('top' in place of 'url'), so the board scrolling to it added no type.
   const live = liveMessageTypes(renderSrcText, uiSrcText);
   assert.deepEqual([...live].sort(),
     ['band', 'click', 'diagrams', 'height', 'hover', 'link', 'locate', 'mermaid', 'mode', 'positions', 'ready', 'scroll', 'scrollBy'].sort());
@@ -1192,9 +1806,16 @@ check('the thirteen live types are exactly ready/hover/click/link/positions/heig
 // A stage is a `srcdoc` frame, so a relative href in it -- an in-page `#anchor`
 // included -- resolves against the BOARD's own address and a click's default
 // action is a frame navigation the page CSP refuses (Chrome's blocked page).
-// The stage script owns the click instead: an anchor scrolls inside the frame,
+// The stage script owns the click instead: an anchor scrolls inside the frame
+// when the frame has somewhere to scroll, and otherwise (a stage that fits its
+// content, or one opened by Show full height, ADR 119) the board scrolls to it;
 // an http/https address is posted to the board, and the board opens it in a new
-// tab at once. The three checks below are one per acceptance criterion.
+// tab at once.
+//
+// The stand-in has no layout, so each fixture declares the geometry a browser
+// would measure: the stage's own viewport (its root's scroll and client
+// height), where the frame sits in the board's window, and where the target
+// sits in the frame.
 // =================================================================================
 
 const ANCHOR_MOCK = '<nav><a id="toc" href="#s2"><span id="inner">Section two</span></a>'
@@ -1231,14 +1852,76 @@ function stubWindowOpen(document) {
   return opens;
 }
 
-check('criterion 1: an in-page anchor scrolls the stage INSIDE the frame, below the board\'s own header band -- on a page board and on an in-column stage alike, and never as a navigation', () => {
+/** The stage's own viewport, as a browser would measure it: how tall its
+ * document is, and how much of it the frame shows. Set on the stage's root
+ * after load, since the stand-in drops an explicit '<html>' inside a srcdoc. */
+function declareStageViewport(frame, scrollHeight, clientHeight) {
+  const root = frame.contentDocument.documentElement;
+  root.setAttribute('data-standin-scroll-height', String(scrollHeight));
+  root.setAttribute('data-standin-client-height', String(clientHeight));
+}
+
+function rectAt(top, height) {
+  return () => ({ left: 0, top, right: 800, bottom: top + height, width: 800, height });
+}
+
+/** Every window scroll the board page asked for, as argument lists, from a
+ * board already scrolled `pageYOffset` down in a window `innerHeight` tall. */
+function stubWindowScroll(document, pageYOffset, innerHeight = 900) {
+  const win = document.defaultView;
+  const scrolls = [];
+  win.pageYOffset = pageYOffset;
+  win.innerHeight = innerHeight;
+  win.scrollTo = (...args) => { scrolls.push(args); };
+  return scrolls;
+}
+
+/** The board's own clearance under its sticky header, read off the stylesheet:
+ * the same token every other scroll-to on the page lands by. */
+function headClear(document) {
+  return parseFloat(resolveComputedProperty(styles, document.documentElement, true, '--head-clear'));
+}
+
+/** A stage holding ANCHOR_MOCK in a document `height` tall, mounted on an
+ * ordinary board, its real script reporting that height under the frame clock
+ * so the board fits or folds it exactly as it would live. */
+function mountReportingStage(height) {
+  const board = linkBoard(`<body data-standin-scroll-height="${height}">${ANCHOR_MOCK}</body>`, false);
+  const document = loadBoard(renderBoardPage(board));
+  const frame = document.querySelector('.html-stage');
+  withFrameClock((clock) => {
+    frame.loadSrcdoc();
+    clock.frames();
+  });
+  return { board, document, frame, stageDoc: frame.contentDocument };
+}
+
+check('criterion 1: an in-page anchor inside a stage that scrolls inside -- a page board, a folded stage -- scrolls the FRAME\'s own scrolling box, below the board\'s own header band, never through scrollIntoView, leaves the board\'s window still, and never navigates (falsify: put scrollIntoView back in scrollToAnchor)', () => {
   for (const pageBoard of [true, false]) {
-    const where = pageBoard ? 'page board' : 'in-column stage';
-    const board = linkBoard(ANCHOR_MOCK, pageBoard);
-    const { document, frame } = mountStage(board);
+    const where = pageBoard ? 'page board' : 'folded in-column stage';
+    let board, document, frame;
+    if (pageBoard) {
+      board = linkBoard(ANCHOR_MOCK, true);
+      ({ document, frame } = mountStage(board));
+      declareStageViewport(frame, 4000, 900);
+    } else {
+      ({ board, document, frame } = mountReportingStage(4000));
+      assert.equal(blockOf(frame).classList.contains('stage-folded'), true, 'setup failure: a 4000px mock folds');
+      declareStageViewport(frame, 4000, 600 - FRAME_EDGE);
+    }
     const opens = stubWindowOpen(document);
+    const scrolls = stubWindowScroll(document, 1000);
     const stageDoc = frame.contentDocument;
     const target = stageDoc.getElementById('s2');
+    // The frame's own scrolling box (the stand-in has no 'scrollingElement',
+    // so the root, as a browser's standards-mode document has), already 200px
+    // down, and every scroll asked of it. The target sits 700px down the
+    // frame's viewport.
+    const root = stageDoc.documentElement;
+    root.scrollTop = 200;
+    const frameScrolls = [];
+    root.scrollTo = (...args) => { frameScrolls.push(args); };
+    target.getBoundingClientRect = rectAt(700, 18);
 
     // What the board tells the stage its own floating chrome covers, the same
     // 'band' message ADR 59 already sends on every refresh. Posted directly
@@ -1256,17 +1939,17 @@ check('criterion 1: an in-page anchor scrolls the stage INSIDE the frame, below 
 
     assert.equal(ev.defaultPrevented, true,
       `${where}: the click must be cancelled -- an uncancelled one navigates this frame to the board's own address plus the fragment, which the page CSP refuses (the blocked page this whole feature exists to remove)`);
-    assert.equal(target.scrollIntoViewCallCount, 1, `${where}: the anchor's target must be scrolled to, inside the frame`);
-    assert.deepEqual(target.scrollIntoViewLastOptions, { block: 'start', inline: 'nearest', behavior: 'smooth' },
-      `${where}: the browser's own scroll-into-view is what walks the target's real scrolling ancestors -- an app-shell artifact scrolls an inner pane, and no arithmetic here can know that in advance`);
-    assert.equal(target.style.scrollMarginTop, '64px',
-      `${where}: the target must land BELOW the board's header band, not under it -- and by the same figure the parent reported, never one invented in the stage`);
+    assert.deepEqual(frameScrolls, [[{ top: 200 + 700 - 64, behavior: 'smooth' }]],
+      `${where}: the frame's own box scrolls once, landing the target BELOW the board's header band by the figure the parent reported, never one invented in the stage`);
+    assert.equal(target.scrollIntoViewCallCount, 0,
+      `${where}: never scrollIntoView -- Chrome carries a frame's scroll-into-view on into the board, a second scroll that leaves the target under the header`);
+    assert.deepEqual(scrolls, [], `${where}: a frame that scrolls to its own target leaves the board's window where it was`);
 
     // A fragment naming nothing scrolls nothing, and still never navigates.
     const dead = new StandInEvent('click');
     stageDoc.getElementById('dead').dispatchEvent(dead);
     assert.equal(dead.defaultPrevented, true, `${where}: a fragment naming nothing must still be cancelled`);
-    assert.equal(target.scrollIntoViewCallCount, 1, `${where}: a fragment naming nothing must scroll nothing`);
+    assert.equal(frameScrolls.length, 1, `${where}: a fragment naming nothing must scroll nothing`);
 
     // While comment mode is on the same click mints a comment anchor as it
     // always did, and neither scrolls nor opens anything. Asserted on the
@@ -1280,13 +1963,180 @@ check('criterion 1: an in-page anchor scrolls the stage INSIDE the frame, below 
     stageDoc.getElementById('inner').dispatchEvent(inMode);
     const form = document.getElementById('comment-form-' + board.blocks[0].id);
     assert.equal(inMode.defaultPrevented, true, `${where}: comment mode must not let a link navigate either`);
-    assert.equal(target.scrollIntoViewCallCount, 1, `${where}: a click in comment mode must not scroll the stage`);
+    assert.equal(frameScrolls.length, 1, `${where}: a click in comment mode must not scroll the stage`);
     assert.deepEqual(opens, [], `${where}: a click in comment mode must open nothing`);
     assert.ok(form && form.classList.contains('open'), `${where}: a click in comment mode must mint a comment anchor, exactly as it does today`);
   }
 });
 
-const OUTBOUND_MOCK = '<a id="out" href="https://example.com/a?x=1">out</a>'
+check('AC 14: an in-page anchor inside a stage that fits its content scrolls the BOARD\'s window to the target, under the header, and the frame -- with nothing to scroll -- does not try (ablation: make frameScrollBoxes always hold the root and the window stays still)', () => {
+  const { document, frame, stageDoc } = mountReportingStage(450);
+  assert.equal(frame.style.height, `${450 + FRAME_EDGE}px`, 'setup failure: a 450px mock fits');
+  assert.equal(blockOf(frame).classList.contains('stage-folded') || blockOf(frame).classList.contains('stage-opened'), false,
+    'setup failure: a fitted stage carries no fold state');
+  declareStageViewport(frame, 450, 450);
+  frame.getBoundingClientRect = rectAt(300, 450 + FRAME_EDGE);
+  const target = stageDoc.getElementById('s2');
+  target.getBoundingClientRect = rectAt(380, 18);
+  const scrolls = stubWindowScroll(document, 1000);
+
+  const ev = new StandInEvent('click');
+  stageDoc.getElementById('inner').dispatchEvent(ev);
+
+  assert.equal(ev.defaultPrevented, true, 'the click must still never navigate the frame');
+  assert.deepEqual(scrolls, [[{ top: 1000 + 300 + 380 - headClear(document), behavior: 'smooth' }]],
+    'the board scrolls once, putting the target (380px down a frame 300px down the window, on a board already 1000px down) right under the header');
+  assert.equal(target.scrollIntoViewCallCount, 0, 'a frame with nothing to scroll leaves the move to the board');
+});
+
+check('AC 14: an in-page anchor inside a stage opened by Show full height scrolls the BOARD\'s window to the target, under the header (falsify: return early from handleStageAnchor in src/ui.mjs and this goes red)', () => {
+  const { document, frame, stageDoc } = mountReportingStage(4000);
+  assert.equal(blockOf(frame).classList.contains('stage-folded'), true, 'setup failure: a 4000px mock folds');
+  toggleOf(frame).dispatchEvent(new StandInEvent('click'));
+  assert.equal(blockOf(frame).classList.contains('stage-opened'), true, 'setup failure: Show full height opens it');
+  assert.equal(frame.style.height, `${4000 + FRAME_EDGE}px`, 'setup failure: opened to its whole height');
+  declareStageViewport(frame, 4000, 4000);
+  frame.getBoundingClientRect = rectAt(200, 4000 + FRAME_EDGE);
+  const target = stageDoc.getElementById('s2');
+  target.getBoundingClientRect = rectAt(2500, 18);
+  const scrolls = stubWindowScroll(document, 1000);
+
+  stageDoc.getElementById('inner').dispatchEvent(new StandInEvent('click'));
+
+  assert.deepEqual(scrolls, [[{ top: 1000 + 200 + 2500 - headClear(document), behavior: 'smooth' }]],
+    'an opened stage shows its whole document, so the board scrolls to the target, 2500px down the frame');
+  assert.equal(target.scrollIntoViewCallCount, 0, 'and the opened frame, with nothing left to scroll, does not try');
+});
+
+check('AC 14: the board scrolls for an in-page anchor only on a well-formed message from a genuine stage, never for a page board\'s, and only ever to a point inside the frame\'s own box', () => {
+  const { document, frame } = mountStage(linkBoard(ANCHOR_MOCK, false));
+  frame.getBoundingClientRect = rectAt(300, 452);
+  const scrolls = stubWindowScroll(document, 1000);
+  const clear = headClear(document);
+  const send = (data, origin = 'null', source = frame.contentWindow) => document.defaultView.dispatchEvent({
+    type: 'message', data: Object.assign({ cb: 'cb-stage', type: 'link' }, data), origin, source,
+  });
+
+  // Not a genuine stage: the same two gates every type on this channel passes.
+  send({ top: 100 }, 'https://evil.example');
+  send({ top: 100 }, 'null', {});
+  assert.deepEqual(scrolls, [], 'an anchor message from anything but a live stage frame moves nothing');
+
+  // A genuine stage, malformed 'top'.
+  for (const data of [{}, { top: NaN }, { top: Infinity }, { top: -Infinity }, { top: '100' }, { top: null },
+    { top: [100] }, { top: { valueOf: () => 100 } }]) {
+    send(data);
+    assert.deepEqual(scrolls, [], `a malformed anchor message moves nothing: ${JSON.stringify(data)}`);
+  }
+
+  // A forged position past either edge lands on that edge of the frame's own
+  // box: a stage can bring a point inside itself to the top, nothing else.
+  send({ top: 999999 });
+  send({ top: -5000 });
+  assert.deepEqual(scrolls, [
+    [{ top: 1000 + 300 + 452 - clear, behavior: 'smooth' }],
+    [{ top: 1000 + 300 - clear, behavior: 'smooth' }],
+  ], 'a position past the frame is clamped to the frame\'s own box');
+
+  // A page board's stage fills the window and the page under it does not
+  // scroll: nothing it sends moves the board.
+  const page = mountStage(linkBoard(ANCHOR_MOCK, true));
+  page.frame.getBoundingClientRect = rectAt(0, 900);
+  const pageScrolls = stubWindowScroll(page.document, 0);
+  page.document.defaultView.dispatchEvent({
+    type: 'message', data: { cb: 'cb-stage', type: 'link', top: 400 }, origin: 'null', source: page.frame.contentWindow,
+  });
+  assert.deepEqual(pageScrolls, [], 'a page board\'s stage never scrolls the board');
+});
+
+// --- 5b. A folded stage whose target lands hidden ----------------------------
+//
+// Off a page board no band reaches a stage, so a frame that scrolls to its own
+// target lands it at the frame's own top. When the reader has scrolled that top
+// above the window, or under the header, the target would land hidden; the
+// board then moves just far enough to bring it down to --head-clear. A target
+// near the document's end stops lower, where the frame's scroll runs out, and
+// in a frame that reaches past the window's bottom edge that can be off screen
+// too; the board then brings it up to --head-clear. A target landing between
+// --head-clear and the same clearance above the window's bottom leaves the
+// board still.
+
+check('AC 14: a link in a folded stage scrolls the frame toward the target, then the board once, bringing a target that landed above --head-clear or within --head-clear of the window\'s bottom (or past it) to --head-clear under the window top; a target landing between the two leaves the board still (falsify: drop either edge of the band in handleStageAnchor)', () => {
+  // A 900px window over a board already 1000px down. The frame shows 598px of a
+  // 4000px document from 200px down, so its own scroll stops at 4000 - 598.
+  const frameMax = 4000 - (600 - FRAME_EDGE);
+  // A target 3500px down the viewport would need the frame at 3700: it stops at
+  // its end and the target sits this far down the frame.
+  const nearEnd = 3500 - (frameMax - 200);
+  const rows = [
+    { frameTop: -120, board: clear => [[{ top: 1000 - 120 - clear, behavior: 'smooth' }]], what: 'above the window' },
+    { frameTop: 40, board: clear => [[{ top: 1000 + 40 - clear, behavior: 'smooth' }]], what: 'under the header' },
+    { frameTop: clear => clear, board: () => [], what: 'exactly at the clearance' },
+    { frameTop: 150, board: () => [], what: 'well below the header' },
+    { frameTop: 700, targetAt: 3500, board: clear => [[{ top: 1000 + 700 + nearEnd - clear, behavior: 'smooth' }]],
+      what: 'a target near the end, landing past the window\'s bottom edge' },
+    { frameTop: 560, targetAt: 3500, board: clear => [[{ top: 1000 + 560 + nearEnd - clear, behavior: 'smooth' }]],
+      what: 'a target near the end, landing in the window\'s last --head-clear px' },
+    { frameTop: clear => 900 - clear - nearEnd, targetAt: 3500, board: () => [],
+      what: 'a target near the end, landing exactly --head-clear above the window\'s bottom' },
+    { frameTop: 150, targetAt: 3500, board: () => [], what: 'a target near the end, landing inside the window' },
+  ];
+  for (const row of rows) {
+    const { document, frame, stageDoc } = mountReportingStage(4000);
+    assert.equal(blockOf(frame).classList.contains('stage-folded'), true, 'setup failure: a 4000px mock folds');
+    const clear = headClear(document);
+    const frameTop = typeof row.frameTop === 'function' ? row.frameTop(clear) : row.frameTop;
+    const targetAt = row.targetAt ?? 700;
+    const where = `frame top ${frameTop}px down the window, target ${targetAt}px down the frame (${row.what})`;
+    declareStageViewport(frame, 4000, 600 - FRAME_EDGE);
+    frame.getBoundingClientRect = rectAt(frameTop, 600);
+    // The frame's own viewport, 200px down, and the target `targetAt` down it.
+    const root = stageDoc.documentElement;
+    root.scrollTop = 200;
+    const frameScrolls = [];
+    root.scrollTo = (...args) => { frameScrolls.push(args); };
+    stageDoc.getElementById('s2').getBoundingClientRect = rectAt(targetAt, 18);
+    const scrolls = stubWindowScroll(document, 1000, 900);
+
+    stageDoc.getElementById('inner').dispatchEvent(new StandInEvent('click'));
+
+    assert.deepEqual(frameScrolls, [[{ top: Math.min(200 + targetAt, frameMax), behavior: 'smooth' }]],
+      `${where}: the frame brings the target toward its own top as far as it scrolls, once (no band off a page board)`);
+    assert.deepEqual(scrolls, row.board(clear),
+      `${where}: the board moves only when the target landed above --head-clear (${clear}px) or below 900 - ${clear}px`);
+  }
+});
+
+check('AC 14: a stage\'s already-scrolled anchor message moves the board only to a point inside the frame\'s own box, only when "scrolled" is exactly true, and never on a page board', () => {
+  const { document, frame } = mountStage(linkBoard(ANCHOR_MOCK, false));
+  frame.getBoundingClientRect = rectAt(-120, 600);
+  const scrolls = stubWindowScroll(document, 1000);
+  const clear = headClear(document);
+  const send = (doc, source, data) => doc.defaultView.dispatchEvent({
+    type: 'message', data: Object.assign({ cb: 'cb-stage', type: 'link' }, data), origin: 'null', source,
+  });
+
+  for (const scrolled of ['true', 1, null, {}, [true], false]) {
+    send(document, frame.contentWindow, { top: 0, scrolled });
+    assert.deepEqual(scrolls, [], `a malformed "scrolled" moves nothing: ${JSON.stringify(scrolled)}`);
+  }
+
+  // Past the top edge: clamped to the frame's top, 120px above the window.
+  send(document, frame.contentWindow, { top: -5000, scrolled: true });
+  // Past the bottom edge: clamped to the frame's bottom, 480px down a 900px
+  // window and so already inside its visible band.
+  send(document, frame.contentWindow, { top: 999999, scrolled: true });
+  assert.deepEqual(scrolls, [[{ top: 1000 - 120 - clear, behavior: 'smooth' }]],
+    'a position past the frame lands on that edge of the frame\'s own box, and a clear one moves nothing');
+
+  const page = mountStage(linkBoard(ANCHOR_MOCK, true));
+  page.frame.getBoundingClientRect = rectAt(0, 900);
+  const pageScrolls = stubWindowScroll(page.document, 0);
+  send(page.document, page.frame.contentWindow, { top: 0, scrolled: true });
+  assert.deepEqual(pageScrolls, [], 'a page board\'s stage, whose top sits at the window top, never scrolls the board');
+});
+
+const OUTBOUND_MOCK ='<a id="out" href="https://example.com/a?x=1">out</a>'
   + '<a id="out2" href="http://example.org/second">second</a>'
   + '<a id="js" href="javascript:alert(1)">js</a>'
   + '<a id="file" href="file:///etc/passwd">file</a>'

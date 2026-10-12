@@ -2992,8 +2992,8 @@ async function main() {
       'so it is still a page -- an amend that landed here would have knocked it out of its own layout');
     assert.deepEqual(afterThird.blocks.filter(b => b.round === 2).map(b => b.kind), ['question', 'markdown']);
 
-    // And the page agrees: round 1 renders as a page (no kicker, no expand
-    // control, its comment surface floating over the frame), round 2 as an
+    // And the page agrees: round 1 renders as a page (no kicker, no Pull-out,
+    // its comment surface floating over the frame), round 2 as an
     // ordinary round in the column.
     const markup = renderedMarkup(await (await fetch(`${base}/b/${first.boardId}`)).text());
     const r1 = markup.indexOf('data-round="1"');
@@ -3003,7 +3003,7 @@ async function main() {
     const page2 = markup.slice(r2);
     assert.ok(page1.includes('TWO_ASK_ARTIFACT'), 'setup failure: the artifact is not in round 1\'s markup');
     assert.ok(!page1.includes('block-kicker'), 'the artifact\'s page carries no kicker');
-    assert.ok(!page1.includes('expand-btn'), 'and no expand control');
+    assert.ok(!page1.includes('pull-out'), 'and no Pull-out');
     assert.ok(page1.includes('page-comments'), 'and its comment surface floats over the frame');
     assert.ok(page2.includes('question-block'), 'round 2 renders as an ordinary question round on its own page');
 

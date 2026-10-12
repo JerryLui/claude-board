@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { createBoard } from '../src/board.mjs';
 import { renderBoardPage } from '../src/render.mjs';
-import { StandInEvent } from './dom-stand-in.mjs';
+import { StandInEvent, withFrameClock } from './dom-stand-in.mjs';
 import { check, finish, pageHarness } from './support.mjs';
 
 const { loadBoard } = await pageHarness();
@@ -213,6 +213,69 @@ check('a stored dom ref on a CONTEXT diagram is dropped rather than walked: the 
   assert.equal(pins[0].style.top, '10px');
   assert.notEqual(pins[0].style.left, toolsBox.left + 'px',
     'and never at the control group the re-based index happens to hit (ablation: drop the .context-item guard from renderDomPins and it lands here)');
+});
+
+check('a stage\'s pin follows its element through every new box: an applied height change, Show full height and Show less each ask the stage again where the element is (ablation: drop relocateStagePins from setStageBox and the pin stays where the first box put it)', () => {
+  // ADR.md entry 119. A mock lays out against its own frame, so a new box moves
+  // a centred or bottom-docked element with no scroll and no window resize --
+  // the only re-asks there were before. The stand-in lays nothing out, so the
+  // move is declared: the button's box is reassigned before each step, the way
+  // the new frame would lay it out, and the pin has to land on the new place.
+  const pinBoard = createBoard({
+    title: 'a pin through a fold',
+    blocks: [
+      { kind: 'html', html: '<div class="mock"><button>Send</button></div>' },
+      { kind: 'markdown', text: 'not a page board' },
+    ],
+  });
+  const pinBlockId = pinBoard.blocks[0].id;
+  const document = loadBoard(renderBoardPage(pinBoard));
+
+  const frame = document.querySelector('.html-stage');
+  document.getElementById('comment-mode-toggle').dispatchEvent(new StandInEvent('click'));
+  // Loaded before the clock goes in, so the stage books no height report of
+  // its own: the one forged below is the only height it ever has (QUIRKS.md,
+  // First bites).
+  frame.loadSrcdoc();
+  const button = frame.contentDocument.querySelector('button');
+  button.dispatchEvent(new StandInEvent('click'));
+  const form = document.getElementById('comment-form-' + pinBlockId);
+  form.querySelector('input[type=text]').value = 'move this';
+  form.dispatchEvent(new StandInEvent('submit'));
+
+  const block = frame.closest('.html-block');
+  const layer = block.querySelector('.pin-layer');
+  const toggle = block.querySelector('.stage-fold-toggle');
+  const pinAt = () => {
+    const pins = layer.querySelectorAll('.anchor-pin');
+    assert.equal(pins.length, 1, `expected the one queued comment's pin, got ${pins.length}`);
+    return pins[0].style.left + ',' + pins[0].style.top;
+  };
+  const first = button.getBoundingClientRect();
+  assert.equal(pinAt(), `${first.left}px,${first.top}px`, 'setup failure: the queued pin must start on the button');
+  const moveButton = (top) => {
+    button.getBoundingClientRect = () => ({ left: 40, top, right: 120, bottom: top + 18, width: 80, height: 18 });
+  };
+
+  withFrameClock((clock) => {
+    moveButton(560);
+    frame.contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'height', height: 2000 }, '*');
+    clock.frames();
+    assert.equal(frame.style.height, '600px', 'setup failure: a 2000px report must fold the stage at the cap');
+    assert.equal(pinAt(), '40px,560px', 'after an applied height change the pin is on the button where the new box put it');
+
+    moveButton(1900);
+    toggle.dispatchEvent(new StandInEvent('click'));
+    clock.frames();
+    assert.equal(block.classList.contains('stage-opened'), true, 'setup failure: Show full height must open the stage');
+    assert.equal(pinAt(), '40px,1900px', 'after Show full height the pin is on the button in the opened box');
+
+    moveButton(300);
+    toggle.dispatchEvent(new StandInEvent('click'));
+    clock.frames();
+    assert.equal(frame.style.height, '600px', 'setup failure: Show less must fold the stage back');
+    assert.equal(pinAt(), '40px,300px', 'and after Show less it is back on the button in the folded box');
+  });
 });
 
 finish('click-pin');

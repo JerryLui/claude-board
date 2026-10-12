@@ -460,7 +460,7 @@ check('a rank on a round already sent is never re-collected by a later Send', ()
 // into history makes its ANSWERS immutable; it does not make its long context
 // unreadable, and a settled round is precisely where someone re-reads one -- so
 // the fold's control gets the same carve-out from the sent-round disable loop
-// that the diagram's expand control has (src/ui.mjs's markRoundHistory). The
+// that the Pull-out has (src/ui.mjs's markRoundHistory). The
 // server-side marking, and the archive half of the same rule, are pinned in
 // test/check-pure.mjs and test/check-archive.mjs respectively.
 
@@ -491,7 +491,7 @@ check('the fold\'s Show more control stays live on a round that has just gone to
 
   assert.equal(round1.querySelector('.btn-defer').disabled, true, 'the sent round\'s own controls are disabled, as always');
   assert.equal(round1.querySelector('.choice-single').disabled, true);
-  assert.equal(control.disabled, false, 'but the fold control survives the pass -- the same carve-out .expand-btn gets');
+  assert.equal(control.disabled, false, 'but the fold control survives the pass -- the same carve-out .pull-out gets');
 
   const item = control.parentElement;
   assert.equal(item.classList.contains('folded'), true, 'setup failure: the item must still be folded');

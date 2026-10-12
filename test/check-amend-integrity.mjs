@@ -505,7 +505,7 @@ await checkAsync('a reconnect that missed nothing leaves an open lens open, one 
   globalThis.DOMParser = class { parseFromString(text) { return parseHTML(text); } };
   const reconnect = async () => { es.dispatch('open', ''); await flush(1); };
   try {
-    document.querySelector('.html-block .expand-btn').dispatchEvent(new StandInEvent('click'));
+    document.querySelector('.html-block .pull-out').dispatchEvent(new StandInEvent('click'));
     assert.ok(document.querySelector('.stage-lens-frame'), 'setup failure: the stage lens did not open');
     await reconnect();
     assert.equal(fetched[0], '/b/' + encodeURIComponent(board.id), 'the catch-up must re-read this board\'s own page');
@@ -607,7 +607,7 @@ await checkAsync('an ordinary board whose round was abandoned stops counting dow
 // renders bare blocks with no round wrapper, so it has to derive it too. Passing
 // nothing meant `false`: the pushed fragment came back as an ORDINARY stage, and
 // applyRoundPush replaces the block outright, so a page board picked up a kicker
-// and an expand control over its 100vh frame and lost `.page-comments`, dropping
+// and a Pull-out over its 100vh frame and lost `.page-comments`, dropping
 // the comment form below the fold of a page that cannot scroll. Nothing repaired
 // it short of a reload, and the reload rendered something different.
 
@@ -636,7 +636,7 @@ check('an amend push of a page-board block renders it as a PAGE, byte-identical 
     'the amend fragment and the reload must be the same block markup -- one board cannot render two ways');
 
   assert.ok(!payload.html.includes('block-kicker'), 'no kicker over a full-viewport artifact');
-  assert.ok(!payload.html.includes('expand-btn'), 'and no expand control');
+  assert.ok(!payload.html.includes('pull-out'), 'and no Pull-out');
   assert.ok(payload.html.includes('page-comments'), 'and the comment surface still floats over the frame');
 
   // And the same call for an ORDINARY board's stage is untouched: this derives
@@ -647,7 +647,7 @@ check('an amend push of a page-board block renders it as a PAGE, byte-identical 
   });
   const ordinaryPush = buildRoundPushPayload(ordinary, 1, 'amend', [ordinary.blocks[0].id]);
   assert.ok(ordinaryPush.html.includes('block-kicker'), 'an ordinary stage keeps its kicker on the same path');
-  assert.ok(ordinaryPush.html.includes('expand-btn'), 'and its lens control');
+  assert.ok(ordinaryPush.html.includes('pull-out'), 'and its Pull-out');
 });
 
 await finish('amend-integrity', { failText: null });

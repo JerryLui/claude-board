@@ -147,24 +147,40 @@ before the stage's scripts run, so an `if (!window.mermaid)` loader short-circui
 unmodified and an artifact needs no bundled engine. The exception is exactly that wide:
 fonts, images and styles stay inline.
 
-**Links inside a stage work, and the board owns them.** A click on an in-page anchor
-(`href="#id"`) scrolls the stage to that element inside the frame, so a table of contents in
-an artifact is worth writing. A click on an `http` or `https` link opens that address in a new
-tab at once, from the board page and with no opener; a link of any other scheme does nothing at
-all. The frame itself never navigates, so an outbound link is worth writing too.
-
 **A stage sizes itself from its own content, never from the viewport.** Outside a page
-board the frame's height is derived from what the stage reports, so a page laid out in
-`vh` units reports whichever slice of itself happens to be visible and lands at the
-placeholder height rather than its own. Size from the content — a `min-height` off what it
-holds, no `100vh` anywhere — and the frame follows it.
+board the frame's height is derived from what the stage reports: it fits the artifact, from a
+120px floor up to 600px. Past 600px the stage folds: it stays 600px tall and scrolls inside,
+and a Show full height bar under the frame opens it in place to the whole artifact. A
+rendered-variant option clips at 600px instead, with no bar, since a click on its card picks
+it. Size from the content: a `min-height` off what it holds, no `100vh` anywhere. A page laid
+out in `vh` units measures its frame rather than itself, so it settles where the frame
+already stood (the 320px placeholder, or folded at 600px), and Show full height opens it once
+to that measure instead of following it.
 
-**The board themes every stage.** Before a stage renders, the board sets `data-theme`
-(`light` or `dark`) and `color-scheme` on its own document — a template that already reads
-`data-theme` needs nothing new. Condition any literal color in your own CSS on that
-attribute, in both directions, or leave the stage colorless and it inherits the board's
-palette for free; a hardcoded light-mode color left unconditioned reads as broken the
-moment the board is dark, and vice versa.
+**Every diagram, and every stage outside a page board, carries a Pull-out**: a button in the
+top-right corner of its frame that opens it at full viewport size. It sits over the artifact's own top-right corner,
+about 36px square, so keep anything the reviewer must read or press out of that corner.
+
+**Links inside a stage work, and the board owns them.** A click on an in-page anchor
+(`href="#id"`) brings that element into view: a stage with room to scroll (a folded stage, a
+page board, an inner pane) scrolls inside the frame, and one showing the whole artifact
+scrolls the board to the target, so a table of contents in an artifact is worth writing. A
+click on an `http` or `https` link opens that address in a new tab at once, from the board
+page and with no opener; a link of any other scheme does nothing at all. The frame itself
+never navigates, so an outbound link is worth writing too.
+
+**The board tells every stage its theme, and the stage stays a light surface.** Before a
+stage renders, the board sets `data-theme` (`light` or `dark`) on its document and nothing
+else. Behind the stage is a light-gray artboard in both themes, dimmer under a dark board,
+and a stage that sets no color draws the browser's light defaults on it in both: black text,
+blue links, light form controls. So a colorless stage reads in either theme with no work. To
+follow the board instead, condition your colors on `data-theme` and paint both halves
+together: a dark palette sets its own background beside its light text, plus
+`color-scheme: dark` for its form controls and scrollbars. A light text color with no
+background of yours behind it lands on the light artboard and cannot be read.
+`prefers-color-scheme` reads light inside a stage whatever the board's theme, so key on
+`data-theme`. The full-size copy a stage's Pull-out opens is told the same theme, so it
+draws the same half of your palette as the stage in its block.
 
 ## Question blocks
 
@@ -208,7 +224,8 @@ card's full row, with the options and the context panel side by side beneath it.
 renders as one panel — every item in the order you posted it, no card and no kind label around
 each — beside the options, or full width under the prompt when the question carries a mock or
 rendered variants. A markdown item longer than about a dozen lines folds under a Show more
-control; a code excerpt keeps its own scroll box, and a diagram or a mock never folds.
+control; a code excerpt keeps its own scroll box, a diagram does not fold, and a stage folds
+past 600px (see "A stage sizes itself" above).
 
 **A question about a screen or control carries its mock in its own `context`, in the same
 round**, never a description or a pointer to an earlier round: the reviewer judges what they

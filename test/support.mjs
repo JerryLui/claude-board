@@ -680,6 +680,26 @@ export function buildLauncher(workDir, opts = {}) {
 
 // --- pages in the DOM stand-in ------------------------------------------------------------
 
+/** `inlineColorScheme(el)` lists every `color-scheme` set on `el` itself, one entry per way
+ * script can set it: the `style.colorScheme` property, `style.setProperty`, `style.cssText`
+ * and a `style` attribute. A browser folds the four into one declaration; the stand-in keeps
+ * them apart (test/dom-stand-in.mjs's `makeStyle`), so a check that reads one of them passes
+ * a regression that writes through another. Empty when none is set:
+ *
+ *   assert.deepEqual(inlineColorScheme(stageRoot), []);
+ */
+export function inlineColorScheme(el) {
+  const found = [];
+  const style = el.style || {};
+  if (style.colorScheme) found.push(`style.colorScheme: ${style.colorScheme}`);
+  const viaSetProperty = typeof style.getPropertyValue === 'function' ? style.getPropertyValue('color-scheme') : '';
+  if (viaSetProperty) found.push(`style.setProperty: ${viaSetProperty}`);
+  if (/color-scheme/i.test(String(style.cssText || ''))) found.push(`style.cssText: ${style.cssText}`);
+  const attr = el.getAttribute('style');
+  if (/color-scheme/i.test(String(attr || ''))) found.push(`style attribute: ${attr}`);
+  return found;
+}
+
 let harness = null;
 
 /** `pageHarness()` loads test/dom-stand-in.mjs and the real client scripts once, and resolves

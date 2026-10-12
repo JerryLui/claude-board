@@ -122,7 +122,7 @@ Content block), attachment, sidebar.
 more — per item, wherever the item sits, decided by a count of its source. A Stage outside a
 page board or a variant option folds too, past 600px: it scrolls inside at that height, and
 Show full height under the frame opens it in place. A code
-excerpt keeps its own scroll box, and a diagram never folds. _Avoid_: collapse, truncate, clamp.
+excerpt keeps its own scroll box, and a diagram does not fold. _Avoid_: collapse, truncate, clamp.
 
 **Commentable**: carrying the comment control and the click-to-anchor gesture — only the
 rendered content kinds, `mermaid` and `html`, wherever they appear; `markdown` and `code` never

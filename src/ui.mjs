@@ -292,11 +292,18 @@ export const ui = `
   function qsa(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
 
   /** The controls that stay live when everything else on a round is disabled:
-   * the diagram's expand control and the fold's Show more. Read by both the
-   * readonly pass below and the sent-round pass (markRoundSent), so a new
-   * read-only affordance is one edit, not two that drift apart silently. */
+   * the Pull-out on a stage or diagram (ADR.md entry 120), the fold's Show
+   * more, and a stage's Show full height bar (ADR.md entry 119). Read by both
+   * the readonly pass below and the sent-round pass (markRoundHistory), so a
+   * new read-only affordance is one edit, not two that drift apart silently. */
   function staysLive(el) {
-    return !!(el.classList && (el.classList.contains('expand-btn') || el.classList.contains('fold-toggle')));
+    return !!(el.classList && (el.classList.contains('pull-out') || el.classList.contains('fold-toggle')))
+      || isStageFoldToggle(el);
+  }
+  // A line of its own rather than a third term above, so a sibling control
+  // joining the carve-out does not have to rewrite this one.
+  function isStageFoldToggle(el) {
+    return !!(el.classList && el.classList.contains('stage-fold-toggle'));
   }
 
   // Read-only mode is enforced at the element level, not just by guarding the
@@ -306,8 +313,8 @@ export const ui = `
   // hard-disabled here, on top of every handler's own readonly guard.
   //
   // Two deliberate exceptions, both read-only affordances: the fold's Show more
-  // control, and the diagram's expand
-  // control. The fold is a reading convenience over content the archive already
+  // control, and the Pull-out on every stage and diagram (ADR.md entry 120).
+  // The fold is a reading convenience over content the archive already
   // carries in its own bytes -- disabling it would leave a reader looking at a
   // fade with no way past it, which is strictly worse than not folding at all.
   // As for the lens: 'The lens is view-only under body.readonly. Pan and zoom work in a
@@ -816,8 +823,9 @@ export const ui = `
   var STAGE_CB = 'cb-stage';
   var nextLocateId = 1;
   var pendingLocates = {}; // requestId -> { layer: pin-layer element, comments: [...] }
-  // The clip point for a variant option's stage (handleStageHeight, below),
-  // tuned against a real mock. Hand-kept in step with src/styles.mjs's
+  // The tallest a stage stands in place before it folds (ADR.md entry 119), and
+  // the clip point for a variant option's stage, which never folds
+  // (applyStageHeight, below). Hand-kept in step with src/styles.mjs's
   // '.choice-variant .html-stage' 'max-height' -- neither file can read a value
   // out of the other (QUIRKS.md "Two stylesheets, one palette"). The CSS
   // max-height is a backstop only: THIS clamp is what actually stops a hostile
@@ -837,18 +845,35 @@ export const ui = `
   // matter what the stage reports.
   var STAGE_TRAVEL_CAP = 30000;
   var STAGE_WHEEL_SLACK = 2 * STAGE_HEIGHT_CAP;
-  // The floor beside that cap: a stage that sizes itself from the
-  // viewport rather than from its own content can report a height that
-  // measures whatever sliver of chrome happened to be visible -- a few
-  // pixels of label, nothing else -- and without a floor that report would
-  // lock the card at exactly that collapsed height forever, since a later,
-  // taller report never arrives from content that isn't reflowing. 320
-  // matches '.choice-variant .html-stage''s own starting height
-  // (src/styles.mjs) -- the same "two independent places, kept in sync by
-  // convention" shape as STAGE_HEIGHT_CAP above -- so a collapsed report
-  // renders exactly at the placeholder a report that never arrived at all
-  // would have left the card at, not below it.
+  // The placeholder every stage holds until its first height report, and the
+  // line a stage only goes below on two matching reports (applyStageHeight). A
+  // stage that sizes itself from the viewport rather than from its own content
+  // can report whatever sliver of chrome happened to be visible -- a few pixels
+  // of label, nothing else -- so one report under this line is not believed on
+  // its own. 320 matches '.html-stage''s own starting height (src/styles.mjs),
+  // the same "two independent places, kept in sync by convention" shape as
+  // STAGE_HEIGHT_CAP above.
   var STAGE_HEIGHT_FLOOR = 320;
+  // The hard floor under that line: no report, however often repeated, takes a
+  // stage below this, so a sliver that does match itself still leaves a box
+  // with room to show what it is.
+  var STAGE_HEIGHT_MIN = 120;
+  // The frame's own border, top and bottom ('.html-stage', src/styles.mjs:
+  // 1px each side, and '* { box-sizing: border-box; }' counts it inside the
+  // height). A box sized to the reported height alone would show the mock
+  // two pixels short and give a fitted stage the stray inner scrollbar
+  // fitting exists to remove.
+  var STAGE_FRAME_EDGE = 2;
+  // How far under the cap a folded stage's content has to fall before it
+  // unfolds. Folding happens the moment content passes the cap; without this
+  // band a mock breathing a few pixels either side of it (a loader, an
+  // animation) would put the Show full height bar in and out on every frame.
+  var STAGE_FOLD_SLACK = 32;
+  // How long a smaller height has to hold before a stage shrinks to it. Growth
+  // applies at once (content must never sit behind a scrollbar it does not
+  // need); a shrink waits, so a mock whose height keeps moving does not jump
+  // everything under it on every change.
+  var STAGE_SETTLE_MS = 300;
   // How far into the artifact counts as fully "reading it" (ADR.md entry 40) --
   // the offset at which the header has finished condensing and the back-to-top
   // control has finished appearing. A RAMP, not a threshold: the condense is a
@@ -1109,44 +1134,414 @@ export const ui = `
     openCommentForm(blockId, 'dom', anchor.ref, hint, '');
   }
 
-  /** 'frame''s stage reporting its own content
-   * height, so a variant option's card can grow to fit it instead of sitting
-   * at '.html-stage''s fixed 320px floor -- the parent cannot measure this
-   * itself (src/render.mjs's design comment on why 'contentDocument' is
-   * unreachable), so the stage measures and reports, the same shape as
-   * 'hover'/'positions'. Height is STAGE-AUTHORED input like every other field
-   * on this channel -- a stage-posted message is agent-authored input, never
-   * evidence a human acted: shape-checked ('Number.isFinite', positive -- a non-finite,
-   * negative or zero report is dropped outright, same as every other
-   * malformed field on this channel) and clamped between STAGE_HEIGHT_FLOOR
-   * and STAGE_HEIGHT_CAP before it ever touches 'frame.style.height', so no
-   * report can grow a card without limit, push page chrome off screen, or
-   * claim more than its own box -- and no report can shrink one below the
-   * placeholder either: a stage that sizes itself from the viewport
-   * rather than its own content can report a collapsed height (a sliver of
-   * label, nothing else) that never grows again, and without the floor that
-   * would lock the card there permanently instead of leaving it at the
-   * placeholder a late or absent report already leaves it at. 'frame' is
-   * already the DOM-walk-identified frame ('findStageFrame(ev.source)' in the
-   * listener below), never an id the message claims for itself.
+  // --- stage height: fit, fold, open (ADR.md entry 119) ---------------------
+  //
+  // A stage outside a page board takes its reported content height, from
+  // STAGE_HEIGHT_MIN up to STAGE_HEIGHT_CAP. Past the cap it FOLDS: the box
+  // stays at the cap, the mock scrolls inside its own frame, and the block
+  // carries '.stage-folded', which shows the Show full height bar under the
+  // frame ('.stage-fold', src/render.mjs's stageFoldBar). The bar OPENS it in
+  // place ('.stage-opened') to a one-time snapshot of the reported height,
+  // capped at STAGE_TRAVEL_CAP, and Show less folds it back to the cap. A
+  // variant option's stage clips at the cap instead and never folds: a click on
+  // its card picks it (entry 22). The state lives on the stage's own
+  // '.html-block' element -- a top-level section or a question's
+  // '.context-item' -- because that is what the bar sits in. Beside it, in
+  // any of those states, the block carries '.stage-scrolls' while the mock is
+  // taller than the box (markStageScrolls).
+  //
+  // Every field below is an expando on the frame element, so a frame an amend
+  // or a push replaces takes its whole state with it.
+  //   __cbStageContentH  the latest report, capped at STAGE_TRAVEL_CAP
+  //   __cbStageMatched   that report repeated the one before it
+  //   __cbStageBox       the box height last applied (absent: the CSS 320px)
+  //   __cbStageOpenBox   the snapshot an opened stage holds (0: not taken)
+  //   __cbStageQueued    an animation frame is already booked to apply
+  //   __cbStageShrinkTo / __cbStageShrinkTimer / __cbStageShrinkDue
+  //                      a smaller box waiting out STAGE_SETTLE_MS
+  //   __cbStagePinsQueued  a pin re-ask is booked after a new box
+
+  /** A page board's stage is a constant full-window box (ADR.md entry 33;
+   * QUIRKS.md "The stage is a constant 100vh box"), so no report is ever
+   * applied to it. Decided by the frame's own round, not by 'body.page-board':
+   * that class follows whichever round is on screen, and an inline height left
+   * on a page round's frame while another round was showing would beat the
+   * stylesheet's 100vh the moment the reader flipped back to it. */
+  function isPageStage(frame) {
+    var round = frame.closest('.round');
+    var n = round ? Number(round.getAttribute('data-round')) : NaN;
+    return isFinite(n) && isPageRound(blocksOfRound(n));
+  }
+
+  /** 'frame''s stage reporting its own content height -- the parent cannot
+   * measure this itself (src/render.mjs's design comment on why
+   * 'contentDocument' is unreachable), so the stage measures and reports, the
+   * same shape as 'hover'/'positions'. Height is STAGE-AUTHORED input like
+   * every other field on this channel, never evidence a human acted:
+   * shape-checked ('Number.isFinite', positive -- a non-finite, negative or
+   * zero report is dropped outright, same as every other malformed field on
+   * this channel) and capped at STAGE_TRAVEL_CAP here, then clamped again by
+   * applyStageHeight before anything touches 'frame.style.height', so no
+   * report can grow a stage without limit or push the page's chrome off
+   * screen. 'frame' is already the DOM-walk-identified frame
+   * ('findStageFrame(ev.source)' in the listener below), never an id the
+   * message claims for itself.
    *
-   * Applied only when 'frame' sits inside a '.choice-variant' card. Every
-   * html stage sends this message, standalone or not (stageAgentScript has no
-   * way to know which kind of card it ended up in -- see its own comment),
-   * but a standalone stage keeps its existing floor/resize behaviour
-   * untouched (a different chunk's territory); the
-   * gate here, not a change to what the stage sends, is what keeps the two
-   * apart. */
+   * Nothing is applied here: the report is recorded and one animation frame
+   * is booked to act on the latest one, so a stage posting many reports a
+   * frame (an animation, a loader, or a hostile flood) moves its box at most
+   * once a frame. */
   function handleStageHeight(data, frame) {
     if (!Number.isFinite(data.height) || data.height <= 0) return;
-    if (!frame.closest('.choice-variant')) return;
-    // Kept beside the height it clamps, not derived later from the box: this
-    // is the mock's OWN reported content height, and the difference between it
-    // and the cap is exactly how much of the mock the cap is hiding -- the one
-    // number forwardWheel (below) needs to know whether there is anything to
-    // scroll at all.
-    frame.__cbStageContentH = data.height;
-    frame.style.height = Math.max(STAGE_HEIGHT_FLOOR, Math.min(data.height, STAGE_HEIGHT_CAP)) + 'px';
+    if (isPageStage(frame)) return;
+    var h = Math.min(data.height, STAGE_TRAVEL_CAP);
+    // Kept beside the box, not derived later from it: this is the mock's OWN
+    // content height, and the difference between it and the cap is exactly how
+    // much of the mock the cap is hiding -- the number forwardStageWheel
+    // (below) and an open both read.
+    frame.__cbStageMatched = h === frame.__cbStageContentH;
+    frame.__cbStageContentH = h;
+    scheduleStageHeight(frame);
+  }
+
+  /** Book one animation frame to apply 'frame''s latest report; a frame
+   * already booked absorbs every report that arrives before it runs. With no
+   * requestAnimationFrame at all (an old browser, or the DOM stand-in) the
+   * report applies straight away. */
+  function scheduleStageHeight(frame) {
+    if (frame.__cbStageQueued) return;
+    if (typeof requestAnimationFrame !== 'function') { applyStageHeight(frame); return; }
+    frame.__cbStageQueued = true;
+    requestAnimationFrame(function () {
+      frame.__cbStageQueued = false;
+      applyStageHeight(frame);
+    });
+  }
+
+  function clearStageShrink(frame) {
+    if (frame.__cbStageShrinkTimer) clearTimeout(frame.__cbStageShrinkTimer);
+    frame.__cbStageShrinkTimer = 0;
+    frame.__cbStageShrinkTo = 0;
+    frame.__cbStageShrinkDue = false;
+  }
+
+  /** The fold state, in one place: the block's class, the bar's label, and
+   * aria-expanded, which is the same fact for a screen reader. 'state' is
+   * 'folded', 'opened', or null for a stage that fits. */
+  function setStageFoldState(block, state) {
+    block.classList.toggle('stage-folded', state === 'folded');
+    block.classList.toggle('stage-opened', state === 'opened');
+    var btn = block.querySelector('.stage-fold-toggle');
+    if (!btn) return;
+    btn.setAttribute('aria-expanded', state === 'opened' ? 'true' : 'false');
+    btn.textContent = state === 'opened' ? 'Show less' : 'Show full height';
+  }
+
+  /** The one place a stage's box is written, and so the one place its pins
+   * are asked for again after it moves (relocateStagePins), and where the
+   * block is marked again for the new box (markStageScrolls). 'state' is
+   * setStageFoldState's. */
+  function setStageBox(frame, block, box, state) {
+    frame.__cbStageBox = box;
+    frame.style.height = box + 'px';
+    setStageFoldState(block, state);
+    markStageScrolls(frame, block);
+    relocateStagePins(frame);
+  }
+
+  /** Mark 'frame''s block '.stage-scrolls' for exactly as long as the frame
+   * scrolls inside: its mock is taller than its box, which is to say the
+   * latest report and the frame's own border come to more than the box. It
+   * is what moves the Pull-out clear of the frame's own scrollbar
+   * ('.stage-scrolls .pull-out', src/styles.mjs).
+   *
+   * No fold state says this, which is why the mark is its own class. A
+   * folded stage whose mock has shrunk into STAGE_FOLD_SLACK has nothing left
+   * to scroll. A variant option clipped at the cap scrolls and never folds.
+   * An opened stage scrolls once its mock outgrows the snapshot it opened to
+   * (a late image, an expanded section, a mock sized in viewport units), and
+   * from the start when it stands at STAGE_TRAVEL_CAP over a taller mock.
+   *
+   * Two things decide it and each changes in one place, so it is read again
+   * in both: a new box in setStageBox, a new report in applyStageHeight,
+   * which is what reaches the reports that move no box. Until a box is
+   * written the frame stands at the stylesheet's own height,
+   * STAGE_HEIGHT_FLOOR. A page board's stage never gets here:
+   * handleStageHeight drops its reports. */
+  function markStageScrolls(frame, block) {
+    var box = frame.__cbStageBox || STAGE_HEIGHT_FLOOR;
+    block.classList.toggle('stage-scrolls', frame.__cbStageContentH + STAGE_FRAME_EDGE > box);
+  }
+
+  /** Ask 'frame''s stage again where its pinned elements are, once the box
+   * setStageBox just wrote has been laid out. A mock lays out against its own
+   * frame, so a new box moves a centred dialog or a footer docked to the
+   * bottom with no scroll and no window resize to re-ask on, and the pins
+   * drawn over them would stay where the old box put them -- every applied
+   * height change and every fold toggle lands here.
+   *
+   * Two animation frames, the stage's own reportHeightAfterLayout idiom: a
+   * box written from a click is laid out at the end of the next frame, and a
+   * stage running in a process of its own learns its new size only after
+   * that layout, so an ask posted at once can be answered from the old box.
+   * One ask booked per frame however many boxes land before it, so a stage
+   * driving its own height cannot turn that into a flood, and none at all
+   * for a stage with no pin on it, the common case; with no
+   * requestAnimationFrame (an old browser, or the DOM stand-in) it asks
+   * straight away. */
+  function relocateStagePins(frame) {
+    if (frame.__cbStagePinsQueued || !stagePinsToPlace(frame)) return;
+    function ask() {
+      frame.__cbStagePinsQueued = false;
+      var pins = stagePinsToPlace(frame);
+      if (pins) requestStagePositions(frame, pins.blockId, pins.layer);
+    }
+    if (typeof requestAnimationFrame !== 'function') { ask(); return; }
+    frame.__cbStagePinsQueued = true;
+    requestAnimationFrame(function () { requestAnimationFrame(ask); });
+  }
+
+  /** 'frame''s block id and pin layer when it has a pin there to place, or
+   * null: gated as handleStageScroll's re-ask is -- a frame still on the page
+   * that has announced 'ready', a layer, and a 'dom' comment to pin. Read
+   * again when the ask runs, since a push or a Send can change any of them
+   * in between. */
+  function stagePinsToPlace(frame) {
+    var block = frame.closest('.html-block');
+    var blockId = block && block.getAttribute('data-block-id');
+    var layer = block && block.querySelector('.pin-layer');
+    if (!blockId || !layer || !isWiredStage(frame) || !domPinCommentsFor(blockId).length) return null;
+    return { blockId: blockId, layer: layer };
+  }
+
+  /** Act on 'frame''s latest report: fit, fold or clip, under the rules
+   * ADR.md entry 119 sets.
+   *   - The box shows the whole report plus the frame's own border
+   *     (STAGE_FRAME_EDGE), never less than STAGE_HEIGHT_MIN.
+   *   - Under STAGE_HEIGHT_FLOOR only on a report that matched the one before
+   *     it: a single sliver holds the box where it is (or at the floor, if it
+   *     stood taller).
+   *   - Past STAGE_HEIGHT_CAP it folds at the cap (a variant option clips
+   *     there and never folds), and a folded stage stays folded until its
+   *     content falls STAGE_FOLD_SLACK under the cap.
+   *   - Growth applies at once; a shrink waits until the smaller box has held
+   *     for STAGE_SETTLE_MS, and any growth in between cancels it.
+   *   - An opened stage keeps its snapshot whatever it reports: a mock sized
+   *     in viewport units grows with its own frame, so following it would
+   *     never stop. A stage already marked opened with no snapshot yet (the
+   *     server marks one holding a comment, src/render.mjs's
+   *     stageRendersOpened) takes its first report past the cap as the
+   *     snapshot. A report under the cap drops the mark, and the stage fits
+   *     like any other, only when it matched the one before it, the same
+   *     distrust STAGE_HEIGHT_FLOOR applies: a first report is often a sliver
+   *     measured mid-build (a mock whose script is still building it, an
+   *     image still loading), and the real height arriving after it would
+   *     fold the stage over the comment the mark was there to keep in view.
+   *   - Whatever box those rules leave, the block is marked '.stage-scrolls'
+   *     while the report is taller than it (markStageScrolls). */
+  function applyStageHeight(frame) {
+    var block = frame.closest('.html-block');
+    var reported = frame.__cbStageContentH;
+    if (!block || !(reported > 0)) return;
+    // The new report against the box as it stands. Most reports move no box
+    // (every return below that writes none, an opened stage holding its
+    // snapshot first among them), and a box that is written further down is
+    // marked again where it is written, in setStageBox.
+    markStageScrolls(frame, block);
+    var want = reported + STAGE_FRAME_EDGE;
+    if (block.classList.contains('stage-opened')) {
+      if (frame.__cbStageOpenBox) return;
+      if (want > STAGE_HEIGHT_CAP) {
+        frame.__cbStageOpenBox = stageOpenBox(reported);
+        setStageBox(frame, block, frame.__cbStageOpenBox, 'opened');
+        return;
+      }
+      if (!frame.__cbStageMatched) return;
+      setStageFoldState(block, null);
+    }
+    var current = frame.__cbStageBox || STAGE_HEIGHT_FLOOR;
+    var folds = !frame.closest('.choice-variant');
+    var folded = block.classList.contains('stage-folded');
+    // The fold state the block carries now. A box is written when the height
+    // or this changes, so a stage reporting the same height again writes
+    // nothing. Whether the frame scrolls inside is no part of it: that mark
+    // follows the report with no box written (markStageScrolls).
+    var held = folded ? 'folded' : null;
+    var target, state = null;
+    if (want > STAGE_HEIGHT_CAP || (folded && want > STAGE_HEIGHT_CAP - STAGE_FOLD_SLACK)) {
+      target = STAGE_HEIGHT_CAP;
+      if (folds) state = 'folded';
+    } else {
+      target = Math.max(STAGE_HEIGHT_MIN, want);
+      if (target < STAGE_HEIGHT_FLOOR && !frame.__cbStageMatched) {
+        target = Math.max(target, Math.min(current, STAGE_HEIGHT_FLOOR));
+      }
+    }
+    if (target >= current) {
+      clearStageShrink(frame);
+      if (target !== current || state !== held) setStageBox(frame, block, target, state);
+      return;
+    }
+    if (frame.__cbStageShrinkDue && frame.__cbStageShrinkTo === target) {
+      clearStageShrink(frame);
+      setStageBox(frame, block, target, state);
+      return;
+    }
+    if (frame.__cbStageShrinkTo === target) return;
+    clearStageShrink(frame);
+    frame.__cbStageShrinkTo = target;
+    frame.__cbStageShrinkTimer = setTimeout(function () {
+      if (frame.__cbStageShrinkTo !== target) return;
+      frame.__cbStageShrinkTimer = 0;
+      frame.__cbStageShrinkDue = true;
+      scheduleStageHeight(frame);
+    }, STAGE_SETTLE_MS);
+  }
+
+  /** The Show full height bar: open a folded stage in place to a snapshot of
+   * its reported height, or fold an opened one back to the cap. Show less
+   * keeps the folded stage in view (keepFoldedStageInView), then books a
+   * fresh look at the latest report, so a mock that shrank while it stood
+   * open unfolds the ordinary way, after the settle delay. */
+  function toggleStageFold(block) {
+    var frame = block.querySelector('.html-stage');
+    if (!frame || frame.closest('.choice-variant')) return;
+    clearStageShrink(frame);
+    if (block.classList.contains('stage-opened')) {
+      frame.__cbStageOpenBox = 0;
+      setStageBox(frame, block, STAGE_HEIGHT_CAP, 'folded');
+      keepFoldedStageInView(frame);
+      scheduleStageHeight(frame);
+      return;
+    }
+    var reported = frame.__cbStageContentH;
+    if (!(reported > 0)) return;
+    frame.__cbStageOpenBox = stageOpenBox(reported);
+    setStageBox(frame, block, frame.__cbStageOpenBox, 'opened');
+  }
+
+  /** After Show less, keep the folded stage in view, the bar the reader just
+   * pressed first. They pressed it at the foot of a tall stage and the box
+   * above it just lost everything over the cap: left alone, the frame ends
+   * above the window, or with its top under the sticky header, and they are
+   * reading whatever followed it. So the board moves, once and one way, by
+   * two rules, the first one winning:
+   *
+   *   1. The bar stays in sight: its bottom never ends under the board's
+   *      bottom chrome (boardFloor). It still holds the reader's focus and is
+   *      the one control that undoes what they just did.
+   *   2. The folded frame's top comes down to the page's own '--head-clear'
+   *      when the fold left it above that, under the header or over the
+   *      window's top edge.
+   *
+   * A window that shows the frame and its bar together gets rule 2 whole. A
+   * shorter one (a small laptop, a phone, or the questions-left pill taking
+   * its row) cannot have both: the board stops with the bar's bottom on the
+   * chrome's top edge and the frame's top stays above the clearance by the
+   * shortfall, under the header. That is the trade-off: the frame's first
+   * rows are a short scroll away, a bar drawn under the send bar is not
+   * there to press. A bar the chrome already covers under a clear top brings
+   * the board up to that same edge. A top already clear with its bar in
+   * sight leaves the board still. Scrolling to the bar itself instead stops
+   * it at the window's top edge, under the header, the whole frame above it.
+   *
+   * Both boxes are measured after setStageBox wrote the folded box, so a
+   * board the shorter page pulled up from its end is read where it now
+   * stands. The frame's top is rounded so it lands at the clearance or just
+   * under it, the bar's bottom so it lands at the chrome's edge or just above
+   * (scrollBoardSo). No 'behavior' is passed: the page's own scroll-behavior
+   * decides, smooth unless the reader asked for reduced motion. */
+  function keepFoldedStageInView(frame) {
+    if (typeof window.scrollTo !== 'function') return;
+    var box = frame.getBoundingClientRect();
+    if (!box || !(box.height > 0)) return;
+    var clear = headClear();
+    // How far down the window the frame's top has to come to clear the header.
+    var down = Math.max(0, clear - box.top);
+    var block = frame.closest('.html-block');
+    var bar = block && block.querySelector('.stage-fold-toggle');
+    var pressed = bar && bar.getBoundingClientRect();
+    if (pressed && pressed.height > 0) {
+      // ...and how far the bar under it can come with it before the bottom
+      // chrome is drawn over it. Under zero: it is covered where it stands.
+      var floor = boardFloor();
+      var room = floor - pressed.bottom;
+      if (room < down) {
+        if (room !== 0) scrollBoardSo(pressed.bottom, floor, null, true);
+        return;
+      }
+    }
+    if (down > 0) scrollBoardSo(box.top, clear);
+  }
+
+  /** How far down the window the board's page is in plain sight: the top edge
+   * of the highest bottom chrome drawn over it, or the window's own bottom
+   * edge with none. Each box is measured where it stands, never a copied
+   * height: the sticky send bar, the questions-left pill floating above it,
+   * and the round pager's dock, fixed at the bottom centre. One the page is
+   * not showing has no box and does not count (a sent round and an archive
+   * hide the send bar, and the pill inside it).
+   *
+   * The pill is the exception to "showing". It comes and goes with the
+   * round's closing rail (setupSendBarDock), and the board move this floor is
+   * measured for can push that rail out of the window and bring the pill back
+   * over whatever was just placed there. So its place counts whenever the
+   * round has a question left, shown or not: a hidden one is shown for the
+   * length of this one measurement and put back, with no paint in between,
+   * and updateQuestionsLeftPill stays the only thing that decides it. A round
+   * with nothing left never shows it, so it never counts there. Not counted:
+   * the Notice, which floats in the pill's place for five seconds and goes. */
+  function boardFloor() {
+    var floor = typeof window.innerHeight === 'number' ? window.innerHeight : Infinity;
+    var pill = document.querySelector('.questions-left-pill');
+    var lift = !!pill && !pill.classList.contains('visible') && outstandingBlocks().length > 0;
+    if (lift) pill.classList.add('visible');
+    qsa('.send-bar, .questions-left-pill, .round-pager-dock', document).forEach(function (el) {
+      var box = el.getBoundingClientRect();
+      if (box && box.height > 0 && box.top < floor) floor = box.top;
+    });
+    if (lift) pill.classList.remove('visible');
+    return floor;
+  }
+
+  /** The page's own clearance under its sticky header: '--head-clear', the
+   * token every scroll-to on this page lands by. Read off the root's computed
+   * style, since the narrow layout raises it; with no computed style to read,
+   * the token's own default. */
+  function headClear() {
+    var clear = NaN;
+    try {
+      if (typeof window.getComputedStyle === 'function') {
+        clear = parseFloat(window.getComputedStyle(document.documentElement).getPropertyValue('--head-clear'));
+      }
+    } catch (e) { /* no computed style: the token's own default below */ }
+    return isFinite(clear) ? clear : 88;
+  }
+
+  /** One board scroll: the point of the page now 'at' px down the window
+   * comes to stand 'to' px down it. The board's offset is a whole pixel
+   * (Chrome stops on them), so the point can land a fraction of one off, and
+   * which side is the caller's to say. Rounded down, the default, it lands at
+   * 'to' or just under it, never above: a target brought to '--head-clear' is
+   * never a fraction under the header. 'noLower' rounds up instead, so it
+   * lands at 'to' or just above: a bar brought to the bottom chrome's edge is
+   * never a fraction under it. 'behavior' is passed on when given; without
+   * one the page's own scroll-behavior decides. */
+  function scrollBoardSo(at, to, behavior, noLower) {
+    var scrolled = typeof window.pageYOffset === 'number' ? window.pageYOffset
+      : (document.documentElement && document.documentElement.scrollTop) || 0;
+    var offset = scrolled + at - to;
+    var move = { top: Math.max(0, noLower ? Math.ceil(offset) : Math.floor(offset)) };
+    if (behavior) move.behavior = behavior;
+    window.scrollTo(move);
+  }
+
+  /** The box an open takes: the whole report and the frame's border, capped
+   * at STAGE_TRAVEL_CAP, and never under the cap it opens from -- a stage
+   * folded inside the slack band opens to where it already stands, not
+   * smaller. */
+  function stageOpenBox(reported) {
+    return Math.max(STAGE_HEIGHT_CAP, Math.min(reported + STAGE_FRAME_EDGE, STAGE_TRAVEL_CAP));
   }
 
   /** One wheel notch in pixels, whatever unit the event reports it in. Chrome
@@ -1168,15 +1563,15 @@ export const ui = `
    * mock's own document, and the parent cannot scroll an opaque-origin document
    * itself. Forwarding the NOTCH rather than relaxing that rule is the whole
    * point -- no pointer event reaches the stage, so this adds no path from a
-   * stage to its own selection; the lens (the expand control) stays the place
+   * stage to its own selection; the lens (the Pull-out) stays the place
    * a stage becomes genuinely live.
    *
    * Returns nothing; the caller is the listener, and the only side effects are
    * the message and, when the notch is consumed, preventDefault.
    *
    * ponytail: the wheel is the only gesture wired. A reader with no wheel --
-   * touch, or keyboard alone -- reads a clipped mock through the expand
-   * control, which is in the tab order and opens the same artifact live and
+   * touch, or keyboard alone -- reads a clipped mock through the Pull-out,
+   * which is in the tab order and opens the same artifact live and
    * full-screen. The upgrade path, if that stops being enough, is the
    * parent-drawn scrollbar this deliberately does not build: a thumb sized
    * from the height the stage already reports, dragged in the parent document,
@@ -1592,6 +1987,49 @@ export const ui = `
   measureDocWidth();
   window.addEventListener('resize', measureDocWidth);
 
+  /** How wide a scrollbar is inside a stage's frame, written to
+   * '--stage-scrollbar-w' for the Pull-out, which moves in by it on a stage
+   * that scrolls inside its frame ('.stage-scrolls .pull-out', src/styles.mjs).
+   * A classic scrollbar takes its width out of the frame's right edge, exactly
+   * where the control sits; an overlay one (the macOS default) takes none and
+   * measures 0, which leaves the control where it was.
+   *
+   * The frame's own scrollbar is out of reach (a sandboxed stage is another
+   * origin), but a scrollbar's width is one number for the whole browser, so a
+   * probe box here stands for it. The box sits in a SHADOW ROOT, because this
+   * page restyles its own scrollbars ('::-webkit-scrollbar', 11px wide,
+   * src/styles.mjs) and a stage's document does not: measured in Chrome 154, a
+   * probe in the page itself reads 11px beside a frame drawing 15px, and the
+   * same probe in a shadow root reads the frame's 15px. A page's rules stop at
+   * a shadow root, so the box inside it draws the native scrollbar a frame
+   * does. What a mock does to its OWN scrollbar (a thin one, a hidden one) the
+   * page cannot know; the control clears the native width regardless.
+   *
+   * Measured again on every resize, measureDocWidth's trigger and the only
+   * one here, so a width that changes while the page is open (the system
+   * going from overlay to classic scrollbars when a mouse is plugged in) is
+   * picked up at the next resize, not at once. With no shadow roots nothing
+   * is written, and the stylesheet's own fallback, 0, holds. */
+  function measureStageScrollbar() {
+    var host = document.createElement('div');
+    if (typeof host.attachShadow !== 'function') return;
+    var box = document.createElement('div');
+    host.style.cssText = 'position:absolute;top:-9999px;left:-9999px;width:100px;height:100px;visibility:hidden;pointer-events:none;';
+    box.style.cssText = 'width:100px;height:100px;overflow:scroll;';
+    host.attachShadow({ mode: 'closed' }).appendChild(box);
+    document.body.appendChild(host);
+    var width = box.offsetWidth - box.clientWidth;
+    // 'replaceWith()' with no node removes this one, the way
+    // refreshPendingCommentItems takes a node out of the page.
+    host.replaceWith();
+    // Nearly every resize measures the width it measured last: written only
+    // when it has changed.
+    var value = (width > 0 ? width : 0) + 'px';
+    if (document.body.style.getPropertyValue('--stage-scrollbar-w') !== value) document.body.style.setProperty('--stage-scrollbar-w', value);
+  }
+  measureStageScrollbar();
+  window.addEventListener('resize', measureStageScrollbar);
+
   var backToTopBtn = document.querySelector('button#back-to-top');
   if (backToTopBtn) {
     backToTopBtn.addEventListener('click', function () {
@@ -1654,6 +2092,49 @@ export const ui = `
     window.open(url, '_blank', 'noopener');
   }
 
+  /** An in-page anchor clicked inside a stage that has nothing of its own to
+   * scroll -- one that fits its content, or one opened by Show full height
+   * (ADR 119) -- so the BOARD scrolls to the target instead, landing it under
+   * the sticky header by the page's own '--head-clear', the clearance every
+   * other scroll-to on this page uses. The stage decides which case it is in
+   * from its own geometry (stageAgentScript's frameScrollBoxes).
+   *
+   * A stage that does scroll (a folded one, or an app shell's inner pane)
+   * scrolls itself first and then says where the target landed, with
+   * 'scrolled: true'. That is the frame's own top off a page board, which the
+   * reader may have scrolled above the window or under the sticky header. A
+   * frame that cannot scroll that far (a target near its document's end)
+   * leaves the target lower down, which may be past the window's bottom edge.
+   * The board leaves a target still when it landed in the visible band, from
+   * '--head-clear' under the window top to the same clearance above its
+   * bottom: room for the target's first lines, and for the sticky send bar
+   * drawn over an open round's bottom edge. Outside that band the board moves
+   * once, bringing the target to '--head-clear'.
+   *
+   * 'top' is where the target sits in the frame's own viewport, and is
+   * stage-authored like every field on this channel: a finite number or
+   * nothing happens, then clamped to the frame's own box, so a stage can only
+   * ever bring a point inside itself to the top of the window, never send the
+   * board somewhere else. 'scrolled' is absent or exactly true. The board's
+   * offset is rounded down, so the target lands at least '--head-clear' under
+   * the window top, never a fraction under the header. A page board's stage
+   * is never acted on: it fills the window and the page under it does not
+   * scroll (ADR 33). */
+  function handleStageAnchor(data, frame) {
+    if (typeof data.top !== 'number' || !isFinite(data.top)) return;
+    if (data.scrolled !== undefined && data.scrolled !== true) return;
+    if (isPageStage(frame) || typeof window.scrollTo !== 'function') return;
+    var box = frame.getBoundingClientRect();
+    if (!box || !(box.height > 0)) return;
+    var inside = Math.min(Math.max(data.top, 0), box.height);
+    var edge = typeof frame.clientTop === 'number' ? frame.clientTop : 0;
+    var clear = headClear();
+    var at = box.top + edge + inside;
+    var low = typeof window.innerHeight === 'number' ? window.innerHeight - clear : Infinity;
+    if (data.scrolled === true && at >= clear && at <= low) return;
+    scrollBoardSo(at, clear, 'smooth');
+  }
+
   // One listener for every stage on the page, registered once (never inside
   // wireRoot: a stage's 'ready' can arrive at any time after this page loads,
   // regardless of whether it was here at hydrate or arrived over an SSE push
@@ -1682,8 +2163,11 @@ export const ui = `
       // here only from a genuine stage -- origin, then 'event.source'
       // re-derived from the live DOM, exactly like every other type on this
       // channel -- and handleStageLink then decides whether the address
-      // itself is one this page will open at all.
-      handleStageLink(data);
+      // itself is one this page will open at all. One with no 'url' is an
+      // in-page anchor, which the board may have to scroll to
+      // (handleStageAnchor).
+      if (data.url !== undefined) handleStageLink(data);
+      else handleStageAnchor(data, frame);
       return;
     }
     if (data.type === 'positions') {
@@ -1834,9 +2318,9 @@ export const ui = `
     if (layer) renderMermaidPins(blockId, svg || null, layer, section);
     // Before the readonly/no-svg return below, deliberately: the lens is
     // view-only under body.readonly, not absent, so
-    // its expand control has to be wired in an archive too. It removes ITSELF
+    // its Pull-out has to be wired in an archive too. It removes ITSELF
     // when there is no rendered SVG to show.
-    wireDiagramExpand(section, blockId, svg || null);
+    wireDiagramPullOut(section, blockId, svg || null);
     if (readonly || !svg) return; // nothing live to click without a rendered diagram
     // Stamp every node that already
     // carries a SENT comment so the comment-mode hover/cursor rules
@@ -1880,7 +2364,7 @@ export const ui = `
 
   // --- the diagram lens -----------------------------
   //
-  // "A mermaid block carries an expand control that opens the
+  // "A mermaid block carries a Pull-out (ADR.md entry 120) that opens the
   // diagram in a full-viewport lens: drag pans, scroll zooms, with fit and 1:1
   // controls." "A mermaid node can be commented on from inside the
   // lens, and that comment is the same comment as one minted inline -- same
@@ -1890,7 +2374,7 @@ export const ui = `
   // spec's Decision directs, and differing from it in the three places that
   // matter here:
   //
-  //   1. It is opened by the explicit .expand-btn ONLY, never by clicking the
+  //   1. It is opened by the explicit .pull-out ONLY, never by clicking the
   //      diagram. /explain has no other meaning for a diagram click; this page
   //      does (comment on this node), and the spec is explicit that "the click
   //      gesture on a diagram keeps its current meaning in both modes".
@@ -1935,7 +2419,7 @@ export const ui = `
   // { x, y, s } -- what 'translate(x, y) scale(s)' on .lens-canvas means, with
   // that element's transform-origin pinned to its own top-left (src/styles.mjs).
   var lensView = { x: 0, y: 0, s: 1 };
-  // Built lazily on the first expand and reused for every diagram afterwards:
+  // Built lazily on the first open and reused for every diagram afterwards:
   // one <dialog>, whose listeners are registered exactly once. A per-block lens
   // would re-register pan/zoom handlers on every open, which is the same
   // stacked-listener failure every wiring loop in this file is scoped to avoid.
@@ -2139,7 +2623,7 @@ export const ui = `
     if (!svg || !svg.cloneNode) return;
     var l = buildLens();
     // Already open: refuse rather than re-enter. A modal <dialog> makes the rest
-    // of the document inert, so no second expand control is reachable while one
+    // of the document inert, so no second Pull-out is reachable while one
     // is open -- and showModal() on an already-open dialog throws, while the
     // close it would need first fires its 'close' event on a LATER task, so
     // "close then reopen" here would tear the new lens down a tick after
@@ -2201,7 +2685,7 @@ export const ui = `
    * too and only the colours moved -- resetting the view here would throw away
    * a position the reviewer had panned to for a change they did not ask for.
    * The pins have to be redrawn regardless, since renderLensPins measures them
-   * off the clone that was just replaced. wireDiagramExpand already re-reads
+   * off the clone that was just replaced. wireDiagramPullOut already re-reads
    * the live svg on click, so a lens opened AFTER a redraw was never affected;
    * this is only ever about one already open. */
   function lensRetheme() {
@@ -2372,17 +2856,17 @@ export const ui = `
     });
   }
 
-  /** "A mermaid block carries an expand control". The button is
-   * server-rendered (src/render.mjs's expandButton) so it exists in a standalone
-   * archive's own bytes; this only binds it, and removes it outright when mermaid
-   * left no SVG behind (CDN unreachable, invalid chart) rather than leaving a
-   * control that opens an empty lens. */
-  function wireDiagramExpand(section, blockId, svg) {
-    var btn = section.querySelector('.expand-btn');
+  /** A diagram's Pull-out (ADR.md entry 120). The button is server-rendered
+   * (src/render.mjs's pullOut) in the frame's corner so it exists in a
+   * standalone archive's own bytes; this only binds it, and removes it outright
+   * when mermaid left no SVG behind (engine missing, invalid chart) rather than
+   * leaving a control that opens an empty lens. */
+  function wireDiagramPullOut(section, blockId, svg) {
+    var btn = section.querySelector('.pull-out');
     if (!btn) return;
     if (!svg) { btn.replaceWith(); return; }
-    if (btn.__cbExpandWired) return;
-    btn.__cbExpandWired = true;
+    if (btn.__cbPullOutWired) return;
+    btn.__cbPullOutWired = true;
     btn.addEventListener('click', function (ev) {
       if (ev && ev.preventDefault) ev.preventDefault();
       // Re-read the live SVG rather than trusting the one captured at wire time:
@@ -2394,8 +2878,8 @@ export const ui = `
 
   // --- the html-stage lens --------------------
   //
-  // "Every html stage carries an expand control that opens the stage in the
-  // lens", and "inside the lens the stage receives real pointer input: a mock
+  // "Every html stage carries a Pull-out that opens the stage in the
+  // lens" (ADR.md entry 120), and "inside the lens the stage receives real pointer input: a mock
   // with its own scrollable content can be scrolled there".
   //
   // It BORROWS THE DIAGRAM LENS'S CHROME, NOT ITS VIEW MATHS (the spec's Out of
@@ -2424,9 +2908,10 @@ export const ui = `
   // dropped at the identity check, before any shape validation -- a strictly
   // SMALLER surface than the inline stage has, which is the direction to fail in
   // for a frame whose whole content is agent-authored. What it costs is
-  // element-level commenting inside the lens copy (no 'ready' means no 'mode');
-  // the inline stage is unchanged, and for a variant option the spec had already
-  // given that up to the inertness rule.
+  // element-level commenting inside the lens copy: its 'ready' is never answered,
+  // and the one message it is ever sent carries the theme with comment mode off
+  // (tellStageLensTheme, below). The inline stage is unchanged, and for a variant
+  // option the spec had already given that up to the inertness rule.
   //
   // A COPY, NOT THE INLINE FRAME MOVED IN (which is what lensAdopt does for the
   // block's comment form). Re-parenting an <iframe> destroys and recreates its
@@ -2493,6 +2978,30 @@ export const ui = `
     return stageLens;
   }
 
+  /** Tell the lens's copy of a stage the board's theme, and nothing else.
+   *
+   * The copy is not a wired stage (this section's design comment): its 'ready'
+   * is never answered and broadcastStageMode never reaches it. Left untold it
+   * carries no 'data-theme' at all, so a mock that keys its palette on that
+   * attribute falls back to its own 'prefers-color-scheme' query, and that reads
+   * light inside every stage frame (src/styles.mjs declares both frames
+   * 'color-scheme: light'). On a dark board such a mock drew dark in its block
+   * and light in the lens.
+   *
+   * It rides the 'mode' message a wired stage already hears, with comment mode
+   * off and no sent refs whatever the board's own state is: the lens is
+   * view-only, and the copy's agent reports no gesture while it believes comment
+   * mode is off. Parent to frame only. Nothing here makes the copy a sender this
+   * page listens to: findStageFrame still returns null for it.
+   *
+   * Called when the copy's document has loaded (stageLensOpen) and on every
+   * theme change while the lens is open. */
+  function tellStageLensTheme() {
+    var l = stageLens;
+    if (!l || !l.open || !l.frame) return;
+    postToStage(l.frame, { type: 'mode', commentMode: false, sentRefs: [], theme: activeTheme() });
+  }
+
   /** Mount 'section''s stage in the lens. 'opener' is the control that asked for
    * it, kept so this can hand focus back to it -- passed in rather than
    * read off document.activeElement, since whether a click focuses a button at
@@ -2515,6 +3024,16 @@ export const ui = `
     frame.setAttribute('title', 'Expanded stage');
     frame.setAttribute('sandbox', sandbox);
     frame.setAttribute('srcdoc', srcdoc);
+    // The copy is told the theme once its document has loaded: the stage agent
+    // is an inline script, so it has run and is listening by the time 'load'
+    // fires, where a post made any earlier lands in the empty document the
+    // frame starts with. On every load, not the first only: a mock that reloads
+    // itself starts again from a document nobody has told. A frame from an
+    // earlier open whose load lands late is no longer the lens's and is told
+    // nothing.
+    frame.addEventListener('load', function () {
+      if (l.frame === frame) tellStageLensTheme();
+    });
     l.body.innerHTML = '';
     l.body.appendChild(frame);
     l.frame = frame;
@@ -2671,16 +3190,19 @@ export const ui = `
     });
   }
 
-  /** Binding half: the control itself is server-rendered
-   * (src/render.mjs's expandButton) so a standalone file: archive carries it in
-   * its own bytes, and src/ui.mjs's readonly pass skips it by class -- both
-   * reasons hold for a stage exactly as they do for a diagram. Guarded against a
-   * second binding the same way wireDiagramExpand is: wireRoot re-runs on every
-   * SSE push, over roots that may already have been wired. */
-  function wireStageExpand(section) {
-    var btn = section.querySelector('.expand-btn');
-    if (!btn || btn.__cbExpandWired) return;
-    btn.__cbExpandWired = true;
+  /** Binding half of a stage's Pull-out: the control itself is server-rendered
+   * in the frame's corner (src/render.mjs's pullOut) so a standalone file:
+   * archive carries it in its own bytes, and src/ui.mjs's readonly pass skips it
+   * by class -- both reasons hold for a stage exactly as they do for a diagram.
+   * 'section' is the '.html-block' the stage sits in, a top-level section or a
+   * context item alike, and holds no other block's stage, so its one '.pull-out'
+   * is this stage's. Guarded against a second binding the same way
+   * wireDiagramPullOut is: wireRoot re-runs on every SSE push, over roots that
+   * may already have been wired. */
+  function wireStagePullOut(section) {
+    var btn = section.querySelector('.pull-out');
+    if (!btn || btn.__cbPullOutWired) return;
+    btn.__cbPullOutWired = true;
     btn.addEventListener('click', function (ev) {
       if (ev && ev.preventDefault) ev.preventDefault();
       stageLensOpen(section, section.getAttribute('data-block-id'), btn);
@@ -2969,15 +3491,24 @@ export const ui = `
   // opened a compose form over the artifact.
   // .context-tools is the kicker's replacement on a context item (ADR.md entry
   // 110) and is listed for the reason .block-kicker is: it is a control group
-  // this page drew, so a click on the gap between its two buttons must mint
-  // nothing, exactly as a click beside the kicker's comment button does.
+  // this page drew, so a click beside its button must mint nothing, exactly as
+  // a click beside the kicker's comment button does.
   // .fold-toggle is the Show more control under a folded prose item (ADR.md
   // entry 110), listed for the same reason: it is a control this page drew, not
-  // authored content, and unlike the expand control it sits directly in the item
-  // rather than inside a '.context-tools' group that is already listed here.
-  var ANCHOR_CHROME_SELECTOR = '.block-kicker, .context-tools, .fold-toggle, .comment-btn, .comment-form, .comment-target, '
+  // authored content, and it sits directly in the item rather than inside a
+  // '.context-tools' group that is already listed here.
+  // .pull-out is the Pull-out in a stage's or diagram's corner (ADR.md entry
+  // 120), a control this page drew over the frame. It sits inside '.stage-wrap'
+  // today, which is listed already; it is named in its own right so a click on
+  // it mints nothing wherever the frame's markup puts it.
+  // .stage-fold is the Show full height bar under a stage (ADR.md entry 119):
+  // the whole bar, not just its button, so a click beside the pill mints
+  // nothing either. It sits in an html block, whose 'dom' anchors resolve
+  // through the iframe's document, where nothing of the bar exists.
+  var ANCHOR_CHROME_SELECTOR = '.block-kicker, .context-tools, .fold-toggle, .pull-out, .comment-btn, .comment-form, .comment-target, '
     + '.comment-list, .page-comments, .pin-layer, .anchor-pin, .mode-toggle, .compare-label, .variant-label, .round-label, '
-    + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens';
+    + 'pre.mermaid, .html-stage, .stage-wrap, .diagram-lens'
+    + ', .stage-fold';
 
   function isAnchorChrome(el) {
     return !!(el.closest && el.closest(ANCHOR_CHROME_SELECTOR));
@@ -3538,11 +4069,11 @@ export const ui = `
   // since a mermaid diagram renders into THIS document and has no navigation
   // event of its own to announce readiness with.
 
-  // Bind the expand control on every html stage under
+  // Bind the Pull-out on every html stage under
   // this root. Unlike the anchoring wiring above there IS something to do here --
-  // the control lives in the block's kicker, in THIS document, so it needs no
-  // message from the stage to become bindable.
-  qsa('.html-block', root).forEach(function (section) { wireStageExpand(section); });
+  // the control sits in the frame's corner in THIS document, outside the iframe,
+  // so it needs no message from the stage to become bindable.
+  qsa('.html-block', root).forEach(function (section) { wireStagePullOut(section); });
 
   wirePageDomPins(root);
 
@@ -3562,7 +4093,7 @@ export const ui = `
   // second wiring pass per root.
   //
   // Live in readonly and on a sent round alike, deliberately and by the same
-  // reasoning the diagram's expand control is (the disable loops carve both out
+  // reasoning the Pull-out is (the disable loops carve both out
   // by class): a settled round is precisely where someone re-reads the context,
   // and an archive reader is exactly who cannot ask for the rest of the text any
   // other way. Live in comment mode too -- the reviewer may need to read what
@@ -3575,6 +4106,18 @@ export const ui = `
     if (!btn) return;
     var item = btn.parentElement;
     if (item) setFoldState(item, !item.classList.contains('folded'));
+  });
+
+  // A stage's Show full height bar (ADR.md entry 119; toggleStageFold above),
+  // delegated for the same reason and live in the same places: readonly, a
+  // sent round and comment mode alike, since opening a mock to read it records
+  // nothing. '.stage-fold' is in ANCHOR_CHROME_SELECTOR, so in comment mode the
+  // click opens the stage and mints no anchor.
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest('.stage-fold-toggle');
+    if (!btn) return;
+    var block = btn.closest('.html-block');
+    if (block) toggleStageFold(block);
   });
 
   // Keyboard focus reaching into the clipped part opens the fold: a Tab that
@@ -4130,9 +4673,14 @@ export const ui = `
   // control's three states down to the two a stage can act on. This is what
   // makes the artifact carry no theme control of its own: there is exactly one
   // on the page, and it paints both documents.
+  //
+  // An open stage lens holds a second copy of one stage that the broadcast
+  // does not walk, so it is told separately (tellStageLensTheme): a no-op
+  // while no stage lens is open.
   window.addEventListener('${THEME_CHANGE_EVENT}', function () {
     redrawMermaidForTheme();
     broadcastStageMode();
+    tellStageLensTheme();
   });
 
   // Cheap, partial mitigation for pin drift: reposition every pin on a window
@@ -4470,7 +5018,7 @@ export const ui = `
    * The explicit 'disabled = false' is the pager's carve-out from the read-only
    * hydrate pass at the top of this file, which hard-disables every button on
    * the page: an archive's rounds are pages too, and flipping between them is
-   * navigation, not editing (the same carve-out .expand-btn and #theme-toggle
+   * navigation, not editing (the same carve-out .pull-out and #theme-toggle
    * already have, made here rather than there because this function has to write
    * these buttons' disabled state anyway). */
   function refreshPager() {
@@ -5787,12 +6335,12 @@ export const ui = `
     // path -- no new stand-in surface needed for this.
     var rail = section.querySelector('.round-end');
     if (rail) rail.replaceWith();
-    // The diagram's expand control and the fold's Show more control are exempt,
+    // The Pull-out and the fold's Show more control are exempt ('staysLive'),
     // exactly as they are in the readonly
     // pass at the top of this file, and for the same reason ("the lens is
     // view-only under body.readonly ... pan and zoom work"). A round collapsing
-    // into history makes its ANSWERS immutable; it does not make its diagrams
-    // unreadable or its long context unreadable, and a settled round is
+    // into history makes its ANSWERS immutable; it does not make its stages and
+    // diagrams unreadable or its long context unreadable, and a settled round is
     // precisely where someone re-reads one.
     qsa('textarea, input, button', section).forEach(function (el) {
       if (staysLive(el)) return;

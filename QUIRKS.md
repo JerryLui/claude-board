@@ -102,12 +102,39 @@ outline as a literal hex, and `.cb-anchor-sent` (`cursor: not-allowed`) as the s
 class name kept in step by convention and nothing else.
 
 The hex tracks `--accent`'s **light** value in both themes, because the requirement
-is not "matches the token" but "has contrast on the surface it renders on" — a
+is not "matches the token" but "has contrast on the surface it renders on": a
 per-palette neutral artboard (`--stage-bg`: `#c3c6cd` dark, `#e6e8ee` light), which
-must stay light in both, since a srcdoc painting no background renders the UA's black
-text. `test/check-pure.mjs` asserts each part separately (the two `--stage-bg` values
-differ; outline >= 3:1 against **each** surface; black text >= 4.5:1 on each;
-equality with the light accent), so a palette change fails on the part it broke.
+must stay light in both. Both stage frames (`.html-stage`, `.stage-lens-frame`)
+declare `color-scheme: light`, so a srcdoc painting no background renders the UA's
+light-scheme ink on it whatever the board's theme: black text and the `#0000ee` link
+blue. `test/check-pure.mjs` asserts each part separately (the two `--stage-bg` values
+differ; outline >= 3:1 against **each** surface; black text and the link blue >= 4.5:1
+on each; equality with the light accent), so a palette change fails on the part it
+broke.
+
+**The frame's scheme and its document's have to agree, or the artboard is gone.** A
+frame whose used `color-scheme` differs from its document's is painted an opaque canvas
+of the document's scheme, never a transparent one, and no computed style reports it:
+only pixels do (`test/browser-check-stage-fold.mjs`'s default-ink rows read a
+screenshot). Measured in Chrome on a dark board, artboard `#c3c6cd`:
+
+| frame element | stage document | empty area | default text | unstyled link |
+| --- | --- | --- | --- | --- |
+| inherits dark | stamped dark | artboard | `#ffffff`, 1.71:1 | `#9e9eff`, 1.40:1 |
+| inherits dark | unset or stamped light | opaque `#ffffff` | `#000000`, 21:1 | `#0000ee`, 9.40:1 |
+| inherits dark | stamped dark, `html{color:#000}` | artboard | `#000000`, 12.28:1 | `#9e9eff`, 1.40:1 |
+| `light` | unset or stamped light (what ships) | artboard | `#000000`, 12.28:1 | `#0000ee`, 5.50:1 |
+| `light` | the mock's own `color-scheme: dark` | opaque `#121212` | `#ffffff`, 18.73:1 | `#9e9eff`, 7.84:1 |
+
+So `applyTheme` sets `data-theme` and never `color-scheme`, and the two frame rules
+carry the declaration: take either half away and a row above is what a dark board
+shows. `prefers-color-scheme` inside the frame follows the frame element's scheme, so
+it reads light in every stage. The Lens's copy is not a wired stage and answers to no
+handshake, so the board tells it the theme itself (`tellStageLensTheme`, `src/ui.mjs`:
+one `mode` with comment mode off when the copy loads, and again on every theme change).
+Left untold it has no `data-theme`, and a template that falls back to
+`prefers-color-scheme` draws its light side in the Lens of a dark board (measured:
+`#f4f1ea` where its stage drew `#14161a`).
 
 The stage is the only thing that has ever needed this. The self-contained 401
 refusal page is a separate case — "cannot link the stylesheet" is not "cannot read
@@ -827,11 +854,11 @@ board document: block text, answer choices, notes, block ids.
 `isPageBoard` (`src/render.mjs`, ADR.md entry 33) infers the page-board layout from the
 board's shape, so the most natural "a board with a stage on it" fixture —
 `createBoard({ blocks: [{ kind: 'html', html: MOCK }] })` — no longer renders a stage in
-a column. It renders the artifact at viewport size with no kicker, and therefore with no
-`.comment-btn` and no `.expand-btn` at all, and with the send bar hidden.
+a column. It renders the artifact at viewport size with no kicker (so no `.comment-btn`), no
+`.pull-out` (nothing to open: the stage already fills the window), and the send bar hidden.
 
 This presents as a null-dereference in the *setup* of checks about the lens
-(`document.querySelector('.html-block .expand-btn')` returning null), pointing nowhere
+(`document.querySelector('.html-block .pull-out')` returning null), pointing nowhere
 near the layout rule that actually causes it. Any check about a stage's kicker, its
 lens, or the send bar beside it needs a SECOND block in the fixture (a one-line
 `markdown` block is enough) to stay an ordinary board. Same class of trap as the
@@ -2071,7 +2098,7 @@ bisecting "how many reps until this blows up" actually wants.
 ## Shapes the page-board stage is pinned to
 
 - [The stage is a constant `100vh` box, not a box that grows to its content](#the-stage-is-a-constant-100vh-box-not-a-box-that-grows-to-its-content)
-- [`handleStageHeight` has a floor as well as a cap](#handlestageheight-has-a-floor-as-well-as-a-cap)
+- [A stage's height has two floors as well as a cap](#a-stages-height-has-two-floors-as-well-as-a-cap)
 - [The board's own mermaid engine is vendored, and that broke stage-rendered diagrams on purpose](#the-boards-own-mermaid-engine-is-vendored-and-that-broke-stage-rendered-diagrams-on-purpose)
 - [What a `srcdoc` stage can actually load: siblings served, nothing over `file://`](#what-a-srcdoc-stage-can-actually-load-siblings-served-nothing-over-file)
 - [A stage's first message can beat the parent's deferred listener -- fire-and-forget is wrong by construction](#a-stages-first-message-can-beat-the-parents-deferred-listener----fire-and-forget-is-wrong-by-construction)
@@ -2087,10 +2114,14 @@ The rendered templates use `position: sticky` and their own full-viewport `<dial
 which survives a frame sized to its content. So a page board's stage is a constant `100vh` box
 that scrolls internally. Sizing it to the document breaks the artifact's own chrome, not the board's.
 
-### `handleStageHeight` has a floor as well as a cap
+### A stage's height has two floors as well as a cap
 
-The floor is the 320px placeholder, beside the existing 600px cap. Without it a stage that sizes
-itself from the viewport reports its collapsed height on first paint and locks its card there.
+Every stage outside a page board fits its reported height (ADR 119, `applyStageHeight` in
+src/ui.mjs). 320px is the placeholder and a soft floor: a stage goes under it only when two reports
+in a row agree, because a stage that sizes itself from the viewport reports a collapsed sliver on
+first paint and would lock its card there. 120px is the hard floor under that. The page board's own
+stage is gated out by its round (`isPageStage`), never by `body.page-board`: that class follows the
+round on screen, and an inline height on a page round's frame would beat its `100vh` on the flip back.
 
 ### The board's own mermaid engine is vendored, and that broke stage-rendered diagrams on purpose
 
@@ -2206,6 +2237,86 @@ chrome band; if that ever surfaces, the fix is this same resend, not a broadcast
 
 Traps that have bitten once. A second bite moves the entry up into the section it belongs to.
 
+- **A stage loaded inside `withFrameClock` reports its own fixture height on every turn of the
+  clock.** `loadSrcdoc()` under the clock books the real `stageAgentScript`'s first report, so the
+  next `clock.frames()` overwrites whatever height a check forged just before it (the stand-in's
+  html box alone reads a synthetic 18px). Load a frame whose height the check forges BEFORE
+  installing the clock: no `requestAnimationFrame` then, so it never reports at all.
+- **`clock.booked` counts every animation frame the page books, not only the stage report's.**
+  `test/check-stage-isolation.mjs`'s once-a-frame row asserts `booked` is 0 after one frame, so
+  any new work booked off a box change (the pin re-ask, `relocateStagePins` in `src/ui.mjs`)
+  turns it red even when it does nothing. Book only when there is work: that re-ask books no
+  frame for a stage with no pin on it.
+- **An explicit `<html>` in a stage fixture kills the stage script in the stand-in.** `parseHTML`
+  of `STAGE_MARGIN_RESET + '<html data-…><body>…</body></html>' + stageAgentScript()` keeps the
+  `<html>` attributes but drops the leading `<style>` and the trailing `<script>`, so the agent
+  script never runs and nothing reports or posts, with no error. Declare the stage's viewport by
+  setting `data-standin-scroll-height` / `-client-height` on `frame.contentDocument.documentElement`
+  after `loadSrcdoc()` (`declareStageViewport` in `test/check-stage-isolation.mjs`); a `<body>`
+  wrapper is safe.
+- **A stage below the fold may send no height until it is scrolled to.** Chrome 154 headless, 15
+  stages on one board, read 1.5s after load: one run had only the 2 in the first viewport
+  reported, the next all 15, same bytes. Chrome may throttle rendering in an off-screen
+  cross-origin frame, and the stage reports from `requestAnimationFrame`, so an unreported stage
+  holds the 320px placeholder. A browser check scrolls each stage into view and waits for its two
+  reports before measuring (`focusStage` in `test/browser-check-stage-fold.mjs`).
+- **A stage's `scrollIntoView` scrolls the board too.** Measured in Chrome 154 (headless, a real
+  CDP click): a table-of-contents link in a folded stage, or in an app shell's inner pane, moves
+  the frame or pane and then the board, by exactly the frame's distance from the window top, so
+  the target ends at the window top under the sticky header. `scrollIntoView` crosses the
+  opaque-origin frame boundary; an element's or the window's own `scrollTo` stays in its box,
+  which is why `scrollToAnchor` (`src/render.mjs`) moves each box itself.
+- **Headless Chrome on macOS draws classic 15px scrollbars**, not the overlay ones a trackpad Mac
+  shows, unless `--hide-scrollbars` is passed (the mermaid browser check passes it). A wide
+  stage's sideways scrollbar then takes 15px out of its viewport, so a check of a fitted height
+  adds `innerHeight - clientHeight`, read inside the frame.
+- **A scroll aimed at a fractional offset stops on a whole pixel.** Chrome 154 headless, DPR 1: a
+  board `scrollTo` aimed so a folded stage's target sits exactly `--head-clear` (88px) under the
+  window top stopped at 5698 for 5697.75, and the frame's own scroll at 1738 for 1737.9, so the
+  target landed at 87.66px, a fraction under the header. A scroll that must land a point at
+  least some distance down rounds its offset down (`scrollBoxTo` in `src/render.mjs`,
+  `handleStageAnchor` in `src/ui.mjs`); a check of "at least" then holds without a tolerance.
+- **The stand-in's `style.height` reads `undefined` until something writes it**, where a browser
+  reads `''`. A row asserting a stage still holds its 320px placeholder with
+  `assert.equal(frame.style.height, '')` fails with `undefined !== ''`; compare
+  `frame.style.height || ''`, or test `!frame.style.height` as the older stage rows do.
+- **A probe box in the board page measures the board's own scrollbar, not a frame's.**
+  `::-webkit-scrollbar { width: 11px; }` (`src/styles.mjs`) restyles every scrollbar in the page,
+  and a stage's document has no such rule. Chrome 154 headless: `offsetWidth - clientWidth` on an
+  `overflow: scroll` box in the page read 11 beside a frame drawing a native 15; the same box in a
+  closed shadow root read 15 (a page's rules stop there), as did an `about:blank` iframe's
+  document and a box with `scrollbar-color` set. `measureStageScrollbar` (`src/ui.mjs`) uses the
+  shadow root. A detached box reads 0 / 0.
+- **No headless switch gives overlay scrollbars on macOS.** Chrome 154:
+  `--enable-features=OverlayScrollbar`, `--enable-blink-features=OverlayScrollbars` and
+  `--enable-overlay-scrollbar` all left a native bar at 15px, and `--hide-scrollbars` zeroes
+  every bar, the restyled 11px one included, so it is no overlay bar either. Behaviour that
+  differs only beside an overlay bar is checked on declared numbers in the stand-in
+  (`withScrollbar` in `test/check-stage-lens.mjs`) or by eye on a trackpad Mac.
+- **The cascade resolver cannot see a sibling combinator or an inline style.**
+  `resolveComputedProperty` splits a selector on whitespace, so `~` is a compound it cannot
+  parse and a quoted attribute value with a space in it (`[style*="height: 600px"]`) breaks in
+  two; either way the rule never matches. `el.style.height = ...` is not reflected into the
+  `style` attribute either. A rule keyed on one of those reads as absent in every stand-in
+  check: key it on a class the page writes (`.stage-scrolls`, written by `markStageScrolls`
+  while a stage's mock is taller than its box), which the resolver does see.
+- **The stand-in has no `offsetWidth`, `clientWidth`, `attachShadow`, `remove()` or
+  `removeChild`.** A width a check needs is declared on `Element.prototype` for the length of
+  one row and deleted in a `finally` (`withScrollbar`); a node is taken out with a bare
+  `replaceWith()`, the way `src/ui.mjs` already does it.
+- **The worktree hook refuses Chrome launched from the shell.** A quoted program path (Chrome's
+  has a space) and a `perl -e 'alarm N; exec @ARGV'` wrapper are both refused as "cannot be
+  shown not to be git". Write a probe script into the worktree and `spawnSync(CHROME, [...],
+  { timeout })` from node. `--dump-dom` with `--virtual-time-budget` prints the DOM and then
+  does not exit: read `stdout` off the timed-out result.
+- **A check piped through `grep` reports no exit code in a worktree agent.** The hook refuses
+  a command that reads `$pipestatus[1]` ("evaluates $pipestatus[1] arithmetically"), and zsh
+  leaves bash's `${PIPESTATUS[0]}` empty. Send the run to a log in the worktree and read `$?`
+  straight after it (`node test/x.mjs > .x.log 2>&1; echo "exit $?"`), then grep the log and
+  delete it before committing.
+- **The stand-in's default `getBoundingClientRect` is an 18px box, never a zero one.** A row
+  that measures page chrome (`.send-bar`, `.round-pager-dock`) declares every box the code
+  reads, a zero one for what the page hides, or an undeclared element counts as showing.
 - **A text swap over `test/` also rewrites child programs held in template literals**
   (2026-10-12). Several checks write a child script or stub to disk from a string
   (`test/check-stranded.mjs`'s reporter child, `test/check-install.mjs`'s health stub). A
@@ -2220,3 +2331,25 @@ Traps that have bitten once. A second bite moves the entry up into the section i
   `withGrace`") stays green while that name still appears in the cited file, and goes red
   once the name leaves it. One branch deleting the helper and another still citing it are
   each green alone. Re-run the check on the merged tip, not only on each branch.
+- **A row the other branch moved into a file you never touched merges clean and goes red**
+  (2026-10-12). The test audit moved the amend-push row out of `test/check-page-board.mjs`
+  into `test/check-amend-integrity.mjs`, and added lens presses to it and to
+  `test/check-anchor-push.mjs`, all through `.expand-btn`. The branch that replaced that class
+  with `.pull-out` never touched either file, so `git merge` reported no conflict in them and
+  three rows failed. A conflict list is not the list of files a merge breaks: after one, grep
+  the merged tree for every name the branch retired (`grep -rn "expand-btn" test/`) and run
+  the whole suite.
+- **A shell loop that runs check files is refused in a worktree agent** (2026-10-12).
+  `for f in a b; do node test/$f.mjs > $f.log 2>&1; done` is refused ("runs node with a value
+  computed at runtime"), though the same loop over `node --check $f` runs. Run several files
+  from a node script in the worktree that `spawnSync`s each one and prints its exit code, or
+  one plain command per file.
+- **A heredoc that writes a script and then runs it is refused in a worktree agent**
+  (2026-10-12). `cat > .x.mjs <<'EOF' ... EOF` followed by `node .x.mjs` in one command is
+  refused ("too complex to verify that it stays inside the worktree"). Write the script with
+  the Write tool, then run it as one plain command.
+- **A falsified row can be red for a reason beside the one being proved** (2026-10-12). With the
+  Lens's load post removed, the self-themed Lens rows in `test/browser-check-stage-fold.mjs`
+  go red in the light pass too, on "told null" alone, so a red row does not say what the copy
+  drew. Read the failing row's own lines (the runner prints them to stderr) before reporting
+  what a mutation showed.

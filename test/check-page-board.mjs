@@ -31,8 +31,8 @@ import { createBoard, addRound, applySubmit, abandonOpenRounds } from '../src/bo
 import { renderBoardPage, renderRoundSection, groupCommentsByBlock, stageAgentScript, COMMENT_ICON } from '../src/render.mjs';
 import { styles } from '../src/styles.mjs';
 import { PAGE_SEND_EXPIRED_LABEL, PAGE_SEND_EXPIRED_TITLE, PILL_READONLY_TITLE } from '../src/badge.mjs';
-import { parseHTML, StandInEvent } from './dom-stand-in.mjs';
-import { check, checkAsync, finish, flush, pageHarness } from './support.mjs';
+import { parseHTML, StandInEvent, withFrameClock } from './dom-stand-in.mjs';
+import { check, checkAsync, finish, flush, inlineColorScheme, pageHarness } from './support.mjs';
 
 const {
   loadBoard, loadBoardWithEventSource, withFetchCapture, enableCommentMode,
@@ -562,12 +562,13 @@ check('the INBOUND half of the channel is shape-checked too -- the stage refuses
     assert.deepEqual(scrolls, [], `a malformed parent message must never reach scrollTo: ${JSON.stringify(data)}`);
     assert.equal(root.getAttribute('data-theme'), themeBefore,
       `nor repaint the artifact: ${JSON.stringify(data)}`);
+    assert.deepEqual(inlineColorScheme(root), [],
+      `nor give the artifact a colour scheme, by a property, setProperty or a style attribute: ${JSON.stringify(data)}`);
     assert.deepEqual(
       { top: frame.contentDocument.body.style.paddingTop, bottom: frame.contentDocument.body.style.paddingBottom },
       paddingBefore,
       `nor touch the band padding: ${JSON.stringify(data)}`);
   }
-  assert.equal(root.style.colorScheme, 'dark', 'and none of them may have moved color-scheme either');
 
   // A well-formed message from something that is NOT this frame's parent -- the
   // lens holds a second copy of this same stage, and a sibling frame can address
@@ -613,11 +614,13 @@ check('criterion 18: the control is live in a read-only archive, where the artif
 // Criterion 15 (the board's half): the theme control drives the artifact.
 // =================================================================================
 
-/** The theme the stage is currently painted in, as the stage itself recorded it
- * (src/render.mjs's applyTheme). */
+/** What the stage's own document carries of the board's theme (src/render.mjs's
+ * applyTheme): the `data-theme` it was last told, and every `color-scheme` set on
+ * its root by any route (test/support.mjs's inlineColorScheme), which the board
+ * never sets. */
 function stageTheme(frame) {
   const root = frame.contentDocument.documentElement;
-  return { attr: root.getAttribute('data-theme'), colorScheme: root.style.colorScheme };
+  return { attr: root.getAttribute('data-theme'), colorScheme: inlineColorScheme(root) };
 }
 
 check('criterion 15: the board\'s theme control drives the artifact through the whole three-state cycle, resolved to a concrete light/dark', () => {
@@ -650,8 +653,8 @@ check('criterion 15: an OS light/dark flip while the board is in System repaints
   // matchMedia listener) -- e.g. macOS switching at sunset while the reviewer
   // is mid-artifact.
   window._setSystemPrefersDark(false);
-  assert.deepEqual(stageTheme(frame), { attr: 'light', colorScheme: 'light' },
-    'the artifact follows the OS exactly as the board around it does');
+  assert.deepEqual(stageTheme(frame), { attr: 'light', colorScheme: [] },
+    'the artifact is told the OS\'s flip exactly as the board around it is, as data-theme and nothing else: its color-scheme is its own');
 
   window._setSystemPrefersDark(true);
   assert.equal(stageTheme(frame).attr, 'dark', 'and back');
@@ -860,22 +863,42 @@ check('the pin layer clips at the frame edge -- a pin whose element scrolled out
 // Criterion 2, live: the frame's height never changes while it is read.
 // =================================================================================
 
-check('criterion 2: a page board\'s frame never takes an inline height from a height report -- neither a forged tall one nor a forged short one', () => {
+check('criterion 2: a page board\'s frame never takes an inline height from a report -- not the artifact\'s own, and not a forged one (ablation: drop handleStageHeight\'s isPageStage gate and the frame folds at 600px like any other stage)', () => {
   // A stage that measures itself against the viewport reports a huge height, and
   // stageAgentScript has no way to know which kind of card it is in (its own
-  // comment) -- so every stage sends this message and the parent decides. A page
-  // board's frame is a constant 100vh; a report that moved it
-  // would reflow a long artifact under the reader mid-read.
-  const { frame } = openPageBoard();
-  assert.ok(!frame.style.height, 'setup: nothing has set a height yet');
+  // comment) -- so every stage sends this message and the parent decides. Every
+  // OTHER stage fits and folds on it (ADR.md entry 119); a page board's frame is
+  // a constant 100vh, and a report that moved it would reflow a long artifact
+  // under the reader mid-read. The clock is turned through every frame and every
+  // settle delay, and each forged report is sent twice, so neither the
+  // coalescing nor the two-matching-reports rule is what keeps the frame still.
+  const document = loadBoard(renderBoardPage(pageBoard('<body data-standin-scroll-height="4000"><p>a long page</p></body>')));
+  const frame = document.querySelector('.html-stage');
+  withFrameClock((clock) => {
+    // The artifact's own report, through the real stageAgentScript.
+    frame.loadSrcdoc();
+    clock.frames();
+    assert.ok(!frame.style.height, 'a page board\'s frame must never be resized by its own height report');
 
-  // Forged from the stage's own window, which is the only thing the parent's
-  // listener trusts (origin 'null' + event.source identity) -- i.e. exactly what
-  // a hostile or merely enthusiastic artifact can send.
-  frame.contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'height', height: 4000 }, '*');
-  assert.ok(!frame.style.height, 'a page board\'s frame must never be resized by a height report');
-  frame.contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'height', height: 120 }, '*');
-  assert.ok(!frame.style.height, 'including a SHORT one -- a collapsed report must not shrink a viewport-sized page either');
+    // Forged from the stage's own window, which is the only thing the parent's
+    // listener trusts (origin 'null' + event.source identity) -- i.e. exactly
+    // what a hostile or merely enthusiastic artifact can send.
+    const report = (height) => {
+      frame.contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'height', height }, '*');
+      frame.contentWindow.parent.postMessage({ cb: 'cb-stage', type: 'height', height }, '*');
+      clock.frames();
+      clock.elapse(5000);
+      clock.frames();
+    };
+    report(4000);
+    assert.ok(!frame.style.height, 'nor by a forged tall one');
+    report(450);
+    assert.ok(!frame.style.height, 'nor by one that would fit any other stage');
+    report(120);
+    assert.ok(!frame.style.height, 'including a SHORT one -- a collapsed report must not shrink a viewport-sized page either');
+  });
+  assert.equal(document.querySelector('.html-block').classList.contains('stage-folded'), false, 'and it never folds');
+  assert.equal(document.querySelector('.stage-fold'), null, 'a page board carries no Show full height bar at all');
 });
 
 // =================================================================================

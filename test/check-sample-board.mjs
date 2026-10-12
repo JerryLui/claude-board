@@ -76,6 +76,47 @@ check('every one of the five widgets appears on a rendered question block', () =
 });
 
 // =================================================================================
+// 3b. The Pull-out and the fold: every html stage and
+//     mermaid diagram outside the page-board round carries one Pull-out; a tall
+//     stage carries the fold bar; the old expand pill is gone.
+// =================================================================================
+
+// Read from a fresh render, so a regression in src/render.mjs reddens these rows
+// on their own, not only the byte-identical row.
+const freshHtmlText = renderBoardPage(committedBoard);
+const pullOutIds = () => [...freshHtmlText.matchAll(/<button type="button" class="pull-out" data-pull-out-for="([^"]+)"/g)].map(m => m[1]);
+
+check('every html stage and mermaid diagram outside the page-board round carries exactly one Pull-out', () => {
+  // Stages also nest inside compare sides and choice variants, so walk the whole JSON.
+  const expected = [];
+  (function walk(node) {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== 'object') return;
+    if ((node.kind === 'html' || node.kind === 'mermaid') && node.id && node.round !== 1) expected.push(node.id);
+    Object.values(node).forEach(walk);
+  })(committedBoard.blocks);
+  expected.sort();
+  assert.ok(expected.length >= 2, 'setup failure: the sample should hold stages and a diagram outside round 1');
+  assert.deepEqual(pullOutIds().sort(), expected, 'Pull-out buttons do not match the sample\'s stages and diagrams one-to-one');
+  assert.ok(parseHTML(freshHtmlText).querySelectorAll('button.pull-out').length >= expected.length, 'the parsed DOM lost a button.pull-out');
+});
+
+check('the page-board round (round 1) carries no Pull-out', () => {
+  const round1Ids = committedBoard.blocks.filter(b => b.round === 1).map(b => b.id);
+  for (const id of pullOutIds()) assert.ok(!round1Ids.includes(id), `page-board block ${id} carries a Pull-out`);
+});
+
+check('the sample\'s tall stages carry the .stage-fold bar with its toggle, collapsed', () => {
+  const bars = freshHtmlText.match(/<div class="stage-fold"><button type="button" class="stage-fold-toggle" aria-expanded="false">Show full height<\/button><\/div>/g) || [];
+  assert.ok(bars.length >= 1, 'no stage carries the .stage-fold bar markup');
+  assert.equal(parseHTML(freshHtmlText).querySelectorAll('.stage-fold').length, bars.length, 'a .stage-fold element lacks the toggle markup');
+});
+
+check('no expand-btn survives anywhere in the page (the Pull-out replaced the expand pill)', () => {
+  assert.ok(!committedHtmlText.includes('expand-btn') && !freshHtmlText.includes('expand-btn'), 'the page still names expand-btn');
+});
+
+// =================================================================================
 // 4b. The sample keeps the manual's own rules for a question card (ADR.md
 //     entries 110/111): the explainer under the prompt, the context as one
 //     panel of plain items, a None option on the multi. A showcase that broke

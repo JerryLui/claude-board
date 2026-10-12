@@ -46,9 +46,12 @@ const DARK = {
   // per-palette, and not a page surface: a mock owns its own background, so this
   // is only ever what shows through one that paints none. Two constraints decide
   // the value and they pull opposite ways:
-  //   - a srcdoc that paints no background sets no color either, so its text is
-  //     the UA's black. The artboard has to stay light enough to read that
-  //     (12.28:1 here) -- which is why the DARK palette's artboard is not dark.
+  //   - a srcdoc that paints no background sets no color either, so it draws the
+  //     UA's default ink, and both frames declare 'color-scheme: light' so that
+  //     ink is the light scheme's in a dark board too: black text (12.28:1
+  //     here) and the #0000ee link blue (5.50:1 here, the tighter of the two).
+  //     The artboard has to stay light enough to read both, which is why the
+  //     DARK palette's artboard is not dark.
   //   - the stage's hover outline (STAGE_ACCENT_HEX, src/render.mjs) is ONE
   //     literal for both palettes and has to clear 3:1 on each: 3.89:1 here.
   // Dimmed well below LIGHT's #e6e8ee, and a plain grey beside this palette's
@@ -156,8 +159,9 @@ const LIGHT = {
   '--history-bg': 'rgba(255, 255, 255, 0.55)',
   // the artboard, one step BELOW --panel-2 (1.14:1) rather than at/near white,
   // so a mock that paints nothing reads as a recessed stage and not as another
-  // card. Black srcdoc text 17.14:1, stage hover outline 5.43:1 -- DARK's own
-  // --stage-bg comment has the full account of both bars.
+  // card. Black srcdoc text 17.14:1, the #0000ee link blue 7.67:1, stage hover
+  // outline 5.43:1 -- DARK's own --stage-bg comment has the full account of
+  // both bars.
   '--stage-bg': '#e6e8ee',
 
   // must track --bg exactly (same rgb triple) or the two fade masks show a seam
@@ -733,7 +737,8 @@ body.sent-page .comment-btn { display: none; }
 .context-item > .md-content > :first-child { margin-top: 0; }
 .context-item > .md-content > :last-child { margin-bottom: 0; }
 /* The controls a commentable item wears in place of the kicker the panel
-   dropped -- the comment button, and the expand control on a diagram. */
+   dropped -- the comment button. The way into the lens is the Pull-out in the
+   frame's own corner, as at the top level, never a control here. */
 .context-tools { display: flex; gap: 6px; margin-top: 6px; }
 /* A code excerpt's source label (path and line range), demoted from the card's
    kicker to a caption under the excerpt: the provenance survives the dropped
@@ -767,10 +772,9 @@ body.sent-page .comment-btn { display: none; }
    dodged). */
 .folded > .fold-body { max-height: 17em; overflow: hidden;
   mask-image: linear-gradient(to bottom, currentColor calc(100% - 4.5em), transparent); }
-/* Same pill chrome as the expand control, shared by selector rather than copied:
-   the two are the same affordance ("open the thing you cannot read from here"),
-   sitting on the same surfaces. A class of its own, though, and never
-   '.expand-btn': that class is what the readonly and sent-round disable loops
+/* The fold's control wears the comment button's pill chrome (its own rule sits
+   beside '.comment-btn' further down). A class of its own, and never
+   '.pull-out': that class is what the readonly and sent-round disable loops
    carve out BY NAME (src/ui.mjs) and what the page-board checks count, so a
    second control wearing it would be counted as a lens control that is not
    there. */
@@ -872,36 +876,20 @@ body.sent-page .comment-btn { display: none; }
 /* a SEPARATE rule from the one immediately
    above rather than folded into it -- that one is a trust boundary
    and stays exactly as written, on
-   its own line, byte for byte. '.html-stage''s own floor (min-height: 320px,
-   resize: vertical, further down this file) is for a STANDALONE stage only
-   (a different chunk's territory); a variant option's stage
-   overrides all three: 'min-height: 0' lifts the floor, 'resize: none' drops
-   a drag handle 'pointer-events: none' already made ungrabbable here, and
-   'overflow: hidden' is the clip -- deliberately with no added
-   "there is more below" marker, the same fault this whole feature exists to
-   fix, one level down; the expand control another chunk is landing is the
-   way to the rest.
-   'height: 320px' is NOT an arbitrary starting number -- it is the exact
-   value of the floor this whole rule replaces. Measured in real Chrome
-   (src/render.mjs's stageAgentScript, "WHEN this runs" comment above
-   reportHeight): a stage's first accurate report is deferred (two nested
-   requestAnimationFrame calls, waiting for this document's own first layout
-   pass), and either that or ResizeObserver's own first delivery can in
-   principle be late or, on a sufficiently old or unusual browser, never
-   arrive at all. A lower placeholder here (200px shipped in an earlier cut
-   of this rule, before that measurement) would leave a variant option's
-   stage WORSE than the fixed floor it was meant to improve on for as long as
-   -- or, in the never-arrives case, for as often as -- that gap lasts. 320px
-   makes "no report yet" cost nothing next to today's behaviour; a real
-   report still grows or shrinks the box exactly as intended the
-   moment it lands. 'max-height' is a CSS backstop for the same cap
-   handleStageHeight enforces in JS (STAGE_HEIGHT_CAP, src/ui.mjs) --
+   its own line, byte for byte. A variant option's stage fits its content like
+   every stage (the 320px placeholder and the fitting are '.html-stage''s and
+   src/ui.mjs's applyStageHeight's), but past the cap it CLIPS where every
+   other stage folds: no Show full height bar, since a click on its card picks
+   it (ADR.md entry 119); its mock scrolls under the wheel in place
+   (forwardStageWheel) and opens whole from the Pull-out in the frame's
+   corner. 'max-height' is a CSS
+   backstop for the cap src/ui.mjs enforces in JS (STAGE_HEIGHT_CAP) --
    hand-kept at the same value, the way QUIRKS.md's "Two stylesheets, one
    palette" already documents for this file's stage-side hex, since neither
    file can read a value out of the other; the clamp that actually matters
    against a hostile report is the one in JS, which runs before a value ever
    reaches this box's inline style. */
-.choice-variant .html-stage { min-height: 0; height: 320px; max-height: 600px; resize: none; overflow: hidden; }
+.choice-variant .html-stage { max-height: 600px; }
 
 /* free text: a comfortable writing surface, not a cramped input */
 .answer-textarea { width: 100%; min-height: 220px; resize: vertical; background: var(--panel-2);
@@ -950,17 +938,17 @@ body.sent-page .comment-btn { display: none; }
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
 .comment-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-/* the diagram's expand control. Same
-   pill chrome as the comment button beside it in the kicker, written out rather
+/* the fold's Show more control. Same
+   pill chrome as the comment button, written out rather
    than folded into the selector above so neither rule's exact text moves (several
    rules in this file are asserted by their text -- QUIRKS.md). It deliberately
    does NOT also carry .comment-btn: that class is what wireRoot binds the
    "open a block-level comment form" click handler to. */
-.expand-btn, .fold-toggle { display: inline-flex; align-items: center; gap: 5px; background: transparent;
+.fold-toggle { display: inline-flex; align-items: center; gap: 5px; background: transparent;
   border: 1px solid var(--hairline); color: var(--muted); font-size: 10.5px; font-weight: 600;
   letter-spacing: 0.06em; text-transform: uppercase; border-radius: var(--r-pill); padding: 4px 10px;
   transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
-.expand-btn:hover:not(:disabled), .fold-toggle:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.fold-toggle:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 .comment-list { margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
 .comment-item { position: relative; font-size: 12.5px; color: var(--ink-2); background: var(--panel-2);
@@ -1011,11 +999,12 @@ body.sent-page .comment-btn { display: none; }
  * can run to hundreds of lines and previously had
  * no height cap at all, pushing everything below it off-screen -- capped at
  * ~480px (roughly 24 lines at this font-size/line-height) with overflow: auto
- * and resize: vertical. NOT quite the idiom '.html-stage' below uses, despite
- * the family resemblance and despite what the spec that ordered this said: that
- * one is FLOORED (min-height: 320px) and resizable, which is a different thing
+ * and resize: vertical. NOT the idiom '.html-stage' once used, despite the
+ * family resemblance and despite what the spec that ordered this said: that one
+ * was FLOORED (min-height: 320px) and resizable, which is a different thing
  * from capped and resizable, and the difference is the whole reason the next
- * paragraph exists. A min-height leaves the resize handle free to move the box
+ * paragraph exists (a stage now fits its content and has no drag grip at all,
+ * ADR.md entry 119). A min-height leaves the resize handle free to move the box
  * in both directions; a max-height does not.
  * A short block's natural height never reaches the cap, so it renders untouched
  * (max-height only ever caps, never pads a shorter box out to it) -- but a
@@ -1121,9 +1110,53 @@ body.sent-page .comment-btn { display: none; }
  * the gutter is in flow rather than absolutely positioned over one. */
 .code-row.diff-flat::before { content: none; }
 
-/* html stage: sandboxed iframe so a hand-mocked preview never leaks into the page */
-.html-stage { display: block; width: 100%; min-height: 320px; resize: vertical; overflow: auto;
+/* html stage: sandboxed iframe so a hand-mocked preview never leaks into the page.
+   'height: 320px' is the placeholder every stage holds until its first height
+   report, and NOT an arbitrary number. Measured in real Chrome
+   (src/render.mjs's stageAgentScript, "WHEN this runs" comment above
+   reportHeight): a stage's first accurate report waits for its own first
+   layout pass, and a board opened in a background tab gets none until the
+   tab is shown, so this box is what the reader sees until then -- a lower one
+   would leave a mock worse off than the fixed box stages had before they
+   fitted their content. From the first report on, src/ui.mjs's
+   applyStageHeight owns the height (an inline style): it fits the content
+   from 120px up, and past 600px folds it, with the bar below. No drag grip
+   (ADR.md entry 119): a stage the reader can drag is a stage whose height is
+   no longer its content's. The 1px border counts inside the height
+   ('* { box-sizing: border-box; }'), which is why src/ui.mjs adds it
+   (STAGE_FRAME_EDGE) to every height it applies.
+
+   'color-scheme: light' is the frame saying what its document stands on, and
+   it holds in a dark board too. '--stage-bg' is a light neutral in both
+   palettes, so a mock that sets no colour has to draw the light scheme's
+   defaults on it: black text, the dark link blue, light form controls and
+   scrollbars. A frame left to inherit the dark page's scheme cannot give it
+   that. Measured in real Chrome: with its document told to be dark as well,
+   the default ink is white on the artboard (1.71:1); with its document left
+   light, the two schemes differ and the browser paints the frame an opaque
+   white canvas in place of the artboard. Only a frame and a document that
+   agree keep the canvas transparent. A mock that paints its own dark palette
+   declares 'color-scheme: dark' on its own root (src/render.mjs's applyTheme);
+   a 'prefers-color-scheme' query inside a stage follows this declaration, so
+   it reads light whatever the board's theme. */
+.html-stage { display: block; width: 100%; height: 320px; color-scheme: light;
   border: 1px solid var(--hairline); border-radius: var(--r-md); background: var(--stage-bg); }
+/* The Show full height bar (ADR.md entry 119; src/render.mjs's stageFoldBar):
+   a centred pill under a folded stage's frame, hidden while the stage fits.
+   '.stage-folded'/'.stage-opened' sit on the stage's own '.html-block' and are
+   written by src/ui.mjs's setStageFoldState. Its own pill rule rather than a
+   share of '.fold-toggle''s: that class is what the prose fold's click handler
+   keys on. The arrow is drawn here so the label src/ui.mjs swaps stays plain
+   words. */
+.stage-fold { display: none; justify-content: center; margin-top: 6px; }
+.stage-folded .stage-fold, .stage-opened .stage-fold { display: flex; }
+.stage-fold-toggle { display: inline-flex; align-items: center; gap: 6px; background: var(--panel-2);
+  border: 1px solid var(--hairline); color: var(--ink-2); font: inherit; font-size: 12px; font-weight: 550;
+  border-radius: var(--r-pill); padding: 3px 12px; cursor: pointer;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.stage-fold-toggle:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.stage-fold-toggle::after { content: "\\25BE"; font-size: 10px; }
+.stage-fold-toggle[aria-expanded="true"]::after { content: "\\25B4"; }
 
 /* element-level anchoring: pin-layer overlays the html-stage iframe or
  * the rendered mermaid SVG exactly, and src/ui.mjs positions numbered .anchor-pin
@@ -1147,6 +1180,45 @@ body.sent-page .comment-btn { display: none; }
    src/ui.mjs mints its number provisionally, continuing the server's sequence */
 .anchor-pin.pin-pending { background: var(--panel); color: var(--accent);
   border: 1px dashed var(--accent); line-height: 18px; }
+
+/* The Pull-out (ADR.md entry 120): the one way into the lens, in the top-right
+   corner of every stage's and diagram's frame -- the positioned '.stage-wrap'
+   above, wherever that frame sits (top level, a compare side, a question's
+   context, a variant option). Always visible, never revealed on hover: nothing
+   on the board hides until hover, and a hover-only control does not exist on
+   touch. It comes after the pin layer in the same wrapper, so it paints over a
+   pin that lands under the corner.
+   Hidden while comment mode is on, so the artifact's own top-right corner stays
+   a comment target (the lens is view-only). One rule on the body class
+   setCommentMode (src/ui.mjs) toggles, so turning the mode off brings it
+   straight back with nothing to restore. */
+.pull-out { position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--hairline-2); border-radius: var(--r-sm); background: var(--panel);
+  color: var(--ink); box-shadow: var(--shadow-1); cursor: pointer;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.pull-out:hover { border-color: var(--accent); color: var(--accent); }
+.pull-out:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+/* A stage that scrolls inside its own frame draws that scrollbar down the
+   frame's right edge, just inside the border, which is where the Pull-out
+   sits: beside a classic scrollbar the control covered half the track and the
+   top of the thumb. So where the frame scrolls, the control moves in by the
+   scrollbar's own width, '--stage-scrollbar-w', which src/ui.mjs's
+   measureStageScrollbar measures: 0 beside an overlay scrollbar, which takes
+   no width, and 0 again (the fallback here) in a browser that cannot measure
+   one. Everywhere else it stays 8px from the corner.
+   A frame scrolls inside while its mock is taller than its box, and for
+   exactly that long src/ui.mjs marks the stage's own block '.stage-scrolls'
+   (markStageScrolls), read from the mock's reported height against the box
+   and not from the fold state. So the control moves on a stage folded at the
+   cap, on a variant option clipped there (it never folds), and on an opened
+   stage too, once its mock has grown past the height it opened to or where it
+   stands at the 30,000px limit with more mock under it. It stays in the
+   corner on a stage opened to its whole mock, and on a folded one whose mock
+   has shrunk into the slack that keeps it folded, with nothing left to
+   scroll. */
+.stage-scrolls .pull-out { right: calc(8px + var(--stage-scrollbar-w, 0px)); }
+body.comment-mode .pull-out { display: none; }
 
 /* Both stage kinds are clickable at element level, and both read as pictures with no
    built-in cue of their own -- the comment-mode toggle is the one thing on the page
@@ -1176,7 +1248,7 @@ body.comment-mode:not(.readonly) .mermaid-block svg g.cb-anchor-sent:hover { out
    A full-viewport <dialog> src/ui.mjs builds once, lazily, and reuses: drag pans,
    scroll zooms, fit and 1:1 reset the view. Modelled on /explain's lens
    (~/.claude/skills/explain/template.html), with two differences that are the
-   whole reason this one exists -- it is opened only by the explicit .expand-btn
+   whole reason this one exists -- it is opened only by the explicit .pull-out
    (never by clicking the diagram, which keeps its comment meaning), and its
    contents are commentable.
 
@@ -1252,14 +1324,18 @@ body.comment-mode:not(.readonly) .lens-canvas svg g.cb-anchor-sent:hover { outli
      leave nothing outside the stage to aim at.
    - the frame is sized in CSS, not by the stage. An iframe's intrinsic size is
      300x150 regardless of what it holds, so 'a mock with its own scrollable
-     content can be scrolled here' needs a real box given from this side. */
+     content can be scrolled here' needs a real box given from this side.
+   The frame is 'color-scheme: light' for the reason '.html-stage' is: its
+   document is never told a theme, so it is always a light one, and a frame
+   that inherited the dark page's scheme would show it on an opaque white
+   canvas in place of the artboard. */
 .stage-lens { width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh;
   margin: 0; padding: 0; border: none; background: var(--bg); color: var(--ink); overflow: hidden; }
 .stage-lens[open] { display: flex; flex-direction: column; }
 .stage-lens::backdrop { background: var(--bg); }
 .stage-lens-body { flex: 1; min-height: 0; padding: var(--space-4); background: var(--bg); }
 .stage-lens-frame { display: block; width: 100%; height: 100%; border: 1px solid var(--hairline);
-  border-radius: var(--r-md); background: var(--stage-bg); }
+  border-radius: var(--r-md); background: var(--stage-bg); color-scheme: light; }
 /* the pick control's slot, between the title (which
    carries 'margin-right: auto') and close. Note what is NOT in the two rules
    above, and is load-bearing for this one: neither the body nor the frame is

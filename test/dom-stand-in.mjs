@@ -1825,6 +1825,76 @@ export class StandInIntersectionObserver {
   }
 }
 
+// --- a hand-turned clock: animation frames and timers ------------------------
+//
+// The stand-in defines no requestAnimationFrame (QUIRKS.md "The stand-in has no
+// layout"), and Node's own setTimeout runs on the wall clock, after a check has
+// already asserted. Stage sizing (src/ui.mjs's applyStageHeight, ADR.md entry
+// 119) turns on both: a report applies on the next animation frame, and a shrink
+// waits out a settle delay. This swaps the three globals the page and its stages
+// resolve those names from for a queue and a clock the check turns by hand, for
+// the duration of `fn` only, restored even if `fn` throws.
+//
+//   frame()     runs the callbacks booked before it was called -- ONE animation
+//               frame; anything they book waits for the next call. Returns how
+//               many ran.
+//   frames()    runs frames until none is booked (bounded, so a page that
+//               books a frame from every frame fails loudly instead of hanging).
+//   elapse(ms)  moves the clock on and fires every timer now due, in due order.
+//   booked      how many callbacks the next frame() would run.
+//
+// Every timer anything sets inside `fn` lands here, not only the stage's: a
+// check that elapses time fires whatever else the page had pending too, the
+// same as a real browser would.
+export function withFrameClock(fn) {
+  const saved = {
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+  };
+  let queue = [];
+  let now = 0;
+  let nextId = 1;
+  const timers = new Map();
+  globalThis.requestAnimationFrame = (cb) => { queue.push(cb); return queue.length; };
+  globalThis.setTimeout = (cb, ms) => {
+    const id = nextId++;
+    timers.set(id, { cb, at: now + (Number(ms) || 0) });
+    return id;
+  };
+  globalThis.clearTimeout = (id) => { timers.delete(id); };
+  const clock = {
+    get booked() { return queue.length; },
+    frame() {
+      const run = queue;
+      queue = [];
+      run.forEach(cb => cb());
+      return run.length;
+    },
+    frames() {
+      for (let i = 0; i < 100; i++) if (!clock.frame()) return;
+      throw new Error('withFrameClock: frames are still being booked after 100 of them');
+    },
+    elapse(ms) {
+      now += ms;
+      for (;;) {
+        let due = null;
+        for (const [id, t] of timers) if (t.at <= now && (!due || t.at < due[1].at)) due = [id, t];
+        if (!due) return;
+        timers.delete(due[0]);
+        due[1].cb();
+      }
+    },
+  };
+  try {
+    return fn(clock);
+  } finally {
+    globalThis.requestAnimationFrame = saved.requestAnimationFrame;
+    globalThis.setTimeout = saved.setTimeout;
+    globalThis.clearTimeout = saved.clearTimeout;
+  }
+}
+
 // --- fetch settling, for checks that run a page against a live daemon ---------
 //
 // test/check-index-live.mjs and test/check-pomodoro-page.mjs both rewrite

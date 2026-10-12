@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **An unstyled mock reads in a dark board**: a stage that sets no color now draws black text,
+  blue links and light form controls on its light artboard in both themes (in a dark board its
+  text was white on light gray, 1.71:1), and the full-size view shows the artboard where a dark
+  board showed a white slab. A stage is told the theme as `data-theme` only; one with a dark
+  palette of its own sets `color-scheme: dark` itself.
+- **Breaking for a template with its own dark palette: a stage is no longer told a color
+  scheme.** The board used to set `color-scheme` on a stage's document beside `data-theme`. It
+  now sets `data-theme` and nothing else, and the frame a stage renders in is a light surface
+  in both themes. A template that paints a dark palette under `[data-theme="dark"]` and leaves
+  any ink to the browser (text with no color, an unstyled link, a native input, a scrollbar)
+  now gets the browser's light defaults there: black text and the dark link blue on its own
+  dark background, in a stored board the moment it is rendered again. Declare
+  `color-scheme: dark` beside the dark palette and the dark defaults come back (measured in
+  Chrome on a `#14161a` background: text 18.11:1, link 7.58:1, input text 11.20:1, button text
+  5.33:1). `prefers-color-scheme` inside a stage now reads light whatever the board's theme or
+  the OS, so key on `data-theme`. The full-size copy a Pull-out opens is told the same
+  `data-theme`, so a template draws the same side of its palette there as in its block.
+- **A stage fits its mock, and every stage and diagram has a Pull-out**: a stage outside a
+  page board now takes its content's height up to 600px instead of a fixed 320px box with a
+  drag grip; past 600px it folds, scrolling inside, and Show full height under the frame opens
+  it in place (ADR 119). One button in the top-right corner of every stage and diagram opens it
+  full size, including a stage inside a question, which had no way in before; the expand pills
+  are gone (ADR 120). An in-page link in a stage that shows its whole mock now scrolls the
+  board to the target, and one in a stage that scrolls inside moves only the frame, no longer
+  the board as well.
 - **Remote review**: answer a second Mac's boards from the Mac you sit at. One
   `LocalForward 7392 127.0.0.1:7391` in `~/.ssh/config` carries the remote daemon, which stays
   loopback-only; `npm run remote -- login` logs your browser in over SSH for the cookie's 30

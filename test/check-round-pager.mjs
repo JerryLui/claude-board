@@ -73,7 +73,7 @@ function twoArtifacts() {
 }
 
 /** A round carrying an artifact AND a question: NOT a page round (isPageRound is
- * "exactly one html block"), so its stage keeps the expand control a page board
+ * "exactly one html block"), so its stage keeps the Pull-out a page board
  * drops and the lens is openable from it. */
 function questionThenArtifactWithQuestion() {
   const board = createBoard({ title: 'Mixed', blocks: [Q] });
@@ -552,11 +552,11 @@ check('ADR 42: an arrow key does not flip the page out from under an open lens',
   const { document } = loadBoardWithEventSource(renderBoardPage(questionThenArtifactWithQuestion()));
   assert.equal(currentPage(document), '2', 'setup: the board opens on its newest page');
 
-  const expand = document.querySelector('.html-block .expand-btn');
-  assert.ok(expand, 'setup failure: a round carrying an artifact AND a question is not a page round, so its stage must keep the expand control');
-  click(expand);
+  const pullOut = document.querySelector('.html-block .pull-out');
+  assert.ok(pullOut, 'setup failure: a round carrying an artifact AND a question is not a page round, so its stage must keep the Pull-out');
+  click(pullOut);
   const dlg = document.querySelector('.stage-lens');
-  assert.ok(dlg && dlg.hasAttribute('open'), 'setup failure: the expand control did not open the lens');
+  assert.ok(dlg && dlg.hasAttribute('open'), 'setup failure: the Pull-out did not open the lens');
 
   // Where showModal actually leaves focus, and the exact case the guard above it
   // does not cover.
@@ -679,7 +679,7 @@ check('criterion 26: the pager is displayed under every body state the cascade c
 check('criterion 26: the pager survives the read-only archive\'s blanket disable, and still flips there', () => {
   // file:// hydrates read-only and hard-disables every button on the page. An
   // archive's rounds are still pages, and flipping between them is navigation,
-  // not editing -- the same carve-out the diagram's expand control has.
+  // not editing -- the same carve-out the Pull-out has.
   const document = loadBoard(renderBoardPage(threeRounds()), { protocol: 'file:' });
   assert.equal(document.body.classList.contains('readonly'), true, 'setup failure: expected file:// to hydrate read-only');
 

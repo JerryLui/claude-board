@@ -911,8 +911,8 @@ check('archive: every reference the emitted page loads resolves inside its own f
 // The control is SERVER-rendered (src/render.mjs), so it is in the archive's own
 // bytes with nothing to fetch -- and it has to stay live once the readonly pass
 // has disabled every other button on the page, or an offline reader is left
-// looking at a fade with no way past it. That carve-out is the one the diagram's
-// expand control already has, and this is the check that it was actually made
+// looking at a fade with no way past it. That carve-out is the one the Pull-out
+// already has, and this is the check that it was actually made
 // for the fold too rather than only intended.
 //
 // A board of its own, written to the same temp folder as the two above and read
@@ -973,7 +973,7 @@ check('archive: the fold arrives folded in the page\'s own bytes, and its contro
 
     const control = item.querySelector('.fold-toggle');
     assert.equal(control.disabled, false,
-      'the fold control must survive the readonly disable pass -- the same carve-out .expand-btn gets, for the same reason');
+      'the fold control must survive the readonly disable pass -- the same carve-out .pull-out gets, for the same reason');
     // The carve-out is a carve-out, not a hole: everything else on the same
     // page is still hard-disabled.
     assert.equal(document.querySelector('.choice-single').disabled, true, 'the answer widget is still disabled');
